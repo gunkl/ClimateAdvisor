@@ -62,14 +62,17 @@ class TestEngineIdentityFixedAtConstruction:
     from."""
 
     def test_engine_a_is_fixed_legacy(self):
+        """Issue #757 Phase 6 Step 4: _doorwindow_fsm_authoritative was removed —
+        door/window's dispatcher is now unconditionally FSM-authoritative for both
+        engines, so this assertion is retired. _natvent_fsm_authoritative is the only
+        remaining per-engine FSM flag."""
         coord, _, _, _ = build_headless_coordinator()
         assert coord._engine_a._natvent_fsm_authoritative is False
-        assert coord._engine_a._doorwindow_fsm_authoritative is False
 
     def test_engine_b_is_fixed_fsm(self):
+        """Issue #757 Phase 6 Step 4: see test_engine_a_is_fixed_legacy's docstring."""
         coord, _, _, _ = build_headless_coordinator()
         assert coord._engine_b._natvent_fsm_authoritative is True
-        assert coord._engine_b._doorwindow_fsm_authoritative is True
 
     def test_default_primary_is_the_legacy_engine(self):
         coord, _, _, _ = build_headless_coordinator()

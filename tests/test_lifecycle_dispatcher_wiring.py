@@ -79,10 +79,7 @@ class TestDoorPauseEvents:
     def test_pause_starts_emits_door_pause_started(self) -> None:
         ae = _engine()
         ae._paused_by_door = False
-        ae._resolve_door_window_pause_flags(
-            kind=DoorWindowFsmEventKind.SENSOR_OPENED,
-            legacy=lambda: setattr(ae, "_paused_by_door", True),
-        )
+        ae._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.SENSOR_OPENED)
         events = _events_of(ae, LifecycleEventType.DOOR_PAUSE_STARTED)
         assert len(events) == 1
         assert ae._dispatched_paused_by_door is True
@@ -91,10 +88,7 @@ class TestDoorPauseEvents:
         ae = _engine()
         ae._paused_by_door = True
         ae._dispatched_paused_by_door = True
-        ae._resolve_door_window_pause_flags(
-            kind=DoorWindowFsmEventKind.ALL_SENSORS_CLOSED,
-            legacy=lambda: setattr(ae, "_paused_by_door", False),
-        )
+        ae._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.ALL_SENSORS_CLOSED)
         events = _events_of(ae, LifecycleEventType.DOOR_PAUSE_ENDED)
         assert len(events) == 1
         assert ae._dispatched_paused_by_door is False
@@ -104,10 +98,7 @@ class TestDoorPauseEvents:
         re-evaluation) must not emit — only a real transition should."""
         ae = _engine()
         ae._paused_by_door = True
-        ae._resolve_door_window_pause_flags(
-            kind=DoorWindowFsmEventKind.SYNC_RECONCILE,
-            legacy=lambda: setattr(ae, "_paused_by_door", True),
-        )
+        ae._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.SYNC_RECONCILE)
         assert ae._lifecycle_dispatcher.event_log == []
 
     def test_apply_nat_vent_fsm_state_is_a_second_real_writer(self) -> None:

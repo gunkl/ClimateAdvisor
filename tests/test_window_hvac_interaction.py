@@ -124,6 +124,21 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._post_grace_fan_check_callback = None
     ae.dry_run = False
     ae._decision_lock = asyncio.Lock()
+    # Issue #757 Phase 6 Step 4: door/window's dispatcher is now unconditionally
+    # FSM-authoritative, so every _resolve_door_window_pause_flags() call always
+    # builds real DoorWindowFsmInputs via _build_door_window_fsm_inputs() — these
+    # fields were previously only exercised when a test explicitly set
+    # _doorwindow_fsm_authoritative=True.
+    from custom_components.climate_advisor.lifecycle_dispatcher import LifecycleDispatcher
+
+    ae._sensor_debounce_pending_callback = None
+    ae._lifecycle_dispatcher = LifecycleDispatcher()
+    ae._fan_drift_tick_count = 0
+    ae._fan_remote_timer_hours = None
+    ae._fan_min_runtime_active = False
+    ae._pre_fan_hvac_mode = None
+    ae._fan_rate_limited_until = None
+    ae._fan_rate_limited_direction = None
 
     # Mock async service calls
     ae._set_hvac_mode = AsyncMock()
@@ -301,8 +316,19 @@ class TestRePauseNatVent:
         ae._activate_fan.assert_called_once()
 
     def test_re_pause_pauses_when_outdoor_warm(self):
-        """Outdoor > threshold → fall through to regular re-pause."""
+        """Outdoor > threshold → fall through to regular re-pause.
+
+        Issue #757 Phase 6 Step 4: door/window's dispatcher is now unconditionally
+        FSM-authoritative, so _re_pause_for_open_sensor()'s reactivation decision
+        reads the already-applied _paused_by_door flag instead of independently
+        recomputing the gate — by design, matching _on_grace_expired()'s own RE_PAUSE
+        dispatch, which this direct-call test bypasses. _paused_by_door=True is the
+        realistic precondition _on_grace_expired() would have already set for a
+        blocked-reactivation outcome (RE_PAUSE -> a paused sub-state) before
+        scheduling this task.
+        """
         ae = _make_ae_stub(_last_outdoor_temp=82.0)
+        ae._paused_by_door = True
 
         # Provide a mock thermostat state of "cool" so the re-pause logic fires
         mock_state = MagicMock()

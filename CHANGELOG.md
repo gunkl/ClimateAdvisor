@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.69] — 2026-08-23
+
+- Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 4 — removes the legacy (pre-FSM) door/window pause/grace code path. The FSM-based door/window dispatch has been production-authoritative for weeks with zero corpus divergence, so the old inline flag-write branch and its differential-comparator scaffolding are no longer needed.
+- Fix #762: two FSM input builders defaulted an unconfigured fan_mode to "whole_house_fan" instead of the disabled default every other fan_mode read in the file uses, which could silently let a home with no whole-house fan configured skip a door/window pause it should have taken. Fixed.
+- Fix #762: the choke-point guard that refuses to arm an active HVAC mode through an open window (`_apply_comfort_band()`) could, in a narrow timing window right after the whole-house fan was turned off manually, fail to mark the pause visible on the dashboard even though HVAC was correctly being held off. Fixed.
+- Fix #762: after grace expired while paused mid-grace, a genuine nat-vent reactivation could be missed due to a stale pause flag. Fixed. All three #762 fixes were latent design gaps in the FSM path since it was first built, invisible until this step made the path unconditional; no known live incident from any of them.
+
 ## [0.6.68] — 2026-08-23
 
 - Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 3 — removes the legacy (pre-FSM) override/grace code path. The FSM-based override/grace dispatch has been production-authoritative for weeks with zero corpus divergence, so the old inline flag-write branch and its differential-comparator scaffolding are no longer needed.

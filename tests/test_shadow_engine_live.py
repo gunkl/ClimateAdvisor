@@ -803,14 +803,20 @@ class TestShadowDisagreementIncident:
         assert len(self._shadow_disagreement_events(coordinator)) == 2
 
     def test_other_axes_stay_independent(self) -> None:
-        """A sustained disagreement on the door/window mirror axis must not emit
-        (or be blocked by) an incident on the unrelated nat-vent mirror axis."""
+        """A sustained disagreement on the classification mirror axis must not emit
+        (or be blocked by) an incident on the unrelated nat-vent mirror axis.
+
+        Issue #757 Phase 6 Step 4: previously used the door_window_mirror axis for
+        this — that axis (and its underlying door/window shadow-comparison machinery)
+        was removed once door/window's dispatcher became unconditionally
+        FSM-authoritative in production. classification_mirror is the same
+        "independent axis, unrelated to nat-vent's own mirror" shape, still active."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
         for ae in (coordinator.automation_engine, coordinator.shadow_automation_engine):
             ae._natural_vent_active = False
-        coordinator.automation_engine._paused_by_door = False
-        coordinator.shadow_automation_engine._paused_by_door = True
-        coordinator._shadow_diag_disagreement_since["door_window_mirror"] = _FIXED_NOW - timedelta(
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
+        coordinator._shadow_diag_disagreement_since["classification_mirror"] = _FIXED_NOW - timedelta(
             seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
@@ -818,7 +824,7 @@ class TestShadowDisagreementIncident:
 
         incidents = self._shadow_disagreement_events(coordinator)
         assert len(incidents) == 1
-        assert incidents[0]["axis"] == "door_window_mirror"
+        assert incidents[0]["axis"] == "classification_mirror"
         assert incidents[0]["comparison_kind"] == "shadow"
 
 

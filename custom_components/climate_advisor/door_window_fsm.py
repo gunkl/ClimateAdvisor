@@ -117,9 +117,12 @@ state *reads* from other lifecycles (Issue #631's "communicating automata"
 design) — legacy flag-derived today, same convention as ``nat_vent_fsm.py``'s
 own ``paused_by_door`` read.
 
-**Authoritative for production, as of Step 8 (Issue #660) — FULL scope, all 8
-real trigger sites.** This module's ``transition()`` is no longer purely a shadow
-diagnostic: when ``AutomationEngine._doorwindow_fsm_authoritative`` is True, every
+**Authoritative for production, unconditionally, as of Issue #757 Phase 6 Step 4**
+(FULL scope since Step 8, Issue #660; the ``_doorwindow_fsm_authoritative`` switch
+that gated it has since been removed — it was permanently True in production for
+weeks and proven behavior-equivalent via an offline differential comparator before
+the legacy inline flag-write branch was deleted). This module's ``transition()`` is
+the sole source of truth, not a shadow diagnostic: every
 one of the 8 real trigger methods
 (``handle_manual_override_during_pause()``, ``resume_from_pause()``,
 ``handle_all_doors_windows_closed()``, ``_exit_nat_vent()``'s sensor-still-open
@@ -145,8 +148,12 @@ already mechanical:
   origin state) *before* scheduling ``_re_pause_for_open_sensor()`` as a task; that
   method then just reads the already-applied flag rather than re-deriving it.
 
-Deploying with the switch flipped True is a separate, explicit live-verification
-step (Issue #660 ships with it still defaulting False).
+The diagnostic-only replica tracker fed by ``_evaluate_door_window_fsm()``/
+``_mirror_to_shadow()`` (and its ``door_window_fsm_agrees`` shadow-comparison axis)
+has been retired along with this switch — see Issue #757 Phase 6 Step 4's commit
+message for the known ``PAUSED_NAT_VENT_REACTIVATED``-gap-in-``_transition_from_grace()``
+diagnostic bug this retirement closes as a side effect (never a real-production bug —
+only the now-deleted shadow replica tracker was affected).
 """
 
 from __future__ import annotations
@@ -280,6 +287,11 @@ class DoorWindowFsmInputs:
                                              the same source-mismatch pitfall already
                                              found there).
       now                                  -> caller-resolved wall-clock time
+      nat_vent_gate_ruled_out               -> True only for _pause_for_door_window()'s
+                                             own SENSOR_OPENED dispatch (Issue #757
+                                             Phase 6 Step 4) — see that field's own
+                                             comment below for the full incident this
+                                             closes.
     """
 
     hvac_mode: str | None
@@ -302,6 +314,31 @@ class DoorWindowFsmInputs:
     now: datetime
     manual_grace_would_start: bool = True
     automation_grace_would_start: bool = True
+    # Issue #757 Phase 6 Step 4 fix: SENSOR_OPENED's transition independently
+    # re-derives TWO conditions that can override a pause — "is this within a
+    # windows-recommended planned window" and "would nat-vent activate" (via
+    # decide_nat_vent_gate() purely from raw outdoor/indoor/comfort readings) —
+    # correct for handle_door_window_open()'s real fresh-open scenario (where
+    # production hasn't yet decided whether to nat-vent or honor the planned-window
+    # exemption), but WRONG for _pause_for_door_window()'s two real callers
+    # (_apply_comfort_band()'s choke-point guard, _sync_paused_by_door_with_live_
+    # sensors()), which only ever call it after already independently ruling out both
+    # possibilities themselves — for reasons this FSM's own simple re-derivations
+    # cannot see (a user manually turning the WHF off, occupancy mode, config, Phase 2
+    # forecast/thermal guards; and, for _apply_comfort_band() specifically, a
+    # *deliberate* override of the planned-window exemption other layers already
+    # granted — see that method's own Issue #629 docstring for why re-honoring it here
+    # would silently undo the fix). Confirmed live via golden scenario
+    # issue_629_comfort_band_arm_through_open_window: a windows-recommended day with
+    # the WHF turned off manually while outdoor/indoor readings were STILL
+    # nat-vent-favorable landed on DoorOpenResponse.PLANNED_WINDOW_NOOP (blocked on
+    # ``within_planned_window`` before ``nat_vent_gate_entered`` was even reached),
+    # silently leaving _paused_by_door=False even though HVAC really was being
+    # suppressed (a real dashboard/status-consistency regression, not cosmetic —
+    # decide_scheduled_band_gate()'s DEFER_PAUSED never engaged). When True, both of
+    # SENSOR_OPENED's re-derived conditions are forced False rather than independently
+    # recomputed — this field is never read by any other event kind.
+    nat_vent_gate_ruled_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -377,8 +414,10 @@ def _transition_from_normal(current_state: DoorWindowLifecycleState, event: Door
                 outdoor=inputs.outdoor,
                 comfort_cool=inputs.comfort_cool,
                 nat_vent_delta=inputs.nat_vent_delta,
-                within_planned_window=inputs.within_planned_window,
-                nat_vent_gate_entered=decide_nat_vent_gate(_nat_vent_gate_inputs(inputs)),
+                within_planned_window=False if inputs.nat_vent_gate_ruled_out else inputs.within_planned_window,
+                nat_vent_gate_entered=(
+                    False if inputs.nat_vent_gate_ruled_out else decide_nat_vent_gate(_nat_vent_gate_inputs(inputs))
+                ),
             )
         )
         if response == DoorOpenResponse.PAUSE:
@@ -531,12 +570,24 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
         response = decide_door_open_response(
             DoorOpenResponseInputs(
                 paused_by_door=False,
-                grace_active=True,
+                # Issue #757 Phase 6 Step 4 fix: forced False (instead of the real
+                # True) when nat_vent_gate_ruled_out — GRACE_SUPPRESSED exists to let
+                # an active grace period tolerate a still-open sensor when
+                # reactivation isn't viable, which is the wrong exemption for
+                # _pause_for_door_window()'s always-pause callers (same incident as
+                # the within_planned_window/nat_vent_gate_entered forcing below — see
+                # DoorWindowFsmInputs.nat_vent_gate_ruled_out's docstring). The actual
+                # FSM transition below still correctly lands on PAUSED_DURING_GRACE
+                # (preserving that grace was running) regardless of this — only the
+                # pure decision function's GRACE_SUPPRESSED exemption is bypassed.
+                grace_active=not inputs.nat_vent_gate_ruled_out,
                 outdoor=inputs.outdoor,
                 comfort_cool=inputs.comfort_cool,
                 nat_vent_delta=inputs.nat_vent_delta,
-                within_planned_window=inputs.within_planned_window,
-                nat_vent_gate_entered=decide_nat_vent_gate(_nat_vent_gate_inputs(inputs)),
+                within_planned_window=False if inputs.nat_vent_gate_ruled_out else inputs.within_planned_window,
+                nat_vent_gate_entered=(
+                    False if inputs.nat_vent_gate_ruled_out else decide_nat_vent_gate(_nat_vent_gate_inputs(inputs))
+                ),
             )
         )
         if response == DoorOpenResponse.PAUSE:

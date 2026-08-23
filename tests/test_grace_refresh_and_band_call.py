@@ -32,6 +32,7 @@ from custom_components.climate_advisor.automation import (  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
 )
+from custom_components.climate_advisor.lifecycle_dispatcher import LifecycleDispatcher  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Minimal engine factory — bypasses full HA wiring, sets only what each test
@@ -125,6 +126,17 @@ def _minimal_engine() -> AutomationEngine:
             "_write_seq": 0,
             "_pending_setpoint_single": None,
             "_pending_setpoint_mode": None,
+            # Issue #757 Phase 6 Step 4: door/window's dispatcher is now
+            # unconditionally FSM-authoritative, so every _resolve_door_window_pause_
+            # flags() call now builds real DoorWindowFsmInputs via
+            # _build_door_window_fsm_inputs() — these fields were never needed while
+            # the legacy branch (this fixture implicitly exercised, since it never set
+            # the old _doorwindow_fsm_authoritative flag to True) could skip that
+            # builder entirely.
+            "_lifecycle_dispatcher": LifecycleDispatcher(),
+            "_last_outdoor_temp": 70.0,
+            "_indoor_temp_history": [],
+            "_natvent_fsm_authoritative": False,
         }
     )
     return engine

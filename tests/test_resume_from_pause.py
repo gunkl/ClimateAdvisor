@@ -519,15 +519,11 @@ class TestResolveDoorWindowPauseFlagsZeroDurationGraceIsolated:
         from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
 
         engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 0})
-        engine._doorwindow_fsm_authoritative = True
         engine._paused_by_door = True
         engine._paused_with_hvac_already_off = False  # PAUSED_ACTIVE origin
         engine._grace_active = False
 
-        engine._resolve_door_window_pause_flags(
-            kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
-            legacy=MagicMock(),
-        )
+        engine._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.DASHBOARD_RESUME)
 
         assert engine._grace_active is False, (
             "_resolve_door_window_pause_flags(DASHBOARD_RESUME) set a phantom "
@@ -558,16 +554,12 @@ class TestResolveDoorWindowPauseFlagsZeroDurationGraceIsolated:
         )
 
         engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 0})
-        engine._doorwindow_fsm_authoritative = True
         engine._paused_by_door = True
         engine._grace_active = True  # PAUSED_DURING_GRACE origin
 
         real_transition = dwfsm.transition
         with patch.object(dwfsm, "transition", wraps=real_transition) as mock_transition:
-            engine._resolve_door_window_pause_flags(
-                kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
-                legacy=MagicMock(),
-            )
+            engine._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.DASHBOARD_RESUME)
 
         mock_transition.assert_called_once()
         called_state, called_event = mock_transition.call_args[0]

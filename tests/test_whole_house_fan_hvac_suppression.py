@@ -621,11 +621,22 @@ class TestRePauseCallsApplyNatVentHvacState:
         engine._apply_nat_vent_hvac_state.assert_awaited_once()
 
     def test_re_pause_does_not_call_apply_nat_vent_hvac_state_when_not_reactivating(self):
-        """Outdoor too warm -> falls through to regular re-pause -> helper NOT called."""
+        """Outdoor too warm -> falls through to regular re-pause -> helper NOT called.
+
+        Issue #757 Phase 6 Step 4: door/window's dispatcher is now unconditionally
+        FSM-authoritative, so _re_pause_for_open_sensor()'s reactivation decision reads
+        the already-applied _paused_by_door flag instead of independently recomputing
+        the gate — by design, matching _on_grace_expired()'s own RE_PAUSE dispatch,
+        which this direct-call test bypasses. _paused_by_door=True is the realistic
+        precondition _on_grace_expired() would have already set for a
+        blocked-reactivation outcome (RE_PAUSE -> a paused sub-state) before scheduling
+        this task.
+        """
         engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="cool")
         engine._get_indoor_temp_f = MagicMock(return_value=76.0)
         engine._last_outdoor_temp = 90.0  # too warm — nat-vent conditions not met
         engine._apply_nat_vent_hvac_state = AsyncMock()
+        engine._paused_by_door = True
 
         asyncio.run(engine._re_pause_for_open_sensor())
 

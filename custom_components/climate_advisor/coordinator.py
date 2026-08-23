@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from .ai_skills import AISkillRegistry
     from .claude_api import ClaudeAPIClient
-    from .door_window_fsm import DoorWindowFsmEventKind
     from .override_grace_fsm import OverrideGraceFsmEventKind
 
 from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
@@ -234,7 +233,6 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
-from .door_window_lifecycle import DoorWindowLifecycleState
 from .fan_status import (
     is_ca_fan_running,
     parse_remote_speed_event,
@@ -264,13 +262,10 @@ _LOGGER = logging.getLogger(__name__)
 _WINDOWS_EXTREME_COLD_MARGIN = 15.0
 
 # Issue #685: the comparison axes tracked by _update_shadow_engine_diagnostic()'s
-# wall-clock cascade-noise debounce (mirror + FSM comparisons for nat-vent,
-# door/window, and override/grace).
+# wall-clock cascade-noise debounce (mirror + FSM comparisons for nat-vent).
 _SHADOW_DIAG_AXES = (
     "mirror",
     "fsm",
-    "door_window_mirror",
-    "door_window_fsm",
     # Issue #757 Phase 6 Step 3: "override_grace_mirror"/"override_grace_fsm" removed
     # from this axis list — override/grace's dispatcher is now unconditionally
     # FSM-authoritative in production, so the _update_shadow_engine_diagnostic()
@@ -278,6 +273,12 @@ _SHADOW_DIAG_AXES = (
     # ``_override_grace_fsm_state`` tracking / ``_evaluate_override_grace_fsm()``
     # machinery this axis read from is intentionally NOT removed in this step — it
     # is out of this step's scope and left for a future cleanup pass.
+    # Issue #757 Phase 6 Step 4: "door_window_mirror"/"door_window_fsm" removed from
+    # this axis list for the same reason — door/window's dispatcher is now
+    # unconditionally FSM-authoritative. Unlike override/grace's Step 3, the
+    # underlying ``_door_window_fsm_state`` tracking / ``_evaluate_door_window_fsm()``
+    # machinery this axis read from IS removed in this step — it had zero other
+    # consumers (confirmed by grep), so nothing was left orphaned by keeping it.
     # Issue #742: "classification_mirror" adds an 8th axis, deliberately with no
     # "classification_fsm" sibling — classification_fsm.py is genuinely stateless
     # (see its own module docstring's five-whys), so there is no separate
@@ -397,67 +398,15 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
     return pool[index]
 
 
-# Issue #637: which mirrored automation.py methods correspond to which door/window
-# FSM event kind. NAT_VENT_EXITED_SENSOR_STILL_OPEN is fed separately via
-# _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES (event-driven, Issue #647).
-# GRACE_TIMER_EXPIRED is fed separately via _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES
-# (also event-driven). SYNC_RECONCILE is fed separately via
-# _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS (method-name-triggered, same shape as
-# _NAT_VENT_FSM_TRIGGER_METHODS — Phase R Step 1b, epic #594, v0.6.24). As of Step 1b
-# all 7 DoorWindowFsmEventKind members have a real feed path; door/window Step 3
-# (#637) closed the one remaining residual (the "within planned window" grace
-# expiry branch previously emitted no event at all) by adding an emit there too —
-# see door_window_fsm.py's docstring for history.
-_DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
-    "handle_door_window_open": "sensor_opened",
-    "handle_all_doors_windows_closed": "all_sensors_closed",
-    "handle_manual_override_during_pause": "manual_override_during_pause",
-    "resume_from_pause": "dashboard_resume",
-    # Issue #668: "check_natural_vent_conditions": "paused_nat_vent_reactivated" used to
-    # live here (added by #660) as a method-name-keyed, UNCONDITIONAL trigger — every
-    # call to check_natural_vent_conditions() fed PAUSED_NAT_VENT_REACTIVATED regardless
-    # of which internal branch it took. #660's own comment claimed this kind is "a
-    # defensive no-op from any non-paused origin state" — true for NORMAL, but silently
-    # FALSE from a PAUSED_* origin: _transition_from_paused() lands unconditionally on
-    # NORMAL for this kind, so every paused-but-not-actually-reactivating cycle wrongly
-    # reset the shadow FSM, producing a permanent live disagreement (confirmed via HA log
-    # timestamps: SYNC_RECONCILE correctly restores PAUSED_IDLE, then this unconditional
-    # trigger immediately clobbers it back to NORMAL moments later, every cycle). Removed
-    # in favor of the event-driven feed below (_DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES),
-    # matching nat-vent's own 6-exit-event convention — only fires when one of the 2 real,
-    # deeply-conditional reactivation branches (automation.py) actually runs.
-}
-
-# Issue #594 Phase R Step 1b: door/window's SYNC_RECONCILE event kind has no natural
-# emitted event to key off (the only event on this path, "sensor_opened", is already
-# claimed by handle_door_window_open()'s semantically different fresh-open transition
-# — reusing it would silently misroute reconcile-detected pauses through the wrong
-# transition logic). Method-name-triggered dispatch is the correct fit instead — same
-# pattern _NAT_VENT_FSM_TRIGGER_METHODS already uses for nat-vent's own non-event-
-# shaped triggers. Each of these 4 methods calls
-# AutomationEngine._sync_paused_by_door_with_live_sensors() internally; all 4 already
-# have (or, for handle_pre_cool/handle_morning_wakeup, now gain) a _mirror_to_shadow()
-# call site, so this reuses that existing timing hook rather than adding a new
-# coordinator/automation-engine callback. This is a trigger-timing hook, not a data
-# dependency — the FSM still reads fresh self.automation_engine state, matching #647's
-# own stated principle that FSM re-evaluation shouldn't depend on shadow-engine replay.
-_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS: frozenset[str] = frozenset(
-    {"apply_classification", "handle_bedtime", "handle_pre_cool", "handle_morning_wakeup"}
-)
-
-# Issue #594 Phase R Step 1b: event types that indicate a door/window grace period just
-# expired, for feeding DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED. _on_grace_expired()
-# (automation.py) is an internal timer callback with no _mirror_to_shadow() call site,
-# and, as of door/window Step 3 (#637), all 4 branches emit a distinct event type
-# after mutating state (no staleness risk): "grace_expired" (the re-pause-on-still-
-# open branch, the normal-expiry branch, and the within-planned-window branch — the
-# latter two share the string with a distinguishing payload key) and
-# "override_adopted" (the adopted-matching-decision branch). These event-type
-# strings are also consumed by
-# _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP for a *different* FSM's GRACE_TIMER_EXPIRED
-# concept — one event type can and does feed multiple FSMs, same as every other branch
-# in _feed_lifecycle_fsms_from_event().
-_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES: frozenset[str] = frozenset({"grace_expired", "override_adopted"})
+# Issue #757 Phase 6 Step 4: _DOOR_WINDOW_FSM_EVENT_KINDS/
+# _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS/_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES
+# (Issue #637/#594 Phase R Step 1b) were removed here — they fed only the now-deleted
+# door/window shadow-comparison axes (door_window_mirror_agrees/door_window_fsm_agrees)
+# via _evaluate_door_window_fsm(), which had zero other consumers. "override_adopted"/
+# "grace_expired" — the event-type strings the removed
+# _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES also fed — are still consumed by
+# _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP below for that FSM's own still-active
+# GRACE_TIMER_EXPIRED concept.
 
 # Issue #639/#643: which mirrored automation.py methods correspond to which
 # override/grace FSM event kind. Of the 8 OverrideGraceFsmEventKind members,
@@ -588,31 +537,11 @@ _NAT_VENT_FSM_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Issue #647: `_exit_nat_vent()`'s sensor-still-open branch sets `_paused_by_door=True`
-# (automation.py:5390) — reachable from any of nat-vent's 5 real exit events. The
-# door/window FSM already has a purpose-built event kind for exactly this
-# (`NAT_VENT_EXITED_SENSOR_STILL_OPEN`, see door_window_fsm.py) that was never wired
-# to any trigger. Fired unconditionally on these event types — `transition()` reads
-# live sensor/pause state fresh each time and no-ops correctly when the sensor-open
-# branch wasn't the one actually taken.
-_DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        "nat_vent_comfort_floor_exit",
-        "nat_vent_away_ceiling_exit",
-        "nat_vent_predicted_floor_exit",
-        "nat_vent_outdoor_rise_exit",
-        "nat_vent_reconcile_exit",
-    }
-)
-
-# Issue #668: event-driven replacement for the removed method-name-keyed
-# "check_natural_vent_conditions" entry in _DOOR_WINDOW_FSM_EVENT_KINDS above. Fed only
-# from the 2 real, deeply-conditional reactivation-while-paused branches in
-# check_natural_vent_conditions() (automation.py's activate-fan and soft-start branches),
-# each of which now emits this event type explicitly, right alongside the existing
-# _resolve_door_window_pause_flags(kind=PAUSED_NAT_VENT_REACTIVATED, ...) call — unlike
-# the old trigger, this only fires when one of those branches actually runs.
-_DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES: frozenset[str] = frozenset({"nat_vent_reactivated_while_paused"})
+# Issue #757 Phase 6 Step 4: _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES (Issue #647) and
+# _DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES (Issue #668) were removed here — both
+# fed only the now-deleted door/window shadow-comparison axes via
+# _evaluate_door_window_fsm()/_evaluate_door_window_fsm_nat_vent_exit(), which had zero
+# other consumers.
 
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
@@ -666,18 +595,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             callbacks=self._build_production_automation_callbacks(),
             role="production",
         )
-        # Issue #729: _engine_a is the fixed-legacy identity — both remaining
-        # FSM-authoritative flags below stay False for its whole lifetime (was 3 —
-        # override_grace's own flag was removed in Issue #757 Phase 6 Step 3, once its
-        # dispatcher became unconditionally FSM-authoritative). Was runtime-toggleable
-        # per-subsystem via separate switches (Issue #594 Phase R / #664); those switches
-        # are gone — engine identity itself (legacy vs FSM, selected by which of
-        # _engine_a/_engine_b is primary) is now the only axis. Explicit assignment here,
-        # even though False is already the AutomationEngine.__init__ default, so this
-        # fact is visible at the construction site rather than relying on a default
-        # matching what's needed.
+        # Issue #729: _engine_a is the fixed-legacy identity — the remaining
+        # FSM-authoritative flag below stays False for its whole lifetime (was 4 —
+        # override_grace's own flag was removed in Issue #757 Phase 6 Step 3, and
+        # door/window's in Phase 6 Step 4, once each dispatcher became unconditionally
+        # FSM-authoritative). Was runtime-toggleable per-subsystem via separate switches
+        # (Issue #594 Phase R / #664); those switches are gone — engine identity itself
+        # (legacy vs FSM, selected by which of _engine_a/_engine_b is primary) is now
+        # the only axis. Explicit assignment here, even though False is already the
+        # AutomationEngine.__init__ default, so this fact is visible at the
+        # construction site rather than relying on a default matching what's needed.
         self._engine_a._natvent_fsm_authoritative = False
-        self._engine_a._doorwindow_fsm_authoritative = False
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_a stays False for its whole lifetime, same as the 4
@@ -699,7 +627,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # See docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation".
         self._shadow_event_log: list[dict[str, Any]] = []
         self._shadow_engine_diagnostic: dict[str, Any] | None = None
-        # Issue #685: wall-clock cascade-noise debounce state for the 6 comparison
+        # Issue #685: wall-clock cascade-noise debounce state for the comparison
         # axes above — see _shadow_diag_update_axis() and SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S.
         self._shadow_diag_disagreement_since: dict[str, datetime | None] = dict.fromkeys(_SHADOW_DIAG_AXES)
         self._shadow_diag_cumulative_seconds: dict[str, float] = dict.fromkeys(_SHADOW_DIAG_AXES, 0.0)
@@ -716,14 +644,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # INACTIVE unconditionally (same clean-slate convention as restore_state()'s
         # documented design for _natural_vent_active).
         self._nat_vent_fsm_state: NatVentLifecycleState = NatVentLifecycleState.INACTIVE
-        # Issue #637: the unified door/window pause/grace FSM's own independently-
-        # tracked state — same third-comparison-point convention as #633 above.
-        # Starts NORMAL unconditionally (no persisted pause/grace on a fresh coordinator).
-        self._door_window_fsm_state: DoorWindowLifecycleState = DoorWindowLifecycleState.NORMAL
         # Issue #639: the unified override/grace joint-lifecycle FSM's own
         # independently-tracked state — same third-comparison-point convention as
-        # #633/#637 above. Starts (IDLE, NONE) unconditionally (no persisted
-        # override/grace on a fresh coordinator).
+        # #633 above (door/window's own equivalent, #637, was removed in Issue #757
+        # Phase 6 Step 4 along with its now-orphaned door_window_fsm_agrees axis).
+        # Starts (IDLE, NONE) unconditionally (no persisted override/grace on a fresh
+        # coordinator).
         self._override_grace_fsm_state: OverrideGraceLifecycleState = (OverrideConfirmState.IDLE, GraceState.NONE)
         self._engine_b: AutomationEngine = AutomationEngine(
             hass=hass,
@@ -737,14 +663,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             role="shadow",
         )
         self._engine_b.dry_run = True
-        # Issue #729: _engine_b is the fixed-FSM identity — both remaining
-        # FSM-authoritative flags below stay True for its whole lifetime (was 3 — see
-        # _engine_a's own comment above for why override_grace's flag is gone; mirror of
-        # _engine_a's fixed-legacy assignment above). Which of the two is primary is
-        # decided by switch.climate_advisor_shadow_engine_primary
+        # Issue #729: _engine_b is the fixed-FSM identity — the remaining
+        # FSM-authoritative flag below stays True for its whole lifetime (was 4 — see
+        # _engine_a's own comment above for why override_grace's and door/window's
+        # flags are gone; mirror of _engine_a's fixed-legacy assignment above). Which
+        # of the two is primary is decided by switch.climate_advisor_shadow_engine_primary
         # (async_set_shadow_engine_primary()) — a single axis, not independent switches.
         self._engine_b._natvent_fsm_authoritative = True
-        self._engine_b._doorwindow_fsm_authoritative = True
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_b stays True for its whole lifetime, mirror of
@@ -1051,10 +976,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         unconditionally FSM-authoritative and its 2 dedicated shadow-diagnostic axes
         removed, this block's 14 raw-copy lines were reviewed for deletion. Kept as-is
         — every one of them is a genuine, live dependency of a subsystem that has NOT
-        graduated yet: ``_grace_active`` is read directly by both
+        graduated yet: ``_grace_active`` is read directly by
         ``check_natural_vent_conditions()`` (feeds ``nat_vent`` mirror/fsm axes, see
-        this docstring's own #631 paragraph above) and ``_door_window_state_for()``
-        (feeds ``door_window_mirror``/``door_window_fsm``). ``handle_fan_manual_override``/
+        this docstring's own #631 paragraph above). ``handle_fan_manual_override``/
         ``handle_manual_override`` remain mirrored onto the shadow engine (see above)
         and still call ``_resolve_override_grace_fsm_state()`` on it — that dispatch
         recomputes ``se._grace_active`` from ``se``'s OWN
@@ -1062,9 +986,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ``_build_override_grace_fsm_inputs()``'s read of ``_manual_override_active/
         _mode/_source``, ``_override_confirm_source``, ``_fan_override_active``, and
         ``_last_resume_source``. A stale/missing copy of ANY of those would corrupt the
-        recomputed ``se._grace_active`` and, transitively, the still-active nat-vent/
-        door-window axes above — so none of the 14 lines could be safely deleted here
-        without first proving that transitive chain is dead, which it isn't.
+        recomputed ``se._grace_active`` and, transitively, the still-active nat-vent
+        axes above — so none of the 14 lines could be safely deleted here without first
+        proving that transitive chain is dead, which it isn't.
+
+        Issue #757 Phase 6 Step 4 re-audit: door/window's own dispatcher is now ALSO
+        unconditionally FSM-authoritative and its 2 dedicated shadow-diagnostic axes
+        (``door_window_mirror``/``door_window_fsm``, fed by the now-deleted
+        ``_door_window_state_for()``) have been removed — that dependency on
+        ``_grace_active`` is gone. All 14 lines are still kept, unchanged, purely on the
+        strength of nat-vent's own still-active dependency documented above; this is not
+        a case of "shared with a since-graduated subsystem," it's "still needed by the
+        one subsystem that was never the reason to consider deleting it."
         """
         se = self.shadow_automation_engine
         ae = self.automation_engine
@@ -1099,7 +1032,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # These 4 fields were never added to this raw-copy block when it was created,
         # so any missed or exception-interrupted _mirror_to_shadow() call site touching
         # them causes a permanent, non-self-healing divergence. _paused_by_door is read
-        # by both the nat-vent and door/window mirror derivations.
+        # by the nat-vent mirror derivation (Issue #757 Phase 6 Step 4: the door/window
+        # mirror derivation that also used to read it was removed along with the
+        # door/window shadow-comparison axes; kept here regardless since nat-vent's own
+        # dependency alone still requires it). ``se._paused_with_hvac_already_off``
+        # (below) is likewise still real: it isn't read by the nat-vent lifecycle
+        # comparison itself, but IS read internally by
+        # check_natural_vent_conditions()'s own reactivation-while-paused branches
+        # (automation.py's ``_actively_paused`` computation) whenever that method is
+        # replayed on the shadow engine via ``_mirror_to_shadow()`` — a stale copy would
+        # corrupt that replay's own decision, not just a comparison axis.
         se._natural_vent_active = ae._natural_vent_active
         se._nat_vent_soft_start = ae._nat_vent_soft_start
         se._paused_by_door = ae._paused_by_door
@@ -1126,8 +1068,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # `... or self._whf_owns_hvac(): return` guard never protects the shadow the way it
         # protects production during a genuine WHF session — the shadow can incorrectly call
         # _pause_for_door_window() and set _paused_by_door=True while production correctly
-        # does not, producing a spurious door_window_mirror_agrees/mirror_agrees disagreement
-        # during ordinary WHF-with-windows-open operation (WHF's designed use case). A raw
+        # does not, producing a spurious mirror_agrees disagreement (nat-vent's own axis —
+        # door_window_mirror_agrees, which this same spurious pause used to also corrupt,
+        # was removed in Issue #757 Phase 6 Step 4) during ordinary WHF-with-windows-open
+        # operation (WHF's designed use case). A raw
         # copy closes this and every other _whf_owns_hvac() read the same way the _fan_active
         # copy above does for its own guards.
         se._pre_fan_hvac_mode = ae._pre_fan_hvac_mode
@@ -1286,23 +1230,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 exc,
             )
         finally:
-            from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
             self._dispatch_fsm_evaluators(
                 method_name,
                 [
                     (_NAT_VENT_FSM_TRIGGER_METHODS, self._evaluate_nat_vent_fsm, "Nat-vent FSM evaluation"),
-                    (
-                        _DOOR_WINDOW_FSM_EVENT_KINDS,
-                        lambda: self._evaluate_door_window_fsm(method_name),
-                        "Door/window FSM evaluation",
-                    ),
-                    (
-                        _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS,
-                        lambda: self._evaluate_door_window_fsm(method_name, event_kind=_DWFEventKind.SYNC_RECONCILE),
-                        "Door/window FSM evaluation (sync-reconcile)",
-                    ),
                     (
                         _OVERRIDE_GRACE_FSM_EVENT_KINDS,
                         lambda: self._evaluate_override_grace_fsm(
@@ -1395,55 +1328,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         result = transition(self._nat_vent_fsm_state, event)
         self._nat_vent_fsm_state = result.to_state
-
-    def _evaluate_door_window_fsm(self, method_name: str, event_kind: DoorWindowFsmEventKind | None = None) -> None:
-        """Run the unified door/window pause/grace FSM (Issue #637) against
-        production's current live readings and track its own independently-
-        derived state.
-
-        The FSM's own tracked state (``self._door_window_fsm_state``) is never
-        written back onto either engine — a third, independent computation,
-        purely for comparison against production's real derived state.
-        Isolated the same way: any exception here is logged and swallowed by
-        the caller, never allowed to affect production.
-
-        As of Issue #594 Phase R Step 1b, all 7 ``DoorWindowFsmEventKind``
-        members have a real feed path across 3 distinct mechanisms — same
-        precedent ``_evaluate_override_grace_fsm()`` established for taking an
-        explicit event kind rather than always deriving one from
-        ``method_name``:
-          - 4 via ``_DOOR_WINDOW_FSM_EVENT_KINDS`` (method-name lookup, this
-            function's original v1 mechanism) — ``event_kind`` omitted.
-          - ``NAT_VENT_EXITED_SENSOR_STILL_OPEN`` via
-            ``_DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES`` (event-driven, #647).
-          - ``GRACE_TIMER_EXPIRED`` via ``_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES``
-            (event-driven, Step 1b).
-          - ``SYNC_RECONCILE`` via ``_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS``
-            (method-name-triggered, Step 1b) — ``event_kind`` passed explicitly
-            rather than added to ``_DOOR_WINDOW_FSM_EVENT_KINDS`` itself, since
-            that dict's method-name keys are disjoint from this trigger set's
-            (``apply_classification``/``handle_bedtime``/``handle_pre_cool``/
-            ``handle_morning_wakeup`` are not door/window "entry point" methods
-            in the same sense as the other 4), but reusing the same dict shape
-            for two different kinds per name would be confusing.
-        All non-method-name-derived kinds are resolved by the caller
-        (``_feed_lifecycle_fsms_from_event()`` or ``_mirror_to_shadow()``'s
-        finally block) and passed via ``event_kind``.
-        """
-        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind, transition
-
-        ae = self.automation_engine
-        now = dt_util.now()
-
-        kind = (
-            event_kind if event_kind is not None else DoorWindowFsmEventKind(_DOOR_WINDOW_FSM_EVENT_KINDS[method_name])
-        )
-        event = DoorWindowFsmEvent(
-            kind=kind,
-            inputs=ae._build_door_window_fsm_inputs(now=now),
-        )
-        result = transition(self._door_window_fsm_state, event)
-        self._door_window_fsm_state = result.to_state
 
     def _evaluate_override_grace_fsm(self, event_kind: OverrideGraceFsmEventKind) -> None:
         """Run the unified override/grace joint-lifecycle FSM (Issue #639) against
@@ -1696,23 +1580,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         mirror_agrees = production_state == shadow_state
         fsm_agrees = production_state == fsm_state
 
-        # Issue #637: door/window pause/grace FSM's own agreement, same pattern.
-        from .door_window_lifecycle import DoorWindowLifecycleInputs, derive_door_window_lifecycle_state
-
-        def _door_window_state_for(ae: AutomationEngine) -> str:
-            inputs = DoorWindowLifecycleInputs(
-                paused_by_door=bool(ae._paused_by_door),
-                paused_with_hvac_already_off=bool(ae._paused_with_hvac_already_off),
-                grace_active=bool(ae._grace_active),
-            )
-            return derive_door_window_lifecycle_state(inputs).value
-
-        door_window_production_state = _door_window_state_for(self.automation_engine)
-        door_window_shadow_state = _door_window_state_for(self.shadow_automation_engine)
-        door_window_fsm_state = self._door_window_fsm_state.value
-        door_window_mirror_agrees = door_window_production_state == door_window_shadow_state
-        door_window_fsm_agrees = door_window_production_state == door_window_fsm_state
-
         # Issue #742: classification's own production/shadow agreement. Deliberately
         # has no separate "classification_fsm" axis — classification_fsm.py is
         # genuinely stateless (see its own module docstring's five-whys), so there is
@@ -1749,25 +1616,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         occupancy_shadow_state = _occupancy_defer_str(self.shadow_automation_engine)
         occupancy_mirror_agrees = occupancy_production_state == occupancy_shadow_state
 
-        agrees = (
-            mirror_agrees
-            and fsm_agrees
-            and door_window_mirror_agrees
-            and door_window_fsm_agrees
-            and classification_mirror_agrees
-            and occupancy_mirror_agrees
-        )
+        agrees = mirror_agrees and fsm_agrees and classification_mirror_agrees and occupancy_mirror_agrees
 
         # Issue #685: wall-clock debounce per axis — a WARNING only fires once a
         # comparison axis has continuously disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S.
         mirror_duration, mirror_sustained = self._shadow_diag_update_axis("mirror", mirror_agrees, now)
         fsm_duration, fsm_sustained = self._shadow_diag_update_axis("fsm", fsm_agrees, now)
-        door_window_mirror_duration, door_window_mirror_sustained = self._shadow_diag_update_axis(
-            "door_window_mirror", door_window_mirror_agrees, now
-        )
-        door_window_fsm_duration, door_window_fsm_sustained = self._shadow_diag_update_axis(
-            "door_window_fsm", door_window_fsm_agrees, now
-        )
         classification_mirror_duration, classification_mirror_sustained = self._shadow_diag_update_axis(
             "classification_mirror", classification_mirror_agrees, now
         )
@@ -1779,11 +1633,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "production_state": production_state,
             "shadow_state": shadow_state,
             "nat_vent_fsm_state": fsm_state,
-            "door_window_production_state": door_window_production_state,
-            "door_window_shadow_state": door_window_shadow_state,
-            "door_window_fsm_state": door_window_fsm_state,
-            "door_window_mirror_agrees": door_window_mirror_agrees,
-            "door_window_fsm_agrees": door_window_fsm_agrees,
             "classification_production_state": classification_production_state,
             "classification_shadow_state": classification_shadow_state,
             "classification_mirror_agrees": classification_mirror_agrees,
@@ -1802,16 +1651,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "disagreement_seconds": fsm_duration,
                     "sustained": fsm_sustained,
                     "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["fsm"],
-                },
-                "door_window_mirror": {
-                    "disagreement_seconds": door_window_mirror_duration,
-                    "sustained": door_window_mirror_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["door_window_mirror"],
-                },
-                "door_window_fsm": {
-                    "disagreement_seconds": door_window_fsm_duration,
-                    "sustained": door_window_fsm_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["door_window_fsm"],
                 },
                 "classification_mirror": {
                     "disagreement_seconds": classification_mirror_duration,
@@ -1848,40 +1687,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if not self._shadow_diag_incident_emitted["fsm"]:
                 self._emit_shadow_disagreement_incident("fsm", now, production_state, fsm_state, "fsm", fsm_duration)
                 self._shadow_diag_incident_emitted["fsm"] = True
-        if door_window_mirror_sustained:
-            _LOGGER.warning(
-                "Door/window shadow engine disagreement (Issue #637): production=%s shadow=%s (sustained %.0fs)",
-                door_window_production_state,
-                door_window_shadow_state,
-                door_window_mirror_duration,
-            )
-            if not self._shadow_diag_incident_emitted["door_window_mirror"]:
-                self._emit_shadow_disagreement_incident(
-                    "door_window_mirror",
-                    now,
-                    door_window_production_state,
-                    door_window_shadow_state,
-                    "shadow",
-                    door_window_mirror_duration,
-                )
-                self._shadow_diag_incident_emitted["door_window_mirror"] = True
-        if door_window_fsm_sustained:
-            _LOGGER.warning(
-                "Door/window FSM disagreement (Issue #637): production=%s fsm=%s (sustained %.0fs)",
-                door_window_production_state,
-                door_window_fsm_state,
-                door_window_fsm_duration,
-            )
-            if not self._shadow_diag_incident_emitted["door_window_fsm"]:
-                self._emit_shadow_disagreement_incident(
-                    "door_window_fsm",
-                    now,
-                    door_window_production_state,
-                    door_window_fsm_state,
-                    "fsm",
-                    door_window_fsm_duration,
-                )
-                self._shadow_diag_incident_emitted["door_window_fsm"] = True
         if classification_mirror_sustained:
             _LOGGER.warning(
                 "Classification shadow engine disagreement (Issue #742): production=%s shadow=%s (sustained %.0fs)",
@@ -3293,19 +3098,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fsm_exc,
             )
         # Issue #679: derive_door_window_lifecycle_state() also takes grace_active as an
-        # input, but this method previously only notified the override/grace FSM above —
-        # leaving the door/window FSM's tracked state stale (stuck at whatever it was
-        # showing pre-force-cancel) until an unrelated later event happened to resync it.
-        # Same closest-semantic-match reasoning as the override/grace call above.
-        from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
-
-        try:
-            self._evaluate_door_window_fsm("_check_orphaned_grace", event_kind=_DWFEventKind.GRACE_TIMER_EXPIRED)
-        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-            _LOGGER.warning(
-                "Door/window FSM evaluation (orphaned-grace-driven) failed (isolated, no production impact): %s",
-                fsm_exc,
-            )
+        # input; this method used to also re-notify the door/window shadow FSM here
+        # (Issue #679's own comment) — that call and the door/window shadow-comparison
+        # axis it fed were both removed in Issue #757 Phase 6 Step 4 once door/window's
+        # dispatcher became unconditionally FSM-authoritative in production (no shadow
+        # replica left to resync).
         self._emit_event(
             "stuck_grace_recovered",
             {"grace_end_time": _grace_end, "reason": "grace_without_override"},
@@ -4682,8 +4479,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _indoor_temp = self._get_indoor_temp()
         await self.automation_engine.handle_morning_wakeup(indoor_temp=_indoor_temp)
         self._feed_override_grace_fsm_if_cleared(_was_overridden)
-        # Issue #594 Phase R Step 1b: closes the door/window SYNC_RECONCILE coverage
-        # gap — see _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS.
+        # Issue #594 Phase R Step 1b: previously also closed the door/window
+        # SYNC_RECONCILE coverage gap (that machinery was removed in Issue #757
+        # Phase 6 Step 4 along with door/window's shadow-comparison axes); this mirror
+        # call still runs for classification_mirror/occupancy_mirror coverage.
         await self._mirror_to_shadow("handle_morning_wakeup", indoor_temp=_indoor_temp)
 
     async def _async_bedtime(self, now: datetime) -> None:
@@ -4794,8 +4593,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             indoor_temp=indoor_temp,
             nat_vent_just_closed=nat_vent_just_closed,
         )
-        # Issue #594 Phase R Step 1b: closes the door/window SYNC_RECONCILE coverage
-        # gap — see _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS.
+        # Issue #594 Phase R Step 1b: previously also closed the door/window
+        # SYNC_RECONCILE coverage gap (that machinery was removed in Issue #757
+        # Phase 6 Step 4 along with door/window's shadow-comparison axes); this mirror
+        # call still runs for classification_mirror/occupancy_mirror coverage.
         await self._mirror_to_shadow(
             "handle_pre_cool", indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed
         )
@@ -8474,32 +8275,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ``_mirror_to_shadow()``'s own finally block: an exception here is logged and
         swallowed, never allowed to affect production.
         """
-        from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         self._dispatch_fsm_evaluators(
             event_type,
             [
                 (_NAT_VENT_FSM_EVENT_TYPES, self._evaluate_nat_vent_fsm, "Nat-vent FSM evaluation (event-driven)"),
-                (
-                    _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES,
-                    self._evaluate_door_window_fsm_nat_vent_exit,
-                    "Door/window FSM evaluation (event-driven)",
-                ),
-                (
-                    _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES,
-                    lambda: self._evaluate_door_window_fsm(
-                        "_on_grace_expired", event_kind=_DWFEventKind.GRACE_TIMER_EXPIRED
-                    ),
-                    "Door/window FSM evaluation (grace-expiry)",
-                ),
-                (
-                    _DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES,
-                    lambda: self._evaluate_door_window_fsm(
-                        "check_natural_vent_conditions", event_kind=_DWFEventKind.PAUSED_NAT_VENT_REACTIVATED
-                    ),
-                    "Door/window FSM evaluation (nat-vent-reactivated-while-paused, event-driven)",
-                ),
                 (
                     _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP,
                     lambda: self._evaluate_override_grace_fsm(
@@ -8509,36 +8290,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ),
             ],
         )
-
-    def _evaluate_door_window_fsm_nat_vent_exit(self) -> None:
-        """Evaluate the door/window FSM's ``NAT_VENT_EXITED_SENSOR_STILL_OPEN`` event
-        (Issue #647; extracted as its own method under Issue #660 Phase R Step 0 so
-        ``_feed_lifecycle_fsms_from_event()`` can dispatch it through the same shared
-        ``_dispatch_fsm_evaluators()`` loop as every other FSM re-evaluation).
-
-        ``NAT_VENT_EXITED_SENSOR_STILL_OPEN``'s ``transition()`` unconditionally pauses
-        (door_window_fsm.py's ``_transition_from_normal``/``_transition_from_grace``
-        branches) — it does not itself re-check ``any_sensor_open``, so this event kind
-        must only be sent when the sensor really is open, or every nat-vent exit
-        (including a clean one) would incorrectly force a pause the FSM never should
-        have entered. Reads live sensor state directly rather than ``ae._paused_by_door``
-        — ``_exit_nat_vent()`` (which sets that flag) runs *after* the exit event this
-        method is triggered for (automation.py's own "caller emits its own specific
-        event before calling this method" convention), so ``_paused_by_door`` is still
-        last-cycle's stale value at this point; the live sensor read isn't.
-        """
-        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
-        from .door_window_fsm import transition as _door_window_transition
-
-        ae = self.automation_engine
-        if ae._any_monitored_sensor_open():
-            now = dt_util.now()
-            event = DoorWindowFsmEvent(
-                kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN,
-                inputs=ae._build_door_window_fsm_inputs(now=now),
-            )
-            result = _door_window_transition(self._door_window_fsm_state, event)
-            self._door_window_fsm_state = result.to_state
 
     def _resolve_active_comfort_band(self) -> tuple[float | None, float | None]:
         """Resolve the currently-active (comfort_heat, comfort_cool) band.

@@ -501,16 +501,14 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "shadow_state": diag["shadow_state"],
             "nat_vent_fsm_state": diag.get("nat_vent_fsm_state"),
             "checked_at": diag["checked_at"],
-            # Issue #660: door/window's own production/shadow/FSM state fields were
-            # already computed in coordinator.shadow_engine_diagnostic (Step 1b) but
-            # never exposed here — an observability gap alongside the door/window FSM
-            # authority extension itself, fixed in the same PR since both touch this
-            # diagnostic surface.
-            "door_window_production_state": diag.get("door_window_production_state"),
-            "door_window_shadow_state": diag.get("door_window_shadow_state"),
-            "door_window_fsm_state": diag.get("door_window_fsm_state"),
-            "door_window_mirror_agrees": diag.get("door_window_mirror_agrees"),
-            "door_window_fsm_agrees": diag.get("door_window_fsm_agrees"),
+            # Issue #660: door/window's own production/shadow/FSM state fields used to
+            # be exposed here (Step 1b). Issue #757 Phase 6 Step 4 removed them along
+            # with their underlying coordinator.shadow_engine_diagnostic computation
+            # (door/window's dispatcher is now unconditionally FSM-authoritative in
+            # production, and the diagnostic machinery feeding these keys had zero
+            # other consumers) — unlike override/grace's analogous fields below, which
+            # Step 3 deliberately left in place because their underlying machinery was
+            # deferred rather than removed.
             # Issue #594 Phase R / #660 / #664 originally surfaced 2 independent
             # per-subsystem authoritative flags here (nat-vent, door/window). Issue
             # #729 retired the 3 independent FSM-authoritative switches — each

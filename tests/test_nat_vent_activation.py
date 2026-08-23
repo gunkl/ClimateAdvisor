@@ -2327,9 +2327,20 @@ class TestIssue504DebounceGatesIdleOpen:
     # -- Site 4: _re_pause_for_open_sensor() -------------------------------------
 
     def test_site4_re_pause_hvac_fan_blocked_past_ceiling(self):
-        """FAN_MODE_HVAC: grace expires with sensor open, indoor > ceiling -> re-pauses (blocked)."""
+        """FAN_MODE_HVAC: grace expires with sensor open, indoor > ceiling -> re-pauses (blocked).
+
+        Issue #757 Phase 6 Step 4: door/window's dispatcher is now unconditionally
+        FSM-authoritative, so _re_pause_for_open_sensor()'s reactivation decision (when
+        _natvent_fsm_authoritative is off, the default) reads the already-applied
+        _paused_by_door flag instead of independently recomputing the gate — by design,
+        matching _on_grace_expired()'s own RE_PAUSE dispatch, which this direct-call
+        test bypasses. _paused_by_door=True is the realistic precondition
+        _on_grace_expired() would have already set for a blocked-reactivation outcome
+        (RE_PAUSE -> a paused sub-state) before scheduling this task.
+        """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=76.0)
         engine._last_outdoor_temp = 68.0
+        engine._paused_by_door = True
 
         asyncio.run(engine._re_pause_for_open_sensor())
 
@@ -2338,11 +2349,20 @@ class TestIssue504DebounceGatesIdleOpen:
         )
 
     def test_site4_re_pause_whf_activates_past_ceiling(self):
-        """FAN_MODE_WHOLE_HOUSE: grace expires with sensor open, indoor > ceiling, outdoor < indoor -> activates."""
+        """FAN_MODE_WHOLE_HOUSE: grace expires with sensor open, indoor > ceiling, outdoor < indoor -> activates.
+
+        Issue #757 Phase 6 Step 4: _paused_by_door=False is the realistic precondition
+        _on_grace_expired() would have already set for a reactivating outcome
+        (RE_PAUSE -> NORMAL) before scheduling this task — see the sibling blocked-case
+        test's docstring for the full explanation. Explicit here (matches the
+        AutomationEngine.__init__ default already) so the precondition isn't
+        accidentally correct rather than deliberately asserted.
+        """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=76.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
         engine.config[CONF_FAN_ENTITY] = "fan.attic"
         engine._last_outdoor_temp = 68.0
+        engine._paused_by_door = False
 
         asyncio.run(engine._re_pause_for_open_sensor())
 

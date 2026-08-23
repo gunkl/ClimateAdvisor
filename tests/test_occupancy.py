@@ -197,9 +197,8 @@ def _make_coordinator(
     coordinator.automation_engine._manual_override_active = False
     coordinator.automation_engine._grace_end_time = None
     # Issue #731: shadow_automation_engine is a real AutomationEngine (never mocked
-    # here), and its cleanup() now genuinely calls _is_recent_fan_command_callback
-    # (routed to coordinator._is_recent_fan_command()) once _fan_fsm_authoritative=True
-    # is wired onto _engine_b. That coordinator method reads
+    # here), and its cleanup() genuinely calls _is_recent_fan_command_callback
+    # (routed to coordinator._is_recent_fan_command()). That coordinator method reads
     # self.automation_engine._fan_command_time — an unset MagicMock attribute is
     # truthy/non-None by default (see CLAUDE.md async-mock guidance), so without this
     # explicit None it crashes comparing a MagicMock against a float in async_shutdown().
@@ -1189,8 +1188,8 @@ class TestOccupancyAwayDelay:
 
         # Shutdown must cancel the timer.
         # Issue #731: shadow_automation_engine.cleanup() -> _stop_fan_min_runtime_cycles()
-        # now genuinely dispatches through the fan FSM (_fan_fsm_authoritative=True on
-        # _engine_b), which reads dt_util.now() via _build_fan_fsm_inputs()/
+        # genuinely dispatches through the fan FSM, which reads dt_util.now() via
+        # _build_fan_fsm_inputs()/
         # _in_sleep_window() — the module-level dt_util stub returns an unpatched
         # MagicMock by default, so a real datetime must be supplied here the same way
         # other fan-area tests do (see test_fan_control.py's `_DT_NOW_PATH` idiom).

@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.67] — 2026-08-23
+
+- Feat #757: Strangler-fig graduation Phase 6 Step 2 — removes the legacy (pre-FSM) fan/whole-house-fan code path. The FSM-based fan/WHF dispatch has been production-authoritative since Phase 5, so the 17 legacy closures and their differential-comparator scaffolding are no longer needed.
+- Fix #759: the whole-house fan's fast, tick-level thermostatic stop check had been silently inert since Phase Fan/WHF went live — it never actually compared live indoor/outdoor temperatures, so the fan only stopped via the slower 30-minute cycle instead of immediately when conditions no longer favored it. Fixed; the fan now stops as promptly as originally intended.
+- Fix #759: the whole-house fan's physical-drift self-correction was firing one backstop tick early (after ~5 minutes instead of the intended two consecutive ticks / ~10 minutes), reducing its protection against momentary sensor flaps. Fixed.
+- Fix #759: restored a missing log line explaining why a too-soon fan on/off reversal was suppressed by the anti-flap rate limiter — the suppression itself was always working correctly, this only affects log visibility.
+
 ## [0.6.66] — 2026-08-23
 
 - Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 1 — removes the legacy (pre-FSM) economizer code path. The FSM-based economizer has been production-authoritative since Phase 5 with zero corpus divergence across weeks of live operation, so the old two-phase branch and its differential-comparator scaffolding are no longer needed.

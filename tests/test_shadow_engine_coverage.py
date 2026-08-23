@@ -640,10 +640,9 @@ _FAN_FSM_EVENT_KIND_REGISTRY: dict[str, str] = {
     # _apply_fan_fsm_state()) and _natural_vent_active/_nat_vent_soft_start (nat-vent's
     # own lifecycle, which _apply_fan_fsm_state() does not and should not own). Routing
     # this write group through the dispatcher would silently drop the nat-vent-side flag
-    # changes once _fan_fsm_authoritative flips True (the FSM branch would apply only the
-    # fan-side quarter of this reconcile decision) — a correctness regression, not a gap
-    # in wiring effort. Stays a direct write; see automation.py's own comment at this
-    # call site for the full rationale.
+    # changes (the FSM branch would apply only the fan-side quarter of this reconcile
+    # decision) — a correctness regression, not a gap in wiring effort. Stays a direct
+    # write; see automation.py's own comment at this call site for the full rationale.
     "STARTUP_RECONCILE": (
         "unreachable: reconcile_fan_on_startup()'s write group spans nat-vent's own "
         "lifecycle fields, which _apply_fan_fsm_state() doesn't own — dispatching would "

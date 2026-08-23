@@ -528,16 +528,9 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "override_grace_fsm_state": diag.get("override_grace_fsm_state"),
             "override_grace_mirror_agrees": diag.get("override_grace_mirror_agrees"),
             "override_grace_fsm_agrees": diag.get("override_grace_fsm_agrees"),
-            # Issue #731: fan/WHF's own production/shadow agreement. No "fan_fsm_state"/
-            # "fan_fsm_agrees" pair exists here (unlike the 3 lifecycles above) — see
-            # coordinator.py's _SHADOW_DIAG_AXES comment for why a third fan_fsm
-            # comparison point would carry zero independent signal for this subsystem.
-            "fan_production_state": diag.get("fan_production_state"),
-            "fan_shadow_state": diag.get("fan_shadow_state"),
-            "fan_mirror_agrees": diag.get("fan_mirror_agrees"),
             # Issue #742: classification's own production/shadow agreement (the
             # decide_scheduled_band_gate() result each engine computes from its own
-            # live flags). Same "no separate FSM axis" shape as fan/WHF above —
+            # live flags). Deliberately has no separate FSM axis —
             # classification_fsm.py is genuinely stateless (see its own module
             # docstring's five-whys), so there is no third comparison point.
             "classification_production_state": diag.get("classification_production_state"),
@@ -553,9 +546,9 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
             # extraction): economizer's own production/shadow agreement (each engine's
             # own economizer_lifecycle_state property, derived from its live
-            # _economizer_active/_economizer_phase flags). Same "no separate FSM axis"
-            # shape as fan/WHF above — economizer_fsm.py's transition state is not
-            # independently tracked as a third comparison point.
+            # _economizer_active/_economizer_phase flags). Deliberately has no separate
+            # FSM axis — economizer_fsm.py's transition state is not independently
+            # tracked as a third comparison point.
             "economizer_production_state": diag.get("economizer_production_state"),
             "economizer_shadow_state": diag.get("economizer_shadow_state"),
             "economizer_mirror_agrees": diag.get("economizer_mirror_agrees"),

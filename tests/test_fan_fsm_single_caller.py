@@ -1,8 +1,11 @@
-"""Issue #731: AST-scan enforcement that each of the 6 pure fan/WHF decision
-functions is called from at most two places in the whole integration —
-``fan_fsm.py`` (the real FSM's own dispatch, once each) and one named legacy
-closure location in ``automation.py`` (the pre-extraction call site kept
-dormant while ``_fan_fsm_authoritative`` is False).
+"""Issue #731 (graduated in Issue #757 Step 2): AST-scan enforcement that each
+of the 6 pure fan/WHF decision functions is called from at most two places in
+the whole integration — ``fan_fsm.py`` (the real FSM's own dispatch, once
+each) and at most one legacy closure location in ``automation.py``. The
+legacy closures were deleted in Step 2 once the FSM path became the sole
+implementation, so automation.py's call count for each function is now 0 —
+this test still enforces the ceiling (at most 1) rather than an exact count,
+so it continues to guard against a future call site creeping back in.
 
 Same AST-scanning technique as ``test_shadow_engine_coverage.py``'s own
 registry-completeness checks. The hazard this guards against: a third call

@@ -4139,14 +4139,21 @@ class AutomationEngine:
                     from .nat_vent_fsm import transition as _nat_vent_transition
 
                     _fsm_current_state = self.nat_vent_lifecycle_state
-                    # paused_by_door=False: this idle-open re-entry site only ever runs
-                    # when _actively_paused is False (see the outer guard above) — legacy
-                    # never consults the reactivation lockout here (only the separate
-                    # paused-reactivation call site below does). See
-                    # _build_nat_vent_fsm_inputs()'s docstring for the full rationale.
-                    _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                        now=dt_util.now(), indoor=_indoor, outdoor=outdoor, paused_by_door=False
-                    )
+                    # Issue #696: previously hardcoded paused_by_door=False here, on the
+                    # premise that this idle-open re-entry site only ever runs when
+                    # _actively_paused is False and so could never legitimately have
+                    # _paused_by_door=True. That premise missed the
+                    # _paused_with_hvac_already_off=True case Issue #523 deliberately made
+                    # reachable here: _actively_paused (= paused_by_door AND NOT
+                    # hvac_already_off) is False even while the real _paused_by_door flag
+                    # is True (sensor still open, HVAC was already idle at exit) — exactly
+                    # what a COMFORT_FLOOR exit with an open sensor produces. Passing the
+                    # real flag lets the FSM's existing PAUSED_REACTIVATION_LOCKOUT branch
+                    # (_transition_from_inactive(), nat_vent_fsm.py) apply here the same way
+                    # it already does at the paused-by-door reactivation call site below —
+                    # outdoor_exit_time/lockout_seconds are unaffected by this parameter and
+                    # were already correctly populated either way.
+                    _fsm_inputs = self._build_nat_vent_fsm_inputs(now=dt_util.now(), indoor=_indoor, outdoor=outdoor)
                     _fsm_result = _nat_vent_transition(
                         _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
                     )
@@ -4231,6 +4238,28 @@ class AutomationEngine:
                                     "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                                 },
                             )
+                elif self._paused_by_door and is_reactivation_locked_out(
+                    outdoor_exit_time=self._nat_vent_outdoor_exit_time,
+                    now=dt_util.now(),
+                    lockout_seconds=float(
+                        self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
+                    ),
+                ):
+                    # Issue #696: legacy (non-FSM) twin of the FSM branch's fix above —
+                    # this idle-open re-entry site never consulted the reactivation lockout
+                    # even when _paused_by_door=True (the _paused_with_hvac_already_off=True
+                    # case Issue #523 made reachable here). Mirrors the paused-by-door
+                    # reactivation call site's own lockout check further below.
+                    _lockout_elapsed = (
+                        (dt_util.now() - self._nat_vent_outdoor_exit_time).total_seconds()
+                        if self._nat_vent_outdoor_exit_time is not None
+                        else 0.0
+                    )
+                    _LOGGER.debug(
+                        "Nat vent idle-open re-entry: lockout active — %.0fs elapsed of %.0fs",
+                        _lockout_elapsed,
+                        float(self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)),
+                    )
                 elif self._nat_vent_may_reactivate(
                     outdoor=outdoor,
                     indoor=_indoor,
@@ -5106,7 +5135,15 @@ class AutomationEngine:
                             self._current_classification.hvac_mode if self._current_classification else "unknown"
                         ),
                     }
-                    _set_outdoor_exit_time = False
+                    # Issue #696: previously False on the (now-disproven) assumption that
+                    # exit and re-entry always check the identical comfort_heat quantity at
+                    # a fixed reading, so they could never both be satisfied by the same
+                    # indoor temperature. That holds only within a single tick — indoor
+                    # legitimately drifts across the floor between ticks in production (a
+                    # real 68->69F rise over 5 real minutes triggered this exact gap on
+                    # 2026-08-23), so this exit needs the same anti-flap protection as the
+                    # other three exit reasons below.
+                    _set_outdoor_exit_time = True
                 elif _exit_reason == NatVentExitReason.PROACTIVE_FLOOR:
                     _ttf = (exit_decision.time_to_floor_hr if exit_decision is not None else None) or 0.0
                     _cf_now = (exit_decision.comfort_heat_now if exit_decision is not None else None) or _hard_floor

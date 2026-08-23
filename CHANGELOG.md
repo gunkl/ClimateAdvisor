@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.65] — 2026-08-23
+
+- Fix #696: closes a gap where the whole-house fan could briefly turn back on below your daytime comfort band shortly after shutting off at the comfort floor. The re-check that runs after a pause now properly waits out the same 5-minute cooldown other exit types already respect, instead of restarting the fan the moment indoor ticks up by even 1°F.
+
 ## [0.6.64] — 2026-08-22
 
 - Feat #749: adds a hard-invariant watchdog that checks, every update cycle, whether the AC and the whole-house fan are ever physically running at the same time — a condition that should never happen. If it ever does, you'll see an immediate notification and a warning on the Status tab, even if the automation's own internal bookkeeping looks fine. Detects and alerts only — it never takes any action on its own.

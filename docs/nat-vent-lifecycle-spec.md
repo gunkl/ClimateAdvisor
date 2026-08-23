@@ -9,7 +9,7 @@
 | What are the 4 nat-vent session states and how do they map to flags? | `INACTIVE`, `ACTIVE_FULL_GATE`, `ACTIVE_SOFT_START`, `PAUSED_REACTIVATION_LOCKOUT` — derived purely from `_natural_vent_active`/`_nat_vent_soft_start`/`_paused_by_door`/`_nat_vent_outdoor_exit_time`. | [State Transitions](#state-transitions) |
 | Where is the derivation computed, and is it load-bearing? | `nat_vent_lifecycle.py::derive_nat_vent_lifecycle_state()`, exposed read-only via `AutomationEngine.nat_vent_lifecycle_state`. Purely observational — not called from any production decision path. | [Scope](#scope) |
 | Does every nat-vent exit hand off through the same choke point? | No — `_exit_nat_vent()` is the choke point for most exits (10 call sites, per `tests/test_nat_vent_exit_lockout_coverage.py`'s AST scan), but the comfort-floor exit inside `check_natural_vent_conditions()`, the away-mode ceiling exit, the ODE ceiling-escalation exit, and two reconcile/bedtime paths mutate the flags directly instead. | [Exit Paths](#exit-paths-not-unified-through-a-single-function) |
-| What is the reactivation lockout and how long is it? | 300s default (`NAT_VENT_REACTIVATION_LOCKOUT_S`). Originally armed only by the outdoor-warm-rise exit; Issue #641 extended arming to the proactive-floor, ceiling-threshold, and fan_thermostat_check's tick-level direction-reversal exits, once all three were found to hand off into the same paused-reactivation race the lockout exists to prevent. | [State Transitions](#state-transitions) |
+| What is the reactivation lockout and how long is it? | 300s default (`NAT_VENT_REACTIVATION_LOCKOUT_S`). Originally armed only by the outdoor-warm-rise exit; Issue #641 extended arming to the proactive-floor, ceiling-threshold, and fan_thermostat_check's tick-level direction-reversal exits; Issue #696 extended it to the comfort-floor exit and — separately — wired the idle-open re-entry call site (previously unchecked entirely, see next row) to actually consult it. | [State Transitions](#state-transitions) |
 | What happens when nat-vent exits and the sensor is still open — pause or grace? | `_exit_nat_vent()` forks: sensor still open → hands off into the pause lifecycle; sensors closed → hands off into the grace lifecycle. See `grace-periods-spec.md` for what happens next in either lifecycle. | [Handoff to Pause/Grace](#handoff-to-pausegrace) |
 | How was this spec's accuracy verified? | Differential replay: `derive_nat_vent_lifecycle_state()` run against the real final engine flags from all 74 golden + 4 pending scenarios (Issue #606), plus 3 hand-reasoned ground-truth scenarios. | [Verification](#verification) |
 | Is every `_exit_nat_vent()` call site's lockout-arming decision enforced, not just documented? | Yes — `tests/test_nat_vent_exit_lockout_coverage.py` AST-scans every call site and requires each to be explicitly classified `"arms lockout"` / `"exempted: <reason>"`, with a positive control that checks the claim against the actual `set_outdoor_exit_time=True` argument (Issue #641). | [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) |
@@ -48,8 +48,8 @@
 |---|---|---|---|---|
 | `INACTIVE` | Door/window opens, full gate passes | `ACTIVE_FULL_GATE` | `decide_nat_vent_gate()` | `~L2841` (`handle_door_window_open`) |
 | `INACTIVE` | Door/window opens, only soft-start gate passes | `ACTIVE_SOFT_START` | `decide_nat_vent_soft_start_gate()` | `~L3093-3094` |
-| `INACTIVE` / `PAUSED_REACTIVATION_LOCKOUT` | Idle-open re-eval, full gate passes | `ACTIVE_FULL_GATE` | `_nat_vent_may_reactivate()` (includes lockout check) | `~L3053`, `~L3381` |
-| `INACTIVE` / `PAUSED_REACTIVATION_LOCKOUT` | Idle-open re-eval, soft-start only | `ACTIVE_SOFT_START` | same, soft-start variant | `~L3412-3413` |
+| `INACTIVE` / `PAUSED_REACTIVATION_LOCKOUT` | Idle-open re-eval, full gate passes | `ACTIVE_FULL_GATE` | `_nat_vent_may_reactivate()`, now preceded by an explicit lockout check (Issue #696 — this call site never consulted the lockout before, despite this row's prior claim) | `~L4147` (FSM), `~L4241` (legacy) |
+| `INACTIVE` / `PAUSED_REACTIVATION_LOCKOUT` | Idle-open re-eval, soft-start only | `ACTIVE_SOFT_START` | same, soft-start variant — also now gated by the same lockout check (Issue #696) | `~L4147` (FSM), `~L4273` (legacy) |
 | `ACTIVE_SOFT_START` | Full gate independently clears | `ACTIVE_FULL_GATE` | `_nat_vent_may_reactivate()` | `~L3125` — label-only, fan/HVAC untouched |
 | `INACTIVE` | Fan already physically running at startup/reconcile, eligible | `ACTIVE_FULL_GATE` | `reconcile_fan_on_startup()` eligibility check | `~L3955` |
 
@@ -243,6 +243,48 @@ exit reason added later without a classification fails immediately. Separately,
 durations at the same 300s minimum — a configured value outside roughly [5, 55]
 minutes would otherwise schedule its own off/on command inside the rate-limit window,
 stranding the fan far longer than the configured cycle intended.
+
+### Incident: idle-open re-entry never consulted the lockout at all (Issue #696)
+
+Reported/confirmed 2026-08-23: after the wake-up routine's 06:30 comfort-floor exit
+(indoor at exactly the 68°F floor), the WHF reactivated ~5 minutes later at indoor
+69°F — still below the 70–72°F daytime cycling band — ran for ~5 minutes pulling in
+59°F outside air, then was corrected by the next periodic cycling check. Filed as
+Issue #696 on 2026-08-20 (three days before this specific occurrence) from a code
+audit during the #694 FSM-wiring verification; this incident is the live confirmation.
+
+Root cause, distinct from #641's: not a missing `set_outdoor_exit_time=True` on one
+more exit reason (though `COMFORT_FLOOR` also had that gap and was fixed alongside
+this), but that the **idle-open re-entry block** inside
+`check_natural_vent_conditions()` (both its FSM and legacy branches) never called
+`is_reactivation_locked_out()` at all, regardless of whether any exit had armed the
+timer. `nat_vent_reactivation_lockout.py`'s own docstring had scoped this
+deliberately, reasoning the block was "structurally unreachable... guarded by `not
+self._paused_by_door`, already False at that moment." That reasoning predates (or
+overlooked) **Issue #523**, which deliberately widened the block's real guard to
+`_actively_paused = paused_by_door and not paused_with_hvac_already_off` specifically
+so a pause where HVAC was already off would *not* block it — exactly the flag
+combination a `COMFORT_FLOOR` exit with the sensor still open produces. The two
+decisions contradicted each other; this incident is where that surfaced.
+
+Fix: armed `set_outdoor_exit_time=True` on the `COMFORT_FLOOR` exit
+(`nat_vent_temperature_check()`), and wired both idle-open branches to actually
+consult the lockout — the FSM branch by no longer overriding `paused_by_door=False`
+when building FSM inputs (letting the FSM's existing `PAUSED_REACTIVATION_LOCKOUT`
+handling apply, the same as the sibling paused-by-door call site already does), the
+legacy branch with an explicit `is_reactivation_locked_out()` guard mirroring that
+same sibling site. The other 3 reactivation-gate call sites named in the lockout
+module's docstring were individually re-verified (not assumed) and their exemptions
+do hold, each for a different, still-valid reason — see the corrected module
+docstring in `nat_vent_reactivation_lockout.py`.
+
+**Known residual limitation, out of scope for #696**: the periodic evaluation that
+re-triggers `check_natural_vent_conditions()` appears to land on a ~5-minute
+clock-aligned cadence — the same order of magnitude as the 300s default lockout. In
+the reported incident, elapsed time between exit and reactivation was ≈300.02s,
+right at the lockout's edge; the fix closes the "never checked at all" gap
+unconditionally, but does not guarantee every occurrence lands outside the lockout
+window by a comfortable margin. Tracked as separate follow-up work, not fixed here.
 
 ### Follow-up: rate-limit reporting was misleading and mis-framed as an incident (Issue #649)
 

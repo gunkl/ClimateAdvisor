@@ -1,22 +1,38 @@
 """Pure decision core for the nat-vent reactivation lockout (architecture-reset Step 2).
 
-Guards against rapid re-activation flapping right after an outdoor-warm exit:
-once nat-vent exits because outdoor rose above indoor (the ONLY exit reason
-that records `_nat_vent_outdoor_exit_time`, per `_exit_nat_vent()`'s
-docstring), the paused-by-door reactivation check inside
-`check_natural_vent_conditions()` must wait out a configured lockout window
-before considering reactivation again.
+Guards against rapid re-activation flapping right after an exit that arms
+`_nat_vent_outdoor_exit_time` (originally only the outdoor-warm-rise exit; as
+of Issue #641/#696 also the proactive-floor, ceiling-threshold, and
+comfort-floor exits — see `_exit_nat_vent()` call sites in `automation.py` for
+the current, authoritative list, since it has grown more than once and this
+docstring should not be trusted as the enumeration).
 
-Verified narrowly and deliberately scoped to this ONE call site, not a gap to
-spread to the other 4 reactivation-gate call sites (`handle_door_window_open`,
-the Priority-0 grace+ceiling re-entry check, `reconcile_fan_on_startup`,
-`_re_pause_for_open_sensor`): each of those is structurally unreachable in the
-immediate aftermath of an outdoor-warm exit-with-pause, because they're each
-guarded by a `not self._paused_by_door` (or equivalent) condition that is
-already False at that moment — `_paused_by_door` and `_natural_vent_active`
-being True is exactly what a pause/reactivation cycle means, and none of the
-other 4 sites can even be entered while paused. Applying the lockout there
-too would be dead code, not a fix.
+As of Issue #696, this is consulted at TWO call sites in
+`check_natural_vent_conditions()`: the paused-by-door reactivation block, and
+the idle-open/"Priority-0 grace+ceiling re-entry" block (both its FSM and
+legacy branches). It was previously scoped to the paused-by-door block ONLY,
+on the claim that the idle-open block is "structurally unreachable... guarded
+by `not self._paused_by_door`, already False at that moment." That claim was
+wrong: the idle-open block's actual guard is `_actively_paused = paused_by_door
+and not paused_with_hvac_already_off` (Issue #523), which is deliberately
+False — making the block reachable — whenever `_paused_by_door=True` AND
+`_paused_with_hvac_already_off=True`. A `COMFORT_FLOOR` exit with the
+monitored sensor still open produces exactly that combination, and did so in
+production on 2026-08-23 (WHF reactivated ~5 minutes after a comfort-floor
+exit, unblocked, because the idle-open path never checked this lockout). See
+Issue #696 for the full incident.
+
+The other 3 reactivation-gate call sites (`handle_door_window_open`,
+`reconcile_fan_on_startup`, `_re_pause_for_open_sensor`) were individually
+re-read (not assumed) during the #696 fix and their exemptions do hold, each
+for its own distinct reason — `handle_door_window_open` genuinely guards on
+plain `not self._paused_by_door`; `reconcile_fan_on_startup` is exempted by
+call cadence (runs at most once per restart/30-min backstop, structurally
+incapable of sub-minute repeats) rather than by reachability;
+`_re_pause_for_open_sensor` only fires after a grace-period expiry, a
+different branch of the exit lifecycle than the pause branch this lockout
+protects. Re-verify each individually before trusting this summary if any of
+their guards change.
 """
 
 from __future__ import annotations

@@ -1,0 +1,75 @@
+{
+  "name": "issue_696_idle_open_reactivation_bypasses_lockout",
+  "description": "Reproduces the reported WHF brief-reactivation incident (2026-08-23, 06:30-06:40): a comfort-floor exit fires while a monitored window is still open and HVAC was already idle, and the next re-evaluation tick -- with indoor drifted only 1F above the floor -- must NOT reactivate nat-vent before the 300s lockout expires. Before the Issue #696 fix, the idle-open re-entry path inside check_natural_vent_conditions() never consulted the reactivation lockout at all (regardless of whether any exit had armed it), so a COMFORT_FLOOR exit followed by a small indoor uptick reactivated the WHF below the daytime cycling band's off-threshold.",
+  "source": "production_incident",
+  "issue": 696,
+  "notes": [
+    "Distinct bug from Issue #641: #641's gap was a missing set_outdoor_exit_time=True on 3 exit reasons, all consumed by the paused-by-door reactivation block. #696's gap was that the idle-open re-entry block (a separate code path, reached when _paused_with_hvac_already_off=True makes _actively_paused False even though _paused_by_door is True -- the Issue #523 widening) never called is_reactivation_locked_out() at all, in either its FSM or legacy branch.",
+    "hvac_mode=off in the classification is load-bearing: it is what makes _paused_with_hvac_already_off=True when the window-open pause fires, which is what routes reactivation through the idle-open path instead of the (already-protected) strict paused-by-door path.",
+    "No thermal_model block on purpose -- omitting it means no PROACTIVE_FLOOR prediction is available, so the 68F reading triggers the hard COMFORT_FLOOR exit specifically, matching the real incident's log line (\"Nat-vent hard exit [daytime] via temp-check (comfort_floor)\").",
+    "The second temp_update lands 250s after the exit -- comfortably inside the 300s default lockout window, unlike the real incident's ~300.02s edge case (that timing-margin question is tracked separately, out of scope for this fix per the #696 plan).",
+    "Occupant framing: before the fix, the WHF would have been commanded on again at 69F -- pulling in cool outside air for several minutes while indoor was still below the 70-72F daytime comfort band -- purely because it ticked 1F above the hard floor, not because conditions actually called for it. After the fix, it stays off until the lockout clears."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-08-23T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 70F, outdoor 60F -- favorable for nat-vent, well above the 68F floor."
+    },
+    {
+      "time": "2026-08-23T06:00:01",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Hot-day classification with HVAC off -- matches the real incident's daytime classification. HVAC already off is what produces _paused_with_hvac_already_off=True when the pause below fires."
+    },
+    {
+      "time": "2026-08-23T06:00:02",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window open (matches the real incident's open-sensor precondition). outdoor(60) < indoor(70) - hysteresis(1), indoor > comfort_heat(68), outdoor < threshold -- nat-vent activates, WHF turns on, HVAC suppressed."
+    },
+    {
+      "time": "2026-08-23T06:30:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 59.0,
+      "note": "Indoor has drifted down to exactly the 68F comfort floor -- COMFORT_FLOOR hard-floor exit fires. Window still open -> _exit_nat_vent() pauses rather than restoring HVAC. HVAC was already off (idle), so _paused_with_hvac_already_off=True and _actively_paused becomes False -- the idle-open re-entry path (not the strict paused-by-door path) governs the next re-evaluation. (Issue #696 fix) this exit now also arms the 300s reactivation lockout."
+    },
+    {
+      "time": "2026-08-23T06:34:10",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 59.0,
+      "note": "Next re-evaluation tick, 250s later (inside the 300s lockout): indoor has drifted up 1F, clearing the raw comfort_heat floor (68) and the idle-open gate's outdoor/hysteresis check -- but still below the 70-72F daytime cycling band. Before the fix: the idle-open path never checked the lockout at all, so this reactivates the WHF regardless of timing. After the fix: the lockout armed at 06:30:00 blocks reactivation here."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-23T06:34:10",
+      "expect": "paused_by_door",
+      "reason": "The reactivation lockout armed by the comfort-floor exit at 06:30:00 must still be blocking reactivation 250s later -- reactivating here reproduces the reported brief below-band WHF run."
+    },
+    {
+      "at": "2026-08-23T06:34:10",
+      "expect": "fan_not_active",
+      "reason": "The WHF must still be physically off at this tick -- before the fix it would have been commanded back on via the idle-open path, which never consulted the lockout."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A comfort-floor exit with a window still open and HVAC already idle correctly stays paused through the next re-evaluation tick instead of reactivating on a 1F uptick, closing the idle-open re-entry path's lockout gap."
+  }
+}

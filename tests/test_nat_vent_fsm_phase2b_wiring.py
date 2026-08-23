@@ -256,14 +256,19 @@ class TestSite2IdleOpenReentry:
             asyncio.run(engine.check_natural_vent_conditions())
             assert engine._natural_vent_active is False, f"authoritative={authoritative}"
 
-    def test_authoritative_ignores_stale_paused_by_door_lockout(self):
-        """Real production incident (see issue-641-whf-proactive-exit-reactivation-
-        flip-flop.json): this site only ever runs when _actively_paused is False,
-        which can coincide with _paused_by_door=True (HVAC was already off, nothing
-        to interrupt). Legacy never consults the reactivation lockout at this call
-        site (only the paused-reactivation site, tested below, does) -- the FSM
-        path must reproduce that exact scope, not apply a lockout legacy never has
-        here."""
+    def test_authoritative_now_respects_lockout(self):
+        """Issue #696 (supersedes the pre-fix test this replaces, which was named
+        test_authoritative_ignores_stale_paused_by_door_lockout and asserted the bug
+        itself as correct behavior): a real production incident (2026-08-23, see
+        tools/simulations/pending/issue_696_idle_open_reactivation_bypasses_lockout.json)
+        showed this site DOES need the lockout -- _paused_with_hvac_already_off=True
+        (HVAC already off, nothing to interrupt) makes _actively_paused False even
+        though _paused_by_door is True, which is exactly what a COMFORT_FLOOR exit
+        with an open sensor produces. Both the FSM branch (no longer overriding
+        paused_by_door=False when building FSM inputs) and the legacy branch (new
+        explicit is_reactivation_locked_out() guard) must now block reactivation here
+        while within the lockout window, matching the paused-reactivation site's
+        existing behavior (TestSite3PausedReactivation below)."""
         for authoritative in (True, False):
             engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=69.0, authoritative=authoritative)
             self._arm_idle_open(engine, outdoor=58.6)
@@ -272,9 +277,9 @@ class TestSite2IdleOpenReentry:
             engine._nat_vent_outdoor_exit_time = _NOW - timedelta(seconds=5)  # well within the 300s lockout
             with patch(_DT_NOW_PATH, return_value=_NOW):
                 asyncio.run(engine.check_natural_vent_conditions())
-            assert engine._natural_vent_active is True, (
-                f"authoritative={authoritative}: idle-open re-entry must not be blocked by a "
-                "lockout this call site has never enforced"
+            assert engine._natural_vent_active is False, (
+                f"authoritative={authoritative}: idle-open re-entry must be blocked by the "
+                "reactivation lockout within its window (Issue #696)"
             )
 
     def test_authoritative_preserves_paused_by_door_flag(self):
@@ -283,13 +288,18 @@ class TestSite2IdleOpenReentry:
         site (`self._natural_vent_active = True`) never touched it. Entering with
         _paused_by_door=True + _paused_with_hvac_already_off=True must leave
         _paused_by_door=True afterward -- otherwise the pair becomes incoherent
-        (_paused_by_door=False while _paused_with_hvac_already_off=True)."""
+        (_paused_by_door=False while _paused_with_hvac_already_off=True).
+
+        Issue #696: exit_time moved outside the (now-enforced) 300s lockout window so
+        reactivation actually proceeds here -- this test is specifically about what
+        happens to _paused_by_door once a genuine post-lockout reactivation succeeds,
+        not about the lockout gate itself (covered separately above)."""
         for authoritative in (True, False):
             engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=69.0, authoritative=authoritative)
             self._arm_idle_open(engine, outdoor=58.6)
             engine._paused_by_door = True
             engine._paused_with_hvac_already_off = True
-            engine._nat_vent_outdoor_exit_time = _NOW - timedelta(seconds=5)  # well within the 300s lockout
+            engine._nat_vent_outdoor_exit_time = _NOW - timedelta(seconds=400)  # past the 300s lockout
             with patch(_DT_NOW_PATH, return_value=_NOW):
                 asyncio.run(engine.check_natural_vent_conditions())
             assert engine._natural_vent_active is True, f"authoritative={authoritative}"

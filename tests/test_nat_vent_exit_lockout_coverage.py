@@ -66,10 +66,20 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "takes the sensors-closed grace-period branch, lockout never consulted"
     ),
     ("nat_vent_temperature_check", 2): (
-        "exempted: hard-floor exit (indoor <= comfort floor) shares the same comparison "
-        "quantity as the reactivation gate's own comfort_heat floor check — self-complementary "
-        "at a fixed reading, cannot both be satisfied by the same indoor temperature the way "
-        "PROACTIVE_FLOOR's independent predictive math could"
+        "exempted: this ordinal is ONE shared _exit_nat_vent() call site serving all 4 of "
+        "this function's exit reasons (COMFORT_FLOOR/PROACTIVE_FLOOR/OUTDOOR_RISE/"
+        "CEILING_THRESHOLD) via a per-branch local (`_set_outdoor_exit_time`), not a literal "
+        "at the call site — so `_find_calls_with_lockout_flag()`'s literal-True check "
+        "structurally cannot confirm arming here for ANY of the 4 reasons, not just this one "
+        "(verified by direct reading, not by this positive control). 3 of the 4 branches "
+        "(PROACTIVE_FLOOR/OUTDOOR_RISE/CEILING_THRESHOLD) already set that local True. Issue "
+        "#696: COMFORT_FLOOR (previously the one holdout, on the now-disproven claim that "
+        "exit and re-entry check the same quantity at a fixed reading and so can't both be "
+        "satisfied by the same indoor temperature — false once indoor drifts across the floor "
+        "between ticks, as it did in production on 2026-08-23) now sets it True too — see the "
+        "COMFORT_FLOOR branch in `nat_vent_temperature_check()` directly, and "
+        "`tools/simulations/pending/issue_696_idle_open_reactivation_bypasses_lockout.json` "
+        "for the regression scenario."
     ),
     ("fan_thermostat_check", 1): (
         "arms lockout — STOP_VIA_NAT_VENT_EXIT, the tick-level twin of "

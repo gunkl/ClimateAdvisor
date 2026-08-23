@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.64"
+VERSION = "0.6.65"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.65": [
+        "Fix #696: closes a gap where the whole-house fan could briefly turn back on"
+        " below your daytime comfort band shortly after shutting off at the comfort"
+        " floor. The re-check that runs after a pause now properly waits out the"
+        " same 5-minute cooldown other exit types already respect, instead of"
+        " restarting the fan the moment indoor ticks up by even 1°F.",
+    ],
     "0.6.64": [
         "Feat #749: adds a hard-invariant watchdog that checks, every update cycle,"
         " whether the AC and the whole-house fan are ever physically running at the"
@@ -2239,6 +2246,44 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    696: {
+        "version_fixed": "0.6.65",
+        "title": (
+            "Fixed a nat-vent reactivation gap traced from a live 2026-08-23 incident:"
+            " the whole-house fan re-engaged ~5 minutes after a comfort-floor exit,"
+            " below the daytime cycling band's off-threshold, because the idle-open"
+            " re-entry path inside check_natural_vent_conditions() (reached whenever a"
+            " pause leaves _paused_with_hvac_already_off=True, per Issue #523) never"
+            " consulted the reactivation lockout at all, regardless of whether any exit"
+            " had armed it. Root cause was a documented but disproven scope decision in"
+            " nat_vent_reactivation_lockout.py, contradicted by Issue #523's own"
+            " widening. Fix arms set_outdoor_exit_time=True on the COMFORT_FLOOR exit"
+            " (nat_vent_temperature_check()) and wires is_reactivation_locked_out() into"
+            " both the FSM branch (stop overriding paused_by_door=False when building"
+            " FSM inputs) and the legacy branch (explicit guard mirroring the existing"
+            " paused-by-door reactivation site) of the idle-open block. As a side"
+            " effect, also collapsed a previously-tracked same-tick reactivation race"
+            " (Issue #699) for the PROACTIVE_FLOOR/OUTDOOR_RISE exit reasons — the"
+            " AWAY_CEILING variant of #699 remains open, untouched by this fix. A"
+            " related but distinct gap (fan_thermostat_check()'s STOP_COOLED_TO_FLOOR"
+            " exit, same disproven self-complementary-floor reasoning) was found during"
+            " this fix's blast-radius check and filed separately as #755, not fixed"
+            " here."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/automation.py"
+            " nat_vent_temperature_check() COMFORT_FLOOR branch,"
+            " check_natural_vent_conditions() idle-open re-entry block (FSM + legacy);"
+            " nat_vent_reactivation_lockout.py docstring correction;"
+            " tests/test_nat_vent_exit_lockout_coverage.py registry entry;"
+            " tests/test_nat_vent_fsm_phase2b_wiring.py,"
+            " tests/test_nat_vent_lifecycle_state.py,"
+            " tests/test_shadow_fsm_harness_event_coverage.py,"
+            " tests/test_nat_vent_fsm_authoritative_compare.py — updated to assert the"
+            " corrected behavior in place of the previously-encoded bug;"
+            " docs/nat-vent-lifecycle-spec.md"
+        ),
+    },
     749: {
         "version_fixed": "0.6.64",
         "title": (

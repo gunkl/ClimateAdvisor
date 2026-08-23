@@ -110,16 +110,23 @@ class TestHardFloorExitWithSensorOpen:
             "exit with the sensor open — this is the exact live incident (Issue #666)"
         )
 
-    def test_nat_vent_fsm_reaches_inactive(self) -> None:
+    def test_nat_vent_fsm_reaches_paused_reactivation_lockout(self) -> None:
+        """Issue #696: this test previously expected 'inactive' because the
+        COMFORT_FLOOR/hard-floor exit never armed `_nat_vent_outdoor_exit_time`, so
+        derive_nat_vent_lifecycle_state() had no lockout window to apply even though
+        `_paused_by_door` was already True with the sensor open. #696 arms it (the
+        same fix that closed the idle-open reactivation gap this incident's own
+        replay exposed) — the sensor is still open here, so the correct state
+        immediately after the exit is PAUSED_REACTIVATION_LOCKOUT, not INACTIVE."""
         coordinator, _fake_hass, scheduler, _event_log, ae = _build_incident_coordinator()
 
         with scheduler.installed():
             run_coro(ae.nat_vent_temperature_check(67.0, outdoor=58.5))
 
         assert ae._natural_vent_active is False
-        assert coordinator._nat_vent_fsm_state.value == "inactive", (
+        assert coordinator._nat_vent_fsm_state.value == "paused_reactivation_lockout", (
             f"shadow nat-vent FSM ({coordinator._nat_vent_fsm_state}) disagreed with production's "
-            "real _natural_vent_active=False after a hard-floor exit — matches the live "
+            "real state after a hard-floor exit with the sensor still open — matches the live "
             "'Nat-vent FSM disagreement (Issue #633)' warning"
         )
 

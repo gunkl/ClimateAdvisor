@@ -122,66 +122,47 @@ _KNOWN_DIVERGENT_SCENARIOS: dict[str, _KnownDivergence] = {
         event_count=1,
         action_count=0,
     ),
-    # Timing-only + one same-tick reactivation race (same root cause as
-    # issue-411-natvent-floor-exit-consistency below, now also reachable here).
+    # Cosmetic-only as of Issue #696: the same-tick reactivation race this entry used to
+    # document is gone. #696 wired the idle-open re-entry path (both its FSM and legacy
+    # branches) to actually consult is_reactivation_locked_out() — PROACTIVE_FLOOR already
+    # armed _nat_vent_outdoor_exit_time (Issue #641), so with the lockout now enforced at
+    # this call site, the baseline (legacy) run no longer reactivates within the same tick
+    # either, matching the authoritative run. This also resolves #699's manifestation for
+    # this scenario (see GitHub issue #699 for the still-open AWAY_CEILING variant, which
+    # #696 did not touch — that exit reason still never arms the lockout).
     "issue-641-whf-proactive-exit-reactivation-flip-flop": _KnownDivergence(
         description=(
-            "5 event divergences, 2 action divergences. (1) payload gains source=temp_check "
-            "(cosmetic) on the PROACTIVE_FLOOR exit event; k_passive is present and identical "
-            "in both runs (Issue #698 Verification Defect 1 fix — the fast loop previously "
-            "dropped this key, which had made this entry's prior 'same actions' description "
-            "harder to trust than it should have been). (2)-(4) the 3 events immediately "
-            "following (whf_hvac_suppressed, fan_activated, sensor_opened) all fire ~5s "
-            "earlier via the fast loop than the slow loop — same event type and payload, "
-            "retimed only. The 2 action divergences (set_hvac_mode off, fan turn_on) are the "
-            "same retiming, ~5s earlier. (5) index 10: an EXTRA nat_vent_predicted_floor_exit "
-            "event (the deferred second exit, 'fan_mode_change: deferred (5-min floor...)') "
-            "appears ONLY in the authoritative run, not in both runs as an earlier version of "
-            "this comment incorrectly claimed — the baseline run's slow-loop cadence never "
-            "revisits the same tick, so it has no equivalent entry. This is the same same-tick "
-            "reactivation race as issue-411-natvent-floor-exit-consistency below (also now "
-            "tracked as GitHub issue #699); the 5-min fan rate limiter defers the reactivation's "
-            "own second exit rather than producing unbounded thrash, but does not prevent the "
-            "extra event/action pair from occurring in the authoritative run."
+            "1 event divergence, 0 action divergences: payload gains source=temp_check "
+            "(cosmetic) on the PROACTIVE_FLOOR exit event — k_passive is present and "
+            "identical in both runs (Issue #698 Verification Defect 1 fix). No retiming, no "
+            "extra reactivation event/action pair — Issue #696 closed the same-tick "
+            "reactivation race this entry previously documented."
         ),
-        event_count=5,
-        action_count=2,
+        event_count=1,
+        action_count=0,
     ),
-    # Genuine (bounded) behavior difference — diagnosed root cause, not just observed:
-    # check_natural_vent_conditions()'s PROACTIVE_FLOOR branch calls _exit_nat_vent()
-    # and returns immediately, so its own idle-open reactivation check (earlier in the
-    # same function) never re-runs within that same invocation — reactivation can only
-    # be attempted on a LATER, separate call. The fast loop's exit lives in a different
-    # function (nat_vent_temperature_check()); when check_natural_vent_conditions() is
-    # also invoked later in the same tick, it starts fresh and its idle-open check (see
-    # automation.py's "_idle_open" gate) DOES see the just-exited state within the same
-    # tick. Since the exit paused with _paused_with_hvac_already_off=True (nat-vent had
-    # already suppressed HVAC to off), _actively_paused is False (see automation.py's
-    # "_actively_paused = self._paused_by_door and not self._paused_with_hvac_already_off"),
-    # so the idle-open gate isn't blocked, and — because indoor hasn't moved between the
-    # exit and this same-tick re-check — the instantaneous reactivation gate re-arms,
-    # producing one extra activate/deactivate cycle at the exit's own timestamp. This is
-    # the SAME "residual, still-present one-cycle reactivation race" this scenario's own
-    # notes already document as a known gap explicitly out of Issue #411's fix scope
-    # ("Recommend filing this as an explicit follow-up issue...") — Phase 2d's fast loop
-    # makes the race reachable WITHIN a single tick (previously only reachable ACROSS two
-    # separate ticks, which this scenario's temperature curve was deliberately tuned to
-    # avoid). No comfort impact (indoor's physical trajectory is identical either way);
-    # bounded to exactly one extra fan-on/fan-off pair, not unbounded thrash. Now formally
-    # tracked as GitHub issue #699 ("Nat-vent same-tick reactivation race after a
-    # proactive/away-ceiling exit") rather than only this scenario's own precedent note.
+    # Resolved by Issue #696: this used to be a genuine (bounded) behavior difference —
+    # check_natural_vent_conditions()'s idle-open gate never consulted the reactivation
+    # lockout, so when it re-ran later in the same tick as a PROACTIVE_FLOOR exit (which
+    # DOES arm _nat_vent_outdoor_exit_time, Issue #641) with _actively_paused False
+    # (exit paused with _paused_with_hvac_already_off=True), the gate saw indoor
+    # unchanged since the exit and re-armed instantly, producing one extra
+    # activate/deactivate cycle. #696 wired is_reactivation_locked_out() into that same
+    # idle-open gate (both FSM and legacy branches) — the lockout now blocks this
+    # same-tick re-check the same way it already blocked the separate
+    # paused-by-door-reactivation call site. Bounded, no-occupant-impact race is now
+    # eliminated rather than merely bounded. Also resolves this scenario's manifestation
+    # of GitHub issue #699 (the AWAY_CEILING variant above remains open — that exit
+    # reason still never arms the lockout, #696 did not touch it).
     "issue-411-natvent-floor-exit-consistency": _KnownDivergence(
         description=(
-            "5 event divergences, 3 action divergences: payload gains source=temp_check "
-            "(cosmetic, 1 event) plus one extra fan activate/deactivate pair — "
-            "whf_hvac_suppressed, fan_activated, sensor_opened, and a second (deferred) "
-            "nat_vent_predicted_floor_exit event (4 events), and set_hvac_mode off + fan "
-            "turn_on + fan turn_off (3 actions) — not present in the baseline run. See the "
-            "long-form root-cause comment above this dict for the full mechanism; tracked as "
-            "GitHub issue #699."
+            "1 event divergence, 0 action divergences: payload gains source=temp_check "
+            "(cosmetic) on the PROACTIVE_FLOOR exit event. No extra fan activate/deactivate "
+            "pair — Issue #696 closed the same-tick reactivation race this entry previously "
+            "documented."
         ),
-        event_count=5,
-        action_count=3,
+        event_count=1,
+        action_count=0,
     ),
 }
 

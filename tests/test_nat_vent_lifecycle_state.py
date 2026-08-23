@@ -219,16 +219,25 @@ class TestGroundTruthScenarios:
         scenario = _load_scenario(_GOLDEN_DIR / "mild_all_day_nat_vent_only.json")
         assert _derive_state_for_scenario(scenario) == NatVentLifecycleState.ACTIVE_FULL_GATE
 
-    def test_comfort_floor_exit_ends_inactive_not_paused(self) -> None:
-        """Issue #99 golden: comfort-floor exit inside check_natural_vent_conditions()
-        is a hand-rolled inline exit (confirmed by reading automation.py directly —
-        it does NOT route through _exit_nat_vent(), unlike most other exits) that
-        clears only _natural_vent_active and never touches _paused_by_door or
-        _nat_vent_outdoor_exit_time. The scenario's own verdict states this
-        explicitly: 'fan stops, heat restores, paused_by_door stays False.'
-        Expect INACTIVE, not PAUSED_REACTIVATION_LOCKOUT."""
+    def test_comfort_floor_exit_ends_locked_out_while_sensor_open(self) -> None:
+        """Issue #99 golden, re-verified for Issue #696: this test previously expected
+        INACTIVE on the premise that the comfort-floor exit "never touches
+        _paused_by_door" — checked directly against the real engine output while
+        investigating #696, that premise was already wrong (this scenario's sensor
+        opens and is never closed, so `_exit_nat_vent()`'s own sensors-still-open
+        branch sets `_paused_by_door=True` here regardless of HVAC restoring to
+        heat — the scenario JSON's own `verdict.observed_behavior` field claiming
+        `paused_by_door=False` was stale). The test passed before #696 only because
+        `_nat_vent_outdoor_exit_time` was never armed for a COMFORT_FLOOR exit, so
+        `derive_nat_vent_lifecycle_state()` had no lockout window to apply even
+        though `_paused_by_door` was already True. Issue #696 arms it (see
+        nat_vent_temperature_check()'s COMFORT_FLOOR branch); at this scenario's
+        final event (the exit itself, elapsed=0s into the 300s lockout), the correct
+        state is PAUSED_REACTIVATION_LOCKOUT — the same state
+        test_outdoor_rise_exit_with_sensor_still_open_ends_locked_out below already
+        expects for the analogous outdoor-rise exit."""
         scenario = _load_scenario(_GOLDEN_DIR / "nat-vent-comfort-floor-exit-restores-heat.json")
-        assert _derive_state_for_scenario(scenario) == NatVentLifecycleState.INACTIVE
+        assert _derive_state_for_scenario(scenario) == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
 
     def test_outdoor_rise_exit_with_sensor_still_open_ends_locked_out(self) -> None:
         """Issue #115 golden: nat-vent activates at 18:00, the door/window sensor

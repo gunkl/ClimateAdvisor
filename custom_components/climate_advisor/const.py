@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.65"
+VERSION = "0.6.66"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.66": [
+        "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 1"
+        " — removes the legacy (pre-FSM) economizer code path. The FSM-based"
+        " economizer has been production-authoritative since Phase 5 with zero"
+        " corpus divergence across weeks of live operation, so the old two-phase"
+        " branch and its differential-comparator scaffolding are no longer needed.",
+    ],
     "0.6.65": [
         "Fix #696: closes a gap where the whole-house fan could briefly turn back on"
         " below your daytime comfort band shortly after shutting off at the comfort"
@@ -2246,6 +2253,34 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    757: {
+        "version_fixed": "0.6.66",
+        "title": (
+            "Strangler-fig graduation Phase 6 Step 1: removed the legacy (pre-FSM)"
+            " economizer code path from AutomationEngine, now that"
+            " _economizer_fsm_authoritative had been permanently True in production"
+            " for weeks with zero divergence (offline differential comparator, full"
+            " golden+pending corpus)."
+        ),
+        "scope_covered": (
+            "automation.py: deleted the __init__ default"
+            " self._economizer_fsm_authoritative flag; check_window_cooling_opportunity()"
+            " now unconditionally delegates to _check_window_cooling_opportunity_fsm()"
+            " (the legacy two-phase cool-down/maintain branch body, ~94 lines, was"
+            " deleted); removed the now-unused free_cooling_direction_ok import."
+            " coordinator.py: removed the _economizer_fsm_authoritative=False/True"
+            " assignments on _engine_a/_engine_b; removed the economizer_mirror axis"
+            " from _SHADOW_DIAG_AXES and its full block in"
+            " _update_shadow_engine_diagnostic() (agreement computation, debounce"
+            " entry, dict assembly, WARNING logging); removed the"
+            " se._economizer_active/se._economizer_phase raw-copy lines from"
+            " _sync_shadow_inputs(). Deleted tests/test_economizer_fsm_authoritative_"
+            "compare.py and tools/sim_harness/economizer_fsm_authoritative_compare.py."
+            " General economizer status/logging/API reads (_economizer_active,"
+            " economizer_lifecycle_state) were left untouched — unrelated to the"
+            " shadow/legacy mechanism."
+        ),
+    },
     696: {
         "version_fixed": "0.6.65",
         "title": (

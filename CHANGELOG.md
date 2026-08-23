@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.66] — 2026-08-23
+
+- Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 1 — removes the legacy (pre-FSM) economizer code path. The FSM-based economizer has been production-authoritative since Phase 5 with zero corpus divergence across weeks of live operation, so the old two-phase branch and its differential-comparator scaffolding are no longer needed.
+
 ## [0.6.65] — 2026-08-23
 
 - Fix #696: closes a gap where the whole-house fan could briefly turn back on below your daytime comfort band shortly after shutting off at the comfort floor. The re-check that runs after a pause now properly waits out the same 5-minute cooldown other exit types already respect, instead of restarting the fan the moment indoor ticks up by even 1°F.

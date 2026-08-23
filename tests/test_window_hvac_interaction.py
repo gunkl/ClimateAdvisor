@@ -97,7 +97,6 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._doorwindow_fsm_authoritative = False
     ae._natvent_fsm_authoritative = False
     ae._override_grace_fsm_authoritative = False
-    ae._economizer_fsm_authoritative = False
     ae._grace_active = False
     ae._grace_protects_override = False
     ae._override_confirm_pending = False

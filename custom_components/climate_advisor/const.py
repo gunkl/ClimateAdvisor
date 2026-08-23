@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.67"
+VERSION = "0.6.68"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.68": [
+        "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 3"
+        " — removes the legacy (pre-FSM) override/grace code path. The FSM-based"
+        " override/grace dispatch has been production-authoritative for weeks with"
+        " zero corpus divergence, so the old inline flag-write branch and its"
+        " differential-comparator scaffolding are no longer needed.",
+    ],
     "0.6.67": [
         "Feat #757: Strangler-fig graduation Phase 6 Step 2 — removes the legacy"
         " (pre-FSM) fan/whole-house-fan code path. The FSM-based fan/WHF dispatch has"
@@ -2272,13 +2279,16 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     757: {
-        "version_fixed": "0.6.67",
+        "version_fixed": "0.6.66-0.6.68",
         "title": (
-            "Strangler-fig graduation Phase 6 Step 2: removed the legacy (pre-FSM)"
-            " fan/whole-house-fan code path from AutomationEngine, now that"
-            " _fan_fsm_authoritative had been permanently True in production for"
-            " weeks with zero divergence (offline differential comparator, full"
-            " golden+pending corpus)."
+            "Strangler-fig graduation Phase 6: Step 1 (economizer, 0.6.66), Step 2"
+            " (fan/whole-house-fan, 0.6.67), and Step 3 (override/grace, 0.6.68) each"
+            " removed a legacy (pre-FSM) code path from AutomationEngine, once that"
+            " subsystem's own _<name>_fsm_authoritative flag had been permanently"
+            " True in production for weeks with zero divergence (offline"
+            " differential comparator, full golden+pending corpus). Step 2's own"
+            " scope_covered below documents its fan/WHF work in full; this entry's"
+            " Step 3 paragraph documents override/grace."
         ),
         "scope_covered": (
             "automation.py: deleted the __init__ default self._fan_fsm_authoritative"
@@ -2338,6 +2348,66 @@ KNOWN_FIXES: dict[int, dict] = {
             " _FAN_FSM_EVENT_KIND_REGISTRY/TestFanFsmEventCoverage was also left"
             " untouched — it enforces event-kind-to-dispatch-site coverage, unrelated"
             " to the removed flag."
+            " Step 3 (0.6.68): automation.py: deleted the __init__ default"
+            " self._override_grace_fsm_authoritative flag;"
+            " _resolve_override_grace_fsm_state() dropped its legacy: Callable[[], None]"
+            " parameter and now unconditionally runs override_grace_fsm.transition();"
+            " deleted the legacy closure at each of the 10 real automation.py call"
+            " sites (cancel_override, handle_fan_manual_override,"
+            " start_override_confirmation's immediate-accept branch and its"
+            " confirm-expiry timer's PATH A/PATH B, resume_from_pause,"
+            " _start_grace_period's UNPROTECTED_GRACE_STARTED wrapper,"
+            " _on_grace_expired's shared _dispatch_override_grace_expired(), and"
+            " restore_state()'s clean-slate GRACE_TIMER_EXPIRED dispatch), plus the 2"
+            " coordinator.py call sites (_check_orphaned_grace(), the"
+            " OVERRIDE_SUPERSEDED 'Fix D' branch in _async_thermostat_changed — an"
+            " 11th/12th real call site the original investigation undercounted by"
+            " one, found and fixed the same way). The 3 shared legacy helper methods"
+            " (_legacy_clear_confirm_flag, _legacy_set_grace_flags,"
+            " _legacy_clear_grace_flags) were NOT deleted — unlike fan/WHF's 17"
+            " closures, each of these 3 has at least one other live, unconditional"
+            " caller outside the dispatcher's dead legacy branch (clear_manual_"
+            "override(), _cancel_grace_timers(), and the pre-existing"
+            " kept-for-reference _confirm_override(), the latter still exercised by"
+            " tests/test_door_window.py::test_grace_started_override_confirmed_"
+            "trigger) — confirmed via a full-file grep before deciding, per the"
+            " task's own instruction, rather than assumed. Docstrings updated"
+            " throughout to stop describing a legacy/FSM switch that no longer"
+            " exists. Added a code comment documenting the pre-existing, confirmed-"
+            "inert _last_resume_source staleness in _build_override_grace_fsm_"
+            "inputs() (GRACE_TIMER_EXPIRED reads it after _cancel_grace_timers_"
+            "action() already cleared it to None) — verified inert both before and"
+            " after this change since transition() never reads the resulting"
+            " grace_source for that event kind. coordinator.py: removed the"
+            " _override_grace_fsm_authoritative=False/True assignments on"
+            " _engine_a/_engine_b; removed the override_grace_mirror/override_grace_"
+            "fsm axis pair from _SHADOW_DIAG_AXES and their full block in"
+            " _update_shadow_engine_diagnostic() (agreement computation, debounce"
+            " entries, dict assembly, WARNING logging for both axes). Unlike fan's"
+            " _sync_shadow_inputs() cleanup, NONE of the 14 override/grace raw-copy"
+            " fields were removed: _grace_active is read directly by both the"
+            " still-active nat-vent mirror (via check_natural_vent_conditions()) and"
+            " door/window mirror (_door_window_state_for()) axes, and the other 13"
+            " fields all transitively feed the shadow engine's own"
+            " _resolve_override_grace_fsm_state() recomputation of _grace_active"
+            " when handle_fan_manual_override()/handle_manual_override() are mirrored"
+            " onto it — deleting any of them risked silently corrupting those two"
+            " still-active axes. Documented in a new paragraph in"
+            " _sync_shadow_inputs()'s own docstring rather than deleted. Deleted"
+            " tests/test_override_grace_fsm_authoritative_compare.py and"
+            " tools/sim_harness/override_grace_fsm_authoritative_compare.py, and"
+            " tests/test_override_grace_fsm_shadow_wiring.py (confirmed"
+            " shadow-wiring-specific). test_shadow_engine_coverage.py's"
+            " _OVERRIDE_GRACE_EVENT_KIND_REGISTRY/TestOverrideGraceFsmEventCoverage"
+            " removed (same reasoning as fan's own registry removal did NOT apply —"
+            " fan's was kept; override/grace's coverage registry tested exactly the"
+            " now-removed override_grace_fsm shadow-diagnostic axis, not an"
+            " independent dispatch-site coverage concern). The underlying"
+            " _evaluate_override_grace_fsm()/_override_grace_fsm_state"
+            " independently-tracked shadow-FSM-replay machinery was deliberately"
+            " NOT removed — out of this step's stated scope; left for a future"
+            " cleanup pass, noted in a code comment at its _SHADOW_DIAG_AXES removal"
+            " site."
         ),
     },
     759: {

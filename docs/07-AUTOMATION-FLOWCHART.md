@@ -244,7 +244,7 @@ When occupancy switches to `away` or `vacation` while `_paused_by_door=True` (a 
 
 Thermostat state changes are monitored by `_async_thermostat_changed()` in the coordinator.
 
-**FSM-equivalent (Issue #639):** the override-confirmation half of this flow maps to `override_grace_fsm.py`'s composite `(OverrideConfirmState, GraceState)` state — `OverrideConfirmState.PENDING` covers the confirmation window (nodes E/K below), `IDLE` otherwise. `AutomationEngine._override_grace_fsm_authoritative` is fixed at construction as of Issue #729 (same fixed-per-engine-identity model as door/window's own flag above). See [§ Grace Period System](#8-grace-period-system) below and [§FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer).
+**FSM-equivalent (Issue #639, legacy removed Issue #757):** the override-confirmation half of this flow maps to `override_grace_fsm.py`'s composite `(OverrideConfirmState, GraceState)` state — `OverrideConfirmState.PENDING` covers the confirmation window (nodes E/K below), `IDLE` otherwise. It is now the sole implementation — the `_override_grace_fsm_authoritative` cutover flag was removed in Phase 6 graduation after zero divergence across the full golden+pending corpus. See [§ Grace Period System](#8-grace-period-system) below and [§FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer).
 
 The `_hvac_command_pending` flag and `_hvac_command_time` timestamp are set by the system before it issues any HVAC service call (pause, resume, classification apply, etc.). When the thermostat state change event arrives, the handler checks this flag first. If it is set, the change is system-initiated and no override is recorded.
 
@@ -351,7 +351,7 @@ graph TD
 
 Two grace period types are managed by `_start_grace_period()` in `AutomationEngine`.
 
-**FSM-equivalent (Issue #639):** `override_grace_fsm.py`'s `GraceState` (`NONE`/`ACTIVE_PROTECTING_OVERRIDE`/`ACTIVE_UNPROTECTED`) names whether grace is running and, separately, whether it's protecting a real override — the same distinction `_grace_protects_override` (Issue #530) already draws in the flag logic below. `AutomationEngine._override_grace_fsm_authoritative` is fixed at construction as of Issue #729. See [§FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer) and [grace-periods-spec.md](grace-periods-spec.md).
+**FSM-equivalent (Issue #639, legacy removed Issue #757):** `override_grace_fsm.py`'s `GraceState` (`NONE`/`ACTIVE_PROTECTING_OVERRIDE`/`ACTIVE_UNPROTECTED`) names whether grace is running and, separately, whether it's protecting a real override — the same distinction `_grace_protects_override` (Issue #530) already draws in the flag logic below. It is now the sole implementation — the `_override_grace_fsm_authoritative` cutover flag was removed in Phase 6 graduation after zero divergence across the full golden+pending corpus. See [§FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer) and [grace-periods-spec.md](grace-periods-spec.md).
 
 When any grace period expires, the system re-checks contact sensor state before resuming normal automation. If any contact sensor is still open, HVAC is re-paused immediately rather than blindly restoring normal operation. This prevents the safety issue of running heating or cooling with a door or window open.
 

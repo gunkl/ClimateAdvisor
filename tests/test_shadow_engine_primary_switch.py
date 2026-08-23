@@ -51,22 +51,25 @@ def _capture_create_task(coord) -> list:
 
 
 class TestEngineIdentityFixedAtConstruction:
-    """Issue #729: each engine's 3 FSM-authoritative flags are now fixed at
-    construction, replacing the 3 independent per-subsystem switches — one
+    """Issue #729: each engine's FSM-authoritative flags are now fixed at
+    construction, replacing the independent per-subsystem switches — one
     engine is always fully legacy, the other always fully FSM. Cheap
-    regression guard replacing the old switch-toggle tests' coverage intent."""
+    regression guard replacing the old switch-toggle tests' coverage intent.
+
+    Was 3 flags (nat-vent, door/window, override/grace) — override/grace's own
+    flag was removed in Issue #757 Phase 6 Step 3, once its dispatcher became
+    unconditionally FSM-authoritative with no more legacy branch to switch away
+    from."""
 
     def test_engine_a_is_fixed_legacy(self):
         coord, _, _, _ = build_headless_coordinator()
         assert coord._engine_a._natvent_fsm_authoritative is False
         assert coord._engine_a._doorwindow_fsm_authoritative is False
-        assert coord._engine_a._override_grace_fsm_authoritative is False
 
     def test_engine_b_is_fixed_fsm(self):
         coord, _, _, _ = build_headless_coordinator()
         assert coord._engine_b._natvent_fsm_authoritative is True
         assert coord._engine_b._doorwindow_fsm_authoritative is True
-        assert coord._engine_b._override_grace_fsm_authoritative is True
 
     def test_default_primary_is_the_legacy_engine(self):
         coord, _, _, _ = build_headless_coordinator()

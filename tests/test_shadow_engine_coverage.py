@@ -173,9 +173,11 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     "handle_fan_manual_override": "mirrored",
     # Issue #651: not itself an AST-detected direct mutator (delegates to
     # start_override_confirmation()), but mirrored at all 3 real call sites for the same
-    # reason handle_fan_manual_override is — see TestOverrideGraceFsmEventCoverage for
-    # the FSM-entry-kind check and TestPerCallerFsmFeedCoverage below for the
-    # per-call-site assertion.
+    # reason handle_fan_manual_override is — see TestPerCallerFsmFeedCoverage below for
+    # the per-call-site assertion. (Issue #757 Phase 6 Step 3: the sibling
+    # TestOverrideGraceFsmEventCoverage/_OVERRIDE_GRACE_EVENT_KIND_REGISTRY this comment
+    # used to also point to were removed along with the override_grace_fsm
+    # shadow-diagnostic axis they tested.)
     "handle_manual_override": "mirrored",
     "clear_fan_override": (
         "exempted: called from clear_manual_override (exempted) and internal cascades; "
@@ -393,104 +395,18 @@ class TestShadowEngineCoverageRegistry:
         assert unregistered == {"a_totally_new_method_not_in_registry"}
 
 
-# Issue #647: a second, independent registry — this one for whether each
-# OverrideGraceFsmEventKind (the FSM's own tracked-state re-evaluation trigger, distinct
-# from the shadow-mirror registry above) is actually reachable from coordinator.py/api.py.
-# #643 wired the entry kind (OVERRIDE_DETECTED) without wiring any exit kind, leaving the
-# FSM permanently stuck once a real fan override occurred — an asymmetric wiring change
-# that shipped with no test catching the imbalance. This registry is that test.
-#
-# "unreachable: <reason>" is for FSM event kinds that exist in the enum but have no real
-# production trigger today (documented, not silently missing).
-_OVERRIDE_GRACE_EVENT_KIND_REGISTRY: dict[str, str] = {
-    "OVERRIDE_DETECTED": "reachable",
-    # Issue #661: split from OVERRIDE_DETECTED — handle_fan_manual_override() never
-    # routes through start_override_confirmation()'s confirm-delay machinery the way
-    # the thermostat-override call sites (handle_manual_override(),
-    # handle_manual_override_during_pause()) genuinely do, so it needed its own kind
-    # rather than sharing OVERRIDE_DETECTED's confirm-delay landing logic.
-    "FAN_OVERRIDE_DETECTED": "reachable",
-    "MANUAL_OVERRIDE_DURING_PAUSE": "reachable",
-    "DASHBOARD_RESUME": "reachable",
-    "OVERRIDE_CONFIRM_EXPIRED": "reachable",
-    "OVERRIDE_CANCELLED": "reachable",
-    "GRACE_TIMER_EXPIRED": "reachable",
-    # Issue #664: re-classified reachable. Investigation for the full-authority migration
-    # found the OVERRIDE_CANCELLED classification above was a real, dangerous mismatch —
-    # coordinator.py's 'new_override_during_grace' branch (clear_manual_override() call)
-    # never touches grace (Issue #282's "Fix D" deliberately leaves the still-running
-    # grace protecting the NEW override handle_manual_override() immediately re-detects),
-    # but OVERRIDE_CANCELLED's own transition unconditionally forces grace to NONE. Feeding
-    # this real site as OVERRIDE_CANCELLED would have made an authoritative FSM wrongly
-    # clear a grace period production intentionally preserves. OVERRIDE_SUPERSEDED's own
-    # transition (_land_after_detection with grace fixed at ACTIVE_PROTECTING_OVERRIDE)
-    # correctly matches production's real "confirm re-evaluated, grace untouched" behavior.
-    "OVERRIDE_SUPERSEDED": "reachable",
-    # Issue #672: automation.py's _start_grace_period() — the shared wrapper for every
-    # trigger that was never modeled at all (fan-off, window-close, nat-vent-exit,
-    # drift-correction) — now dispatches this kind after _start_grace_period_action()
-    # confirms a real grace actually started.
-    "UNPROTECTED_GRACE_STARTED": "reachable",
-}
+# Issue #757 Phase 6 Step 3: _OVERRIDE_GRACE_EVENT_KIND_REGISTRY and
+# TestOverrideGraceFsmEventCoverage (the coverage-enforcement test for whether each
+# OverrideGraceFsmEventKind reaches the independently-tracked shadow-FSM-replay
+# machinery, formerly Issue #647) were removed along with the override_grace_fsm
+# shadow-diagnostic axis they existed to protect. The underlying
+# _evaluate_override_grace_fsm()/_override_grace_fsm_state machinery itself was NOT
+# removed (out of this step's scope, left for a future cleanup pass — see
+# coordinator.py's _SHADOW_DIAG_AXES comment), so it is currently untested by this
+# file; it has no other test coverage either as of this step.
 
 
-class TestOverrideGraceFsmEventCoverage:
-    def test_every_event_kind_is_registered(self) -> None:
-        from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
-
-        all_kinds = {member.name for member in OverrideGraceFsmEventKind}
-        unregistered = all_kinds - set(_OVERRIDE_GRACE_EVENT_KIND_REGISTRY)
-        assert not unregistered, (
-            f"New OverrideGraceFsmEventKind member(s) aren't in "
-            f"_OVERRIDE_GRACE_EVENT_KIND_REGISTRY: {sorted(unregistered)}. Classify each "
-            f'as "reachable" (and wire a real trigger in coordinator.py/api.py) or '
-            f'"unreachable: <reason>" — see Issue #647.'
-        )
-
-    def test_registry_entries_reference_real_members(self) -> None:
-        from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
-
-        all_kinds = {member.name for member in OverrideGraceFsmEventKind}
-        unknown = set(_OVERRIDE_GRACE_EVENT_KIND_REGISTRY) - all_kinds
-        assert not unknown, (
-            f"Registry references OverrideGraceFsmEventKind member(s) that no longer "
-            f"exist (renamed or removed?): {sorted(unknown)}. Update the registry."
-        )
-
-    def test_every_reachable_kind_has_a_real_trigger(self) -> None:
-        """Positive control: every 'reachable' entry must appear as a value somewhere
-        coordinator.py actually feeds the FSM from — either of the two mirror-name-keyed
-        dicts, the event-type map, or a direct OverrideGraceFsmEventKind.<X> reference at
-        a real call site (e.g. _feed_override_grace_fsm_cancelled()). Catches the
-        registry claiming coverage that doesn't actually exist in code — this is the
-        specific check that would have caught #643 shipping OVERRIDE_DETECTED without
-        any exit kind wired."""
-        combined = _COORDINATOR_PY.read_text(encoding="utf-8")
-        for name, classification in _OVERRIDE_GRACE_EVENT_KIND_REGISTRY.items():
-            if classification != "reachable":
-                continue
-            # Matches either a dict value like "override_cancelled" (snake_case enum
-            # value, used by the two method-name/event-type-keyed dicts) or a direct
-            # member reference — coordinator.py imports OverrideGraceFsmEventKind under
-            # a local alias (`_OGFEventKind`) at every direct-call-site import, so match
-            # any `<name ending in EventKind or aliased>.MEMBER` shape rather than the
-            # literal unaliased class name.
-            value_pattern = re.compile(r'"' + re.escape(name.lower()) + r'"')
-            member_pattern = re.compile(r"\b\w*(?:EventKind|OGFEventKind)\." + re.escape(name) + r"\b")
-            assert value_pattern.search(combined) or member_pattern.search(combined), (
-                f'{name} is marked "reachable" but no dict value or direct '
-                f"OverrideGraceFsmEventKind.{name} reference was found in coordinator.py"
-            )
-
-    def test_positive_control_unregistered_kind_is_caught(self) -> None:
-        """Proves test_every_event_kind_is_registered actually fails on a genuinely
-        unregistered member, not just passing vacuously."""
-        all_kinds = {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
-        unregistered = all_kinds - set(_OVERRIDE_GRACE_EVENT_KIND_REGISTRY)
-        assert unregistered == {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
-
-
-# Issue #594 Phase R Step 1b: same registry-enforcement shape as
+# Issue #594 Phase R Step 1b: same registry-enforcement shape as the former
 # _OVERRIDE_GRACE_EVENT_KIND_REGISTRY above, for DoorWindowFsmEventKind. Originally only
 # 4 of 7 members had a real feed path (SENSOR_OPENED, ALL_SENSORS_CLOSED,
 # MANUAL_OVERRIDE_DURING_PAUSE via _DOOR_WINDOW_FSM_EVENT_KINDS;

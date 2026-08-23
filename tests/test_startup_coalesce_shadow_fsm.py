@@ -33,7 +33,6 @@ call actually happened.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import patch
 
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_coordinator
@@ -108,14 +107,22 @@ class TestRestartResumeRfTimerFeedsShadowFsm:
         """The live-verification diagnostic (what the upcoming combined observation
         window depends on) must report agreement, not a stuck disagreement.
 
-        The diagnostic snapshot itself is only recomputed inside
-        ``_mirror_to_shadow()``'s finally block (i.e. on the next coordinator
-        update cycle's mirrored call) — the fix's direct FSM feed in
-        ``_do_startup_coalesce()`` updates ``_override_grace_fsm_state`` immediately
-        (asserted above) but the diagnostic snapshot itself lags to that next
-        cycle by design, same as every other coordinator-originated FSM feed
-        (``_check_orphaned_grace()``). Calling ``_update_shadow_engine_diagnostic()``
-        directly here simulates that next cycle's snapshot."""
+        Issue #757 Phase 6 Step 3: ``_update_shadow_engine_diagnostic()`` no longer
+        exposes ``override_grace_production_state``/``override_grace_fsm_state``/
+        ``override_grace_fsm_agrees`` — override/grace's own dispatcher is now
+        unconditionally FSM-authoritative in production, so that comparison axis was
+        removed (same graduation fan/economizer went through in Steps 1-2). The
+        underlying ``_override_grace_fsm_state`` tracker this test's own fix targets
+        was deliberately NOT removed (out of Step 3's scope), so this test now proves
+        agreement directly against that tracker and production's live
+        ``override_grace_lifecycle_state``, instead of via the removed diagnostic
+        dict keys.
+
+        The tracker itself is only fed inside ``_mirror_to_shadow()``'s finally
+        block (i.e. on the next coordinator update cycle's mirrored call) — the
+        fix's direct FSM feed in ``_do_startup_coalesce()`` updates
+        ``_override_grace_fsm_state`` immediately (asserted in the sibling test
+        above), so no further cycle needs to be simulated here."""
         coordinator, _fake_hass, scheduler, _event_log = _build_coord_with_fan_running(
             remote_timer_provenance=(25200.0, 8.0)
         )
@@ -124,13 +131,10 @@ class TestRestartResumeRfTimerFeedsShadowFsm:
             _run(coordinator._do_startup_coalesce())
             scheduler.advance_to(scheduler.now())
 
-        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
-            coordinator._update_shadow_engine_diagnostic()
-        diag = coordinator.shadow_engine_diagnostic
-        assert diag is not None
-        assert diag["override_grace_production_state"] == "idle/active_protecting_override"
-        assert diag["override_grace_fsm_state"] == "idle/active_protecting_override"
-        assert diag["override_grace_fsm_agrees"] is True
+        production_state = coordinator.automation_engine.override_grace_lifecycle_state
+        tracked_state = coordinator._override_grace_fsm_state
+        assert production_state == (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
+        assert tracked_state == production_state
 
     def test_normal_coalesce_no_timer_no_spurious_fsm_feed(self) -> None:
         """Control case: no live remote timer provenance and no fan running — the

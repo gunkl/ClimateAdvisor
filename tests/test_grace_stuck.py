@@ -68,14 +68,29 @@ def _make_automation_engine_stub() -> AutomationEngine:
     ae._grace_end_time = None
     ae._grace_duration_seconds = 0
     ae._last_resume_source = None
+    ae._last_grace_trigger = None
     ae._manual_grace_cancel = None
     ae._automation_grace_cancel = None
     ae._manual_override_active = False
     ae._manual_override_mode = None
+    ae._manual_override_source = None
+    ae._manual_override_time = None
     ae._natural_vent_active = False
     ae._fan_active = False
     ae._fan_override_active = False
     ae.clear_manual_override = MagicMock()
+    # Issue #757 Phase 6 Step 3: _resolve_override_grace_fsm_state() is now
+    # unconditionally FSM-authoritative, so it always reads these 3 fields via
+    # override_grace_lifecycle_state plus the extra fields _build_override_grace_fsm_
+    # inputs() reads — previously only exercised when a test explicitly set
+    # _override_grace_fsm_authoritative=True, now exercised unconditionally.
+    ae._override_confirm_pending = False
+    ae._override_confirm_source = None
+    ae._override_confirm_mode = None
+    ae._grace_protects_override = False
+    ae._current_classification = None
+    ae._sensor_check_callback = None
+    ae._emit_event_callback = None
     return ae
 
 
@@ -579,15 +594,32 @@ class TestGraceProtectsOverrideClassification:
         return ae
 
     def test_fan_manual_override_trigger_protects_override(self):
-        """trigger='fan_manual_override' (a real fan-on override) -> protects_override=True."""
+        """trigger='fan_manual_override' (a real fan-on override) -> protects_override=True.
+
+        Issue #757 Phase 6 Step 3 correction: real production code never calls the
+        generic ``_start_grace_period()`` wrapper with a protecting trigger — the 3
+        protecting triggers (fan_manual_override, override_confirmed, dashboard_resume)
+        call ``_start_grace_period_action()`` directly and dispatch their own specific
+        FSM kind (see ``_start_grace_period()``'s own docstring). The wrapper always
+        dispatches ``UNPROTECTED_GRACE_STARTED``, which the FSM unconditionally lands
+        on ACTIVE_UNPROTECTED regardless of ``trigger`` — so routing a protecting
+        trigger through the wrapper no longer reflects any real call shape (it only
+        worked before because the legacy flag-write was trigger-string-keyed,
+        independent of which FSM kind — if any — was notionally dispatched). This test
+        now exercises the real, still-live classification function directly —
+        ``_legacy_set_grace_flags()``, used by every non-FSM-modeled ``_start_grace_period()``
+        caller and by ``_confirm_override()`` — instead of the wrapper."""
         ae = self._make_real_engine_for_grace_start()
-        ae._start_grace_period("manual", trigger="fan_manual_override")
+        ae._legacy_set_grace_flags("fan_manual_override")
         assert ae._grace_protects_override is True
 
     def test_override_confirmed_trigger_protects_override(self):
-        """trigger='override_confirmed' (a real thermostat override) -> protects_override=True."""
+        """trigger='override_confirmed' (a real thermostat override) -> protects_override=True.
+
+        See test_fan_manual_override_trigger_protects_override's docstring for why this
+        exercises _legacy_set_grace_flags() directly rather than the wrapper."""
         ae = self._make_real_engine_for_grace_start()
-        ae._start_grace_period("manual", trigger="override_confirmed")
+        ae._legacy_set_grace_flags("override_confirmed")
         assert ae._grace_protects_override is True
 
     def test_fan_off_trigger_does_not_protect_override(self):
@@ -612,7 +644,7 @@ class TestGraceProtectsOverrideClassification:
         """_cancel_grace_timers() must reset _grace_protects_override alongside _grace_active,
         so a stale True doesn't leak into whatever starts next."""
         ae = self._make_real_engine_for_grace_start()
-        ae._start_grace_period("manual", trigger="fan_manual_override")
+        ae._legacy_set_grace_flags("fan_manual_override")
         assert ae._grace_protects_override is True
 
         ae._cancel_grace_timers()

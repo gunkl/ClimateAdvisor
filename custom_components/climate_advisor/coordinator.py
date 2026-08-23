@@ -271,8 +271,13 @@ _SHADOW_DIAG_AXES = (
     "fsm",
     "door_window_mirror",
     "door_window_fsm",
-    "override_grace_mirror",
-    "override_grace_fsm",
+    # Issue #757 Phase 6 Step 3: "override_grace_mirror"/"override_grace_fsm" removed
+    # from this axis list — override/grace's dispatcher is now unconditionally
+    # FSM-authoritative in production, so the _update_shadow_engine_diagnostic()
+    # comparison built on these two axes was removed. Note the underlying
+    # ``_override_grace_fsm_state`` tracking / ``_evaluate_override_grace_fsm()``
+    # machinery this axis read from is intentionally NOT removed in this step — it
+    # is out of this step's scope and left for a future cleanup pass.
     # Issue #742: "classification_mirror" adds an 8th axis, deliberately with no
     # "classification_fsm" sibling — classification_fsm.py is genuinely stateless
     # (see its own module docstring's five-whys), so there is no separate
@@ -661,16 +666,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             callbacks=self._build_production_automation_callbacks(),
             role="production",
         )
-        # Issue #729: _engine_a is the fixed-legacy identity — all 3 FSM-authoritative
-        # flags stay False for its whole lifetime. Was runtime-toggleable per-subsystem
-        # via 3 separate switches (Issue #594 Phase R / #664); those switches are gone —
-        # engine identity itself (legacy vs FSM, selected by which of _engine_a/_engine_b
-        # is primary) is now the only axis. Explicit assignment here, even though False is
-        # already the AutomationEngine.__init__ default, so this fact is visible at the
-        # construction site rather than relying on a default matching what's needed.
+        # Issue #729: _engine_a is the fixed-legacy identity — both remaining
+        # FSM-authoritative flags below stay False for its whole lifetime (was 3 —
+        # override_grace's own flag was removed in Issue #757 Phase 6 Step 3, once its
+        # dispatcher became unconditionally FSM-authoritative). Was runtime-toggleable
+        # per-subsystem via separate switches (Issue #594 Phase R / #664); those switches
+        # are gone — engine identity itself (legacy vs FSM, selected by which of
+        # _engine_a/_engine_b is primary) is now the only axis. Explicit assignment here,
+        # even though False is already the AutomationEngine.__init__ default, so this
+        # fact is visible at the construction site rather than relying on a default
+        # matching what's needed.
         self._engine_a._natvent_fsm_authoritative = False
         self._engine_a._doorwindow_fsm_authoritative = False
-        self._engine_a._override_grace_fsm_authoritative = False
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_a stays False for its whole lifetime, same as the 4
@@ -730,13 +737,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             role="shadow",
         )
         self._engine_b.dry_run = True
-        # Issue #729: _engine_b is the fixed-FSM identity — all 3 FSM-authoritative flags
-        # stay True for its whole lifetime (mirror of _engine_a's fixed-legacy assignment
-        # above). Which of the two is primary is decided by switch.climate_advisor_shadow_engine_primary
-        # (async_set_shadow_engine_primary()) — a single axis, not 3 independent switches.
+        # Issue #729: _engine_b is the fixed-FSM identity — both remaining
+        # FSM-authoritative flags below stay True for its whole lifetime (was 3 — see
+        # _engine_a's own comment above for why override_grace's flag is gone; mirror of
+        # _engine_a's fixed-legacy assignment above). Which of the two is primary is
+        # decided by switch.climate_advisor_shadow_engine_primary
+        # (async_set_shadow_engine_primary()) — a single axis, not independent switches.
         self._engine_b._natvent_fsm_authoritative = True
         self._engine_b._doorwindow_fsm_authoritative = True
-        self._engine_b._override_grace_fsm_authoritative = True
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_b stays True for its whole lifetime, mirror of
@@ -1038,6 +1046,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         tolerated, not the reason the mirror call exists. See
         ``tests/test_shadow_engine_coverage.py`` for the registry entries documenting
         why each setter is exempted or mirrored.
+
+        Issue #757 Phase 6 Step 3 audit: with override/grace's own dispatcher now
+        unconditionally FSM-authoritative and its 2 dedicated shadow-diagnostic axes
+        removed, this block's 14 raw-copy lines were reviewed for deletion. Kept as-is
+        — every one of them is a genuine, live dependency of a subsystem that has NOT
+        graduated yet: ``_grace_active`` is read directly by both
+        ``check_natural_vent_conditions()`` (feeds ``nat_vent`` mirror/fsm axes, see
+        this docstring's own #631 paragraph above) and ``_door_window_state_for()``
+        (feeds ``door_window_mirror``/``door_window_fsm``). ``handle_fan_manual_override``/
+        ``handle_manual_override`` remain mirrored onto the shadow engine (see above)
+        and still call ``_resolve_override_grace_fsm_state()`` on it — that dispatch
+        recomputes ``se._grace_active`` from ``se``'s OWN
+        ``_override_confirm_pending``/``_grace_protects_override`` (origin state) plus
+        ``_build_override_grace_fsm_inputs()``'s read of ``_manual_override_active/
+        _mode/_source``, ``_override_confirm_source``, ``_fan_override_active``, and
+        ``_last_resume_source``. A stale/missing copy of ANY of those would corrupt the
+        recomputed ``se._grace_active`` and, transitively, the still-active nat-vent/
+        door-window axes above — so none of the 14 lines could be safely deleted here
+        without first proving that transitive chain is dead, which it isn't.
         """
         se = self.shadow_automation_engine
         ae = self.automation_engine
@@ -1686,25 +1713,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         door_window_mirror_agrees = door_window_production_state == door_window_shadow_state
         door_window_fsm_agrees = door_window_production_state == door_window_fsm_state
 
-        # Issue #639: override/grace joint-lifecycle FSM's own agreement, same pattern.
-        from .override_grace_lifecycle import OverrideGraceLifecycleInputs, derive_override_grace_lifecycle_state
-
-        def _override_grace_state_for(ae: AutomationEngine) -> str:
-            inputs = OverrideGraceLifecycleInputs(
-                override_confirm_pending=bool(ae._override_confirm_pending),
-                grace_active=bool(ae._grace_active),
-                grace_protects_override=bool(ae._grace_protects_override),
-            )
-            confirm, grace = derive_override_grace_lifecycle_state(inputs)
-            return f"{confirm.value}/{grace.value}"
-
-        override_grace_production_state = _override_grace_state_for(self.automation_engine)
-        override_grace_shadow_state = _override_grace_state_for(self.shadow_automation_engine)
-        override_grace_confirm, override_grace_grace = self._override_grace_fsm_state
-        override_grace_fsm_state = f"{override_grace_confirm.value}/{override_grace_grace.value}"
-        override_grace_mirror_agrees = override_grace_production_state == override_grace_shadow_state
-        override_grace_fsm_agrees = override_grace_production_state == override_grace_fsm_state
-
         # Issue #742: classification's own production/shadow agreement. Deliberately
         # has no separate "classification_fsm" axis — classification_fsm.py is
         # genuinely stateless (see its own module docstring's five-whys), so there is
@@ -1746,8 +1754,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and fsm_agrees
             and door_window_mirror_agrees
             and door_window_fsm_agrees
-            and override_grace_mirror_agrees
-            and override_grace_fsm_agrees
             and classification_mirror_agrees
             and occupancy_mirror_agrees
         )
@@ -1761,12 +1767,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         door_window_fsm_duration, door_window_fsm_sustained = self._shadow_diag_update_axis(
             "door_window_fsm", door_window_fsm_agrees, now
-        )
-        override_grace_mirror_duration, override_grace_mirror_sustained = self._shadow_diag_update_axis(
-            "override_grace_mirror", override_grace_mirror_agrees, now
-        )
-        override_grace_fsm_duration, override_grace_fsm_sustained = self._shadow_diag_update_axis(
-            "override_grace_fsm", override_grace_fsm_agrees, now
         )
         classification_mirror_duration, classification_mirror_sustained = self._shadow_diag_update_axis(
             "classification_mirror", classification_mirror_agrees, now
@@ -1784,11 +1784,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "door_window_fsm_state": door_window_fsm_state,
             "door_window_mirror_agrees": door_window_mirror_agrees,
             "door_window_fsm_agrees": door_window_fsm_agrees,
-            "override_grace_production_state": override_grace_production_state,
-            "override_grace_shadow_state": override_grace_shadow_state,
-            "override_grace_fsm_state": override_grace_fsm_state,
-            "override_grace_mirror_agrees": override_grace_mirror_agrees,
-            "override_grace_fsm_agrees": override_grace_fsm_agrees,
             "classification_production_state": classification_production_state,
             "classification_shadow_state": classification_shadow_state,
             "classification_mirror_agrees": classification_mirror_agrees,
@@ -1817,16 +1812,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "disagreement_seconds": door_window_fsm_duration,
                     "sustained": door_window_fsm_sustained,
                     "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["door_window_fsm"],
-                },
-                "override_grace_mirror": {
-                    "disagreement_seconds": override_grace_mirror_duration,
-                    "sustained": override_grace_mirror_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["override_grace_mirror"],
-                },
-                "override_grace_fsm": {
-                    "disagreement_seconds": override_grace_fsm_duration,
-                    "sustained": override_grace_fsm_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["override_grace_fsm"],
                 },
                 "classification_mirror": {
                     "disagreement_seconds": classification_mirror_duration,
@@ -1897,40 +1882,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     door_window_fsm_duration,
                 )
                 self._shadow_diag_incident_emitted["door_window_fsm"] = True
-        if override_grace_mirror_sustained:
-            _LOGGER.warning(
-                "Override/grace shadow engine disagreement (Issue #639): production=%s shadow=%s (sustained %.0fs)",
-                override_grace_production_state,
-                override_grace_shadow_state,
-                override_grace_mirror_duration,
-            )
-            if not self._shadow_diag_incident_emitted["override_grace_mirror"]:
-                self._emit_shadow_disagreement_incident(
-                    "override_grace_mirror",
-                    now,
-                    override_grace_production_state,
-                    override_grace_shadow_state,
-                    "shadow",
-                    override_grace_mirror_duration,
-                )
-                self._shadow_diag_incident_emitted["override_grace_mirror"] = True
-        if override_grace_fsm_sustained:
-            _LOGGER.warning(
-                "Override/grace FSM disagreement (Issue #639): production=%s fsm=%s (sustained %.0fs)",
-                override_grace_production_state,
-                override_grace_fsm_state,
-                override_grace_fsm_duration,
-            )
-            if not self._shadow_diag_incident_emitted["override_grace_fsm"]:
-                self._emit_shadow_disagreement_incident(
-                    "override_grace_fsm",
-                    now,
-                    override_grace_production_state,
-                    override_grace_fsm_state,
-                    "fsm",
-                    override_grace_fsm_duration,
-                )
-                self._shadow_diag_incident_emitted["override_grace_fsm"] = True
         if classification_mirror_sustained:
             _LOGGER.warning(
                 "Classification shadow engine disagreement (Issue #742): production=%s shadow=%s (sustained %.0fs)",
@@ -3333,9 +3284,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # "not via clear_manual_override()"), so only the grace half is dispatched. Closest
         # semantic match is GRACE_TIMER_EXPIRED (grace ending with nothing left to protect).
         ae._cancel_grace_timers_action()
-        ae._resolve_override_grace_fsm_state(
-            kind=_OGFEventKind.GRACE_TIMER_EXPIRED, legacy=ae._legacy_clear_grace_flags
-        )
+        ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
         try:
             self._evaluate_override_grace_fsm(_OGFEventKind.GRACE_TIMER_EXPIRED)
         except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
@@ -5275,14 +5224,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if _was_confirm_pending:
                 ae._clear_override_confirm_action()
 
-            def _legacy_supersede() -> None:
-                if _was_confirm_pending:
-                    ae._legacy_clear_confirm_flag()
-                # Grace intentionally left untouched — see comment above.
-
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-            ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_SUPERSEDED, legacy=_legacy_supersede)
+            ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_SUPERSEDED)
             ae._clear_manual_override_active("new_override_during_grace")
             try:
                 self._evaluate_override_grace_fsm(_OGFEventKind.OVERRIDE_SUPERSEDED)

@@ -25,18 +25,20 @@ None-guard convention introduces without changing the actual decision). Two
 conditions with the same canonical form are the same logical gate, regardless of
 naming or an added null-guard.
 
-**Confirmed real, live proof case (investigated directly, not from docs — see
-below for why the doc-cited 3-function claim needed correcting).**
-``nat_vent_temperature_check()`` (automation.py ~L4818) has an
-``if self._natvent_fsm_authoritative: ... else: ...`` split (~L4898-4929). The
-FSM-authoritative branch calls the shared pure ``decide_nat_vent_exit()`` (the real
-5-reason priority exit chain, ``nat_vent_exit.py``). ``_natvent_fsm_authoritative``
-defaults to ``False`` (automation.py L810) and no production coordinator flips it
-True (only the internal shadow-engine harness does, coordinator.py L715) — so the
-*legacy* ``else`` branch is the one live in every real install today, and it
-hand-rolls a narrower 2-check subset of ``decide_nat_vent_exit()``'s own first two
-priority checks (manual-override-conflict, then comfort-floor) instead of calling
-it. This is a real, still-shipping duplication, not stale doc debt.
+**Resolved (Issue #757 Phase 6 Step 5).** ``nat_vent_temperature_check()`` used
+to have an ``if self._natvent_fsm_authoritative: ... else: ...`` split whose
+legacy ``else`` branch hand-rolled a narrower 2-check subset of
+``decide_nat_vent_exit()``'s own first two priority checks
+(manual-override-conflict, then comfort-floor) instead of calling it directly —
+a real, live duplication for as long as the legacy branch existed
+(``_natvent_fsm_authoritative`` defaulted ``False`` and no production
+coordinator ever flipped it). Step 5 deleted the legacy branch entirely once
+the FSM path had been production-authoritative for weeks with zero corpus
+divergence — the sole surviving branch now calls ``decide_nat_vent_exit()``
+directly, unconditionally, closing this finding. The registry entry and its
+dedicated regression test (``test_known_natvent_duplicate_is_detected``) were
+removed accordingly, per this module's own "if this now fails... celebrate,
+then remove" resolution note.
 
 ``docs/nat-vent-lifecycle-spec.md`` also names ``fan_thermostat_check()`` and
 ``check_natural_vent_conditions()`` as having the same duplication shape (citing
@@ -45,11 +47,7 @@ now STALE: ``fan_thermostat_check()`` was unified via ``decide_fan_thermostat_ch
 (Issue #435 architecture-reset — no inline re-check remains, FSM-authoritative or
 not) and ``check_natural_vent_conditions()`` calls ``decide_nat_vent_exit()``
 directly and unconditionally for its exit chain (no legacy hand-rolled duplicate
-branch at all) — both already fully consolidated. Only
-``nat_vent_temperature_check()``'s legacy branch remains live duplicated logic.
-This checker's registry and its direct regression test
-(``test_known_natvent_duplicate_is_detected``) reflect the CORRECTED, verified
-finding — one duplicate pair, not three functions.
+branch at all) — both already fully consolidated.
 
 **Scope of the scan.** Every method on ``AutomationEngine`` (automation.py) plus
 every module-level function in the "pure decision leaf" sibling modules — the
@@ -462,23 +460,6 @@ _ACKNOWLEDGED_DUPLICATE_GATES: dict[frozenset[str], tuple[str, str]] = {
     frozenset(
         {
             "automation.py:AutomationEngine.nat_vent_temperature_check",
-            "nat_vent_exit.py:decide_nat_vent_exit",
-        }
-    ): (
-        "real_duplicate_debt",
-        "Issue #608/#698/#714/#737: nat_vent_temperature_check()'s legacy "
-        "(non-FSM-authoritative) branch hand-rolls the first two priority checks "
-        "of decide_nat_vent_exit()'s 5-reason exit chain (manual-override-conflict, "
-        "then comfort-floor) instead of calling it. _natvent_fsm_authoritative "
-        "defaults False (automation.py __init__) and no production coordinator "
-        "flips it True, so this legacy branch is live in every real install today "
-        "— known, tracked debt, not a false positive. Resolve by making the legacy "
-        "branch also call decide_nat_vent_exit() (or by finishing the FSM-"
-        "authoritative rollout), then remove this registry entry.",
-    ),
-    frozenset(
-        {
-            "automation.py:AutomationEngine.nat_vent_temperature_check",
             "automation.py:AutomationEngine._activate_fan",
             "fan_thermostat_decision.py:decide_fan_thermostat_check",
             "nat_vent_exit.py:decide_nat_vent_exit",
@@ -595,26 +576,6 @@ class TestDuplicateGateDetection:
                     f"longer resolves to a scanned function (renamed or removed?) — "
                     f"update the registry."
                 )
-
-    def test_known_natvent_duplicate_is_detected(self) -> None:
-        """Direct regression test for the confirmed real, live finding (see module
-        docstring): nat_vent_temperature_check()'s legacy branch vs
-        decide_nat_vent_exit(). Proves the detector still actually finds this
-        specific pair, not just that the registry claims it exists."""
-        found = _find_duplicate_gate_pairs()
-        key = frozenset(
-            {
-                "automation.py:AutomationEngine.nat_vent_temperature_check",
-                "nat_vent_exit.py:decide_nat_vent_exit",
-            }
-        )
-        assert key in found, (
-            "Expected nat_vent_temperature_check() vs decide_nat_vent_exit() to be "
-            "detected as a structural gate duplicate (Issue #608/#737) — if this "
-            "now fails, either the detector regressed or the duplication was "
-            "actually fixed (in which case: celebrate, then remove both this test "
-            "and the matching _ACKNOWLEDGED_DUPLICATE_GATES entry)."
-        )
 
     def test_positive_control_unacknowledged_finding_fails_enforcement(self) -> None:
         """Proves test_no_unacknowledged_duplicate_gates' own enforcement logic

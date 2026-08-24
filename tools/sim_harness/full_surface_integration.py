@@ -57,10 +57,15 @@ def _break_fan_drift_reconciliation():
 def _break_reactivation_lockout():
     from unittest.mock import patch  # noqa: PLC0415
 
-    # Must capture `original` BEFORE the patch is applied — importing it lazily inside
-    # _broken() would re-read automation.py's module-global AFTER patching, resolving
-    # to _broken itself and recursing infinitely (caught the hard way: RecursionError).
-    from custom_components.climate_advisor.automation import is_reactivation_locked_out as original  # noqa: PLC0415
+    # Issue #757 Phase 6 Step 5: automation.py no longer imports
+    # is_reactivation_locked_out at all (its direct legacy call sites were
+    # deleted) — nat_vent_fsm.py's own top-level import is the name that
+    # actually drives production now, via _transition_from_inactive(). Must
+    # capture `original` BEFORE the patch is applied — importing it lazily
+    # inside _broken() would re-read the module-global AFTER patching,
+    # resolving to _broken itself and recursing infinitely (caught the hard
+    # way: RecursionError).
+    from custom_components.climate_advisor.nat_vent_fsm import is_reactivation_locked_out as original  # noqa: PLC0415
 
     def _broken(*, outdoor_exit_time: datetime | None, now: datetime, lockout_seconds: float) -> bool:
         # Invert, but preserve "no prior exit recorded -> never locked out" — a blind
@@ -71,7 +76,7 @@ def _break_reactivation_lockout():
             return False
         return not original(outdoor_exit_time=outdoor_exit_time, now=now, lockout_seconds=lockout_seconds)
 
-    with patch("custom_components.climate_advisor.automation.is_reactivation_locked_out", _broken):
+    with patch("custom_components.climate_advisor.nat_vent_fsm.is_reactivation_locked_out", _broken):
         yield
 
 

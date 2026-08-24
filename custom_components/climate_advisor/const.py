@@ -4,9 +4,27 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.69"
+VERSION = "0.6.70"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.70": [
+        "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 5"
+        " — removes the legacy (pre-FSM) nat-vent code path. The FSM-based nat-vent"
+        " dispatch has been production-authoritative for weeks with zero corpus"
+        " divergence, so the 10 inline legacy call sites and the differential-"
+        " comparator scaffolding are no longer needed.",
+        "Fix #765: found while forcing every test through the nat-vent FSM path for"
+        " the first time — opening a door/window during an active manual-override"
+        " grace period, with outdoor conditions favorable for free cooling, could"
+        " stay suppressed by an unrelated overheat-exception rule instead of"
+        " activating immediately as designed. Fixed.",
+        "Fix #765: nat-vent exiting at the away-mode ceiling could immediately"
+        " re-activate via the idle-open reactivation gate, flip-flopping in and out"
+        " right at the ceiling boundary instead of staying settled and defeating the"
+        " away-mode overheating guard the ceiling exists to enforce. Fixed — the"
+        " away-ceiling exit now arms the same reactivation lockout every other exit"
+        " reason already did.",
+    ],
     "0.6.69": [
         "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 4"
         " — removes the legacy (pre-FSM) door/window pause/grace code path. The"
@@ -2625,6 +2643,37 @@ KNOWN_FIXES: dict[int, dict] = {
             " tests/test_resume_from_pause.py::test_repause_clears_paused_by_door_on_"
             "nat_vent_reactivation and 2 siblings before shipping; the"
             " _natvent_fsm_authoritative-gated branch alongside it is untouched."
+        ),
+    },
+    765: {
+        "version_fixed": "0.6.70",
+        "title": (
+            "2 latent design gaps in the nat-vent FSM-authoritative path, found while"
+            " removing its now-dead legacy branch (Issue #757 Step 5) — same pattern"
+            " as Issue #762's door/window gaps: invisible until removing the legacy"
+            " flag-gate forced every test through the FSM path for the first time."
+        ),
+        "scope_covered": (
+            "automation.py handle_door_window_open(): the FSM gate-check call"
+            " immediately following its own grace-period pre-check (which already"
+            " decides reactivation is favorable via a temperature-only rule, Fix"
+            " 2/#249) re-read the still-True self._grace_active and re-blocked via"
+            " the unrelated overheat-exception rule (_grace_blocks_natvent(),"
+            " Issue #134/#706), silently defeating the Fix 2 bypass for any"
+            " door-open-during-grace scenario where indoor didn't also exceed"
+            " comfort_cool. Fixed via a new grace_active override parameter on"
+            " _build_nat_vent_fsm_inputs(), passed as False at this one call site"
+            " only (every other caller keeps reading self._grace_active live)."
+            " automation.py check_natural_vent_conditions()/"
+            " nat_vent_temperature_check(): the AWAY_CEILING exit reason never set"
+            " self._nat_vent_outdoor_exit_time, unlike the other 4 exit reasons —"
+            " check_natural_vent_conditions()'s idle-open reactivation gate could"
+            " then immediately re-enter right after an away-ceiling exit, flip-"
+            " flopping the fan/thermostat at the ceiling boundary and defeating the"
+            " away-mode overheating guard the ceiling exists to enforce. Fixed by"
+            " arming the outdoor-exit timestamp on both AWAY_CEILING branches and"
+            " gating the idle-open reactivation on is_reactivation_locked_out(),"
+            " matching every other exit reason's existing anti-flip-flop coverage."
         ),
     },
     696: {

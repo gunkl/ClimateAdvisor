@@ -30,8 +30,13 @@ from tools.sim_harness.nat_vent_gate_compare import substitute_new_gate  # noqa:
 GOLDEN_DIR = TOOLS / "simulations" / "golden"
 
 # A scenario known to actually exercise the nat-vent reactivation gate at least
-# once — chosen because it's used as the positive-control probe elsewhere too.
-_PROBE_GOLDEN = "2026-03-28-overnight"
+# once. Issue #757 Phase 6 Step 5: _nat_vent_may_reactivate() now has exactly
+# one real caller left (handle_door_window_open()'s grace-period pre-check —
+# every other of its former 5 call sites dispatches through
+# nat_vent_fsm.transition() directly instead), so the probe must specifically
+# reach that one path (grace active + a door/window opens) — the previous
+# probe no longer does, see test_nat_vent_gate_compare.py's matching fix.
+_PROBE_GOLDEN = "grace_prevents_sensor_repause"
 
 
 def _load(name: str) -> dict:
@@ -57,10 +62,23 @@ def test_substitution_positive_control_detects_a_broken_new_function():
     a shadow disagreement. Proves the substitution mechanism can catch downstream
     effects (e.g. a nat-vent activation event never firing), not only the immediate
     call site.
+
+    Issue #757 Phase 6 Step 5: unlike the module-level _PROBE_GOLDEN (chosen for
+    _substitution_produces_identical_full_scenario_on_real_golden, where any
+    scenario that reaches the call at all suffices), this positive control
+    needs a scenario where the gate's REAL answer is True — forcing it to
+    always return False must actually flip the observable outcome.
+    grace_prevents_sensor_repause's real answer is already False at the point
+    it's reached (that's the whole point of its name), so forcing False there
+    changes nothing and produces a false-negative "no divergence." Uses
+    issue-392-natvent-ceiling-oscillation instead, confirmed to reach the gate
+    with a real True answer.
     """
-    scen = _load(_PROBE_GOLDEN)
+    scen = _load("issue-392-natvent-ceiling-oscillation")
     with patch("custom_components.climate_advisor.nat_vent_gate.decide_nat_vent_gate", lambda inputs: False):
-        diff = diff_runs(scen, mutate_b=substitute_new_gate, scenario_name=f"{_PROBE_GOLDEN}_POSITIVE_CONTROL")
+        diff = diff_runs(
+            scen, mutate_b=substitute_new_gate, scenario_name="issue-392-natvent-ceiling-oscillation_POSITIVE_CONTROL"
+        )
 
     assert not diff.a_error and not diff.b_error, (diff.a_error, diff.b_error)
     assert not diff.is_clean, (

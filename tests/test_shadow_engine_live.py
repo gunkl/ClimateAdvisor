@@ -224,17 +224,29 @@ class TestMirrorToShadow:
 
 
 class TestShadowEngineDiagnostic:
+    """Issue #757 Phase 6 Step 5: nat-vent's own "mirror"/"fsm" axes (and the
+    production_state/shadow_state/nat_vent_fsm_state keys they populated) were
+    removed once its legacy branch was deleted — there is no longer a second
+    implementation to compare against. These tests now exercise the
+    classification_mirror axis instead (still live — classification's own
+    legacy-vs-FSM removal is Step 7, not yet executed), using an occupancy_mode
+    mismatch between the two engines to force ``decide_scheduled_band_gate()``
+    to disagree, same technique ``test_other_axes_stay_independent`` (below)
+    already used."""
+
     def test_diagnostic_agrees_by_default(self) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
         coordinator._update_shadow_engine_diagnostic()
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
         assert diag["agrees"] is True
-        assert diag["production_state"] == diag["shadow_state"]
+        assert diag["classification_production_state"] == diag["classification_shadow_state"]
+        assert diag["occupancy_production_state"] == diag["occupancy_shadow_state"]
 
     def test_positive_control_disagreement_is_detected(self) -> None:
-        """Forces a real divergence (shadow thinks nat-vent is active, production
-        doesn't) and confirms the diagnostic — and its WARNING log — catch it.
+        """Forces a real divergence (shadow's occupancy mode differs from
+        production's, so the classification gate disagrees) and confirms the
+        diagnostic — and its WARNING log — catch it.
 
         Issue #685: patches dt_util.now to a real fixed datetime because the
         debounce helper now subtracts two "now" values, which raises against the
@@ -242,23 +254,23 @@ class TestShadowEngineDiagnostic:
         original form, needed only because a disagreement path is exercised.
         """
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        coordinator.shadow_automation_engine._natural_vent_active = True
-        coordinator.automation_engine._natural_vent_active = False
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
             coordinator._update_shadow_engine_diagnostic()
         diag = coordinator.shadow_engine_diagnostic
         assert diag["agrees"] is False
-        assert diag["production_state"] != diag["shadow_state"]
+        assert diag["classification_production_state"] != diag["classification_shadow_state"]
 
     def test_disagreement_logs_warning(self, caplog) -> None:
-        """Issue #685: a WARNING only fires once the mirror axis has continuously
-        disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S — seed the streak as
-        already past threshold so this test still proves a real, persistent
-        divergence gets reported."""
+        """Issue #685: a WARNING only fires once the classification_mirror axis has
+        continuously disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S — seed the
+        streak as already past threshold so this test still proves a real,
+        persistent divergence gets reported."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        coordinator.shadow_automation_engine._natural_vent_active = True
-        coordinator.automation_engine._natural_vent_active = False
-        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
+        coordinator._shadow_diag_disagreement_since["classification_mirror"] = _FIXED_NOW - timedelta(
             seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
         )
         with (
@@ -266,7 +278,7 @@ class TestShadowEngineDiagnostic:
             caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
         ):
             coordinator._update_shadow_engine_diagnostic()
-        assert any("Shadow engine disagreement" in r.message for r in caplog.records)
+        assert any("shadow engine disagreement" in r.message.lower() for r in caplog.records)
 
     def test_fresh_disagreement_does_not_log_warning(self, caplog) -> None:
         """Issue #685: the actual bug fix — a single-tick, fresh disagreement
@@ -274,8 +286,8 @@ class TestShadowEngineDiagnostic:
         self-resolving divergence, confirmed via live log evidence) must NOT log
         a WARNING. Without the debounce, this fires immediately."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        coordinator.shadow_automation_engine._natural_vent_active = True
-        coordinator.automation_engine._natural_vent_active = False
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
         with (
             patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
             caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
@@ -284,37 +296,8 @@ class TestShadowEngineDiagnostic:
         assert not any("Shadow engine disagreement" in r.message for r in caplog.records)
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
-        assert diag["debounce"]["mirror"]["sustained"] is False
-        assert 0.0 <= diag["debounce"]["mirror"]["disagreement_seconds"] < 1.0
-
-    def test_production_state_honors_configured_lockout_seconds(self) -> None:
-        """Issue #684: ``_state_for()`` used to hardcode ``lockout_seconds=300``
-        instead of reading the configured ``CONF_NAT_VENT_REACTIVATION_LOCKOUT_S``
-        value (which ``_evaluate_nat_vent_fsm()`` has always read correctly).
-        Default lockout is also 300s, so the bug was invisible on any install
-        using the default — this test configures a shorter lockout (60s) and
-        an outdoor-exit timestamp 120s in the past: with the fix, the
-        (already-elapsed) lockout means the derived state is INACTIVE; with the
-        old hardcoded 300s, 120s is still inside the window and the state would
-        incorrectly read PAUSED_REACTIVATION_LOCKOUT.
-        """
-        from custom_components.climate_advisor.const import CONF_NAT_VENT_REACTIVATION_LOCKOUT_S
-
-        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        coordinator.config[CONF_NAT_VENT_REACTIVATION_LOCKOUT_S] = 60
-        for ae in (coordinator.automation_engine, coordinator.shadow_automation_engine):
-            ae._natural_vent_active = False
-            ae._paused_by_door = True
-            ae._nat_vent_outdoor_exit_time = _FIXED_NOW - timedelta(seconds=120)
-        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
-            coordinator._update_shadow_engine_diagnostic()
-        diag = coordinator.shadow_engine_diagnostic
-        # Nat-vent-specific fields only — setting _paused_by_door also feeds the
-        # unrelated door/window FSM comparison, which is out of scope here and
-        # not staged for this test.
-        assert diag["production_state"] == "inactive"
-        assert diag["shadow_state"] == "inactive"
-        assert diag["nat_vent_fsm_state"] == "inactive"
+        assert diag["debounce"]["classification_mirror"]["sustained"] is False
+        assert 0.0 <= diag["debounce"]["classification_mirror"]["disagreement_seconds"] < 1.0
 
 
 class TestShadowEngineShutdown:
@@ -720,13 +703,22 @@ class TestShadowDisagreementIncident:
     def test_sustained_disagreement_emits_incident(self) -> None:
         """A disagreement streak already past SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S
         (same seeding pattern as test_disagreement_logs_warning) must emit exactly
-        one shadow_disagreement incident with axis='mirror' and the two disagreeing
-        state strings."""
+        one shadow_disagreement incident with axis='classification_mirror' and the
+        two disagreeing state strings.
+
+        Issue #757 Phase 6 Step 5: previously used the nat-vent "mirror" axis
+        (``_natural_vent_active`` mismatch) — that axis (and the underlying
+        nat-vent legacy branch it compared against) was removed once nat-vent's
+        dispatcher became unconditionally FSM-authoritative in production.
+        classification_mirror is the same "still-active, independent axis" shape,
+        driven by an occupancy_mode mismatch (same technique
+        ``TestShadowEngineDiagnostic`` above and
+        ``test_other_axes_stay_independent`` below already use)."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
         coordinator.data = {"indoor_temp": 72.0, "outdoor_temp": 68.0, "hvac_mode": "off"}
-        coordinator.shadow_automation_engine._natural_vent_active = True
-        coordinator.automation_engine._natural_vent_active = False
-        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
+        coordinator._shadow_diag_disagreement_since["classification_mirror"] = _FIXED_NOW - timedelta(
             seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
@@ -735,7 +727,7 @@ class TestShadowDisagreementIncident:
         incidents = self._shadow_disagreement_events(coordinator)
         assert len(incidents) == 1
         incident = incidents[0]
-        assert incident["axis"] == "mirror"
+        assert incident["axis"] == "classification_mirror"
         assert incident["comparison_kind"] == "shadow"
         assert incident["production_state"] != incident["comparison_state"]
         assert incident["indoor_f"] == 72.0
@@ -747,8 +739,8 @@ class TestShadowDisagreementIncident:
         """A single-tick, not-yet-sustained disagreement (the debounce window itself
         exists to suppress cascade noise, Issue #685) must NOT emit an incident."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        coordinator.shadow_automation_engine._natural_vent_active = True
-        coordinator.automation_engine._natural_vent_active = False
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
             coordinator._update_shadow_engine_diagnostic()
 
@@ -759,9 +751,9 @@ class TestShadowDisagreementIncident:
         often than a 30-min cycle. A streak that stays sustained across multiple
         recomputes must emit exactly one incident, not one per call."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        coordinator.shadow_automation_engine._natural_vent_active = True
-        coordinator.automation_engine._natural_vent_active = False
-        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
+        coordinator._shadow_diag_disagreement_since["classification_mirror"] = _FIXED_NOW - timedelta(
             seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
@@ -776,9 +768,9 @@ class TestShadowDisagreementIncident:
         a later, distinct disagreement streak on the same axis emits its own
         incident."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        coordinator.shadow_automation_engine._natural_vent_active = True
-        coordinator.automation_engine._natural_vent_active = False
-        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+        coordinator.automation_engine._occupancy_mode = "home"
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
+        coordinator._shadow_diag_disagreement_since["classification_mirror"] = _FIXED_NOW - timedelta(
             seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
@@ -786,15 +778,15 @@ class TestShadowDisagreementIncident:
         assert len(self._shadow_disagreement_events(coordinator)) == 1
 
         # Resolve: engines agree again.
-        coordinator.shadow_automation_engine._natural_vent_active = False
+        coordinator.shadow_automation_engine._occupancy_mode = "home"
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
             coordinator._update_shadow_engine_diagnostic()
-        assert coordinator._shadow_diag_incident_emitted["mirror"] is False
+        assert coordinator._shadow_diag_incident_emitted["classification_mirror"] is False
 
         # New sustained streak on the same axis.
-        coordinator.shadow_automation_engine._natural_vent_active = True
+        coordinator.shadow_automation_engine._occupancy_mode = "away"
         later = _FIXED_NOW + timedelta(seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1)
-        coordinator._shadow_diag_disagreement_since["mirror"] = later - timedelta(
+        coordinator._shadow_diag_disagreement_since["classification_mirror"] = later - timedelta(
             seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=later):

@@ -1,0 +1,85 @@
+{
+  "name": "issue_764_bedtime_economizer_teardown_gate",
+  "description": "Bedtime with an active economizer cool-down session (WHF suppressing HVAC, no nat-vent involved): bedtime must defer economizer teardown the same way it defers fan teardown — not turn the WHF off and command AC cool while the fan is still doing useful free cooling.",
+  "source": "synthetic",
+  "issue": 764,
+  "simulator_support": true,
+  "track": "unit",
+  "notes": [
+    "Occupant outcome: reproduces the reported production incident (2026-08-23 20:30) — indoor 76F/outdoor 74F, evening economizer cool-down active, doors/windows closed by bedtime. handle_bedtime() correctly decided the WHF session should continue (decide_scheduled_band_gate() == DEFER_NAT_VENT, driven by _whf_owns_hvac() being True from the economizer's own fan-suppression, independent of _natural_vent_active), but a separate, unconditional _deactivate_economizer() call two lines later turned the WHF off anyway and, because the day's classification was cool, immediately commanded the AC compressor on — the occupant heard the AC kick on right after CA's own log said free cooling should continue, and a comfort_violation was logged 30s later as the compressor cold-started.",
+    "Scenario effectiveness: if the fix at automation.py:6497-6498/6517-6525 is reverted (economizer teardown moved back outside the DEFER_NAT_VENT gate), _deactivate_economizer() fires unconditionally at bedtime — fan_deactivated (economizer off) is emitted, _economizer_phase drops to inactive, and the classification's cool mode gets commanded via set_hvac_mode/set_temperature. Both economizer_final_phase and hvac_mode_never_commanded independently catch the regression.",
+    "No nat-vent activation is used here deliberately: economizer_fsm.py's own natural_vent_active short-circuit means economizer_check() would just defer/no-op (never reach cool-down) once nat-vent is already active, so a nat-vent-first scenario could never even get _economizer_active to True in the first place. The real production incident's simultaneous nat-vent+economizer state came from economizer engaging BEFORE nat-vent reactivated from a pause; this scenario isolates the actual bug condition instead: an active WHF-owning session (_whf_owns_hvac()==True, purely from the economizer's own suppression) at the moment bedtime fires — the same DEFER_NAT_VENT gate value production hit, without needing to reproduce nat-vent's own separate entry-gate timing.",
+    "Two-way alignment: matches docs/08-COMPUTATION-REFERENCE.md's corrected anchor-table row (line 27) and the existing #9 table row 1442/1445 ('economizer also deactivated in that case' — i.e. only in the non-DEFER_NAT_VENT branch), both of which now match handle_bedtime()'s actual gated behavior post-fix.",
+    "User outcome if this scenario is not caught: the occupant's AC audibly and unnecessarily cycles on at bedtime immediately after CA's own activity log states free cooling should continue — wasted energy plus a false comfort_violation incident, undermining trust in the automation's stated reasoning.",
+    "Config note: sleep_time/wake_time are required for bedtime's sleep-window logic. fan_mode=whole_house matches the reported incident's WHF hardware — _whf_owns_hvac() requires this archetype (WHOLE_HOUSE or BOTH) to ever return True. economizer_temp_delta=3.0 keeps outdoor(74) within the eligibility delta of comfort_cool+delta(74+3=77)."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "07:00",
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan"
+  },
+  "events": [
+    {
+      "time": "2026-08-23T17:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot day, hvac_mode=cool — matches the reported incident's classification."
+    },
+    {
+      "time": "2026-08-23T20:05:00",
+      "type": "economizer_check",
+      "outdoor_temp": 74,
+      "indoor_temp": 76,
+      "windows_open": true,
+      "hour": 20,
+      "note": "hour=20 is in the evening economizer window [17,24). outdoor=74 <= threshold(74+3=77), direction ok (74<76). indoor=76 > comfort_cool=74 -> cool-down phase engages: fan (WHF) turns on and suppresses HVAC (_whf_owns_hvac() becomes True), matching the reported incident's readings exactly."
+    },
+    {
+      "time": "2026-08-23T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime fires with _economizer_active=True (cool-down phase) and _whf_owns_hvac()=True (from the economizer's own fan suppression — _natural_vent_active stays False the whole scenario). decide_scheduled_band_gate() returns DEFER_NAT_VENT purely from whf_owns_hvac. Fixed behavior: bedtime leaves both the fan and the economizer session alone — no fan_deactivated(economizer off), no AC command. Pre-fix behavior: the fan-deactivation call correctly deferred, but the economizer teardown fired anyway, turning the WHF off and commanding AC cool."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-23T20:05:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Evening window, indoor 76F > comfort_cool 74F, direction favorable, outdoor within delta -> cool-down phase engages, WHF turns on and suppresses HVAC."
+    },
+    {
+      "at": "2026-08-23T22:30:00",
+      "expect": "hvac_write_blocked_whf_active",
+      "reason": "Bedtime fires with whf_owns_hvac()==True -> decide_scheduled_band_gate() returns DEFER_NAT_VENT -> nat_vent_bedtime_continue is emitted (informational payload only) and the sleep-band write is silently no-op'd by _apply_comfort_band()'s WHF choke-point guard (hvac_write_blocked_whf_active) instead of overriding the WHF session. This is the last decision at 22:30:00 and directly confirms bedtime never fought the active WHF session for control."
+    },
+    {
+      "at": "2026-08-23T22:30:00",
+      "expect": "economizer_final_phase",
+      "phase": "cool-down",
+      "reason": "Final state check: the economizer session must still be in cool-down phase after bedtime — pre-fix, the unconditional _deactivate_economizer() call would have dropped this to 'inactive'."
+    },
+    {
+      "at": "2026-08-23T22:30:00",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["cool"],
+      "since": "2026-08-23T22:30:00",
+      "reason": "Pre-fix, _deactivate_economizer() saw classification.hvac_mode=='cool' and immediately called _set_hvac_mode('cool', ...) — commanding the AC compressor on at the exact moment CA's own gate had just said to leave the WHF session alone. This must never happen while the WHF owns HVAC."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Bedtime defers economizer teardown the same way it defers fan teardown when the WHF owns HVAC (Issue #764 fix)",
+    "observed_behavior": "economizer_check -> cool-down phase, WHF suppresses HVAC (20:05) -> bedtime fires -> nat_vent_bedtime_continue (22:30), economizer stays in cool-down, AC never commanded",
+    "expected_behavior": "In the evening economizer window, the WHF engages cool-down and suppresses HVAC. At bedtime, since the WHF session is still active and doing useful free cooling, CA leaves both the fan AND the economizer alone instead of tearing the economizer down and cold-starting the AC — matching what its own nat_vent_bedtime_continue log message says is happening."
+  }
+}

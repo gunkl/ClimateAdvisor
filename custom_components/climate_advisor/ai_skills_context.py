@@ -2079,12 +2079,12 @@ def _render_nat_vent_sleep_ceiling_reached(p: dict, unit: str) -> tuple[str, str
 def _render_nat_vent_bedtime_continue(p: dict, unit: str) -> tuple[str, str]:
     outdoor = p.get("outdoor_temp")
     cool = p.get("sleep_cool")
-    label = "Nat-vent continues through bedtime"
+    label = "Nat-vent/WHF session active -- continuing through bedtime"
     if outdoor is not None and cool is not None:
         with contextlib.suppress(TypeError, ValueError):
             label = (
-                f"Nat-vent continues at bedtime -- outdoor {format_temp(float(outdoor), unit)}"
-                f" < sleep ceiling {format_temp(float(cool), unit)}"
+                f"Nat-vent/WHF session active -- continuing through bedtime"
+                f" (outdoor {format_temp(float(outdoor), unit)}, sleep ceiling {format_temp(float(cool), unit)})"
             )
     return label, ""
 

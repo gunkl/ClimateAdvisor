@@ -736,3 +736,103 @@ class TestNatVentBedtimeContinuation:
         assert "nat_vent_bedtime_continue" in event_names, (
             f"FAN_MODE_HVAC: expected 'nat_vent_bedtime_continue'; got: {event_names}"
         )
+
+
+class TestEconomizerDeferredAtBedtime:
+    """Issue #764: bedtime must defer economizer teardown the same way it defers fan
+    teardown, instead of tearing the economizer down unconditionally.
+
+    Previously `_deactivate_economizer()` was called whenever `_economizer_active` was
+    True regardless of the gate's result — even when `decide_scheduled_band_gate()` had
+    just returned DEFER_NAT_VENT because an active nat-vent/WHF session should be left
+    alone. That turned the WHF off and (since `_deactivate_economizer()` resumes normal
+    AC when the classification's hvac_mode is "cool") immediately commanded the
+    compressor on, while windows were still open and outdoor was still cooler than
+    indoor. Fixed by nesting the economizer teardown inside the same gate check already
+    used for the fan, in both of `handle_bedtime()`'s call sites (the `if not c:`
+    early-return branch and the main path).
+
+    Occupant experience: at bedtime, if the whole-house fan is still doing useful free
+    cooling, it keeps running instead of the AC audibly kicking on for no reason a few
+    seconds later.
+    """
+
+    def test_economizer_not_deactivated_when_nat_vent_active(self):
+        """Gate passes (DEFER_NAT_VENT): economizer teardown must be skipped too."""
+        engine = _make_nat_vent_engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._economizer_active = True
+        engine._last_outdoor_temp = 74.0
+        engine._last_indoor_temp = 76.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._deactivate_economizer = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        engine._deactivate_fan.assert_not_called()
+        engine._deactivate_economizer.assert_not_called()
+        assert engine._economizer_active is True
+
+    def test_economizer_not_deactivated_when_nat_vent_active_no_classification(self):
+        """Same gate applies in the `if not c:` early-return branch."""
+        engine = _make_nat_vent_engine()
+        engine._current_classification = None
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._economizer_active = True
+        engine._last_outdoor_temp = 74.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._deactivate_economizer = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        engine._deactivate_fan.assert_not_called()
+        engine._deactivate_economizer.assert_not_called()
+        assert engine._economizer_active is True
+
+    def test_economizer_deactivated_when_nat_vent_not_active(self):
+        """Gate fails (no active session): economizer teardown still happens — no
+        regression on the legitimate teardown path."""
+        engine = _make_nat_vent_engine()
+        engine._natural_vent_active = False
+        engine._fan_active = False
+        engine._fan_override_active = False
+        engine._economizer_active = True
+        engine._last_outdoor_temp = 65.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._deactivate_economizer = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        engine._deactivate_economizer.assert_called_once()
+
+    def test_economizer_deactivated_when_nat_vent_not_active_no_classification(self):
+        """Gate fails in the `if not c:` early-return branch: teardown still happens."""
+        engine = _make_nat_vent_engine()
+        engine._current_classification = None
+        engine._natural_vent_active = False
+        engine._fan_active = False
+        engine._fan_override_active = False
+        engine._economizer_active = True
+        engine._last_outdoor_temp = 65.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._deactivate_economizer = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        engine._deactivate_economizer.assert_called_once()

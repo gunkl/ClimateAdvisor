@@ -289,7 +289,11 @@ _SHADOW_DIAG_AXES = (
     # inside apply_classification() regardless of this phase's new flag — so
     # comparing engine_a's and engine_b's live gate result is a meaningful mirror
     # check even though the flag only governs the ceiling-guard half of this
-    # phase's extraction.
+    # phase's extraction. Issue #757 Phase 7 Step 7: classification's own
+    # AutomationEngine._classification_fsm_authoritative flag has since been
+    # removed entirely (this was the last of the 5 ``_*_fsm_authoritative``
+    # flags to graduate), but this axis is KEPT — see the graduation-survives
+    # reasoning in _update_shadow_engine_diagnostic()'s own comment for this axis.
     "classification_mirror",
     # Issue #744: "occupancy_mirror" adds a 9th axis, deliberately with no
     # "occupancy_fsm" sibling — occupancy_fsm.py is genuinely stateless (see its
@@ -553,21 +557,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             callbacks=self._build_production_automation_callbacks(),
             role="production",
         )
-        # Issue #729: _engine_a is the fixed-legacy identity — the remaining
-        # FSM-authoritative flag below stays False for its whole lifetime (was 5 —
-        # override_grace's own flag was removed in Issue #757 Phase 6 Step 3,
-        # door/window's in Phase 6 Step 4, nat-vent's in Phase 6 Step 5, and
-        # occupancy's in Phase 6 Step 6, once each dispatcher became unconditionally
-        # FSM-authoritative). Was runtime-toggleable per-subsystem via separate
-        # switches (Issue #594 Phase R / #664); those switches are gone — engine
-        # identity itself (legacy vs FSM, selected by which of _engine_a/_engine_b
-        # is primary) is now the only axis.
-        # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
-        # (classification/ODE ceiling guard), fixed at construction as of #729's
-        # pattern — _engine_a stays False for its whole lifetime, same as the flags
-        # above. This is the only remaining per-engine FSM-authoritative flag —
-        # occupancy's (Issue #744) was removed in Phase 6 Step 6.
-        self._engine_a._classification_fsm_authoritative = False
+        # Issue #729: _engine_a used to be the fixed-legacy identity for a set of
+        # per-engine FSM-authoritative flags (override_grace's own flag was removed
+        # in Issue #757 Phase 6 Step 3, door/window's in Phase 6 Step 4, nat-vent's
+        # in Phase 6 Step 5, occupancy's in Phase 6 Step 6, and classification's —
+        # the last of the 5 — in Phase 7 Step 7). Was runtime-toggleable per-subsystem
+        # via separate switches (Issue #594 Phase R / #664); those switches are gone —
+        # engine identity itself (legacy vs FSM, selected by which of _engine_a/
+        # _engine_b is primary) is now the only axis. As of Phase 7 Step 7, neither
+        # engine carries any ``_*_fsm_authoritative`` flag anymore — every subsystem's
+        # dispatcher is unconditionally FSM-authoritative on both engines.
         # Issue #613 (Block 5, subtask Q): a real, live second AutomationEngine instance
         # computing decisions from the same inputs as production, permanently inert.
         # dry_run is set True immediately below and MUST NEVER be toggled elsewhere —
@@ -611,18 +610,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             role="shadow",
         )
         self._engine_b.dry_run = True
-        # Issue #729: _engine_b is the fixed-FSM identity — see _engine_a's own
-        # comment above for why override_grace's, door/window's, nat-vent's, and
-        # occupancy's flags are gone. Which of the two is primary is decided by
+        # Issue #729: _engine_b used to be the fixed-FSM identity — see _engine_a's
+        # own comment above for why override_grace's, door/window's, nat-vent's,
+        # occupancy's, and (as of Issue #757 Phase 7 Step 7) classification's flags
+        # are all gone now. Which of the two is primary is decided by
         # switch.climate_advisor_shadow_engine_primary (async_set_shadow_engine_primary())
         # — a single axis, not independent switches.
-        # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
-        # (classification/ODE ceiling guard), fixed at construction as of #729's
-        # pattern — _engine_b stays True for its whole lifetime, mirror of
-        # _engine_a's fixed-legacy assignment above. This is the only remaining
-        # per-engine FSM-authoritative flag — occupancy's (Issue #744) was removed
-        # in Phase 6 Step 6.
-        self._engine_b._classification_fsm_authoritative = True
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1440,11 +1433,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # has no separate "classification_fsm" axis — classification_fsm.py is
         # genuinely stateless (see its own module docstring's five-whys), so there is
         # no separate untethered FSM state object to compare production against.
-        # decide_scheduled_band_gate() is a
-        # pre-existing pure function BOTH engines already call unconditionally
-        # every apply_classification() cycle, so comparing its live result on
-        # each engine's own flags is a meaningful mirror check independent of
-        # whether either engine's _classification_fsm_authoritative flag is set.
+        # decide_scheduled_band_gate() is a pre-existing pure function BOTH engines
+        # already call unconditionally every apply_classification() cycle. Issue #757
+        # Phase 7 Step 7: classification's own AutomationEngine._classification_fsm_authoritative
+        # flag was removed (apply_classification()'s ODE ceiling guard block is now
+        # unconditionally FSM-authoritative on both engines), but this axis is KEPT —
+        # same reasoning as occupancy_mirror's own graduation-survives note below: the
+        # compared predicate is a pure function both engines' live state already
+        # determines regardless of the (now-removed) flag, so removing the flag does
+        # not retire this axis's usefulness, unlike nat-vent's/door-window's/override-
+        # grace's own mirror axes, which compared "did the legacy branch's write agree
+        # with the FSM branch's write" — a comparison that became meaningless once
+        # there was no legacy branch left to compare against.
         from .desired_state import decide_scheduled_band_gate
 
         def _classification_gate_str(ae: AutomationEngine) -> str:

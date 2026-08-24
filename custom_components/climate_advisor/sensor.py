@@ -497,10 +497,15 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
         if diag is None:
             return {}
         return {
-            "production_state": diag["production_state"],
-            "shadow_state": diag["shadow_state"],
-            "nat_vent_fsm_state": diag.get("nat_vent_fsm_state"),
             "checked_at": diag["checked_at"],
+            # Issue #613/#633: nat-vent's own production/shadow/FSM state fields
+            # ("production_state"/"shadow_state"/"nat_vent_fsm_state") used to be
+            # exposed here. Issue #757 Phase 6 Step 5 removed them along with their
+            # underlying coordinator.shadow_engine_diagnostic computation (nat-vent's
+            # dispatcher is now unconditionally FSM-authoritative in production, and
+            # the diagnostic machinery feeding these keys — including the independent
+            # _evaluate_nat_vent_fsm()/_nat_vent_fsm_state replica — had zero other
+            # consumers). Same removal shape as door/window's Step 4 below.
             # Issue #660: door/window's own production/shadow/FSM state fields used to
             # be exposed here (Step 1b). Issue #757 Phase 6 Step 4 removed them along
             # with their underlying coordinator.shadow_engine_diagnostic computation

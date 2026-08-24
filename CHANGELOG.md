@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.72] — 2026-08-23
+
+- Fix #764: at bedtime, if the whole-house fan was already running and doing useful free cooling (natural ventilation or the evening economizer), Climate Advisor could turn the fan off and start the AC compressor anyway — even right after its own activity log said the fan session would continue. Fixed: bedtime now leaves an active fan session alone in both places that could tear it down, matching what it already logs.
+
 ## [0.6.71] — 2026-08-23
 
 - Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 6 — removes the legacy (pre-FSM) occupancy dispatch code path. The FSM-based occupancy dispatch has been production-authoritative for weeks with zero corpus divergence, so the legacy inline branches in `handle_occupancy_away()`/`handle_occupancy_home()`/`handle_occupancy_vacation()` and the differential-comparator scaffolding are no longer needed. Unlike prior graduation steps, no new production bugs were found — the legacy and FSM paths were already behavior-identical.

@@ -6307,13 +6307,14 @@ class AutomationEngine:
         if not c:
             if self._today_record is not None:
                 self._today_record.setback_skipped_reason = "no_classification"
-            # No sleep target available — deactivate fan unless nat-vent/WHF owns it.
-            if _gate != ScheduledBandGate.DEFER_NAT_VENT and self._fan_active and not _fan_was_overridden:
-                await self._deactivate_fan(reason="bedtime — no classification")
-                self._natural_vent_active = False
-                self._nat_vent_soft_start = False
-            if self._economizer_active:
-                await self._deactivate_economizer(outdoor_temp=0)
+            # No sleep target available — deactivate fan/economizer unless nat-vent/WHF owns it.
+            if _gate != ScheduledBandGate.DEFER_NAT_VENT:
+                if self._fan_active and not _fan_was_overridden:
+                    await self._deactivate_fan(reason="bedtime — no classification")
+                    self._natural_vent_active = False
+                    self._nat_vent_soft_start = False
+                if self._economizer_active:
+                    await self._deactivate_economizer(outdoor_temp=0)
             return
 
         _sleep_band = select_comfort_band(
@@ -6339,8 +6340,8 @@ class AutomationEngine:
                 await self._deactivate_fan(reason="bedtime — nat-vent not active")
                 self._natural_vent_active = False
                 self._nat_vent_soft_start = False
-        if self._economizer_active:
-            await self._deactivate_economizer(outdoor_temp=0)
+            if self._economizer_active:
+                await self._deactivate_economizer(outdoor_temp=0)
 
         if self._emit_event_callback:
             self._emit_event_callback(

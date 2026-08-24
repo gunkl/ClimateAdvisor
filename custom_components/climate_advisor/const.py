@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.71"
+VERSION = "0.6.72"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.72": [
+        "Fix #764: at bedtime, if the whole-house fan was already running and doing"
+        " useful free cooling (natural ventilation or the evening economizer),"
+        " Climate Advisor could turn the fan off and start the AC compressor anyway"
+        " — even right after its own activity log said the fan session would"
+        " continue. Fixed: bedtime now leaves an active fan session alone in both"
+        " places that could tear it down, matching what it already logs.",
+    ],
     "0.6.71": [
         "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 6"
         " — removes the legacy (pre-FSM) occupancy dispatch code path. The FSM-based"
@@ -2684,6 +2692,43 @@ KNOWN_FIXES: dict[int, dict] = {
             " arming the outdoor-exit timestamp on both AWAY_CEILING branches and"
             " gating the idle-open reactivation on is_reactivation_locked_out(),"
             " matching every other exit reason's existing anti-flip-flop coverage."
+        ),
+    },
+    764: {
+        "version_fixed": "0.6.72",
+        "title": (
+            "handle_bedtime() tore down an active economizer/WHF session unconditionally,"
+            " even when it had just decided (via decide_scheduled_band_gate() =="
+            " DEFER_NAT_VENT) to leave the fan alone — turning the WHF off and"
+            " immediately commanding the AC compressor on at bedtime while the fan was"
+            " still doing useful free cooling. Root-caused from a live 2026-08-23 20:30"
+            " incident (Activity Record) via five-whys: an Issue #498 refactor moved"
+            " handle_bedtime()'s fan-deactivation call behind the shared gate but left"
+            " the immediately-following, unconditional _deactivate_economizer() call"
+            " outside it — a duplicated 2-line block (present in both the `if not c:`"
+            " early-return branch and the main path) that was never updated to move"
+            " with the gate it sits next to."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/automation.py handle_bedtime(): both"
+            " _deactivate_economizer() call sites (the no-classification early-return"
+            " branch and the main sleep-band path) now nest inside the same"
+            " decide_scheduled_band_gate() != DEFER_NAT_VENT check already used for"
+            " the fan-deactivation call immediately above each — mirroring the pattern"
+            " economizer_fsm.py's own natural_vent_active defer already uses when"
+            " reached through the FSM (the third, already-correct"
+            " _deactivate_economizer() call site). ai_skills_context.py"
+            " _render_nat_vent_bedtime_continue(): removed a stale 'outdoor <"
+            " sleep_cool' comparison claim from the nat_vent_bedtime_continue log"
+            " message — that comparison was deleted from handle_bedtime() by Issue"
+            " #498, so outdoor_temp/sleep_cool are informational payload only, not a"
+            " condition actually evaluated. docs/08-COMPUTATION-REFERENCE.md anchor"
+            " table row and docs/activity-report-table.md updated to match."
+            " tests/test_bedtime_setback.py: added TestEconomizerDeferredAtBedtime (4"
+            " cases covering both call sites, gate-passes and gate-fails). New golden-"
+            " pending scenario tools/simulations/pending/"
+            "issue_764_bedtime_economizer_teardown_gate.json reproduces the incident"
+            " through the real production harness."
         ),
     },
     696: {

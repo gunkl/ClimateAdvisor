@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.71] — 2026-08-23
+
+- Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 6 — removes the legacy (pre-FSM) occupancy dispatch code path. The FSM-based occupancy dispatch has been production-authoritative for weeks with zero corpus divergence, so the legacy inline branches in `handle_occupancy_away()`/`handle_occupancy_home()`/`handle_occupancy_vacation()` and the differential-comparator scaffolding are no longer needed. Unlike prior graduation steps, no new production bugs were found — the legacy and FSM paths were already behavior-identical.
+
 ## [0.6.70] — 2026-08-23
 
 - Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 5 — removes the legacy (pre-FSM) nat-vent code path. The FSM-based nat-vent dispatch has been production-authoritative for weeks with zero corpus divergence, so the 10 inline legacy call sites and the differential-comparator scaffolding are no longer needed.

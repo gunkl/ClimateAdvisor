@@ -297,15 +297,24 @@ _SHADOW_DIAG_AXES = (
     # classification_mirror's own comment above documents for its own missing
     # "classification_fsm" sibling. should_defer_to_occupancy_setback() is a
     # pre-existing shared pure function (Issue #460) both engines' live
-    # _occupancy_mode already determines, unconditionally, regardless of this
-    # phase's new flag — _occupancy_mode itself is kept in sync from production to
-    # shadow every cycle by _sync_shadow_inputs() (`se.set_occupancy_mode(ae._occupancy_mode)`),
-    # so comparing this predicate is a meaningful mirror check even though neither
-    # engine's occupancy dispatch HANDLERS (handle_occupancy_away/home/vacation)
-    # are ever invoked on the shadow engine — only whichever engine is currently
-    # `self.automation_engine` (primary) receives those calls; see
+    # _occupancy_mode already determines, unconditionally — _occupancy_mode itself
+    # is kept in sync from production to shadow every cycle by
+    # _sync_shadow_inputs() (`se.set_occupancy_mode(ae._occupancy_mode)`), so
+    # comparing this predicate remains a meaningful mirror check even though
+    # neither engine's occupancy dispatch HANDLERS (handle_occupancy_away/home/
+    # vacation) are ever invoked on the shadow engine — only whichever engine is
+    # currently `self.automation_engine` (primary) receives those calls; see
     # project memory "shadow engine coverage gap" for the broader known limitation
-    # this axis does not attempt to close.
+    # this axis does not attempt to close. Issue #757 Phase 6 Step 6: occupancy's
+    # own AutomationEngine._occupancy_fsm_authoritative flag was removed (both
+    # engines' handlers are now unconditionally FSM-authoritative), but this axis
+    # is KEPT — same reasoning as classification_mirror's own graduation-survives
+    # note above: the compared predicate is a pure function both engines' live
+    # state already determines regardless of the (now-removed) flag, so removing
+    # the flag does not retire this axis's usefulness, unlike nat-vent's/door-
+    # window's/override-grace's own mirror axes, which compared "did the legacy
+    # branch's write agree with the FSM branch's write" — a comparison that
+    # became meaningless once there was no legacy branch left to compare against.
     "occupancy_mirror",
 )
 
@@ -545,22 +554,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             role="production",
         )
         # Issue #729: _engine_a is the fixed-legacy identity — the remaining
-        # FSM-authoritative flag below stays False for its whole lifetime (was 4 —
+        # FSM-authoritative flag below stays False for its whole lifetime (was 5 —
         # override_grace's own flag was removed in Issue #757 Phase 6 Step 3,
-        # door/window's in Phase 6 Step 4, and nat-vent's in Phase 6 Step 5, once each
-        # dispatcher became unconditionally FSM-authoritative). Was runtime-toggleable
-        # per-subsystem via separate switches (Issue #594 Phase R / #664); those
-        # switches are gone — engine identity itself (legacy vs FSM, selected by which
-        # of _engine_a/_engine_b is primary) is now the only axis.
+        # door/window's in Phase 6 Step 4, nat-vent's in Phase 6 Step 5, and
+        # occupancy's in Phase 6 Step 6, once each dispatcher became unconditionally
+        # FSM-authoritative). Was runtime-toggleable per-subsystem via separate
+        # switches (Issue #594 Phase R / #664); those switches are gone — engine
+        # identity itself (legacy vs FSM, selected by which of _engine_a/_engine_b
+        # is primary) is now the only axis.
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
-        # pattern — _engine_a stays False for its whole lifetime, same as the 4
-        # flags above.
+        # pattern — _engine_a stays False for its whole lifetime, same as the flags
+        # above. This is the only remaining per-engine FSM-authoritative flag —
+        # occupancy's (Issue #744) was removed in Phase 6 Step 6.
         self._engine_a._classification_fsm_authoritative = False
-        # Issue #744 (strangler-fig completion Phase 4): 6th FSM-authoritative flag
-        # (occupancy dispatch), fixed at construction as of #729's pattern —
-        # _engine_a stays False for its whole lifetime, same as the 5 flags above.
-        self._engine_a._occupancy_fsm_authoritative = False
         # Issue #613 (Block 5, subtask Q): a real, live second AutomationEngine instance
         # computing decisions from the same inputs as production, permanently inert.
         # dry_run is set True immediately below and MUST NEVER be toggled elsewhere —
@@ -605,20 +612,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self._engine_b.dry_run = True
         # Issue #729: _engine_b is the fixed-FSM identity — see _engine_a's own
-        # comment above for why override_grace's, door/window's, and nat-vent's flags
-        # are gone. Which of the two is primary is decided by
+        # comment above for why override_grace's, door/window's, nat-vent's, and
+        # occupancy's flags are gone. Which of the two is primary is decided by
         # switch.climate_advisor_shadow_engine_primary (async_set_shadow_engine_primary())
         # — a single axis, not independent switches.
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_b stays True for its whole lifetime, mirror of
-        # _engine_a's fixed-legacy assignment above.
+        # _engine_a's fixed-legacy assignment above. This is the only remaining
+        # per-engine FSM-authoritative flag — occupancy's (Issue #744) was removed
+        # in Phase 6 Step 6.
         self._engine_b._classification_fsm_authoritative = True
-        # Issue #744 (strangler-fig completion Phase 4): 6th FSM-authoritative flag
-        # (occupancy dispatch), fixed at construction as of #729's pattern —
-        # _engine_b stays True for its whole lifetime, mirror of _engine_a's
-        # fixed-legacy assignment above.
-        self._engine_b._occupancy_fsm_authoritative = True
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),

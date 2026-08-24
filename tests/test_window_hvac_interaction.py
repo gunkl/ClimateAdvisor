@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from custom_components.climate_advisor import automation as _ae_mod
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
+from custom_components.climate_advisor.const import OCCUPANCY_HOME
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,6 +88,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     }
     ae._current_classification = _make_hot_classification()
     ae._natural_vent_active = False
+    ae._nat_vent_soft_start = False
     ae._hourly_forecast_temps = []
     ae._thermal_model = {}
     ae._economizer_active = False
@@ -96,6 +98,14 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._pre_pause_mode = None
     ae._doorwindow_fsm_authoritative = False
     ae._natvent_fsm_authoritative = False
+    # Issue #757 Phase 6 Step 5: nat-vent's 10 inline dispatch sites are now
+    # unconditionally FSM-authoritative, so _build_nat_vent_fsm_inputs() always
+    # reads _occupancy_mode — previously only exercised when a test explicitly
+    # set _natvent_fsm_authoritative=True.
+    ae._occupancy_mode = OCCUPANCY_HOME
+    ae._outdoor_temp_today_peak = None
+    ae._outdoor_temp_today_sample_count = 0
+    ae._nat_vent_outdoor_exit_time = None
     ae._grace_active = False
     ae._grace_protects_override = False
     ae._override_confirm_pending = False

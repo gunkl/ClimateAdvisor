@@ -191,8 +191,33 @@ class TestStateDesyncWithPreExistingOverride:
         assert engine._natural_vent_active is False
 
     def test_handle_door_window_open_skips_activation_when_grace_active(self) -> None:
+        """Issue #757 Phase 6 Step 5 correction: this test's original scenario
+        (outdoor=60.0, well below the ~77°F threshold) was itself
+        temperature-favorable for nat-vent — under Fix 2 (#249,
+        handle_door_window_open()'s deliberate grace-period bypass when outdoor
+        is cool enough, see tests/test_window_hvac_interaction.py's
+        TestGraceNatVentBypass), activation SHOULD proceed despite grace in
+        that scenario. Legacy (the pre-Step-5 default, since this test's
+        sibling override test doesn't set the flag) correctly implemented Fix
+        2; the FSM-authoritative path (this test forces authoritative=True) did
+        not — _build_nat_vent_fsm_inputs() had no way for this specific caller
+        to signal "grace's blocking question was already resolved favorably by
+        my own pre-check," so _grace_blocks_natvent() re-blocked using its own,
+        unrelated overheat-exception rule. No single pre-#757 test ever
+        exercised both the legacy and FSM paths under this same scenario, so
+        the divergence went uncaught — live in production since the FSM path
+        went authoritative. Fixed in automation.py's handle_door_window_open()
+        (grace_active=False override at its FSM dispatch call, once its own
+        temperature-only pre-check already fell through favorably).
+
+        This test now covers the genuinely-still-blocked case instead: outdoor
+        ABOVE indoor, so Fix 2's own pre-check gate fails on temperature alone
+        (the early return at handle_door_window_open()'s grace block fires
+        before ever reaching the FSM dispatch this class is about) — grace
+        correctly blocks activation when nothing else justifies overriding it.
+        """
         engine = _make_engine(indoor_f=72.0)  # indoor < comfort_cool -> no #134 exception
-        engine._last_outdoor_temp = 60.0
+        engine._last_outdoor_temp = 75.0  # outdoor > indoor -> Fix 2's own gate fails too
         engine._grace_active = True
         engine._activate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
         asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))

@@ -96,7 +96,6 @@ from .const import (
     CONF_HOME_TOGGLE_INVERT,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
-    CONF_NAT_VENT_REACTIVATION_LOCKOUT_S,
     CONF_NATURAL_VENT_DELTA,
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
@@ -140,7 +139,6 @@ from .const import (
     MAX_WEATHER_BIAS_APPLY_F,
     MIN_WEATHER_BIAS_APPLY_F,
     NAT_VENT_HYSTERESIS_F,
-    NAT_VENT_REACTIVATION_LOCKOUT_S,
     OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
@@ -153,7 +151,6 @@ from .const import (
     OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-    PEAK_DECLINE_MARGIN_F,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
     REJECT_AC_INSUFFICIENT_MIDDAY_ACTIVITY,
@@ -242,7 +239,6 @@ from .fan_status import (
 from .invariant_watchdog import run_invariant_checks
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
-from .nat_vent_lifecycle import NatVentLifecycleState
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
 from .state import StatePersistence
@@ -262,10 +258,14 @@ _LOGGER = logging.getLogger(__name__)
 _WINDOWS_EXTREME_COLD_MARGIN = 15.0
 
 # Issue #685: the comparison axes tracked by _update_shadow_engine_diagnostic()'s
-# wall-clock cascade-noise debounce (mirror + FSM comparisons for nat-vent).
+# wall-clock cascade-noise debounce.
 _SHADOW_DIAG_AXES = (
-    "mirror",
-    "fsm",
+    # Issue #757 Phase 6 Step 5: "mirror"/"fsm" (nat-vent's own axes) removed from
+    # this list — nat-vent's dispatcher is now unconditionally FSM-authoritative,
+    # so the _update_shadow_engine_diagnostic() comparison built on these two axes
+    # was removed, along with the underlying _nat_vent_fsm_state tracking /
+    # _evaluate_nat_vent_fsm() machinery (a third, independent replica with zero
+    # other consumers — confirmed by grep, same shape as door/window's Step 4).
     # Issue #757 Phase 6 Step 3: "override_grace_mirror"/"override_grace_fsm" removed
     # from this axis list — override/grace's dispatcher is now unconditionally
     # FSM-authoritative in production, so the _update_shadow_engine_diagnostic()
@@ -486,57 +486,6 @@ _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP: dict[str, str] = {
     "unprotected_grace_started": "unprotected_grace_started",
 }
 
-# Issue #647: `check_natural_vent_conditions` was, until now, the ONLY mirrored method
-# name that re-evaluated the nat-vent FSM — deliberately excluding `apply_classification`
-# (its own trigger is periodic/incidental, not gate/exit-adjacent — see
-# `_evaluate_nat_vent_fsm()`'s docstring and `test_nat_vent_fsm_shadow_wiring.py`'s
-# `test_not_triggered_by_unrelated_mirrored_call`, both left unchanged). `reconcile_fan_on_startup`
-# and `on_fan_turned_off` are added here because both mutate `_natural_vent_active` with
-# NO adjacent `_emit_event_callback` call `_feed_lifecycle_fsms_from_event()` could hook
-# instead (confirmed by inspection — `reconcile_fan_on_startup`'s "fan confirmed off"
-# branch and `on_fan_turned_off`'s `_clear_fan_flags_and_start_grace()` call are both
-# silent), AND both use the same shared `_nat_vent_may_reactivate()` -> `decide_nat_vent_gate()`
-# gate the FSM already models (automation.py:4160/Issue #417's consolidation) — unlike
-# `apply_classification`, these are genuine (if less common) instances of the same
-# gate/exit chain, not an unrelated periodic trigger. Both run production's real mutation
-# to completion before `_mirror_to_shadow()`'s finally block runs (production is always
-# called before its mirror), so there is no staleness risk reading `self.automation_engine`
-# here, unlike the event-type-driven hooks below.
-_NAT_VENT_FSM_TRIGGER_METHODS: frozenset[str] = frozenset(
-    {"check_natural_vent_conditions", "reconcile_fan_on_startup", "on_fan_turned_off"}
-)
-
-# Issue #647: nat-vent's own exit events (already emitted at every one of the 6 real
-# exit paths — see `_emit_event()`'s own #437-follow-up comment) are exactly the
-# moments `_natural_vent_active`/`_nat_vent_soft_start` change — re-running the TICK
-# re-evaluation here is not the "evaluating at a moment production never would" trap
-# `_evaluate_nat_vent_fsm()`'s docstring warns about (that was about periodic,
-# untied-to-a-transition triggers like `apply_classification`'s mirror); these are
-# 1:1 with a genuine production transition.
-_NAT_VENT_FSM_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        "nat_vent_soft_start_entered",
-        "nat_vent_comfort_floor_exit",
-        "nat_vent_away_ceiling_exit",
-        "nat_vent_predicted_floor_exit",
-        "nat_vent_outdoor_rise_exit",
-        "nat_vent_reconcile_exit",
-        "sensor_all_closed",
-        "fan_activated",
-        "fan_deactivated",
-        # handle_door_window_open()'s nat-vent-activation branch (automation.py:2968-2979)
-        "sensor_opened",
-        # apply_classification()'s ODE ceiling-guard escalation branch
-        # (automation.py:2120-2132) — a 7th real nat-vent exit path not covered by the
-        # canonical 6 listed in `_emit_event()`'s own #437-follow-up comment.
-        "nat_vent_ceiling_escalation",
-        # handle_bedtime()'s nat-vent-clearing branches (automation.py:4937/4964) —
-        # emitted unconditionally at the end of handle_bedtime() regardless of whether
-        # the clear branch fired; harmless extra evaluation when it didn't.
-        "bedtime_setback",
-    }
-)
-
 # Issue #757 Phase 6 Step 4: _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES (Issue #647) and
 # _DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES (Issue #668) were removed here — both
 # fed only the now-deleted door/window shadow-comparison axes via
@@ -597,15 +546,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         # Issue #729: _engine_a is the fixed-legacy identity — the remaining
         # FSM-authoritative flag below stays False for its whole lifetime (was 4 —
-        # override_grace's own flag was removed in Issue #757 Phase 6 Step 3, and
-        # door/window's in Phase 6 Step 4, once each dispatcher became unconditionally
-        # FSM-authoritative). Was runtime-toggleable per-subsystem via separate switches
-        # (Issue #594 Phase R / #664); those switches are gone — engine identity itself
-        # (legacy vs FSM, selected by which of _engine_a/_engine_b is primary) is now
-        # the only axis. Explicit assignment here, even though False is already the
-        # AutomationEngine.__init__ default, so this fact is visible at the
-        # construction site rather than relying on a default matching what's needed.
-        self._engine_a._natvent_fsm_authoritative = False
+        # override_grace's own flag was removed in Issue #757 Phase 6 Step 3,
+        # door/window's in Phase 6 Step 4, and nat-vent's in Phase 6 Step 5, once each
+        # dispatcher became unconditionally FSM-authoritative). Was runtime-toggleable
+        # per-subsystem via separate switches (Issue #594 Phase R / #664); those
+        # switches are gone — engine identity itself (legacy vs FSM, selected by which
+        # of _engine_a/_engine_b is primary) is now the only axis.
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_a stays False for its whole lifetime, same as the 4
@@ -639,11 +585,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # _shadow_diag_update_axis() the moment that axis resolves back to agreement, so
         # a later, distinct disagreement streak on the same axis emits its own incident.
         self._shadow_diag_incident_emitted: dict[str, bool] = dict.fromkeys(_SHADOW_DIAG_AXES, False)
-        # Issue #633: the unified nat-vent FSM's own independently-tracked state —
-        # never written onto either engine, purely a third comparison point. Starts
-        # INACTIVE unconditionally (same clean-slate convention as restore_state()'s
-        # documented design for _natural_vent_active).
-        self._nat_vent_fsm_state: NatVentLifecycleState = NatVentLifecycleState.INACTIVE
         # Issue #639: the unified override/grace joint-lifecycle FSM's own
         # independently-tracked state — same third-comparison-point convention as
         # #633 above (door/window's own equivalent, #637, was removed in Issue #757
@@ -663,13 +604,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             role="shadow",
         )
         self._engine_b.dry_run = True
-        # Issue #729: _engine_b is the fixed-FSM identity — the remaining
-        # FSM-authoritative flag below stays True for its whole lifetime (was 4 — see
-        # _engine_a's own comment above for why override_grace's and door/window's
-        # flags are gone; mirror of _engine_a's fixed-legacy assignment above). Which
-        # of the two is primary is decided by switch.climate_advisor_shadow_engine_primary
-        # (async_set_shadow_engine_primary()) — a single axis, not independent switches.
-        self._engine_b._natvent_fsm_authoritative = True
+        # Issue #729: _engine_b is the fixed-FSM identity — see _engine_a's own
+        # comment above for why override_grace's, door/window's, and nat-vent's flags
+        # are gone. Which of the two is primary is decided by
+        # switch.climate_advisor_shadow_engine_primary (async_set_shadow_engine_primary())
+        # — a single axis, not independent switches.
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_b stays True for its whole lifetime, mirror of
@@ -998,6 +937,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         strength of nat-vent's own still-active dependency documented above; this is not
         a case of "shared with a since-graduated subsystem," it's "still needed by the
         one subsystem that was never the reason to consider deleting it."
+
+        Issue #757 Phase 6 Step 5 re-audit: nat-vent's own dispatcher is now ALSO
+        unconditionally FSM-authoritative and its 2 dedicated shadow-diagnostic axes
+        (``mirror``/``fsm``, fed by the now-deleted ``_evaluate_nat_vent_fsm()``) have
+        been removed. Unlike override/grace's and door/window's prior graduations,
+        this does NOT retire the reason these fields exist: ``check_natural_vent_
+        conditions()`` (and nat-vent's other mirrored methods) are still replayed on
+        the shadow engine by ``_mirror_to_shadow()`` for the dual-engine shell's own
+        sake — the shadow engine instance itself still exists (collapsed only in Step
+        8) — so a stale copy of any of these 4 lines, or the grace/override lines
+        above that feed nat-vent's reactivation gate, would still corrupt that live
+        replay, not just a deleted comparison axis. All lines kept, unchanged.
         """
         se = self.shadow_automation_engine
         ae = self.automation_engine
@@ -1235,7 +1186,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._dispatch_fsm_evaluators(
                 method_name,
                 [
-                    (_NAT_VENT_FSM_TRIGGER_METHODS, self._evaluate_nat_vent_fsm, "Nat-vent FSM evaluation"),
                     (
                         _OVERRIDE_GRACE_FSM_EVENT_KINDS,
                         lambda: self._evaluate_override_grace_fsm(
@@ -1252,82 +1202,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "Shadow engine diagnostic update failed (isolated, no production impact): %s",
                     diag_exc,
                 )
-
-    def _evaluate_nat_vent_fsm(self) -> None:
-        """Run the unified nat-vent FSM (Issue #633) against production's current
-        live readings and track its own independently-derived state.
-
-        v1 scope, deliberately narrow: only called from ``check_natural_vent_conditions``'s
-        mirror (see ``_mirror_to_shadow()``'s call site) — the one mirrored method
-        that is unambiguously nat-vent's own periodic gate/exit re-evaluation point
-        (``nat_vent_exit.py``'s own docstring: this is exactly the chain it
-        replaces). Issue #647 widened the trigger set (see
-        ``_NAT_VENT_FSM_TRIGGER_METHODS``) to also include ``reconcile_fan_on_startup``
-        and ``on_fan_turned_off`` — both genuine, if less common, instances of the same
-        shared ``decide_nat_vent_gate()`` chain (automation.py:4160), not the periodic/
-        incidental trigger ``apply_classification`` remains deliberately excluded for:
-        evaluating there would create a disagreement from evaluating at a moment
-        production itself never runs the gate/exit chain (the exact class of
-        test-premise mistake caught and removed from this module's own differential
-        validation — see ``tests/test_nat_vent_fsm.py``'s in-test comment, and
-        ``test_nat_vent_fsm_shadow_wiring.py``'s
-        ``test_not_triggered_by_unrelated_mirrored_call``, unchanged). Issue #647 also
-        added a second, event-driven trigger for this FSM — see
-        ``_feed_lifecycle_fsms_from_event()`` — for nat-vent's own named exit/activation
-        events, covering the remaining mutating call sites (``apply_classification``'s
-        ceiling-escalation branch, ``handle_door_window_open``, ``handle_bedtime``,
-        ``check_natural_vent_conditions``'s other exit branches) without re-running the
-        FSM on every unrelated ``apply_classification`` cycle the way a blanket
-        method-name trigger would.
-
-        The FSM's own tracked state (``self._nat_vent_fsm_state``) is never written
-        back onto either engine — this is a third, independent computation, purely
-        for comparison against production's real derived state. Isolated the same
-        way ``_mirror_to_shadow()`` isolates the shadow replay itself: any exception
-        here is logged and swallowed, never allowed to affect production.
-        """
-        from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind, NatVentFsmInputs, transition
-
-        ae = self.automation_engine
-        now = dt_util.now()
-        config = self.config
-        comfort_heat_raw = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-        sleep_heat = float(config.get(CONF_SLEEP_HEAT, comfort_heat_raw))
-        thermal_model = ae._thermal_model or {}
-
-        event = NatVentFsmEvent(
-            kind=NatVentFsmEventKind.TICK,
-            inputs=NatVentFsmInputs(
-                indoor=ae._get_indoor_temp_f(),
-                outdoor=ae._last_outdoor_temp,
-                comfort_heat_raw=comfort_heat_raw,
-                sleep_heat=sleep_heat,
-                in_sleep_window=_in_sleep_window(now, config),
-                comfort_cool=float(config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
-                nat_vent_delta=float(config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
-                hysteresis=float(config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F)),
-                fan_mode=str(config.get(CONF_FAN_MODE, "whole_house_fan")),
-                aggressive_savings=bool(config.get("aggressive_savings", False)),
-                occupancy_mode=ae._occupancy_mode,
-                thermal_confidence=thermal_model.get("confidence", "none"),
-                k_passive=thermal_model.get("k_passive"),
-                outdoor_today_peak=ae._outdoor_temp_today_peak,
-                outdoor_sample_count=ae._outdoor_temp_today_sample_count,
-                peak_decline_margin=PEAK_DECLINE_MARGIN_F,
-                paused_by_door=bool(ae._paused_by_door),
-                outdoor_exit_time=ae._nat_vent_outdoor_exit_time,
-                lockout_seconds=float(
-                    config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
-                ),
-                now=now,
-                override_active=bool(ae._fan_override_active or ae._manual_override_active),
-                grace_active=bool(ae._grace_active),
-                manual_override_active=bool(ae._manual_override_active),
-                manual_override_mode=ae._manual_override_mode,
-            ),
-        )
-        result = transition(self._nat_vent_fsm_state, event)
-        self._nat_vent_fsm_state = result.to_state
 
     def _evaluate_override_grace_fsm(self, event_kind: OverrideGraceFsmEventKind) -> None:
         """Run the unified override/grace joint-lifecycle FSM (Issue #639) against
@@ -1541,16 +1415,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
     def _update_shadow_engine_diagnostic(self) -> None:
-        """Recompute production/shadow nat-vent lifecycle state agreement (Issue #613),
-        plus (Issue #633) the independent nat-vent FSM's agreement with production.
+        """Recompute cross-subsystem production/shadow agreement diagnostics.
 
-        Reuses ``derive_nat_vent_lifecycle_state()`` (Issue #606) directly — the same
-        pure function both engines' state already agreed on in Phase 3's offline sweep
-        of 60 golden/pending scenarios. Live ``now`` is real wall-clock time here (not
-        a scenario timestamp), since this runs against the live coordinator.
+        Nat-vent's own axes (Issue #613's mirror comparison, Issue #633's independent
+        FSM comparison) were removed in Issue #757 Phase 6 Step 5 once the legacy
+        branch they compared against was deleted — there is no longer a second
+        implementation to compare production against for nat-vent.
         """
-        from .nat_vent_lifecycle import NatVentLifecycleInputs, derive_nat_vent_lifecycle_state
-
         now = dt_util.now()
 
         # Issue #685: lazy daily reset of cumulative disagreement seconds, same
@@ -1560,25 +1431,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if today != self._shadow_diag_cumulative_date:
             self._shadow_diag_cumulative_seconds = dict.fromkeys(_SHADOW_DIAG_AXES, 0.0)
             self._shadow_diag_cumulative_date = today
-
-        def _state_for(ae: AutomationEngine) -> str:
-            inputs = NatVentLifecycleInputs(
-                natural_vent_active=bool(ae._natural_vent_active),
-                nat_vent_soft_start=bool(ae._nat_vent_soft_start),
-                paused_by_door=bool(ae._paused_by_door),
-                outdoor_exit_time=ae._nat_vent_outdoor_exit_time,
-                now=now,
-                lockout_seconds=float(
-                    self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
-                ),
-            )
-            return derive_nat_vent_lifecycle_state(inputs).value
-
-        production_state = _state_for(self.automation_engine)
-        shadow_state = _state_for(self.shadow_automation_engine)
-        fsm_state = self._nat_vent_fsm_state.value
-        mirror_agrees = production_state == shadow_state
-        fsm_agrees = production_state == fsm_state
 
         # Issue #742: classification's own production/shadow agreement. Deliberately
         # has no separate "classification_fsm" axis — classification_fsm.py is
@@ -1616,12 +1468,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         occupancy_shadow_state = _occupancy_defer_str(self.shadow_automation_engine)
         occupancy_mirror_agrees = occupancy_production_state == occupancy_shadow_state
 
-        agrees = mirror_agrees and fsm_agrees and classification_mirror_agrees and occupancy_mirror_agrees
+        agrees = classification_mirror_agrees and occupancy_mirror_agrees
 
         # Issue #685: wall-clock debounce per axis — a WARNING only fires once a
         # comparison axis has continuously disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S.
-        mirror_duration, mirror_sustained = self._shadow_diag_update_axis("mirror", mirror_agrees, now)
-        fsm_duration, fsm_sustained = self._shadow_diag_update_axis("fsm", fsm_agrees, now)
         classification_mirror_duration, classification_mirror_sustained = self._shadow_diag_update_axis(
             "classification_mirror", classification_mirror_agrees, now
         )
@@ -1630,9 +1480,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
         self._shadow_engine_diagnostic = {
-            "production_state": production_state,
-            "shadow_state": shadow_state,
-            "nat_vent_fsm_state": fsm_state,
             "classification_production_state": classification_production_state,
             "classification_shadow_state": classification_shadow_state,
             "classification_mirror_agrees": classification_mirror_agrees,
@@ -1642,16 +1489,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "agrees": agrees,
             "checked_at": now.isoformat(),
             "debounce": {
-                "mirror": {
-                    "disagreement_seconds": mirror_duration,
-                    "sustained": mirror_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["mirror"],
-                },
-                "fsm": {
-                    "disagreement_seconds": fsm_duration,
-                    "sustained": fsm_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["fsm"],
-                },
                 "classification_mirror": {
                     "disagreement_seconds": classification_mirror_duration,
                     "sustained": classification_mirror_sustained,
@@ -1665,28 +1502,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             },
             "cumulative_reset_date": self._shadow_diag_cumulative_date.isoformat(),
         }
-        if mirror_sustained:
-            _LOGGER.warning(
-                "Shadow engine disagreement (Issue #613): production=%s shadow=%s (sustained %.0fs)",
-                production_state,
-                shadow_state,
-                mirror_duration,
-            )
-            if not self._shadow_diag_incident_emitted["mirror"]:
-                self._emit_shadow_disagreement_incident(
-                    "mirror", now, production_state, shadow_state, "shadow", mirror_duration
-                )
-                self._shadow_diag_incident_emitted["mirror"] = True
-        if fsm_sustained:
-            _LOGGER.warning(
-                "Nat-vent FSM disagreement (Issue #633): production=%s fsm=%s (sustained %.0fs)",
-                production_state,
-                fsm_state,
-                fsm_duration,
-            )
-            if not self._shadow_diag_incident_emitted["fsm"]:
-                self._emit_shadow_disagreement_incident("fsm", now, production_state, fsm_state, "fsm", fsm_duration)
-                self._shadow_diag_incident_emitted["fsm"] = True
         if classification_mirror_sustained:
             _LOGGER.warning(
                 "Classification shadow engine disagreement (Issue #742): production=%s shadow=%s (sustained %.0fs)",
@@ -1724,8 +1539,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     @property
     def shadow_engine_diagnostic(self) -> dict[str, Any] | None:
-        """Latest production/shadow nat-vent lifecycle agreement snapshot, or None
-        before the first mirrored decision has run."""
+        """Latest production/shadow agreement snapshot (classification/occupancy axes
+        remaining), or None before the first mirrored decision has run."""
         return self._shadow_engine_diagnostic
 
     @property
@@ -8280,7 +8095,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._dispatch_fsm_evaluators(
             event_type,
             [
-                (_NAT_VENT_FSM_EVENT_TYPES, self._evaluate_nat_vent_fsm, "Nat-vent FSM evaluation (event-driven)"),
                 (
                     _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP,
                     lambda: self._evaluate_override_grace_fsm(

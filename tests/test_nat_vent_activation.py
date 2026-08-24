@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
@@ -513,15 +513,28 @@ class TestReactivationFsmDispatch:
         assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED
 
     def test_soft_start_reactivation_clears_pause_when_authoritative(self):
+        """Issue #757 Phase 6 Step 5 correction: this call site now dispatches
+        through nat_vent_fsm.transition() unconditionally, which calls
+        decide_nat_vent_gate()/decide_nat_vent_soft_start_gate() directly (via
+        nat_vent_fsm.py's own top-level imports) rather than through the
+        now-deleted self._nat_vent_may_reactivate()/self._nat_vent_may_soft_start()
+        legacy call chain — mocking those engine methods (as this test
+        originally did) no longer has any effect on the real decision. Patches
+        the pure functions at the module nat_vent_fsm.py actually calls them
+        from instead, matching the fix already applied to
+        tools/sim_harness/nat_vent_gate_integration.py's positive control for
+        the same reason."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
         engine._doorwindow_fsm_authoritative = True
         engine._paused_by_door = True
         engine._natural_vent_active = False
         engine._last_outdoor_temp = 68.0
-        engine._nat_vent_may_reactivate = MagicMock(return_value=False)
-        engine._nat_vent_may_soft_start = MagicMock(return_value=True)
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        with (
+            patch("custom_components.climate_advisor.nat_vent_fsm.decide_nat_vent_gate", return_value=False),
+            patch("custom_components.climate_advisor.nat_vent_fsm.decide_nat_vent_soft_start_gate", return_value=True),
+        ):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is True
         assert engine._nat_vent_soft_start is True
@@ -535,7 +548,13 @@ class TestReactivationLockoutLoadBearing:
     def test_forcing_never_locked_out_allows_reactivation_within_the_real_window(self):
         """Same setup as test_reactivation_blocked_within_lockout (10s after exit, well
         within the real 300s lockout) — but with the lockout function forced to always
-        return False. Reactivation must now proceed, proving the real check is load-bearing."""
+        return False. Reactivation must now proceed, proving the real check is load-bearing.
+
+        Issue #757 Phase 6 Step 5 correction: the paused-by-door reactivation
+        call site now dispatches through nat_vent_fsm.transition() (this
+        subsystem's own top-level import of is_reactivation_locked_out), not
+        through automation.py's copy — patching the latter no longer affects
+        this call path, same class of fix as the sibling test above."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
         engine._paused_by_door = True
         engine._natural_vent_active = False
@@ -548,7 +567,7 @@ class TestReactivationLockoutLoadBearing:
         with (
             patch(_DT_NOW_PATH, return_value=check_time),
             patch(
-                "custom_components.climate_advisor.automation.is_reactivation_locked_out",
+                "custom_components.climate_advisor.nat_vent_fsm.is_reactivation_locked_out",
                 return_value=False,
             ),
         ):
@@ -2986,3 +3005,53 @@ class TestNatVentSessionForceClosedWhenSensorsClosed:
 
         assert engine._fan_active is True
         assert engine._natural_vent_active is True
+
+
+class TestBlockerFRaceAcrossAllGraduatedSubsystems:
+    """Issue #706 (Blocker F): a manual override arriving during the await window of
+    ``_activate_fan()`` must not have its pre-await ACTIVE_FULL_GATE decision silently
+    applied afterward, clobbering the override.
+
+    Originally proven with only nat-vent's FSM authoritative (Issue #706); Phase V
+    deployed all of nat-vent/door-window/override-grace/fan FSM-authoritative together,
+    so a dedicated "G-test" class (``tests/test_combined_fsm_authoritative_compare.py``)
+    re-proved the same race-safety property under the actual combined condition, since
+    door/window's and override/grace's own authoritative code paths had never been
+    exercised alongside it before. That file (and its ``combined_fsm_authoritative_
+    compare.py`` companion) existed solely to flip all 4 subsystems'
+    ``_X_fsm_authoritative`` switches simultaneously and compare against a
+    default-flags engine — Issue #757 Phase 6 graduated all 4 (Steps 2-5), permanently
+    removing every flag those switches gated, so there is no longer a "combined
+    switch state" to construct: FSM-only IS the only behavior, unconditionally, for
+    every engine instance. The G-test's own equivalence/positive-control machinery
+    became pure dead weight (comparing production to itself), but this one regression
+    guard remains genuinely load-bearing — ported here, simplified to a single
+    ordinary engine construction (no flag overrides needed, since the race protection
+    this asserts is now always active by construction, not conditionally).
+    """
+
+    def test_idle_open_reentry_does_not_clobber_override(self) -> None:
+        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        engine._paused_by_door = False
+        engine._natural_vent_active = False
+        engine._nat_vent_soft_start = False
+        engine._grace_active = False
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 68.0
+        engine._sensor_check_callback = lambda: True
+
+        async def _activate_fan_races_override(*, reason: str, emit_event: bool = True):
+            # Simulates a real manual override winning the race during this await
+            # window.
+            engine._fan_override_active = True
+            engine._grace_active = True
+            return FanCommandResult.OVERRIDDEN
+
+        engine._activate_fan = AsyncMock(side_effect=_activate_fan_races_override)
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False, (
+            "the pre-await ACTIVE_FULL_GATE decision must not be applied once "
+            "_activate_fan() reports the command was overridden mid-activation"
+        )

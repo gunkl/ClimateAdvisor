@@ -57,22 +57,18 @@ class TestEngineIdentityFixedAtConstruction:
     regression guard replacing the old switch-toggle tests' coverage intent.
 
     Was 3 flags (nat-vent, door/window, override/grace) — override/grace's own
-    flag was removed in Issue #757 Phase 6 Step 3, once its dispatcher became
-    unconditionally FSM-authoritative with no more legacy branch to switch away
-    from."""
-
-    def test_engine_a_is_fixed_legacy(self):
-        """Issue #757 Phase 6 Step 4: _doorwindow_fsm_authoritative was removed —
-        door/window's dispatcher is now unconditionally FSM-authoritative for both
-        engines, so this assertion is retired. _natvent_fsm_authoritative is the only
-        remaining per-engine FSM flag."""
-        coord, _, _, _ = build_headless_coordinator()
-        assert coord._engine_a._natvent_fsm_authoritative is False
-
-    def test_engine_b_is_fixed_fsm(self):
-        """Issue #757 Phase 6 Step 4: see test_engine_a_is_fixed_legacy's docstring."""
-        coord, _, _, _ = build_headless_coordinator()
-        assert coord._engine_b._natvent_fsm_authoritative is True
+    flag was removed in Issue #757 Phase 6 Step 3, door/window's in Step 4,
+    and nat-vent's (the last of the three session/lifecycle-shaped flags) in
+    Step 5, each once its dispatcher became unconditionally FSM-authoritative
+    with no more legacy branch to switch away from. The per-flag
+    `test_engine_a_is_fixed_legacy`/`test_engine_b_is_fixed_fsm` assertions
+    this class used to carry are retired along with the last flag they
+    checked — `_classification_fsm_authoritative`/`_occupancy_fsm_authoritative`
+    remain (Steps 6-7, not yet executed), but those are deliberately stateless
+    FSMs with no engine-identity-fixing test of this shape (see their own
+    module docstrings), so there is nothing left for a flag-value assertion
+    here to check. `test_default_primary_is_the_legacy_engine` below still
+    covers the genuinely load-bearing claim (engine role/dry_run wiring)."""
 
     def test_default_primary_is_the_legacy_engine(self):
         coord, _, _, _ = build_headless_coordinator()

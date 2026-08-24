@@ -49,40 +49,27 @@ class TestExtraStateAttributes:
         sensor = _make_sensor(None)
         assert sensor.extra_state_attributes == {}
 
-    def test_reports_both_states_and_timestamp(self) -> None:
+    def test_reports_timestamp(self) -> None:
         sensor = _make_sensor(
             {
-                "production_state": "active",
-                "shadow_state": "idle",
                 "agrees": False,
                 "checked_at": "2026-08-08T12:00:00",
             }
         )
         attrs = sensor.extra_state_attributes
-        assert attrs["production_state"] == "active"
-        assert attrs["shadow_state"] == "idle"
         assert attrs["checked_at"] == "2026-08-08T12:00:00"
 
-    def test_reports_nat_vent_fsm_state_when_present(self) -> None:
-        """Issue #633: the independent nat-vent FSM's own tracked state."""
-        sensor = _make_sensor(
-            {
-                "production_state": "active_full_gate",
-                "shadow_state": "active_full_gate",
-                "nat_vent_fsm_state": "inactive",
-                "agrees": False,
-                "checked_at": "2026-08-08T12:00:00",
-            }
-        )
-        assert sensor.extra_state_attributes["nat_vent_fsm_state"] == "inactive"
-
-    def test_nat_vent_fsm_state_absent_before_first_fsm_evaluation(self) -> None:
-        """A diagnostic recomputed from a mirrored call other than
-        check_natural_vent_conditions (v1 scope) never populated the FSM key."""
-        sensor = _make_sensor(
-            {"production_state": "active", "shadow_state": "idle", "agrees": False, "checked_at": "t"}
-        )
-        assert sensor.extra_state_attributes["nat_vent_fsm_state"] is None
+    # Issue #757 Phase 6 Step 5: test_reports_both_states_and_timestamp (renamed
+    # test_reports_timestamp above, "production_state"/"shadow_state" assertions
+    # dropped), test_reports_nat_vent_fsm_state_when_present, and
+    # test_nat_vent_fsm_state_absent_before_first_fsm_evaluation were removed —
+    # nat-vent's own production/shadow/FSM state fields were removed from
+    # ClimateAdvisorShadowEngineStatusSensor.extra_state_attributes along with their
+    # underlying coordinator.shadow_engine_diagnostic computation (nat-vent's
+    # dispatcher is now unconditionally FSM-authoritative in production, and the
+    # diagnostic machinery feeding these keys — including the independent
+    # _evaluate_nat_vent_fsm()/_nat_vent_fsm_state replica — had zero other
+    # consumers). Same removal shape as door/window's Step 4 below.
 
     # Issue #757 Phase 6 Step 4: test_reports_door_window_fields_when_present and
     # test_door_window_fields_absent_before_first_evaluation (Issue #660) were removed

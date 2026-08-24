@@ -152,7 +152,8 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "ODE-ceiling-guard ESCALATE branch — called only from apply_classification "
         "(mirrored), never a standalone entry point. Sets _natural_vent_active=False/"
         "_nat_vent_soft_start=False on escalation, mirroring the legacy inline block "
-        "it replaces when self._classification_fsm_authoritative is True"
+        "it replaced before graduation (Issue #757 Phase 7 Step 7) — called "
+        "unconditionally now, same as apply_classification()'s own call site"
     ),
     "_reconcile_fan_physical_drift": (
         "internal: self-scheduled 5-min thermo-backstop timer, runs independently per engine instance"

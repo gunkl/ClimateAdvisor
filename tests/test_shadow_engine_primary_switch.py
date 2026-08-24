@@ -56,19 +56,24 @@ class TestEngineIdentityFixedAtConstruction:
     engine is always fully legacy, the other always fully FSM. Cheap
     regression guard replacing the old switch-toggle tests' coverage intent.
 
-    Was 3 flags (nat-vent, door/window, override/grace) — override/grace's own
-    flag was removed in Issue #757 Phase 6 Step 3, door/window's in Step 4,
-    and nat-vent's (the last of the three session/lifecycle-shaped flags) in
-    Step 5, each once its dispatcher became unconditionally FSM-authoritative
-    with no more legacy branch to switch away from. The per-flag
-    `test_engine_a_is_fixed_legacy`/`test_engine_b_is_fixed_fsm` assertions
-    this class used to carry are retired along with the last flag they
-    checked — `_occupancy_fsm_authoritative` was removed in Phase 6 Step 6
-    (occupancy_fsm.py is deliberately stateless, so there was never an
-    engine-identity-fixing test of this shape for it — see its own module
-    docstring). `_classification_fsm_authoritative` remains (Step 7, not yet
-    executed) for the same stateless-FSM reason. `test_default_primary_is_the_legacy_engine`
-    below still covers the genuinely load-bearing claim (engine role/dry_run wiring)."""
+    Was 5 flags total. 3 were session/lifecycle-shaped (nat-vent, door/window,
+    override/grace) — override/grace's own flag was removed in Issue #757
+    Phase 6 Step 3, door/window's in Step 4, and nat-vent's (the last of the
+    three session/lifecycle-shaped flags) in Step 5, each once its dispatcher
+    became unconditionally FSM-authoritative with no more legacy branch to
+    switch away from. The per-flag `test_engine_a_is_fixed_legacy`/
+    `test_engine_b_is_fixed_fsm` assertions this class used to carry are
+    retired along with the last flag they checked. The remaining 2 flags
+    (occupancy, classification) were both deliberately STATELESS FSMs (see
+    each module's own docstring), so there was never an engine-identity-fixing
+    test of this shape for either — `_occupancy_fsm_authoritative` was removed
+    in Phase 6 Step 6, and `_classification_fsm_authoritative` — the last of
+    all 5 `_*_fsm_authoritative` flags on either engine — was removed in Phase
+    7 Step 7. As of Step 7, neither `_engine_a` nor `_engine_b` carries any
+    `_*_fsm_authoritative` flag anymore; every subsystem's dispatcher is
+    unconditionally FSM-authoritative on both engines.
+    `test_default_primary_is_the_legacy_engine` below still covers the
+    genuinely load-bearing claim (engine role/dry_run wiring)."""
 
     def test_default_primary_is_the_legacy_engine(self):
         coord, _, _, _ = build_headless_coordinator()

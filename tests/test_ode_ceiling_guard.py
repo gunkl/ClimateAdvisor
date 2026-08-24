@@ -6,9 +6,13 @@ in the same priority order production checks them: not-applicable, model
 ineligibility, missing temps, no-ceiling-threshold archetype, dormancy
 (Issue #247's 3 conditions), no-breach, standing-by, escalate.
 
-The swap-in itself is verified separately by
+The swap-in itself was verified separately (pre-graduation) by
 ``tests/test_classification_fsm_authoritative_compare.py`` against the full
-golden/pending scenario corpus.
+golden/pending scenario corpus — that comparator was deleted at graduation
+(Issue #757 Phase 7 Step 7) once the legacy branch it compared against was
+removed from ``apply_classification()``; this file's direct unit coverage of
+``decide_ode_ceiling_guard()`` is unaffected and remains the primary test
+coverage for the guard's decision logic.
 """
 
 from __future__ import annotations

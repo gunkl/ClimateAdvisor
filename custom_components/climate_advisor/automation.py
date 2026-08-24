@@ -23,7 +23,6 @@ from .classifier import DayClassification
 from .const import (
     CEILING_BRIDGE_TOLERANCE_F,
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
-    CEILING_PRECOOL_FALLBACK_MIN,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
     CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
@@ -842,18 +841,19 @@ class AutomationEngine:
         # an offline differential comparator (zero divergence across the golden+pending
         # corpus) before the legacy inline flag-write branch was deleted.
 
-        # Issue #742 (strangler-fig completion program, Phase 3): whether the
-        # classification decision FSM (classification_fsm.py) is authoritative for
-        # apply_classification()'s ODE ceiling guard block, instead of the inline
-        # ~190-line eligibility/dormancy/breach-scan/lead-time computation. Unlike
-        # the 4 flags above, classification_fsm.py is deliberately STATELESS (see
-        # its own module docstring's five-whys) — there is no persisted lifecycle
-        # state this flag governs, only which code path computes the ceiling-guard
-        # decision each cycle. Fixed-per-engine-identity, same convention as the 4
-        # flags above (set once at construction by coordinator.py, never mutated
-        # afterward). Default False — zero behavior change until wiring is verified
-        # live; deployed OFF initially.
-        self._classification_fsm_authoritative: bool = False
+        # Issue #757 Phase 6 Step 7 (final subsystem — graduation complete): the
+        # classification decision FSM (classification_fsm.py, Issue #742) is now
+        # unconditionally authoritative for apply_classification()'s ODE ceiling
+        # guard block — _classification_fsm_authoritative has been removed. It was
+        # permanently True in production for weeks and proven behavior-equivalent via
+        # an offline differential comparator (zero divergence across the golden+pending
+        # corpus) before the legacy inline ~190-line eligibility/dormancy/breach-scan/
+        # lead-time computation was deleted. Like occupancy_fsm.py, classification_fsm.py
+        # is deliberately STATELESS (see its own module docstring's five-whys) — there
+        # was never a persisted lifecycle this graduation touches, only which code path
+        # computed the ceiling-guard decision each cycle. This is the last of the 5
+        # ``_*_fsm_authoritative`` flags to graduate — as of this step, neither engine
+        # instance carries any such flag anymore.
 
         # Issue #757 Phase 6 Step 6 correction: the occupancy dispatch FSM
         # (occupancy_fsm.py, Issue #744) is now unconditionally authoritative for
@@ -2632,201 +2632,16 @@ class AutomationEngine:
             # (nat-vent unavailable), set HVAC to cool proactively.
             # Re-evaluated on every 30-min cycle — no flag needed; adapts to forecast changes.
             #
-            # Issue #742: when self._classification_fsm_authoritative is True, the entire
-            # eligibility/dormancy/breach-scan/lead-time computation below is replaced by a
-            # call to the pure classification_fsm.py/ode_ceiling_guard.py pair — same
-            # logging, same events, same HVAC writes, driven by the returned decision
-            # instead of re-derived inline. False (default) runs this legacy block
-            # byte-identical to pre-Issue-#742 behavior — see
-            # _apply_ode_ceiling_guard_decision()'s own docstring for the parity contract.
-            if self._classification_fsm_authoritative:
-                _cls_decision = self._resolve_classification_fsm_state(
-                    classification=classification, predicted_indoor=predicted_indoor
-                )
-                await self._apply_ode_ceiling_guard_decision(classification, predicted_indoor, _cls_decision)
-            elif predicted_indoor and classification.hvac_mode == "off":
-                _thermal = self._thermal_model or {}
-                _k_passive = _thermal.get("k_passive")
-                _conf = _thermal.get("confidence_k_passive") or _thermal.get("confidence", "none")
-                _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
-                _k_active_cool = _thermal.get("k_active_cool")
-                _comfort_cool_cg = self.config.get("comfort_cool")
-                _tolerance = CEILING_BRIDGE_TOLERANCE_F if _k_via_bridge else 0.0
-
-                _model_eligible = (
-                    _k_passive is not None
-                    and _k_passive < 0
-                    and (_conf != "none" or _k_via_bridge)
-                    and _comfort_cool_cg is not None
-                )
-
-                _outdoor = self._last_outdoor_temp
-                _indoor_cg = self._get_indoor_temp_f()
-
-                _LOGGER.debug(
-                    "ODE ceiling guard eval: %d points, comfort_cool=%s, outdoor=%s, indoor=%s,"
-                    " k_passive=%s, conf=%s, bridge=%s",
-                    len(predicted_indoor),
-                    _comfort_cool_cg,
-                    _outdoor,
-                    _indoor_cg,
-                    _k_passive,
-                    _conf,
-                    _k_via_bridge,
-                )
-
-                # Issue #247: dormancy is THREE conditions (the change #218 specified but its commit
-                # omitted — only the escalation-on-fire half landed). Defer to free cooling ONLY when
-                # outdoor is cooler AND nat-vent is actually running AND indoor is still within band.
-                # If indoor has breached the ceiling (free cooling losing to solar/internal gains), or
-                # nat-vent is not actually running (sensors closed / fan override — #215), the guard must
-                # evaluate and escalate to AC even though outdoor <= indoor. aggressive_savings widens the
-                # in-band threshold so savings homes tolerate a small overshoot before paying for cooling.
-                # Issue #392 Fix 1: the ceiling threshold is archetype-aware — None for whole-house-fan
-                # mode (direction-only, no ceiling handoff; see _ceiling_threshold() docstring).
-                _ceiling_threshold_val = self._ceiling_threshold(_comfort_cool_cg)
-                if not _model_eligible:
-                    _LOGGER.debug("ODE ceiling guard: skipped — k_passive=%s, conf=%s", _k_passive, _conf)
-                elif _outdoor is None or _indoor_cg is None:
-                    _LOGGER.debug("ODE ceiling guard: skipped — missing outdoor/indoor temps")
-                elif _ceiling_threshold_val is None:
-                    # Issue #402: archetypes with no ceiling-based compressor handoff
-                    # (FAN_MODE_WHOLE_HOUSE/BOTH — see _ceiling_threshold() docstring) must never
-                    # escalate to AC here at all, not just stay dormant while nat-vent happens to
-                    # be active. Previously, a brief transient where _natural_vent_active flipped
-                    # False (e.g. a pause/reactivate cycle) let dormancy lift and this guard arm
-                    # 'cool' mode + a setpoint — which the reactivation gate then immediately
-                    # undid (that gate also has no ceiling threshold for this archetype, so
-                    # nothing blocked it from reactivating nat-vent right away) — producing a
-                    # rapid escalate/reactivate oscillation with redundant thermostat writes
-                    # every time this function re-evaluated, instead of a single clean decision.
-                    _LOGGER.debug(
-                        "ODE ceiling guard: dormant — no ceiling-based compressor handoff for this"
-                        " fan archetype (WHOLE_HOUSE/BOTH); free cooling is direction-only"
-                    )
-                elif _outdoor <= _indoor_cg and self._natural_vent_active and _indoor_cg <= _ceiling_threshold_val:
-                    _LOGGER.debug(
-                        "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
-                        " indoor <= ceiling threshold %s (free cooling viable)",
-                        _outdoor,
-                        _indoor_cg,
-                        _ceiling_threshold_val,
-                    )
-                else:
-                    # Dormancy lifted (outdoor rose above indoor, OR nat-vent is not running, OR indoor
-                    # breached the ceiling under active nat-vent — Issue #247). Scan the predicted curve
-                    # for a ceiling breach.
-                    # Inline equivalent of _find_ceiling_breach_time() — avoids circular import.
-                    _breach_ts: datetime | None = None
-                    _threshold = _comfort_cool_cg + _tolerance
-                    for _entry in predicted_indoor:
-                        _t = _entry.get("temp")
-                        if _t is not None and _t > _threshold:
-                            with contextlib.suppress(KeyError, ValueError, TypeError):
-                                _breach_ts = datetime.fromisoformat(_entry["ts"])
-                            break
-
-                    if _breach_ts is None:
-                        _LOGGER.debug(
-                            "ODE ceiling guard: dormant — no breach above %.1f°F predicted",
-                            _threshold,
-                        )
-                    else:
-                        _now_cg = dt_util.now()
-                        # Normalize both to UTC for reliable subtraction
-                        _now_utc = (
-                            _now_cg.astimezone(UTC)
-                            if getattr(_now_cg, "tzinfo", None) is not None
-                            else _now_cg.replace(tzinfo=UTC)
-                        )
-                        _breach_utc = (
-                            _breach_ts.astimezone(UTC)
-                            if _breach_ts.tzinfo is not None
-                            else _breach_ts.replace(tzinfo=UTC)
-                        )
-                        _hours_to_breach = (_breach_utc - _now_utc).total_seconds() / 3600
-
-                        if _k_active_cool is not None and abs(_k_active_cool) > 0:
-                            _lead_min = ((_comfort_cool_cg - _indoor_cg) / abs(_k_active_cool)) * 60 * 1.3
-                        else:
-                            _lead_min = float(CEILING_PRECOOL_FALLBACK_MIN)
-                        _lead_min = max(30.0, min(240.0, _lead_min))
-
-                        _LOGGER.info(
-                            "ODE ceiling guard: breach predicted at %s (%.1fh away), outdoor=%.1f, indoor=%.1f,"
-                            " nat_vent=%s",
-                            _breach_ts.strftime("%H:%M"),
-                            _hours_to_breach,
-                            _outdoor,
-                            _indoor_cg,
-                            self._natural_vent_active,
-                        )
-
-                        if _hours_to_breach <= _lead_min / 60:
-                            _LOGGER.info(
-                                "ODE ceiling guard: active — setting HVAC cool, target=%.1f"
-                                " (breach %.1fh, lead=%.0fmin, k_cool=%s)",
-                                _comfort_cool_cg,
-                                _hours_to_breach,
-                                _lead_min,
-                                _k_active_cool,
-                            )
-                            if self._natural_vent_active:
-                                await self._deactivate_fan(
-                                    reason=(
-                                        f"ceiling guard override — indoor {_indoor_cg:.1f}°F approaching"
-                                        f" comfort_cool {_comfort_cool_cg:.1f}°F, breach predicted in"
-                                        f" {_hours_to_breach:.1f}h — switching to active cooling"
-                                    )
-                                )
-                                self._natural_vent_active = False
-                                self._nat_vent_soft_start = False
-                                if self._emit_event_callback:
-                                    self._emit_event_callback(
-                                        "nat_vent_ceiling_escalation",
-                                        {
-                                            "indoor": _indoor_cg,
-                                            "outdoor": _outdoor,
-                                            "comfort_cool": _comfort_cool_cg,
-                                            "hours_to_breach": round(_hours_to_breach, 2),
-                                            "lead_min": round(_lead_min),
-                                            "k_active_cool": _k_active_cool,
-                                        },
-                                    )
-                            _cs_cg = self.hass.states.get(self.climate_entity)
-                            _old_mode_cg = _cs_cg.state if _cs_cg else None
-                            _old_setpoint_raw_cg = _cs_cg.attributes.get("temperature") if _cs_cg else None
-                            _old_setpoint_f_cg = (
-                                to_fahrenheit(_old_setpoint_raw_cg, unit) if _old_setpoint_raw_cg is not None else None
-                            )
-                            await self._set_hvac_mode(
-                                "cool",
-                                reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
-                            )
-                            await self._set_temperature(
-                                _comfort_cool_cg,
-                                reason="ODE ceiling guard — target comfort_cool",
-                                mode="cool",
-                            )
-                            if self._emit_event_callback:
-                                self._emit_event_callback(
-                                    "ceiling_guard_fired",
-                                    {
-                                        "breach_time": _breach_ts.isoformat(),
-                                        "hours_to_breach": round(_hours_to_breach, 1),
-                                        "lead_time_min": round(_lead_min),
-                                        "old_hvac_mode": _old_mode_cg,
-                                        "new_hvac_mode": "cool",
-                                        "new_setpoint_f": _comfort_cool_cg,
-                                        "old_setpoint_f": _old_setpoint_f_cg,
-                                    },
-                                )
-                        else:
-                            _LOGGER.debug(
-                                "ODE ceiling guard: standing by — breach %.1fh away, need %.0fmin lead time",
-                                _hours_to_breach,
-                                _lead_min,
-                            )
+            # Issue #742/#757 Phase 7: the eligibility/dormancy/breach-scan/lead-time
+            # computation is delegated to the pure classification_fsm.py/ode_ceiling_guard.py
+            # pair — same logging, same events, same HVAC writes, driven by the returned
+            # decision instead of re-derived inline. The legacy inline implementation was
+            # graduated (removed) in Phase 7 after weeks of zero-divergence shadow comparison —
+            # see _apply_ode_ceiling_guard_decision()'s own docstring for the parity contract.
+            _cls_decision = self._resolve_classification_fsm_state(
+                classification=classification, predicted_indoor=predicted_indoor
+            )
+            await self._apply_ode_ceiling_guard_decision(classification, predicted_indoor, _cls_decision)
 
             # Handle pre-conditioning
             if classification.pre_condition and classification.pre_condition_target:
@@ -7701,9 +7516,9 @@ class AutomationEngine:
         ceiling-guard outcome).
 
         Read-only — this resolver never mutates engine state. The caller
-        (``apply_classification()``, gated on
-        ``self._classification_fsm_authoritative``) is responsible for acting
-        on the returned ``ClassificationDecision`` — see
+        (``apply_classification()``, unconditional as of Issue #757 Phase 7 —
+        see this module's ``__init__`` for the graduation note) is responsible
+        for acting on the returned ``ClassificationDecision`` — see
         ``_apply_ode_ceiling_guard_decision()`` for the side-effecting half.
 
         Recomputes the same ``decide_scheduled_band_gate()`` result
@@ -7749,10 +7564,10 @@ class AutomationEngine:
     ) -> None:
         """Side-effecting shell for the ODE ceiling guard's FSM-authoritative
         branch (Issue #742). Byte-identical logging/event/HVAC-write behavior
-        to the legacy inline block in ``apply_classification()``, driven by
-        ``decision.ceiling_decision`` instead of re-deriving it inline. Only
-        called when ``self._classification_fsm_authoritative`` is True — see
-        ``apply_classification()``'s own call site.
+        to the legacy inline block that used to live in ``apply_classification()``
+        (removed at graduation, Issue #757 Phase 7), driven by
+        ``decision.ceiling_decision`` instead of re-deriving it inline. Called
+        unconditionally from ``apply_classification()``'s own call site.
 
         ``decision.ceiling_eligibility`` is not consulted directly here (only
         ``decision.ceiling_decision``) — by construction, this method is only

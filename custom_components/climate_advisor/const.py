@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.70"
+VERSION = "0.6.71"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.71": [
+        "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 6"
+        " — removes the legacy (pre-FSM) occupancy dispatch code path. The FSM-based"
+        " occupancy dispatch has been production-authoritative for weeks with zero"
+        " corpus divergence, so the legacy inline branches in handle_occupancy_away()/"
+        "handle_occupancy_home()/handle_occupancy_vacation() and the differential-"
+        " comparator scaffolding are no longer needed. Unlike prior graduation steps,"
+        " no new production bugs were found — the legacy and FSM paths were already"
+        " behavior-identical.",
+    ],
     "0.6.70": [
         "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 5"
         " — removes the legacy (pre-FSM) nat-vent code path. The FSM-based nat-vent"

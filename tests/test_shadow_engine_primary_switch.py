@@ -63,12 +63,12 @@ class TestEngineIdentityFixedAtConstruction:
     with no more legacy branch to switch away from. The per-flag
     `test_engine_a_is_fixed_legacy`/`test_engine_b_is_fixed_fsm` assertions
     this class used to carry are retired along with the last flag they
-    checked — `_classification_fsm_authoritative`/`_occupancy_fsm_authoritative`
-    remain (Steps 6-7, not yet executed), but those are deliberately stateless
-    FSMs with no engine-identity-fixing test of this shape (see their own
-    module docstrings), so there is nothing left for a flag-value assertion
-    here to check. `test_default_primary_is_the_legacy_engine` below still
-    covers the genuinely load-bearing claim (engine role/dry_run wiring)."""
+    checked — `_occupancy_fsm_authoritative` was removed in Phase 6 Step 6
+    (occupancy_fsm.py is deliberately stateless, so there was never an
+    engine-identity-fixing test of this shape for it — see its own module
+    docstring). `_classification_fsm_authoritative` remains (Step 7, not yet
+    executed) for the same stateless-FSM reason. `test_default_primary_is_the_legacy_engine`
+    below still covers the genuinely load-bearing claim (engine role/dry_run wiring)."""
 
     def test_default_primary_is_the_legacy_engine(self):
         coord, _, _, _ = build_headless_coordinator()

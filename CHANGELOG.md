@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.73] — 2026-08-23
+
+- Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 7 — removes the legacy (pre-FSM) classification code path, the final subsystem in the migration. The FSM-based ODE ceiling guard has been production-authoritative for weeks with zero corpus divergence, so the ~190-line legacy eligibility/dormancy/breach-scan/lead-time block and the differential-comparator scaffolding are no longer needed — no automation subsystem in Climate Advisor carries a legacy/FSM cutover flag anymore. No new production bugs were found.
+
 ## [0.6.72] — 2026-08-23
 
 - Fix #764: at bedtime, if the whole-house fan was already running and doing useful free cooling (natural ventilation or the evening economizer), Climate Advisor could turn the fan off and start the AC compressor anyway — even right after its own activity log said the fan session would continue. Fixed: bedtime now leaves an active fan session alone in both places that could tear it down, matching what it already logs.

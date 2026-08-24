@@ -841,7 +841,7 @@ class AutomationEngine:
         # an offline differential comparator (zero divergence across the golden+pending
         # corpus) before the legacy inline flag-write branch was deleted.
 
-        # Issue #757 Phase 7 Step 7 (final subsystem — graduation complete): the
+        # Issue #757 Phase 6 Step 7 (final subsystem — graduation complete): the
         # classification decision FSM (classification_fsm.py, Issue #742) is now
         # unconditionally authoritative for apply_classification()'s ODE ceiling
         # guard block — _classification_fsm_authoritative has been removed. It was

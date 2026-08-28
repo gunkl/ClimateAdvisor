@@ -129,8 +129,6 @@ def _make_coordinator_stub(config: dict | None = None) -> MagicMock:
     # otherwise return a truthy MagicMock and silently suppress every dispatch test
     # below. These tests exercise post-coalescing (normal) dispatch behavior.
     coord._suppress_during_startup_coalescing = MagicMock(return_value=False)
-    # Issue #615: on_fan_turned_off() is now mirrored onto the shadow engine too.
-    coord._mirror_to_shadow = AsyncMock()
 
     return coord
 

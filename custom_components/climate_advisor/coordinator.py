@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import functools
 import hashlib
-import inspect
 import logging
 import math
 from collections.abc import Callable, Container
@@ -168,7 +167,6 @@ from .const import (
     REJECT_WINDOW_TOO_SHORT,
     REMOTE_BURST_WINDOW_SECONDS,
     REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS,
-    SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -256,71 +254,6 @@ _LOGGER = logging.getLogger(__name__)
 # Degrees below comfort_heat at which outdoor temp is too cold to recommend opening windows.
 # With default comfort_heat=70°F this means outdoor must be ≥ 55°F for windows to be recommended.
 _WINDOWS_EXTREME_COLD_MARGIN = 15.0
-
-# Issue #685: the comparison axes tracked by _update_shadow_engine_diagnostic()'s
-# wall-clock cascade-noise debounce.
-_SHADOW_DIAG_AXES = (
-    # Issue #757 Phase 6 Step 5: "mirror"/"fsm" (nat-vent's own axes) removed from
-    # this list — nat-vent's dispatcher is now unconditionally FSM-authoritative,
-    # so the _update_shadow_engine_diagnostic() comparison built on these two axes
-    # was removed, along with the underlying _nat_vent_fsm_state tracking /
-    # _evaluate_nat_vent_fsm() machinery (a third, independent replica with zero
-    # other consumers — confirmed by grep, same shape as door/window's Step 4).
-    # Issue #757 Phase 6 Step 3: "override_grace_mirror"/"override_grace_fsm" removed
-    # from this axis list — override/grace's dispatcher is now unconditionally
-    # FSM-authoritative in production, so the _update_shadow_engine_diagnostic()
-    # comparison built on these two axes was removed. Note the underlying
-    # ``_override_grace_fsm_state`` tracking / ``_evaluate_override_grace_fsm()``
-    # machinery this axis read from is intentionally NOT removed in this step — it
-    # is out of this step's scope and left for a future cleanup pass.
-    # Issue #757 Phase 6 Step 4: "door_window_mirror"/"door_window_fsm" removed from
-    # this axis list for the same reason — door/window's dispatcher is now
-    # unconditionally FSM-authoritative. Unlike override/grace's Step 3, the
-    # underlying ``_door_window_fsm_state`` tracking / ``_evaluate_door_window_fsm()``
-    # machinery this axis read from IS removed in this step — it had zero other
-    # consumers (confirmed by grep), so nothing was left orphaned by keeping it.
-    # Issue #742: "classification_mirror" adds an 8th axis, deliberately with no
-    # "classification_fsm" sibling — classification_fsm.py is genuinely stateless
-    # (see its own module docstring's five-whys), so there is no separate
-    # untethered FSM state object to compare production against — the same "no
-    # functional consumer" trap CLAUDE.md's KNOWN_FIXES removal (Issue #563) warns
-    # about for diagnostic surfaces. decide_scheduled_band_gate() is a
-    # pre-existing shared pure function BOTH engines already call unconditionally
-    # inside apply_classification() regardless of this phase's new flag — so
-    # comparing engine_a's and engine_b's live gate result is a meaningful mirror
-    # check even though the flag only governs the ceiling-guard half of this
-    # phase's extraction. Issue #757 Phase 6 Step 7: classification's own
-    # AutomationEngine._classification_fsm_authoritative flag has since been
-    # removed entirely (this was the last of the 5 ``_*_fsm_authoritative``
-    # flags to graduate), but this axis is KEPT — see the graduation-survives
-    # reasoning in _update_shadow_engine_diagnostic()'s own comment for this axis.
-    "classification_mirror",
-    # Issue #744: "occupancy_mirror" adds a 9th axis, deliberately with no
-    # "occupancy_fsm" sibling — occupancy_fsm.py is genuinely stateless (see its
-    # own module docstring's five-whys), same "no functional consumer" reasoning
-    # classification_mirror's own comment above documents for its own missing
-    # "classification_fsm" sibling. should_defer_to_occupancy_setback() is a
-    # pre-existing shared pure function (Issue #460) both engines' live
-    # _occupancy_mode already determines, unconditionally — _occupancy_mode itself
-    # is kept in sync from production to shadow every cycle by
-    # _sync_shadow_inputs() (`se.set_occupancy_mode(ae._occupancy_mode)`), so
-    # comparing this predicate remains a meaningful mirror check even though
-    # neither engine's occupancy dispatch HANDLERS (handle_occupancy_away/home/
-    # vacation) are ever invoked on the shadow engine — only whichever engine is
-    # currently `self.automation_engine` (primary) receives those calls; see
-    # project memory "shadow engine coverage gap" for the broader known limitation
-    # this axis does not attempt to close. Issue #757 Phase 6 Step 6: occupancy's
-    # own AutomationEngine._occupancy_fsm_authoritative flag was removed (both
-    # engines' handlers are now unconditionally FSM-authoritative), but this axis
-    # is KEPT — same reasoning as classification_mirror's own graduation-survives
-    # note above: the compared predicate is a pure function both engines' live
-    # state already determines regardless of the (now-removed) flag, so removing
-    # the flag does not retire this axis's usefulness, unlike nat-vent's/door-
-    # window's/override-grace's own mirror axes, which compared "did the legacy
-    # branch's write agree with the FSM branch's write" — a comparison that
-    # became meaningless once there was no legacy branch left to compare against.
-    "occupancy_mirror",
-)
 
 # Maximum rejection events retained per obs_type in the in-memory rejection log.
 # Matches the per-obs-type cap enforced by LearningState.rejection_log on load.
@@ -421,25 +354,15 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
 # _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP below for that FSM's own still-active
 # GRACE_TIMER_EXPIRED concept.
 
-# Issue #639/#643: which mirrored automation.py methods correspond to which
-# override/grace FSM event kind. Of the 8 OverrideGraceFsmEventKind members,
-# 3 have an actual _mirror_to_shadow() call site in coordinator.py/api.py today
-# (handle_fan_manual_override added in #643 — the FSM's OVERRIDE_DETECTED
-# transition was already fully built and generically input-driven; the only
-# gap was this dict entry plus the 3 mirror call sites in
-# _async_thermostat_changed/_async_fan_entity_changed/_flush_fan_remote_burst).
-# OVERRIDE_CONFIRM_EXPIRED/OVERRIDE_SUPERSEDED/OVERRIDE_CANCELLED still
-# correspond to AutomationEngine methods (start_override_confirmation,
-# _confirm_override, cancel_override, clear_manual_override) that are called
-# directly from coordinator.py/api.py or from internal async_call_later timer
-# closures with no _mirror_to_shadow(...) call site at all (see
-# _sync_shadow_inputs()'s own docstring and tests/test_shadow_engine_coverage.py's
-# registry, which classifies every one of them "exempted" rather than
-# "mirrored") — same "raw copy, not a new mirror call site" reasoning as Issue
-# #631. GRACE_TIMER_EXPIRED also has no mirror call site (the grace-expiry
-# timer closures are internal-only, same as door/window's own
-# GRACE_TIMER_EXPIRED omission). Confirmed by grepping every
-# _mirror_to_shadow( call site in both files as of #643.
+# Issue #639/#643: which automation.py entry-point methods correspond to which
+# override/grace FSM event kind. Of the 8 OverrideGraceFsmEventKind members, 3 are
+# fed here via _feed_override_grace_fsm_on_detect() (added Issue #757 Phase 6 Step 8,
+# replacing the removed dual-engine shell's _mirror_to_shadow() finally block, which
+# used to derive the same lookup as an incidental side effect of replaying the call
+# onto the now-deleted shadow engine). OVERRIDE_CONFIRM_EXPIRED/OVERRIDE_SUPERSEDED/
+# OVERRIDE_CANCELLED are fed separately by _feed_override_grace_fsm_cancelled() and
+# the ``_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP``-driven exit paths below.
+# GRACE_TIMER_EXPIRED is fed the same way (see that map).
 _OVERRIDE_GRACE_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_manual_override_during_pause": "manual_override_during_pause",
     "resume_from_pause": "dashboard_resume",
@@ -539,14 +462,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # async_restore_state() where it can be awaited via the executor.
         self._chart_log = ChartStateLog(Path(hass.config.config_dir), max_days=CHART_LOG_MAX_DAYS)
         self.learning = LearningEngine(Path(hass.config.config_dir))
-        # Issue #727: which of the two engines below is "production" is now a runtime-
-        # switchable routing choice (see the automation_engine/shadow_automation_engine
-        # properties), not a fixed identity — _engine_a/_engine_b are the two fixed
-        # physical engine handles; _shadow_is_primary selects which one the properties
-        # resolve to. Defaults False: _engine_a starts as production, exactly as before
-        # this issue (backward-compatible default).
-        self._shadow_is_primary: bool = False
-        self._engine_a = AutomationEngine(
+        # Issue #757 Phase 6 Step 8: this used to construct two live AutomationEngine
+        # instances (_engine_a/_engine_b) behind a runtime-switchable primary/shadow
+        # routing (automation_engine/shadow_automation_engine properties, Issue #727/
+        # #729) so a second, permanently-dry-run FSM engine could be compared against
+        # production (Issue #613) while every subsystem migrated onto FSM dispatch.
+        # That migration is complete (Phase 6 Steps 1-7 removed every per-subsystem
+        # legacy branch), so both engines had become identical in behavior — this
+        # collapses back to the single engine every other part of the codebase
+        # (api.py, sensor.py, tests) already expects `coordinator.automation_engine`
+        # to be. See #757 for the full migration history.
+        self._override_grace_fsm_state: OverrideGraceLifecycleState = (OverrideConfirmState.IDLE, GraceState.NONE)
+        self.automation_engine: AutomationEngine = AutomationEngine(
             hass=hass,
             climate_entity=config["climate_entity"],
             weather_entity=config["weather_entity"],
@@ -557,65 +484,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             callbacks=self._build_production_automation_callbacks(),
             role="production",
         )
-        # Issue #729: _engine_a used to be the fixed-legacy identity for a set of
-        # per-engine FSM-authoritative flags (override_grace's own flag was removed
-        # in Issue #757 Phase 6 Step 3, door/window's in Phase 6 Step 4, nat-vent's
-        # in Phase 6 Step 5, occupancy's in Phase 6 Step 6, and classification's —
-        # the last of the 5 — in Phase 6 Step 7). Was runtime-toggleable per-subsystem
-        # via separate switches (Issue #594 Phase R / #664); those switches are gone —
-        # engine identity itself (legacy vs FSM, selected by which of _engine_a/
-        # _engine_b is primary) is now the only axis. As of Phase 6 Step 7, neither
-        # engine carries any ``_*_fsm_authoritative`` flag anymore — every subsystem's
-        # dispatcher is unconditionally FSM-authoritative on both engines.
-        # Issue #613 (Block 5, subtask Q): a real, live second AutomationEngine instance
-        # computing decisions from the same inputs as production, permanently inert.
-        # dry_run is set True immediately below and MUST NEVER be toggled elsewhere —
-        # unlike production's dry_run (tied to automation_enabled), the shadow engine has
-        # no owner-facing switch this phase; that's Phase 5/subtask R. Built with its own
-        # isolated callback bundle (_build_shadow_automation_callbacks) — never the
-        # production callbacks above — per N2's confirmed HIGH-risk finding: a shadow
-        # engine given production's callbacks could reach real production state/side
-        # effects (e.g. reconcile_fan_on_startup) regardless of the shadow's own dry_run.
-        # See docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation".
-        self._shadow_event_log: list[dict[str, Any]] = []
-        self._shadow_engine_diagnostic: dict[str, Any] | None = None
-        # Issue #685: wall-clock cascade-noise debounce state for the comparison
-        # axes above — see _shadow_diag_update_axis() and SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S.
-        self._shadow_diag_disagreement_since: dict[str, datetime | None] = dict.fromkeys(_SHADOW_DIAG_AXES)
-        self._shadow_diag_cumulative_seconds: dict[str, float] = dict.fromkeys(_SHADOW_DIAG_AXES, 0.0)
-        self._shadow_diag_cumulative_date: date = dt_util.now().date()
-        # Issue #738: level-triggered guard so a sustained per-axis disagreement emits
-        # exactly one `shadow_disagreement` incident for its streak, not one per mirrored
-        # production call (this diagnostic recomputes on every mirrored decision method,
-        # far more often than the 30-min reactive incident cycle) — reset to False by
-        # _shadow_diag_update_axis() the moment that axis resolves back to agreement, so
-        # a later, distinct disagreement streak on the same axis emits its own incident.
-        self._shadow_diag_incident_emitted: dict[str, bool] = dict.fromkeys(_SHADOW_DIAG_AXES, False)
-        # Issue #639: the unified override/grace joint-lifecycle FSM's own
-        # independently-tracked state — same third-comparison-point convention as
-        # #633 above (door/window's own equivalent, #637, was removed in Issue #757
-        # Phase 6 Step 4 along with its now-orphaned door_window_fsm_agrees axis).
-        # Starts (IDLE, NONE) unconditionally (no persisted override/grace on a fresh
-        # coordinator).
-        self._override_grace_fsm_state: OverrideGraceLifecycleState = (OverrideConfirmState.IDLE, GraceState.NONE)
-        self._engine_b: AutomationEngine = AutomationEngine(
-            hass=hass,
-            climate_entity=config["climate_entity"],
-            weather_entity=config["weather_entity"],
-            door_window_sensors=config.get("door_window_sensors", []),
-            notify_service=config["notify_service"],
-            config=config,
-            sensor_polarity_inverted=config.get(CONF_SENSOR_POLARITY_INVERTED, False),
-            callbacks=self._build_shadow_automation_callbacks(),
-            role="shadow",
-        )
-        self._engine_b.dry_run = True
-        # Issue #729: _engine_b used to be the fixed-FSM identity — see _engine_a's
-        # own comment above for why override_grace's, door/window's, nat-vent's,
-        # occupancy's, and (as of Issue #757 Phase 6 Step 7) classification's flags
-        # are all gone now. Which of the two is primary is decided by
-        # switch.climate_advisor_shadow_engine_primary (async_set_shadow_engine_primary())
-        # — a single axis, not independent switches.
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -805,329 +673,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             reclassify=self._on_whf_release_reclassify,
         )
 
-    def _build_shadow_automation_callbacks(self) -> AutomationEngineCallbacks:
-        """Build the callback bundle wired onto the inert shadow AutomationEngine.
-
-        Issue #613 (Block 5, subtask Q). Every callback here is either a pure read
-        (safe to share with production — it observes ground truth, it doesn't act)
-        or a no-op (the ones N2 confirmed can reach real production side effects):
-
-          - ``sensor_check``/``sensor_debounce_pending``/``get_fan_physical_state``/
-            ``is_recent_fan_command`` are read-only observations of live HA/production
-            state — reused as-is, same callables the production bundle uses.
-          - ``emit_event`` is shadow-local (``_on_shadow_emit_event``) — appends to its
-            own capped log, never touches ``_event_log`` or the pre-cool rescheduling
-            side effect ``_emit_event`` triggers on a nat-vent exit transition.
-          - ``request_refresh``, ``post_grace_fan_check``, and ``reclassify`` are
-            no-op lambdas — each is invoked as a plain synchronous call (never
-            ``async_create_task(callback())``), so a lambda returning ``None`` is a
-            safe true no-op. These are exactly three of the four callables N2's
-            investigation traced as capable of reaching production: request_refresh
-            schedules a real coordinator refresh, post_grace_fan_check can reach
-            ``automation_engine.reconcile_fan_on_startup()`` (real fan commands gated
-            only by production's own live dry_run), and reclassify triggers a real
-            setpoint reassert task. The shadow engine's own dry_run only guards its
-            own service-call choke points — it has no bearing on what these callbacks
-            do once invoked, so isolation must be structural (no-op), not dry_run-based.
-          - ``revisit`` is left unset (``None``), not a no-op lambda: unlike the three
-            above, ``_schedule_revisit()`` invokes it as ``hass.async_create_task(
-            revisit_cb())`` — a lambda returning ``None`` would crash there (``None``
-            is not awaitable). Passing ``None`` makes ``AutomationEngine`` see
-            ``has_revisit_callback=False`` and skip scheduling the follow-up timer
-            entirely, which is the correct no-op for an engine whose actions are
-            always dry-run anyway.
-        """
-        return AutomationEngineCallbacks(
-            revisit=None,
-            sensor_check=self._any_sensor_open,
-            sensor_debounce_pending=self._sensor_debounce_pending,
-            emit_event=self._on_shadow_emit_event,
-            request_refresh=lambda: None,
-            post_grace_fan_check=lambda: None,
-            get_fan_physical_state=self._get_fan_physical_state,
-            is_recent_fan_command=self._is_recent_fan_command,
-            reclassify=lambda: None,
-        )
-
-    def _on_shadow_emit_event(self, event_type: str, data: dict) -> None:
-        """Shadow-engine event sink (Issue #613) — a capped local log only.
-
-        Deliberately NOT ``_emit_event``: that method also mutates ``_nat_vent_was_active``
-        and can trigger ``_maybe_reschedule_pre_cool_on_nat_vent_exit()``, a real production
-        side effect keyed off the production engine's nat-vent transition, not the shadow's.
-        """
-        entry: dict[str, Any] = {"time": dt_util.now().isoformat(), "type": event_type, **data}
-        self._shadow_event_log.append(entry)
-        if len(self._shadow_event_log) > EVENT_LOG_CAP:
-            self._shadow_event_log.pop(0)
-
-    def _sync_shadow_inputs(self) -> None:
-        """Copy live input-data attributes onto the shadow engine (Issue #615, #631).
-
-        Several nat-vent decision methods (``handle_door_window_open()`` chief among
-        them) read ``self._last_outdoor_temp``/``self._hourly_forecast_temps``/
-        ``self._thermal_model``/``self._occupancy_mode`` as engine-instance state, not
-        as method arguments — the coordinator sets these directly on
-        ``self.automation_engine`` at several scattered call sites (``update_outdoor_temp()``,
-        daily-reset, restore) that ``_mirror_to_shadow()``'s per-decision replay never
-        touched. #613 shipped with the shadow engine's ``_last_outdoor_temp`` permanently
-        ``None`` as a result — its nat-vent gate could never fire, producing a
-        structural, permanent false "disagree" (confirmed live: agreed briefly right
-        after restart, then stuck disagreeing for hours). Called unconditionally at the
-        top of every ``_mirror_to_shadow()`` invocation — single call site, always fresh,
-        instead of re-deriving "which of the many production input-setting call sites
-        needs a matching shadow line" (the pattern that caused the bug in the first
-        place). Copies straight from ``self.automation_engine``'s current values, never
-        from local cycle variables, so it can't drift from whatever production most
-        recently observed.
-
-        Issue #631: grace/override state (``_grace_active``, ``_manual_override_active``,
-        ``_fan_override_active``, and their companion mode/source/time/duration fields)
-        is a second instance of this exact class of gap. These are set by
-        ``AutomationEngine`` methods called either directly from coordinator.py/api.py
-        (never followed by a ``_mirror_to_shadow(...)`` call) or by purely internal
-        ``async_call_later`` timers with no coordinator call site at all
-        (``_on_grace_expired``, the ``_confirm_override_expired`` timer's clear path) —
-        the latter category can *never* be reached by adding a mirror call, only by a
-        raw-value copy like this one. Confirmed live: shadow disagreed
-        (``production=inactive shadow=active_full_gate``) for 2h38m straight
-        (2026-08-12 21:02–23:40) because ``check_natural_vent_conditions()`` — a mirrored
-        method — gates nat-vent reactivation on ``not self._grace_active``, and the
-        shadow's copy never reflected production's active manual-override grace period.
-        Deliberately NOT adding new ``_mirror_to_shadow(...)`` call sites for the setters
-        of ``clear_manual_override``/``cancel_override`` — that would reintroduce the
-        "duplicate each write at its call site" pattern this function exists to replace,
-        and would start real ``async_call_later`` timers against the shared ``hass``
-        event loop on the shadow engine for no benefit over a raw copy refreshed every
-        cycle. ``handle_fan_manual_override`` (#643) and ``handle_manual_override``
-        (#651) are the sole exceptions — both are mirrored anyway, but only to serve as
-        the FSM entry-event trigger hook in ``_mirror_to_shadow()``'s finally block (see
-        ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``); the shadow-engine replay side-effect of
-        that call is redundant with this function's raw copy and intentionally
-        tolerated, not the reason the mirror call exists. See
-        ``tests/test_shadow_engine_coverage.py`` for the registry entries documenting
-        why each setter is exempted or mirrored.
-
-        Issue #757 Phase 6 Step 3 audit: with override/grace's own dispatcher now
-        unconditionally FSM-authoritative and its 2 dedicated shadow-diagnostic axes
-        removed, this block's 14 raw-copy lines were reviewed for deletion. Kept as-is
-        — every one of them is a genuine, live dependency of a subsystem that has NOT
-        graduated yet: ``_grace_active`` is read directly by
-        ``check_natural_vent_conditions()`` (feeds ``nat_vent`` mirror/fsm axes, see
-        this docstring's own #631 paragraph above). ``handle_fan_manual_override``/
-        ``handle_manual_override`` remain mirrored onto the shadow engine (see above)
-        and still call ``_resolve_override_grace_fsm_state()`` on it — that dispatch
-        recomputes ``se._grace_active`` from ``se``'s OWN
-        ``_override_confirm_pending``/``_grace_protects_override`` (origin state) plus
-        ``_build_override_grace_fsm_inputs()``'s read of ``_manual_override_active/
-        _mode/_source``, ``_override_confirm_source``, ``_fan_override_active``, and
-        ``_last_resume_source``. A stale/missing copy of ANY of those would corrupt the
-        recomputed ``se._grace_active`` and, transitively, the still-active nat-vent
-        axes above — so none of the 14 lines could be safely deleted here without first
-        proving that transitive chain is dead, which it isn't.
-
-        Issue #757 Phase 6 Step 4 re-audit: door/window's own dispatcher is now ALSO
-        unconditionally FSM-authoritative and its 2 dedicated shadow-diagnostic axes
-        (``door_window_mirror``/``door_window_fsm``, fed by the now-deleted
-        ``_door_window_state_for()``) have been removed — that dependency on
-        ``_grace_active`` is gone. All 14 lines are still kept, unchanged, purely on the
-        strength of nat-vent's own still-active dependency documented above; this is not
-        a case of "shared with a since-graduated subsystem," it's "still needed by the
-        one subsystem that was never the reason to consider deleting it."
-
-        Issue #757 Phase 6 Step 5 re-audit: nat-vent's own dispatcher is now ALSO
-        unconditionally FSM-authoritative and its 2 dedicated shadow-diagnostic axes
-        (``mirror``/``fsm``, fed by the now-deleted ``_evaluate_nat_vent_fsm()``) have
-        been removed. Unlike override/grace's and door/window's prior graduations,
-        this does NOT retire the reason these fields exist: ``check_natural_vent_
-        conditions()`` (and nat-vent's other mirrored methods) are still replayed on
-        the shadow engine by ``_mirror_to_shadow()`` for the dual-engine shell's own
-        sake — the shadow engine instance itself still exists (collapsed only in Step
-        8) — so a stale copy of any of these 4 lines, or the grace/override lines
-        above that feed nat-vent's reactivation gate, would still corrupt that live
-        replay, not just a deleted comparison axis. All lines kept, unchanged.
-        """
-        se = self.shadow_automation_engine
-        ae = self.automation_engine
-        se.update_outdoor_temp(ae._last_outdoor_temp)
-        se._hourly_forecast_temps = ae._hourly_forecast_temps
-        se._thermal_model = ae._thermal_model
-        se._outdoor_temp_today_peak = ae._outdoor_temp_today_peak
-        se._outdoor_temp_today_sample_count = ae._outdoor_temp_today_sample_count
-        se.set_occupancy_mode(ae._occupancy_mode)
-
-        # Issue #631: grace/override state — see docstring above.
-        se._grace_active = ae._grace_active
-        se._grace_end_time = ae._grace_end_time
-        se._grace_duration_seconds = ae._grace_duration_seconds
-        se._last_grace_trigger = ae._last_grace_trigger
-        se._grace_protects_override = ae._grace_protects_override
-        se._last_resume_source = ae._last_resume_source
-        se._manual_override_active = ae._manual_override_active
-        se._manual_override_mode = ae._manual_override_mode
-        se._manual_override_source = ae._manual_override_source
-        se._manual_override_time = ae._manual_override_time
-        se._fan_override_active = ae._fan_override_active
-        se._fan_override_time = ae._fan_override_time
-        se._fan_remote_timer_hours = ae._fan_remote_timer_hours
-        se._fan_remote_speed = ae._fan_remote_speed
-        se._override_confirm_pending = ae._override_confirm_pending
-        se._override_confirm_mode = ae._override_confirm_mode
-        se._override_confirm_source = ae._override_confirm_source
-        se._paused_with_hvac_already_off = ae._paused_with_hvac_already_off
-
-        # Issue #673: nat-vent/door-window state — same gap class as #613/#631 above.
-        # These 4 fields were never added to this raw-copy block when it was created,
-        # so any missed or exception-interrupted _mirror_to_shadow() call site touching
-        # them causes a permanent, non-self-healing divergence. _paused_by_door is read
-        # by the nat-vent mirror derivation (Issue #757 Phase 6 Step 4: the door/window
-        # mirror derivation that also used to read it was removed along with the
-        # door/window shadow-comparison axes; kept here regardless since nat-vent's own
-        # dependency alone still requires it). ``se._paused_with_hvac_already_off``
-        # (below) is likewise still real: it isn't read by the nat-vent lifecycle
-        # comparison itself, but IS read internally by
-        # check_natural_vent_conditions()'s own reactivation-while-paused branches
-        # (automation.py's ``_actively_paused`` computation) whenever that method is
-        # replayed on the shadow engine via ``_mirror_to_shadow()`` — a stale copy would
-        # corrupt that replay's own decision, not just a comparison axis.
-        se._natural_vent_active = ae._natural_vent_active
-        se._nat_vent_soft_start = ae._nat_vent_soft_start
-        se._paused_by_door = ae._paused_by_door
-        se._nat_vent_outdoor_exit_time = ae._nat_vent_outdoor_exit_time
-
-        # Issue #716: same gap class again. _fan_active is set by _activate_fan()/
-        # _deactivate_fan(), both of which `return` early under `self.dry_run` before
-        # ever assigning the flag — the shadow engine is permanently dry_run=True, so a
-        # _mirror_to_shadow(...) replay of either method can never work for this field.
-        # A raw copy is the only mechanism that reaches it, and it also transparently
-        # covers every other production-side writer of _fan_active (e.g. the stale-flag
-        # correction at the "Thermostat set to off" branch above in
-        # _async_thermostat_changed) without needing its own mirror call, since this
-        # function always re-reads production's current value regardless of which
-        # method last set it.
-        se._fan_active = ae._fan_active
-
-        # Issue #724: same gap class again, one field over. _whf_owns_hvac() (read by
-        # _sync_paused_by_door_with_live_sensors(), itself called from apply_classification/
-        # handle_bedtime/handle_morning_wakeup/handle_pre_cool — all 4 mirrored) depends on
-        # _pre_fan_hvac_mode, which was never added to this raw-copy block. Confirmed live-
-        # reachable, not dormant: with the shadow's copy permanently None, its
-        # _whf_owns_hvac() is always False, so _sync_paused_by_door_with_live_sensors()'s
-        # `... or self._whf_owns_hvac(): return` guard never protects the shadow the way it
-        # protects production during a genuine WHF session — the shadow can incorrectly call
-        # _pause_for_door_window() and set _paused_by_door=True while production correctly
-        # does not, producing a spurious mirror_agrees disagreement (nat-vent's own axis —
-        # door_window_mirror_agrees, which this same spurious pause used to also corrupt,
-        # was removed in Issue #757 Phase 6 Step 4) during ordinary WHF-with-windows-open
-        # operation (WHF's designed use case). A raw
-        # copy closes this and every other _whf_owns_hvac() read the same way the _fan_active
-        # copy above does for its own guards.
-        se._pre_fan_hvac_mode = ae._pre_fan_hvac_mode
-
-    def _apply_engine_roles(self, primary: AutomationEngine, secondary: AutomationEngine) -> None:
-        """Wire dry_run/callbacks/role so ``primary`` issues real commands and
-        ``secondary`` is diagnostic-only (Issue #727).
-
-        Shared by ``async_restore_state()`` (re-establishing the correct wiring for
-        a restored routing choice on every boot — the normal path as of Issue #729,
-        since promotion now happens via config-entry reload, not a live in-process
-        swap) and ``async_set_shadow_engine_primary()``'s sim-harness/no-real-entry
-        fallback (no reload available, so the in-memory routing is applied directly
-        instead) — one place computes what "being primary" means, so the callers
-        can't drift out of sync with each other about it.
-        """
-        primary.dry_run = not self._automation_enabled
-        primary.set_callbacks(self._build_production_automation_callbacks())
-        primary.role = "production"
-        secondary.dry_run = True
-        secondary.set_callbacks(self._build_shadow_automation_callbacks())
-        secondary.role = "shadow"
-
-    async def async_set_shadow_engine_primary(self, enabled: bool) -> None:
-        """Promote the FSM engine to be the one issuing real HVAC/fan commands,
-        or demote it back to diagnostic-only (Issue #727, redesigned #729).
-
-        Issue #727 shipped this as a *live* in-process swap: flip the routing,
-        copy a hand-picked list of fields across, and keep running. Issue #729
-        replaced that after finding it structurally couldn't migrate in-flight
-        ``async_call_later`` timers (grace, override-confirm, setpoint-retry,
-        etc.) to the newly-primary engine — they kept firing against the
-        demoted engine's ``self``. This version instead persists the choice and
-        reloads the whole config entry: ``coordinator.async_shutdown()`` (via
-        ``async_unload_entry``) already tears down both engines' ``cleanup()``,
-        cancelling every internal timer, and the rebuild path
-        (``async_setup_entry`` → ``async_restore_state()``) already reads the
-        persisted flag and wires ``dry_run``/callbacks correctly — the same
-        mechanism already proven for restart-persistence. No live swap, no
-        field carry-over list, nothing left running against a stale object.
-
-        The 3 FSM-authoritative flags are no longer part of what this method
-        touches — as of Issue #729 they're fixed at engine construction
-        (``_engine_a`` always legacy, ``_engine_b`` always FSM), not carried
-        between engines. This switch's only job is choosing which fixed
-        identity is primary.
-
-        Real-HA path: persists to disk (awaited — the reload that follows reads
-        this back from disk, so it must actually be written first, not
-        fire-and-forget) without touching ``self._shadow_is_primary`` in memory
-        on *this* coordinator instance, since it's about to be discarded by the
-        reload; only the rebuilt coordinator ever sets it. Then schedules the
-        reload via ``hass.async_create_task(...)`` rather than awaiting it
-        directly — this method runs from the switch entity's own
-        ``async_turn_on``/``async_turn_off``, i.e. platform code belonging to
-        the entry about to be torn down, and awaiting a reload from inside code
-        that's about to be unloaded is the same "tearing down the integration
-        mid-flow" hazard ``repairs.py``'s own reload call already documents and
-        avoids the same way.
-
-        Sim-harness / no-real-entry path (``self._entry_id`` empty or
-        unresolvable — an existing, documented convention, not new to this
-        method): no reload is possible, so this flips ``_shadow_is_primary`` and
-        calls ``_apply_engine_roles()`` directly in-memory instead, so
-        simulation/tests can still exercise the effect of a flip.
-
-        KNOWN RISK, unchanged from Issue #727 and still accepted rather than
-        blocked on: the FSM engine's decision coverage is a strict subset of
-        production's — some entry points have no ``_mirror_to_shadow()``
-        counterpart at all (see the documented list earlier in this file). A
-        decision only the demoted engine's un-mirrored code path made may
-        simply not fire the same way on the newly-primary engine. Logged
-        loudly below every time this is used.
-        """
-        if enabled == self._shadow_is_primary:
-            return
-
-        entry = self.hass.config_entries.async_get_entry(self._entry_id) if self._entry_id else None
-        if entry is not None:
-            # _build_state_dict() reads self._shadow_is_primary, which is still the OLD
-            # value here (deliberately not flipped on this doomed coordinator instance —
-            # see the docstring). Override just that one key on the built dict rather than
-            # mutating the coordinator, so the persisted file reflects the NEW choice.
-            state_dict = self._build_state_dict()
-            state_dict["shadow_engine_primary"] = enabled
-            await self.hass.async_add_executor_job(self._state_persistence.save, state_dict)
-            _LOGGER.warning(
-                "Shadow engine %s (Issue #729) — reloading the config entry so the %s "
-                "engine comes up primary with a clean timer/state slate. KNOWN RISK: the "
-                "FSM engine's decision coverage is a strict subset of production's (see "
-                "coordinator.py's documented un-mirrored entry points) — some decisions "
-                "the demoted engine would have made may not fire identically on the "
-                "newly-primary engine until that coverage gap is closed.",
-                "promoted to primary" if enabled else "demoted back to diagnostic-only",
-                "FSM" if enabled else "legacy",
-            )
-            self.hass.async_create_task(self.hass.config_entries.async_reload(self._entry_id))
-            return
-
-        _LOGGER.warning(
-            "Shadow engine %s (Issue #729) — no resolvable config entry (sim harness or "
-            "test context), applying the routing change in-memory instead of reloading",
-            "promoted to primary" if enabled else "demoted back to diagnostic-only",
-        )
-        self._shadow_is_primary = enabled
-        self._apply_engine_roles(self.automation_engine, self.shadow_automation_engine)
-        self.hass.async_create_task(self._async_save_state())
-
     def _dispatch_fsm_evaluators(
         self,
         key: str,
@@ -1153,52 +698,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     evaluator()
                 except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
                     _LOGGER.warning("%s failed (isolated, no production impact): %s", label, fsm_exc)
-
-    async def _mirror_to_shadow(self, method_name: str, *args: Any, **kwargs: Any) -> None:
-        """Replay a production nat-vent decision call on the shadow engine (Issue #613).
-
-        Isolated by construction (see ``_build_shadow_automation_callbacks``) and, on
-        top of that, isolated here: any exception raised by the shadow call is logged
-        and swallowed, never re-raised — a bug in the shadow engine's decision code
-        must never be able to affect production's own control flow. Supports both sync
-        (``on_fan_turned_off()``) and async decision methods — awaits the result only
-        if it's actually awaitable, since a handful of the mirrored methods are
-        synchronous (Issue #615).
-        """
-        try:
-            self._sync_shadow_inputs()
-            method = getattr(self.shadow_automation_engine, method_name)
-            result = method(*args, **kwargs)
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:  # noqa: BLE001 — shadow errors must never affect production
-            _LOGGER.warning(
-                "Shadow engine mirror of %s() failed (isolated, no production impact): %s",
-                method_name,
-                exc,
-            )
-        finally:
-            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-            self._dispatch_fsm_evaluators(
-                method_name,
-                [
-                    (
-                        _OVERRIDE_GRACE_FSM_EVENT_KINDS,
-                        lambda: self._evaluate_override_grace_fsm(
-                            _OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name])
-                        ),
-                        "Override/grace FSM evaluation",
-                    ),
-                ],
-            )
-            try:
-                self._update_shadow_engine_diagnostic()
-            except Exception as diag_exc:  # noqa: BLE001 — diagnostic is best-effort observability
-                _LOGGER.warning(
-                    "Shadow engine diagnostic update failed (isolated, no production impact): %s",
-                    diag_exc,
-                )
 
     def _evaluate_override_grace_fsm(self, event_kind: OverrideGraceFsmEventKind) -> None:
         """Run the unified override/grace joint-lifecycle FSM (Issue #639) against
@@ -1290,6 +789,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result = _override_grace_transition(self._override_grace_fsm_state, event)
         self._override_grace_fsm_state = result.to_state
 
+    def _feed_override_grace_fsm_on_detect(self, method_name: str) -> None:
+        """Feed the override/grace FSM an entry event for a former ``_mirror_to_shadow()``
+        call site (Issue #757 Phase 6 Step 8).
+
+        The dual-engine shell (and ``_mirror_to_shadow()`` itself) was removed, but 8 of
+        its call sites secretly drove the still-live override/grace FSM via its
+        ``finally`` block (see the removed ``_OVERRIDE_GRACE_FSM_EVENT_KINDS`` dispatch).
+        This preserves that FSM feed exactly, keyed the same way (mirrored method name ->
+        event kind via ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``). Isolated the same way every
+        other FSM-feed call site is: any exception here is logged and swallowed, never
+        allowed to affect production.
+        """
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+        try:
+            self._evaluate_override_grace_fsm(_OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name]))
+        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+            _LOGGER.warning(
+                "Override/grace FSM evaluation failed (isolated, no production impact): %s",
+                fsm_exc,
+            )
+
     def _feed_override_grace_fsm_cancelled(self) -> None:
         """Feed the override/grace FSM an ``OVERRIDE_CANCELLED`` event (Issue #647).
 
@@ -1346,256 +867,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.climate_entity)`` read)."""
         state = self.hass.states.get(self.automation_engine.climate_entity)
         return state.state if state else None
-
-    def _shadow_diag_update_axis(self, axis: str, agrees: bool, now: datetime) -> tuple[float, bool]:
-        """Update the wall-clock disagreement streak for one comparison axis and
-        return (seconds_disagreeing_now, sustained). Cascade-noise fix (Issue #685):
-        time-based, not count-based — duplicate mirrored calls fire sub-millisecond
-        apart during a real cascade (confirmed via live log evidence), so a
-        consecutive-snapshot counter would trip immediately on the exact noise this
-        exists to suppress.
-        """
-        since = self._shadow_diag_disagreement_since[axis]
-        if not agrees:
-            if since is None:
-                since = now
-                self._shadow_diag_disagreement_since[axis] = since
-            duration = (now - since).total_seconds()
-            return duration, duration >= SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S
-        if since is not None:
-            self._shadow_diag_cumulative_seconds[axis] += (now - since).total_seconds()
-            self._shadow_diag_disagreement_since[axis] = None
-            # Issue #738: axis resolved back to agreement — clear the incident-emitted
-            # guard so a future, distinct disagreement streak on this axis can emit its
-            # own shadow_disagreement incident again.
-            self._shadow_diag_incident_emitted[axis] = False
-        return 0.0, False
-
-    def _emit_shadow_disagreement_incident(
-        self,
-        axis: str,
-        now: datetime,
-        production_state: str,
-        comparison_state: str,
-        comparison_kind: str,
-        duration_seconds: float,
-    ) -> None:
-        """Emit a ``shadow_disagreement`` incident for one sustained comparison-axis
-        disagreement (Issue #738).
-
-        Feeds the same simulation-feedback-loop pipeline the other 8 incident classes
-        already use (``docs/simulation-feedback-loop.md``) — a live shadow-engine A/B
-        catch becomes a permanent regression test candidate instead of a one-off WARNING
-        a human has to notice in the logs. Called once per sustained disagreement streak
-        (the `_shadow_diag_incident_emitted` level-trigger guard in
-        ``_update_shadow_engine_diagnostic()`` prevents re-emitting on every mirrored
-        production call while the streak continues).
-        """
-        current_data = self.data or {}
-        self._emit_incident(
-            "shadow_disagreement",
-            now.isoformat(),
-            extra={
-                "axis": axis,
-                "production_state": production_state,
-                "comparison_state": comparison_state,
-                "comparison_kind": comparison_kind,
-                "disagreement_seconds": round(duration_seconds),
-                "indoor_f": current_data.get("indoor_temp"),
-                "outdoor_f": current_data.get("outdoor_temp"),
-                "hvac_mode": current_data.get("hvac_mode"),
-                "nat_vent_active": (self.automation_engine._natural_vent_active if self.automation_engine else None),
-                "manual_override_active": (
-                    self.automation_engine._manual_override_active if self.automation_engine else None
-                ),
-            },
-        )
-
-    def _update_shadow_engine_diagnostic(self) -> None:
-        """Recompute cross-subsystem production/shadow agreement diagnostics.
-
-        Nat-vent's own axes (Issue #613's mirror comparison, Issue #633's independent
-        FSM comparison) were removed in Issue #757 Phase 6 Step 5 once the legacy
-        branch they compared against was deleted — there is no longer a second
-        implementation to compare production against for nat-vent.
-        """
-        now = dt_util.now()
-
-        # Issue #685: lazy daily reset of cumulative disagreement seconds, same
-        # style as claude_api.py's _reset_daily_counters_if_needed() — self-heals
-        # across HA restarts that cross midnight, no scheduled callback needed.
-        today = now.date()
-        if today != self._shadow_diag_cumulative_date:
-            self._shadow_diag_cumulative_seconds = dict.fromkeys(_SHADOW_DIAG_AXES, 0.0)
-            self._shadow_diag_cumulative_date = today
-
-        # Issue #742: classification's own production/shadow agreement. Deliberately
-        # has no separate "classification_fsm" axis — classification_fsm.py is
-        # genuinely stateless (see its own module docstring's five-whys), so there is
-        # no separate untethered FSM state object to compare production against.
-        # decide_scheduled_band_gate() is a pre-existing pure function BOTH engines
-        # already call unconditionally every apply_classification() cycle. Issue #757
-        # Phase 6 Step 7: classification's own AutomationEngine._classification_fsm_authoritative
-        # flag was removed (apply_classification()'s ODE ceiling guard block is now
-        # unconditionally FSM-authoritative on both engines), but this axis is KEPT —
-        # same reasoning as occupancy_mirror's own graduation-survives note below: the
-        # compared predicate is a pure function both engines' live state already
-        # determines regardless of the (now-removed) flag, so removing the flag does
-        # not retire this axis's usefulness, unlike nat-vent's/door-window's/override-
-        # grace's own mirror axes, which compared "did the legacy branch's write agree
-        # with the FSM branch's write" — a comparison that became meaningless once
-        # there was no legacy branch left to compare against.
-        from .desired_state import decide_scheduled_band_gate
-
-        def _classification_gate_str(ae: AutomationEngine) -> str:
-            gate = decide_scheduled_band_gate(
-                occupancy_mode=ae._occupancy_mode,
-                manual_override_active=ae._manual_override_active,
-                paused_by_door=ae._paused_by_door,
-                natural_vent_active=ae._natural_vent_active,
-                whf_owns_hvac=ae._whf_owns_hvac(),
-            )
-            return gate.value
-
-        classification_production_state = _classification_gate_str(self.automation_engine)
-        classification_shadow_state = _classification_gate_str(self.shadow_automation_engine)
-        classification_mirror_agrees = classification_production_state == classification_shadow_state
-
-        # Issue #744: occupancy dispatch's own production/shadow agreement. See
-        # _SHADOW_DIAG_AXES' comment above for the full rationale.
-        from .automation import should_defer_to_occupancy_setback
-
-        def _occupancy_defer_str(ae: AutomationEngine) -> str:
-            return str(should_defer_to_occupancy_setback(ae._occupancy_mode))
-
-        occupancy_production_state = _occupancy_defer_str(self.automation_engine)
-        occupancy_shadow_state = _occupancy_defer_str(self.shadow_automation_engine)
-        occupancy_mirror_agrees = occupancy_production_state == occupancy_shadow_state
-
-        agrees = classification_mirror_agrees and occupancy_mirror_agrees
-
-        # Issue #685: wall-clock debounce per axis — a WARNING only fires once a
-        # comparison axis has continuously disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S.
-        classification_mirror_duration, classification_mirror_sustained = self._shadow_diag_update_axis(
-            "classification_mirror", classification_mirror_agrees, now
-        )
-        occupancy_mirror_duration, occupancy_mirror_sustained = self._shadow_diag_update_axis(
-            "occupancy_mirror", occupancy_mirror_agrees, now
-        )
-
-        self._shadow_engine_diagnostic = {
-            "classification_production_state": classification_production_state,
-            "classification_shadow_state": classification_shadow_state,
-            "classification_mirror_agrees": classification_mirror_agrees,
-            "occupancy_production_state": occupancy_production_state,
-            "occupancy_shadow_state": occupancy_shadow_state,
-            "occupancy_mirror_agrees": occupancy_mirror_agrees,
-            "agrees": agrees,
-            "checked_at": now.isoformat(),
-            "debounce": {
-                "classification_mirror": {
-                    "disagreement_seconds": classification_mirror_duration,
-                    "sustained": classification_mirror_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["classification_mirror"],
-                },
-                "occupancy_mirror": {
-                    "disagreement_seconds": occupancy_mirror_duration,
-                    "sustained": occupancy_mirror_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["occupancy_mirror"],
-                },
-            },
-            "cumulative_reset_date": self._shadow_diag_cumulative_date.isoformat(),
-        }
-        if classification_mirror_sustained:
-            _LOGGER.warning(
-                "Classification shadow engine disagreement (Issue #742): production=%s shadow=%s (sustained %.0fs)",
-                classification_production_state,
-                classification_shadow_state,
-                classification_mirror_duration,
-            )
-            if not self._shadow_diag_incident_emitted["classification_mirror"]:
-                self._emit_shadow_disagreement_incident(
-                    "classification_mirror",
-                    now,
-                    classification_production_state,
-                    classification_shadow_state,
-                    "shadow",
-                    classification_mirror_duration,
-                )
-                self._shadow_diag_incident_emitted["classification_mirror"] = True
-        if occupancy_mirror_sustained:
-            _LOGGER.warning(
-                "Occupancy shadow engine disagreement (Issue #744): production=%s shadow=%s (sustained %.0fs)",
-                occupancy_production_state,
-                occupancy_shadow_state,
-                occupancy_mirror_duration,
-            )
-            if not self._shadow_diag_incident_emitted["occupancy_mirror"]:
-                self._emit_shadow_disagreement_incident(
-                    "occupancy_mirror",
-                    now,
-                    occupancy_production_state,
-                    occupancy_shadow_state,
-                    "shadow",
-                    occupancy_mirror_duration,
-                )
-                self._shadow_diag_incident_emitted["occupancy_mirror"] = True
-
-    @property
-    def shadow_engine_diagnostic(self) -> dict[str, Any] | None:
-        """Latest production/shadow agreement snapshot (classification/occupancy axes
-        remaining), or None before the first mirrored decision has run."""
-        return self._shadow_engine_diagnostic
-
-    @property
-    def automation_engine(self) -> AutomationEngine:
-        """The engine currently issuing real HVAC/fan commands.
-
-        Issue #727: used to be a plain instance attribute set once in __init__ and
-        never reassigned. It's now a routing property over two fixed engine handles
-        (``_engine_a`` — always fully legacy, ``_engine_b`` — always fully FSM, see
-        their construction site in ``__init__`` — fixed identities as of Issue #729),
-        selected by ``_shadow_is_primary``, so ``switch.climate_advisor_shadow_engine_primary``
-        can choose which physical engine object is "production" without touching any
-        of the many existing read call sites across ``api.py``/``sensor.py``/
-        ``coordinator.py`` itself — they all just read ``coordinator.automation_engine``
-        fresh, same as before. The setter exists only so the many existing test files
-        that do ``coord.automation_engine = MagicMock()`` keep working unmodified.
-        """
-        return self._engine_b if getattr(self, "_shadow_is_primary", False) else self._engine_a
-
-    @automation_engine.setter
-    def automation_engine(self, value: AutomationEngine) -> None:
-        if getattr(self, "_shadow_is_primary", False):
-            self._engine_b = value
-        else:
-            self._engine_a = value
-
-    @property
-    def shadow_automation_engine(self) -> AutomationEngine:
-        """The engine currently in diagnostic-only (permanently dry_run) role.
-
-        See ``automation_engine``'s docstring — same routing mechanism, opposite
-        selection.
-        """
-        return self._engine_a if getattr(self, "_shadow_is_primary", False) else self._engine_b
-
-    @shadow_automation_engine.setter
-    def shadow_automation_engine(self, value: AutomationEngine) -> None:
-        if getattr(self, "_shadow_is_primary", False):
-            self._engine_a = value
-        else:
-            self._engine_b = value
-
-    @property
-    def shadow_engine_primary(self) -> bool:
-        """Whether the fixed-FSM engine (``_engine_b``) is currently the one issuing
-        real HVAC/fan commands (Issue #727, redesigned #729). False = the fixed-legacy
-        engine (``_engine_a``) is primary (default). This is now the single control
-        axis for legacy-vs-FSM behavior — the 3 independent per-subsystem
-        FSM-authoritative switches (Issue #594 Phase R / #664) were retired in #729;
-        each engine's FSM flags are fixed at construction, not toggled here."""
-        return self._shadow_is_primary
 
     @property
     def automation_enabled(self) -> bool:
@@ -1764,18 +1035,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             trigger="indoor",
                         )
                     )
-                    # Issue #716: this dedicated indoor-temp listener had no matching
-                    # _mirror_to_shadow — a second real fan_thermostat_check() call site
-                    # (alongside the outdoor listener below) missed by #613/#615's original
-                    # coverage, found by the same per-caller audit the shadow-gap fix required.
-                    self.hass.async_create_task(
-                        self._mirror_to_shadow(
-                            "fan_thermostat_check",
-                            indoor=self._get_indoor_temp(),
-                            outdoor=self._last_outdoor_temp,
-                            trigger="indoor",
-                        )
-                    )
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, _indoor_temp_entity, _async_indoor_temp_changed)
@@ -1806,16 +1065,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             pass
                     self.hass.async_create_task(
                         ae.fan_thermostat_check(
-                            indoor=self._get_indoor_temp(),
-                            outdoor=self._last_outdoor_temp,
-                            trigger="outdoor",
-                        )
-                    )
-                    # Issue #716: matching fix for the outdoor-temp listener — see the indoor
-                    # listener above for the full rationale.
-                    self.hass.async_create_task(
-                        self._mirror_to_shadow(
-                            "fan_thermostat_check",
                             indoor=self._get_indoor_temp(),
                             outdoor=self._last_outdoor_temp,
                             trigger="outdoor",
@@ -1961,23 +1210,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except (TypeError, ValueError):
             self.consecutive_failure_count = 0
 
-        # Issue #727/#729: which physical engine is primary is a mode-like setting,
-        # not daily ephemeral state — restored regardless of date boundary (same
-        # reasoning as ai_stats/coordinator health above), so it survives any
-        # restart, not just a same-day one. As of #729 this is the ONLY thing
-        # restored here — the 3 FSM-authoritative flags are fixed per engine
-        # identity at construction (see __init__), not persisted/restored
-        # per-flag anymore, since they never vary independently of which engine
-        # is primary.
-        restored_shadow_primary = bool(state.get("shadow_engine_primary", False))
-        if restored_shadow_primary:
-            self._shadow_is_primary = True
-            self._apply_engine_roles(self.automation_engine, self.shadow_automation_engine)
-            _LOGGER.warning(
-                "Restored shadow-engine-primary routing (Issue #727/#729): the FSM engine "
-                "is issuing real HVAC/fan commands, matching its state before this restart"
-            )
-
         if state_date != today_str:
             _LOGGER.debug(
                 "Persisted state is from %s (today is %s) — starting fresh",
@@ -2057,7 +1289,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # mirrored too. Still does not restore _natural_vent_active or
             # _current_classification on either engine (restore_state()'s own
             # documented clean-slate design).
-            await self._mirror_to_shadow("restore_state", auto_state)
 
         # Grace state is cleared by restore_state() (clean-slate design, Issue #282).
         # The coordinator does not reschedule grace timers on restart.
@@ -2196,14 +1427,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "briefing_day_type": self._briefing_day_type,
             },
             "automation_enabled": self._automation_enabled,
-            # Issue #727/#729: which engine is primary is a mode-like setting the
-            # user wants to survive ANY restart, not just a same-day one — restored
-            # unconditionally, before the same-day gate in async_restore_state(),
-            # same as ai_stats/coordinator health below. The 3 FSM-authoritative
-            # flags are no longer persisted separately as of #729 — they're fixed
-            # per engine identity at construction, so restoring which engine is
-            # primary already restores the right decision behavior.
-            "shadow_engine_primary": getattr(self, "_shadow_is_primary", False),
             "occupancy_mode": self._occupancy_mode,
             "occupancy_away_since": (self._occupancy_away_since.isoformat() if self._occupancy_away_since else None),
             "ai_stats": self.claude_client.get_persistent_stats() if self.claude_client else {},
@@ -2736,7 +1959,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             first_sensor = open_sensors[0]
             _LOGGER.debug("[coalesce-diag] before handle_door_window_open(%s)", first_sensor)
             await self.automation_engine.handle_door_window_open(first_sensor)
-            await self._mirror_to_shadow("handle_door_window_open", first_sensor)
             _LOGGER.debug("[coalesce-diag] after handle_door_window_open(%s)", first_sensor)
             nat_vent_activated = self.automation_engine._natural_vent_active
             _LOGGER.info(
@@ -2760,9 +1982,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 c,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=indoor_temp,
-            )
-            await self._mirror_to_shadow(
-                "apply_classification", c, predicted_indoor=self._last_predicted_indoor, indoor_temp=indoor_temp
             )
             _LOGGER.debug("[coalesce-diag] after apply_classification() [coalesce path]")
             hvac_commanded = True
@@ -2794,18 +2013,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _remote_timer_provenance = self._read_live_remote_timer_provenance()
         _LOGGER.debug("[coalesce-diag] before reconcile_fan_on_startup()")
         await self.automation_engine.reconcile_fan_on_startup(
-            indoor=indoor,
-            outdoor=outdoor,
-            thermostat_fan_running=_thermostat_fan_running,
-            any_sensor_open=self._any_sensor_open(),
-            trigger="ha_restart",
-            remote_timer_provenance=_remote_timer_provenance,
-        )
-        # Issue #615: this exact call site is what tonight's bug reproduces — the
-        # startup-time fan reconciliation that can set _natural_vent_active=True from
-        # physical fan state, never previously mirrored.
-        await self._mirror_to_shadow(
-            "reconcile_fan_on_startup",
             indoor=indoor,
             outdoor=outdoor,
             thermostat_fan_running=_thermostat_fan_running,
@@ -3243,12 +2450,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     predicted_indoor=self._last_predicted_indoor,
                     indoor_temp=self._get_indoor_temp(),
                 )
-                await self._mirror_to_shadow(
-                    "apply_classification",
-                    self._current_classification,
-                    predicted_indoor=self._last_predicted_indoor,
-                    indoor_temp=self._get_indoor_temp(),
-                )
                 _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
 
             # If the day type changed since the briefing was generated,
@@ -3315,7 +2516,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._should_run_regular_cycle_nat_vent_check():
                 _LOGGER.debug("[coalesce-diag] before check_natural_vent_conditions()")
                 await self.automation_engine.check_natural_vent_conditions()
-                await self._mirror_to_shadow("check_natural_vent_conditions")
                 _LOGGER.debug("[coalesce-diag] after check_natural_vent_conditions()")
 
             # Save state after classification update
@@ -3534,17 +2734,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     outdoor=self._last_outdoor_temp,
                     # Issue #423: archetype-aware — WHF mode checks the real fan entity's
                     # physical state instead of always trusting the thermostat's attributes.
-                    thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
-                        fan_mode_attr=_bst_fan_mode,
-                        hvac_action_attr=_bst_hvac_action,
-                    ),
-                    any_sensor_open=self._any_sensor_open(),
-                    trigger="backstop_30min",
-                )
-                await self._mirror_to_shadow(
-                    "reconcile_fan_on_startup",
-                    indoor=self._get_indoor_temp(),
-                    outdoor=self._last_outdoor_temp,
                     thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
                         fan_mode_attr=_bst_fan_mode,
                         hvac_action_attr=_bst_hvac_action,
@@ -4241,12 +3430,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             predicted_indoor=self._last_predicted_indoor,
             indoor_temp=self._get_indoor_temp(),
         )
-        await self._mirror_to_shadow(
-            "apply_classification",
-            classification,
-            predicted_indoor=self._last_predicted_indoor,
-            indoor_temp=self._get_indoor_temp(),
-        )
 
         # Initialize today's learning record, preserving any counters already accumulated
         # today (e.g. after an HA restart mid-day that fires briefing again). Issue #602:
@@ -4298,18 +3481,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _indoor_temp = self._get_indoor_temp()
         await self.automation_engine.handle_morning_wakeup(indoor_temp=_indoor_temp)
         self._feed_override_grace_fsm_if_cleared(_was_overridden)
-        # Issue #594 Phase R Step 1b: previously also closed the door/window
-        # SYNC_RECONCILE coverage gap (that machinery was removed in Issue #757
-        # Phase 6 Step 4 along with door/window's shadow-comparison axes); this mirror
-        # call still runs for classification_mirror/occupancy_mirror coverage.
-        await self._mirror_to_shadow("handle_morning_wakeup", indoor_temp=_indoor_temp)
 
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
         _was_overridden = self._any_override_active()
         await self.automation_engine.handle_bedtime()
         self._feed_override_grace_fsm_if_cleared(_was_overridden)
-        await self._mirror_to_shadow("handle_bedtime")
 
     def _compute_pre_cool_trigger_time(self) -> datetime | None:
         """Compute the pre-cool trigger time for tonight.
@@ -4411,13 +3588,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result = await self.automation_engine.handle_pre_cool(
             indoor_temp=indoor_temp,
             nat_vent_just_closed=nat_vent_just_closed,
-        )
-        # Issue #594 Phase R Step 1b: previously also closed the door/window
-        # SYNC_RECONCILE coverage gap (that machinery was removed in Issue #757
-        # Phase 6 Step 4 along with door/window's shadow-comparison axes); this mirror
-        # call still runs for classification_mirror/occupancy_mirror coverage.
-        await self._mirror_to_shadow(
-            "handle_pre_cool", indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed
         )
         _LOGGER.info("Pre-cool trigger handler completed: %s", result)
         if "suppressed" in result:
@@ -4602,7 +3772,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             c.windows_recommended if c else False,
                         )
                         await self.automation_engine.handle_door_window_open(eid)
-                        await self._mirror_to_shadow("handle_door_window_open", eid)
                         # Trigger coordinator refresh so sensor entities reflect post-evaluation state
                         self.hass.async_create_task(self.async_request_refresh())
                         if self._today_record:
@@ -4656,7 +3825,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ):
                     self._today_record.window_physical_close_time = dt_util.now().isoformat()
                 await self.automation_engine.handle_all_doors_windows_closed()
-                await self._mirror_to_shadow("handle_all_doors_windows_closed")
                 # Issue #489: post-decision refresh, mirroring the open path's
                 # post-handle_door_window_open refresh above — covers the real-pause-
                 # resume case (HVAC mode/temp restored, grace started), not just the
@@ -4702,16 +3870,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self.automation_engine.nat_vent_temperature_check(
                 float(_new_temp_attr), outdoor=self._last_outdoor_temp
             )
-        # Issue #613: mirrored unconditionally (not gated on production's own
-        # _natural_vent_active) — nat_vent_temperature_check() internally no-ops on
-        # `self._natural_vent_active` (the SHADOW's own flag when bound to the shadow
-        # instance), which is exactly the independent-conclusion check this diagnostic
-        # needs: does the shadow's own state agree production should even be running
-        # this check right now.
-        if _new_temp_attr is not None and _new_temp_attr != _old_temp_attr:
-            await self._mirror_to_shadow(
-                "nat_vent_temperature_check", float(_new_temp_attr), outdoor=self._last_outdoor_temp
-            )
 
         # Issue #327: Thermostatic fan re-evaluation on every indoor temp tick.
         # Fires whenever the thermostat reports a new current_temperature and a CA fan is running
@@ -4723,18 +3881,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active)
         ):
             await self.automation_engine.fan_thermostat_check(
-                indoor=self._get_indoor_temp(),
-                outdoor=self._last_outdoor_temp,
-                trigger="tick",
-            )
-        # Issue #615: mirrored unconditionally, same rationale as nat_vent_temperature_check
-        # above — fan_thermostat_check() is documented as idempotent/no-op-safe when no CA
-        # fan is active, and per Issue #608's own finding this is usually the function that
-        # actually EXITS a nat-vent session on this dispatch path (wins the race before
-        # check_natural_vent_conditions()'s chain ever runs) — a gap in #613's original scope.
-        if _new_temp_attr is not None and _new_temp_attr != _old_temp_attr:
-            await self._mirror_to_shadow(
-                "fan_thermostat_check",
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
                 trigger="tick",
@@ -4792,14 +3938,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._current_classification.hvac_mode if self._current_classification else None
                     ),
                 )
-                await self._mirror_to_shadow(
-                    "handle_manual_override_during_pause",
-                    old_mode=old_state.state,
-                    new_mode=new_state.state,
-                    classification_mode=(
-                        self._current_classification.hvac_mode if self._current_classification else None
-                    ),
-                )
+                self._feed_override_grace_fsm_on_detect("handle_manual_override_during_pause")
                 self._cancel_all_debounce_timers()
             else:
                 _LOGGER.debug(
@@ -4860,12 +3999,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
             )
-            await self._mirror_to_shadow(
-                "handle_manual_override",
-                old_mode=old_state.state,
-                new_mode=new_state.state,
-                classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
-            )
+            self._feed_override_grace_fsm_on_detect("handle_manual_override")
         elif (
             old_state.state != new_state.state
             and new_state.state not in ("unavailable", "unknown")
@@ -4944,12 +4078,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
             )
-            await self._mirror_to_shadow(
-                "handle_manual_override",
-                old_mode=old_state.state,
-                new_mode=new_state.state,
-                classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
-            )
+            self._feed_override_grace_fsm_on_detect("handle_manual_override")
 
         # HVAC runtime tracking via hvac_action (preferred) or mode
         new_action = new_state.attributes.get("hvac_action", "").lower()
@@ -5064,18 +4193,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # hvac_action transitioning to "fan" is a thermostat-internal event unrelated
                 # to a physically separate whole-house fan. Archetype-aware derivation checks
                 # the real fan entity's state instead of assuming this transition means it.
-                thermostat_fan_running=_thermostat_fan_running_347,
-                any_sensor_open=self._any_sensor_open(),
-                trigger="thermostat_state_change",
-                recent_hvac_session_ended=_recent_hvac_session_ended_618,
-            )
-            # Issue #618: this call site had no matching _mirror_to_shadow — a pre-existing gap
-            # discovered while fixing the recent_hvac_session_ended stomp above, on top of #615's
-            # coverage fix (which mirrored the other 3 of 4 reconcile_fan_on_startup call sites).
-            await self._mirror_to_shadow(
-                "reconcile_fan_on_startup",
-                indoor=self._get_indoor_temp(),
-                outdoor=self._last_outdoor_temp,
                 thermostat_fan_running=_thermostat_fan_running_347,
                 any_sensor_open=self._any_sensor_open(),
                 trigger="thermostat_state_change",
@@ -5272,17 +4389,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_setpoint_f=old_temp,
                     new_setpoint_f=new_temp,
                 )
-                await self._mirror_to_shadow(
-                    "handle_manual_override",
-                    source="setpoint",
-                    old_mode=old_state.state,
-                    new_mode=new_state.state,
-                    classification_mode=(
-                        self._current_classification.hvac_mode if self._current_classification else None
-                    ),
-                    old_setpoint_f=old_temp,
-                    new_setpoint_f=new_temp,
-                )
+                self._feed_override_grace_fsm_on_detect("handle_manual_override")
         elif _fan_cancel_in_this_event and _setpoint_changed:
             # Issue #359 Fix A: fan-off echo branch — the thermostat restored its comfort-program
             # setpoint as a side-effect of the fan being turned off (ecobee behavior).  Do NOT start
@@ -5337,16 +4444,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (which sets the "user turned fan ON" override flag).
             if _fan_cancel_in_this_event:
                 self.automation_engine.on_fan_turned_off(fan_before=str(old_fan_mode), fan_after=str(new_fan_mode))
-                await self._mirror_to_shadow(
-                    "on_fan_turned_off", fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
-                )
             else:
                 self.automation_engine.handle_fan_manual_override(
                     fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
                 )
-                await self._mirror_to_shadow(
-                    "handle_fan_manual_override", fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
-                )
+                self._feed_override_grace_fsm_on_detect("handle_fan_manual_override")
 
     async def _async_command_fan_entity(self, *, on: bool) -> bool:
         """Issue a turn_on or turn_off service call to the configured WHF fan entity (Issue #361).
@@ -5513,12 +4615,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.automation_engine.handle_fan_manual_override(
                 fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
             )
-            await self._mirror_to_shadow(
-                "handle_fan_manual_override",
-                fan_before=str(old_state.state),
-                fan_after=str(new_state.state),
-                event_context_id=event_context_id,
-            )
+            self._feed_override_grace_fsm_on_detect("handle_fan_manual_override")
         elif not is_on and self.automation_engine._fan_active:
             # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
             # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
@@ -5530,12 +4627,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self.automation_engine.on_fan_turned_off(
                 fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
-            )
-            await self._mirror_to_shadow(
-                "on_fan_turned_off",
-                fan_before=str(old_state.state),
-                fan_after=str(new_state.state),
-                event_context_id=event_context_id,
             )
 
     async def _async_fan_remote_changed(self, event: Event) -> None:
@@ -5715,15 +4806,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 remote_speed=burst.speed,
                 is_remote_event=True,
             )
-            await self._mirror_to_shadow(
-                "handle_fan_manual_override",
-                fan_before="?",
-                fan_after="on",
-                duration_override=duration_seconds,
-                remote_timer_hours=burst.timer_hours if burst.has_timer else None,
-                remote_speed=burst.speed,
-                is_remote_event=True,
-            )
+            self._feed_override_grace_fsm_on_detect("handle_fan_manual_override")
         else:
             self.automation_engine.handle_fan_speed_observed(burst.speed, is_remote_event=True)
         await self.async_request_refresh()
@@ -5874,12 +4957,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
             )
-            await self._mirror_to_shadow(
-                "apply_classification",
-                classification,
-                predicted_indoor=self._last_predicted_indoor,
-                indoor_temp=self._get_indoor_temp(),
-            )
             _LOGGER.info(
                 "Setpoint re-asserted after fan-off echo: reasserted day_type=%s hvac_mode=%s",
                 classification.day_type,
@@ -5959,18 +5036,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         if archetype_fan_running and hvac_action not in ("heating", "cooling"):
             await ae.reconcile_fan_on_startup(
-                indoor=self._get_indoor_temp(),
-                outdoor=self._last_outdoor_temp,
-                thermostat_fan_running=archetype_fan_running,
-                any_sensor_open=self._any_sensor_open(),
-                trigger="post_grace_expiry",
-            )
-            # Issue #618: this call site (the 4th of the "4 different sites" documented on
-            # reconcile_fan_on_startup) had no matching _mirror_to_shadow — a second
-            # pre-existing gap found while auditing all 4 call sites for the same issue
-            # already confirmed at the thermostat_state_change site above.
-            await self._mirror_to_shadow(
-                "reconcile_fan_on_startup",
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
                 thermostat_fan_running=archetype_fan_running,
@@ -8086,13 +7151,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Re-evaluate the lifecycle FSMs whose tracked state this event just changed
         in production (Issue #647).
 
-        Production-only — this is called from ``_emit_event`` (the real
-        ``AutomationEngine``'s callback), never from ``_on_shadow_emit_event`` (the
-        shadow engine's own event sink), matching every other ``_evaluate_*_fsm()``
-        call site's convention of reading ``self.automation_engine`` (production),
-        never the shadow engine. Each branch is isolated exactly like
-        ``_mirror_to_shadow()``'s own finally block: an exception here is logged and
-        swallowed, never allowed to affect production.
+        Called from ``_emit_event`` (the real ``AutomationEngine``'s callback). Each
+        branch is isolated the same way ``_feed_override_grace_fsm_on_detect()`` is:
+        an exception here is logged and swallowed, never allowed to affect production.
         """
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
@@ -9513,11 +8574,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.clear()
         self._unsubscribe_door_window_listeners()
         self.automation_engine.cleanup()
-        # Issue #613: the shadow engine schedules its own real async_call_later timers
-        # (grace, fan min-cycle, thermo backstop, etc.) via the real HA event loop even
-        # though its dry_run=True guards only the service-call choke points — cleanup()
-        # cancels those the same way it does for production.
-        self.shadow_automation_engine.cleanup()
 
 
 def _decide_pre_cool_reschedule(

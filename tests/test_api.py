@@ -747,24 +747,25 @@ class TestCancelViewsGraceCancellation:
             mock_call_later.assert_called_once()
 
 
-class TestResumeFromPauseViewShadowMirror:
-    """Issue #615: ClimateAdvisorResumeFromPauseView.post() must mirror
-    resume_from_pause() onto the shadow engine too — the only decision method
-    triggered from api.py rather than coordinator.py."""
+class TestResumeFromPauseViewFeedsOverrideGraceFsm:
+    """Issue #757 Phase 6 Step 8: ClimateAdvisorResumeFromPauseView.post() used to
+    mirror resume_from_pause() onto the now-removed shadow engine — a side effect
+    of that mirror call was feeding the override/grace FSM's DASHBOARD_RESUME entry
+    event via `_mirror_to_shadow()`'s own finally block. With the shadow engine
+    gone, the view now feeds that FSM event directly via
+    `coordinator._feed_override_grace_fsm_on_detect("resume_from_pause")`."""
 
     def _post(self, coordinator):
         import asyncio
-        from unittest.mock import AsyncMock
 
         from custom_components.climate_advisor.api import ClimateAdvisorResumeFromPauseView
 
         view = ClimateAdvisorResumeFromPauseView()
         request = _make_view_request(coordinator)
-        coordinator._mirror_to_shadow = AsyncMock()
         resp = asyncio.run(view.post(request))
         return resp.json_data
 
-    def test_mirrors_resume_from_pause_when_paused(self):
+    def test_feeds_override_grace_fsm_when_paused(self):
         from unittest.mock import AsyncMock
 
         coordinator = MagicMock()
@@ -773,12 +774,12 @@ class TestResumeFromPauseViewShadowMirror:
 
         self._post(coordinator)
 
-        coordinator._mirror_to_shadow.assert_awaited_once_with("resume_from_pause")
+        coordinator._feed_override_grace_fsm_on_detect.assert_called_once_with("resume_from_pause")
 
-    def test_does_not_mirror_when_not_paused(self):
+    def test_does_not_feed_fsm_when_not_paused(self):
         coordinator = MagicMock()
         coordinator.automation_engine.is_paused_by_door = False
 
         self._post(coordinator)
 
-        coordinator._mirror_to_shadow.assert_not_awaited()
+        coordinator._feed_override_grace_fsm_on_detect.assert_not_called()

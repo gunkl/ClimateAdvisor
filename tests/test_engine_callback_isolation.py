@@ -5,9 +5,12 @@ Covers:
   - Bundle application: passing ``AutomationEngineCallbacks`` sets exactly those 9.
   - Coordinator regression: ``_build_production_automation_callbacks()`` is a
     behavior-preserving refactor of the old post-hoc assignment block.
-  - Hazard characterization: documents (does not defend against) the real danger of
-    handing a second engine instance the production coordinator's own callables —
-    a concrete negative example for Block 5 subtask Q's review.
+
+Issue #757 Phase 6 Step 8: the shadow-engine-specific tests that used to live here
+(bundle isolation on a live shadow engine, and the hazard-characterization test for
+sharing production's callbacks with a second engine) were removed along with the
+dual-engine shell itself — there is no second engine to isolate a bundle from
+anymore.
 """
 
 from __future__ import annotations
@@ -154,61 +157,3 @@ class TestCoordinatorRefactorIsBehaviorPreserving:
         assert ae._is_recent_fan_command_callback == coordinator._is_recent_fan_command
         assert ae._reclassify_callback == coordinator._on_whf_release_reclassify
         assert ae._sensor_debounce_pending_callback() == bool(coordinator._door_open_timers)
-
-    def test_shadow_automation_engine_is_constructed_with_its_own_isolated_bundle(self) -> None:
-        """Superseded by Issue #613 (Block 5 subtask Q): the coordinator now builds a
-        real shadow engine at construction time, not the ``None`` placeholder N2 left
-        here. See ``tests/test_shadow_engine_live.py`` for full Q-phase coverage —
-        this test just confirms N2's own bundle-isolation building blocks are what Q
-        actually used, not a hand-rolled reimplementation.
-        """
-        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        shadow = coordinator.shadow_automation_engine
-        assert shadow is not None
-        assert shadow.role == "shadow"
-        assert shadow is not coordinator.automation_engine
-        assert shadow._revisit_callback is None
-        assert shadow._request_refresh_callback is not coordinator.automation_engine._request_refresh_callback
-
-
-class TestHazardCharacterization:
-    """Documents the real danger a shadow engine must avoid (Block 5 subtask Q).
-
-    There is no runtime defense here by design (see the plan's Design Decision
-    section) — isolation is structural, enforced by which callables get wired at
-    construction time, not by a check inside these methods. This test proves the
-    documented hazard is real and reproducible today: reusing the production
-    coordinator's own callbacks on a second engine instance lets that second
-    engine's events land in the SAME production event log and trigger the SAME
-    real side effects as the production engine, regardless of which instance
-    fired them.
-    """
-
-    def test_second_engine_sharing_production_callbacks_writes_into_production_event_log(
-        self,
-    ) -> None:
-        coordinator, _fake_hass, _scheduler, event_log = build_headless_coordinator()
-
-        # Deliberately misconfigured — as subtask Q's review must never allow:
-        # a second engine built with the PRODUCTION coordinator's own bundle.
-        hazardous_bundle = coordinator._build_production_automation_callbacks()
-        second_engine = AutomationEngine(
-            hass=None,
-            climate_entity="climate.test",
-            weather_entity="weather.test",
-            door_window_sensors=[],
-            notify_service="notify.test",
-            config={},
-            callbacks=hazardous_bundle,
-            role="shadow",
-        )
-
-        assert second_engine._emit_event_callback is not None
-        second_engine._emit_event_callback("hazard_probe_event", {"source": "second_engine"})
-
-        assert any(evt[0] == "hazard_probe_event" for evt in event_log), (
-            "A second engine built with the production coordinator's own callbacks "
-            "leaked an event into the production event log — exactly the hazard "
-            "AutomationEngineCallbacks exists to make structurally impossible for "
-            "a real shadow engine (Block 5 subtask Q must build its own bundle)."
-        )

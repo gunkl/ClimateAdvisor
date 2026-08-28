@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.73"
+VERSION = "0.6.74"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.74": [
+        "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 8"
+        " — collapses the dual-engine shadow-comparison shell. With every subsystem's"
+        " legacy/FSM cutover flag already gone (Steps 1-7), the coordinator's two live"
+        " AutomationEngine instances had become behaviorally identical, so the second"
+        " (shadow) instance, its diagnostic sensor, its primary-switch entity, and the"
+        " comparison plumbing between them are no longer needed. One internal safety"
+        " detail: 8 call sites that fed the override/grace FSM as a side effect of the"
+        " now-removed mirroring call were rewired to feed it directly, so that FSM"
+        " keeps receiving the same events it always did. Also removed a dead"
+        " historical-scenario tool mode whose only data source (the shadow-comparison"
+        " diagnostic) no longer exists.",
+    ],
     "0.6.73": [
         "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 7"
         " — removes the legacy (pre-FSM) classification code path, the final"

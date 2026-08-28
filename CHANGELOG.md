@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.74] — 2026-08-27
+
+- Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 8 — collapses the dual-engine shadow-comparison shell. With every subsystem's legacy/FSM cutover flag already gone (Steps 1-7), the coordinator's two live AutomationEngine instances had become behaviorally identical, so the second (shadow) instance, its diagnostic sensor, its primary-switch entity, and the comparison plumbing between them are no longer needed. One internal safety detail: 8 call sites that fed the override/grace FSM as a side effect of the now-removed mirroring call were rewired to feed it directly, so that FSM keeps receiving the same events it always did. Also removed a dead historical-scenario tool mode whose only data source (the shadow-comparison diagnostic) no longer exists.
+
 ## [0.6.73] — 2026-08-23
 
 - Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 7 — removes the legacy (pre-FSM) classification code path, the final subsystem in the migration. The FSM-based ODE ceiling guard has been production-authoritative for weeks with zero corpus divergence, so the ~190-line legacy eligibility/dormancy/breach-scan/lead-time block and the differential-comparator scaffolding are no longer needed — no automation subsystem in Climate Advisor carries a legacy/FSM cutover flag anymore. No new production bugs were found.

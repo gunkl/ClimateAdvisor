@@ -14,7 +14,6 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -84,7 +83,6 @@ async def async_setup_entry(
         ClimateAdvisorOutdoorTempSensor(coordinator, entry),
         ClimateAdvisorForecastHighSensor(coordinator, entry),
         ClimateAdvisorForecastLowSensor(coordinator, entry),
-        ClimateAdvisorShadowEngineStatusSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -461,103 +459,3 @@ class ClimateAdvisorForecastLowSensor(ClimateAdvisorBaseSensor):
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the forecast low temperature sensor."""
         super().__init__(coordinator, entry, ATTR_FORECAST_LOW, "Forecast Low", "mdi:thermometer-chevron-down")
-
-
-class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
-    """Diagnostic sensor: agreement between the live production and shadow automation
-    engines' nat-vent lifecycle state (Issue #613, Block 5 / epic #594, subtask Q),
-    plus (Issue #633) the independent unified nat-vent FSM's agreement with production.
-
-    The shadow engine is permanently dry_run=True and never issues a real command —
-    this sensor has zero occupant HVAC impact. It exists to validate the Block 5
-    architecture migration, not to inform HVAC behavior, so it is deliberately NOT
-    wired into any of the four occupant-facing Status-tab cards (see CLAUDE.md's
-    Status Card Ontology, Issue #527) — those each answer an occupant-facing
-    question this sensor doesn't.
-    """
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
-        """Initialize the shadow engine status sensor."""
-        super().__init__(coordinator, entry, "shadow_engine_status", "Shadow Engine Status", "mdi:compare")
-
-    @property
-    def native_value(self) -> str:
-        """Return "agree", "disagree", or "inactive" (before the first mirrored decision)."""
-        diag = self.coordinator.shadow_engine_diagnostic
-        if diag is None:
-            return "inactive"
-        return "agree" if diag["agrees"] else "disagree"
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Both engines' derived lifecycle state and when the comparison last ran."""
-        diag = self.coordinator.shadow_engine_diagnostic
-        if diag is None:
-            return {}
-        return {
-            "checked_at": diag["checked_at"],
-            # Issue #613/#633: nat-vent's own production/shadow/FSM state fields
-            # ("production_state"/"shadow_state"/"nat_vent_fsm_state") used to be
-            # exposed here. Issue #757 Phase 6 Step 5 removed them along with their
-            # underlying coordinator.shadow_engine_diagnostic computation (nat-vent's
-            # dispatcher is now unconditionally FSM-authoritative in production, and
-            # the diagnostic machinery feeding these keys — including the independent
-            # _evaluate_nat_vent_fsm()/_nat_vent_fsm_state replica — had zero other
-            # consumers). Same removal shape as door/window's Step 4 below.
-            # Issue #660: door/window's own production/shadow/FSM state fields used to
-            # be exposed here (Step 1b). Issue #757 Phase 6 Step 4 removed them along
-            # with their underlying coordinator.shadow_engine_diagnostic computation
-            # (door/window's dispatcher is now unconditionally FSM-authoritative in
-            # production, and the diagnostic machinery feeding these keys had zero
-            # other consumers) — unlike override/grace's analogous fields below, which
-            # Step 3 deliberately left in place because their underlying machinery was
-            # deferred rather than removed.
-            # Issue #594 Phase R / #660 / #664 originally surfaced 2 independent
-            # per-subsystem authoritative flags here (nat-vent, door/window). Issue
-            # #729 retired the 3 independent FSM-authoritative switches — each
-            # engine's FSM-vs-legacy behavior is fixed at construction, and which
-            # whole engine is primary is the single remaining axis, so a single
-            # field replaces the 2 booleans that used to vary independently.
-            "fsm_engine_primary": self.coordinator.shadow_engine_primary,
-            # Issue #661: override/grace's own production/shadow/FSM state fields were
-            # already computed in coordinator.shadow_engine_diagnostic but never exposed
-            # here — the same observability gap door/window had before #660, now closed
-            # for override/grace too. No authoritative switch exists for override/grace
-            # (see AutomationEngine's override/grace handlers) — this is diagnostic only.
-            "override_grace_production_state": diag.get("override_grace_production_state"),
-            "override_grace_shadow_state": diag.get("override_grace_shadow_state"),
-            "override_grace_fsm_state": diag.get("override_grace_fsm_state"),
-            "override_grace_mirror_agrees": diag.get("override_grace_mirror_agrees"),
-            "override_grace_fsm_agrees": diag.get("override_grace_fsm_agrees"),
-            # Issue #742: classification's own production/shadow agreement (the
-            # decide_scheduled_band_gate() result each engine computes from its own
-            # live flags). Deliberately has no separate FSM axis —
-            # classification_fsm.py is genuinely stateless (see its own module
-            # docstring's five-whys), so there is no third comparison point.
-            "classification_production_state": diag.get("classification_production_state"),
-            "classification_shadow_state": diag.get("classification_shadow_state"),
-            "classification_mirror_agrees": diag.get("classification_mirror_agrees"),
-            # Issue #744: occupancy dispatch's own production/shadow agreement (the
-            # should_defer_to_occupancy_setback() result each engine computes from its
-            # own live _occupancy_mode). Same "no separate FSM axis" shape as
-            # classification above — occupancy_fsm.py is genuinely stateless.
-            "occupancy_production_state": diag.get("occupancy_production_state"),
-            "occupancy_shadow_state": diag.get("occupancy_shadow_state"),
-            "occupancy_mirror_agrees": diag.get("occupancy_mirror_agrees"),
-            # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
-            # extraction): economizer's own production/shadow agreement (each engine's
-            # own economizer_lifecycle_state property, derived from its live
-            # _economizer_active/_economizer_phase flags). Deliberately has no separate
-            # FSM axis — economizer_fsm.py's transition state is not independently
-            # tracked as a third comparison point.
-            "economizer_production_state": diag.get("economizer_production_state"),
-            "economizer_shadow_state": diag.get("economizer_shadow_state"),
-            "economizer_mirror_agrees": diag.get("economizer_mirror_agrees"),
-            # Issue #685: cascade-noise wall-clock debounce state per comparison axis
-            # (disagreement_seconds, sustained, cumulative_seconds_today), plus the
-            # date the cumulative counters last reset. Additive only.
-            "debounce": diag.get("debounce"),
-            "cumulative_reset_date": diag.get("cumulative_reset_date"),
-        }

@@ -65,15 +65,6 @@ class TestControllerRegistration:
         ae = _engine()
         assert ae._lifecycle_dispatcher.check_registry_completeness() == []
 
-    def test_each_engine_owns_a_separate_dispatcher_instance(self) -> None:
-        """Decision Point 1 of the approved plan: never shared, structural
-        isolation — production and shadow must not be able to see each other's
-        events."""
-        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        assert coordinator.automation_engine._lifecycle_dispatcher is not (
-            coordinator.shadow_automation_engine._lifecycle_dispatcher
-        )
-
 
 class TestDoorPauseEvents:
     def test_pause_starts_emits_door_pause_started(self) -> None:

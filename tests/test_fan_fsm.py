@@ -14,7 +14,9 @@ fan_drift_reconciliation.py/desired_state.py/fan_thermostat_decision.py).
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from custom_components.climate_advisor.desired_state import FanCycleOutcome
 from custom_components.climate_advisor.fan_drift_reconciliation import FanDriftOutcome
@@ -386,3 +388,121 @@ class TestTransitionChangedProperty:
         inputs = _inputs(fan_active=True)
         t = transition(_IDLE, FanFsmEvent(FanFsmEventKind.STARTUP_RECONCILE, inputs))
         assert t.changed
+
+
+# Relocated from tests/test_shadow_engine_coverage.py (Issue #757 Phase 6 Step 8 —
+# that file's shadow-engine-registry tests were removed along with the dual-engine
+# shell; this registry-enforcement test is independent of the shadow engine and
+# still applies). Same registry-enforcement shape as the former
+# _OVERRIDE_GRACE_EVENT_KIND_REGISTRY/_DOOR_WINDOW_EVENT_KIND_REGISTRY (both
+# removed, Issue #757 Phase 6 Steps 3/4), for FanFsmEventKind. Every real fan/WHF
+# dispatch site lives INSIDE AutomationEngine itself (automation.py), not in
+# coordinator.py/api.py — fan_fsm.py's own module docstring documents all 16
+# members as "one per real call site read in full for this phase", each a method
+# on AutomationEngine. So this registry's scan target is automation.py.
+#
+# "unreachable: <reason>" is for FSM event kinds that exist in the enum but are
+# deliberately never dispatched from a real call site (documented, not silently missing).
+_AUTOMATION_PY = Path(__file__).parent.parent / "custom_components" / "climate_advisor" / "automation.py"
+
+_FAN_FSM_EVENT_KIND_REGISTRY: dict[str, str] = {
+    "ACTIVATE_REQUESTED": "reachable",
+    "DEACTIVATE_REQUESTED": "reachable",
+    # Issue #731 Phase 5: reconcile_fan_on_startup()'s "fan is off" write group spans
+    # TWO independent lifecycles — _fan_active/_fan_on_since (fan-lifecycle, owned by
+    # _apply_fan_fsm_state()) and _natural_vent_active/_nat_vent_soft_start (nat-vent's
+    # own lifecycle, which _apply_fan_fsm_state() does not and should not own). Routing
+    # this write group through the dispatcher would silently drop the nat-vent-side flag
+    # changes (the FSM branch would apply only the fan-side quarter of this reconcile
+    # decision) — a correctness regression, not a gap in wiring effort. Stays a direct
+    # write; see automation.py's own comment at this call site for the full rationale.
+    "STARTUP_RECONCILE": (
+        "unreachable: reconcile_fan_on_startup()'s write group spans nat-vent's own "
+        "lifecycle fields, which _apply_fan_fsm_state() doesn't own — dispatching would "
+        "silently drop the nat-vent-side half of the decision"
+    ),
+    "MANUAL_OVERRIDE_DETECTED": "reachable",
+    "OVERRIDE_CLEARED": "reachable",
+    # Issue #731 Phase 5: on_fan_turned_off()'s normal fan-off path is deliberately left
+    # without its own USER_FAN_OFF dispatch — its entire flag-clearing effect IS
+    # _clear_fan_flags_and_start_grace() (FLAGS_CLEARED_FOR_GRACE's real dispatch site),
+    # so a second dispatch here would report the same net state change twice for one
+    # logical event (double-dispatch), not add real coverage.
+    "USER_FAN_OFF": (
+        "unreachable: fully delegated to FLAGS_CLEARED_FOR_GRACE to avoid "
+        "double-dispatching the same logical event — see fan_fsm.py's own "
+        "USER_FAN_OFF/FLAGS_CLEARED_FOR_GRACE docstring split"
+    ),
+    "TIMER_BOUNDARY_SETTLE": "reachable",
+    "FLAGS_CLEARED_FOR_GRACE": "reachable",
+    "MIN_RUNTIME_CYCLE_ON": "reachable",
+    "MIN_RUNTIME_CYCLE_OFF": "reachable",
+    "MIN_RUNTIME_CYCLE_STOPPED": "reachable",
+    "DRIFT_TICK": "reachable",
+    "THERMO_BACKSTOP_TICK": "reachable",
+    "THERMOSTAT_CHECK_TICK": "reachable",
+    "WHF_SUPPRESSION_REQUESTED": "reachable",
+    "WHF_RELEASE_REQUESTED": "reachable",
+}
+
+
+class TestFanFsmEventCoverage:
+    def test_every_event_kind_is_registered(self) -> None:
+        from custom_components.climate_advisor.fan_fsm import FanFsmEventKind
+
+        all_kinds = {member.name for member in FanFsmEventKind}
+        unregistered = all_kinds - set(_FAN_FSM_EVENT_KIND_REGISTRY)
+        assert not unregistered, (
+            f"New FanFsmEventKind member(s) aren't in _FAN_FSM_EVENT_KIND_REGISTRY: "
+            f'{sorted(unregistered)}. Classify each as "reachable" (and wire a real '
+            f'dispatch site in automation.py) or "unreachable: <reason>" — see Issue #731.'
+        )
+
+    def test_registry_entries_reference_real_members(self) -> None:
+        from custom_components.climate_advisor.fan_fsm import FanFsmEventKind
+
+        all_kinds = {member.name for member in FanFsmEventKind}
+        unknown = set(_FAN_FSM_EVENT_KIND_REGISTRY) - all_kinds
+        assert not unknown, (
+            f"Registry references FanFsmEventKind member(s) that no longer exist "
+            f"(renamed or removed?): {sorted(unknown)}. Update the registry."
+        )
+
+    def test_every_reachable_kind_has_a_real_dispatch_site(self) -> None:
+        """Positive control: every 'reachable' entry must appear as a direct
+        FanFsmEventKind.<X> reference in automation.py — unlike override/grace and
+        door/window (dispatched from coordinator.py/api.py via mirror-name-keyed
+        dicts), every real fan/WHF dispatch site is a method on AutomationEngine
+        itself, so automation.py is the correct — and only — scan target."""
+        src = _AUTOMATION_PY.read_text(encoding="utf-8")
+        for name, classification in _FAN_FSM_EVENT_KIND_REGISTRY.items():
+            if classification != "reachable":
+                continue
+            member_pattern = re.compile(r"\bFanFsmEventKind\." + re.escape(name) + r"\b")
+            assert member_pattern.search(src), (
+                f'{name} is marked "reachable" but no direct FanFsmEventKind.{name} '
+                f"reference was found in automation.py"
+            )
+
+    def test_every_unreachable_kind_has_no_real_dispatch_site(self) -> None:
+        """Inverse positive control: an 'unreachable' entry must NOT appear as a
+        direct FanFsmEventKind.<X> dispatch reference in automation.py — catches the
+        registry claiming a kind is deliberately unwired when a later phase actually
+        wired it (the classification going stale in the opposite direction)."""
+        src = _AUTOMATION_PY.read_text(encoding="utf-8")
+        for name, classification in _FAN_FSM_EVENT_KIND_REGISTRY.items():
+            if not classification.startswith("unreachable"):
+                continue
+            member_pattern = re.compile(r"\bFanFsmEventKind\." + re.escape(name) + r"\b")
+            assert not member_pattern.search(src), (
+                f'{name} is marked "unreachable" but a direct FanFsmEventKind.{name} '
+                f'reference now exists in automation.py — reclassify to "reachable" '
+                f"(Issue #731)."
+            )
+
+    def test_positive_control_unregistered_kind_is_caught(self) -> None:
+        """Proves test_every_event_kind_is_registered actually fails on a genuinely
+        unregistered member, not just passing vacuously."""
+        all_kinds = {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
+        unregistered = all_kinds - set(_FAN_FSM_EVENT_KIND_REGISTRY)
+        assert unregistered == {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}

@@ -16,7 +16,9 @@ documented defensive no-op/"unreachable" branches. Mirrors
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 
 from custom_components.climate_advisor.override_grace_fsm import (
     OverrideGraceFsmEvent,
@@ -25,6 +27,8 @@ from custom_components.climate_advisor.override_grace_fsm import (
     transition,
 )
 from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
+
+_COORDINATOR_PY = Path(__file__).parent.parent / "custom_components" / "climate_advisor" / "coordinator.py"
 
 _NOW = datetime(2026, 8, 14, 12, 0, 0, tzinfo=UTC)
 
@@ -377,3 +381,29 @@ class TestUnprotectedGraceStarted:
         existing confirm-axis behavior."""
         t = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED))
         assert t.to_state[0] == OverrideConfirmState.IDLE
+
+
+class TestBedtimeAndMorningWakeupFeedFsmOnOverrideClear:
+    """Relocated from ``tests/test_shadow_engine_coverage.py`` (Issue #757 Phase 6
+    Step 8 — that file's shadow-engine-registry tests were removed along with the
+    dual-engine shell; this per-caller wiring assertion is independent of the
+    shadow engine and still applies)."""
+
+    def test_bedtime_and_morning_wakeup_feed_fsm_on_override_clear(self) -> None:
+        """_async_bedtime()/_async_morning_wakeup() must call
+        _feed_override_grace_fsm_if_cleared() after the real engine call, so a fan-only
+        override cleared by either handler is fed to the FSM immediately instead of
+        waiting on _check_orphaned_grace()'s one-cycle-later self-heal (Issue #651)."""
+        src = _COORDINATOR_PY.read_text(encoding="utf-8")
+        # Match each method body up to the next method definition (async or sync) at the
+        # same indent level, so the assertion is scoped to that method's own body only.
+        bedtime_match = re.search(r"    async def _async_bedtime\(.*?\n    (?:async )?def ", src, re.DOTALL)
+        wakeup_match = re.search(r"    async def _async_morning_wakeup\(.*?\n    (?:async )?def ", src, re.DOTALL)
+        assert bedtime_match and "_feed_override_grace_fsm_if_cleared" in bedtime_match.group(0), (
+            "_async_bedtime() must call _feed_override_grace_fsm_if_cleared() after "
+            "automation_engine.handle_bedtime() (Issue #651)."
+        )
+        assert wakeup_match and "_feed_override_grace_fsm_if_cleared" in wakeup_match.group(0), (
+            "_async_morning_wakeup() must call _feed_override_grace_fsm_if_cleared() after "
+            "automation_engine.handle_morning_wakeup() (Issue #651)."
+        )

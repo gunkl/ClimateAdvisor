@@ -618,10 +618,6 @@ class TestBriefingNotificationSplit:
         coord.automation_engine._grace_active = False
         coord.automation_engine._last_resume_source = None
         coord.automation_engine.apply_classification = AsyncMock()
-        # Issue #615: _async_send_briefing() now mirrors apply_classification() onto
-        # the shadow engine too — coord is a bare MagicMock, so this attribute must be
-        # stubbed as AsyncMock explicitly or awaiting it raises TypeError.
-        coord._mirror_to_shadow = AsyncMock()
 
         # Mock learning engine
         coord.learning = MagicMock()
@@ -1024,7 +1020,6 @@ class TestBriefingRegeneration:
         coord.automation_engine._grace_active = False
         coord.automation_engine._last_resume_source = None
         coord.automation_engine.apply_classification = AsyncMock()
-        coord._mirror_to_shadow = AsyncMock()
 
         coord.learning = MagicMock()
         coord.learning.generate_suggestions.return_value = []

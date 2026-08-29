@@ -171,7 +171,7 @@ Use this taxonomy to classify findings before acting on them:
 | **TIME-DEPENDENT** | Cannot classify without more data over time | `solar_gain: 0 commits` on active-HVAC hot days — check after quiet days |
 | **CONTEXTUAL** | Technically real but fully explained by operational conditions | `ventilated_decay: 32 abandoned` (normal contact-open events) |
 | **NOISE** | Implementation detail user should never see | `observation_count_cool` off by 1 (flush lag) |
-| **RESOLVED** | Covered by a KNOWN_FIXES entry in current version | Off-by-one in HVAC observation count → Issue #156 [COVERED] |
+| **RESOLVED** | Matches a fix_history.jsonl entry at or before the current version | Off-by-one in HVAC observation count → Issue #156, fixed in v0.3.44 |
 
 **Common noise patterns:**
 
@@ -183,7 +183,7 @@ Use this taxonomy to classify findings before acting on them:
 
 **Classifying a finding step-by-step:**
 
-1. Is it covered by a `KNOWN_FIXES` entry at the current CA version? → **RESOLVED**
+1. Is it covered by a fix_history entry at or before the current CA version? → **RESOLVED**
 2. Is it a count discrepancy ≤ 1 or a flush-lag artifact? → **NOISE**
 3. Is it speculation about a pending (in-flight) observation? → **NOISE**
 4. Is the abandonment rate driven entirely by operational interruptions (`hvac_started`, `sensor_opened`, `fan_activated`) with committed count > 0? → **NOISE**

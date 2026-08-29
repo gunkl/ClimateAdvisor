@@ -1065,93 +1065,42 @@ async def build_operational_design_context(hass: Any, coordinator: Any, **kwargs
     return _OPERATIONAL_DESIGN_TEXT
 
 
-def _parse_version(version_str: str) -> tuple[int, ...]:
-    """Parse a dotted version string into a comparable tuple.
-
-    Examples: '0.4.47' -> (0, 4, 47);  '0.3.55' -> (0, 3, 55).
-    Returns (0,) on any parse failure.
-    """
-    try:
-        return tuple(int(x) for x in str(version_str).split("."))
-    except (ValueError, AttributeError):
-        return (0,)
-
-
 _KNOWN_FIXES_RECENT_COUNT = 15  # bound by count, same pattern as GITHUB_ISSUES_LIMIT
 
 
-def _select_relevant_fixes(known_fixes: dict, current_tuple: tuple[int, ...]) -> dict:
-    """Return the KNOWN_FIXES entries relevant to the investigator's cross-check.
-
-    Bounded by count, not by an exact version-equality threshold. An earlier version
-    of this filter kept an entry only when `version_fixed >= current version` — but on
-    a real running install `current version` is pinned to whatever's actually deployed,
-    so that threshold only ever matches the single most-recent release's fixes
-    (verified directly: one release after a fix ships, its entry already drops out of
-    context). That's too narrow to usefully answer "was this already fixed" for a user
-    who hasn't updated in a few releases — the entire purpose of this section.
-
-    Instead: always include any not-yet-deployed entry (version_fixed > current — a
-    known, still-open gap Claude should recognize rather than "discover" fresh), plus
-    the `_KNOWN_FIXES_RECENT_COUNT` most recently fixed entries. This stays properly
-    bounded regardless of how large KNOWN_FIXES grows or how often releases ship — the
-    two things the prior `scope_not_covered`-based rule failed at (see Issue #563:
-    that field was mandatory on every entry, so the rule matched all 169 of them).
-    """
-    not_yet_deployed = {
-        num: fix for num, fix in known_fixes.items() if _parse_version(fix.get("version_fixed", "0")) > current_tuple
-    }
-    already_fixed_nums = sorted(
-        (num for num in known_fixes if num not in not_yet_deployed),
-        key=lambda num: _parse_version(known_fixes[num].get("version_fixed", "0")),
-        reverse=True,
-    )
-    recent = {num: known_fixes[num] for num in already_fixed_nums[:_KNOWN_FIXES_RECENT_COUNT]}
-    return {**not_yet_deployed, **recent}
-
-
-def _release_note_bullet(release_notes: dict, version: str, issue_num: int) -> str:
-    """Find the RELEASE_NOTES bullet for a given issue number within a version's notes.
-
-    Matches bullets formatted "Fix #N: ..." or "Feat #N: ...". Returns "" if no match,
-    so the caller can fall back to the KNOWN_FIXES title.
-    """
-    prefix_fix = f"Fix #{issue_num}:"
-    prefix_feat = f"Feat #{issue_num}:"
-    for note in release_notes.get(version, []):
-        if note.startswith(prefix_fix) or note.startswith(prefix_feat):
-            return note
-    return ""
-
-
 async def build_known_fixes_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
-    """Build KNOWN-FIXED ISSUES section, bounded to a recent-and-relevant subset.
+    """Build KNOWN-FIXED ISSUES section, bounded to a relevant-and-recent subset.
 
-    Each entry is rendered as its RELEASE_NOTES bullet (short, occupant-outcome
-    language, already mandatory for every release) rather than the KNOWN_FIXES
-    `title`/`scope_covered` fields, which are internal engineering detail aimed at
-    a PR reviewer, not the investigator's cross-check use case. Falls back to
-    `title` only when no matching RELEASE_NOTES bullet is found.
+    Since Issue #702, this reads `fix_history.py` (a streaming search over
+    `fix_history.jsonl`) instead of the old `KNOWN_FIXES`/`RELEASE_NOTES` dicts that
+    used to live in const.py. Not-yet-deployed fixes always surface; the rest are
+    ranked by relevance to the investigation's `focus` when one is given, falling back
+    to recency otherwise — a strict improvement over the old recency-only selection,
+    which could miss the actually-relevant older fix for the user's specific symptom.
+
+    Each entry renders its `user_summary` (occupant-outcome language) when present,
+    falling back to `title` (internal engineering detail) for records that never had
+    a user-facing summary — not every historical change was user-visible.
     """
-    from .const import KNOWN_FIXES, RELEASE_NOTES, VERSION  # noqa: PLC0415
+    from .const import VERSION  # noqa: PLC0415
+    from .fix_history import async_search_fix_history, parse_version  # noqa: PLC0415
 
-    if not KNOWN_FIXES:
-        return ""
-
-    current_tuple = _parse_version(VERSION)
-    relevant = _select_relevant_fixes(KNOWN_FIXES, current_tuple)
+    focus = kwargs.get("focus", "")
+    current_tuple = parse_version(VERSION)
+    relevant = await async_search_fix_history(
+        hass, query=focus, limit=_KNOWN_FIXES_RECENT_COUNT, current_version=current_tuple
+    )
 
     if not relevant:
         return ""
 
     lines = [
-        f"## KNOWN-FIXED ISSUES (most recent {len(relevant)} of {len(KNOWN_FIXES)} entries)"
-        " (scope-bounded — use for cross-check, step 8)"
+        f"## KNOWN-FIXED ISSUES ({len(relevant)} relevant/recent entries) (scope-bounded — use for cross-check, step 8)"
     ]
-    for issue_num in sorted(relevant.keys(), reverse=True):
-        fix = relevant[issue_num]
+    for fix in sorted(relevant, key=lambda r: r.get("issue", 0), reverse=True):
+        issue_num = fix.get("issue")
         version_fixed = fix.get("version_fixed", "")
-        summary = _release_note_bullet(RELEASE_NOTES, version_fixed, issue_num) or fix.get("title", "")
+        summary = fix.get("user_summary") or fix.get("title", "")
         lines.append(f"\nIssue #{issue_num} — fixed in v{version_fixed}: {summary}")
     lines.append("")
     return "\n".join(lines)
@@ -1159,11 +1108,14 @@ async def build_known_fixes_context(hass: Any, coordinator: Any, **kwargs: Any) 
 
 async def build_version_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
     """Build version/release notes section for investigator context."""
-    from .const import RELEASE_NOTES, VERSION  # noqa: PLC0415
+    from .const import VERSION  # noqa: PLC0415
+    from .fix_history import async_recent_release_notes  # noqa: PLC0415
+
+    release_notes = await async_recent_release_notes(hass)
 
     lines = [f"## RUNNING VERSION\n{VERSION}\n"]
     lines.append("## RECENT RELEASE NOTES")
-    for ver, notes in list(RELEASE_NOTES.items())[:5]:
+    for ver, notes in release_notes.items():
         lines.append(f"\n### v{ver}")
         for note in notes:
             lines.append(f"- {note}")

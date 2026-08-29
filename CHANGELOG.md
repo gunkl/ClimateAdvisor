@@ -3,9 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.6.77] — 2026-08-29
+## [0.6.78] — 2026-08-29
 
 - Fix #774: turning off the whole-house fan while a manual override/grace period was protecting it could leave that override fully active for minutes afterward — suppressing natural ventilation and the AC/fan mutex exactly as if the fan were still running. Turning the fan off now ends the override immediately, matching what actually happened at the fan. Also fixed: the Activity Report could show a false "Fan stopped" line for a fan that never physically stopped, just got reclassified from untracked to override-tracked at restart.
+
+## [0.6.77] — 2026-08-29
+
+- Feat #702: no user-visible change. Shrinks const.py (was 710KB, mostly historical changelog data imported on every Home Assistant startup) by moving fix history to its own file, read only when actually needed. Reduces memory use on all installs, especially small hardware like a Raspberry Pi.
 
 ## [0.6.76] — 2026-08-29
 

@@ -1156,34 +1156,36 @@ class TestInvestigatorVersionContext:
         finally:
             const.VERSION = original
 
-    def test_context_includes_release_notes_section(self):
+    def test_context_includes_release_notes_section(self, tmp_path):
         """_build_version_context includes a RELEASE NOTES header."""
-        from custom_components.climate_advisor import const
+        import json
+        from unittest.mock import patch
+
         from custom_components.climate_advisor.ai_skills_investigator import _build_version_context
 
-        original = getattr(const, "RELEASE_NOTES", {})
-        try:
-            const.RELEASE_NOTES = {"0.1.0": ["Fixed something"]}
+        path = tmp_path / "fix_history.jsonl"
+        path.write_text(json.dumps({"issue": 1, "version_fixed": "0.1.0", "user_summary": "Fixed something"}) + "\n")
+        with patch("custom_components.climate_advisor.fix_history._FIX_HISTORY_FILE", path):
             result = _build_version_context(None)
-            assert "RELEASE NOTES" in result.upper()
-            assert "Fixed something" in result
-        finally:
-            const.RELEASE_NOTES = original
+        assert "RELEASE NOTES" in result.upper()
+        assert "Fixed something" in result
 
-    def test_context_includes_at_most_5_versions(self):
+    def test_context_includes_at_most_5_versions(self, tmp_path):
         """_build_version_context limits output to the 5 most recent versions."""
-        from custom_components.climate_advisor import const
+        import json
+        from unittest.mock import patch
+
         from custom_components.climate_advisor.ai_skills_investigator import _build_version_context
 
-        original = getattr(const, "RELEASE_NOTES", {})
-        try:
-            const.RELEASE_NOTES = {f"0.{i}.0": [f"Note {i}"] for i in range(10)}
+        path = tmp_path / "fix_history.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for i in range(10):
+                f.write(json.dumps({"issue": i, "version_fixed": f"0.{i}.0", "user_summary": f"Note {i}"}) + "\n")
+        with patch("custom_components.climate_advisor.fix_history._FIX_HISTORY_FILE", path):
             result = _build_version_context(None)
-            # Count version headers; should be at most 5
-            version_count = sum(1 for line in result.splitlines() if line.startswith("### v"))
-            assert version_count <= 5
-        finally:
-            const.RELEASE_NOTES = original
+        # Count version headers; should be at most 5
+        version_count = sum(1 for line in result.splitlines() if line.startswith("### v"))
+        assert version_count <= 5
 
     def test_startup_version_logged(self):
         """async_setup_entry logs the current VERSION at INFO level."""

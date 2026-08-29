@@ -266,3 +266,55 @@ class TestBlockingIOExecutorOffload:
             + ". Wrap in await self.hass.async_add_executor_job(self.<attr>.<method>) "
             "to avoid blocking the HA event loop."
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #702: fix_history.py's blocking file reads must only be reached via its
+# own async_search_fix_history/async_recent_release_notes wrappers, never by
+# calling the sync search_records/_recent_release_notes functions directly from
+# an async context provider. These are plain module-level functions (not
+# self.<attr>.<method> bound methods), so the coordinator.py-specific registry
+# above doesn't apply — this is a small, targeted check of its own.
+# ---------------------------------------------------------------------------
+
+AI_SKILLS_CONTEXT_PY = Path(__file__).parent.parent / "custom_components" / "climate_advisor" / "ai_skills_context.py"
+
+_FIX_HISTORY_BLOCKING_FUNCS = {"search_records", "_recent_release_notes", "_iter_records"}
+
+
+def _find_direct_fix_history_calls(fn_node: ast.AST) -> list[ast.Call]:
+    direct_calls = []
+
+    class _Visitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+            if name in _FIX_HISTORY_BLOCKING_FUNCS:
+                direct_calls.append(node)
+            self.generic_visit(node)
+
+    _Visitor().visit(fn_node)
+    return direct_calls
+
+
+class TestFixHistoryExecutorOffload:
+    """fix_history.py does blocking file I/O — its sync functions must never be
+    called directly from an async context provider in ai_skills_context.py, only
+    through the async_search_fix_history/async_recent_release_notes wrappers that
+    offload via hass.async_add_executor_job (Issue #702)."""
+
+    def test_no_direct_calls_in_ai_skills_context_async_methods(self):
+        source = AI_SKILLS_CONTEXT_PY.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        offenders: list[tuple[str, ast.Call]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef):
+                for call in _find_direct_fix_history_calls(node):
+                    offenders.append((node.name, call))
+
+        assert not offenders, (
+            "fix_history's blocking sync function(s) called directly (not via "
+            "async_search_fix_history/async_recent_release_notes) inside: "
+            + ", ".join(f"{name}() at line {call.lineno}" for name, call in offenders)
+        )

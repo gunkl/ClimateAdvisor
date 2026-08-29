@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.77] — 2026-08-29
+
+- Feat #702: no user-visible change. Shrinks const.py (was 710KB, mostly historical changelog data imported on every Home Assistant startup) by moving fix history to its own file, read only when actually needed. Reduces memory use on all installs, especially small hardware like a Raspberry Pi.
+
 ## [0.6.76] — 2026-08-29
 
 - Fix #739: the whole-house fan could reactivate seconds after shutting off because indoor dropped below your comfort floor — pulling in cold outside air again and pushing the home right back under the floor it had just recovered from. The comfort-floor stop now waits out the same 5-minute cooldown every other stop reason already respects.

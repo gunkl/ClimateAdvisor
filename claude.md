@@ -677,8 +677,12 @@ git merge origin/release/<version>   # or other pending branches
 #### Inline version bump rule (MANDATORY for every PR)
 
 **Every PR must include its own version bump.** Do NOT create a PR without first updating:
-- `const.py`: bump `VERSION` to the next patch (e.g. 0.4.14 → 0.4.15), add `RELEASE_NOTES["X.Y.Z"]` entry, add `KNOWN_FIXES[<issue>]` entry
+- `const.py`: bump `VERSION` to the next patch (e.g. 0.4.14 → 0.4.15)
 - `manifest.json`: `"version"` to match
+- `fix_history.jsonl`: one entry per fixed/added issue (see below; Issue #702 — this
+  replaced `RELEASE_NOTES`/`KNOWN_FIXES` in `const.py`, which had grown to 91% of that
+  file and was imported/held resident on every installation regardless of whether the
+  opt-in AI Investigator ever read it)
 - `CHANGELOG.md`: matching `## [X.Y.Z] — <date>` entry (see below) — this was skipped for ~80
   releases (0.4.61 → 0.5.40) because it wasn't in this checklist; backfilled in #543, don't
   let it drift again
@@ -687,30 +691,31 @@ This replaces the old pattern of separate `release/X.Y.Z` branches for patch fix
 
 **Version conflict on merge**: When two concurrent PRs both target the same next version, the one that merges second must increment again (e.g. both claim 0.4.15 → second becomes 0.4.16). Resolve this during conflict resolution: keep HEAD's version for the earlier-merged PR, bump the incoming branch's entry to the next number.
 
-**What goes in RELEASE_NOTES**: One line per issue in the version dict, describing the user-visible change. Format: `"Fix #N: <what the user now experiences differently>."` or `"Feat #N: ..."`.
+**What goes in fix_history.jsonl**: One record per closed issue, appended via
+`python tools/add_fix_entry.py --issue N --version X.Y.Z --title "..." --scope "..." [--user-summary "..."]`
+— never hand-edit the JSONL file directly (a malformed line breaks the streaming
+parser for every record after it; the tool validates required fields and rejects
+duplicate issue numbers before writing). `--title`/`--scope` are dev-facing detail
+(exact code paths fixed) for a developer or dev-stack session doing archaeology.
+`--user-summary`, when the change is user-visible, is what the AI Investigator and
+`RECENT RELEASE NOTES` render — format `"Fix #N: <what the user now experiences
+differently>."` or `"Feat #N: ..."`. Omit `--user-summary` for internal-only changes
+(refactors, tooling, process) with no occupant-facing outcome — do not invent one.
+Search prior entries first with `python tools/fix_search.py "<topic>"` to avoid a
+duplicate. Do **not** add a `scope_not_covered`/gaps field — see Issue #563: it was
+mandatory on every entry, which silently defeated the version-scoping filter meant to
+bound the AI Investigator's context (all entries always matched). If a fix leaves a
+genuinely open gap worth tracking, file or keep open a GitHub issue for it instead —
+the Investigator already reads live open issues (bounded, TTL-cached).
 
-**What goes in KNOWN_FIXES**: Every closed issue that changed system behavior. The entry
-must have `title` and `scope_covered` (exact code paths fixed) — technical detail for a
-developer or dev-stack session doing archaeology, not for the AI Investigator, which reads
-the matching `RELEASE_NOTES` bullet instead (see Issue #563). Do **not** add a
-`scope_not_covered`/gaps field: it was removed entirely (Issue #563) after audit showed it
-had exactly one functional consumer in the codebase — a version-scoping filter in the AI
-Investigator's context builder that the field's mandatory presence on every entry silently
-defeated (169 of 169 entries always matched, so the "filter" never actually excluded
-anything and the KNOWN_FIXES context block grew unboundedly with every release). If a fix
-leaves a genuinely open gap worth tracking, file or keep open a GitHub issue for it instead
-— the Investigator already reads live open issues (bounded, TTL-cached) and that avoids
-recreating an unbounded duplicate store.
-
-**What goes in CHANGELOG.md**: Same user-visible bullet(s) as `RELEASE_NOTES`, Keep-a-Changelog formatted under a new `## [X.Y.Z] — <date>` section, newest on top.
+**What goes in CHANGELOG.md**: Same user-visible bullet(s) as the `--user-summary` above, Keep-a-Changelog formatted under a new `## [X.Y.Z] — <date>` section, newest on top.
 
 #### PR checklist (before `gh pr create`)
 1. Bump `VERSION` in `const.py` and `manifest.json` to the next patch version
-2. Add `RELEASE_NOTES["X.Y.Z"]` entry with one bullet per fixed issue
-3. Add `KNOWN_FIXES[<issue_number>]` entry with `version_fixed`, `title`, `scope_covered`
-4. Add a matching `CHANGELOG.md` entry
-5. Run `python -m pytest tests/test_version_sync.py` to confirm versions match
-6. Then open the PR
+2. Append a `fix_history.jsonl` entry per fixed/added issue via `tools/add_fix_entry.py` (see above)
+3. Add a matching `CHANGELOG.md` entry
+4. Run `python -m pytest tests/test_version_sync.py` to confirm versions match
+5. Then open the PR
 
 #### GitHub Release tagging (for distributable releases only)
 When creating a versioned GitHub Release (not every PR):

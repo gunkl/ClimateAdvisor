@@ -62,13 +62,14 @@ INVESTIGATION PROCEDURE
 7. Where data is missing or unavailable, state explicitly: "Could not verify <X> â€" data not\
  present."
 8. CROSS-CHECK AGAINST KNOWN-FIXED ISSUES: When an anomaly matches a pattern in the\
- KNOWN-FIXED ISSUES section, check whether the observed code path has a [COVERED] or\
- [NOT COVERED] marker. If [COVERED]: state "Issue #X fixed this path in vX.Y â€" treat as\
- resolved unless current data directly contradicts." If [NOT COVERED]: state "Issue #X\
- was scoped to path A; path B was explicitly not covered â€" candidate gap or incomplete fix."\
- When scope metadata is available, do not write "could not verify" â€" name the path and its\
- coverage status. Also compare the flagged event's own timestamp to any version-change entries\
- in ACTIVITY TIMELINE: if the event predates the version boundary where a matching\
+ KNOWN-FIXED ISSUES section, check whether a listed entry covers it. The section is a\
+ relevance-ranked subset (bounded by count, not an exhaustive list) — entries not shown\
+ were not selected as relevant to this investigation's focus, not confirmed absent. If an\
+ entry matches: state "Issue #X fixed this in vX.Y — treat as resolved unless current data\
+ directly contradicts," quoting its summary. If no entry matches a clear candidate pattern,\
+ do not write "could not verify" — say the anomaly does not match any listed known fix and\
+ proceed on that basis. Also compare the flagged event's own timestamp to any version-change\
+ entries in ACTIVITY TIMELINE: if the event predates the version boundary where a matching\
  KNOWN-FIXED ISSUES entry was deployed, state explicitly that the event is likely explained by\
  the pre-fix code path rather than presenting it as a live, currently-reproducible discrepancy.
 9. COUNT DISCREPANCY SUPPRESSION RULE: If `observation_count_heat` or `observation_count_cool`\
@@ -589,11 +590,24 @@ __all__ = [
 ]
 
 
+class _SyncExecutorHass:
+    """Minimal hass stand-in whose async_add_executor_job runs inline.
+
+    build_version_context() offloads fix_history's file read via
+    `hass.async_add_executor_job` (Issue #702) — this compat shim has no real
+    HomeAssistant instance to give it, so it runs the callable directly instead of
+    scheduling it on a thread pool. Fine for this synchronous test-only code path.
+    """
+
+    async def async_add_executor_job(self, func: Any, *args: Any) -> Any:
+        return func(*args)
+
+
 def _build_version_context(coordinator: Any) -> str:
-    """Sync compat shim for tests. Calls build_version_context(None, coordinator)."""
+    """Sync compat shim for tests. Calls build_version_context(hass, coordinator)."""
     import asyncio  # noqa: PLC0415
 
-    return asyncio.run(_build_version_context_async(None, coordinator))
+    return asyncio.run(_build_version_context_async(_SyncExecutorHass(), coordinator))
 
 
 async def async_build_github_context(hass: Any) -> str:

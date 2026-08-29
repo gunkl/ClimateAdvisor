@@ -247,8 +247,8 @@ and assembly continues.
 | `daily_summaries` | Historical multi-day trend summary, only populated when `hours > 36` (ported, Issue #563) |
 | `config` | ~11 curated `coordinator.config` fields (comfort/setback temps, schedule, `ai_model`, `learning_enabled`) — not a full config dump |
 | `operational_design` | Static prose block explaining fan_status values, deadband behavior, warm-day comfort guard, natural vent mode, contradiction suppression logic |
-| `known_fixes` | `KNOWN_FIXES` entries bounded to the most recent `_KNOWN_FIXES_RECENT_COUNT` (15) plus any not-yet-deployed entry — rendered as the matching `RELEASE_NOTES` bullet, not the internal `title`/`scope_covered` engineering prose (Issue #563; see anchor above) |
-| `version` | Last 5 versions' `RELEASE_NOTES` |
+| `known_fixes` | Fix-history entries from `fix_history.jsonl` (streamed via `fix_history.py`, Issue #702), ranked by relevance to `focus` when given (else recency), bounded to `_KNOWN_FIXES_RECENT_COUNT` (15) plus any not-yet-deployed entry — rendered as the entry's `user_summary` when present, else `title` |
+| `version` | Last 5 versions with a `user_summary`, from `fix_history.jsonl` (Issue #702; formerly `RELEASE_NOTES`) |
 | `github` | Live open + closed GitHub issues (TTL-cached; trimmed to `number`/`title`/`state`/`labels` before caching, Issue #563), silently omitted on network error |
 
 #### Output Schema

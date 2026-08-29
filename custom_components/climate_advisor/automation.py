@@ -4065,8 +4065,22 @@ class AutomationEngine:
                     # _pre_fan_hvac_mode snapshot — those are different restore-target semantics
                     # that need their own decision, not a mechanical swap. Flagged as a known
                     # follow-up, out of scope for #620.
+                    #
+                    # Issue #739: this branch bypasses _exit_nat_vent() entirely, so it never
+                    # armed the reactivation lockout the way every sibling exit reason in this
+                    # method (and, since #696/#755, both COMFORT_FLOOR-class fast-path twins)
+                    # already does — the exact "self-complementary at a fixed reading" gap #696
+                    # disproved, just unnoticed here because this branch's own bypass makes it
+                    # invisible to the _exit_nat_vent()-only AST coverage scan. Confirmed live:
+                    # a comfort-floor exit here on 2026-08-22 left indoor still below the
+                    # 70-72F daytime band, and the WHF reactivated within a minute on a
+                    # ~1F uptick, immediately re-breaching the floor it had just exited to
+                    # protect. Set the exit time directly (this branch has no
+                    # set_outdoor_exit_time kwarg to pass, same as the AWAY_CEILING branch
+                    # below).
                     _vent_floor = exit_decision.vent_floor
                     self._natural_vent_active = False
+                    self._nat_vent_outdoor_exit_time = dt_util.now()
                     await self._deactivate_fan(
                         reason=(f"natural vent exit: indoor {indoor:.1f}°F ≤ comfort floor {_vent_floor:.1f}°F")
                     )

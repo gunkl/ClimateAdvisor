@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.75"
+VERSION = "0.6.76"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.76": [
+        "Fix #739: the whole-house fan could reactivate seconds after shutting off"
+        " because indoor dropped below your comfort floor — pulling in cold outside"
+        " air again and pushing the home right back under the floor it had just"
+        " recovered from. The comfort-floor stop now waits out the same 5-minute"
+        " cooldown every other stop reason already respects.",
+    ],
     "0.6.75": [
         "Fix #755: closes a gap where the whole-house fan (or HVAC fan) could briefly"
         " turn back on right after stopping because indoor cooled to your comfort"
@@ -2366,6 +2373,41 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    739: {
+        "version_fixed": "0.6.76",
+        "title": (
+            "A production incident (2026-08-22) showed the whole-house fan reactivating"
+            " within a minute of a comfort-floor exit — pulling in cold outside air and"
+            " re-breaching the same floor it had just exited to protect, while a"
+            " monitored window stayed open. Root cause: check_natural_vent_conditions()'s"
+            " own COMFORT_FLOOR branch bypasses _exit_nat_vent() entirely (a direct"
+            " _deactivate_fan() call, per its own Issue #620 note), so it never armed"
+            " _nat_vent_outdoor_exit_time — the field the existing 5-minute reactivation"
+            " lockout reads. This is the same 'self-complementary at a fixed reading'"
+            " reasoning already disproved by #696/#755 for two sibling exit branches,"
+            " just on a third call site the AST-scan coverage registry in"
+            " tests/test_nat_vent_exit_lockout_coverage.py structurally cannot see"
+            " (it only keys on literal _exit_nat_vent() calls, and this branch never"
+            " makes one). Fix: set _nat_vent_outdoor_exit_time directly at this call"
+            " site, the same pattern the AWAY_CEILING branch in the same method already"
+            " uses. Blast-radius check: re-read every golden/pending scenario touching a"
+            " comfort-floor exit + reactivation; the one that does (golden scenario"
+            " whf_reactivates_after_sleep_floor_exit, #402) reactivates 70 minutes"
+            " later, far outside the 5-min lockout, so it is unaffected. Verified with a"
+            " direct unit test (test_comfort_floor_exit_arms_reactivation_lockout in"
+            " tests/test_fan_control.py) rather than a new pending scenario, following"
+            " the same precedent #755 used for a similarly race-prone harness path."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/automation.py"
+            " check_natural_vent_conditions() COMFORT_FLOOR branch;"
+            " nat_vent_reactivation_lockout.py docstring correction;"
+            " tests/test_nat_vent_exit_lockout_coverage.py docstring note (no registry"
+            " entry — this call site makes no _exit_nat_vent() call to key on);"
+            " tests/test_fan_control.py new unit test;"
+            " docs/nat-vent-lifecycle-spec.md"
+        ),
+    },
     755: {
         "version_fixed": "0.6.75",
         "title": (

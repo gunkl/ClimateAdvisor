@@ -679,10 +679,16 @@ class TestNatVentSleepWindowCycling:
 class TestNatVentReactivationFloorSleepAware:
     """_nat_vent_reactivation_floor() must use sleep_heat during the sleep window."""
 
-    def test_returns_daytime_comfort_heat_outside_sleep_window(self):
+    def test_returns_daytime_cycling_off_threshold_outside_sleep_window(self):
+        """Issue #775: the daytime branch no longer returns raw comfort_heat — it
+        returns the same cycling-off threshold ((comfort_heat+comfort_cool)/2 -
+        hysteresis) a live session already uses, so a stopped session can't restart
+        below where a continuously-running one would have cycled off. With
+        comfort_heat=68, comfort_cool default 74 (DEFAULT_COMFORT_COOL), hysteresis
+        default 1.0: (68+74)/2-1 = 70.0."""
         ae = _make_automation_engine({"comfort_heat": 68.0, "sleep_heat": 64.0})
         with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
-            assert ae._nat_vent_reactivation_floor() == 68.0
+            assert ae._nat_vent_reactivation_floor() == 70.0
 
     def test_returns_sleep_heat_inside_sleep_window(self):
         ae = _make_automation_engine({"comfort_heat": 68.0, "sleep_heat": 64.0})

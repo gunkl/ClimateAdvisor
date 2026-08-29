@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.79] — 2026-08-29
+
+- Fix #775: the whole-house fan could restart just 1°F above your comfort floor after already shutting off once — below the tighter comfort band it would have held if it had just kept running. Restarting now requires indoor to recover to the same point a continuously-running fan would already be cycling at, not the looser floor used for a brand-new activation. The fan's very first activation each day is unaffected.
+
 ## [0.6.78] — 2026-08-29
 
 - Fix #774: turning off the whole-house fan while a manual override/grace period was protecting it could leave that override fully active for minutes afterward — suppressing natural ventilation and the AC/fan mutex exactly as if the fan were still running. Turning the fan off now ends the override immediately, matching what actually happened at the fan. Also fixed: the Activity Report could show a false "Fan stopped" line for a fan that never physically stopped, just got reclassified from untracked to override-tracked at restart.

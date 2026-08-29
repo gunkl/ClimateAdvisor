@@ -2006,13 +2006,15 @@ class TestCheckNatVentGraceComfortCeiling:
 
 
 def _make_idle_reactivation_engine(
-    hvac_state: str, hvac_action: str, indoor_temp: float = 70.0, outdoor_temp: float = 60.0
+    hvac_state: str, hvac_action: str, indoor_temp: float = 71.0, outdoor_temp: float = 60.0
 ) -> AutomationEngine:
     """Engine with neither nat-vent flag set, a sensor open, and a given thermostat state.
 
-    comfort_heat=68, comfort_cool=74 (default overrides) so indoor=70 > comfort_heat and
-    outdoor=60 < indoor - hysteresis, satisfying the reactivation condition itself — the
-    only variable under test is whether the HVAC-state gate permits re-evaluation to run.
+    comfort_heat=68, comfort_cool=74 (default overrides) so indoor=71 is above the
+    Issue #775 daytime reactivation floor ((68+74)/2-1=70, this site is a genuine
+    reactivation-after-exit path) and outdoor=60 < indoor - hysteresis, satisfying the
+    reactivation condition itself — the only variable under test is whether the
+    HVAC-state gate permits re-evaluation to run.
     """
     engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, "comfort_heat": 68.0, "comfort_cool": 74.0})
     engine._natural_vent_active = False

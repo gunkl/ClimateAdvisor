@@ -3849,7 +3849,9 @@ class AutomationEngine:
                 # it already does at the paused-by-door reactivation call site below —
                 # outdoor_exit_time/lockout_seconds are unaffected by this parameter and
                 # were already correctly populated either way.
-                _fsm_inputs = self._build_nat_vent_fsm_inputs(now=dt_util.now(), indoor=_indoor, outdoor=outdoor)
+                _fsm_inputs = self._build_nat_vent_fsm_inputs(
+                    now=dt_util.now(), indoor=_indoor, outdoor=outdoor, apply_reactivation_floor=True
+                )
                 _fsm_result = _nat_vent_transition(
                     _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
                 )
@@ -4284,7 +4286,9 @@ class AutomationEngine:
                 from .nat_vent_fsm import transition as _nat_vent_transition
 
                 _fsm_current_state = self.nat_vent_lifecycle_state
-                _fsm_inputs = self._build_nat_vent_fsm_inputs(now=dt_util.now(), indoor=indoor, outdoor=outdoor)
+                _fsm_inputs = self._build_nat_vent_fsm_inputs(
+                    now=dt_util.now(), indoor=indoor, outdoor=outdoor, apply_reactivation_floor=True
+                )
                 _fsm_result = _nat_vent_transition(
                     _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
                 )
@@ -5895,7 +5899,12 @@ class AutomationEngine:
             # 2-of-5 callers that never applied hysteresis, and this site never
             # consulted _paused_by_door either).
             _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                now=dt_util.now(), indoor=indoor, outdoor=outdoor, hysteresis=0.0, paused_by_door=False
+                now=dt_util.now(),
+                indoor=indoor,
+                outdoor=outdoor,
+                hysteresis=0.0,
+                paused_by_door=False,
+                apply_reactivation_floor=True,
             )
             _fsm_result = _nat_vent_transition(
                 NatVentLifecycleState.INACTIVE,
@@ -6710,11 +6719,24 @@ class AutomationEngine:
         session should stay armed until the (lower) sleep floor. This is the same
         failure mode already fixed once for the cycling functions under Issue #402;
         this closes the gap on the reactivation-gate side.
+
+        Issue #775: the daytime branch previously returned raw ``comfort_heat``, which
+        sits below the cycling-off threshold (``nat_vent_target - hysteresis``) a *live*
+        session already uses in ``nat_vent_temperature_check()``. That let a re-armed
+        session push indoor below where a continuously-running session would have
+        stopped cycling. The daytime branch now returns that same off_threshold so a
+        stopped session can't restart any lower than a live one would have cycled.
+        The sleep-window branch is unchanged: ``sleep_heat`` already equals the live
+        session's sleep-window off_threshold (``sleep_heat + hysteresis - hysteresis``),
+        which is why this gap only showed up during the day.
         """
         comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         if _in_sleep_window(dt_util.now(), self.config):
             return float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
-        return comfort_heat
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        nat_vent_target = (comfort_heat + comfort_cool) / 2.0
+        return nat_vent_target - hysteresis
 
     def _build_nat_vent_fsm_inputs(
         self,
@@ -6726,6 +6748,7 @@ class AutomationEngine:
         paused_by_door: bool | None = None,
         fan_hardware_active: bool | None = None,
         grace_active: bool | None = None,
+        apply_reactivation_floor: bool = False,
     ):
         """Build the FSM's input snapshot from current engine state (Issue #594
         Phase R, Step 2). Issue #757 Phase 6 Step 5: this was previously also shared
@@ -6780,6 +6803,22 @@ class AutomationEngine:
                 (every other caller) keeps this method's prior behavior
                 (``self._fan_active``) unchanged — harmless either way, since none of
                 those other call sites read ``NatVentTransition.fan_should_be_active``.
+            apply_reactivation_floor: Issue #775. ``False`` (default) keeps
+                ``comfort_heat_raw``/``in_sleep_window`` genuinely raw/live, matching
+                every call site's behavior before this issue — correct for a pure
+                first-activation/adopt-gate question (``handle_door_window_open()``'s
+                dormancy-mirror check, ``reconcile_fan_on_startup()``'s adopt gate),
+                where there is no live session's own cycling band to hold a restart to.
+                ``True`` pre-resolves ``comfort_heat_raw`` through
+                ``self._nat_vent_reactivation_floor()`` (the same daytime
+                cycling-off-threshold fix ``_nat_vent_may_reactivate()``'s 4 legacy
+                callers already apply) and forces ``in_sleep_window=False`` as a
+                pass-through, so the gate's own sleep-window branch doesn't re-resolve
+                an already-resolved value — same convention documented on
+                ``_nat_vent_may_reactivate()``. Set at the 3 call sites that are
+                genuinely re-arming a session that already ran and exited: the
+                idle-open re-entry check, the paused-by-door reactivation block, and
+                ``_re_pause_for_open_sensor``'s reactivation check.
 
         Issue #706 (Bug D): ``override_active``/``grace_active`` are now always read
         live from engine state — ``bool(self._fan_override_active or
@@ -6805,21 +6844,31 @@ class AutomationEngine:
 
         comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         thermal_model = self._thermal_model or {}
-        _hysteresis = (
-            hysteresis
-            if hysteresis is not None
-            else float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        )
+        _configured_hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        _hysteresis = hysteresis if hysteresis is not None else _configured_hysteresis
         _paused_by_door = paused_by_door if paused_by_door is not None else bool(self._paused_by_door)
         _fan_hardware_active = fan_hardware_active if fan_hardware_active is not None else bool(self._fan_active)
         _override_active = bool(self._fan_override_active or self._manual_override_active)
         _grace_active = grace_active if grace_active is not None else bool(self._grace_active)
+        _sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat_raw))
+        _in_sleep_window_val = _in_sleep_window(now, self.config)
+        if apply_reactivation_floor:
+            # Issue #775: pre-resolve through the same daytime cycling-off-threshold
+            # formula _nat_vent_reactivation_floor() already applies for every other
+            # reactivation call site, then force in_sleep_window=False so the gate's
+            # own sleep-window branch treats this as already-resolved (same
+            # pass-through convention documented on _nat_vent_may_reactivate()). Note
+            # this reassigns comfort_heat_raw AFTER _sleep_heat's own raw-comfort_heat
+            # fallback above is computed, so _sleep_heat is never accidentally
+            # derived from the already-tightened value.
+            comfort_heat_raw = self._nat_vent_reactivation_floor()
+            _in_sleep_window_val = False
         return NatVentFsmInputs(
             indoor=indoor,
             outdoor=outdoor,
             comfort_heat_raw=comfort_heat_raw,
-            sleep_heat=float(self.config.get(CONF_SLEEP_HEAT, comfort_heat_raw)),
-            in_sleep_window=_in_sleep_window(now, self.config),
+            sleep_heat=_sleep_heat,
+            in_sleep_window=_in_sleep_window_val,
             comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
             nat_vent_delta=float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
             hysteresis=_hysteresis,

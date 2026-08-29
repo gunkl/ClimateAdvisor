@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.76] — 2026-08-29
+
+- Fix #739: the whole-house fan could reactivate seconds after shutting off because indoor dropped below your comfort floor — pulling in cold outside air again and pushing the home right back under the floor it had just recovered from. The comfort-floor stop now waits out the same 5-minute cooldown every other stop reason already respects.
+
 ## [0.6.75] — 2026-08-29
 
 - Fix #755: closes a gap where the whole-house fan (or HVAC fan) could briefly turn back on right after stopping because indoor cooled to your comfort floor. The fast, tick-level check that stops the fan at the floor now waits out the same 5-minute cooldown other stop reasons already respect, instead of letting the fan restart the moment indoor ticks up by even 1°F.

@@ -1725,6 +1725,25 @@ class TestNatVentComfortFloorExit:
         assert "indoor_temp" in comfort_floor_call[0][1]
         assert "fan_device" in comfort_floor_call[0][1], "Issue #402: exit events must identify the fan mechanism"
 
+    def test_comfort_floor_exit_arms_reactivation_lockout(self):
+        """Issue #739: check_natural_vent_conditions()'s own COMFORT_FLOOR branch bypasses
+        _exit_nat_vent() entirely (it calls _deactivate_fan() directly, per the Issue #620
+        note above), so it never armed _nat_vent_outdoor_exit_time — the field the
+        reactivation lockout reads. Production incident (2026-08-22): this exit fired with a
+        monitored window still open, and the WHF reactivated within a minute on a ~1F uptick,
+        immediately re-breaching the floor it had just exited to protect. Fixed to set the
+        exit time directly, matching the AWAY_CEILING branch in the same method."""
+        engine = _make_nat_vent_engine(indoor_temp=70.0)
+        assert engine._nat_vent_outdoor_exit_time is None
+        with patch(_PATCH_CALL_LATER):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False
+        assert engine._nat_vent_outdoor_exit_time is not None, (
+            "Issue #739: COMFORT_FLOOR exit via check_natural_vent_conditions() must arm the "
+            "same reactivation lockout as every sibling exit reason in this method"
+        )
+
     def test_comfort_floor_check_skipped_when_not_in_nat_vent(self):
         """_natural_vent_active=False → no service calls even when indoor is below floor."""
         engine = _make_nat_vent_engine(indoor_temp=65.0)

@@ -16,6 +16,19 @@ enforcement shape as ``tests/test_shadow_engine_coverage.py``'s ``_TRACKED_FIELD
 registry and ``tests/test_executor_offload.py``'s ``_BLOCKING_METHODS`` registry. A new
 call site added later without a classification fails immediately, instead of silently
 repeating this bug class a fourth time.
+
+**Known blind spot (Issue #739):** this scanner only sees calls to
+``self._exit_nat_vent(...)`` — a branch that bypasses that function entirely is invisible
+to it. ``check_natural_vent_conditions()``'s own ``COMFORT_FLOOR`` branch does exactly
+that (it calls ``_deactivate_fan()`` directly, per that branch's own Issue #620 note), and
+it silently omitted arming ``_nat_vent_outdoor_exit_time`` for the same reason every other
+exit reason here needs it. There is no registry entry for this site since it makes no
+``_exit_nat_vent()`` call to key on; coverage instead lives in a direct unit test —
+``tests/test_fan_control.py::TestNatVentComfortFloorExit::test_comfort_floor_exit_arms_reactivation_lockout``
+— mirroring how Issue #755's harness-unreachable ``STOP_COOLED_TO_FLOOR`` fix was verified.
+If another bypass-style exit branch (calls ``_deactivate_fan()``/sets
+``_natural_vent_active = False`` directly, without going through ``_exit_nat_vent()``) is
+ever added, it needs its own such test — this scanner structurally cannot catch it.
 """
 
 from __future__ import annotations

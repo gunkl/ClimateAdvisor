@@ -2,11 +2,25 @@
 
 Guards against rapid re-activation flapping right after an exit that arms
 `_nat_vent_outdoor_exit_time` (originally only the outdoor-warm-rise exit; as
-of Issue #641/#696/#755 also the proactive-floor, ceiling-threshold,
-comfort-floor, and fan_thermostat_check()'s STOP_COOLED_TO_FLOOR exits — see
+of Issue #641/#696/#755/#739 also the proactive-floor, ceiling-threshold,
+comfort-floor (both its `_exit_nat_vent()`-routed fast-path twin and, as of
+#739, `check_natural_vent_conditions()`'s own direct-`_deactivate_fan()`
+branch), and fan_thermostat_check()'s STOP_COOLED_TO_FLOOR exits — see
 `_exit_nat_vent()` call sites in `automation.py` for the current, authoritative
 list, since it has grown more than once and this docstring should not be
 trusted as the enumeration).
+
+Issue #739: `check_natural_vent_conditions()`'s own `COMFORT_FLOOR` branch was
+the last unarmed comfort-floor exit — it bypasses `_exit_nat_vent()` entirely
+(direct `_deactivate_fan()` call, per that branch's own Issue #620 note), so it
+never set this field even after #696/#755 fixed the two `_exit_nat_vent()`-
+routed comfort-floor twins on the same "self-complementary at a fixed reading"
+reasoning. Confirmed live on 2026-08-22: this exit fired with a monitored
+window still open and HVAC already idle, and the WHF reactivated within a
+minute on a ~1F uptick, immediately re-breaching the floor it had just exited
+to protect. Fixed by setting `_nat_vent_outdoor_exit_time` directly at that
+call site, the same pattern the `AWAY_CEILING` branch in the same method
+already used for the identical reason.
 
 As of Issue #696, this is consulted at TWO call sites in
 `check_natural_vent_conditions()`: the paused-by-door reactivation block, and

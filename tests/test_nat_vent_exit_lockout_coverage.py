@@ -93,8 +93,11 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "nat-vent-active gate — found unarmed during this issue's own coverage audit"
     ),
     ("fan_thermostat_check", 3): (
-        "exempted: STOP_COOLED_TO_FLOOR (Check 2) — same self-complementary-floor reasoning "
-        "as nat_vent_temperature_check's hard-floor exit above"
+        "arms lockout — Issue #755: STOP_COOLED_TO_FLOOR (Check 2) previously exempted on "
+        "the same self-complementary-floor reasoning as nat_vent_temperature_check's "
+        "hard-floor exit — disproven by Issue #696's live incident (indoor drifts across "
+        "the floor between ticks). This tick-level check runs on every sensor update, a "
+        "higher-frequency trigger than #696's, so now sets set_outdoor_exit_time=True too."
     ),
     ("_reconcile_fan_on_startup_locked", 1): (
         "exempted: startup/periodic reconciliation, not a per-tick decision path — runs at "

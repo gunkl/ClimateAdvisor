@@ -4976,8 +4976,19 @@ class AutomationEngine:
                 "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
                 "fan_device": _fan_device_label(self.config),
             }
+        # Issue #755: previously omitted set_outdoor_exit_time here on the same
+        # "self-complementary at a fixed reading" reasoning already disproven for
+        # nat_vent_temperature_check()'s COMFORT_FLOOR exit (Issue #696) — indoor
+        # legitimately drifts across vent_floor_ftc between ticks in production, so exit
+        # and re-entry are not actually self-complementary. This tick-level check runs on
+        # every sensor update (not just the 30-min cycle #696 hit), so the exposure window
+        # is at least as wide. Arm the same 300s lockout as this method's other two exit
+        # branches above, so a sensor-still-open pause here gets the same anti-flap
+        # protection at the idle-open re-entry path check_natural_vent_conditions() already
+        # consults (fixed by #696).
         await self._exit_nat_vent(
             reason=f"fan thermostat check — {stop_reason}",
+            set_outdoor_exit_time=True,
             event_type=_event_type,
             event_payload=_event_payload,
         )

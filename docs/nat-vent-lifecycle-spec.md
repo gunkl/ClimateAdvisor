@@ -9,7 +9,7 @@
 | What are the 4 nat-vent session states and how do they map to flags? | `INACTIVE`, `ACTIVE_FULL_GATE`, `ACTIVE_SOFT_START`, `PAUSED_REACTIVATION_LOCKOUT` — derived purely from `_natural_vent_active`/`_nat_vent_soft_start`/`_paused_by_door`/`_nat_vent_outdoor_exit_time`. | [State Transitions](#state-transitions) |
 | Where is the derivation computed, and is it load-bearing? | `nat_vent_lifecycle.py::derive_nat_vent_lifecycle_state()`, exposed read-only via `AutomationEngine.nat_vent_lifecycle_state`. Purely observational — not called from any production decision path. | [Scope](#scope) |
 | Does every nat-vent exit hand off through the same choke point? | No — `_exit_nat_vent()` is the choke point for most exits (10 call sites, per `tests/test_nat_vent_exit_lockout_coverage.py`'s AST scan), but the comfort-floor exit inside `check_natural_vent_conditions()`, the away-mode ceiling exit, the ODE ceiling-escalation exit, and two reconcile/bedtime paths mutate the flags directly instead. | [Exit Paths](#exit-paths-not-unified-through-a-single-function) |
-| What is the reactivation lockout and how long is it? | 300s default (`NAT_VENT_REACTIVATION_LOCKOUT_S`). Originally armed only by the outdoor-warm-rise exit; Issue #641 extended arming to the proactive-floor, ceiling-threshold, and fan_thermostat_check's tick-level direction-reversal exits; Issue #696 extended it to the comfort-floor exit and — separately — wired the idle-open re-entry call site (previously unchecked entirely, see next row) to actually consult it. | [State Transitions](#state-transitions) |
+| What is the reactivation lockout and how long is it? | 300s default (`NAT_VENT_REACTIVATION_LOCKOUT_S`). Originally armed only by the outdoor-warm-rise exit; Issue #641 extended arming to the proactive-floor, ceiling-threshold, and fan_thermostat_check's tick-level direction-reversal exits; Issue #696 extended it to the comfort-floor exit and — separately — wired the idle-open re-entry call site (previously unchecked entirely, see next row) to actually consult it; Issue #755 closed the sibling gap #696 found but didn't fix — fan_thermostat_check()'s STOP_COOLED_TO_FLOOR exit now arms it too, on the same disproven "self-complementary at a fixed reading" reasoning #696 already disproved for the comfort-floor exit. | [State Transitions](#state-transitions) |
 | What happens when nat-vent exits and the sensor is still open — pause or grace? | `_exit_nat_vent()` forks: sensor still open → hands off into the pause lifecycle; sensors closed → hands off into the grace lifecycle. See `grace-periods-spec.md` for what happens next in either lifecycle. | [Handoff to Pause/Grace](#handoff-to-pausegrace) |
 | How was this spec's accuracy verified? | Differential replay: `derive_nat_vent_lifecycle_state()` run against the real final engine flags from all 74 golden + 4 pending scenarios (Issue #606), plus 3 hand-reasoned ground-truth scenarios. | [Verification](#verification) |
 | Is every `_exit_nat_vent()` call site's lockout-arming decision enforced, not just documented? | Yes — `tests/test_nat_vent_exit_lockout_coverage.py` AST-scans every call site and requires each to be explicitly classified `"arms lockout"` / `"exempted: <reason>"`, with a positive control that checks the claim against the actual `set_outdoor_exit_time=True` argument (Issue #641). | [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) |
@@ -285,6 +285,61 @@ the reported incident, elapsed time between exit and reactivation was ≈300.02s
 right at the lockout's edge; the fix closes the "never checked at all" gap
 unconditionally, but does not guarantee every occurrence lands outside the lockout
 window by a comfortable margin. Tracked as separate follow-up work, not fixed here.
+
+### Incident: STOP_COOLED_TO_FLOOR shared #696's disproven reasoning (Issue #755)
+
+Found during #696's own blast-radius check, filed separately rather than expanding that
+fix's scope: `fan_thermostat_check()`'s `STOP_COOLED_TO_FLOOR` exit (Check 2, "cooled to
+target") was exempted from arming the reactivation lockout in
+`tests/test_nat_vent_exit_lockout_coverage.py`'s coverage registry using the exact same
+"self-complementary at a fixed reading" reasoning #696 disproved for
+`nat_vent_temperature_check()`'s `COMFORT_FLOOR` exit — the claim that exit and re-entry
+check the same `comfort_heat`-derived floor and so can't both be satisfied by the same
+indoor reading. It was never disproven for this call site specifically, but shares the
+identical structure: `_exit_nat_vent()` is the same choke point, produces the same
+`_paused_by_door=True`/`_paused_with_hvac_already_off=True` combination when the sensor is
+still open and HVAC was already off (the normal case during WHF-only free cooling), and
+the idle-open re-entry path #696 fixed already consults `is_reactivation_locked_out()` for
+this pause — but that check is a no-op when `_nat_vent_outdoor_exit_time` was never set,
+which was exactly this exit's gap. `fan_thermostat_check()` also runs on every indoor/
+outdoor sensor update (not just the 5-min backstop), so the exposure window is at least as
+wide as #696's.
+
+Fix: armed `set_outdoor_exit_time=True` on this exit, identical in shape to #696's
+`COMFORT_FLOOR` fix. No FSM/legacy branch split was needed here (unlike #696) —
+`fan_fsm.py`'s `_transition_on_thermostat_check_tick()` only returns the outcome enum and
+deliberately leaves all `_exit_nat_vent()`/exit-time bookkeeping to the shell, so a single
+call-site edit was sufficient. A blast-radius re-check of every other registry entry found
+no further instances of the disproven reasoning — this was the last one.
+
+**When STOP_COOLED_TO_FLOOR is actually the deciding exit, not preempted**: re-reading
+`_handle_temp_update()` (`tools/sim_harness/run_production.py`) and the real
+`_async_thermostat_changed()` listener (`coordinator.py:3860-3887`) found that when a
+nat-vent session is active, `nat_vent_temperature_check()` is always dispatched first on
+the same tick and, since it checks the identical floor, almost always exits (and turns the
+fan off) before `fan_thermostat_check()` gets a turn — its own comment calls the second
+call "idempotent... safe" precisely because the fan is usually already off by then. So in
+practice `STOP_COOLED_TO_FLOOR` is the deciding exit mainly for a CA-owned fan running
+*independent* of a nat-vent session (e.g. a min-runtime cycling fan started via
+`start_min_fan_runtime_cycles()`), the `_was_nat_vent_floor=False` branch — not the
+nat-vent-active case #696's incident was. The fix and its unit-test coverage (below) are
+correct regardless of which branch triggers it, since `_exit_nat_vent()`'s pause/lockout
+mechanics don't depend on the nat-vent-active label; this is a precondition-accuracy note
+for future readers, not a scope change.
+
+**No new pending/golden simulation scenario added** — `tools/simulations/unsupported/
+issue_620_fast_loop_floor_exit_pauses_with_window_open.json` already documents 4 separate,
+failed attempts to isolate `fan_thermostat_check()`'s `STOP_COOLED_TO_FLOOR` outcome
+end-to-end in this harness (the earlier-firing `nat_vent_temperature_check()` intercepts it
+in engine-only mode; the `seed:true` sensor flag is silently ignored in engine-only mode;
+a real coordinator's scheduled triggers pause the sensor first via a different choke point;
+and a neutral-time real-coordinator run produced no observable effect before investigation
+time ran out) — and settled on unit-test coverage in `tests/test_fan_control.py` as the
+verification method for this exact code path instead. Issue #755 follows that same
+precedent rather than re-attempting the harness isolation: `TestFanThermostatCheck::
+test_stop_cooled_to_floor_arms_reactivation_lockout` calls `fan_thermostat_check()`
+directly (bypassing the temp_update dispatch race entirely) and was verified to fail
+against pre-fix code and pass after.
 
 ### Follow-up: rate-limit reporting was misleading and mis-framed as an incident (Issue #649)
 

@@ -2,10 +2,11 @@
 
 Guards against rapid re-activation flapping right after an exit that arms
 `_nat_vent_outdoor_exit_time` (originally only the outdoor-warm-rise exit; as
-of Issue #641/#696 also the proactive-floor, ceiling-threshold, and
-comfort-floor exits — see `_exit_nat_vent()` call sites in `automation.py` for
-the current, authoritative list, since it has grown more than once and this
-docstring should not be trusted as the enumeration).
+of Issue #641/#696/#755 also the proactive-floor, ceiling-threshold,
+comfort-floor, and fan_thermostat_check()'s STOP_COOLED_TO_FLOOR exits — see
+`_exit_nat_vent()` call sites in `automation.py` for the current, authoritative
+list, since it has grown more than once and this docstring should not be
+trusted as the enumeration).
 
 As of Issue #696, this is consulted at TWO call sites in
 `check_natural_vent_conditions()`: the paused-by-door reactivation block, and

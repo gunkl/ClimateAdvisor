@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.76"
+VERSION = "0.6.77"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.77": [
+        "Fix #774: turning off the whole-house fan while a manual override/grace period was"
+        " protecting it could leave that override fully active for minutes afterward —"
+        " suppressing natural ventilation and the AC/fan mutex exactly as if the fan were"
+        " still running. Turning the fan off now ends the override immediately, matching"
+        " what actually happened at the fan. Also fixed: the Activity Report could show a"
+        ' false "Fan stopped" line for a fan that never physically stopped, just got'
+        " reclassified from untracked to override-tracked at restart.",
+    ],
     "0.6.76": [
         "Fix #739: the whole-house fan could reactivate seconds after shutting off"
         " because indoor dropped below your comfort floor — pulling in cold outside"
@@ -2373,6 +2382,48 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    774: {
+        "version_fixed": "0.6.77",
+        "title": (
+            "A user turned the whole-house fan off from the wall remote while an active"
+            " RF-timer manual override/grace period was protecting it, and confirmed the"
+            " fan physically stopped (ground-truth entity input_boolean.quietcool_detectpower"
+            " transitions on->off). The override and its ~67-minute grace stayed fully"
+            " active for 5+ minutes afterward — nat-vent suppression and the AC/WHF mutex"
+            " both stayed engaged as if the fan were still running — and only cleared"
+            " because an unrelated second HA restart happened to clean-slate it. Root"
+            " cause: two independent coordinator listeners for a fan-state change"
+            " (_async_fan_entity_changed(), the Type 2 physical dual-entity path, and"
+            " _async_thermostat_changed()'s fan_mode-attribute block, the Type 1 path)"
+            " both gated on `not _fan_override_active` for EVERY transition direction,"
+            " not just the ON-direction re-announcement case the guard was written for"
+            " (Issue #510). This silently made the existing, correct direction-aware"
+            " dispatch to on_fan_turned_off() (Issue #359 Fix B/C) unreachable for exactly"
+            " the case an override protects: the fan turning off while the override is"
+            " active. Fix: both guards now let an off-direction transition through"
+            " regardless of override state; on_fan_turned_off() itself needed no changes."
+            " Separately (lower severity, purely cosmetic): the coordinator's"
+            " untracked-fan Activity Report tracker could emit a false 'Fan stopped"
+            " (untracked fan ended)' event when _compute_fan_status() reclassified a"
+            " still-running fan from 'running (untracked)' to a different active status"
+            " (e.g. an RF-timer restart-reconcile re-arming an override) in the same"
+            " update cycle — confirmed via ground-truth entity history that the fan never"
+            " actually stopped at that timestamp. Fixed by only emitting the 'cleared'"
+            " event when the new status is not itself one of the fan-active values"
+            " (fan_status.is_ca_fan_running())."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/coordinator.py"
+            " _async_fan_entity_changed() override-active guard (direction-aware);"
+            " _async_thermostat_changed() fan_mode-attribute block entry guard"
+            " (direction-aware); untracked-fan tracker exit branch (~L2669-2695,"
+            " reuses fan_status.is_ca_fan_running());"
+            " tests/test_whf_dual_entity.py TestOverrideActiveFanOffStillDispatches;"
+            " tests/test_hvac_session_detection.py"
+            " TestFanModeOverrideActiveStillDispatches,"
+            " TestUntrackedFanEvent.test_untracked_fan_reclassified_to_override_does_not_emit_cleared"
+        ),
+    },
     739: {
         "version_fixed": "0.6.76",
         "title": (

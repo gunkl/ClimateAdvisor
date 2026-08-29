@@ -685,3 +685,75 @@ class TestUntrackedFanEvent:
             types3 = [c.args[0] for c in coord._emit_event.call_args_list]
             assert "fan_untracked_cleared" in types3
             assert coord._untracked_fan_active is False
+
+    def test_untracked_fan_reclassified_to_override_does_not_emit_cleared(self):
+        """Issue #774: fan status flipping from 'running (untracked)' to 'running (manual
+        override)' in the same cycle (e.g. an RF-timer restart-reconcile re-arming an
+        override on a still-running fan) is a reclassification, not a stop — must NOT emit
+        fan_untracked_cleared. Confirmed live: the fan never physically stopped, but the
+        pre-fix code emitted a false "Fan stopped (untracked fan ended)" event for exactly
+        this transition."""
+        coord = _make_update_data_coord(hvac_mode="cool", hvac_action="fan", ca_fan_active=False)
+        coord._untracked_fan_active = False
+        coord._compute_fan_status = MagicMock(return_value="running (untracked)")
+
+        fixed_now = datetime(2026, 4, 8, 21, 0, 0)
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=fixed_now):
+            # Entry: untracked fan
+            asyncio.run(coord._async_update_data())
+            assert coord._untracked_fan_active is True
+
+            # Reclassified to override — same physical fan, different owning status.
+            coord._compute_fan_status = MagicMock(return_value="running (manual override)")
+            coord._emit_event.reset_mock()
+            asyncio.run(coord._async_update_data())
+            types = [c.args[0] for c in coord._emit_event.call_args_list]
+            assert "fan_untracked_cleared" not in types
+            assert coord._untracked_fan_active is False
+
+
+class TestFanModeOverrideActiveStillDispatches:
+    """Issue #774: the thermostat fan_mode-attribute listener (Type 1 / HVAC-fan config)
+    must still route a genuine fan-off to on_fan_turned_off() even while a fan override is
+    already active — mirrors the equivalent fix in _async_fan_entity_changed() (Type 2
+    physical dual-entity listener). Before this fix, `not ae._fan_override_active` was an
+    unconditional entry guard on the whole fan_mode-change block, so an active override
+    silently blocked the direction-aware dispatch (Issue #359 Fix B) from ever running for
+    the off-direction case — exactly the case an override needs it most.
+    """
+
+    def test_fan_mode_on_to_auto_with_override_active_dispatches_on_fan_turned_off(self):
+        coord = _make_thermostat_coord()
+        coord.automation_engine._fan_override_active = True
+        coord.automation_engine._fan_command_time = None
+
+        old = _make_state("cool", hvac_action="cooling")
+        old.attributes["fan_mode"] = "on"
+        new = _make_state("cool", hvac_action="cooling")
+        new.attributes["fan_mode"] = "auto"
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 21, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord.automation_engine.on_fan_turned_off.assert_called_once()
+        coord.automation_engine.handle_fan_manual_override.assert_not_called()
+
+    def test_fan_mode_auto_to_on_with_override_active_still_skips(self):
+        """Regression guard: the ON-direction re-detection case (a redundant re-announcement
+        while already overridden) must remain unaffected — still no dispatch."""
+        coord = _make_thermostat_coord()
+        coord.automation_engine._fan_override_active = True
+        coord.automation_engine._fan_command_time = None
+
+        old = _make_state("cool", hvac_action="cooling")
+        old.attributes["fan_mode"] = "auto"
+        new = _make_state("cool", hvac_action="cooling")
+        new.attributes["fan_mode"] = "on"
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 21, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord.automation_engine.on_fan_turned_off.assert_not_called()
+        coord.automation_engine.handle_fan_manual_override.assert_not_called()

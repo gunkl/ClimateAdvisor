@@ -638,3 +638,71 @@ class TestOverrideActiveRequestsRefresh:
         asyncio.run(method(event))
 
         coord.async_request_refresh.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestOverrideActiveFanOffStillDispatches (Issue #774)
+# ---------------------------------------------------------------------------
+
+
+class TestOverrideActiveFanOffStillDispatches:
+    """Tests for Issue #774: a fan-off arriving while an override is already active must
+    still reach on_fan_turned_off() — that transition is the override's own defining
+    condition ending, not a redundant re-announcement (the case the override-active guard
+    was written to skip). Confirmed live: without this fix, an active override's grace
+    stayed set for 5+ minutes after the WHF was physically confirmed off, only clearing
+    because an unrelated restart happened to wipe it.
+    """
+
+    def test_state_entity_confirms_off_while_override_active_dispatches_fan_turned_off(self):
+        """fan_state_entity flips on->off while an override is active → on_fan_turned_off()
+        is called, not silently skipped."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+        }
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_active = False
+        ae._fan_override_active = True  # override already active, protecting the fan-on state
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("on")
+        new_state = _make_fake_state("off")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        ae.on_fan_turned_off.assert_called_once()
+        assert ae.on_fan_turned_off.call_args.kwargs["fan_before"] == "on"
+        assert ae.on_fan_turned_off.call_args.kwargs["fan_after"] == "off"
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_on_direction_while_override_active_still_skips_re_detection(self):
+        """Regression guard: the ON-direction re-announcement case this guard was built for
+        (Issue #510) must remain unaffected — still no dispatch, still just a refresh."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+        }
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_active = False
+        ae._fan_override_active = True
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("off")
+        new_state = _make_fake_state("on")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        coord.async_request_refresh.assert_called_once()
+        ae.on_fan_turned_off.assert_not_called()
+        ae.handle_fan_manual_override.assert_not_called()

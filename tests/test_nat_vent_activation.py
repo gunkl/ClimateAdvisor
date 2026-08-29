@@ -1270,9 +1270,13 @@ class TestIssue641ExitReactivationFlipFlop:
             asyncio.run(engine.check_natural_vent_conditions())
         assert engine._natural_vent_active is False
 
-        # Indoor recovers slightly above the floor by the time the lockout expires,
-        # so the reactivation isn't itself blocked by anything except the lockout.
-        _set_engine_indoor(engine, 69.0)
+        # Indoor recovers above the daytime reactivation floor by the time the lockout
+        # expires, so the reactivation isn't itself blocked by anything except the
+        # lockout. Issue #775: this site's floor is now (comfort_heat+comfort_cool)/2
+        # - hysteresis = (68+74)/2-1 = 70, so 69 (the pre-#775 value) would now be
+        # blocked by the floor itself, defeating this test's purpose of isolating the
+        # lockout — 71 stays clear of the floor.
+        _set_engine_indoor(engine, 71.0)
         late = exit_time + timedelta(seconds=NAT_VENT_REACTIVATION_LOCKOUT_S + 1)
         with patch(_DT_NOW_PATH, return_value=late):
             asyncio.run(engine.check_natural_vent_conditions())
@@ -2215,13 +2219,15 @@ class TestCeilingGateArchetypeAllFourSites:
 
         This is the idle_open trigger path (contact sensor open, HVAC not actively
         calling) rather than the original grace-active-ceiling-breach case — indoor here
-        (70) is well BELOW comfort_cool (74), so the old hardcoded message
+        (71) is well BELOW comfort_cool (74), so the old hardcoded message
         ("indoor {X} > comfort_cool {Y}") was factually false, confirmed against live
-        production data showing exactly this combination (indoor=70, comfort_cool=74).
+        production data showing exactly this combination (indoor originally 70,
+        comfort_cool=74; bumped to 71 for Issue #775 — this site's daytime reactivation
+        floor is now (68+74)/2-1=70, so 70 itself would no longer reactivate here).
         The message must instead describe the real condition: outdoor cooler than indoor,
         indoor above the comfort floor, outdoor below the ceiling threshold.
         """
-        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=70.0)
+        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=71.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
         engine._paused_by_door = False
         engine._natural_vent_active = False
@@ -2242,7 +2248,7 @@ class TestCeilingGateArchetypeAllFourSites:
         # the mocked _activate_fan call directly since that's where the string is built.
         engine._activate_fan.assert_awaited()
         reason = engine._activate_fan.call_args.kwargs.get("reason", "")
-        assert "indoor 70.0" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
+        assert "indoor 71.0" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
         assert "> comfort_cool 74.0" not in reason, (
             f"reason must not falsely claim indoor > comfort_cool; got: {reason!r}"
         )

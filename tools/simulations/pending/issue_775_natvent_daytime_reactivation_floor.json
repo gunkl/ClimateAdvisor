@@ -1,0 +1,85 @@
+{
+  "name": "issue_775_natvent_daytime_reactivation_floor",
+  "description": "Daytime WHF nat-vent session exits at the hard comfort_heat floor (68F), then indoor drifts back up to 69F while outdoor stays favorable. 69F sits exactly at the daytime cycling-off threshold ((comfort_heat+comfort_cool)/2 - hysteresis = (68+72)/2-1 = 69) that a LIVE session already uses to cycle off -- so a stopped session must not be allowed to reactivate any lower than that. Before the fix, the reactivation gate compared against raw comfort_heat (68F), so 69 > 68 passed and the fan wrongly restarted, pushing indoor below the daytime comfort band it would otherwise hold.",
+  "source": "production incident 2026-08-29 (issue #775 activity record)",
+  "issue": 775,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: reverting the #775 fix in _nat_vent_reactivation_floor() (daytime branch back to raw comfort_heat) causes the final assertion (nat_vent_not_active at 08:10) to FAIL -- the fan wrongly reactivates at indoor=69F, reproducing the reported incident exactly.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's nat-vent reactivation-floor description is updated alongside this fix to state the daytime branch matches the live cycling off_threshold, not raw comfort_heat, for the reactivation-only call sites.",
+    "(c) Occupant experience: without this fix, the whole-house fan restarts the moment indoor ticks 1F above the raw comfort_heat floor, cooling the home further below the daytime comfort band the occupant configured and expects the automation to hold. With the fix, the fan only restarts once indoor is back above the same threshold a continuously-running session would have cycled at -- no unexpected overshoot below the daytime band. First-time daily activation (no live session to protect yet) is deliberately unaffected -- see docs for the scope rationale."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 72,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "fan_mode": "whole_house_fan"
+  },
+  "events": [
+    {
+      "time": "2026-08-29T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 63.0,
+      "note": "Daytime (well past wake_time 06:30). Indoor=72F, outdoor=63F -- outdoor cooler than indoor, favorable for nat-vent."
+    },
+    {
+      "time": "2026-08-29T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Warm day classification: hvac_mode=off, windows recommended."
+    },
+    {
+      "time": "2026-08-29T08:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "Door/window opens. outdoor=63F < indoor=72F, indoor > comfort_heat=68F, outdoor < threshold=75F -- nat-vent activates (first-time activation, unaffected by the #775 fix), WHF turns on."
+    },
+    {
+      "time": "2026-08-29T08:05:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 63.0,
+      "note": "Indoor reaches the daytime hard comfort floor (comfort_heat=68F, unaffected by the #775 fix -- resolve_hard_exit_floor() still uses raw comfort_heat for the hard-exit case). Session ends here."
+    },
+    {
+      "time": "2026-08-29T08:10:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 63.0,
+      "note": "Indoor drifts back up to exactly 69F -- the daytime cycling-off threshold a live session already uses ((68+72)/2-1=69), and also the exact indoor reading from the #775 production incident. THE FIX: this is a REACTIVATION (the session already ran and exited above), so the gate must require indoor > 69F, not indoor > 68F -- fan stays off here."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-29T08:00:00",
+      "expect": "natural_ventilation",
+      "reason": "outdoor 63F < indoor 72F (beneficial direction); outdoor 63F < threshold 75F; indoor 72F > comfort_heat 68F -- first-time activation, nat-vent activates as before the fix."
+    },
+    {
+      "at": "2026-08-29T08:05:00",
+      "expect": "nat_vent_comfort_floor_exit",
+      "reason": "Indoor=68F reaches the daytime hard floor (comfort_heat=68) -- session ends correctly, confirming _natural_vent_active transitions to False."
+    },
+    {
+      "at": "2026-08-29T08:10:00",
+      "expect": "nat_vent_not_active",
+      "reason": "THE FIX: indoor=69F is exactly at the live session's own cycling-off threshold, not above it. This is a REACTIVATION (session already ran once and exited), so the gate must not restart the fan here -- before the fix, raw comfort_heat=68F made 69>68 pass and the fan wrongly reactivated, pushing indoor below the daytime comfort band a continuously-running session would have held."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "WHF does not reactivate below the daytime comfort/cycling band, even when a stopped session becomes eligible again -- while first-time daily activation is unaffected",
+    "observed_behavior": "natural_ventilation on door/window open -> nat_vent_comfort_floor_exit at the daytime hard floor (68F) -> stays inactive as indoor drifts back to 69F, the same threshold a live session already cycles off at",
+    "expected_behavior": "The occupant's daytime comfort band (~69-71F derived from comfort_heat/comfort_cool/hysteresis) is respected consistently when a nat-vent session that already ran becomes eligible to restart -- no unexpected overshoot below the band on reactivation. The fan's very first activation each day is unaffected, since there's no live session's band to protect yet."
+  }
+}

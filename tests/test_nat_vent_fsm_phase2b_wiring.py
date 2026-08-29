@@ -293,9 +293,14 @@ class TestSite2IdleOpenReentry:
         Issue #696: exit_time moved outside the (now-enforced) 300s lockout window so
         reactivation actually proceeds here -- this test is specifically about what
         happens to _paused_by_door once a genuine post-lockout reactivation succeeds,
-        not about the lockout gate itself (covered separately above)."""
+        not about the lockout gate itself (covered separately above).
+
+        Issue #775: indoor bumped from 69 to 71 -- this site's daytime reactivation
+        floor is now (comfort_heat+comfort_cool)/2-hysteresis = (68+74)/2-1 = 70, so 69
+        would now be blocked by the floor itself rather than reaching the
+        paused_by_door-preservation behavior under test."""
         for authoritative in (True, False):
-            engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=69.0, authoritative=authoritative)
+            engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=71.0, authoritative=authoritative)
             self._arm_idle_open(engine, outdoor=58.6)
             engine._paused_by_door = True
             engine._paused_with_hvac_already_off = True
@@ -354,8 +359,12 @@ class TestSite3PausedReactivation:
             assert engine._paused_by_door is True, f"authoritative={authoritative}"
 
     def test_authoritative_lockout_expires_and_reactivates(self):
+        """Issue #775: indoor bumped from 69 to 71 -- this site's daytime reactivation
+        floor is now (comfort_heat+comfort_cool)/2-hysteresis = (68+74)/2-1 = 70, so 69
+        would now be blocked by the floor itself rather than isolating the lockout
+        expiry behavior under test."""
         for authoritative in (True, False):
-            engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=69.0, authoritative=authoritative)
+            engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=71.0, authoritative=authoritative)
             self._arm_paused(engine, outdoor=58.6, exit_time=_NOW - timedelta(seconds=301))
             with patch(_DT_NOW_PATH, return_value=_NOW):
                 asyncio.run(engine.check_natural_vent_conditions())

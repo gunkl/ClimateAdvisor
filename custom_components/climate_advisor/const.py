@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.74"
+VERSION = "0.6.75"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.75": [
+        "Fix #755: closes a gap where the whole-house fan (or HVAC fan) could briefly"
+        " turn back on right after stopping because indoor cooled to your comfort"
+        " floor. The fast, tick-level check that stops the fan at the floor now waits"
+        " out the same 5-minute cooldown other stop reasons already respect, instead"
+        " of letting the fan restart the moment indoor ticks up by even 1°F.",
+    ],
     "0.6.74": [
         "Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 8"
         " — collapses the dual-engine shadow-comparison shell. With every subsystem's"
@@ -2359,6 +2366,42 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    755: {
+        "version_fixed": "0.6.75",
+        "title": (
+            "Closed a sibling gap to #696, found during that fix's own blast-radius"
+            " check and filed separately rather than expanding its scope:"
+            " fan_thermostat_check()'s STOP_COOLED_TO_FLOOR exit (Check 2, 'cooled to"
+            " target') never armed the nat-vent reactivation lockout"
+            " (_nat_vent_outdoor_exit_time), on the same 'self-complementary at a fixed"
+            " reading' reasoning #696 already disproved for"
+            " nat_vent_temperature_check()'s COMFORT_FLOOR exit — indoor legitimately"
+            " drifts across the floor between ticks in production. The idle-open"
+            " re-entry path #696 fixed to consult is_reactivation_locked_out() was a"
+            " no-op for this exit specifically because the lockout timer was never set."
+            " fan_thermostat_check() also runs on every indoor/outdoor sensor update"
+            " (not just the 5-min backstop), so the exposure window was at least as"
+            " wide as #696's. Fix: armed set_outdoor_exit_time=True on this exit,"
+            " matching its two sibling branches in the same method. Investigation also"
+            " confirmed this was the only remaining registry entry using the disproven"
+            " reasoning — no further blast radius. No new pending/golden simulation"
+            " scenario was added: tools/simulations/unsupported/"
+            " issue_620_fast_loop_floor_exit_pauses_with_window_open.json already"
+            " documents 4 failed attempts (Issue #620) to isolate this exact code path"
+            " end-to-end in the harness (nat_vent_temperature_check() intercepts it"
+            " first whenever nat-vent is active), so a direct unit test"
+            " (test_stop_cooled_to_floor_arms_reactivation_lockout in"
+            " tests/test_fan_control.py) was added instead, following that precedent."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/automation.py"
+            " fan_thermostat_check() STOP_COOLED_TO_FLOOR branch;"
+            " nat_vent_reactivation_lockout.py docstring correction;"
+            " tests/test_nat_vent_exit_lockout_coverage.py registry entry"
+            " (fan_thermostat_check, 3); tests/test_fan_control.py new unit test;"
+            " docs/nat-vent-lifecycle-spec.md"
+        ),
+    },
     757: {
         "version_fixed": "0.6.66-0.6.69",
         "title": (

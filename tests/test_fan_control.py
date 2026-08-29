@@ -2178,6 +2178,27 @@ class TestFanThermostatCheck:
             "STOP_DEACTIVATE must arm the same reactivation lockout as its sibling STOP_VIA_NAT_VENT_EXIT branch"
         )
 
+    def test_stop_cooled_to_floor_arms_reactivation_lockout(self):
+        """Issue #755: STOP_COOLED_TO_FLOOR previously omitted set_outdoor_exit_time=True on
+        the same "self-complementary at a fixed reading" reasoning already disproven for
+        nat_vent_temperature_check()'s COMFORT_FLOOR exit (Issue #696) — indoor legitimately
+        drifts across the floor between ticks in production, and this tick-level check fires
+        on every sensor update (a higher-frequency trigger than #696's), so the exposure
+        window is at least as wide. Fixed to match its two sibling branches above."""
+        engine = self._engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._sensor_check_callback = lambda: True  # window still open at exit
+
+        asyncio.run(engine.fan_thermostat_check(indoor=68.0, outdoor=60.0, trigger="test"))
+
+        engine._deactivate_fan.assert_awaited()
+        assert engine._natural_vent_active is False
+        assert engine._nat_vent_outdoor_exit_time is not None, (
+            "Issue #755: STOP_COOLED_TO_FLOOR must arm the same reactivation lockout as its "
+            "STOP_VIA_NAT_VENT_EXIT/STOP_DEACTIVATE siblings"
+        )
+
     def test_noop_when_override_active(self):
         """Manual fan override in effect → fast loop is a no-op (user has control)."""
         engine = self._engine()

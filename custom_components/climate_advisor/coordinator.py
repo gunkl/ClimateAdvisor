@@ -2666,7 +2666,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 },
             )
             self._untracked_fan_active = True
-        elif not _is_untracked and _untracked_logged:
+        elif not _is_untracked and _untracked_logged and not is_ca_fan_running(_fan_status_uc):
+            # Genuinely stopped (or disabled) — not just reclassified to a different active
+            # status (e.g. an override/reconcile now owning the same still-running fan).
             _fan_mode_clr = self.automation_engine.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
             _fan_device_clr = (
                 "whf"
@@ -2678,6 +2680,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 else "none"
             )
             self._emit_event("fan_untracked_cleared", {"fan_device": _fan_device_clr})
+            self._untracked_fan_active = False
+        elif not _is_untracked and _untracked_logged:
+            # Issue #774: the fan is still running — _compute_fan_status() just started
+            # explaining it via a different active status (override, active, nat-vent) in
+            # this same cycle. That is a reclassification, not a stop; don't emit a
+            # misleading "Fan stopped" event for it, but do clear our own tracking flag
+            # since it is no longer "untracked" by any definition.
             self._untracked_fan_active = False
 
         # Issue #359 Fix D: periodic backstop — reconcile an untracked fan at each 30-min cycle.
@@ -4409,7 +4418,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and old_fan_mode is not None
             and new_fan_mode != old_fan_mode
             and not self.automation_engine._fan_command_pending
-            and not self.automation_engine._fan_override_active
+            # Issue #774: an active fan override must not block re-detection of the fan
+            # turning OFF — that's the override's own defining condition ending, and is
+            # exactly what `_fan_cancel_in_this_event` (computed above) identifies. Only an
+            # ON-direction re-detection while already overridden is the redundant case this
+            # guard exists to skip.
+            and (not self.automation_engine._fan_override_active or _fan_cancel_in_this_event)
             and not self.automation_engine._hvac_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not _is_expected_confirmation
@@ -4586,10 +4600,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             return
 
-        # Skip if fan override is already active — the display refresh already happened
-        # unconditionally above (Issue #510); this just skips re-running override detection
-        # for a transition that's already accounted for.
-        if self.automation_engine._fan_override_active:
+        on_states = {"on"}
+        is_on = new_state.state in on_states
+
+        # Skip if fan override is already active AND this is not the fan turning off — the
+        # display refresh already happened unconditionally above (Issue #510); an "on"
+        # transition here is a redundant re-announcement, already accounted for. An "off"
+        # transition, however, is the override's own defining condition ending and must not
+        # be swallowed here (Issue #774) — it falls through to the direction-aware dispatch
+        # below instead of returning.
+        if self.automation_engine._fan_override_active and is_on:
             _LOGGER.info(
                 "Fan/state entity changed while override already active (%s -> %s) — "
                 "skipping override re-detection (display already refreshed above)",
@@ -4602,9 +4622,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._is_recent_fan_command(threshold_seconds=30.0):
             return
 
-        on_states = {"on"}
-        is_on = new_state.state in on_states
-
         if is_on and not self.automation_engine._fan_active:
             # Fan turned on externally — manual override
             _LOGGER.info(
@@ -4616,10 +4633,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
             )
             self._feed_override_grace_fsm_on_detect("handle_fan_manual_override")
-        elif not is_on and self.automation_engine._fan_active:
+        elif not is_on and (self.automation_engine._fan_active or self.automation_engine._fan_override_active):
             # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
             # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
             # the "user turned fan ON" path and must NOT be called here.
+            #
+            # Issue #774: the `_fan_override_active` half of this condition matters when an
+            # active fan override (user turned the fan on, CA backed off) ends because the
+            # fan turns back off — `_fan_active` stays False for the whole life of an override
+            # (CA never "owns" that run), so checking `_fan_active` alone would silently drop
+            # this dispatch for exactly the case an override protects.
             _LOGGER.info(
                 "Fan turned off externally: %s -> %s (integration expected fan on)",
                 old_state.state,

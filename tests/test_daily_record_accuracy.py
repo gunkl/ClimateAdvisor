@@ -416,6 +416,38 @@ class TestManualOverridesTracking:
 
         assert coord._today_record.override_details == []
 
+    def test_manual_override_count_matches_details_on_none_new_temp(self):
+        """Issue #583: a None new_temp must not increment manual_overrides without
+        a matching override_details entry — the counter and list must never diverge.
+        """
+        coord = _make_thermostat_coordinator_stub(temp_command_pending=False)
+        coord._today_record.manual_overrides = 0
+        coord._today_record.override_details = []
+
+        old_state = _make_state("cool", {"temperature": 72.0})
+        new_state = _make_state("cool", {"temperature": None})
+        event = _make_event({"new_state": new_state, "old_state": old_state})
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        assert coord._today_record.manual_overrides == len(coord._today_record.override_details)
+        assert coord._today_record.manual_overrides == 0
+
+    def test_manual_override_count_matches_details_on_none_old_temp(self):
+        """Issue #583: same invariant when old_temp (rather than new_temp) is None."""
+        coord = _make_thermostat_coordinator_stub(temp_command_pending=False)
+        coord._today_record.manual_overrides = 0
+        coord._today_record.override_details = []
+
+        old_state = _make_state("cool", {"temperature": None})
+        new_state = _make_state("cool", {"temperature": 72.0})
+        event = _make_event({"new_state": new_state, "old_state": old_state})
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        assert coord._today_record.manual_overrides == len(coord._today_record.override_details)
+        assert coord._today_record.manual_overrides == 0
+
 
 # ---------------------------------------------------------------------------
 # TestDailyRecordBriefingPreservation — Issue #176

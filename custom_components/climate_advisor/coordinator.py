@@ -4351,11 +4351,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # A single event that changes both setpoint and fan_mode has one root cause; two
             # simultaneous grace periods from one event would confuse the automation engine.
             _setpoint_override_detected = True
-            self._today_record.manual_overrides += 1
             try:
                 old_val = float(old_temp)
                 new_val = float(new_temp)
                 magnitude = round(new_val - old_val, 1)
+                # Issue #583: increment the counter only after the append below is guaranteed
+                # to succeed, so manual_overrides and len(override_details) can never diverge.
+                self._today_record.manual_overrides += 1
                 self._today_record.override_details.append(
                     {
                         "time": dt_util.now().strftime("%H:%M"),
@@ -4366,7 +4368,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     }
                 )
             except (ValueError, TypeError):
-                pass  # Non-numeric temps, skip detail recording
+                # Issue #583: diagnostic evidence for the still-open Phase (b) investigation
+                # (leading hypothesis: a WHF-triggered HVAC-off transition producing a None
+                # temperature reading outside the ~30s command-recency window). Do NOT count
+                # this as an override — old_temp/new_temp isn't a real setpoint pair.
+                try:
+                    _cmd_age = (
+                        f"{(dt_util.now() - _last_cmd_time).total_seconds():.0f}s ago"
+                        if _last_cmd_time is not None
+                        else "None"
+                    )
+                except (TypeError, AttributeError):
+                    _cmd_age = "None"
+                _LOGGER.debug(
+                    "Setpoint override swallowed (non-numeric temp): old_temp=%s new_temp=%s "
+                    "hvac_mode=%s last_hvac_command=%s",
+                    old_temp,
+                    new_temp,
+                    new_state.state,
+                    _cmd_age,
+                )
             _LOGGER.debug("Possible manual override detected: %s -> %s", old_temp, new_temp)
             await self._async_save_state()
             # Setpoint-only override: mode matches what CA is actively controlling.

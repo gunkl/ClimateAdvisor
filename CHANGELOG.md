@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.82] — 2026-08-30
+
+- Fix #583: The Manual Overrides panel no longer shows a contradictory count (e.g. "1 override" alongside "no overrides recorded"). The setpoint-override counter and its detail list are now updated together, so they can never disagree.
+
 ## [0.6.81] — 2026-08-30
 
 - Fix #535: the briefing and dashboard's predicted window-close time for warm/mild days now also accounts for indoor reaching your comfort floor, not just outdoor air warming up — closing a latent gap where the predicted close time could show later than nat-vent would actually still be helping.

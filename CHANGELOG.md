@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.80] — 2026-08-29
+
+- No user-visible behavior change. Documentation accuracy and readability pass covering `docs/`, `README.md`, and `CHANGELOG.md`: backfilled two missing changelog sections (0.5.48/0.5.49), corrected stale references to the shadow-engine/dual-engine migration infrastructure deleted in Phase 6 (issues #757–#770) across the Architecture Reference and all FSM lifecycle specs, fixed several numeric drifts (source file count, REST endpoint count, AI context-provider count) and two issue-number misattributions, converted the README's ASCII architecture diagram to a native Mermaid flowchart, and compacted dense prose throughout the FSM specs and computation reference for readability.
+
 ## [0.6.79] — 2026-08-29
 
 - Fix #775: the whole-house fan could restart just 1°F above your comfort floor after already shutting off once — below the tighter comfort band it would have held if it had just kept running. Restarting now requires indoor to recover to the same point a continuously-running fan would already be cycling at, not the looser floor used for a brand-new activation. The fan's very first activation each day is unaffected.
@@ -413,6 +417,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ## [0.5.50] — 2026-08-03
 
 - Fix #561: the whole-house fan could turn itself on with every door and window closed, briefly switching the thermostat off for no reason — and the log misleadingly claimed "whole-house fan manually turned on" even though nobody touched it. The fan-cycling logic now re-checks that a monitored sensor is actually open before ever turning the fan back on, instead of trusting an internal flag that could go stale for hours. Also fixed the underlying causes: a self-healing check that could keep a ventilation "session" alive after windows closed, and a rare timing gap that could start two duplicate internal timers, both of which could leave the system briefly confused about whether it or the user caused a fan change.
+
+## [0.5.49] — 2026-08-02
+
+- Fix #557: options dialog sections now save the instant you hit Submit — no more separate "Save & Close" step. Previously, submitting a section (e.g. Setpoints or Notifications) only staged the change in memory; re-opening that same section before hitting the separate Save button showed the old value, making it look like the change hadn't taken. Every section now writes and reloads immediately, so what you see after Submit is always what's actually saved.
+
+## [0.5.48] — 2026-08-02
+
+- Fix #558: the AC no longer chases a colder-than-comfort setpoint on hot days after you return from being away — it now simply restores your normal comfort setting. The overnight pre-cool banking feature (which quietly cools the house before a hot day, overnight, while it's cheap) now also runs on stretches of consecutive hot days that aren't getting hotter each day, not just the first day of a heat wave. The morning briefing no longer claims pre-cooling happened if it didn't.
 
 ## [0.5.47] — 2026-08-02
 

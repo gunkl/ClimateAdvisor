@@ -195,7 +195,7 @@ Without this, production code that reads the thermostat back (e.g. `handle_occup
 | `automation_grace_seconds` | `300` | |
 | `manual_grace_seconds` | `900` | |
 | `fan_mode` | `"disabled"` | fan cycles off by default |
-| `nat_vent_hysteresis_f` | `1.0` | mirrors production const (was 2.0 — wrong) |
+| `nat_vent_hysteresis_f` | `1.0` | mirrors production const (previously 2.0, corrected) |
 | `nat_vent_reactivation_lockout_s` | `300` | mirrors production const |
 
 **Why `nat_vent_hysteresis_f = 1.0`?** The production constant `NAT_VENT_HYSTERESIS_F` is 1.0°F. The old harness default was 2.0°F — a hardcoded departure that silently suppressed nat-vent activation for marginal temperature gaps, making scenarios behave unlike any real home. The harness must mirror the exact production constants.
@@ -362,7 +362,7 @@ Assertions are evaluated by reading three sources:
 
 ## tools/simulate.py — CLI Shell
 
-`tools/simulate.py` (~657 lines) is a thin shell around `run_production.py`. It owns:
+`tools/simulate.py` (726 lines) is a thin shell around `run_production.py`. It owns:
 - CLI argument parsing (`--pending`, `-s NAME`, `--list`, `--cases`, `-v`, `--report`, `--check-integrity`, `--sign`)
 - `run_scenario_production(scenario_file, state)` — loads JSON, calls `run_production_scenario()`, formats assertions
 - Tier separation: `track: "integration"` → `skipped: True`; `simulator_support: false` → evaluated normally

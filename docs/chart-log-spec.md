@@ -357,10 +357,10 @@ In all error paths `load()` returns `None` and does not raise. The coordinator r
 - [`ChartStateLog.load`](../custom_components/climate_advisor/chart_log.py#L55) — disk read, parse, prune on startup
 - [`ChartStateLog.save`](../custom_components/climate_advisor/chart_log.py#L95) — atomic write to disk
 - [`ChartStateLog.append`](../custom_components/climate_advisor/chart_log.py#L119) — entry construction and in-memory append
-- [`ChartStateLog._maybe_prune`](../custom_components/climate_advisor/chart_log.py#L154) — time-gated retention enforcement
-- [`ChartStateLog.get_entries`](../custom_components/climate_advisor/chart_log.py#L176) — filtered, downsampled retrieval
-- [`ChartStateLog._bucket_hourly`](../custom_components/climate_advisor/chart_log.py#L234) — 1-hour average bucketing
-- [`ChartStateLog._bucket_daily`](../custom_components/climate_advisor/chart_log.py#L274) — daily summary bucketing
+- [`ChartStateLog._maybe_prune`](../custom_components/climate_advisor/chart_log.py#L167) — time-gated retention enforcement
+- [`ChartStateLog.get_entries`](../custom_components/climate_advisor/chart_log.py#L189) — filtered, downsampled retrieval
+- [`ChartStateLog._bucket_hourly`](../custom_components/climate_advisor/chart_log.py#L260) — 1-hour average bucketing
+- [`ChartStateLog._bucket_daily`](../custom_components/climate_advisor/chart_log.py#L304) — daily summary bucketing
 - [`_parse_ts`](../custom_components/climate_advisor/chart_log.py#L31) — ISO-8601 parse helper; returns `None` on failure
 
 ## Coordinator Chart Log Wiring

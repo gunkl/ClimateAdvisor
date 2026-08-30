@@ -75,14 +75,9 @@ pytest tests/ -v --cov=custom_components/climate_advisor --cov-report=html
 # Open htmlcov/index.html in your browser
 ```
 
-### Current Test Files
+### Test Suite
 
-| File | What it covers |
-|---|---|
-| `test_classifier.py` | Day type classification, trend analysis (pure logic, no mocks) |
-| `test_const.py` | Internal consistency of constants and thresholds |
-| `test_door_window.py` | Door/window sensor group resolution and polarity logic |
-| `conftest.py` | Shared fixtures and HA module mocking |
+The project maintains 202 test files under `tests/test_*.py` (verify with `find tests -name 'test_*.py' | wc -l`). Coverage spans: classification logic, thermal learning (v2 and v3 concurrent observations), FSM state machines (nat-vent, door/window, override/grace, fan, economizer, classification, occupancy), automation gate logic, grace/pause/override mechanics, occupancy-aware guards, briefing generation, API views, config flow, and simulation feedback. Shared fixtures and Home Assistant module mocking are centralized in `conftest.py`.
 
 ### Writing New Tests
 

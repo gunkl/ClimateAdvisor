@@ -32,12 +32,12 @@
 
 | Function | File | Start line |
 |---|---|---|
-| `compute_k_passive` | learning.py | 187 |
-| `compute_k_passive_blocks` | learning.py | 285 |
-| `compute_k_env_solar` | learning.py | 370 |
-| `compute_k_active` | learning.py | 446 |
-| `compute_k_active_single_point` | learning.py | 505 |
-| `record_thermal_observation` | learning.py | 734 |
+| `compute_k_passive` | learning.py | 236 |
+| `compute_k_passive_blocks` | learning.py | 334 |
+| `compute_k_env_solar` | learning.py | 419 |
+| `compute_k_active` | learning.py | 495 |
+| `compute_k_active_single_point` | learning.py | 554 |
+| `record_thermal_observation` (method) | learning.py | 820 |
 | `_update_thermal_model_cache` | learning.py | 754 |
 | `get_thermal_model` | learning.py | 1028 |
 | `_commit_event_from_dict` | learning.py | 1127 |
@@ -431,9 +431,17 @@ When the guard applies, ramp interpolation is used for that hour. When windows a
 
 ### Motivation
 
-The in-memory consecutive-pair OLS on 5-min thermostat samples structurally fails for 1°F thermostat resolution: overnight drift of ≈0.25°F/hr produces 0.021°F per 5-min interval, well below the 1°F quantization floor. Nearly all pairs show rate=0; rare pairs show ±12°F/hr spikes. R² ≈ 0.02; almost all windows are rejected. The v0.3.43 chart_log endpoint backfill committed 8 windows at α=0.05, yielding only 33% convergence ((0.95)^8 = 0.663 weight on prior). Both k_passive and k_vent_window were ≈3–5× too large, causing the overnight predicted indoor temperature to dip 8–10°F below actual.
+Thermostat quantization defeats the consecutive-pair OLS estimator. The raw samples produce near-zero R² while the early endpoint estimator converged too slowly, yielding estimates 3–5× too large.
 
-The dual-estimator framework runs both estimators on every overnight chart_log window and selects per-night based on data quality. Backfill v2 reprocesses 30 days, accumulating enough EWMA iterations for convergence.
+| Metric | Value | Impact |
+|---|---|---|
+| Overnight passive drift | ≈0.25°F/hr | Produces 0.021°F per 5-min interval |
+| Thermostat quantization | 1°F | Dwarfs the signal; nearly all rate pairs are zero |
+| Consecutive-pair R² | ≈0.02 | Almost all windows rejected |
+| Early convergence (8 windows @ α=0.05) | 66.3% weight still on prior (`(1-0.05)^8`) | Slow adaptation to true value |
+| Resulting k estimates | 3–5× too large | Overnight predicted indoor dips 8–10°F below actual |
+
+The dual-estimator framework runs both methods on every overnight window and selects per-night based on data quality. Backfill v2 reprocesses 30 days to converge via EWMA, reaching ≈99% weight in 30 medium-grade updates.
 
 ### Estimator A — Endpoint
 

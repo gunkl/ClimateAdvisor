@@ -41,7 +41,7 @@ any human reviewer sees the PR.
 | `dependencies` | Yes | `["weather", "climate", "http"]` | Required HA integrations |
 | `documentation` | Yes | GitHub repo URL | Must resolve to a real page |
 | `integration_type` | Yes | `"service"` | See section above — do not change |
-| `iot_class` | Yes | `"local_polling"` | CA polls local HA entities |
+| `iot_class` | Yes | `"cloud_polling"` | Corrected from `local_polling` in Issue #543 — the HACS default-store reviewer flagged the original value because CA calls the Anthropic cloud API, not just local HA entities. Do not revert. |
 | `issue_tracker` | Yes | GitHub issues URL | Must resolve to real issues page |
 | `requirements` | Yes | `["anthropic>=0.49.0"]` | pip packages |
 | `version` | Yes | current semver | Must match `const.py VERSION` |

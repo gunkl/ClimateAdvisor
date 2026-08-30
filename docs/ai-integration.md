@@ -76,7 +76,7 @@ for the full audit of what was ported vs. retired as redundant.
 | `claude_api.py` | `ClaudeAPIClient`: all Anthropic API access, circuit breaker, rate limits, budget, retry, cost estimation, persistence |
 | `ai_skills.py` | `AISkillRegistry` + `AISkillDefinition`: skill registration, lookup, execution pipeline, return contract enforcement |
 | `ai_skills_investigator.py` | The merged `"investigator"` skill: system prompt, response parser, deterministic fallback, thin context-assembly orchestrator |
-| `ai_skills_context.py` | `ContextProviderRegistry` + every individual context provider (16, as of Issue #563) the investigator's context is assembled from, including the render/timeline functions and the state-cross-validation/override-details/daily-summaries providers ported from the retired `ai_skills_activity.py` |
+| `ai_skills_context.py` | `ContextProviderRegistry` + every individual context provider (15, as of Issue #563) the investigator's context is assembled from, including the render/timeline functions and the state-cross-validation/override-details/daily-summaries providers ported from the retired `ai_skills_activity.py` |
 
 ---
 
@@ -227,7 +227,7 @@ one fallback:
 
 #### Context Sources
 
-Sixteen context providers are registered in `ai_skills_context.py`'s `ContextProviderRegistry`
+Fifteen context providers are registered in `ai_skills_context.py`'s `ContextProviderRegistry`
 (`ai_skills_investigator.py:async_build_investigator_context` is a thin orchestrator that calls
 `registry.select(focus)` and concatenates the result). Each provider is wrapped in its own
 `try/except`; a failure in one does not abort the others — the section is marked unavailable
@@ -241,7 +241,7 @@ and assembly continues.
 | `last_briefing` | Most recent daily briefing text |
 | `learning` | Compliance summary, thermal model, weather bias, suggestions, recent daily records |
 | `thermal_pipeline` | Per-obs-type rejection/commit counts, `NEVER LEARNED`/`***PIPELINE FAILURE***` markers, engine status |
-| `event_log` | Last 200 event-log entries filtered to last N hours (`kwargs["hours"]`, default 168, clamped 1–720); event-type counts, `SYSTEM LOG RECORDS` (real captured WARNING+/ERROR log records via `log_capture.py`, Issue #578 — replaces an earlier check that only matched the substring "error"/"warning" in a CA event's `type` field), `TIMING CORRELATIONS` (manual events near known automation cycle periods), `KNOWN OVERRIDE FALSE POSITIVES` (Issue #205 pattern: `override_detected` within 60s of an automation event), `RESTART HISTORY` (restart count by cause — `user_restart`/`version_changed` filtered out as benign, only `cause=unknown` is noteworthy) |
+| `event_log` | Last 200 entries (last N hours, clamped 1–720). Includes: event-type counts, SYSTEM LOG RECORDS, TIMING CORRELATIONS, KNOWN OVERRIDE FALSE POSITIVES, RESTART HISTORY. [See ai-skills-spec.md](ai-skills-spec.md#event-log-provider) for sub-section details. |
 | `activity_timeline` | Deterministic markdown event timeline table (ported from the retired activity context; never LLM-authored) |
 | `override_details` | Setpoint override count/history/current-override-duration, Issue #321 stuck-grace critical warning, fan ownership transitions plus a fan override count (Issue #578) (ported, Issue #563) |
 | `daily_summaries` | Historical multi-day trend summary, only populated when `hours > 36` (ported, Issue #563) |

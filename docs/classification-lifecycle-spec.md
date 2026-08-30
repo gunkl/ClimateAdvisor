@@ -9,13 +9,13 @@
 | Why is `classification_fsm.py` stateless, unlike the other 4 FSMs? | `apply_classification()` has no genuine multi-tick session state — `_current_classification` is DATA (a fresh `DayClassification` handed in each cycle), not a state machine that persists/evolves across calls. Forcing a state dataclass with no real transitions to model would be dead weight. | [State Model](#state-model) |
 | Why only ONE event kind (`CYCLE_EVALUATED`) instead of one per production call site? | All 6 real call sites (`api.py:578`, the grace-expiry re-entry, coordinator's startup coalesce / 30-min cycle / two others) invoke the exact same `apply_classification()` method with no call-site-specific branching inside it. | [Event Kinds](#event-kinds) |
 | What does the ODE ceiling guard extraction actually cover? | The ~190-line eligibility/dormancy/breach-scan/lead-time computation inside `apply_classification()` (Issue #136, dormancy fixed Issue #247, archetype-aware threshold Issue #392 Fix 1) — extracted into `ode_ceiling_guard.py`'s `decide_ode_ceiling_guard()`. | [Scope](#scope) |
-| Does flipping `_classification_fsm_authoritative` change production behavior today? | No — `False` for `_engine_a`/production for its whole lifetime; the legacy inline block runs unconditionally and unchanged. Only `_engine_b`/shadow ever applies the FSM's decision. | [Verification](#verification) |
-| Is classification's shadow-diagnostic coverage a `mirror`+`fsm` pair like nat-vent/door-window/override-grace? | No — a single `classification_mirror` axis only, same shape as fan/WHF's own `fan_mirror`-only axis, for the same reason: no separate untethered FSM state object exists to compare against (this FSM is stateless). | [Shadow-Diagnostic Coverage](#shadow-diagnostic-coverage) |
-| What proves the extraction is behavior-identical? | `tools/sim_harness/classification_fsm_authoritative_compare.py` + `tests/test_classification_fsm_authoritative_compare.py`, run against the full 90-scenario golden+pending corpus — zero divergence (Issue #742). | [Verification](#verification) |
+| When did the classification FSM become sole authority? | Phase 6 (Issues #757–#770) deleted the legacy inline block and the shadow-engine infrastructure. The FSM is now the only decision path for classification apply. | [Verification](#verification) |
+| What happened to classification's shadow-diagnostic coverage? | Deprecated and deleted in Phase 6. The `classification_mirror` axis and the entire shadow-engine infrastructure were removed once all 4 FSMs proved reliable in production use. | [Shadow-Diagnostic Coverage](#shadow-diagnostic-coverage-historical) |
+| What proves the extraction is behavior-identical? | During the migration, a differential comparator ran the full 90-scenario golden+pending corpus and found zero divergence (Issue #742). That comparator was retired along with the rest of the shadow-engine infrastructure in Phase 6 (Issue #757) — the FSM is now unconditionally the sole implementation, so there is no second path left to compare against. | [Verification](#verification) |
 
 ## Scope
 
-- **Files:** `custom_components/climate_advisor/ode_ceiling_guard.py` (pure ODE ceiling guard decision), `custom_components/climate_advisor/classification_fsm.py` (the wiring layer composing `desired_state.decide_scheduled_band_gate()` + `ode_ceiling_guard.decide_ode_ceiling_guard()`), `custom_components/climate_advisor/automation.py` (`_resolve_classification_fsm_state()`, `_apply_ode_ceiling_guard_decision()`, and the flag-gated call site inside `apply_classification()`), `custom_components/climate_advisor/coordinator.py` (the 5th fixed-per-engine-identity flag and the `classification_mirror` shadow-diagnostic axis).
+- **Files:** `custom_components/climate_advisor/ode_ceiling_guard.py` (pure ODE ceiling guard decision), `custom_components/climate_advisor/classification_fsm.py` (the wiring layer composing `desired_state.decide_scheduled_band_gate()` + `ode_ceiling_guard.decide_ode_ceiling_guard()`), `custom_components/climate_advisor/automation.py` (`_resolve_classification_fsm_state()`, `_apply_ode_ceiling_guard_decision()`, and the unconditional call site inside `apply_classification()`). `coordinator.py`'s per-engine flag and `classification_mirror` shadow-diagnostic axis existed only during the migration and were deleted in Phase 6 (Issue #757).
 - **Entry point:** `AutomationEngine.apply_classification()` / `classification_fsm.transition()` (the composed decision function) / `AutomationEngine._resolve_classification_fsm_state()` (the single dispatch point).
 
 **Does NOT cover:**
@@ -56,9 +56,9 @@
 | `DEFER_NAT_VENT` | `aggressive_savings=True` | `NOT_EVALUATED_SAVINGS_NAT_VENT` | No |
 | `DEFER_NAT_VENT` | `fan_mode` in (WHOLE_HOUSE, BOTH) | `NOT_EVALUATED_WHF_ARCHETYPE` | No |
 | `DEFER_NAT_VENT` | `fan_mode` is HVAC or DISABLED, `aggressive_savings=False` | `EVALUATED` | Yes |
-| `PROCEED` (or the structurally-unreachable `DEFER_OVERRIDE` — see below) | — | `EVALUATED` | Yes |
+| `PROCEED` | — | `EVALUATED` | Yes |
 
-**`DEFER_OVERRIDE` is structurally unreachable at this call site in production**, but is not special-cased by `apply_classification()` at all — the real method's own `self._manual_override_active` early-return (automation.py `~L2456-2497`) always fires *before* `decide_scheduled_band_gate()` is ever called, so `DEFER_OVERRIDE` can never actually be returned here. If it somehow were, production has no `if _gate == DEFER_OVERRIDE:` branch, so it would fall through to the ceiling guard exactly like `PROCEED` — `classification_fsm.py` mirrors this exactly (only 3 explicit short-circuit branches, not 4).
+**`DEFER_OVERRIDE` is structurally unreachable** at this call site: the real method's `self._manual_override_active` early-return always fires *before* `decide_scheduled_band_gate()` is ever called, so `DEFER_OVERRIDE` can never be returned here. If it somehow were, it would fall through to the ceiling guard exactly like `PROCEED` — `classification_fsm.py` mirrors this exactly (only 3 explicit short-circuit branches, not 4).
 
 ### ODE Ceiling Guard (`ode_ceiling_guard.py`)
 
@@ -79,26 +79,19 @@
 
 ## Wiring
 
-`apply_classification()`'s ceiling-guard section (automation.py) is gated on `self._classification_fsm_authoritative`:
+`apply_classification()`'s ceiling-guard section (automation.py) calls the FSM unconditionally. As of Phase 6 (Issues #757–#770), the legacy inline block has been deleted — the FSM is the sole authority.
 
-- **`False` (production, `_engine_a`, forever):** the original inline block runs byte-identical to pre-Issue-#742 behavior.
-- **`True` (shadow, `_engine_b`, forever):** `_resolve_classification_fsm_state()` builds one `ClassificationFsmInputs` snapshot and calls `classification_fsm.transition()`; `_apply_ode_ceiling_guard_decision()` then reproduces the exact same logging/event/HVAC-write behavior, driven by the returned `OdeCeilingGuardDecision` instead of re-deriving it inline.
+`_resolve_classification_fsm_state()` builds one `ClassificationFsmInputs` snapshot and calls `classification_fsm.transition()`; `_apply_ode_ceiling_guard_decision()` then reproduces the exact same logging/event/HVAC-write behavior, driven by the returned `OdeCeilingGuardDecision`.
 
-Fixed at construction (Issue #729's pattern) — `coordinator.py` sets `_engine_a._classification_fsm_authoritative = False` and `_engine_b._classification_fsm_authoritative = True` once, never mutated afterward.
+## Shadow-Diagnostic Coverage (historical)
 
-## Shadow-Diagnostic Coverage
-
-A single `classification_mirror` axis (no paired `classification_fsm` axis) — same shape as fan/WHF's own `fan_mirror`-only axis, for an analogous but distinct reason: `classification_fsm.py` is genuinely stateless, so there is no separate untethered FSM state object to compare production against the way `self._nat_vent_fsm_state` stands apart from both engines. `_update_shadow_engine_diagnostic()` instead compares `decide_scheduled_band_gate()`'s live result on each engine's own flags — a pre-existing shared pure function both engines already call unconditionally every `apply_classification()` cycle, independent of either engine's `_classification_fsm_authoritative` flag.
-
-Exposed on `ClimateAdvisorShadowEngineStatusSensor` (`sensor.py`) as `classification_production_state`/`classification_shadow_state`/`classification_mirror_agrees`, plus a `classification_mirror` entry in the sensor's `debounce` attribute.
+During the migration, a single `classification_mirror` axis (no paired `classification_fsm` axis — `classification_fsm.py` is genuinely stateless, so there was no separate untethered FSM state object to compare production against) tracked live agreement via `_update_shadow_engine_diagnostic()`, exposed on a dedicated shadow-engine status sensor. This entire mechanism — the axis, the comparison, and the sensor — was permanently deleted in Phase 6 graduation (Issue #757) once the classification FSM proved reliable in production; nothing about it remains in the current codebase.
 
 ## Verification
 
 - `tests/test_ode_ceiling_guard.py` — exhaustive unit coverage of `decide_ode_ceiling_guard()`'s 8 outcomes and their boundary conditions.
 - `tests/test_classification_fsm.py` — wiring correctness between the 2 composed pure pieces.
-- `tests/test_classification_fsm_authoritative_compare.py` — full 90-scenario golden+pending corpus differential comparator (Issue #742's primary gate — zero divergence required) plus 2 positive-control tests proving the FSM branch is actually reached, not vacuously passing.
-- `tests/test_combined_fsm_authoritative_compare.py` — all 5 `*_fsm_authoritative` flags flipped together; no new compound-interaction divergence from adding classification into the mix.
-- `tests/test_shadow_engine_coverage.py` — `_apply_ode_ceiling_guard_decision` registered as `"internal"` (called only from `apply_classification()`, already `"mirrored"`).
+- During the migration, a full 90-scenario golden+pending corpus differential comparator (Issue #742's primary gate) and a combined-flags comparator (all `*_fsm_authoritative` flags flipped together) both proved zero divergence. Both comparators were retired in Phase 6 (Issue #757) along with the flags they compared — there is no second path left to compare against.
 
 ## Code Reference
 

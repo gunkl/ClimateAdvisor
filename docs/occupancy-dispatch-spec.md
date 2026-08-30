@@ -22,7 +22,7 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
   - `custom_components/climate_advisor/automation.py` — occupancy handlers, `_set_temperature_for_mode()` safety net, `apply_classification()` guards, bedtime/wakeup guards, `set_occupancy_mode()`
   - `custom_components/climate_advisor/const.py` — mode constants, `OCCUPANCY_SETBACK_MINUTES`, `VACATION_SETBACK_EXTRA`
   - `custom_components/climate_advisor/state.py` — `STATE_VERSION`, `StatePersistence` (state file I/O)
-- **Approximate line ranges** (re-verified 2026-08-22, Issue #735 — previous citations were ~5,000 lines stale; behavioral content below was checked against current code and remains accurate):
+- **Approximate line ranges** (re-verified 2026-08-22; previous citations were ~5,000 lines stale):
   - `coordinator.py`: L2648–L2780 (toggle listener + priority resolver + away timer)
   - `coordinator.py`: ~L1947 (instance variables), L2333–L2340 (state restore), L2470 (state persist)
   - `automation.py`: L2432 (`apply_classification`, DEFER_OCCUPANCY guard ~L2518), L3305 (`_set_temperature_for_mode` safety net), L6655 (`handle_occupancy_away`), L6728 (`handle_occupancy_home`), L6780 (`handle_occupancy_vacation`), L6840 (`handle_bedtime`, DEFER_OCCUPANCY guard ~L6879), L7019 (`handle_pre_cool`, DEFER_OCCUPANCY guard ~L7068), L7195 (`handle_morning_wakeup`). Line numbers drift with unrelated commits — treat as approximate; verify with `grep -n "async def " automation.py` before citing.

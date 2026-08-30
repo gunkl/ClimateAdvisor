@@ -8,7 +8,7 @@ This file tracks approved exceptions where Climate Advisor interacts with Home A
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What is the one approved exception to the HA boundary rule and why? | Climate Advisor writes `climate_advisor_learning.json` to the HA config root. This is the standard persistent storage location for custom integrations; the file is owned entirely by CA and deleting it resets learning gracefully. | [§1. Learning Engine Database File](HA-BOUNDARY-EXCEPTIONS.md#1-learning-engine-database-file) |
-| What is the resolution plan for the learning DB file exception? | Migrate to HA's `hass.helpers.storage.Store` API (stores under `.storage/` with versioning and atomic writes). Targeted for v0.2.0. | [§1. Learning Engine Database File](HA-BOUNDARY-EXCEPTIONS.md#1-learning-engine-database-file) |
+| What is the resolution plan for the learning DB file exception? | Not urgent — current file-based persistence is already atomic/race-safe (Issue #493). Migration to HA's `Store` API is tracked as a future evaluation, not a fix for a known defect. See [Issue #779](https://github.com/gunkl/ClimateAdvisor/issues/779). | [§1. Learning Engine Database File](HA-BOUNDARY-EXCEPTIONS.md#1-learning-engine-database-file) |
 | How often should active exceptions be reviewed? | Quarterly or before each minor version release. For each exception: is it still necessary, has HA added a better-supported alternative, can it move inside the integration's scope, what is the current risk level? | [§Review Schedule](HA-BOUNDARY-EXCEPTIONS.md#review-schedule) |
 
 ## Active Exceptions
@@ -19,8 +19,8 @@ This file tracks approved exceptions where Climate Advisor interacts with Home A
 - **What**: The learning engine writes `climate_advisor_learning.json` to the HA config root (`/config/climate_advisor_learning.json`)
 - **Why**: HA's config directory is the standard persistent storage location for custom integrations that need to store state across restarts. The learning engine needs a 90-day rolling window of daily observations and user feedback to generate suggestions.
 - **Risk**: Low. The file is a single JSON file owned entirely by Climate Advisor. It does not modify any existing HA files. If the file is deleted, the learning engine resets gracefully with no impact to HA.
-- **Resolution plan**: Migrate to HA's `hass.helpers.storage.Store` API, which manages storage under `.storage/` with proper versioning and atomic writes. This is the HA-recommended approach for integration-managed data. Target: v0.2.0.
-- **Status**: Active — awaiting migration to `Store` API
+- **Resolution plan**: A brief investigation (2026-08-29) found the current persistence already atomic/race-safe (`tempfile.mkstemp()` + `os.replace()`, Issue #493) — there is no known defect driving a migration. Migrating to HA's `Store` API would match HA's recommended pattern but requires a careful one-time data-migration path for existing installs and an equivalent read path for `tools/learning_db.py`/`tools/thermal_health.py` (which currently SSH-read the file directly). Tracked as a future evaluation in [Issue #779](https://github.com/gunkl/ClimateAdvisor/issues/779), not targeted to a specific version.
+- **Status**: Active — not urgent; see Issue #779 for the migration tradeoffs
 
 ---
 

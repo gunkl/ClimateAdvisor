@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import logging
 import platform
+from collections.abc import Callable
 from datetime import datetime, time, timedelta
 
-from .automation import compute_pre_cool_target, resolve_pre_cool_modifier
+from .automation import _in_sleep_window, compute_pre_cool_target, resolve_pre_cool_modifier
 from .classifier import DayClassification
 from .const import (
     COLD_DAY_SETBACK_DEPTH_F,
@@ -35,6 +36,7 @@ from .const import (
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
 )
+from .nat_vent_gate import resolve_comfort_heat
 from .temperature import FAHRENHEIT, find_temperature_crossing, format_temp, format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
@@ -116,6 +118,20 @@ def generate_briefing(
         "sleep_time": sleep_time,
         "wake_time": wake_time,
     }
+    # Issue #535: comfort-floor awareness for the nat-vent cutoff prediction — the real
+    # activation gate (decide_nat_vent_gate()) requires indoor > comfort_heat as one of
+    # its four conditions, but this predictive curve scan historically only modeled the
+    # outdoor-vs-indoor half. When runtime_config is available, resolve comfort_heat_raw/
+    # sleep_heat from it and pass an in_sleep_window_fn so _derive_warm_day_events() can
+    # also scan for a floor crossing. Omitted (None) when runtime_config isn't provided —
+    # callers relying on that (e.g. tests that call generate_briefing() directly without
+    # it) keep today's outdoor-only behavior rather than guessing at missing config.
+    _comfort_heat_raw = float(runtime_config.get("comfort_heat", comfort_heat)) if runtime_config else None
+    _sleep_heat = float(runtime_config.get("sleep_heat", comfort_heat)) if runtime_config else None
+    _in_sleep_window_fn: Callable[[datetime], bool] | None = (
+        (lambda ts: _in_sleep_window(ts, runtime_config)) if runtime_config else None
+    )
+
     # Single source of truth for warm-day window/AC timing (Issue #518): derive once here
     # and hand the same result to both the header table and the conversational body, so
     # they can never disagree about when windows close or whether AC is expected.
@@ -124,23 +140,26 @@ def generate_briefing(
             predicted_indoor=predicted_indoor_future,
             predicted_outdoor=predicted_outdoor_future,
             comfort_cool=comfort_cool,
+            comfort_heat_raw=_comfort_heat_raw,
+            sleep_heat=_sleep_heat,
+            in_sleep_window_fn=_in_sleep_window_fn,
         )
         if c.day_type == DAY_TYPE_WARM and predicted_indoor_future and predicted_outdoor_future
         else None
     )
     # Issue #534: MILD-day window close time was documented (docs/08-COMPUTATION-REFERENCE.md
     # §6d) as ODE-dynamic but never actually wired up — _mild_day_plan() always used the static
-    # classifier hour. The dead `_derive_natural_vent_events()` helper was built for a
-    # list[float] hour-indexed curve shape that _build_predicted_indoor_future() has never
-    # actually produced (it returns list[{"ts", "temp"}], same as the warm-day curves) — so
-    # reuse _derive_warm_day_events() here instead, the same call already validated accurate
-    # for warm days, rather than wiring up a function whose expected input shape doesn't match
-    # what production provides.
+    # classifier hour. Uses _derive_warm_day_events() here too (the dead
+    # `_derive_natural_vent_events()` sibling — built for a list[float] hour-indexed curve shape
+    # that _build_predicted_indoor_future() has never actually produced — was removed in #535).
     mild_events = (
         _derive_warm_day_events(
             predicted_indoor=predicted_indoor_future,
             predicted_outdoor=predicted_outdoor_future,
             comfort_cool=comfort_cool,
+            comfort_heat_raw=_comfort_heat_raw,
+            sleep_heat=_sleep_heat,
+            in_sleep_window_fn=_in_sleep_window_fn,
         )
         if c.day_type == DAY_TYPE_MILD and predicted_indoor_future and predicted_outdoor_future
         else None
@@ -529,9 +548,10 @@ _NAT_VENT_CUTOFF_MARGIN_F = 1.0  # forecast-hour margin — distinct from the li
 
 
 def _nat_vent_cutoff_reached(outdoor_temp: float, indoor_temp: float) -> bool:
-    """Architecture-reset (Issue #429 consolidation): the shared predicate both
-    _derive_warm_day_events() and _derive_natural_vent_events() independently
-    hand-rolled as `outdoor >= indoor - 1.0` — now a single shared definition."""
+    """Architecture-reset (Issue #429 consolidation): the shared outdoor-vs-indoor
+    predicate _derive_warm_day_events() hand-rolled as `outdoor >= indoor - 1.0` —
+    now a single shared definition. This is only half of the real activation gate's
+    predicate — see the comfort-floor scan in _derive_warm_day_events() (Issue #535)."""
     return outdoor_temp >= indoor_temp - _NAT_VENT_CUTOFF_MARGIN_F
 
 
@@ -540,11 +560,25 @@ def _derive_warm_day_events(
     predicted_outdoor: list[dict] | None,
     comfort_cool: float,
     k_active_cool: float | None = None,
+    comfort_heat_raw: float | None = None,
+    sleep_heat: float | None = None,
+    in_sleep_window_fn: Callable[[datetime], bool] | None = None,
 ) -> dict:
     """Derive warm-day timing events from ODE predicted curves.
 
+    Args:
+        comfort_heat_raw, sleep_heat, in_sleep_window_fn: optional (Issue #535) — when
+            all three are provided, nat_vent_cutoff also scans for the comfort-floor
+            crossing the real activation gate (decide_nat_vent_gate() in
+            nat_vent_gate.py) requires (`indoor > comfort_heat`) but this predictive
+            scan previously never modeled. When omitted, behavior is unchanged from
+            before #535 (outdoor-crossing only).
+
     Returns a dict with keys:
-      nat_vent_cutoff: datetime | None — first hour outdoor >= indoor - 1 F
+      nat_vent_cutoff: datetime | None — earlier of the outdoor-crossing and (if the
+          three optional params are given) comfort-floor crossing
+      nat_vent_cutoff_reason: str | None — "outdoor_rise" or "comfort_floor", whichever
+          produced nat_vent_cutoff; None if nat_vent_cutoff is None
       ceiling_breach_time: datetime | None — first hour indoor > comfort_cool
       precool_start_time: datetime | None — ceiling_breach_time minus computed lead
       any_nat_vent_window: bool — True if outdoor < indoor at any point
@@ -553,6 +587,7 @@ def _derive_warm_day_events(
     """
     result: dict = {
         "nat_vent_cutoff": None,
+        "nat_vent_cutoff_reason": None,
         "ceiling_breach_time": None,
         "precool_start_time": None,
         "any_nat_vent_window": False,
@@ -574,9 +609,30 @@ def _derive_warm_day_events(
         find_temperature_crossing(predicted_indoor, predicted_outdoor, lambda _ts, o, i: o < i) is not None
     )
 
-    result["nat_vent_cutoff"] = find_temperature_crossing(
+    outdoor_crossing = find_temperature_crossing(
         predicted_indoor, predicted_outdoor, lambda _ts, o, i: _nat_vent_cutoff_reached(o, i)
     )
+
+    # Issue #535: comfort-floor crossing — the real activation gate (decide_nat_vent_gate())
+    # requires indoor > comfort_heat as one of its four conditions; this predictive scan
+    # previously never modeled that term. Only reads the indoor curve (no outdoor pairing
+    # needed — same shape as ceiling_breach_time below), but still requires a matching
+    # entry in predicted_outdoor via find_temperature_crossing() so it can only fire at a
+    # timestamp both curves actually cover.
+    floor_crossing = None
+    if comfort_heat_raw is not None and sleep_heat is not None and in_sleep_window_fn is not None:
+        floor_crossing = find_temperature_crossing(
+            predicted_indoor,
+            predicted_outdoor,
+            lambda ts, _o, i: i <= resolve_comfort_heat(comfort_heat_raw, sleep_heat, in_sleep_window_fn(ts)),
+        )
+
+    if outdoor_crossing is not None and (floor_crossing is None or outdoor_crossing <= floor_crossing):
+        result["nat_vent_cutoff"] = outdoor_crossing
+        result["nat_vent_cutoff_reason"] = "outdoor_rise"
+    elif floor_crossing is not None:
+        result["nat_vent_cutoff"] = floor_crossing
+        result["nat_vent_cutoff_reason"] = "comfort_floor"
 
     # ceiling_breach_time only reads the indoor curve — no pairing needed.
     for entry in predicted_indoor:
@@ -610,66 +666,14 @@ def _derive_warm_day_events(
         result["nat_vent_recovers"] = result["recovery_time"] is not None
 
     _LOGGER.debug(
-        "WarmDayEvents: nat_vent_cutoff=%s, ceiling_breach=%s, precool_start=%s, recovers=%s, recovery_time=%s",
+        "WarmDayEvents: nat_vent_cutoff=%s (%s), ceiling_breach=%s, precool_start=%s, recovers=%s, recovery_time=%s",
         result["nat_vent_cutoff"],
+        result["nat_vent_cutoff_reason"],
         result["ceiling_breach_time"],
         result["precool_start_time"],
         result["nat_vent_recovers"],
         result["recovery_time"],
     )
-
-    return result
-
-
-def _derive_natural_vent_events(
-    predicted_indoor_future: list,
-    predicted_outdoor_future: list,
-    comfort_cool: float,
-    k_active_cool,
-) -> dict:
-    """Derive natural-ventilation timing events from ODE predicted curves (hour-indexed lists).
-
-    Simpler companion to _derive_warm_day_events for use with list[float] hour-indexed
-    arrays (as produced by _build_predicted_indoor_future / MILD day ODE calls).
-
-    Args:
-        predicted_indoor_future: list[float] where index = local hour (0–23).
-        predicted_outdoor_future: list[float] where index = local hour (0–23).
-        comfort_cool: Upper comfort bound (°F); used for ceiling breach detection.
-        k_active_cool: Cooling rate (°F/hr) for precool lead time, or None.
-
-    Returns a dict with keys:
-        nat_vent_cutoff: int | None — first hour h where predicted_outdoor_future[h] >= predicted_indoor_future[h] - 1.0
-        ceiling_breach_hour: int | None — first hour where indoor > comfort_cool
-        any_nat_vent_window: bool — True if outdoor < indoor at any hour
-    """
-    result: dict = {
-        "nat_vent_cutoff": None,
-        "ceiling_breach_hour": None,
-        "any_nat_vent_window": False,
-    }
-
-    if not predicted_indoor_future or not predicted_outdoor_future:
-        return result
-
-    n = min(len(predicted_indoor_future), len(predicted_outdoor_future))
-    if n == 0:
-        return result
-
-    # Any nat-vent window (outdoor < indoor at any hour)
-    result["any_nat_vent_window"] = any(predicted_outdoor_future[h] < predicted_indoor_future[h] for h in range(n))
-
-    # nat_vent_cutoff: first hour where outdoor >= indoor - 1.0 °F
-    for h in range(n):
-        if _nat_vent_cutoff_reached(predicted_outdoor_future[h], predicted_indoor_future[h]):
-            result["nat_vent_cutoff"] = h
-            break
-
-    # ceiling_breach_hour: first hour where indoor > comfort_cool
-    for h in range(n):
-        if predicted_indoor_future[h] > comfort_cool:
-            result["ceiling_breach_hour"] = h
-            break
 
     return result
 
@@ -702,6 +706,7 @@ def _warm_day_plan(
             comfort_cool=comfort_cool,
         )
     _nat_vent_cutoff = _events["nat_vent_cutoff"] if _events else None
+    _nat_vent_cutoff_reason = _events.get("nat_vent_cutoff_reason") if _events else None
     _ceiling_breach = _events["ceiling_breach_time"] if _events else None
     _nat_vent_recovers = _events["nat_vent_recovers"] if _events else False
 
@@ -709,11 +714,14 @@ def _warm_day_plan(
         open_t = c.window_open_time.strftime(_FMT_HOUR)
         if _nat_vent_cutoff is not None:
             close_t = _nat_vent_cutoff.strftime(_FMT_HOUR)
-            lines.append(
-                f"Open windows around {open_t} to catch the cool morning air."
-                f" Close up at {close_t} \u2014 after that the outdoor air will be"
-                f" warmer than inside."
-            )
+            # Issue #535: two distinct reasons the cutoff can fire \u2014 outdoor air rising
+            # above indoor (the original predicate), or indoor forecast to reach the
+            # comfort floor first. Same close time either way; different sentence why.
+            if _nat_vent_cutoff_reason == "comfort_floor":
+                close_sentence = f"Close up at {close_t} to hold the heat in."
+            else:
+                close_sentence = f"Close up at {close_t} \u2014 after that the outdoor air will be warmer than inside."
+            lines.append(f"Open windows around {open_t} to catch the cool morning air. {close_sentence}")
         else:
             lines.append(
                 f"Open windows around {open_t} to catch the cool morning air"

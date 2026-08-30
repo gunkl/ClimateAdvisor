@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.81] — 2026-08-30
+
+- Fix #535: the briefing and dashboard's predicted window-close time for warm/mild days now also accounts for indoor reaching your comfort floor, not just outdoor air warming up — closing a latent gap where the predicted close time could show later than nat-vent would actually still be helping.
+
 ## [0.6.80] — 2026-08-29
 
 - No user-visible behavior change. Documentation accuracy and readability pass covering `docs/`, `README.md`, and `CHANGELOG.md`: backfilled two missing changelog sections (0.5.48/0.5.49), corrected stale references to the shadow-engine/dual-engine migration infrastructure deleted in Phase 6 (issues #757–#770) across the Architecture Reference and all FSM lifecycle specs, fixed several numeric drifts (source file count, REST endpoint count, AI context-provider count) and two issue-number misattributions, converted the README's ASCII architecture diagram to a native Mermaid flowchart, and compacted dense prose throughout the FSM specs and computation reference for readability.

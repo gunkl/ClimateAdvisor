@@ -995,13 +995,35 @@ used the static `c.window_close_time` unconditionally. It has now been wired up,
 `_derive_warm_day_events()` directly (the same function warm days use), not
 `_derive_natural_vent_events()` — that helper's documented input shape (`list[float]`,
 hour-indexed) does not match what `_build_predicted_indoor_future()` actually produces
-(`list[{"ts", "temp"}]`, the same shape warm-day curves use), so it remains unused/dead code.
-`generate_briefing()` computes `mild_events` for MILD days the same way it already computes
-`warm_events` for warm days (identical call shape), and passes it to both `_generate_tldr_table()`
-(header row) and `_mild_day_plan()` (conversational body).
+(`list[{"ts", "temp"}]`, the same shape warm-day curves use), so it remained unused/dead code
+until **Issue #535** removed it outright (see below). `generate_briefing()` computes
+`mild_events` for MILD days the same way it already computes `warm_events` for warm days
+(identical call shape), and passes it to both `_generate_tldr_table()` (header row) and
+`_mild_day_plan()` (conversational body).
+
+**Comfort-floor hardening (Issue #535, 2026-08-30):** `nat_vent_cutoff` previously came from a
+bare `outdoor >= indoor - 1°F` scan (`_nat_vent_cutoff_reached()`) — only half of the real
+activation gate's predicate. The live gate, `decide_nat_vent_gate()` in `nat_vent_gate.py`
+(Issues #411/#417), requires **four** conditions, including `indoor > comfort_heat`.
+`_derive_warm_day_events()` now takes optional `comfort_heat_raw`/`sleep_heat`/
+`in_sleep_window_fn` params; when supplied, it also scans `predicted_indoor` for the first
+timestamp where indoor drops to `resolve_comfort_heat(comfort_heat_raw, sleep_heat,
+in_sleep_window_fn(ts))` (the same sleep-aware floor resolver `decide_nat_vent_gate()` uses,
+extracted to a standalone function in `nat_vent_gate.py`). `nat_vent_cutoff` becomes whichever
+of the outdoor-crossing or floor-crossing timestamps is earlier, and a new
+`nat_vent_cutoff_reason` field (`"outdoor_rise"` / `"comfort_floor"`) records which one won —
+`_warm_day_plan()` uses it to pick between two close-time sentences ("...after that the outdoor
+air will be warmer than inside" vs. "...to hold the heat in"). `generate_briefing()` resolves
+the three optional params from its `runtime_config` argument for both `warm_events` and
+`mild_events`; when `runtime_config` is omitted (direct test calls), the floor scan is skipped
+and behavior is identical to before #535. No confirmed production incident motivated this fix —
+see project memory `feedback_verify_before_confirmed_bug` — it closes a latent gap the
+recurring nat-vent duplication-drift pattern (`project_natvent_duplicate_threshold_logic`)
+predicted would eventually reappear in a forecast-curve consumer.
 
 When a predicted indoor/outdoor forecast curve is available (thermal model calibrated):
-- MILD day window close time = `nat_vent_cutoff` (the timestamp outdoor temp ≥ indoor − 1°F)
+- MILD day window close time = `nat_vent_cutoff` (earlier of: outdoor temp ≥ indoor − 1°F, or
+  indoor ≤ the sleep-aware comfort floor — Issue #535)
 - Fallback when no forecast curve is available = `time(MILD_WINDOW_CLOSE_HOUR, 0)` (5pm), unchanged
   from before this fix
 

@@ -18,6 +18,7 @@ from custom_components.climate_advisor.nat_vent_gate import (
     _resolve_comfort_heat,
     decide_nat_vent_gate,
     decide_nat_vent_soft_start_gate,
+    resolve_comfort_heat,
 )
 
 _BASE = {
@@ -108,6 +109,26 @@ class TestResolveComfortHeat:
 
     def test_sleep_window_uses_sleep_heat(self):
         assert _resolve_comfort_heat(_inputs(in_sleep_window=True)) == 64.0
+
+
+class TestResolveComfortHeatStandalone:
+    """Issue #535: resolve_comfort_heat() extracted as a dependency-free function
+    so callers outside nat_vent_gate.py (briefing.py's forecast-curve scan) can
+    resolve the sleep-aware comfort floor without constructing a full
+    NatVentGateInputs. Must match _resolve_comfort_heat(inputs) exactly."""
+
+    def test_daytime_uses_raw_comfort_heat(self):
+        assert resolve_comfort_heat(comfort_heat_raw=70.0, sleep_heat=64.0, in_sleep_window=False) == 70.0
+
+    def test_sleep_window_uses_sleep_heat(self):
+        assert resolve_comfort_heat(comfort_heat_raw=70.0, sleep_heat=64.0, in_sleep_window=True) == 64.0
+
+    def test_matches_inputs_shaped_wrapper(self):
+        for in_sleep_window in (True, False):
+            inputs = _inputs(in_sleep_window=in_sleep_window)
+            assert resolve_comfort_heat(inputs.comfort_heat_raw, inputs.sleep_heat, in_sleep_window) == (
+                _resolve_comfort_heat(inputs)
+            )
 
 
 class TestResolveCeilingThreshold:

@@ -716,48 +716,6 @@ class TestMildDayDynamicScheduling:
             f"Expected window_close_time=time({MILD_WINDOW_CLOSE_HOUR}, 0), got {classification.window_close_time}"
         )
 
-    def test_mild_day_close_time_uses_ode_crossover(self):
-        """Briefing for MILD day with ODE data showing crossover at 13:30 uses ~13:30, not 17:00.
-
-        This test exercises the briefing layer. Since briefing.py is not yet updated
-        (Phase 2), this test is expected to fail until _derive_natural_vent_events is
-        applied to the MILD day path.
-
-        The test calls the briefing module's MILD-day plan function and checks that
-        the window_close_time in the output reflects the ODE nat_vent_crossover
-        (13:30) rather than the const fallback (17:00).
-        """
-        import importlib
-
-        briefing_mod = importlib.import_module("custom_components.climate_advisor.briefing")
-        # _derive_warm_day_events / _derive_natural_vent_events must exist on the module
-        # after Fix C implementation. Until then, test fails with AttributeError.
-        derive_fn = getattr(briefing_mod, "_derive_natural_vent_events", None)
-        assert derive_fn is not None, (
-            "_derive_natural_vent_events not found in briefing.py — Fix C briefing change not yet implemented"
-        )
-
-        # Synthetic predicted futures: outdoor crosses indoor at hour 13 (13:30 between 13 and 14)
-        # indoor_future[h] > outdoor_future[h] is true until nat_vent_cutoff
-        # For simplicity, use a 24-entry list where each index = hour
-        pred_indoor = [70.0] * 24
-        pred_outdoor = [55.0] * 24
-        # At hour 13, outdoor temp rises to equal indoor, then exceeds it
-        pred_outdoor[13] = 70.0  # equal at 13 → crossover just before 14
-        pred_outdoor[14] = 72.0  # outdoor > indoor from 14 onward
-        pred_outdoor[15] = 73.0
-        # Build hourly list format (list of floats indexed by hour)
-        result = derive_fn(
-            predicted_indoor_future=pred_indoor,
-            predicted_outdoor_future=pred_outdoor,
-            comfort_cool=75.0,
-            k_active_cool=None,
-        )
-        crossover_hour = result.get("nat_vent_cutoff")
-        assert crossover_hour is not None, "nat_vent_cutoff should be set in result"
-        # Crossover detected at hour 13 or 14 (first hour outdoor >= indoor)
-        assert crossover_hour <= 14, f"Expected nat_vent_cutoff ≤ 14 (before 17:00 fallback), got {crossover_hour}"
-
     def test_mild_day_constants_in_const_py(self):
         """MILD_WINDOW_OPEN_HOUR == 10 and MILD_WINDOW_CLOSE_HOUR == 17 exist in const.py.
 

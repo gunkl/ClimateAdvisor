@@ -11,7 +11,12 @@ from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
-from custom_components.climate_advisor.briefing import _derive_warm_day_events, _generate_tldr_table, generate_briefing
+from custom_components.climate_advisor.briefing import (
+    _derive_warm_day_events,
+    _generate_tldr_table,
+    _warm_day_plan,
+    generate_briefing,
+)
 from custom_components.climate_advisor.classifier import DayClassification
 
 # ---------------------------------------------------------------------------
@@ -376,11 +381,17 @@ class TestMildDayBriefing:
 
     def test_uses_ode_close_time_when_forecast_available(self):
         """Issue #534: MILD-day close time uses the ODE-derived cutoff when a forecast curve
-        is available, instead of always falling back to the static classifier hour (5 PM)."""
+        is available, instead of always falling back to the static classifier hour (5 PM).
+
+        Indoor is kept above DEFAULT_CONFIG's comfort_heat=70 for the whole curve (Issue #535:
+        _generate()'s default runtime_config now also enables the comfort-floor scan, so the
+        outdoor crossing must stay the binding constraint here — this test is about the
+        outdoor-crossing path specifically, not the floor path, which has its own coverage in
+        TestDeriveWarmDayEvents)."""
         c = _make_classification("mild", today_high=68, today_low=48)
         # Outdoor crosses indoor at hour 13 UTC (index 3) — well before the static 5 PM fallback.
-        indoor = _make_indoor_curve([65.0, 66.0, 67.0, 68.0], start_hour_utc=10)
-        outdoor = _make_outdoor_curve([55.0, 58.0, 62.0, 67.5], start_hour_utc=10)
+        indoor = _make_indoor_curve([72.0, 71.5, 71.0, 70.5], start_hour_utc=10)
+        outdoor = _make_outdoor_curve([55.0, 58.0, 62.0, 69.5], start_hour_utc=10)
         result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
         assert "1:00 PM" in result
         assert "5:00 PM" not in result
@@ -1670,6 +1681,117 @@ class TestDeriveWarmDayEvents:
         assert events["recovery_time"] is not None
         assert events["recovery_time"] > events["nat_vent_cutoff"]
         assert events["recovery_time"].hour == 12
+
+    # ── Issue #535: comfort-floor hardening ──────────────────────────────────
+
+    def test_no_floor_scan_when_params_omitted(self):
+        """Regression guard: every pre-#535 caller/test omits the new optional
+        params and must reproduce today's exact outdoor-only result (with the new
+        reason field correctly reporting "outdoor_rise" — the only scan that ran)."""
+        indoor = _make_indoor_curve([72.0, 73.0, 74.0, 75.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([65.0, 68.0, 73.0, 76.0], start_hour_utc=8)
+        events = _derive_warm_day_events(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=75.0,
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 10
+        assert events["nat_vent_cutoff_reason"] == "outdoor_rise"
+
+    def test_outdoor_crossing_wins_when_earlier_than_floor(self):
+        """Outdoor crosses indoor well before indoor ever nears comfort_heat —
+        reason must be 'outdoor_rise', not 'comfort_floor'."""
+        indoor = _make_indoor_curve([72.0, 73.0, 74.0, 75.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([65.0, 68.0, 73.0, 76.0], start_hour_utc=8)
+        events = _derive_warm_day_events(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=75.0,
+            comfort_heat_raw=60.0,  # far below every indoor value — floor never crosses
+            sleep_heat=55.0,
+            in_sleep_window_fn=lambda _ts: False,
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 10
+        assert events["nat_vent_cutoff_reason"] == "outdoor_rise"
+
+    def test_floor_crossing_wins_when_earlier_than_outdoor_crossing(self):
+        """Indoor is forecast to fall to comfort_heat before outdoor ever rises
+        above indoor — nat_vent_cutoff must be the (earlier) floor crossing, with
+        reason 'comfort_floor'. This is the exact gap Issue #535 was filed for:
+        decide_nat_vent_gate() requires indoor > comfort_heat, but the old
+        outdoor-only scan never modeled it."""
+        # Indoor falls from 74 to 69 (crosses comfort_heat=70 at hour 10). Outdoor
+        # stays well below indoor the entire curve — no outdoor crossing at all.
+        indoor = _make_indoor_curve([74.0, 72.0, 69.0, 68.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([50.0, 52.0, 54.0, 56.0], start_hour_utc=8)
+        events = _derive_warm_day_events(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=75.0,
+            comfort_heat_raw=70.0,
+            sleep_heat=65.0,
+            in_sleep_window_fn=lambda _ts: False,
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 10
+        assert events["nat_vent_cutoff_reason"] == "comfort_floor"
+
+    def test_sleep_window_resolves_lower_floor(self):
+        """in_sleep_window_fn=True at every hour must use sleep_heat, not
+        comfort_heat_raw — matching resolve_comfort_heat()'s sleep-aware resolution.
+        comfort_heat_raw=70 would cross at hour 10 (indoor=69); the lower
+        sleep_heat=65 pushes the crossing later, to hour 12 (indoor=64) — only
+        reachable if the sleep-window floor is actually being used."""
+        indoor = _make_indoor_curve([74.0, 72.0, 69.0, 66.0, 64.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([50.0, 52.0, 54.0, 56.0, 58.0], start_hour_utc=8)
+        events = _derive_warm_day_events(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=75.0,
+            comfort_heat_raw=70.0,
+            sleep_heat=65.0,
+            in_sleep_window_fn=lambda _ts: True,
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 12
+        assert events["nat_vent_cutoff_reason"] == "comfort_floor"
+
+
+class TestWarmDayPlanFloorWording:
+    """Issue #535: _warm_day_plan() must pick close-time wording based on
+    nat_vent_cutoff_reason, not always claim the outdoor-air explanation."""
+
+    def test_outdoor_rise_reason_uses_outdoor_wording(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        cutoff = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        warm_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "ceiling_breach_time": None,
+            "nat_vent_recovers": False,
+            "recovery_time": None,
+        }
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        text = "\n".join(lines)
+        assert "outdoor air will be warmer than inside" in text
+        assert "hold the heat in" not in text
+
+    def test_comfort_floor_reason_uses_generic_wording(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        cutoff = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        warm_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "comfort_floor",
+            "ceiling_breach_time": None,
+            "nat_vent_recovers": False,
+            "recovery_time": None,
+        }
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        text = "\n".join(lines)
+        assert "hold the heat in" in text
+        assert "outdoor air will be warmer than inside" not in text
 
 
 class TestWarmDayBriefWithPrediction:

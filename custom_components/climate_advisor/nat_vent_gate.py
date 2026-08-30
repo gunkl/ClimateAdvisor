@@ -72,9 +72,18 @@ class NatVentGateInputs:
     aggressive_savings: bool
 
 
+def resolve_comfort_heat(comfort_heat_raw: float, sleep_heat: float, in_sleep_window: bool) -> float:
+    """Pure reimplementation of _nat_vent_reactivation_floor() (Issue #417).
+
+    Standalone (not NatVentGateInputs-shaped) so callers that only need the
+    comfort-floor resolution — not the full activation gate — can use it
+    without constructing a NatVentGateInputs (Issue #535).
+    """
+    return sleep_heat if in_sleep_window else comfort_heat_raw
+
+
 def _resolve_comfort_heat(inputs: NatVentGateInputs) -> float:
-    """Pure reimplementation of _nat_vent_reactivation_floor() (Issue #417)."""
-    return inputs.sleep_heat if inputs.in_sleep_window else inputs.comfort_heat_raw
+    return resolve_comfort_heat(inputs.comfort_heat_raw, inputs.sleep_heat, inputs.in_sleep_window)
 
 
 def _resolve_ceiling_threshold(inputs: NatVentGateInputs) -> float | None:

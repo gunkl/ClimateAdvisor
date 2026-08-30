@@ -7931,6 +7931,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # rather than requiring every one of them to know about this new attribute.
         _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
 
+        # Issue #535: shared comfort-floor inputs, hoisted above both the WARM/MILD-day
+        # events block and the nat-vent start-prediction block below so they don't each
+        # independently re-read the same config keys. "sleep_heat" literal, not the
+        # CONF_SLEEP_HEAT constant: the bedtime block above does a local
+        # `from .const import ... CONF_SLEEP_HEAT` inside an `if c.hvac_mode in ("heat",
+        # "cool")` branch, which makes CONF_SLEEP_HEAT a local name for this ENTIRE
+        # function regardless of whether that branch actually runs — referencing the
+        # module-level import here raises UnboundLocalError whenever hvac_mode is
+        # "off"/"auto". Same value either way.
+        _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
+
         # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_cutoff/
         # ceiling_breach_time/precool_start_time/recovery_time already computed for the
         # briefing (now timestamp-correct, see _derive_warm_day_events()), surfaced here
@@ -7942,6 +7954,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=_predicted_indoor,
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                comfort_heat_raw=_comfort_heat_raw,
+                sleep_heat=_sleep_heat,
+                in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
             )
             if _warm_events["nat_vent_cutoff"] and _warm_events["nat_vent_cutoff"] > now:
                 # Issue #534: this is a forecast for a future time, not a claim about current
@@ -7974,14 +7989,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and (ae.is_paused_by_door or self._any_sensor_open())
             and _predicted_indoor
         ):
-            _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-            # "sleep_heat" literal, not the CONF_SLEEP_HEAT constant: the bedtime block
-            # above does a local `from .const import ... CONF_SLEEP_HEAT` inside an
-            # `if c.hvac_mode in ("heat", "cool")` branch, which makes CONF_SLEEP_HEAT a
-            # local name for this ENTIRE function regardless of whether that branch
-            # actually runs — referencing the module-level import here raises
-            # UnboundLocalError whenever hvac_mode is "off"/"auto". Same value either way.
-            _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
+            # _comfort_heat_raw / _sleep_heat computed once above, shared with the
+            # WARM/MILD-day events block.
             _comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             _nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))

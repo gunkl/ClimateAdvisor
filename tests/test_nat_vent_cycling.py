@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from custom_components.climate_advisor.nat_vent_cycling import (
     NatVentCyclingInputs,
+    compute_nat_vent_target,
     decide_nat_vent_cycling,
 )
 
@@ -55,6 +56,58 @@ class TestThresholdMath:
         decision = decide_nat_vent_cycling(_inputs(sleep_heat=65.0, hysteresis=1.0, in_sleep_window=True, indoor=66.0))
         assert decision.off_threshold == 65.0
         assert decision.on_threshold == 67.0
+
+
+class TestComputeNatVentTargetConsolidation:
+    """Phase 3a-pre: ``compute_nat_vent_target()`` is now the single shared formula behind
+    both ``decide_nat_vent_cycling()`` (this module) and ``automation.py``'s live
+    ``nat_vent_temperature_check()``. These assert the extracted helper's output directly,
+    bit-identical to the values ``TestThresholdMath`` above already proves
+    ``decide_nat_vent_cycling()`` produces end-to-end -- confirming the migration changed
+    nothing about the formula itself.
+    """
+
+    def test_daytime_target_is_comfort_midpoint(self) -> None:
+        target = compute_nat_vent_target(
+            sleep_heat=68.0,
+            in_sleep_window=False,
+            comfort_heat_raw=68.0,
+            comfort_cool=76.0,
+            hysteresis=1.0,
+        )
+        assert target == 72.0
+
+    def test_sleep_window_target_is_sleep_heat_plus_hysteresis(self) -> None:
+        target = compute_nat_vent_target(
+            sleep_heat=65.0,
+            in_sleep_window=True,
+            comfort_heat_raw=68.0,
+            comfort_cool=76.0,
+            hysteresis=1.0,
+        )
+        assert target == 66.0
+
+    def test_sleep_window_ignores_comfort_midpoint(self) -> None:
+        # in_sleep_window=True must take the sleep_heat branch even when comfort_heat/cool
+        # would produce a different midpoint -- guards against a future edit collapsing the
+        # branch condition.
+        daytime_would_be = compute_nat_vent_target(
+            sleep_heat=65.0,
+            in_sleep_window=False,
+            comfort_heat_raw=68.0,
+            comfort_cool=76.0,
+            hysteresis=1.0,
+        )
+        sleep_actual = compute_nat_vent_target(
+            sleep_heat=65.0,
+            in_sleep_window=True,
+            comfort_heat_raw=68.0,
+            comfort_cool=76.0,
+            hysteresis=1.0,
+        )
+        assert daytime_would_be == 72.0
+        assert sleep_actual == 66.0
+        assert daytime_would_be != sleep_actual
 
 
 class TestCycleOff:

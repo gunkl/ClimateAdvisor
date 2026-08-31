@@ -2266,6 +2266,163 @@ class TestOptionsFlowScheduler:
         )
         assert len(data["schedules"]) == 5
 
+    # -- UI-polish follow-up (Issue #786 follow-up) -----------------------------
+
+    def test_scheduler_edit_error_redisplay_preserves_user_input(self):
+        """Fix 4: a validation error (empty days) must redisplay the form with the
+        submitted name/start/end preserved, not reverted to blank/pre-edit defaults.
+        Before the fix, `defaults = existing or {}` ignored `user_input` entirely on
+        the error-redisplay path, silently wiping every field the user just typed."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        flow, captured = _make_options_flow(entry_data)
+
+        async def _drive():
+            await flow.async_step_scheduler({"manage": "__add__"})
+            return await flow.async_step_scheduler_edit(
+                _schedule_fields(name="My Custom Name", start="17:30:00", end="19:45:00", days=[])
+            )
+
+        result = asyncio.run(_drive())
+        assert result["type"] == "form"
+        assert result["errors"] == {"days": "schedule_days_required"}
+        assert "data" not in captured  # nothing was committed
+
+        import voluptuous as vol
+
+        schema_defaults = {
+            field.schema: field.default()
+            for field in result["data_schema"].schema
+            if field.default is not vol.UNDEFINED
+        }
+        assert schema_defaults["name"] == "My Custom Name"
+        assert schema_defaults["start"] == "17:30:00"
+        assert schema_defaults["end"] == "19:45:00"
+
+    def test_scheduler_edit_cost_tag_always_persists_as_high(self):
+        """The cost_tag selector no longer exists in the schema (Fix 5) — every
+        schedule created or edited via the UI persists cost_tag="high" regardless
+        of what (if anything) is submitted, since the commit path hardcodes it."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        # Submit fields with no cost_tag key at all — simulating what a real HA
+        # frontend would send now that the field isn't part of the schema.
+        submitted = _schedule_fields()
+        del submitted["cost_tag"]
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler_edit", submitted),
+            ],
+        )
+        new = data["schedules"][0]
+        assert new["cost_tag"] == "high"
+
+    def test_scheduler_edit_cost_tag_ignores_submitted_low_value(self):
+        """Even if a stale client somehow still submits cost_tag="low", the commit
+        path hardcodes "high" — the field is fully server-controlled now."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler_edit", _schedule_fields(cost_tag="low")),
+            ],
+        )
+        new = data["schedules"][0]
+        assert new["cost_tag"] == "high"
+
+    def test_legacy_all_days_schedule_round_trips_and_displays(self):
+        """A schedule saved before this change (days=["all"]) must still round-trip
+        through the list step and display correctly via _format_schedule_summary(),
+        even though the UI no longer offers "all" as a selectable option going
+        forward. scheduler.py's ALL_DAYS handling is untouched for backward compat."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = [_seed_schedule("legacy1", "Legacy All-Days", "all", "09:00:00", "12:00:00", "high")]
+        flow, _ = _make_options_flow(entry_data)
+
+        result = asyncio.run(flow.async_step_scheduler(None))
+        assert result["type"] == "form"
+        assert result["step_id"] == "scheduler"
+
+        # _format_schedule_summary() is real (non-mocked) code — this is the direct
+        # proof the legacy "all" value still displays correctly, independent of the
+        # mocked selector layer HA's frontend would otherwise render.
+        summary = flow._format_schedule_summary(entry_data["schedules"][0])
+        assert "All days" in summary
+
+        # Editing the legacy schedule back out must also not raise/crash — the
+        # existing "all" days value is still accepted as a pre-filled default even
+        # though it's no longer a *selectable* option going forward (Fix 1).
+        flow._editing_schedule_id = "legacy1"
+        edit_result = asyncio.run(flow.async_step_scheduler_edit(None))
+        assert edit_result["type"] == "form"
+        assert edit_result["step_id"] == "scheduler_edit"
+
+    def test_day_selector_no_longer_offers_all_days_option(self):
+        """Fix 1: ALL_DAYS must not appear in the edit form's day selector options —
+        only the 7 individual weekday abbreviations are offered. Since the selector
+        module itself is a MagicMock in this test environment (production HA's real
+        selector library isn't installed), we inspect the actual kwargs passed to the
+        mocked SelectOptionDict()/SelectSelectorConfig() constructors — the only way
+        to see what config_flow.py really built, since the mocked selector objects'
+        own return values carry no real data."""
+        from homeassistant.helpers import selector
+
+        from custom_components.climate_advisor.scheduler import ALL_DAYS, WEEKDAY_ABBREVS
+
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        flow, _ = _make_options_flow(entry_data)
+
+        selector.SelectOptionDict.reset_mock()
+
+        # _editing_schedule_id defaults to None ("add new") — call the edit step
+        # directly rather than routing through async_step_scheduler first, which
+        # would itself call async_step_scheduler_edit() a second time and double
+        # the recorded selector-construction calls.
+        result = asyncio.run(flow.async_step_scheduler_edit(None))
+        assert result["type"] == "form"
+
+        day_option_values = [
+            call.kwargs["value"] for call in selector.SelectOptionDict.call_args_list if "value" in call.kwargs
+        ]
+        assert ALL_DAYS not in day_option_values
+        assert set(WEEKDAY_ABBREVS).issubset(set(day_option_values))
+
+    def test_day_selector_uses_dropdown_mode(self):
+        """Fix 2: the days field selector must use DROPDOWN mode (compact,
+        collapsed-by-default) rather than the always-expanded LIST mode. Inspects
+        the mocked SelectSelectorConfig() call args directly — see the note on
+        test_day_selector_no_longer_offers_all_days_option for why."""
+        from homeassistant.helpers import selector
+
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        flow, _ = _make_options_flow(entry_data)
+
+        selector.SelectSelectorConfig.reset_mock()
+
+        result = asyncio.run(flow.async_step_scheduler_edit(None))
+        assert result["type"] == "form"
+
+        # The "days" field is the only multiple=True SelectSelectorConfig call in
+        # async_step_scheduler_edit() now that cost_tag's single-select is gone.
+        days_calls = [call for call in selector.SelectSelectorConfig.call_args_list if call.kwargs.get("multiple")]
+        assert len(days_calls) == 1
+        assert days_calls[0].kwargs["mode"] == selector.SelectSelectorMode.DROPDOWN
+
+    def test_cost_tag_field_not_present_in_schema(self):
+        """Fix 5: the cost_tag selector must be hidden from the form entirely."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        flow, _ = _make_options_flow(entry_data)
+
+        result = asyncio.run(flow.async_step_scheduler_edit(None))
+        assert "cost_tag" not in result["data_schema"].schema
+
 
 # ---------------------------------------------------------------------------
 # Options flow — clearing optional entity fields (Issue #434)

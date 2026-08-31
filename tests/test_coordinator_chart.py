@@ -397,9 +397,23 @@ class TestPredIndoorIntegration:
 
 
 class TestBandScheduleReuse:
-    """Issue #470: _build_predicted_indoor_future() must reuse a pre-computed
+    """Issue #470/#514: _build_predicted_indoor_future() must reuse a pre-computed
     band_schedule when given one, instead of recomputing it internally with its
-    own (previously non-identical) pre-cool trigger-time formula."""
+    own (previously non-identical) pre-cool trigger-time formula.
+
+    Issue #514 completed the consolidation this class originally motivated: all 3
+    production callers of _build_predicted_indoor_future() (main cycle, briefing,
+    get_chart_data()) now ALWAYS pass band_schedule= from a single canonical
+    computation (coordinator._build_target_band_for(), cached once per cycle on
+    self._target_band_schedule by _resolve_target_band_schedule() — see
+    TestSingleChokePointBandConsolidation below for the coordinator-level proof).
+    The internal recompute this class exercises directly (band_schedule=None) is no
+    longer reachable from any production call site — only from a direct/standalone
+    call to _build_predicted_indoor_future() itself, which is exactly what these two
+    tests do, and exactly what the many pre-existing standalone tests in
+    tests/test_prediction.py, tests/test_physics_prediction.py, and
+    tests/test_thermal_predictions.py still rely on — so the internal fallback is
+    kept (not deleted) rather than becoming untestable dead code."""
 
     def _classification(self, **overrides):
         from custom_components.climate_advisor.classifier import DayClassification
@@ -539,6 +553,256 @@ class TestBandScheduleReuse:
         assert displayed_band[0]["lower"] != float(config["comfort_heat"]) - 4.0 or solid_model.get(
             "heating_rate_f_per_hour"
         ), "expected the adaptive compute_bedtime_setback() branch to be reachable for this scenario"
+
+
+# ---------------------------------------------------------------------------
+# TestSingleChokePointBandConsolidation  (Issue #514, Phase 2 steps 3-5)
+# ---------------------------------------------------------------------------
+
+
+class TestSingleChokePointBandConsolidation:
+    """Issue #514: single-choke-point band resolution — coordinator-level proof.
+
+    ``_build_target_band_for()`` (the new shared implementation behind both
+    ``get_chart_data()``'s on-demand call and ``_resolve_target_band_schedule()``'s
+    once-per-cycle cache) must agree with the OLD internal recompute inside
+    ``_build_predicted_indoor_future()`` (``band_schedule=None``, still present only
+    for direct/standalone callers — see ``TestBandScheduleReuse`` above) wherever the
+    4 known divergences (config copy, dropped ``setback_modifier``, independent
+    trigger-time formula, timestamp filtering) don't actually change the result, and
+    must diverge from it in the scenario the investigation found broken — proving the
+    fix is real, not a no-op refactor. Mandatory pre-consolidation proof per the
+    plan's Assumption Audit #2.
+    """
+
+    def _classification(self, **overrides):
+        from custom_components.climate_advisor.classifier import DayClassification
+
+        c = object.__new__(DayClassification)
+        defaults = {
+            "day_type": "cold",
+            "trend_direction": "stable",
+            "trend_magnitude": 0,
+            "today_high": 40,
+            "today_low": 25,
+            "tomorrow_high": 41,
+            "tomorrow_low": 26,
+            "hvac_mode": "heat",
+            "pre_condition": False,
+            "pre_condition_target": None,
+            "windows_recommended": False,
+            "window_open_time": None,
+            "window_close_time": None,
+            "setback_modifier": 0.0,
+            "window_opportunity_morning": False,
+            "window_opportunity_evening": False,
+        }
+        defaults.update(overrides)
+        c.__dict__.update(defaults)
+        return c
+
+    def _make_coordinator(self, config, classification, hourly_forecast_temps, occupancy_mode="home"):
+        """Bare ClimateAdvisorCoordinator bound to the real _build_target_band_for /
+        _compute_pre_cool_trigger_time / _tou_precondition_window_tuple methods —
+        object.__new__() + types.MethodType() (the established partial-instantiation
+        pattern, see test_contact_status.py / test_daily_record_accuracy.py)."""
+        import types
+
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord.config = config
+        coord._current_classification = classification
+        coord._occupancy_mode = occupancy_mode
+        coord._hourly_forecast_temps = hourly_forecast_temps
+        coord._tou_phase_resolution = None
+        coord._build_target_band_for = types.MethodType(ClimateAdvisorCoordinator._build_target_band_for, coord)
+        coord._compute_pre_cool_trigger_time = types.MethodType(
+            ClimateAdvisorCoordinator._compute_pre_cool_trigger_time, coord
+        )
+        coord._tou_precondition_window_tuple = types.MethodType(
+            ClimateAdvisorCoordinator._tou_precondition_window_tuple, coord
+        )
+        return coord
+
+    def _capture_old_internal_band(self, coord_mod, **build_kwargs) -> dict:
+        """Invoke the OLD internal-fallback path (band_schedule omitted) and capture the
+        band _compute_target_band_schedule() actually computed inside it, keyed by ts."""
+        original = coord_mod._compute_target_band_schedule
+        captured: list = []
+
+        def _spy(*args, **kwargs):
+            result = original(*args, **kwargs)
+            captured.append(result)
+            return result
+
+        with patch.object(coord_mod, "_compute_target_band_schedule", side_effect=_spy):
+            coord_mod._build_predicted_indoor_future(**build_kwargs)
+
+        assert captured, "internal fallback must have called _compute_target_band_schedule()"
+        return {b["ts"]: b for b in captured[-1]}
+
+    def test_new_resolution_matches_old_fallback_when_no_divergent_input_is_exercised(self):
+        """Baseline: when none of the 4 known divergences would actually change the
+        result (sleep_heat/sleep_cool explicit, setback_modifier=0, all forecast
+        timestamps already future, pre-cool ineligible so the trigger-time formula
+        never runs on either path), the new canonical _build_target_band_for() and the
+        old internal fallback must produce bit-identical lower/upper at every
+        overlapping timestamp."""
+        from datetime import datetime
+
+        coord_mod = _get_coordinator_module()
+
+        config = {
+            "comfort_heat": 68,
+            "comfort_cool": 76,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "sleep_heat": 64,
+            "sleep_cool": 78,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+        }
+        classification = self._classification()  # setback_modifier=0.0, pre-cool ineligible
+        now = datetime(2026, 1, 13, 12, 0, 0, tzinfo=UTC)
+        hourly_forecast = [
+            {"datetime": "2026-01-13T13:00:00+00:00", "temperature": 30.0},
+            {"datetime": "2026-01-13T18:00:00+00:00", "temperature": 32.0},
+        ]
+
+        coord = self._make_coordinator(config, classification, hourly_forecast)
+
+        with patch.object(
+            coord_mod.dt_util,
+            "as_local",
+            side_effect=lambda x: x if x.tzinfo is not None else x.replace(tzinfo=UTC),
+        ):
+            old_band = self._capture_old_internal_band(
+                coord_mod,
+                hourly_forecast=hourly_forecast,
+                config=config,
+                now=now,
+                current_indoor_temp=65.0,
+                thermal_model=None,
+                occupancy_mode="home",
+                classification=classification,
+            )
+            new_band = {b["ts"]: b for b in coord._build_target_band_for(now, None)}
+
+        assert old_band, "fixture must produce a non-empty band"
+        overlapping = set(old_band) & set(new_band)
+        assert overlapping, "old and new paths must share at least one timestamp to compare"
+        for ts in overlapping:
+            assert new_band[ts]["lower"] == old_band[ts]["lower"], f"lower mismatch at {ts}"
+            assert new_band[ts]["upper"] == old_band[ts]["upper"], f"upper mismatch at {ts}"
+
+    def test_new_resolution_diverges_from_old_fallback_when_config_copy_and_setback_modifier_matter(self):
+        """Reproduces the exact bug the investigation found: sleep_heat/sleep_cool NOT
+        explicitly configured (so the old fallback's sleep_heat/cool-overridden config
+        copy differs from the real config compute_bedtime_setback() would otherwise
+        see) plus a nonzero setback_modifier (silently dropped by the old internal
+        fallback, which never passes it to _compute_target_band_schedule() at all).
+        The new canonical resolution must NOT match the old internal fallback here —
+        the regression-catcher proving the fix changes behavior for the scenario it
+        was meant to fix, not just a no-op refactor."""
+        from datetime import datetime
+
+        coord_mod = _get_coordinator_module()
+
+        config = {
+            "comfort_heat": 68,
+            "comfort_cool": 76,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+            # no sleep_heat/sleep_cool -> compute_bedtime_setback()'s adaptive branch reachable
+        }
+        classification = self._classification(setback_modifier=3.0)
+        solid_model = {
+            "confidence": "high",
+            "k_passive": -0.05,
+            "k_active_heat": 3.5,
+            "heating_rate_f_per_hour": 3.5,
+        }
+        now = datetime(2026, 1, 13, 23, 0, 0, tzinfo=UTC)  # inside the sleep window
+        hourly_forecast = [{"datetime": "2026-01-14T05:00:00+00:00", "temperature": 20.0}]
+
+        coord = self._make_coordinator(config, classification, hourly_forecast)
+
+        with patch.object(
+            coord_mod.dt_util,
+            "as_local",
+            side_effect=lambda x: x if x.tzinfo is not None else x.replace(tzinfo=UTC),
+        ):
+            old_band = self._capture_old_internal_band(
+                coord_mod,
+                hourly_forecast=hourly_forecast,
+                config=config,
+                now=now,
+                current_indoor_temp=60.0,
+                thermal_model=solid_model,
+                occupancy_mode="home",
+                classification=classification,
+            )
+            new_band = {b["ts"]: b for b in coord._build_target_band_for(now, solid_model)}
+
+        overlapping = set(old_band) & set(new_band)
+        assert overlapping, "old and new paths must share at least one timestamp to compare"
+        mismatches = [
+            ts
+            for ts in overlapping
+            if new_band[ts]["lower"] != old_band[ts]["lower"] or new_band[ts]["upper"] != old_band[ts]["upper"]
+        ]
+        assert mismatches, (
+            "expected the new canonical resolution to diverge from the OLD internal "
+            "fallback for this scenario (unmodified config + real setback_modifier vs "
+            "the fallback's sleep_heat/cool-overridden config copy + dropped modifier) "
+            "— if this now passes vacuously, the divergence-inducing inputs no longer "
+            "actually diverge and this test's premise needs re-checking"
+        )
+
+    def test_resolve_target_band_schedule_caches_same_value_build_target_band_for_returns(self):
+        """_resolve_target_band_schedule() (the once-per-cycle cache consumed by the
+        main-cycle and briefing calls to _build_predicted_indoor_future()) must store
+        exactly what _build_target_band_for(dt_util.now(), automation_engine._thermal_model)
+        would return — proving the cache is not a second, independently-computed copy."""
+        import types
+        from datetime import datetime
+
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        config = {
+            "comfort_heat": 68,
+            "comfort_cool": 76,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "sleep_heat": 64,
+            "sleep_cool": 78,
+        }
+        classification = self._classification()
+        now = datetime(2026, 1, 13, 12, 0, 0, tzinfo=UTC)
+        hourly_forecast = [{"datetime": "2026-01-13T13:00:00+00:00", "temperature": 30.0}]
+        thermal_model = {"confidence": "high", "k_passive": -0.05}
+
+        coord = self._make_coordinator(config, classification, hourly_forecast)
+        coord.automation_engine = MagicMock()
+        coord.automation_engine._thermal_model = thermal_model
+        coord._resolve_target_band_schedule = types.MethodType(
+            ClimateAdvisorCoordinator._resolve_target_band_schedule, coord
+        )
+
+        coord_mod = _get_coordinator_module()
+        with (
+            patch.object(coord_mod.dt_util, "now", return_value=now),
+            patch.object(
+                coord_mod.dt_util,
+                "as_local",
+                side_effect=lambda x: x if x.tzinfo is not None else x.replace(tzinfo=UTC),
+            ),
+        ):
+            coord._resolve_target_band_schedule()
+            expected = coord._build_target_band_for(now, thermal_model)
+
+        assert coord._target_band_schedule == expected
 
 
 # ---------------------------------------------------------------------------
@@ -843,3 +1107,175 @@ class TestVentBarStateContract:
         # Both have nat_vent_active=True
         assert entry_a["nat_vent_active"] is True
         assert entry_b["nat_vent_active"] is True
+
+
+# ---------------------------------------------------------------------------
+# TestTargetBandLowerUpperNow  (Issue #514, Phase 2 step 7)
+# ---------------------------------------------------------------------------
+
+
+class TestTargetBandLowerUpperNow:
+    """Tests for ``_target_band_lower_upper_now()`` — the write-site helper that
+    extracts this cycle's cached ``self._target_band_schedule`` entry for the
+    current instant, so ``chart_log.append()`` call sites persist the same
+    single-choke-point value every other consumer reads this cycle, never a fresh
+    independent recompute."""
+
+    def _make_coord(self):
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._target_band_lower_upper_now = types.MethodType(
+            ClimateAdvisorCoordinator._target_band_lower_upper_now, coord
+        )
+        return coord
+
+    def test_picks_latest_entry_at_or_before_now(self):
+        from datetime import datetime
+
+        coord = self._make_coord()
+        coord._target_band_schedule = [
+            {"ts": "2026-01-13T10:00:00+00:00", "lower": 65.0, "upper": 75.0},
+            {"ts": "2026-01-13T11:00:00+00:00", "lower": 66.0, "upper": 76.0},
+            {"ts": "2026-01-13T13:00:00+00:00", "lower": 68.0, "upper": 78.0},  # future — must not be picked
+        ]
+        coord_mod = _get_coordinator_module()
+        now = datetime(2026, 1, 13, 11, 30, 0, tzinfo=UTC)
+        with (
+            patch.object(coord_mod.dt_util, "now", return_value=now),
+            patch.object(coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        ):
+            lower, upper = coord._target_band_lower_upper_now()
+        assert (lower, upper) == (66.0, 76.0)
+
+    def test_falls_back_to_earliest_entry_when_now_precedes_all(self):
+        from datetime import datetime
+
+        coord = self._make_coord()
+        coord._target_band_schedule = [
+            {"ts": "2026-01-13T13:00:00+00:00", "lower": 68.0, "upper": 78.0},
+            {"ts": "2026-01-13T14:00:00+00:00", "lower": 69.0, "upper": 79.0},
+        ]
+        coord_mod = _get_coordinator_module()
+        now = datetime(2026, 1, 13, 10, 0, 0, tzinfo=UTC)
+        with (
+            patch.object(coord_mod.dt_util, "now", return_value=now),
+            patch.object(coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        ):
+            lower, upper = coord._target_band_lower_upper_now()
+        assert (lower, upper) == (68.0, 78.0)
+
+    def test_returns_none_none_when_no_schedule_resolved_yet(self):
+        coord = self._make_coord()
+        coord._target_band_schedule = None
+        lower, upper = coord._target_band_lower_upper_now()
+        assert (lower, upper) == (None, None)
+
+    def test_returns_none_none_when_schedule_attribute_absent(self):
+        """Partially-instantiated test coordinators (object.__new__() without
+        __init__) may never have set self._target_band_schedule at all — must not
+        raise AttributeError."""
+        coord = self._make_coord()
+        lower, upper = coord._target_band_lower_upper_now()
+        assert (lower, upper) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# TestMidDayBandChangePersistedImmutably  (Issue #514 Simplified Design proof)
+# ---------------------------------------------------------------------------
+
+
+class TestMidDayBandChangePersistedImmutably:
+    """Mandatory empirical proof for the #514 "no archive needed" design decision
+    (see the plan's "Simplified design decision for #514" section): an earlier
+    cycle's persisted lower/upper must correctly differ from a later cycle's
+    persisted lower/upper on the same calendar day when occupancy/classification
+    changes mid-day — proving the immutable-per-cycle-write approach correctly
+    captures "what was true at time T" rather than a single stale value baked in
+    once for the whole day."""
+
+    def test_earlier_cycle_and_later_cycle_persist_different_band_values(self, tmp_path):
+        from datetime import datetime
+
+        import custom_components.climate_advisor.chart_log as chart_log_mod
+        from custom_components.climate_advisor.chart_log import ChartStateLog
+
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._target_band_lower_upper_now = types.MethodType(
+            ClimateAdvisorCoordinator._target_band_lower_upper_now, coord
+        )
+        coord_mod = _get_coordinator_module()
+        log = ChartStateLog(tmp_path)
+        # chart_log.py's own dt_util.now() (used by append()'s _maybe_prune()) is a
+        # MagicMock in this file's HA stub layer — give it a real, fixed clock so
+        # append() doesn't raise comparing MagicMock to datetime/timedelta. Restored
+        # in a finally block (not patch.object's context-manager form) since the
+        # fixed clock must stay in effect across both append() calls below, which
+        # straddle two separate `with patch.object(coord_mod.dt_util, ...)` blocks —
+        # an unrestored raw assignment here previously leaked into test_chart_log.py
+        # when run in the same session, breaking its real-wall-clock-based pruning
+        # assertions (full-suite-only failure).
+        _orig_chart_log_now = chart_log_mod.dt_util.now
+        chart_log_mod.dt_util.now = lambda: datetime(2026, 1, 13, 14, 0, 0, tzinfo=UTC)
+        try:
+            # Cycle 1 (10:00): occupancy=home — comfort band resolved by
+            # _resolve_target_band_schedule() for this cycle.
+            cycle1_now = datetime(2026, 1, 13, 10, 0, 0, tzinfo=UTC)
+            coord._target_band_schedule = [
+                {"ts": "2026-01-13T10:00:00+00:00", "lower": 68.0, "upper": 76.0},
+            ]
+            with (
+                patch.object(coord_mod.dt_util, "now", return_value=cycle1_now),
+                patch.object(coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+            ):
+                lower1, upper1 = coord._target_band_lower_upper_now()
+            log.append(
+                hvac="heat",
+                fan=False,
+                indoor=70.0,
+                outdoor=40.0,
+                lower=lower1,
+                upper=upper1,
+                ts=cycle1_now.isoformat(),
+            )
+
+            # User leaves partway through the day. Occupancy flips to "away" and the
+            # NEXT cycle's _resolve_target_band_schedule() resolves a different
+            # (setback) band — simulated here by swapping the cached schedule, the
+            # same way a real cycle would overwrite self._target_band_schedule.
+            cycle2_now = datetime(2026, 1, 13, 14, 0, 0, tzinfo=UTC)
+            coord._target_band_schedule = [
+                {"ts": "2026-01-13T14:00:00+00:00", "lower": 60.0, "upper": 82.0},
+            ]
+            with (
+                patch.object(coord_mod.dt_util, "now", return_value=cycle2_now),
+                patch.object(coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+            ):
+                lower2, upper2 = coord._target_band_lower_upper_now()
+            log.append(
+                hvac="off",
+                fan=False,
+                indoor=71.0,
+                outdoor=55.0,
+                lower=lower2,
+                upper=upper2,
+                ts=cycle2_now.isoformat(),
+            )
+
+            entries = log.get_entries("24h", before=datetime(2026, 1, 13, 15, 0, 0, tzinfo=UTC))
+        finally:
+            chart_log_mod.dt_util.now = _orig_chart_log_now
+
+        assert len(entries) == 2
+        e1 = next(e for e in entries if e["ts"] == cycle1_now.isoformat())
+        e2 = next(e for e in entries if e["ts"] == cycle2_now.isoformat())
+
+        assert (e1["lower"], e1["upper"]) == (68.0, 76.0), "cycle 1's persisted band must match what was resolved then"
+        assert (e2["lower"], e2["upper"]) == (60.0, 82.0), "cycle 2's persisted band must match what was resolved then"
+        assert (e1["lower"], e1["upper"]) != (e2["lower"], e2["upper"]), (
+            "earlier cycle's persisted band must differ from the later cycle's after a "
+            "mid-day occupancy change — proves the immutable per-cycle write correctly "
+            "captures 'what was true at time T', not one stale value baked in for the "
+            "whole day (the exact counter-scenario the #514 no-archive design decision "
+            "was checked against, not merely asserted)"
+        )

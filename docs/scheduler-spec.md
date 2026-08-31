@@ -12,6 +12,7 @@
 | Why does the "coast" phase after pre-conditioning need no dedicated code? | `_apply_comfort_band()` issues a single-setpoint *threshold* command; a real thermostat only acts once indoor crosses it. Confirmed by a prerequisite test before any implementation began — not assumed. | [Coast Phase — Confirmed, Not Assumed](#coast-phase--confirmed-not-assumed) |
 | How is the pre-conditioning lead time computed? | `thermal_lead_time.compute_lead_minutes_from_rate()` — one formula shared by 4 call sites (this feature, adaptive pre-heat, ODE ceiling guard, warm-day briefing), each with its own bounds/fallback. | [Lead-Time Computation](#lead-time-computation) |
 | Where does the chart's Target Band show pre-conditioning, and how does it stay in sync with what's actually commanded? | `_compute_target_band_schedule()`'s `tou_precondition_window` parameter — an additive override applied after the normal band, same shape as the existing `pre_cool_target` mechanism. Both call sites (chart builder, ODE curve builder) always receive the same resolved window. | [Chart Coverage](#chart-coverage) |
+| Does the chart show the actual system target (not just the comfort band range), and does it know about TOU/nat-vent? | Yes — one bold "Target" line, historical half from `chart_log`'s `setpoint`/`nat_vent_target` fields, forward half from `_compute_effective_target_forward()`'s 3-tier TOU→nat-vent→band-edge derivation. Supersedes the old dead `predicted_setpoint`/`historical_setpoint` fields and the thin `defense_lines` overlay. | [Unified Target Line](#unified-target-line-issue-786-follow-up-phase-3) |
 
 ## Scope
 
@@ -40,10 +41,10 @@ GitHub issue #786, following a request on the project roadmap issue (#11) from a
 |---|---|---|
 | `id` | `str` | uuid4 hex, assigned at creation by `config_flow.py` |
 | `name` | `str` | user-facing label |
-| `days` | `tuple[str, ...]` | 3-letter weekday abbreviations (`WEEKDAY_ABBREVS = ("mon","tue","wed","thu","fri","sat","sun")`), or `("all",)` (the `ALL_DAYS` sentinel) |
+| `days` | `tuple[str, ...]` | 3-letter weekday abbreviations (`WEEKDAY_ABBREVS = ("mon","tue","wed","thu","fri","sat","sun")`), or `("all",)` (the `ALL_DAYS` sentinel — data-model/`scheduler.py` only as of the Issue #786 UI-polish follow-up; the config-flow day selector no longer offers it, since checking all 7 weekday boxes is functionally identical and the sentinel was redundant UI surface. `scheduler.py`'s `ALL_DAYS`/`_days_match()` handling and `config_flow.py`'s `_format_schedule_summary()` "All days" display branch are both kept for backward compat with already-saved `days=["all"]` schedules) |
 | `start` | `str` | `"HH:MM"` or `"HH:MM:SS"` (HA's `TimeSelector` returns the latter) — local wall-clock, civil time |
 | `end` | `str` | same shape as `start` |
-| `cost_tag` | `str` | `COST_TAG_HIGH` (`"high"`) or `COST_TAG_LOW` (`"low"`) |
+| `cost_tag` | `str` | `COST_TAG_HIGH` (`"high"`) or `COST_TAG_LOW` (`"low"`) at the data-model level. As of the Issue #786 UI-polish follow-up, the config-flow edit form no longer exposes a cost_tag selector — every schedule created/edited via the UI is hardcoded to `COST_TAG_HIGH` (it's the only value with any live behavioral consumer: `resolve_tou_phase()` only ever checks for `cost_tag == COST_TAG_HIGH`). `scheduler.py` still parses any `cost_tag` value permissively, and `COST_TAG_LOW` is kept as dead-but-harmless for backward compat with any pre-existing "low" schedule |
 
 No temperature field exists anywhere in this shape — this is deliberate, not an oversight (see [Origin](#origin)).
 
@@ -138,6 +139,93 @@ if tou_precondition_window is not None:
 `coordinator._tou_precondition_window_tuple()` builds this tuple from the cached `self._tou_phase_resolution` (`(precondition_start, schedule_start, target, mode)`), returning `None` when no upcoming `high` schedule was resolved. Both call sites that build the chart Target Band and the ODE prediction curve (`get_chart_data()`'s own `_compute_target_band_schedule()` call, and `_build_predicted_indoor_future()`'s internal one when it isn't handed a pre-computed `band_schedule`) always receive the same tuple, so they can never disagree — the mandatory Chart Coverage rule (`CLAUDE.md`).
 
 **Resolution timing**: `coordinator._resolve_tou_schedule_state()` (pure, no HVAC writes) runs *before* the ODE-prediction executor call in `_async_update_data_impl()` (and again before the equivalent call in the briefing-generation path), so both consumers see the current cycle's fresh resolution rather than the previous cycle's stale one. Acting on a `PRECONDITIONING` result (`coordinator._apply_tou_schedule()`, which calls `automation_engine.apply_tou_precondition()`) happens later in the same cycle, after `apply_classification()` — so the pre-conditioning setpoint is the final word for the thermostat that cycle, not the day's normal comfort-band edge.
+
+### Unified "Target" chart line supersedes a separate TOU-window annotation
+
+An earlier design direction for surfacing TOU on the chart considered a dashed vertical-line
+annotation marking the schedule's start/end (reusing the existing `caAnnotations` plugin).
+That direction was superseded: instead, one bold, solid "Target" line renders the actual
+system target at any point in time regardless of source — plain comfort-band operation, TOU
+banking, or nat-vent thermostatic cycling — and the level shift itself is the visual signal
+that TOU pre-conditioning (or nat-vent cycling) is active. No separate annotation is needed;
+see the "Unified Target Line" section below for the full three-tier derivation.
+
+## Unified Target Line (Issue #786 follow-up, Phase 3)
+
+The dashboard chart's Target line answers "what is the system actually targeting right now"
+— distinct from the shaded Target Band (the comfort *range*), this is the single value the
+thermostat is being driven toward. It has a historical (past) half and a forward (future)
+half, both built entirely from data already resolved elsewhere in this cycle — no new
+resolution logic anywhere in this chain.
+
+### Historical half — `coordinator._extract_historical_effective_target()`
+
+Per persisted `chart_log` cycle, in priority order:
+
+1. The real `setpoint` field (compressor-commanded — read from the live thermostat's
+   `target_temperature` attribute at write time, genuinely source-agnostic since it doesn't
+   care *why* the thermostat is set there).
+2. Else `nat_vent_target` (Phase 3a) when `nat_vent_active` was true that cycle — the real
+   thermostatic value the WHF fan was cycling around
+   (`nat_vent_cycling.compute_nat_vent_target()`, see below), not a band-edge approximation.
+3. Else `None` — genuinely undefined (thermostat off, no nat-vent).
+
+All 4 `chart_log.append()` call sites (the 30-min poll plus the 3 event-driven sites —
+`classification_change`/`override`/`hvac_action_change`) now populate both `setpoint` and
+`nat_vent_target` every cycle (`coordinator._read_chart_setpoint()` /
+`coordinator._nat_vent_target_now()`), closing the gap where the 3 event-driven sites
+previously always wrote `setpoint=None`.
+
+### Forward half — `coordinator._compute_effective_target_forward()`
+
+Per future forecast-hour timestamp, in priority order:
+
+1. **TOU banking target** — while the timestamp falls inside the resolved
+   `[precondition_start, schedule_start)` window (`coordinator._tou_precondition_window_tuple()`,
+   the same tuple the Target Band's own TOU override branch above already consumes).
+2. **Nat-vent thermostatic cycling target** — while `get_chart_data()`'s pre-existing
+   `predicted_activity[].fan_active` proxy says nat-vent is predicted active for that
+   timestamp. Fed through the same shared `nat_vent_cycling.compute_nat_vent_target()`
+   helper as the historical half and the live decision path, using *that timestamp's own*
+   `target_band.lower`/`.upper` (already sleep/wake/TOU-ramp-aware) as the day/sleep
+   floor-and-ceiling inputs. `fan_active` is a known, pre-existing, already-accepted
+   approximation (`outdoor < indoor and outdoor < band_upper + delta and indoor >
+   band_upper` — not a call into the real `decide_nat_vent_gate()`/FSM); this derivation
+   inherits that approximation rather than correcting it, and degrades gracefully to tier 3
+   (never crashes, never fabricates an out-of-band value) whenever the proxy's inputs are
+   incomplete.
+3. **Plain active comfort-band edge** — `target_band.lower` for `hvac_mode == "heat"`,
+   `.upper` for `"cool"`, `None` otherwise. Same derivation `_derive_predicted_setpoint()`
+   used before this fix; now only the fallback tier instead of the whole answer, closing
+   that function's TOU-blindness and nat-vent-blindness (both confirmed gaps — the old
+   field was never rendered by the frontend, so neither gap was previously user-visible).
+
+### `nat_vent_target` DRY consolidation
+
+`(comfort_heat + comfort_cool) / 2` by day, `sleep_heat + hysteresis` overnight — previously
+duplicated independently in `automation.py`'s live `nat_vent_temperature_check()` decision
+path, `nat_vent_cycling.decide_nat_vent_cycling()`'s pure reimplementation, and (found during
+this consolidation, not previously tracked) `coordinator.compute_nat_vent_cycling_band()`'s
+dashboard-status helper. Consolidated into one shared
+`nat_vent_cycling.compute_nat_vent_target()`, mirroring how Issue #786 consolidated the
+3x-duplicated lead-time formula into `thermal_lead_time.py`. All three pre-existing call
+sites, plus `coordinator._nat_vent_target_now()` (the chart line's own per-cycle read), now
+call the one shared function.
+
+### Frontend
+
+`frontend/index.html` renders one dataset, `'Target'` — `borderWidth: 4`, solid (not
+dashed), amber/gold (`CHART_COLORS.target`), distinctly bolder than every other line on the
+chart. Built via the same historical/future merge pattern already established for
+`mergedPredIndoor`: `chartData.effective_target_history` (past, `x <= now`) concatenated with
+`chartData.effective_target_forecast` (future, `x > now`), sorted by timestamp. This retires
+the old thin `defense_lines`-based "Heat Setpoint"/"Cool Setpoint" overlay — a second,
+always-both-band-edges rendering of the same shaded Target Band with no independent
+information — which the code's own prior comment already flagged as superseded
+("kept for backward-compat (no longer drives display)"). The backend `defense_lines` field
+and `_compute_defense_lines()` function are unchanged (other tests pin their contract); only
+the frontend's use of them for rendering was removed. The `overlay-setpoint` checkbox
+(relabeled "Target") now toggles the new line instead.
 
 ## Status Card
 

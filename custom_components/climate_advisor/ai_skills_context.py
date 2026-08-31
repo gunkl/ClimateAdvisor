@@ -1490,6 +1490,24 @@ def _render_tou_precondition_applied(p: dict, unit: str) -> tuple[str, str]:
     return label, settings
 
 
+def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[str, str]:
+    """Phase 3d / Investigation D: a configured cost_tag="high" TOU schedule window
+    became active. Occupant-first framing per CLAUDE.md: distinguishes "this window
+    coincided with real heating/cooling" from "this window applied to a day with no
+    planned HVAC operation, so nothing else happened" -- the exact live-instance gap
+    (a schedule silently doing nothing with zero visibility) this event closes.
+    """
+    del unit  # no temperature value on this event
+    preconditioned = bool(p.get("preconditioned"))
+    hvac_mode = p.get("hvac_mode")
+    label = "TOU high-cost period active"
+    if preconditioned:
+        settings = f"coincided with active {hvac_mode} operation"
+    else:
+        settings = "no pre-conditioning needed today (hvac_mode=off)"
+    return label, settings
+
+
 def _render_morning_wakeup(p: dict, unit: str) -> tuple[str, str]:
     mode = p.get("mode", "")
     label = f"Morning wake-up -- comfort restored ({mode})" if mode else "Morning wake-up -- comfort restored"
@@ -2352,6 +2370,7 @@ def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[str
 EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "comfort_band_applied": _render_comfort_band_applied,
     "tou_precondition_applied": _render_tou_precondition_applied,
+    "tou_schedule_window_active": _render_tou_schedule_window_active,
     "bedtime_setback": _render_bedtime_setback,
     "morning_wakeup": _render_morning_wakeup,
     "occupancy_setback": _render_occupancy_setback,

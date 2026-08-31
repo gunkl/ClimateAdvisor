@@ -144,7 +144,7 @@ from .fan_toggle_rate_limit import (
 )
 from .lifecycle_dispatcher import LifecycleDispatcher
 from .lifecycle_events import LifecycleEvent, LifecycleEventType
-from .nat_vent_cycling import NatVentCyclingInputs, decide_nat_vent_cycling
+from .nat_vent_cycling import NatVentCyclingInputs, compute_nat_vent_target, decide_nat_vent_cycling
 from .nat_vent_exit import (
     NatVentExitInputs,
     NatVentExitReason,
@@ -4597,12 +4597,14 @@ class AutomationEngine:
             hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
             sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
             in_sleep_window = _in_sleep_window(dt_util.now(), self.config)
-            if in_sleep_window:
-                nat_vent_target = sleep_heat + hysteresis  # e.g. 65+1=66; off at 65, on at 67
-                _context = "sleep"
-            else:
-                nat_vent_target = (comfort_heat + comfort_cool) / 2.0
-                _context = "daytime"
+            nat_vent_target = compute_nat_vent_target(
+                sleep_heat=sleep_heat,
+                in_sleep_window=in_sleep_window,
+                comfort_heat_raw=comfort_heat,
+                comfort_cool=comfort_cool,
+                hysteresis=hysteresis,
+            )
+            _context = "sleep" if in_sleep_window else "daytime"
             # Hard exit floor — single source of truth in resolve_hard_exit_floor() (Issue #456),
             # also used by fan_thermostat_check()/check_natural_vent_conditions(). In the sleep
             # branch this is one hysteresis step below the cycling-off threshold above, so the
@@ -6878,7 +6880,13 @@ class AutomationEngine:
             return float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
         comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        nat_vent_target = (comfort_heat + comfort_cool) / 2.0
+        nat_vent_target = compute_nat_vent_target(
+            sleep_heat=0.0,
+            in_sleep_window=False,
+            comfort_heat_raw=comfort_heat,
+            comfort_cool=comfort_cool,
+            hysteresis=hysteresis,
+        )
         return nat_vent_target - hysteresis
 
     def _build_nat_vent_fsm_inputs(

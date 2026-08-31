@@ -146,7 +146,7 @@
           "sensors": "Sensors & Fan",
           "occupancy": "Occupancy",
           "schedule": "Schedule",
-          "scheduler": "Scheduler",
+          "scheduler": "TOU Scheduler",
           "notifications": "Notifications",
           "advanced": "Learning & Behavior",
           "classification_thresholds": "Day-Type Thresholds",
@@ -282,14 +282,13 @@
         }
       },
       "scheduler_edit": {
-        "title": "Schedule",
+        "title": "TOU Scheduler",
         "description": "No temperature fields — Climate Advisor banks toward your existing comfort range automatically before a High-cost window.",
         "data": {
           "name": "Name",
           "days": "Days",
           "start": "Starts",
           "end": "Ends",
-          "cost_tag": "Cost",
           "delete_schedule": "Delete this schedule"
         }
       },

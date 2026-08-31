@@ -132,6 +132,9 @@ class ChartStateLog:
         ts: str | None = None,
         fan_running: bool = False,
         nat_vent_active: bool = False,
+        lower: float | None = None,
+        upper: float | None = None,
+        nat_vent_target: float | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -140,6 +143,18 @@ class ChartStateLog:
             or when the fan is inactive/disabled.
         nat_vent_active: automation_engine._natural_vent_active — the nat-vent
             session is armed (fan may or may not be spinning).
+        lower/upper: the target-band schedule's resolved lower/upper bound for the
+            current instant (Issue #514) — an immutable per-cycle snapshot of "what
+            was the system's actual target at this timestamp," not a re-derivable
+            prediction. The caller is responsible for resolving these once per cycle
+            (see coordinator.py's ``_target_band_lower_upper_now()``) and passing the
+            already-resolved values here; this method does not compute them.
+        nat_vent_target: the real thermostatic target the nat-vent fan was cycling
+            around this cycle (Phase 3a), computed via
+            ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
+            when ``nat_vent_active`` is True for this cycle. Immutable per-cycle
+            snapshot, same discipline as ``lower``/``upper``; this method does not
+            compute it.
         """
         if ts is None:
             ts = dt_util.now().isoformat()
@@ -157,6 +172,9 @@ class ChartStateLog:
             "setpoint": setpoint,
             "fan_running": fan_running,
             "nat_vent_active": nat_vent_active,
+            "lower": lower,
+            "upper": upper,
+            "nat_vent_target": nat_vent_target,
         }
         if event is not None:
             entry["event"] = event
@@ -278,6 +296,9 @@ class ChartStateLog:
             pred_outdoor_vals = [e["pred_outdoor"] for e in group if e.get("pred_outdoor") is not None]
             pred_indoor_vals = [e["pred_indoor"] for e in group if e.get("pred_indoor") is not None]
             setpoint_vals = [e["setpoint"] for e in group if e.get("setpoint") is not None]
+            lower_vals = [e["lower"] for e in group if e.get("lower") is not None]
+            upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
+            nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
 
             summary: dict[str, Any] = {
                 "ts": bucket_key,
@@ -294,6 +315,11 @@ class ChartStateLog:
                 ),
                 "pred_indoor": (round(sum(pred_indoor_vals) / len(pred_indoor_vals), 1) if pred_indoor_vals else None),
                 "setpoint": round(sum(setpoint_vals) / len(setpoint_vals), 1) if setpoint_vals else None,
+                "lower": round(sum(lower_vals) / len(lower_vals), 1) if lower_vals else None,
+                "upper": round(sum(upper_vals) / len(upper_vals), 1) if upper_vals else None,
+                "nat_vent_target": (
+                    round(sum(nat_vent_target_vals) / len(nat_vent_target_vals), 1) if nat_vent_target_vals else None
+                ),
             }
             if events:
                 summary["event"] = events
@@ -322,6 +348,9 @@ class ChartStateLog:
             pred_outdoor_vals = [e["pred_outdoor"] for e in group if e.get("pred_outdoor") is not None]
             pred_indoor_vals = [e["pred_indoor"] for e in group if e.get("pred_indoor") is not None]
             setpoint_vals = [e["setpoint"] for e in group if e.get("setpoint") is not None]
+            lower_vals = [e["lower"] for e in group if e.get("lower") is not None]
+            upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
+            nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
 
             summary: dict[str, Any] = {
                 "ts": f"{day_key}T00:00:00+00:00",
@@ -344,6 +373,11 @@ class ChartStateLog:
                     round(sum(pred_indoor_vals) / len(pred_indoor_vals), 1) if pred_indoor_vals else None
                 ),
                 "setpoint": round(sum(setpoint_vals) / len(setpoint_vals), 1) if setpoint_vals else None,
+                "lower": round(sum(lower_vals) / len(lower_vals), 1) if lower_vals else None,
+                "upper": round(sum(upper_vals) / len(upper_vals), 1) if upper_vals else None,
+                "nat_vent_target": (
+                    round(sum(nat_vent_target_vals) / len(nat_vent_target_vals), 1) if nat_vent_target_vals else None
+                ),
             }
             if events:
                 summary["events"] = events

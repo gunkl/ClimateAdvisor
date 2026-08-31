@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.88] — 2026-08-31
+
+- Feat #794: the TOU Scheduler setup screen now shows one consistent "TOU Scheduler" title throughout, a compact collapsed day picker instead of an always-open checkbox list, and no longer wipes out what you typed in other fields when one field fails validation. The unused cost-tag choice is hidden. A savings schedule can now tell you when it's active even on a day it correctly decides not to act (e.g. windows already open, HVAC off) — the Status card and Activity Record now say so instead of showing nothing. The chart's overlay is now a single, bold "Target" line showing the real system target at any point in time — whatever the source (normal comfort-band operation, whole-house-fan/nat-vent cycling, or TOU pre-conditioning) — for both past and predicted-future hours, replacing two thinner, less accurate lines.
+- Fix #514: the shaded Target Band on the chart now shows what your actual comfort target was at any past time, not today's live schedule re-applied backward over history.
+
 ## [0.6.87] — 2026-08-31
 
 - Feat #786: Climate Advisor can now pre-cool or pre-heat automatically ahead of a scheduled high electricity-rate window, banking toward the comfort band's own floor or ceiling using the home's learned thermal response rate — no new temperature settings to configure. Up to 5 schedules (day-of-week and time-of-day, midnight-spanning windows handled correctly) are configurable from Settings → Options → Scheduler. Pre-conditioning never overrides an active or not-yet-confirmed manual thermostat change, and never runs the compressor while a monitored door/window is open or the whole-house fan is running — it defers automatically and resumes on the next cycle.

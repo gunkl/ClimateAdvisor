@@ -236,10 +236,11 @@ from .fan_status import (
 )
 from .invariant_watchdog import run_invariant_checks
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
+from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
-from .scheduler import Schedule, TOUPhase, resolve_active_schedules, resolve_tou_phase
+from .scheduler import COST_TAG_HIGH, Schedule, TOUPhase, resolve_active_schedules, resolve_tou_phase
 from .state import StatePersistence
 from .temperature import (
     convert_delta,
@@ -463,6 +464,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # invariant already established for _compute_target_band_schedule().
         self._tou_phase_resolution: Any = None
         self._tou_active_cost_resolution: Any = None
+        # Phase 3d (Investigation D): dedup guard for the tou_schedule_window_active
+        # Activity Record event — True while a resolved high-cost schedule window
+        # currently covers `now`, reset when it no longer does, so the event fires once
+        # per window-becomes-active transition rather than once every 30-min cycle.
+        self._tou_active_window_notified: bool = False
+        # Target-band single-choke-point resolution (Issue #514): resolved once per cycle
+        # by _resolve_target_band_schedule(), cached here, consumed by the main-cycle and
+        # daily-briefing calls to _build_predicted_indoor_future() via band_schedule=.
+        self._target_band_schedule: list[dict] | None = None
 
         # Sub-components
         self._state_persistence = StatePersistence(Path(hass.config.config_dir))
@@ -2245,6 +2255,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         _chart_hvac_cc,
                         self._fan_is_running(_fan_status_cc) if self.automation_engine else False,
                     )
+                    _band_lower_cc, _band_upper_cc = self._target_band_lower_upper_now()
                     self._chart_log.append(
                         hvac=_chart_hvac_cc,
                         fan=self._fan_is_running(_fan_status_cc) if self.automation_engine else False,
@@ -2252,11 +2263,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         outdoor=forecast.current_outdoor_temp,
                         windows_open=self._any_sensor_open(),
                         windows_recommended=bool(self._current_classification.windows_recommended),
+                        setpoint=self._read_chart_setpoint(),
                         event="classification_change",
                         fan_running=self._fan_physically_running(_fan_status_cc) if self.automation_engine else False,
                         nat_vent_active=bool(
                             self.automation_engine._natural_vent_active if self.automation_engine else False
                         ),
+                        lower=_band_lower_cc,
+                        upper=_band_upper_cc,
+                        nat_vent_target=self._nat_vent_target_now(),
                     )
 
             # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
@@ -2391,6 +2406,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # call below, which computes its own internal band (see
             # _resolve_tou_schedule_state()'s docstring on why the ordering matters).
             self._resolve_tou_schedule_state()
+            # Issue #514: resolve and cache this cycle's target-band schedule (same
+            # timing reason as above) so the executor call below reuses the canonical
+            # band instead of falling through to its own divergent internal recompute.
+            self._resolve_target_band_schedule()
 
             # Compute and cache ODE prediction for ceiling guard + chart reuse.
             # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
@@ -2404,6 +2423,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     thermal_model=self.automation_engine._thermal_model if self.automation_engine else {},
                     occupancy_mode=self._occupancy_mode,
                     classification=self._current_classification,
+                    band_schedule=self._target_band_schedule,
                     tou_precondition_window=self._tou_precondition_window_tuple(),
                 )
             )
@@ -2928,6 +2948,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _chart_hvac_poll,
                 self._fan_is_running(),
             )
+            _band_lower_poll, _band_upper_poll = self._target_band_lower_upper_now()
             self._chart_log.append(
                 hvac=_chart_hvac_poll,
                 fan=self._fan_is_running(),
@@ -2942,6 +2963,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 setpoint=_setpoint_f,
                 fan_running=self._fan_physically_running(),
                 nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
+                lower=_band_lower_poll,
+                upper=_band_upper_poll,
+                nat_vent_target=self._nat_vent_target_now(),
             )
             await self.hass.async_add_executor_job(self._chart_log.save)
             _LOGGER.debug(
@@ -3440,6 +3464,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # docstring) — this path recomputes classification/thermal_model locally above,
         # so re-resolving here keeps the ODE curve's TOU override in sync with them.
         self._resolve_tou_schedule_state()
+        # Issue #514: resolve and cache this cycle's target-band schedule, same reason —
+        # closes the divergence where this call site previously fell through to
+        # _build_predicted_indoor_future()'s own internal (not-identical) band recompute.
+        self._resolve_target_band_schedule()
 
         # Update cached ODE prediction for ceiling guard.
         # thermal_model is already computed from self.learning.get_thermal_model() above.
@@ -3453,6 +3481,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 current_indoor_temp=self._get_indoor_temp(),
                 thermal_model=thermal_model,
                 occupancy_mode=self._occupancy_mode,
+                band_schedule=self._target_band_schedule,
                 classification=classification,
                 tou_precondition_window=self._tou_precondition_window_tuple(),
             )
@@ -3544,6 +3573,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not raw_schedules or self._current_classification is None:
             self._tou_phase_resolution = None
             self._tou_active_cost_resolution = None
+            self._tou_active_window_notified = False
             return
 
         schedules = [Schedule(**s) for s in raw_schedules]
@@ -3556,6 +3586,47 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._current_classification.hvac_mode,
             self.automation_engine._thermal_model if self.automation_engine else None,
             self.config,
+        )
+        self._maybe_emit_tou_active_window_event()
+
+    def _maybe_emit_tou_active_window_event(self) -> None:
+        """Investigation D / Phase 3d: a configured TOU schedule can silently do nothing
+        with zero visibility — the live-instance finding. A ``cost_tag="high"`` window
+        covering `now` previously left no trace anywhere: the Status card only ever
+        showed TOU text during ``PRECONDITIONING`` (never the active window itself, and
+        never on a day where the classification ruled out banking entirely), and the
+        Activity Record had no ``tou_*`` event of any kind for a day like that. This emits
+        a deduped ``tou_schedule_window_active`` event once per window-becomes-active
+        transition (``self._tou_active_window_notified`` guards re-firing every cycle
+        while the same window stays active), carrying whether pre-conditioning was
+        actually possible for this window (``hvac_mode`` in ``heat``/``cool`` at
+        activation) — so the record shows *why* nothing else happened on an off/windows
+        day, rather than showing nothing at all. INFO-level logging on the same
+        transition, matching this project's Observability Requirements.
+        """
+        resolution = self._tou_active_cost_resolution
+        is_active_high = resolution is not None and resolution.cost_tag == COST_TAG_HIGH
+        if not is_active_high:
+            self._tou_active_window_notified = False
+            return
+        if self._tou_active_window_notified:
+            return
+        self._tou_active_window_notified = True
+        mode = self._current_classification.hvac_mode if self._current_classification else None
+        preconditioned = mode in ("heat", "cool")
+        _LOGGER.info(
+            "TOU schedule window active: schedule_ids=%s preconditioned=%s hvac_mode=%s",
+            resolution.active_schedule_ids,
+            preconditioned,
+            mode,
+        )
+        self._emit_event(
+            "tou_schedule_window_active",
+            {
+                "active_schedule_ids": list(resolution.active_schedule_ids),
+                "preconditioned": preconditioned,
+                "hvac_mode": mode,
+            },
         )
 
     async def _apply_tou_schedule(self) -> None:
@@ -3589,69 +3660,166 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _compute_pre_cool_trigger_time(self) -> datetime | None:
         """Compute the pre-cool trigger time for tonight.
 
-        Primary: nat-vent window close time + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES.
-        Fallback: wake_time - PRE_COOL_WAKE_OFFSET_HOURS.
-        Returns None if tonight isn't eligible for pre-cool — see ``resolve_pre_cool_modifier()``
-        (warming trend, or tomorrow independently forecast hot).
+        Thin ``self``-bound wrapper around the pure ``_compute_pre_cool_trigger_time_pure()``
+        (Issue #514) — see that module-level function's docstring for the algorithm
+        (nat-vent window close + delay, or wake_time - offset fallback). Kept as a method
+        for existing callers that expect bound access to live classification/config/clock.
         """
-        from .const import (
-            CONF_SLEEP_COOL,
-            DEFAULT_SLEEP_COOL,
-            PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
-            PRE_COOL_WAKE_OFFSET_HOURS,
+        return _compute_pre_cool_trigger_time_pure(self._current_classification, self.config, dt_util.now())
+
+    def _build_target_band_for(self, now: datetime, thermal_model: dict | None) -> list[dict]:
+        """Compute the target-band schedule for *now* — the single shared implementation
+        behind both ``get_chart_data()``'s own on-demand computation (which supplies its
+        own live ``now`` and freshly-fetched ``thermal_model``) and the once-per-cycle
+        cache built by ``_resolve_target_band_schedule()`` below (Issue #514).
+
+        Extracted verbatim from ``get_chart_data()`` (the canonical "call site A" per the
+        Issue #514/#470 investigation) so there is exactly one place that builds the
+        hourly-timestamp list, resolves the pre-cool trigger/target, and calls
+        ``_compute_target_band_schedule()`` — no second, independently-maintained copy of
+        this block anywhere in the module.
+        """
+        _band_timestamps = []
+        for _fc_entry in self._hourly_forecast_temps or []:
+            _dt_str = _fc_entry.get("datetime") or _fc_entry.get("time")
+            if not _dt_str:
+                continue
+            try:
+                _dt_obj = datetime.fromisoformat(_dt_str)
+                _band_timestamps.append(dt_util.as_local(_dt_obj) if _dt_obj.tzinfo else _dt_obj)
+            except (ValueError, TypeError):
+                continue
+
+        # Compute pre-cool band parameters for chart dip visualization
+        _pc_trigger_h: float | None = None
+        _pc_target: float | None = None
+        _pc_modifier = (
+            resolve_pre_cool_modifier(self._current_classification, self.config)
+            if self._current_classification
+            else None
+        )
+        if _pc_modifier is not None:
+            _pc_trigger_time = self._compute_pre_cool_trigger_time()
+            if _pc_trigger_time is not None:
+                _pc_trigger_h = _pc_trigger_time.hour + _pc_trigger_time.minute / 60.0
+                _pc_target = compute_pre_cool_target(self.config, _pc_modifier)
+
+        return list(
+            _compute_target_band_schedule(
+                _band_timestamps,
+                self.config,
+                self._occupancy_mode,
+                now,
+                setback_modifier=(
+                    getattr(self._current_classification, "setback_modifier", 0.0)
+                    if self._current_classification is not None
+                    else 0.0
+                ),
+                thermal_model=thermal_model,
+                classification=self._current_classification,
+                pre_cool_trigger_h=_pc_trigger_h,
+                pre_cool_target=_pc_target,
+                tou_precondition_window=self._tou_precondition_window_tuple(),
+            )
         )
 
-        c = self._current_classification
-        _modifier = resolve_pre_cool_modifier(c, self.config) if c else None
-        if _modifier is None:
-            return None
+    def _resolve_target_band_schedule(self) -> None:
+        """Resolve and cache this cycle's target-band schedule (Issue #514) — cached on
+        ``self._target_band_schedule``.
 
-        # Verify the pre-cool target would actually differ from sleep_cool
-        sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
-        pre_cool_target = compute_pre_cool_target(self.config, _modifier)
-        if pre_cool_target >= sleep_cool:
-            _LOGGER.info(
-                "Pre-cool scheduling: clamped target (%.1f°F) == sleep_cool (%.1f°F); skipping",
-                pre_cool_target,
-                sleep_cool,
-            )
-            return None
+        Mirrors ``_resolve_tou_schedule_state()``'s "resolve once early, cache, multiple
+        consumers read it later" pattern (Issue #786) — call this at the same point in the
+        cycle (immediately after ``_resolve_tou_schedule_state()``), before the ODE
+        prediction executor call.
 
+        This closes the pre-existing call-site divergence: the main 30-min cycle and the
+        daily briefing previously called ``_build_predicted_indoor_future()`` without a
+        ``band_schedule=`` argument, silently falling through to that function's internal
+        fallback recompute — an independent, not-identical formula (different pre-cool
+        trigger-time logic, a ``sleep_heat``/``sleep_cool``-overridden config copy, a
+        dropped ``setback_modifier``, and a differently-filtered timestamp array) than the
+        canonical one ``get_chart_data()`` already used for the displayed band. Both the
+        main cycle and the briefing now pass ``band_schedule=self._target_band_schedule``
+        (cached here) to ``_build_predicted_indoor_future()``, so that fallback is never
+        reached by any production caller again — only by direct/standalone tests of
+        ``_build_predicted_indoor_future()`` that don't supply ``band_schedule``.
+
+        ``get_chart_data()`` is unaffected by this cache — it continues to compute its own
+        band on demand (live ``now``, freshly-fetched ``thermal_model``) via
+        ``_build_target_band_for()`` directly, since it must reflect the exact moment a
+        chart request arrives, not the last 30-min cycle's snapshot.
+        """
+        self._target_band_schedule = self._build_target_band_for(
+            dt_util.now(),
+            self.automation_engine._thermal_model if self.automation_engine else None,
+        )
+
+    def _target_band_lower_upper_now(self) -> tuple[float | None, float | None]:
+        """Return this cycle's cached target-band lower/upper for the current instant
+        (Issue #514).
+
+        Reads ``self._target_band_schedule`` — resolved once per cycle by
+        ``_resolve_target_band_schedule()`` above — rather than recomputing the band.
+        Per the Issue #514 design decision, ``chart_log`` entries persist an immutable
+        per-cycle snapshot of "what was the target at time T"; that snapshot must come
+        from the same single choke-point computation every other consumer reads this
+        cycle, never a fresh independent recompute (that would just reintroduce the
+        call-site-divergence bug class Phase 2 closed).
+
+        The schedule is keyed by hourly forecast timestamps, not "now" itself, so this
+        picks the latest entry at-or-before now (the hour bucket currently in effect),
+        falling back to the earliest available entry if now precedes every entry (e.g.
+        immediately after startup, before the first forecast hour has passed).
+
+        Returns ``(None, None)`` if no schedule has been resolved yet (e.g. an
+        event-driven chart_log write firing before the first cycle's
+        ``_resolve_target_band_schedule()`` call, or a partially-instantiated test
+        coordinator) — callers persist that as a null-safe "unknown", never a guess.
+        """
+        schedule = getattr(self, "_target_band_schedule", None)
+        if not schedule:
+            return None, None
         now = dt_util.now()
-        today = now.date()
+        best: tuple[datetime, dict] | None = None
+        for entry in schedule:
+            ts_str = entry.get("ts")
+            if not ts_str:
+                continue
+            try:
+                ts_dt = datetime.fromisoformat(ts_str)
+                ts_dt = dt_util.as_local(ts_dt) if ts_dt.tzinfo else ts_dt
+            except (ValueError, TypeError):
+                continue
+            if ts_dt <= now and (best is None or ts_dt > best[0]):
+                best = (ts_dt, entry)
+        chosen = best[1] if best is not None else schedule[0]
+        return chosen.get("lower"), chosen.get("upper")
 
-        # Primary: nat-vent window close time + delay
-        if c.window_close_time is not None:
-            wct_dt = dt_util.as_local(datetime.combine(today, c.window_close_time).replace(tzinfo=None))
-            # If window close is before midnight (typical), use today; else tomorrow
-            if wct_dt < now:
-                wct_dt = wct_dt + timedelta(days=1)
-            trigger = wct_dt + timedelta(minutes=PRE_COOL_POST_NAT_VENT_DELAY_MINUTES)
-            _LOGGER.info(
-                "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
-                trigger.strftime("%H:%M"),
-                c.window_close_time.strftime("%H:%M"),
-                PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
-                pre_cool_target,
-            )
-            return trigger
+    def _nat_vent_target_now(self) -> float | None:
+        """This cycle's real nat-vent thermostatic cycling target, or None if nat-vent is
+        not currently active (Phase 3a, chart target-line).
 
-        # Fallback: wake_time - offset
-        wake_str = self.config.get("wake_time", "06:30")
-        wake_h, wake_m = int(wake_str.split(":")[0]), int(wake_str.split(":")[1])
-        wake_dt = dt_util.as_local(datetime.combine(today, time(wake_h, wake_m)).replace(tzinfo=None))
-        # If wake_time already passed, schedule for tomorrow night
-        if wake_dt < now:
-            wake_dt = wake_dt + timedelta(days=1)
-        trigger = wake_dt - timedelta(hours=PRE_COOL_WAKE_OFFSET_HOURS)
-        _LOGGER.info(
-            "Pre-cool scheduled for %s (wake_time %s - %.0fh fallback); target %.1f°F",
-            trigger.strftime("%H:%M"),
-            wake_str,
-            PRE_COOL_WAKE_OFFSET_HOURS,
-            pre_cool_target,
+        Uses the shared ``nat_vent_cycling.compute_nat_vent_target()`` helper (Phase 3a-pre
+        DRY consolidation) — the same formula ``automation.py``'s live
+        ``nat_vent_temperature_check()`` decision path uses — rather than re-deriving the
+        comfort-midpoint/sleep-floor math a third time here. Only meaningful while
+        ``automation_engine._natural_vent_active`` is True; callers persist ``None``
+        otherwise, matching the field's documented semantics in ``chart_log.append()``.
+        """
+        if not (self.automation_engine and self.automation_engine._natural_vent_active):
+            return None
+        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+        in_sleep_window = _in_sleep_window(dt_util.now(), self.config)
+        return compute_nat_vent_target(
+            sleep_heat=sleep_heat,
+            in_sleep_window=in_sleep_window,
+            comfort_heat_raw=comfort_heat,
+            comfort_cool=comfort_cool,
+            hysteresis=hysteresis,
         )
-        return trigger
 
     def _maybe_schedule_pre_cool(self) -> None:
         """Schedule the overnight pre-cool trigger if tonight is eligible and not yet scheduled."""
@@ -4154,6 +4322,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _chart_hvac_ov,
                     self._fan_is_running(),
                 )
+                _band_lower_ov, _band_upper_ov = self._target_band_lower_upper_now()
                 self._chart_log.append(
                     hvac=_chart_hvac_ov,
                     fan=self._fan_is_running(),
@@ -4165,11 +4334,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         if self._current_classification
                         else False
                     ),
+                    setpoint=self._read_chart_setpoint(),
                     event="override",
                     fan_running=self._fan_physically_running(),
                     nat_vent_active=bool(
                         self.automation_engine._natural_vent_active if self.automation_engine else False
                     ),
+                    lower=_band_lower_ov,
+                    upper=_band_upper_ov,
+                    nat_vent_target=self._nat_vent_target_now(),
                 )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -4320,6 +4493,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     new_action,
                     self._fan_is_running(),
                 )
+                _band_lower_hac, _band_upper_hac = self._target_band_lower_upper_now()
                 self._chart_log.append(
                     hvac=new_action,
                     fan=self._fan_is_running(),
@@ -4331,11 +4505,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         if self._current_classification
                         else False
                     ),
+                    setpoint=self._read_chart_setpoint(),
                     event="hvac_action_change",
                     fan_running=self._fan_physically_running(),
                     nat_vent_active=bool(
                         self.automation_engine._natural_vent_active if self.automation_engine else False
                     ),
+                    lower=_band_lower_hac,
+                    upper=_band_upper_hac,
+                    nat_vent_target=self._nat_vent_target_now(),
                 )
                 await self.hass.async_add_executor_job(self._chart_log.save)
 
@@ -7635,6 +7813,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _label = "pre-cooling" if _tou.mode == "cool" else "pre-heating"
             _ends = self._format_tou_ends(_tou.schedule_start)
             return f"{_label} — TOU high-cost period{_ends}"
+        # Investigation D / Phase 3d: the active cost_period window itself (not just the
+        # PRECONDITIONING lead-time before it) — previously invisible on the Status card
+        # entirely, including the case David actually hit (a configured schedule covering
+        # `now`, but `hvac_mode="off"` that day so resolve_tou_phase() correctly never
+        # entered PRECONDITIONING — nothing anywhere told the occupant this was evaluated
+        # and found inapplicable, vs. silently broken). Reads the already-resolved,
+        # previously write-only self._tou_active_cost_resolution (from
+        # resolve_active_schedules(), cached each cycle by _resolve_tou_schedule_state())
+        # — no new resolution logic, just a new consumer of data that already exists.
+        _tou_active = getattr(self, "_tou_active_cost_resolution", None)
+        if _tou_active is not None and _tou_active.cost_tag == COST_TAG_HIGH:
+            _ends = self._format_tou_ends(_tou_active.schedule_end)
+            _mode = getattr(self._current_classification, "hvac_mode", None) if self._current_classification else None
+            if _mode in ("heat", "cool"):
+                return f"TOU high-cost period active{_ends}"
+            return f"TOU high-cost period active{_ends} — no pre-conditioning needed today"
         if self._occupancy_mode == OCCUPANCY_VACATION:
             return "active (vacation)"
         if self._occupancy_mode == OCCUPANCY_AWAY:
@@ -7680,6 +7874,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("chart_hvac_action: remapping fan→cooling (fan_mode=%s)", fan_mode or "empty")
                 return "cooling"
         return hvac_action
+
+    def _read_chart_setpoint(self) -> float | None:
+        """Return the live thermostat's ``target_temperature`` in °F, for chart_log's
+        ``setpoint`` field (Phase 3a).
+
+        Mirrors the read the 30-min poll ``chart_log.append()`` site has always done
+        (only heat/cool modes carry a real commanded setpoint) — extracted here so the
+        3 event-driven ``chart_log.append()`` call sites (``classification_change``/
+        ``override``/``hvac_action_change``) can share it instead of writing ``None`` for
+        ``setpoint`` (the gap Investigation B found: those 3 sites never populated it,
+        leaving the historical "effective target" series with holes at exactly the moments
+        an event fired between 30-min polls).
+        """
+        unit = self.config.get("temp_unit", "fahrenheit")
+        climate_id = self.config.get("climate_entity", "")
+        cs = self.hass.states.get(climate_id) if climate_id else None
+        if cs is None or cs.state not in ("heat", "cool"):
+            return None
+        raw_sp = cs.attributes.get("target_temperature")
+        if raw_sp is None:
+            return None
+        return to_fahrenheit(float(raw_sp), unit)
 
     def _fan_is_running(self, _status: str | None = None) -> bool:
         """Return True if the fan is running for any reason.
@@ -8189,6 +8405,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if _nat_vent_dt:
                 candidates.append((_nat_vent_dt, "Natural ventilation"))
 
+        # Phase 3e (Issue #786 follow-up): TOU pre-conditioning start. Per CLAUDE.md's
+        # Status Card Ontology, "Next Automation" answers "what will the automation do
+        # next" — TOU pre-conditioning is exactly that shape and was previously entirely
+        # absent here (confirmed zero references). Guarded the same way the existing
+        # pre-cool-ceiling candidate is (precondition_start is not None and
+        # precondition_start > now) — this alone correctly excludes the case where
+        # pre-conditioning has already started (once phase == PRECONDITIONING,
+        # precondition_start <= now by the resolver's own definition), so no separate
+        # phase check is needed. Pure consumer of Phase 2's already-cached
+        # self._tou_phase_resolution — zero new resolution logic, same DRY shape as the
+        # Status-card wiring above.
+        _tou_next = getattr(self, "_tou_phase_resolution", None)
+        if (
+            _tou_next is not None
+            and _tou_next.precondition_start is not None
+            and _tou_next.precondition_start > now
+            and _tou_next.target is not None
+        ):
+            _tou_unit = self.config.get("temp_unit", "fahrenheit")
+            _tou_action = "Pre-cool" if _tou_next.mode == "cool" else "Pre-heat"
+            candidates.append(
+                (
+                    _tou_next.precondition_start,
+                    f"{_tou_action} for TOU schedule ({format_temp(_tou_next.target, _tou_unit)})",
+                )
+            )
+
         if not candidates:
             _LOGGER.info("Next-automation: No more actions today")
             return ("No more actions today", "")
@@ -8336,60 +8579,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         actual_outdoor = [{"time": p["time"], "temp": _conv(p["temp"])} for p in actual_outdoor]
         actual_indoor = [{"time": p["time"], "temp": _conv(p["temp"])} for p in actual_indoor]
 
-        # Build timestamp list for _compute_target_band_schedule — same parse pattern
-        # as _build_predicted_indoor_future.
-        #
-        # Issue #470: this block (timestamps, pre-cool trigger/target, and the band
-        # schedule itself) is computed once, HERE, and threaded into
-        # _build_predicted_indoor_future() below via its band_schedule= parameter —
-        # previously that function recomputed the same schedule internally, using its
-        # own independent (and not proven identical) inline pre-cool trigger-time
-        # formula rather than the canonical self._compute_pre_cool_trigger_time().
-        _band_timestamps = []
-        for _fc_entry in self._hourly_forecast_temps or []:
-            _dt_str = _fc_entry.get("datetime") or _fc_entry.get("time")
-            if not _dt_str:
-                continue
-            try:
-                _dt_obj = datetime.fromisoformat(_dt_str)
-                _band_timestamps.append(dt_util.as_local(_dt_obj) if _dt_obj.tzinfo else _dt_obj)
-            except (ValueError, TypeError):
-                continue
-
-        # Compute pre-cool band parameters for chart dip visualization
-        _pc_trigger_h: float | None = None
-        _pc_target: float | None = None
-        _pc_modifier = (
-            resolve_pre_cool_modifier(self._current_classification, self.config)
-            if self._current_classification
-            else None
-        )
-        if _pc_modifier is not None:
-            _pc_trigger_time = self._compute_pre_cool_trigger_time()
-            if _pc_trigger_time is not None:
-                _pc_trigger_h = _pc_trigger_time.hour + _pc_trigger_time.minute / 60.0
-                _pc_target = compute_pre_cool_target(self.config, _pc_modifier)
-
-        _raw_band = list(
-            _compute_target_band_schedule(
-                _band_timestamps,
-                self.config,
-                self._occupancy_mode,
-                now,
-                setback_modifier=(
-                    getattr(self._current_classification, "setback_modifier", 0.0)
-                    if self._current_classification is not None
-                    else 0.0
-                ),
-                thermal_model=thermal_model,
-                classification=self._current_classification,
-                pre_cool_trigger_h=_pc_trigger_h,
-                pre_cool_target=_pc_target,
-                tou_precondition_window=self._tou_precondition_window_tuple(),
-            )
-        )
+        # Issue #470/#514: the band (timestamps, pre-cool trigger/target, and the
+        # _compute_target_band_schedule() call itself) is computed once, HERE, via the
+        # shared _build_target_band_for() helper — the canonical "call site A" — and
+        # threaded into _build_predicted_indoor_future() below via its band_schedule=
+        # parameter, so the displayed band and the ODE prediction curve always agree.
         _hvac_mode = getattr(self._current_classification, "hvac_mode", None) if self._current_classification else None
-        _conv_band = [{"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _raw_band]
+        if is_historical:
+            # Issue #514: a historical viewport must show what the target band
+            # actually was at that past time, not today's live band recomputed
+            # against today's config/occupancy/classification. Read the immutable
+            # per-cycle lower/upper snapshot persisted into chart_log at that time
+            # (Phase 2 steps 6-7) instead of calling _build_target_band_for() with
+            # today's `now`. Pre-fix entries (written before this field existed)
+            # come back as {"lower": None, "upper": None} via plain dict.get() —
+            # same null-safe shape as _extract_historical_setpoint() already uses.
+            _raw_band = None
+            _conv_band = [
+                {"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])}
+                for e in _extract_historical_target_band(log_entries)
+            ]
+        else:
+            _raw_band = self._build_target_band_for(now, thermal_model)
+            _conv_band = [{"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _raw_band]
 
         # Historical views suppress forward-looking series (prediction + forecast).
         # They are meaningless for a window anchored in the past and would confuse
@@ -8431,6 +8643,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return e
 
         log_entries = [_conv_log_entry(e) for e in log_entries]
+
+        # Phase 3 (Investigation B, #786 follow-up): unified "effective target" chart line —
+        # the real system target at any point in time regardless of source (comfort band,
+        # TOU banking, or nat-vent thermostatic cycling). Historical portion reads chart_log's
+        # setpoint/nat_vent_target fields directly; forward portion derives from the same
+        # target_band/predicted_activity/TOU-window data already computed above — no new
+        # resolution logic. predicted_activity is computed here (rather than inline in the
+        # return dict below, as it was before this field existed) so both it and the new
+        # forward effective-target series can share the one computation.
+        _predicted_activity = (
+            []
+            if is_historical
+            else _compute_predicted_activity(
+                _conv_band,
+                forecast_outdoor,
+                predicted_indoor,
+                self._current_classification,
+                self.config,
+            )
+        )
+        _effective_target_history = [
+            {"ts": e["ts"], "target": _conv(e["target"])} for e in _extract_historical_effective_target(log_entries)
+        ]
+        if is_historical:
+            _effective_target_forecast: list[dict] = []
+        else:
+            _nv_hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+            _effective_target_forecast = [
+                {"ts": e["ts"], "target": _conv(e["target"])}
+                for e in _compute_effective_target_forward(
+                    _conv_band,
+                    _predicted_activity,
+                    _hvac_mode,
+                    _nv_hysteresis,
+                    self.config,
+                    tou_precondition_window=self._tou_precondition_window_tuple(),
+                )
+            ]
 
         return {
             "predicted_indoor": predicted_indoor,
@@ -8484,17 +8734,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 {"ts": e["ts"], "setpoint": _conv(e["setpoint"])} for e in _extract_historical_setpoint(log_entries)
             ],
             "defense_lines": [] if is_historical else _compute_defense_lines(_conv_band),
-            "predicted_activity": (
-                []
-                if is_historical
-                else _compute_predicted_activity(
-                    _conv_band,
-                    forecast_outdoor,
-                    predicted_indoor,
-                    self._current_classification,
-                    self.config,
-                )
-            ),
+            "predicted_activity": _predicted_activity,
+            "effective_target_history": _effective_target_history,
+            "effective_target_forecast": _effective_target_forecast,
             "unit": unit,
         }
 
@@ -8558,17 +8800,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         is NOT a thermostat setpoint and is never written to the climate entity; do not
         confuse it with comfort_heat/comfort_cool or the armed comfort-band ceiling/floor.
         """
-        ae = self.automation_engine
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        if not ae._natural_vent_active:
+        # Phase 3a-pre: routed through the shared self._nat_vent_target_now() (which itself
+        # delegates to nat_vent_cycling.compute_nat_vent_target()) instead of an independent
+        # third inline copy of the same formula — this function pre-dated the DRY
+        # consolidation and was found to be a third duplicate not named in the original
+        # audit (which only tracked automation.py and nat_vent_cycling.py).
+        target = self._nat_vent_target_now()
+        if target is None:
             return {"nat_vent_target": None, "nat_vent_on_threshold": None, "nat_vent_off_threshold": None}
-        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-        if _in_sleep_window(dt_util.now(), self.config):
-            sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
-            target = sleep_heat + hysteresis
-        else:
-            target = (comfort_heat + comfort_cool) / 2.0
         return {
             "nat_vent_target": target,
             "nat_vent_on_threshold": target + hysteresis,
@@ -8808,19 +9048,6 @@ def _decide_pre_cool_reschedule(
     if candidate >= current_trigger_at:
         return None
     return candidate
-
-
-def _compute_ramp_hours(temp_delta: float, hvac_mode: str, thermal_model: dict | None) -> float:
-    """Compute heating/cooling ramp duration in hours from thermal model."""
-    if thermal_model is None or thermal_model.get("confidence") == "none":
-        return 0.5
-    if hvac_mode == "heat":
-        rate = thermal_model.get("heating_rate_f_per_hour")
-    else:
-        rate = thermal_model.get("cooling_rate_f_per_hour")
-    if not rate:
-        return 0.5
-    return max(temp_delta / rate, 0.25)
 
 
 def _compute_thermal_factors(chart_entries: list[dict]) -> dict:
@@ -9207,6 +9434,85 @@ def _simulate_indoor_physics_v3(
     return t_next
 
 
+def _compute_pre_cool_trigger_time_pure(
+    classification: DayClassification | None,
+    config: dict[str, Any],
+    now: datetime,
+) -> datetime | None:
+    """Pure computation behind ``ClimateAdvisorCoordinator._compute_pre_cool_trigger_time()``
+    (Issue #514) — takes ``classification``/``config``/``now`` explicitly instead of reading
+    ``self.*`` or calling ``dt_util.now()`` internally, mirroring ``_compute_target_band_schedule()``'s
+    own already-pure shape. This is the root fix for the call-site-divergence bug class: because
+    the canonical trigger-time logic previously lived only as a bound method,
+    ``_build_predicted_indoor_future()`` (a module-level function with no ``self``) couldn't call
+    it directly and reimplemented it inline instead — see that function's ``band_schedule`` fallback
+    branch. Any future caller can now import and call this function directly instead of writing a
+    third divergent copy.
+
+    Primary: nat-vent window close time + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES.
+    Fallback: wake_time - PRE_COOL_WAKE_OFFSET_HOURS.
+    Returns None if tonight isn't eligible for pre-cool — see ``resolve_pre_cool_modifier()``
+    (warming trend, or tomorrow independently forecast hot).
+    """
+    from .const import (
+        CONF_SLEEP_COOL,
+        DEFAULT_SLEEP_COOL,
+        PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+        PRE_COOL_WAKE_OFFSET_HOURS,
+    )
+
+    c = classification
+    _modifier = resolve_pre_cool_modifier(c, config) if c else None
+    if _modifier is None:
+        return None
+
+    # Verify the pre-cool target would actually differ from sleep_cool
+    sleep_cool = float(config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
+    pre_cool_target = compute_pre_cool_target(config, _modifier)
+    if pre_cool_target >= sleep_cool:
+        _LOGGER.info(
+            "Pre-cool scheduling: clamped target (%.1f°F) == sleep_cool (%.1f°F); skipping",
+            pre_cool_target,
+            sleep_cool,
+        )
+        return None
+
+    today = now.date()
+
+    # Primary: nat-vent window close time + delay
+    if c.window_close_time is not None:
+        wct_dt = dt_util.as_local(datetime.combine(today, c.window_close_time).replace(tzinfo=None))
+        # If window close is before midnight (typical), use today; else tomorrow
+        if wct_dt < now:
+            wct_dt = wct_dt + timedelta(days=1)
+        trigger = wct_dt + timedelta(minutes=PRE_COOL_POST_NAT_VENT_DELAY_MINUTES)
+        _LOGGER.info(
+            "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
+            trigger.strftime("%H:%M"),
+            c.window_close_time.strftime("%H:%M"),
+            PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+            pre_cool_target,
+        )
+        return trigger
+
+    # Fallback: wake_time - offset
+    wake_str = config.get("wake_time", "06:30")
+    wake_h, wake_m = int(wake_str.split(":")[0]), int(wake_str.split(":")[1])
+    wake_dt = dt_util.as_local(datetime.combine(today, time(wake_h, wake_m)).replace(tzinfo=None))
+    # If wake_time already passed, schedule for tomorrow night
+    if wake_dt < now:
+        wake_dt = wake_dt + timedelta(days=1)
+    trigger = wake_dt - timedelta(hours=PRE_COOL_WAKE_OFFSET_HOURS)
+    _LOGGER.info(
+        "Pre-cool scheduled for %s (wake_time %s - %.0fh fallback); target %.1f°F",
+        trigger.strftime("%H:%M"),
+        wake_str,
+        PRE_COOL_WAKE_OFFSET_HOURS,
+        pre_cool_target,
+    )
+    return trigger
+
+
 def _compute_target_band_schedule(
     hourly_timestamps: list,
     config: dict,
@@ -9447,9 +9753,8 @@ def _build_predicted_indoor_future(
     setback_heat = float(config.get("setback_heat", DEFAULT_SETBACK_HEAT))  # absolute floor for heat
     setback_cool = float(config.get("setback_cool", DEFAULT_SETBACK_COOL))  # absolute ceiling for cool
 
-    # Mirror automation engine (automation.py compute_setback_temp) and
-    # compute_predicted_temps (coordinator.py ~line 2678) — use sleep_heat/sleep_cool if
-    # configured; otherwise default to comfort ± DEFAULT_SETBACK_DEPTH_*F.
+    # Mirror automation engine (automation.py compute_setback_temp) — use
+    # sleep_heat/sleep_cool if configured; otherwise default to comfort ± DEFAULT_SETBACK_DEPTH_*F.
     # setback_heat/setback_cool remain as hard floor/ceiling guards.
     setback_temp_heat = float(config.get("sleep_heat", comfort_heat - DEFAULT_SETBACK_DEPTH_F))
     setback_temp_heat = max(setback_temp_heat, setback_heat)
@@ -9824,130 +10129,6 @@ def _build_predicted_indoor_future(
     return result
 
 
-def compute_predicted_temps(
-    classification: DayClassification | None,
-    config: dict[str, Any],
-    hourly_forecast: list[dict] | None = None,
-    thermal_model: dict | None = None,
-    thermal_factors: dict | None = None,
-) -> tuple[list[dict], list[dict]]:
-    """Compute predicted outdoor and indoor hourly temperatures.
-
-    This is a standalone function so it can be tested without a coordinator.
-
-    Uses a unified equilibrium model:
-    - For hvac_mode="off" (mild/warm days): indoor = max(HVAC_floor, outdoor_lagged + cond_diff)
-    - For hvac_mode="heat" or "cool": follow HVAC schedule (setback→comfort ramps),
-      equilibrium adjusts drift at edges.
-
-    Returns:
-        (predicted_outdoor, predicted_indoor) — each a list of 24 dicts
-        with 'hour' and 'temp' keys, or empty lists if no classification.
-    """
-    if not classification:
-        return [], []
-
-    c = classification
-
-    # --- Predicted outdoor temps ---
-    predicted_outdoor = _build_outdoor_curve(high=c.today_high, low=c.today_low, hourly_forecast=hourly_forecast)
-
-    # --- Thermal factors ---
-    _tf = thermal_factors or {}
-    _lag_h = max(0, int(round(_tf.get("time_lag_hours", 1.0))))
-
-    # --- HVAC floor and ceiling for this day type ---
-    if c.hvac_mode == "heat":
-        hvac_floor = config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
-        hvac_ceiling = None
-    elif c.hvac_mode == "cool":
-        hvac_floor = config.get("setback_cool", DEFAULT_SETBACK_COOL) + c.setback_modifier
-        hvac_ceiling = config.get("comfort_cool", DEFAULT_COMFORT_COOL)
-    else:  # "off" / mild
-        hvac_floor = config.get("setback_heat", DEFAULT_SETBACK_HEAT) + c.setback_modifier
-        hvac_ceiling = None
-
-    # --- Schedule timing (for heat/cool days where HVAC actively ramps) ---
-    if c.hvac_mode != "cool":
-        comfort = config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
-    else:
-        comfort = config.get("comfort_cool", DEFAULT_COMFORT_COOL)
-    if c.hvac_mode == "heat":
-        setback = config.get("setback_heat", DEFAULT_SETBACK_HEAT) + c.setback_modifier
-    elif c.hvac_mode == "cool":
-        setback = config.get("setback_cool", DEFAULT_SETBACK_COOL) + c.setback_modifier
-    else:
-        setback = hvac_floor
-
-    wake = _parse_time(config.get("wake_time", "06:30"))
-    sleep = _parse_time(config.get("sleep_time", "22:30"))
-    wake_h = wake.hour + wake.minute / 60.0
-    sleep_h = sleep.hour + sleep.minute / 60.0
-
-    if c.hvac_mode == "heat":
-        _sleep_h = config.get("sleep_heat", comfort - DEFAULT_SETBACK_DEPTH_F)
-        bedtime_setback = _sleep_h + c.setback_modifier
-    elif c.hvac_mode == "cool":
-        # Cool mode: setback_modifier is not applied to bedtime (original behavior preserved)
-        _sleep_c = config.get("sleep_cool", comfort + DEFAULT_SETBACK_DEPTH_COOL_F)
-        bedtime_setback = _sleep_c
-    else:
-        bedtime_setback = comfort  # off-mode: unused in schedule loop
-    ramp_h_morning = _compute_ramp_hours(abs(comfort - setback), c.hvac_mode, thermal_model)
-    ramp_h_evening = _compute_ramp_hours(abs(comfort - bedtime_setback), c.hvac_mode, thermal_model)
-
-    # Running indoor state for exponential smoothing (off-day only).
-    # Seed with hour-0 equilibrium so the first step uses a physical starting point.
-    if predicted_outdoor and c.hvac_mode not in ("heat", "cool"):
-        _out0 = predicted_outdoor[0]["temp"]
-        _cd0 = _outdoor_conditional_diff(_out0, _tf)
-        _prev_indoor = max(hvac_floor, _out0 + _cd0)
-    else:
-        _prev_indoor = comfort
-
-    predicted_indoor: list[dict] = []
-    for h in range(24):
-        if predicted_outdoor:
-            lag_idx = max(0, h - _lag_h)
-            out_t = predicted_outdoor[lag_idx]["temp"]
-            cond_diff = _outdoor_conditional_diff(out_t, _tf)
-            equilibrium = out_t + cond_diff
-        else:
-            equilibrium = comfort
-
-        if c.hvac_mode in ("heat", "cool"):
-            # HVAC actively holds setpoints: follow schedule
-            if h < wake_h:
-                temp = setback
-            elif h < wake_h + ramp_h_morning:
-                frac = (h - wake_h) / ramp_h_morning
-                temp = setback + frac * (comfort - setback)
-            elif h < sleep_h:
-                temp = comfort
-            elif h < sleep_h + ramp_h_evening:
-                frac = (h - sleep_h) / ramp_h_evening
-                temp = comfort + frac * (bedtime_setback - comfort)
-            else:
-                temp = bedtime_setback
-        else:
-            # hvac_mode == "off": CA manages floor (heater), no active cooling ceiling.
-            # Exponential smoothing: alpha=1/lag_h so lag controls convergence speed,
-            # not an index offset. For lag=1 (alpha=1.0) this is identical to instantaneous.
-            _alpha = 1.0 / max(1, _lag_h)
-            raw = _prev_indoor + _alpha * (equilibrium - _prev_indoor)
-            temp = max(hvac_floor, raw)
-
-        _prev_indoor = temp  # track for exponential smoothing
-
-        # Apply ceiling for cool days during waking hours
-        if hvac_ceiling is not None and wake_h <= h < sleep_h:
-            temp = min(temp, hvac_ceiling)
-
-        predicted_indoor.append({"hour": h, "temp": round(temp, 1)})
-
-    return predicted_outdoor, predicted_indoor
-
-
 def _cosine_outdoor_curve(high: float, low: float) -> list[dict]:
     """Sinusoidal outdoor temperature model (peak 3 PM, trough 3 AM).
 
@@ -10217,6 +10398,25 @@ def _extract_historical_setpoint(log_entries: list[dict]) -> list[dict]:
     return result
 
 
+def _extract_historical_target_band(log_entries: list[dict]) -> list[dict]:
+    """Extract {ts, lower, upper} pairs from state_log entries (Issue #514).
+
+    Mirrors ``_extract_historical_setpoint()`` exactly — same null-safe shape via
+    plain ``dict.get()``, which returns ``None`` for both an explicit ``null`` and a
+    missing key. Entries persisted before this fix simply have no "lower"/"upper"
+    keys at all (old ``chart_log`` schema); ``.get()`` returns ``None`` for those the
+    same way it already does for setpoint on entries predating that field, requiring
+    no separate "is this an old entry" branch.
+    """
+    result = []
+    for e in log_entries:
+        ts = e.get("ts")
+        if not ts:
+            continue
+        result.append({"ts": ts, "lower": e.get("lower"), "upper": e.get("upper")})
+    return result
+
+
 def _compute_defense_lines(target_band: list[dict]) -> list[dict]:
     """Return [{ts, heat, cool}] from target_band — always both bounds, never null.
 
@@ -10277,6 +10477,121 @@ def _compute_predicted_activity(
                 "windows_recommended": windows_recommended,
             }
         )
+    return result
+
+
+def _extract_historical_effective_target(log_entries: list[dict]) -> list[dict]:
+    """Historical (past) portion of the unified "effective target" chart line (Phase 3a).
+
+    Per cycle: ``chart_log``'s real ``setpoint`` when present (compressor-commanded,
+    genuinely source-agnostic — comfort-band and TOU banking both land here identically
+    since it only reads what the thermostat's ``target_temperature`` attribute reads),
+    else ``nat_vent_target`` when ``nat_vent_active`` was true that cycle (the real
+    thermostatic value the fan was cycling around — not a band-edge approximation),
+    else ``None`` only when genuinely undefined (thermostat off, no nat-vent, no
+    comfort-band-active mode).
+
+    This is the corrected replacement for the dead ``historical_setpoint``/
+    ``_extract_historical_setpoint()`` field (Investigation B): that field was a naive
+    setpoint-only pass-through, ``None`` for 3 of chart_log's 4 write call sites (fixed
+    in Phase 3a step 2 above) and always ``None`` while nat-vent was active (nat-vent
+    never calls ``set_temperature``, so it never populates ``setpoint``). Kept as a
+    separate function/field rather than repurposing ``_extract_historical_setpoint()``
+    in place — that function and its ``historical_setpoint`` API field are directly
+    pinned by ``tests/test_chart_setpoint.py``'s locked band-edge-only contract and are
+    left untouched for backward compatibility.
+    """
+    result = []
+    for e in log_entries:
+        ts = e.get("ts")
+        if not ts:
+            continue
+        setpoint = e.get("setpoint")
+        if setpoint is not None:
+            target = setpoint
+        elif e.get("nat_vent_active"):
+            target = e.get("nat_vent_target")
+        else:
+            target = None
+        result.append({"ts": ts, "target": target})
+    return result
+
+
+def _compute_effective_target_forward(
+    target_band: list[dict],
+    predicted_activity: list[dict],
+    hvac_mode: str | None,
+    hysteresis: float,
+    config: dict,
+    tou_precondition_window: tuple[datetime, datetime, float, str] | None = None,
+) -> list[dict]:
+    """Forward (future) portion of the unified "effective target" chart line (Phase 3b).
+
+    Per future timestamp, in priority order:
+      1. The TOU banking target (``tou_precondition_window``'s resolved ``target``)
+         while ``ts`` falls inside ``[precondition_start, schedule_start)`` — reusing
+         Phase 2's already-cached band-schedule input verbatim, no new resolution.
+      2. Else ``nat_vent_cycling.compute_nat_vent_target()``'s output — fed from this
+         timestamp's own ``target_band.lower``/``.upper`` (already sleep/wake/TOU-ramp
+         -aware per Phase 2) and this timestamp's in-sleep-window state — while
+         ``predicted_activity[].fan_active`` is true for this timestamp (Investigation
+         B's pre-existing, already-accepted forward nat-vent-active proxy; not
+         re-derived or made more accurate here, per Assumption Audit #5).
+      3. Else the plain active comfort-band edge for ``hvac_mode`` (heat: lower, cool:
+         upper) — the same derivation ``_derive_predicted_setpoint()`` used, now only
+         the fallback tier instead of the whole answer.
+
+    Degrades gracefully to tier 3 whenever tiers 1/2 don't apply or their inputs are
+    incomplete (missing band bounds, unparseable timestamp) — never raises, never
+    fabricates a value out of tier 3's band-edge range.
+    """
+    activity_fan_active_by_ts = {e.get("ts"): bool(e.get("fan_active")) for e in predicted_activity if e.get("ts")}
+
+    result: list[dict] = []
+    for entry in target_band:
+        ts_str = entry.get("ts")
+        if not ts_str:
+            continue
+        lower = entry.get("lower")
+        upper = entry.get("upper")
+
+        ts_dt: datetime | None = None
+        with contextlib.suppress(ValueError, TypeError):
+            ts_dt = datetime.fromisoformat(ts_str)
+
+        target: float | None = None
+
+        # Tier 1: TOU banking target.
+        if tou_precondition_window is not None and ts_dt is not None:
+            _window_start, _window_end, _tou_target, _tou_mode = tou_precondition_window
+            if _window_start <= ts_dt < _window_end:
+                target = _tou_target
+
+        # Tier 2: nat-vent thermostatic cycling target.
+        if (
+            target is None
+            and activity_fan_active_by_ts.get(ts_str)
+            and lower is not None
+            and upper is not None
+            and ts_dt is not None
+        ):
+            in_sleep_window = _in_sleep_window(ts_dt, config)
+            target = compute_nat_vent_target(
+                sleep_heat=lower,
+                in_sleep_window=in_sleep_window,
+                comfort_heat_raw=lower,
+                comfort_cool=upper,
+                hysteresis=hysteresis,
+            )
+
+        # Tier 3: plain active comfort-band edge.
+        if target is None:
+            if hvac_mode == "heat":
+                target = lower
+            elif hvac_mode == "cool":
+                target = upper
+
+        result.append({"ts": ts_str, "target": target})
     return result
 
 

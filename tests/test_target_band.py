@@ -7,8 +7,9 @@ imported and tested directly without a running HA instance.
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 # ── HA module stubs (must happen before importing climate_advisor) ──
 if "homeassistant" not in sys.modules:
@@ -16,6 +17,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.coordinator import _compute_target_band_schedule  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -396,3 +398,140 @@ class TestTouPreconditionWindow:
         with_none = _compute_target_band_schedule([ts_awake], _BASE_CONFIG, "home", _NOW, tou_precondition_window=None)
         without_param = _compute_target_band_schedule([ts_awake], _BASE_CONFIG, "home", _NOW)
         assert with_none == without_param
+
+
+# ---------------------------------------------------------------------------
+# Pure pre-cool-trigger-time extraction (Issue #514, Phase 2 step 1)
+#
+# _compute_pre_cool_trigger_time() was previously only reachable as a bound
+# coordinator method (reading self._current_classification/self.config and
+# calling dt_util.now() internally) — this is the root enabler that let
+# _build_predicted_indoor_future() (a module-level function with no `self`)
+# drift into its own independent, not-identical inline reimplementation
+# instead of calling the canonical logic. The method is now a thin wrapper
+# around the pure, module-level _compute_pre_cool_trigger_time_pure().
+# ---------------------------------------------------------------------------
+class TestPreCoolTriggerTimePureExtraction:
+    """Bit-identical-output proof: the method wrapper and the new pure function
+    must return the exact same value for the exact same inputs, mandatory before
+    any call site is switched to consume the pure function directly."""
+
+    def _make_coordinator(self, classification, config: dict):
+        """Bare ClimateAdvisorCoordinator bound to the real
+        _compute_pre_cool_trigger_time method — object.__new__() + types.MethodType()
+        (the established partial-instantiation pattern for coordinator unit tests,
+        see test_contact_status.py / test_daily_record_accuracy.py)."""
+        import types
+
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord.config = config
+        coord._current_classification = classification
+        coord._compute_pre_cool_trigger_time = types.MethodType(
+            ClimateAdvisorCoordinator._compute_pre_cool_trigger_time, coord
+        )
+        return coord
+
+    def _classification(self, **overrides):
+        defaults = dict(
+            day_type="hot",
+            trend_direction="stable",
+            trend_magnitude=1.0,
+            today_high=95.0,
+            today_low=72.0,
+            tomorrow_high=96.0,
+            tomorrow_low=73.0,
+            hvac_mode="cool",
+            windows_recommended=True,
+            window_open_time=None,
+            window_close_time=time(20, 0),
+            setback_modifier=0.0,
+            pre_condition=False,
+            pre_condition_target=None,
+        )
+        defaults.update(overrides)
+        c = object.__new__(DayClassification)
+        for k, v in defaults.items():
+            object.__setattr__(c, k, v)
+        return c
+
+    def test_wrapper_matches_pure_function_nat_vent_close_branch(self):
+        """Primary branch: nat-vent window_close_time + delay."""
+        from custom_components.climate_advisor.coordinator import (
+            _compute_pre_cool_trigger_time_pure,
+            dt_util,
+        )
+
+        classification = self._classification()
+        config = dict(_BASE_CONFIG)
+        fixed_now = _ts(14)
+
+        with (
+            patch.object(dt_util, "now", return_value=fixed_now),
+            patch.object(
+                dt_util,
+                "as_local",
+                side_effect=lambda x: x if x.tzinfo is not None else x.replace(tzinfo=UTC),
+            ),
+        ):
+            coord = self._make_coordinator(classification, config)
+            method_result = coord._compute_pre_cool_trigger_time()
+            pure_result = _compute_pre_cool_trigger_time_pure(classification, config, fixed_now)
+
+        assert method_result is not None, "fixture must actually reach the nat-vent-close branch"
+        assert method_result == pure_result
+
+    def test_wrapper_matches_pure_function_wake_time_fallback_branch(self):
+        """Fallback branch: no window_close_time -> wake_time - offset."""
+        from custom_components.climate_advisor.coordinator import (
+            _compute_pre_cool_trigger_time_pure,
+            dt_util,
+        )
+
+        classification = self._classification(window_close_time=None, windows_recommended=False)
+        config = dict(_BASE_CONFIG)
+        fixed_now = _ts(14)
+
+        with (
+            patch.object(dt_util, "now", return_value=fixed_now),
+            patch.object(
+                dt_util,
+                "as_local",
+                side_effect=lambda x: x if x.tzinfo is not None else x.replace(tzinfo=UTC),
+            ),
+        ):
+            coord = self._make_coordinator(classification, config)
+            method_result = coord._compute_pre_cool_trigger_time()
+            pure_result = _compute_pre_cool_trigger_time_pure(classification, config, fixed_now)
+
+        assert method_result is not None, "fixture must actually reach the wake-time fallback branch"
+        assert method_result == pure_result
+
+    def test_wrapper_matches_pure_function_ineligible_returns_none(self):
+        """Not pre-cool-eligible (mild day, hvac off) -> both paths return None identically."""
+        from custom_components.climate_advisor.coordinator import (
+            _compute_pre_cool_trigger_time_pure,
+            dt_util,
+        )
+
+        classification = self._classification(
+            day_type="mild",
+            hvac_mode="off",
+            today_high=72.0,
+            tomorrow_high=72.0,
+            trend_direction="stable",
+            trend_magnitude=0.0,
+        )
+        config = dict(_BASE_CONFIG)
+        fixed_now = _ts(14)
+
+        with patch.object(dt_util, "now", return_value=fixed_now):
+            coord = self._make_coordinator(classification, config)
+            method_result = coord._compute_pre_cool_trigger_time()
+
+        pure_result = _compute_pre_cool_trigger_time_pure(classification, config, fixed_now)
+
+        assert method_result is None
+        assert pure_result is None
+        assert method_result == pure_result

@@ -95,7 +95,12 @@ def _make_automation_engine(
 
 
 def _make_real_coordinator(
-    automation_enabled: bool, automation_engine, occupancy_mode: str = "home", tou_phase_resolution=None
+    automation_enabled: bool,
+    automation_engine,
+    occupancy_mode: str = "home",
+    tou_phase_resolution=None,
+    tou_active_cost_resolution=None,
+    current_classification=None,
 ):
     """Build a bare ClimateAdvisorCoordinator bound to the real status-computation methods.
 
@@ -103,6 +108,11 @@ def _make_real_coordinator(
     partial-instantiation pattern — see test_daily_record_accuracy.py) rather than
     replicating the method bodies, so these tests exercise the real
     ClimateAdvisorCoordinator._compute_automation_status/_compute_next_automation_action.
+
+    tou_active_cost_resolution/current_classification (Phase 3d): threaded through so
+    tests can exercise _compute_automation_status()'s new "TOU high-cost window active"
+    branch, which reads self._tou_active_cost_resolution and
+    self._current_classification.hvac_mode.
     """
     import types
 
@@ -113,7 +123,7 @@ def _make_real_coordinator(
     coord._startup_coalesce_active = False
     coord._startup_coalesce_expiry = None
     coord._startup_timer_fired = False
-    coord._current_classification = None
+    coord._current_classification = current_classification
     coord._occupancy_mode = occupancy_mode
     coord.automation_engine = automation_engine
     coord._any_sensor_open = MagicMock(return_value=False)
@@ -122,6 +132,7 @@ def _make_real_coordinator(
     coord._pre_cool_trigger_dt = None
     coord._pre_cool_target = None
     coord._tou_phase_resolution = tou_phase_resolution
+    coord._tou_active_cost_resolution = tou_active_cost_resolution
     coord.config = {}
     coord._compute_automation_status = types.MethodType(ClimateAdvisorCoordinator._compute_automation_status, coord)
     coord._compute_next_automation_action = types.MethodType(
@@ -131,7 +142,12 @@ def _make_real_coordinator(
 
 
 def _compute_automation_status(
-    automation_enabled: bool, automation_engine, now_dt: datetime | None = None, tou_phase_resolution=None
+    automation_enabled: bool,
+    automation_engine,
+    now_dt: datetime | None = None,
+    tou_phase_resolution=None,
+    tou_active_cost_resolution=None,
+    current_classification=None,
 ) -> str:
     """Call the real ClimateAdvisorCoordinator._compute_automation_status().
 
@@ -141,7 +157,13 @@ def _compute_automation_status(
     """
     from custom_components.climate_advisor import coordinator as _coord_mod
 
-    coord = _make_real_coordinator(automation_enabled, automation_engine, tou_phase_resolution=tou_phase_resolution)
+    coord = _make_real_coordinator(
+        automation_enabled,
+        automation_engine,
+        tou_phase_resolution=tou_phase_resolution,
+        tou_active_cost_resolution=tou_active_cost_resolution,
+        current_classification=current_classification,
+    )
     if now_dt is None:
         return coord._compute_automation_status()
     with (
@@ -177,20 +199,35 @@ def _compute_next_automation_action(
     automation_engine,
     config: dict,
     now_time: time,
+    tou_phase_resolution=None,
+    pre_cool_trigger_dt=None,
+    pre_cool_target=None,
 ) -> tuple[str, str]:
     """Call the real ClimateAdvisorCoordinator._compute_next_automation_action().
 
     now_time (a plain time-of-day) is combined with a fixed date and patched in
     as dt_util.now()/as_local() — the real method now works in full datetimes
     (to correctly order cross-midnight events like pre-cool), not bare times.
+
+    tou_phase_resolution (Phase 3e test-harness prerequisite): threaded through the
+    same way the Status-card wrapper (_compute_automation_status above) already does
+    — this wrapper previously did not, which would have silently no-op'd any TOU
+    candidate test against _compute_next_automation_action().
+
+    pre_cool_trigger_dt/pre_cool_target: overrides for the tie-break test against the
+    existing pre-cool-ceiling candidate (_make_real_coordinator always defaults these
+    to None otherwise, which would silently exclude that candidate from any test).
     """
     from datetime import date, datetime
     from unittest.mock import patch
 
     from custom_components.climate_advisor import coordinator as _coord_mod
 
-    coord = _make_real_coordinator(True, automation_engine)
+    coord = _make_real_coordinator(True, automation_engine, tou_phase_resolution=tou_phase_resolution)
     coord.config = config
+    if pre_cool_trigger_dt is not None:
+        coord._pre_cool_trigger_dt = pre_cool_trigger_dt
+        coord._pre_cool_target = pre_cool_target
 
     now_dt = datetime.combine(date(2026, 7, 10), now_time)
     with (
@@ -317,6 +354,114 @@ class TestComputeAutomationStatus:
         result = _compute_automation_status(True, ae, tou_phase_resolution=resolution)
         assert "grace period" in result
         assert "pre-cooling" not in result
+
+
+class TestTouActiveWindowStatus:
+    """Phase 3d / Investigation D: the active cost_period window itself (not just the
+    PRECONDITIONING lead-time before it) must be visible on the Status card — the exact
+    live-instance finding David hit (a configured schedule covering `now`, but
+    hvac_mode="off" that day, produced zero Status-card/Activity-Record trace).
+    """
+
+    def _resolution(self, *, cost_tag="high", schedule_end=None):
+        from custom_components.climate_advisor.scheduler import ScheduleResolution
+
+        return ScheduleResolution(
+            cost_tag=cost_tag,
+            active_schedule_ids=("s1",),
+            schedule_end=schedule_end or datetime(2026, 8, 31, 10, 0),
+        )
+
+    def test_active_high_window_with_hvac_off_shows_no_preconditioning_needed(self):
+        """The exact reproduction: hvac_mode='off' -> distinct 'no pre-conditioning
+        needed today' wording, not a blank/unrelated status."""
+        c = _make_classification(hvac_mode="off")
+        ae = _make_automation_engine()
+        result = _compute_automation_status(
+            True,
+            ae,
+            now_dt=datetime(2026, 8, 31, 9, 45),
+            tou_active_cost_resolution=self._resolution(),
+            current_classification=c,
+        )
+        assert result != ""
+        assert "TOU high-cost period active" in result
+        assert "no pre-conditioning needed today" in result
+
+    def test_active_high_window_with_real_heating_shows_plain_active_text(self):
+        """hvac_mode='heat' (or 'cool') -> the window coincided with real HVAC
+        operation, so the 'no pre-conditioning needed' caveat must NOT appear."""
+        c = _make_classification(hvac_mode="heat")
+        ae = _make_automation_engine()
+        result = _compute_automation_status(
+            True,
+            ae,
+            now_dt=datetime(2026, 8, 31, 9, 45),
+            tou_active_cost_resolution=self._resolution(),
+            current_classification=c,
+        )
+        assert "TOU high-cost period active" in result
+        assert "no pre-conditioning needed today" not in result
+
+    def test_no_covering_schedule_does_not_affect_status(self):
+        """cost_tag=None (no covering schedule) must not trigger the new branch."""
+        from custom_components.climate_advisor.scheduler import ScheduleResolution
+
+        c = _make_classification(hvac_mode="off")
+        ae = _make_automation_engine()
+        resolution = ScheduleResolution(cost_tag=None, active_schedule_ids=(), schedule_end=None)
+        result = _compute_automation_status(True, ae, tou_active_cost_resolution=resolution, current_classification=c)
+        assert result == "active"
+
+    def test_low_cost_tag_does_not_affect_status(self):
+        """COST_TAG_LOW has zero live behavioral consumers (Investigation A) — must not
+        trigger this branch either, matching that established design decision."""
+        c = _make_classification(hvac_mode="off")
+        ae = _make_automation_engine()
+        result = _compute_automation_status(
+            True,
+            ae,
+            tou_active_cost_resolution=self._resolution(cost_tag="low"),
+            current_classification=c,
+        )
+        assert result == "active"
+
+    def test_grace_period_takes_priority_over_active_tou_window(self):
+        """Grace is a higher-priority mechanism reason (Status Card Ontology) than the
+        TOU active-window text."""
+        c = _make_classification(hvac_mode="off")
+        ae = _make_automation_engine(grace_active=True, last_resume_source="manual")
+        result = _compute_automation_status(
+            True, ae, tou_active_cost_resolution=self._resolution(), current_classification=c
+        )
+        assert "grace period" in result
+        assert "TOU high-cost period active" not in result
+
+    def test_preconditioning_phase_takes_priority_over_active_window_branch(self):
+        """PRECONDITIONING is checked first in the function's branch order (and by
+        construction never overlaps with the active-window time range anyway, since
+        precondition_start < schedule_start), but this pins the ordering explicitly."""
+        from custom_components.climate_advisor.scheduler import TOUPhase, TOUPhaseResolution
+
+        c = _make_classification(hvac_mode="cool")
+        ae = _make_automation_engine()
+        phase_resolution = TOUPhaseResolution(
+            phase=TOUPhase.PRECONDITIONING,
+            target=68.0,
+            mode="cool",
+            schedule_id="s1",
+            schedule_start=datetime(2026, 8, 31, 16, 0),
+            precondition_start=datetime(2026, 8, 31, 13, 0),
+        )
+        result = _compute_automation_status(
+            True,
+            ae,
+            now_dt=datetime(2026, 8, 31, 13, 30),
+            tou_phase_resolution=phase_resolution,
+            tou_active_cost_resolution=self._resolution(),
+            current_classification=c,
+        )
+        assert result.startswith("pre-cooling")
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +761,136 @@ def _compute_next_automation_action_with_forecast(
         patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
     ):
         return coord._compute_next_automation_action(c)
+
+
+class TestTouNextAutomationCandidate:
+    """Phase 3e: an upcoming TOU precondition_start must appear as a
+    _compute_next_automation_action() candidate — previously entirely absent
+    (confirmed zero references via grep, per the plan's investigation)."""
+
+    def _resolution(self, *, mode="cool", target=68.0, precondition_start=None, schedule_start=None):
+        from custom_components.climate_advisor.scheduler import TOUPhase, TOUPhaseResolution
+
+        return TOUPhaseResolution(
+            phase=TOUPhase.NONE,
+            target=target,
+            mode=mode,
+            schedule_id="s1",
+            schedule_start=schedule_start or datetime(2026, 7, 10, 16, 0),
+            precondition_start=precondition_start or datetime(2026, 7, 10, 13, 0),
+        )
+
+    def test_upcoming_tou_precondition_is_a_candidate(self):
+        """precondition_start in the future -> appears as the next action when it's the
+        earliest candidate."""
+        ae = _make_automation_engine()
+        c = _make_classification(hvac_mode="cool")
+        config = {"briefing_time": "00:00:00", "wake_time": "00:00:01", "sleep_time": "23:59:00"}
+        resolution = self._resolution(mode="cool", target=68.0, precondition_start=datetime(2026, 7, 10, 13, 0))
+        action, t = _compute_next_automation_action(c, ae, config, time(12, 30), tou_phase_resolution=resolution)
+        assert "Pre-cool for TOU schedule" in action
+        assert "68" in action
+        assert t == "1:00 PM"
+
+    def test_upcoming_tou_precondition_heat_mode_wording(self):
+        ae = _make_automation_engine()
+        c = _make_classification(hvac_mode="heat")
+        config = {"briefing_time": "00:00:00", "wake_time": "00:00:01", "sleep_time": "23:59:00"}
+        resolution = self._resolution(mode="heat", target=76.0, precondition_start=datetime(2026, 7, 10, 13, 0))
+        action, _t = _compute_next_automation_action(c, ae, config, time(12, 30), tou_phase_resolution=resolution)
+        assert "Pre-heat for TOU schedule" in action
+
+    def test_already_active_preconditioning_is_excluded(self):
+        """precondition_start <= now (already inside the PRECONDITIONING window) must
+        NOT be re-offered as a future candidate — the guard alone (precondition_start >
+        now) correctly excludes this, no separate phase check needed."""
+        ae = _make_automation_engine()
+        c = _make_classification(hvac_mode="cool")
+        config = {"briefing_time": "00:00:00", "wake_time": "00:00:01", "sleep_time": "23:59:00"}
+        resolution = self._resolution(mode="cool", target=68.0, precondition_start=datetime(2026, 7, 10, 11, 0))
+        action, _t = _compute_next_automation_action(c, ae, config, time(12, 30), tou_phase_resolution=resolution)
+        assert "TOU schedule" not in action
+
+    def test_no_tou_resolution_produces_no_tou_candidate(self):
+        ae = _make_automation_engine()
+        c = _make_classification(hvac_mode="cool")
+        config = {"briefing_time": "00:00:00", "wake_time": "00:00:01", "sleep_time": "23:59:00"}
+        action, _t = _compute_next_automation_action(c, ae, config, time(12, 30), tou_phase_resolution=None)
+        assert "TOU schedule" not in action
+
+    def test_tie_break_earliest_wins_against_pre_cool_ceiling_tou_earlier(self):
+        """Both a TOU candidate and the pre-cool-ceiling candidate are upcoming — earliest
+        time wins, no TOU-specific precedence added."""
+        ae = _make_automation_engine()
+        c = _make_classification(hvac_mode="cool")
+        config = {"briefing_time": "00:00:00", "wake_time": "00:00:01", "sleep_time": "23:59:00"}
+        resolution = self._resolution(mode="cool", target=68.0, precondition_start=datetime(2026, 7, 10, 13, 0))
+        action, t = _compute_next_automation_action(
+            c,
+            ae,
+            config,
+            time(12, 30),
+            tou_phase_resolution=resolution,
+            pre_cool_trigger_dt=datetime(2026, 7, 10, 14, 0),
+            pre_cool_target=70.0,
+        )
+        assert "Pre-cool for TOU schedule" in action
+        assert t == "1:00 PM"
+
+    def test_tie_break_earliest_wins_against_pre_cool_ceiling_precool_earlier(self):
+        """Same as above but the pre-cool-ceiling candidate is earlier — it must win,
+        proving there's no TOU-specific precedence either direction."""
+        ae = _make_automation_engine()
+        c = _make_classification(hvac_mode="cool")
+        config = {"briefing_time": "00:00:00", "wake_time": "00:00:01", "sleep_time": "23:59:00"}
+        resolution = self._resolution(mode="cool", target=68.0, precondition_start=datetime(2026, 7, 10, 15, 0))
+        action, t = _compute_next_automation_action(
+            c,
+            ae,
+            config,
+            time(12, 30),
+            tou_phase_resolution=resolution,
+            pre_cool_trigger_dt=datetime(2026, 7, 10, 14, 0),
+            pre_cool_target=70.0,
+        )
+        assert "Pre-cool ceiling" in action
+        assert "TOU schedule" not in action
+        assert t == "2:00 PM"
+
+
+class TestNextActionNeverShowsTou:
+    """Regression: 'Next User Action' (_compute_next_action(), a DIFFERENT function
+    from _compute_next_automation_action() tested above) must never surface TOU state
+    — CLAUDE.md's Issue #527 boundary excludes automation-mechanism state from this
+    card entirely. TOU pre-conditioning is mechanism state (an autonomous setpoint
+    action), not something requiring occupant action, so it belongs on Status and
+    Next Automation only.
+    """
+
+    def test_next_action_ignores_tou_phase_resolution_entirely(self):
+        import types
+
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+        from custom_components.climate_advisor.scheduler import TOUPhase, TOUPhaseResolution
+
+        c = _make_classification(hvac_mode="cool")
+        ae = _make_automation_engine()
+        coord = _make_real_coordinator(True, ae)
+        coord._compute_next_action = types.MethodType(ClimateAdvisorCoordinator._compute_next_action, coord)
+        coord._tou_phase_resolution = TOUPhaseResolution(
+            phase=TOUPhase.PRECONDITIONING,
+            target=68.0,
+            mode="cool",
+            schedule_id="s1",
+            schedule_start=datetime(2026, 7, 10, 16, 0),
+            precondition_start=datetime(2026, 7, 10, 13, 0),
+        )
+        result = coord._compute_next_action(c)
+        # _compute_next_action() has no TOU-reading code path at all — this asserts the
+        # absence of any TOU-related wording, proving the boundary holds even when a
+        # PRECONDITIONING resolution is present on the coordinator.
+        assert "TOU" not in result
+        assert "pre-cool" not in result.lower()
 
 
 class TestHotDayWindowOpportunityCandidates:

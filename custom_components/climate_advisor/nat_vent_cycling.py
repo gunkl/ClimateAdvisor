@@ -72,6 +72,34 @@ class NatVentCyclingDecision:
     outdoor_rise_blocked: bool = False
 
 
+def compute_nat_vent_target(
+    *,
+    sleep_heat: float,
+    in_sleep_window: bool,
+    comfort_heat_raw: float,
+    comfort_cool: float,
+    hysteresis: float,
+) -> float:
+    """Shared pure formula for the nat-vent thermostatic cycling target (Issue #786-follow-up
+    Phase 3a-pre).
+
+    Previously duplicated independently in two places: the live decision path
+    (``automation.py``'s ``nat_vent_temperature_check()``) and this module's own
+    ``decide_nat_vent_cycling()``. Consolidated here the same way Issue #786 consolidated the
+    3x-duplicated lead-time formula into ``thermal_lead_time.py`` — one shared pure function,
+    both existing call sites migrated onto it, no third independent reimplementation for the
+    chart's historical/forward target-line derivation (Phase 3a/3b), which becomes this
+    function's third caller.
+
+    Overnight (``in_sleep_window``): ``sleep_heat + hysteresis`` — e.g. 65+1=66; off at 65 (the
+    session's cycling floor), on at 67. Daytime: the plain comfort-band midpoint,
+    ``(comfort_heat_raw + comfort_cool) / 2``.
+    """
+    if in_sleep_window:
+        return sleep_heat + hysteresis
+    return (comfort_heat_raw + comfort_cool) / 2.0
+
+
 def decide_nat_vent_cycling(inputs: NatVentCyclingInputs) -> NatVentCyclingDecision:
     """Pure reimplementation of ``nat_vent_temperature_check()``'s two cycling
     branches ONLY (automation.py, the code below its hard-floor exit check).
@@ -96,12 +124,13 @@ def decide_nat_vent_cycling(inputs: NatVentCyclingInputs) -> NatVentCyclingDecis
     doesn't share that same precondition — not because it's expected to fire
     on the wired ``nat_vent_temperature_check()``/``transition()`` call paths.
     """
-    if inputs.in_sleep_window:
-        # e.g. 65+1=66; off at 65, on at 67 — matches nat_vent_temperature_check()'s
-        # sleep-window comment exactly.
-        nat_vent_target = inputs.sleep_heat + inputs.hysteresis
-    else:
-        nat_vent_target = (inputs.comfort_heat_raw + inputs.comfort_cool) / 2.0
+    nat_vent_target = compute_nat_vent_target(
+        sleep_heat=inputs.sleep_heat,
+        in_sleep_window=inputs.in_sleep_window,
+        comfort_heat_raw=inputs.comfort_heat_raw,
+        comfort_cool=inputs.comfort_cool,
+        hysteresis=inputs.hysteresis,
+    )
     off_threshold = nat_vent_target - inputs.hysteresis
     on_threshold = nat_vent_target + inputs.hysteresis
 

@@ -553,12 +553,13 @@
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px dashed rgba(33,150,243,0.85)"></span><span>Predicted Outdoor</span></div>
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(255,152,0,1)"></span><span>Actual Indoor</span></div>
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(33,150,243,1)"></span><span>Actual Outdoor</span></div>
+      <div class="cl-item"><span class="cl-swatch" style="border-top:3px solid rgba(255,193,7,0.95)"></span><span>Target</span></div>
     </div>
     <div class="chart-overlay-bar">
       <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Target band</label>
       <label id="overlay-humidity-label"><input type="checkbox" id="overlay-humidity" onchange="toggleOverlay('humidity')"> Humidity</label>
       <label id="overlay-feelslike-label"><input type="checkbox" id="overlay-feelslike" onchange="toggleOverlay('feelslike')"> Feels-like</label>
-      <label id="overlay-setpoint-label"><input type="checkbox" id="overlay-setpoint" checked onchange="toggleOverlay('setpoint')"> Automation Setpoints</label>
+      <label id="overlay-setpoint-label"><input type="checkbox" id="overlay-setpoint" checked onchange="toggleOverlay('setpoint')"> Target</label>
     </div>
   </div>
 
@@ -1059,8 +1060,13 @@
     feelslike:     'rgba(0, 188, 212, 0.70)',    // cyan
     setpoint:      'rgb(160, 32, 240)',           // purple/magenta
     setpoint_fill: 'rgba(160, 32, 240, 0.35)',   // faint for off-mode forward-fill
-    heatSetpoint:  'rgba(239, 68, 68, 0.55)',     // muted red — heat defense line
-    coolSetpoint:  'rgba(34, 197, 94, 0.55)',    // muted green — cool defense line
+    // Phase 3c (unified "effective target" chart line): retires the old thin
+    // heatSetpoint/coolSetpoint defense-line pair (always both band edges, a second
+    // redundant rendering of the shaded Target Band) in favor of one bold, solid line
+    // showing the actual system target regardless of source (comfort band, TOU
+    // banking, or nat-vent thermostatic cycling).
+    target:        'rgba(255, 193, 7, 0.95)',     // amber/gold — distinct from every
+                                                   // other line, visible in both themes
   };
 
   // Map hvac action string → colour
@@ -1351,11 +1357,24 @@
     const actIndoorPts  = (chartData.actual_indoor  || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
 
     // Target band datasets (dynamic — reflects occupancy and time-of-day schedule)
+    // Issue #514: historical points (x <= now) are sourced from state_log[*].lower/
+    // .upper (the immutable per-cycle snapshot persisted at that time), future points
+    // (x > now) from the live target_band array — same historical/future merge
+    // pattern as mergedPredIndoor above (histPredIndoorPts + predIndoorFuturePts).
     const targetBandVisible = document.getElementById('overlay-comfort')?.checked ?? true;
     const _targetBandRaw = chartData.target_band || [];
-    const targetBandUpper = _targetBandRaw.map(e => ({ x: _parseTs(e.ts), y: e.upper }));
-    const targetBandLower = _targetBandRaw.map(e => ({ x: _parseTs(e.ts), y: e.lower }));
-    const targetBandUpperDs = _targetBandRaw.length > 0 ? {
+    const histBandUpperPts = (chartData.state_log || [])
+      .map(e => ({ x: _parseTs(e.ts), y: e.upper }))
+      .filter(p => p.y != null && p.x <= _nowMs);
+    const histBandLowerPts = (chartData.state_log || [])
+      .map(e => ({ x: _parseTs(e.ts), y: e.lower }))
+      .filter(p => p.y != null && p.x <= _nowMs);
+    const bandUpperFuturePts = _targetBandRaw.map(e => ({ x: _parseTs(e.ts), y: e.upper })).filter(p => p.x > _nowMs);
+    const bandLowerFuturePts = _targetBandRaw.map(e => ({ x: _parseTs(e.ts), y: e.lower })).filter(p => p.x > _nowMs);
+    const targetBandUpper = [...histBandUpperPts, ...bandUpperFuturePts].sort((a, b) => a.x - b.x);
+    const targetBandLower = [...histBandLowerPts, ...bandLowerFuturePts].sort((a, b) => a.x - b.x);
+    const _targetBandHasData = targetBandUpper.length > 0 || targetBandLower.length > 0;
+    const targetBandUpperDs = _targetBandHasData ? {
       label: 'Target Band',
       type: 'line',
       data: targetBandUpper,
@@ -1370,7 +1389,7 @@
       hidden: !targetBandVisible,
       order: 5,
     } : null;
-    const targetBandLowerDs = _targetBandRaw.length > 0 ? {
+    const targetBandLowerDs = _targetBandHasData ? {
       label: '_target_band_lower',
       type: 'line',
       data: targetBandLower,
@@ -1393,15 +1412,24 @@
     const humidityPts  = log.filter(e => e.humidity  != null).map(e => ({ x: _parseTs(e.ts), y: e.humidity }));
     const feelsLikePts = log.filter(e => e.feelslike != null).map(e => ({ x: _parseTs(e.ts), y: e.feelslike }));
 
-    // Automation Setpoints: heat/cool defense lines from backend defense_lines array.
-    // defense_lines are always fully populated — no forward-fill needed.
+    // Phase 3c: unified "effective target" line — the actual system target at any
+    // point in time regardless of source (comfort band, TOU banking, or nat-vent
+    // thermostatic cycling). Retires the old thin defense_lines-based "Heat/Cool
+    // Setpoint" overlay (always both band edges — a second, thinner, redundant
+    // rendering of the same shaded Target Band with no independent information).
+    // Same historical/future merge pattern as mergedPredIndoor above: past points
+    // (x <= now) come from the backend's effective_target_history array (derived
+    // from state_log's setpoint/nat_vent_target fields), future points (x > now)
+    // from effective_target_forecast.
     const setpointVisible = document.getElementById('overlay-setpoint')?.checked ?? true;
-    const setpointHistPts = [];   // kept for backward-compat (no longer drives display)
-    const setpointPredPts = [];   // kept for backward-compat (no longer drives display)
-    const heatLinePts = (chartData.defense_lines || []).map(e => ({ x: new Date(e.ts), y: e.heat }));
-    const coolLinePts = (chartData.defense_lines || []).map(e => ({ x: new Date(e.ts), y: e.cool }));
-    const defenseHasData = heatLinePts.length > 0 || coolLinePts.length > 0;
-    const setpointHasData = defenseHasData; // alias used by legacy hidden guards below
+    const histEffTargetPts = (chartData.effective_target_history || [])
+      .map(e => ({ x: _parseTs(e.ts), y: e.target }))
+      .filter(p => p.y != null && p.x <= _nowMs);
+    const effTargetFuturePts = (chartData.effective_target_forecast || [])
+      .map(e => ({ x: _parseTs(e.ts), y: e.target }))
+      .filter(p => p.y != null && p.x > _nowMs);
+    const mergedEffTarget = [...histEffTargetPts, ...effTargetFuturePts].sort((a, b) => a.x - b.x);
+    const setpointHasData = mergedEffTarget.length > 0;
 
     const datasets = [
       {
@@ -1505,29 +1533,22 @@
       order: 7,
     });
 
-    // Automation Setpoints — heat defense (red) and cool defense (green), smooth lines.
+    // Phase 3c: the unified "Target" line — notably thicker and solid (not dashed),
+    // so it visually reads as "the one real target" distinct from every other line
+    // (the dashed prediction lines, the thin dotted Target Band edges). Steps to the
+    // TOU-banked or nat-vent-cycling value and back automatically — the level shift
+    // itself is the visual signal those regimes are active, with no separate
+    // annotation needed.
     datasets.push({
-      label: 'Heat Setpoint',
+      label: 'Target',
       type: 'line',
-      data: heatLinePts,
-      borderColor: CHART_COLORS.heatSetpoint,
-      borderWidth: 2,
+      data: mergedEffTarget,
+      borderColor: CHART_COLORS.target,
+      borderWidth: 4,
       pointRadius: 0,
       tension: 0,
       yAxisID: 'y',
-      hidden: !defenseHasData,
-      order: 8,
-    });
-    datasets.push({
-      label: 'Cool Setpoint',
-      type: 'line',
-      data: coolLinePts,
-      borderColor: CHART_COLORS.coolSetpoint,
-      borderWidth: 2,
-      pointRadius: 0,
-      tension: 0,
-      yAxisID: 'y',
-      hidden: !defenseHasData,
+      hidden: !setpointVisible,
       order: 8,
     });
 
@@ -2016,7 +2037,8 @@
       comfort_band: 'Target Band',
       humidity: 'Humidity %',
       feelslike: 'Feels-like',
-      setpoint: '_setpoint',  // handled by dedicated branch below; entry kept so !label guard passes
+      setpoint: 'Target',  // Phase 3c: the unified effective-target line (retired the
+                            // old separate Heat/Cool Setpoint defense-line pair)
     };
     const label = labelMap[name];
     if (!label) return;
@@ -2024,13 +2046,6 @@
     if (name === 'comfort_band') {
       _tempChart.data.datasets.forEach(d => {
         if (d.label === 'Target Band' || d.label === '_target_band_lower') {
-          d.hidden = !d.hidden;
-        }
-      });
-    } else if (name === 'setpoint') {
-      // Toggle both heat and cool defense lines
-      _tempChart.data.datasets.forEach(d => {
-        if (d.label === 'Heat Setpoint' || d.label === 'Cool Setpoint') {
           d.hidden = !d.hidden;
         }
       });

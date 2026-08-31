@@ -102,7 +102,7 @@ from .const import (
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_WEATHER_SERVICE,
 )
-from .scheduler import ALL_DAYS, COST_TAG_HIGH, COST_TAG_LOW, MAX_SCHEDULES, WEEKDAY_ABBREVS, _parse_hhmm
+from .scheduler import ALL_DAYS, COST_TAG_HIGH, MAX_SCHEDULES, WEEKDAY_ABBREVS, _parse_hhmm
 from .temperature import CELSIUS, FAHRENHEIT, from_fahrenheit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
@@ -1210,7 +1210,14 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     "days": list(user_input["days"]),
                     "start": user_input["start"],
                     "end": user_input["end"],
-                    "cost_tag": user_input["cost_tag"],
+                    # cost_tag selector removed from the form (Issue #786 follow-up) —
+                    # COST_TAG_LOW has zero live behavioral consumers anywhere in
+                    # scheduler.py/automation.py/coordinator.py, so every schedule
+                    # created/edited via the UI is hardcoded to "high". scheduler.py
+                    # keeps parsing any cost_tag value permissively for backward
+                    # compat with pre-existing "low" schedules (dead-but-harmless,
+                    # deliberately not removed there).
+                    "cost_tag": COST_TAG_HIGH,
                 }
                 if existing is not None:
                     schedules = [new_schedule if s["id"] == editing_id else s for s in schedules]
@@ -1222,24 +1229,31 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 self._editing_schedule_id = None
                 return await self.async_step_scheduler()
 
+        # ALL_DAYS ("all") is intentionally NOT offered here — it's functionally
+        # identical to checking all 7 weekday boxes (_days_match() in scheduler.py
+        # treats both as equivalent), so the sentinel is redundant UI surface.
+        # scheduler.py's ALL_DAYS/_days_match() handling is untouched for backward
+        # compat: existing pending golden scenarios and any already-saved schedule
+        # may still use days=["all"], and _format_schedule_summary() above keeps
+        # its "All days" display branch as a defensive case for those.
         day_options = [selector.SelectOptionDict(value=d, label=d.capitalize()) for d in WEEKDAY_ABBREVS]
-        day_options.append(selector.SelectOptionDict(value=ALL_DAYS, label="All days"))
-        cost_tag_options = [
-            selector.SelectOptionDict(value=COST_TAG_HIGH, label="High cost"),
-            selector.SelectOptionDict(value=COST_TAG_LOW, label="Low cost"),
-        ]
-        defaults = existing or {}
+        # Error-redisplay must preserve what the user just typed, not revert to the
+        # pre-edit (or blank/new-schedule) defaults — otherwise every field wipes on
+        # a validation error (e.g. missing days), forcing the user to re-enter
+        # everything just to fix one field.
+        defaults = user_input if user_input is not None else (existing or {})
 
         schema_dict: dict[Any, Any] = {
             vol.Required("name", default=defaults.get("name", "")): selector.TextSelector(),
             vol.Required("days", default=list(defaults.get("days", []))): selector.SelectSelector(
-                selector.SelectSelectorConfig(options=day_options, multiple=True, mode=selector.SelectSelectorMode.LIST)
+                selector.SelectSelectorConfig(
+                    options=day_options, multiple=True, mode=selector.SelectSelectorMode.DROPDOWN
+                )
             ),
             vol.Required("start", default=defaults.get("start", "16:00:00")): selector.TimeSelector(),
             vol.Required("end", default=defaults.get("end", "21:00:00")): selector.TimeSelector(),
-            vol.Required("cost_tag", default=defaults.get("cost_tag", COST_TAG_HIGH)): selector.SelectSelector(
-                selector.SelectSelectorConfig(options=cost_tag_options, mode=selector.SelectSelectorMode.LIST)
-            ),
+            # cost_tag selector removed from the form (Issue #786 follow-up) — see the
+            # commit-path comment above. Always hardcoded to COST_TAG_HIGH there.
         }
         if existing is not None:
             schema_dict[vol.Optional("delete_schedule", default=False)] = selector.BooleanSelector()

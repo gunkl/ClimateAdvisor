@@ -325,3 +325,163 @@ class TestGetChartDataBeforeTs:
         assert isinstance(predicted_indoor, list), (
             f"predicted_indoor must be a list (not suppressed); got {type(predicted_indoor).__name__}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: get_chart_data() target_band reads real historical lower/upper
+# (Issue #514 — historical band persistence, Phase 2 step 8)
+# ---------------------------------------------------------------------------
+
+
+class TestGetChartDataHistoricalTargetBand:
+    """A historical viewport must show what the target band actually was at that
+    past time — read from the immutable per-cycle lower/upper snapshot persisted
+    into chart_log (Phase 2 steps 6-7) — not today's live band recomputed against
+    today's config/occupancy/classification (the pre-#514 behavior, where
+    ``target_band`` was the one series NOT gated by ``is_historical``)."""
+
+    @pytest.fixture(autouse=True)
+    def _freeze_chart_log_now(self):
+        from custom_components.climate_advisor import chart_log as _chart_log_mod
+
+        orig = _chart_log_mod.dt_util.now
+        _chart_log_mod.dt_util.now = lambda: _FAKE_NOW
+        yield
+        _chart_log_mod.dt_util.now = orig
+
+    def _make_coord_with_banded_chart_log(self, tmp_path):
+        """Same stub shape as TestGetChartDataBeforeTs._make_coord_with_chart_log(),
+        but entries carry distinct lower/upper values so a historical read-back can
+        be proven to match the OLD entry's band, not today's live (very different)
+        comfort-band config."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+
+        # Today's LIVE config band is intentionally very different from what was
+        # persisted historically (60-90 vs. the persisted 66/74) — proves a
+        # historical request doesn't fall through to a live recompute.
+        coord.config = {
+            "temp_unit": "fahrenheit",
+            "comfort_heat": 60,
+            "comfort_cool": 90,
+            "setback_heat": 55,
+            "setback_cool": 95,
+        }
+
+        mock_learning = MagicMock()
+        mock_learning.get_thermal_model = MagicMock(
+            return_value={
+                "confidence": "none",
+                "confidence_k_passive": "none",
+                "observation_count_heat": 0,
+                "observation_count_cool": 0,
+                "observation_count_passive": 0,
+                "observation_count_fan_only": 0,
+                "observation_count_vent": 0,
+                "observation_count_solar": 0,
+                "observation_count_swing_heat": 0,
+                "observation_count_swing_cool": 0,
+                "heating_rate_f_per_hour": None,
+                "cooling_rate_f_per_hour": None,
+                "k_passive": None,
+                "k_vent": None,
+                "k_vent_window": None,
+                "k_solar": None,
+                "learning_health": {},
+                "swing_heat_f_display": 1.5,
+                "swing_cool_f_display": 1.5,
+                "swing_heat_f": None,
+                "swing_cool_f": None,
+                "confidence_swing_heat": "none",
+                "confidence_swing_cool": "none",
+                "solar_phase_offset_h": None,
+                "avg_r_squared_passive": None,
+                "last_observation_date": None,
+            }
+        )
+        coord.learning = mock_learning
+        coord.hass = MagicMock()
+        coord._hourly_forecast_temps = []
+        coord._current_classification = None
+        coord._occupancy_mode = "home"
+
+        from pathlib import Path
+
+        chart_log = ChartStateLog(Path(tmp_path), max_days=365)
+        t_old = _ago(days=5)
+        t_recent = _ago(hours=1)
+        # The historical entry's persisted band (what the fix must read back).
+        chart_log.append(hvac="heat", fan=False, indoor=65.0, outdoor=30.0, lower=66.0, upper=74.0, ts=_iso(t_old))
+        chart_log.append(hvac="off", fan=False, indoor=72.0, outdoor=55.0, lower=68.0, upper=76.0, ts=_iso(t_recent))
+        coord._chart_log = chart_log
+
+        coord.get_chart_data = types.MethodType(ClimateAdvisorCoordinator.get_chart_data, coord)
+        coord._build_learning_health = types.MethodType(ClimateAdvisorCoordinator._build_learning_health, coord)
+        coord._get_indoor_temp = MagicMock(return_value=None)
+
+        return coord, t_old, t_recent
+
+    def test_historical_target_band_matches_persisted_entry_not_live_config(self, tmp_path):
+        coord, t_old, _t_recent = self._make_coord_with_banded_chart_log(tmp_path)
+        anchor_dt = _ago(days=3)
+        before_ts_seconds = anchor_dt.timestamp()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.as_local",
+                side_effect=lambda x: x,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.now",
+                return_value=_FAKE_NOW,
+            ),
+        ):
+            result = coord.get_chart_data("3d", before_ts=before_ts_seconds)
+
+        target_band = result.get("target_band", [])
+        assert len(target_band) == 1, (
+            f"Expected 1 historical target_band entry (only now-5d is before the "
+            f"anchor); got {len(target_band)}: {target_band!r}"
+        )
+        entry = target_band[0]
+        # Persisted values (66/74 °F) round-trip through _conv() unit conversion,
+        # but config is fahrenheit here so they pass through unchanged.
+        assert entry["lower"] == 66.0, (
+            f"Historical target_band lower={entry['lower']!r} must match the persisted "
+            "chart_log entry's lower (66.0), not today's live config-derived band "
+            "(comfort_heat=60/setback_heat=55) — if this reads 60.0 or 55.0, the fix "
+            "is falling through to a live recompute instead of state_log."
+        )
+        assert entry["upper"] == 74.0, (
+            f"Historical target_band upper={entry['upper']!r} must match the persisted "
+            "chart_log entry's upper (74.0), not today's live config-derived band "
+            "(comfort_cool=90/setback_cool=95)."
+        )
+
+    def test_live_target_band_still_uses_current_config_when_not_historical(self, tmp_path):
+        """Regression: a non-historical (live/"now") request must still compute the
+        band from today's live config via _build_target_band_for() — proving the
+        is_historical branch didn't accidentally become the only path."""
+        coord, _t_old, _t_recent = self._make_coord_with_banded_chart_log(tmp_path)
+
+        with (
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.as_local",
+                side_effect=lambda x: x,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.now",
+                return_value=_FAKE_NOW,
+            ),
+        ):
+            result = coord.get_chart_data("24h")
+
+        target_band = result.get("target_band", [])
+        # With no hourly forecast temps, _build_target_band_for() has nothing to
+        # iterate — the live path returns an empty band, distinctly NOT the
+        # persisted historical 66.0/74.0 values (proving it didn't read state_log).
+        assert target_band == [], (
+            f"Live (non-historical) target_band must come from _build_target_band_for() "
+            f"(empty here — no forecast timestamps), not the persisted historical "
+            f"entries; got {target_band!r}"
+        )

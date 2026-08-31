@@ -735,3 +735,250 @@ class TestFanRunningNatVentFields:
         entry = log2._entries[0]
         assert entry["fan_running"] is False
         assert entry["nat_vent_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# 12. lower / upper target-band fields (Issue #514)
+# ---------------------------------------------------------------------------
+
+
+class TestTargetBandFields:
+    """Tests for the lower/upper target-band snapshot fields added for Issue #514.
+
+    These persist the immutable per-cycle "what was the system's actual target at
+    this timestamp" values (resolved once per cycle by the coordinator's
+    ``_target_band_lower_upper_now()``) — chart_log itself just stores/aggregates
+    whatever it's handed, mirroring the existing pred_outdoor/pred_indoor/setpoint
+    fields exactly.
+    """
+
+    # ---- append() persists both fields when explicitly passed ---------------
+
+    def test_append_stores_lower_upper(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="heating", fan=False, indoor=68.0, outdoor=35.0, lower=66.0, upper=74.0)
+        entry = log._entries[0]
+        assert entry["lower"] == 66.0
+        assert entry["upper"] == 74.0
+
+    def test_append_lower_upper_default_none(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0)
+        entry = log._entries[0]
+        assert entry["lower"] is None
+        assert entry["upper"] is None
+
+    def test_get_entries_24h_exposes_lower_upper(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(
+            hvac="heating",
+            fan=False,
+            indoor=68.0,
+            outdoor=35.0,
+            lower=66.0,
+            upper=74.0,
+            ts=_iso(_ago(hours=1)),
+        )
+        result = log.get_entries("24h")
+        assert len(result) == 1
+        assert result[0]["lower"] == 66.0
+        assert result[0]["upper"] == 74.0
+
+    # ---- hourly-bucketed (7d) entries: averaged -----------------------------
+
+    def test_bucket_hourly_averages_lower_upper(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=5).replace(minute=0, second=0, microsecond=0)
+        ts_a = _iso(base_ts.replace(minute=10))
+        ts_b = _iso(base_ts.replace(minute=50))
+        log.append(hvac="heating", fan=False, indoor=68.0, outdoor=35.0, lower=64.0, upper=72.0, ts=ts_a)
+        log.append(hvac="heating", fan=False, indoor=69.0, outdoor=36.0, lower=66.0, upper=74.0, ts=ts_b)
+        result = log.get_entries("7d")
+        assert len(result) == 1
+        assert result[0]["lower"] == 65.0  # (64+66)/2
+        assert result[0]["upper"] == 73.0  # (72+74)/2
+
+    def test_bucket_hourly_lower_upper_none_when_missing(self, tmp_path: Path) -> None:
+        """An old, pre-Issue-#514 entry with no lower/upper must not poison the average
+        — it's simply excluded from the average (same shape as pred_outdoor/pred_indoor),
+        and a bucket with zero surviving values comes back None, not zero/crash."""
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=5).replace(minute=0, second=0, microsecond=0)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0, ts=_iso(base_ts))
+        result = log.get_entries("7d")
+        assert len(result) == 1
+        assert result[0]["lower"] is None
+        assert result[0]["upper"] is None
+
+    # ---- daily-bucketed (1y) entries: averaged ------------------------------
+
+    def test_bucket_daily_averages_lower_upper(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=60).replace(hour=12, minute=0, second=0, microsecond=0)
+        ts_a = _iso(base_ts.replace(hour=10))
+        ts_b = _iso(base_ts.replace(hour=14))
+        log.append(hvac="cooling", fan=False, indoor=76.0, outdoor=92.0, lower=72.0, upper=78.0, ts=ts_a)
+        log.append(hvac="cooling", fan=False, indoor=77.0, outdoor=93.0, lower=74.0, upper=80.0, ts=ts_b)
+        result = log.get_entries("1y")
+        assert len(result) == 1
+        assert result[0]["lower"] == 73.0  # (72+74)/2
+        assert result[0]["upper"] == 79.0  # (78+80)/2
+
+    def test_bucket_daily_lower_upper_none_when_missing(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=60).replace(hour=12, minute=0, second=0, microsecond=0)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0, ts=_iso(base_ts))
+        result = log.get_entries("1y")
+        assert len(result) == 1
+        assert result[0]["lower"] is None
+        assert result[0]["upper"] is None
+
+    # ---- round-trip: both fields survive save/load --------------------------
+
+    def test_lower_upper_survive_save_load(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(
+            hvac="heating",
+            fan=False,
+            indoor=68.0,
+            outdoor=35.0,
+            lower=66.0,
+            upper=74.0,
+            ts=_iso(_ago(hours=1)),
+        )
+        log.save()
+        log2 = _make_log(tmp_path)
+        log2.load()
+        assert log2.entry_count == 1
+        entry = log2._entries[0]
+        assert entry["lower"] == 66.0
+        assert entry["upper"] == 74.0
+
+    def test_lower_upper_none_survives_save_load(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0, ts=_iso(_ago(hours=1)))
+        log.save()
+        log2 = _make_log(tmp_path)
+        log2.load()
+        entry = log2._entries[0]
+        assert entry["lower"] is None
+        assert entry["upper"] is None
+
+    def test_old_entry_without_lower_upper_keys_loads_cleanly(self, tmp_path: Path) -> None:
+        """Simulates a pre-Issue-#514 persisted entry (written before the fields
+        existed) being loaded by the fixed code — no exception, and the entry is
+        usable (missing keys, not present-but-None, since old writers never emitted
+        them at all)."""
+        path = tmp_path / "climate_advisor_chart_log.json"
+        ts = _iso(_ago(hours=1))
+        entries = [{"ts": ts, "hvac": "heating", "fan": False, "indoor": 68.0, "outdoor": 35.0}]
+        path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        log = _make_log(tmp_path)
+        log.load()
+        assert log.entry_count == 1
+        result = log.get_entries("24h")
+        assert result[0].get("lower") is None
+        assert result[0].get("upper") is None
+
+
+class TestNatVentTargetField:
+    """Tests for the ``nat_vent_target`` snapshot field added for Phase 3a (the unified
+    "effective target" chart line). Mirrors ``TestTargetBandFields`` exactly — same
+    append/get_entries/bucket-average/round-trip/old-entry-compat shape, just for the
+    one new field.
+    """
+
+    def test_append_stores_nat_vent_target(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=True, indoor=68.0, outdoor=60.0, nat_vent_active=True, nat_vent_target=66.0)
+        entry = log._entries[0]
+        assert entry["nat_vent_target"] == 66.0
+
+    def test_append_nat_vent_target_default_none(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0)
+        entry = log._entries[0]
+        assert entry["nat_vent_target"] is None
+
+    def test_get_entries_24h_exposes_nat_vent_target(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(
+            hvac="off",
+            fan=True,
+            indoor=68.0,
+            outdoor=60.0,
+            nat_vent_active=True,
+            nat_vent_target=66.0,
+            ts=_iso(_ago(hours=1)),
+        )
+        result = log.get_entries("24h")
+        assert len(result) == 1
+        assert result[0]["nat_vent_target"] == 66.0
+
+    def test_bucket_hourly_averages_nat_vent_target(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=5).replace(minute=0, second=0, microsecond=0)
+        ts_a = _iso(base_ts.replace(minute=10))
+        ts_b = _iso(base_ts.replace(minute=50))
+        log.append(hvac="off", fan=True, indoor=68.0, outdoor=60.0, nat_vent_active=True, nat_vent_target=65.0, ts=ts_a)
+        log.append(hvac="off", fan=True, indoor=69.0, outdoor=61.0, nat_vent_active=True, nat_vent_target=67.0, ts=ts_b)
+        result = log.get_entries("7d")
+        assert len(result) == 1
+        assert result[0]["nat_vent_target"] == 66.0  # (65+67)/2
+
+    def test_bucket_hourly_nat_vent_target_none_when_missing(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=5).replace(minute=0, second=0, microsecond=0)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0, ts=_iso(base_ts))
+        result = log.get_entries("7d")
+        assert len(result) == 1
+        assert result[0]["nat_vent_target"] is None
+
+    def test_bucket_daily_averages_nat_vent_target(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=60).replace(hour=12, minute=0, second=0, microsecond=0)
+        ts_a = _iso(base_ts.replace(hour=1))
+        ts_b = _iso(base_ts.replace(hour=3))
+        log.append(hvac="off", fan=True, indoor=64.0, outdoor=55.0, nat_vent_active=True, nat_vent_target=65.0, ts=ts_a)
+        log.append(hvac="off", fan=True, indoor=65.0, outdoor=56.0, nat_vent_active=True, nat_vent_target=67.0, ts=ts_b)
+        result = log.get_entries("1y")
+        assert len(result) == 1
+        assert result[0]["nat_vent_target"] == 66.0  # (65+67)/2
+
+    def test_bucket_daily_nat_vent_target_none_when_missing(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        base_ts = _ago(days=60).replace(hour=12, minute=0, second=0, microsecond=0)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0, ts=_iso(base_ts))
+        result = log.get_entries("1y")
+        assert len(result) == 1
+        assert result[0]["nat_vent_target"] is None
+
+    def test_nat_vent_target_survives_save_load(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(
+            hvac="off",
+            fan=True,
+            indoor=68.0,
+            outdoor=60.0,
+            nat_vent_active=True,
+            nat_vent_target=66.0,
+            ts=_iso(_ago(hours=1)),
+        )
+        log.save()
+        log2 = _make_log(tmp_path)
+        log2.load()
+        assert log2.entry_count == 1
+        assert log2._entries[0]["nat_vent_target"] == 66.0
+
+    def test_old_entry_without_nat_vent_target_key_loads_cleanly(self, tmp_path: Path) -> None:
+        """Pre-Phase-3 persisted entries (written before this field existed) load
+        cleanly with no exception; the missing key resolves to None via .get()."""
+        path = tmp_path / "climate_advisor_chart_log.json"
+        ts = _iso(_ago(hours=1))
+        entries = [{"ts": ts, "hvac": "off", "fan": True, "indoor": 68.0, "outdoor": 60.0, "nat_vent_active": True}]
+        path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        log = _make_log(tmp_path)
+        log.load()
+        assert log.entry_count == 1
+        result = log.get_entries("24h")
+        assert result[0].get("nat_vent_target") is None

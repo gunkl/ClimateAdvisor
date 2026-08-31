@@ -242,6 +242,7 @@ def _inject_thermostat_mode(
     *,
     dispatch: bool = False,
     temperature: float | None = None,
+    hvac_action: str | None = None,
 ) -> None:
     """Update the thermostat state string on the climate entity.
 
@@ -253,11 +254,21 @@ def _inject_thermostat_mode(
             When omitted (the default, all pre-existing scenarios), the entity's
             existing ``temperature`` attribute is left untouched, matching the
             prior behavior exactly.
+        hvac_action: Issue #790 — optional ``hvac_action`` attribute to set alongside
+            the mode change, for scenarios that need to drive the real
+            ``_async_thermostat_changed`` listener's ``old_action``/``new_action``
+            transition detection (e.g. a transition into ``"fan"`` that fires
+            ``reconcile_fan_on_startup(trigger="thermostat_state_change")``). When
+            omitted (the default, all pre-existing scenarios), the entity's existing
+            ``hvac_action`` attribute is left untouched, matching the prior behavior
+            exactly.
     """
     existing = fake_hass.states.get(climate_entity)
     attrs = dict(existing.attributes) if existing is not None else {}
     if temperature is not None:
         attrs["temperature"] = temperature
+    if hvac_action is not None:
+        attrs["hvac_action"] = hvac_action
     if dispatch:
         fake_hass.states.async_set(climate_entity, hvac_mode, attrs)
     else:
@@ -744,12 +755,20 @@ def _dispatch_event(
         # override-detection fidelity must run with use_coordinator=True.
         new_hvac_mode = event.get("hvac_mode", "off")
         new_temperature = event.get("temperature")  # optional (Issue #483)
+        new_hvac_action = event.get("hvac_action")  # optional (Issue #790)
         if coordinator is not None:
             _inject_thermostat_mode(
-                fake_hass, climate_entity, new_hvac_mode, dispatch=True, temperature=new_temperature
+                fake_hass,
+                climate_entity,
+                new_hvac_mode,
+                dispatch=True,
+                temperature=new_temperature,
+                hvac_action=new_hvac_action,
             )
         else:
-            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode, temperature=new_temperature)
+            _inject_thermostat_mode(
+                fake_hass, climate_entity, new_hvac_mode, temperature=new_temperature, hvac_action=new_hvac_action
+            )
 
     elif etype == "cancel_override":
         # Issue #476: replicates api.py's ClimateAdvisorCancelOverrideView.post()

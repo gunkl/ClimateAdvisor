@@ -5247,6 +5247,19 @@ class AutomationEngine:
         finally:
             self._reconcile_fan_in_progress = False
 
+    def _nat_vent_lockout_status(self, now: datetime) -> tuple[float, float] | None:
+        """Elapsed/remaining seconds of the reactivation lockout, or ``None`` if not armed.
+
+        Shared by every call site that needs to log lockout timing (Issue #790) —
+        one place to compute ``(elapsed, remaining)`` from ``_nat_vent_outdoor_exit_time``
+        instead of each site re-deriving the same subtraction.
+        """
+        if self._nat_vent_outdoor_exit_time is None:
+            return None
+        lockout_s = float(self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S))
+        elapsed = (now - self._nat_vent_outdoor_exit_time).total_seconds()
+        return elapsed, lockout_s
+
     async def _reconcile_fan_on_startup_locked(
         self,
         *,
@@ -5400,16 +5413,30 @@ class AutomationEngine:
         from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
         from .nat_vent_fsm import transition as _nat_vent_transition
 
-        # paused_by_door=False: legacy _nat_vent_may_reactivate() here never
-        # consulted _paused_by_door/the reactivation lockout — see
-        # _build_nat_vent_fsm_inputs()'s docstring for the shared rationale (also
-        # applied at the idle-open re-entry site).
+        # Issue #790: previously hardcoded paused_by_door=False here, on the claim
+        # (nat_vent_reactivation_lockout.py's docstring) that this method "runs at
+        # most once per restart/30-min backstop, structurally incapable of sub-minute
+        # repeats" — false for 2 of its 4 real triggers (thermostat_state_change,
+        # post_grace_expiry are event-driven, not cadence-bound, and can fire
+        # sub-minute). Passing the real value is safe uniformly across all 4 triggers:
+        # _nat_vent_outdoor_exit_time is never persisted across restarts (state.py),
+        # so is_reactivation_locked_out() can only fire when a real exit was armed
+        # earlier in this same running process — no restart-staleness hazard.
         _fsm_inputs = self._build_nat_vent_fsm_inputs(
-            now=dt_util.now(), indoor=indoor, outdoor=outdoor, paused_by_door=False
+            now=dt_util.now(), indoor=indoor, outdoor=outdoor, paused_by_door=self._paused_by_door
         )
         _fsm_result = _nat_vent_transition(
             NatVentLifecycleState.INACTIVE, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
         )
+        if _fsm_result.to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT:
+            _lockout_status = self._nat_vent_lockout_status(dt_util.now())
+            _elapsed, _lockout_s = _lockout_status if _lockout_status is not None else (0.0, 0.0)
+            _LOGGER.warning(
+                "Fan reconcile (%s): reactivation lockout suppressed adoption — %.0fs remaining of %.0fs",
+                trigger,
+                _lockout_s - _elapsed,
+                _lockout_s,
+            )
         nat_vent_eligible = (
             fan_mode != FAN_MODE_DISABLED
             and any_sensor_open
@@ -5530,7 +5557,13 @@ class AutomationEngine:
                         "fan_device": _fan_device_label(self.config),
                     },
                 )
-            await self._exit_nat_vent(reason=_turn_off_reason)
+            # Issue #790: arms the same reactivation lockout every other _exit_nat_vent()
+            # call site arms — previously exempted on the same debunked "runs at most
+            # once per restart/30-min backstop" cadence claim as the check-side bypass
+            # fixed above, but 2 of this method's 4 triggers are event-driven and can
+            # fire sub-minute. Without this, a turn-off issued from THIS call site left
+            # no lockout timer for a subsequent reconcile call to check.
+            await self._exit_nat_vent(reason=_turn_off_reason, set_outdoor_exit_time=True)
 
     async def handle_manual_override_during_pause(
         self,

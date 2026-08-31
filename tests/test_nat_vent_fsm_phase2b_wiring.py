@@ -424,13 +424,33 @@ class TestSite4ReconcileFanOnStartup:
         assert engine._natural_vent_active is False
         engine._exit_nat_vent.assert_awaited()
 
-    def test_authoritative_ignores_stale_paused_by_door_state(self):
-        """This is a pure entry-gate question independent of restored/stale
-        _paused_by_door state at reconcile time -- legacy never consults it here,
-        and the FSM path must not either."""
+    def test_authoritative_honors_reactivation_lockout(self):
+        """Issue #790: this call site previously hardcoded paused_by_door=False into
+        the FSM inputs, bypassing the reactivation lockout entirely regardless of
+        trigger -- provably wrong for 2 of this method's 4 real triggers
+        (thermostat_state_change, post_grace_expiry), which are event-driven and can
+        fire sub-minute. paused_by_door=True with a fresh _nat_vent_outdoor_exit_time
+        (5s old, well inside the 300s default lockout) must now suppress adoption
+        even though the fan is physically running and the temperature gate would
+        otherwise clear. (Formerly test_authoritative_ignores_stale_paused_by_door_state,
+        which asserted the opposite -- this is the bug it was pinning.)"""
         for authoritative in (True, False):
             engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, authoritative=authoritative)
             engine._paused_by_door = True
             engine._nat_vent_outdoor_exit_time = _NOW - timedelta(seconds=5)
-            self._run_reconcile(engine, indoor=72.0, outdoor=68.0)
+            engine._exit_nat_vent = AsyncMock()
+            with patch(_DT_NOW_PATH, return_value=_NOW):
+                self._run_reconcile(engine, indoor=72.0, outdoor=68.0)
+            assert engine._natural_vent_active is False, f"authoritative={authoritative}"
+
+    def test_authoritative_adopts_once_lockout_elapses(self):
+        """Companion to the lockout-honoring test above: once the lockout window has
+        fully elapsed, normal adoption must still work -- guards against the Issue
+        #790 fix over-suppressing forever instead of only for the configured window."""
+        for authoritative in (True, False):
+            engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, authoritative=authoritative)
+            engine._paused_by_door = True
+            engine._nat_vent_outdoor_exit_time = _NOW - timedelta(seconds=301)  # just past the 300s default
+            with patch(_DT_NOW_PATH, return_value=_NOW):
+                self._run_reconcile(engine, indoor=72.0, outdoor=68.0)
             assert engine._natural_vent_active is True, f"authoritative={authoritative}"

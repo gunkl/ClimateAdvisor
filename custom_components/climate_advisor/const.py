@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.85"
+VERSION = "0.6.86"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -225,6 +225,12 @@ NAT_VENT_HYSTERESIS_F = 1.0
 
 # Minimum seconds between an outdoor-warm exit and the next re-activation check.
 # 5 minutes prevents whiplash cycling when temps are near-equal.
+# Issue #787: this value is independently duplicated by FAN_MIN_TOGGLE_INTERVAL_S and
+# REVISIT_DELAY_SECONDS below (both also 300s). Their alignment today is coincidental,
+# not enforced — CONF_NAT_VENT_REACTIVATION_LOCKOUT_S below lets a user override THIS
+# one without touching the other two. Changing any of the three without the others risks
+# reintroducing the exit/reactivate flapping investigated in Issue #787. Keep in sync
+# until/unless these are formally consolidated.
 NAT_VENT_REACTIVATION_LOCKOUT_S = 300
 
 CONF_NAT_VENT_HYSTERESIS_F = "nat_vent_hysteresis_f"
@@ -244,6 +250,8 @@ SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S = 60  # Issue #685: cascade-noise debounce, 
 # protecting the physical relay from rapid on/off/on cycling. A plain internal safety
 # constant, not a CONF_* option (matching NAT_VENT_HYSTERESIS_F/MIN_VIABLE_NAT_VENT_HOURS
 # precedent) — not something a user should be able to weaken below what the hardware needs.
+# Issue #787: independently duplicated with NAT_VENT_REACTIVATION_LOCKOUT_S/REVISIT_DELAY_SECONDS
+# — see that constant's comment. Keep in sync until these are formally consolidated.
 FAN_MIN_TOGGLE_INTERVAL_S = 300
 
 # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): WHF-purge/comfort activation
@@ -322,6 +330,8 @@ ATTR_HVAC_RUNTIME_TODAY = "hvac_runtime_today"
 ATTR_CONTACT_STATUS = "contact_status"
 
 # Revisit delay — follow-up check after any HVAC action (seconds)
+# Issue #787: independently duplicated with NAT_VENT_REACTIVATION_LOCKOUT_S/FAN_MIN_TOGGLE_INTERVAL_S
+# — see that constant's comment. Keep in sync until these are formally consolidated.
 REVISIT_DELAY_SECONDS = 300  # 5 minutes
 
 # Event log ring buffer cap (Issue #76)

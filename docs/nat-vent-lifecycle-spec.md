@@ -280,6 +280,25 @@ types; `_render_fan_activated`/`_render_fan_deactivated` gained a small
 `fan_mode_change`-override fallback since, unlike their nat-vent-specific siblings,
 they previously hardcoded the state-transition text unconditionally).
 
+### Finding: three independent 300-second constants, not one shared value (Issue #787)
+
+While investigating an overnight fan-cycling incident, a Five Whys pass traced two
+reactivations to two *different* functions than the reactivation lockout described above:
+a generic per-toggle rate limiter (`FAN_MIN_TOGGLE_INTERVAL_S`, this section's `#641`
+floor) and a separate "5-minute follow-up" revisit scheduler (`REVISIT_DELAY_SECONDS`,
+`_schedule_revisit()`). Both happen to be hardcoded to 300 seconds — the same value as
+`NAT_VENT_REACTIVATION_LOCKOUT_S` above — but as three **independently defined**
+constants in `const.py` with no shared reference between them. Their apparent
+coordination in that incident (each firing right as another's window closed) was
+coincidental value alignment, not deliberate integration: nothing in the revisit
+scheduler or the toggle rate limiter reads or depends on the lockout constant. A future
+tuning change to any one of the three (e.g. lengthening the lockout to reduce flapping
+further) would not propagate to the other two, and could silently reintroduce this class
+of bug. Cross-referencing comments were added at all three `const.py` definitions;
+formal consolidation is a tracked follow-up, not done in Issue #787's fix (which
+addressed a separate, unrelated root cause — see `docs/grace-periods-spec.md`'s
+"Fan-Entity Availability Blips Misread as Manual Action" section).
+
 ## Code Reference
 
 - [`derive_nat_vent_lifecycle_state`](../custom_components/climate_advisor/nat_vent_lifecycle.py) — pure derivation

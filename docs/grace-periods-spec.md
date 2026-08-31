@@ -415,6 +415,43 @@ reset alongside grace's other one-shot state). `const.py` — `TIMER_BOUNDARY_SE
 
 ---
 
+## Fan-Entity Availability Blips Misread as Manual Action (Issue #787)
+
+**Problem:** the settle window above only covers a fan-off that arrives within 120s of a
+*previously software-tracked* remote-timer grace expiring. It does not cover a `fan_entity`
+briefly reporting `unavailable` at an arbitrary moment with no preceding grace at all — e.g.
+a transient network/API dropout between Home Assistant and the fan's own Wi-Fi module,
+confirmed live (Issue #787) via `aioesphomeapi.reconnect_logic`'s `EncryptionHelloAPIError`.
+`coordinator.py::_async_fan_entity_changed()` had no special case for `unavailable`: it
+computed `is_on = new_state.state in {"on"}`, so `on->unavailable` dispatched as a manual
+cancel (`on_fan_turned_off()`, starting a fresh `"fan_off"`-triggered "unprotected" grace) and
+the recovery `unavailable->on` dispatched as a fresh manual override
+(`handle_fan_manual_override()`, starting a "protected" 3-hour manual grace) — two bogus
+grace periods from one non-event, and the fan was never actually off.
+
+**Fix:** when either side of a `fan_entity` state transition is `unavailable`,
+`_async_fan_entity_changed()` now cross-checks `_get_fan_physical_state()` (the same
+ground-truth `fan_state_entity` reader built for Issue #363's status-sensor fallback) before
+deciding what to dispatch. If ground truth is available and shows no real corresponding
+change, the transition is treated purely as a connectivity blip — no override, no cancel, no
+grace. If ground truth disagrees with what CA currently believes (a genuine state change
+that happens to coincide with an availability blip), the existing dispatch logic still fires
+correctly, now driven by the ground-truth value instead of the transient raw state. Type-1
+installs with no `fan_state_entity` configured have no ground truth to check; an
+`unavailable` transition there is currently skipped rather than guessed at (a
+minimum-duration debounce is a tracked follow-up, not yet implemented).
+
+**Relationship to the RF-Timer Boundary Settle Window above:** independent, not overlapping.
+That fix resolves a *known, software-anticipated* timer-linked fan-off with no ground-truth
+entity involved. This fix resolves an *unanticipated* connectivity blip on the fan-command
+entity itself, using a *different* signal (a separate ground-truth sensor) that may not even
+be configured on every install.
+
+**Location:** `coordinator.py` — `_async_fan_entity_changed()` (the `unavailable` branch),
+`_get_fan_physical_state()` (the ground-truth reader, pre-existing).
+
+---
+
 ## Pre-Pause Mode Storage
 
 *(See also the invariants section above for the full storage contract.)*

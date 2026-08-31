@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.83] — 2026-08-30
+
+- Fix #586: the AI Investigator's thermal report could show two observation counts that look like they should match and don't (e.g. an all-time count of 24 next to a "0 committed" figure for the same category), with no explanation. The report now labels these explicitly as different scopes — an all-time cumulative counter vs. a 90-day-windowed, capped count — so a large gap reads as expected, not as lost data. A rejection count sitting exactly at its cap now displays as "100+ (capped)" instead of an exact "100".
+
 ## [0.6.82] — 2026-08-30
 
 - Fix #583: The Manual Overrides panel no longer shows a contradictory count (e.g. "1 override" alongside "no overrides recorded"). The setpoint-override counter and its detail list are now updated together, so they can never disagree.

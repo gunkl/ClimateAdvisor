@@ -48,8 +48,10 @@ from .const import (
     OBS_TYPE_PASSIVE_DECAY,
     OBS_TYPE_SOLAR_GAIN,
     OBS_TYPE_VENTILATED_DECAY,
+    THERMAL_OBS_CAP,
     THERMAL_SWING_DEFAULT_F,
 )
+from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
 from .temperature import format_temp, format_temp_delta
 
@@ -691,6 +693,10 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 f"  confidence:                {thermal.get('confidence', 'unknown')}",
                 f"  observation_count_heat:    {thermal.get('observation_count_heat', 'unknown')}",
                 f"  observation_count_cool:    {thermal.get('observation_count_cool', 'unknown')}",
+                "  NOTE — these are all-time cumulative counters (confidence-grading input), not",
+                "  the live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below,",
+                "  which are windowed to 90 days and capped. A large gap between them is expected",
+                "  on installs with enough history and does not indicate lost data (Issue #586).",
                 "",
             ]
         except Exception:
@@ -828,6 +834,11 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     }
 
     lines.append("Per-type rejection summary:")
+    lines.append(
+        f"  (committed is windowed to 90 days and capped at {THERMAL_OBS_CAP}; rejected is capped at"
+        f" {_REJECTION_LOG_CAP} per type — compare against observation_count_heat/cool in LEARNING —"
+        " THERMAL MODEL above only as a floor, not an exact match; Issue #586)"
+    )
     hvac_heat_committed = 0
     hvac_cool_committed = 0
     hvac_heat_total_rejected = 0
@@ -862,7 +873,10 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
             suffix_parts.append("NEVER LEARNED — k_active_heat is None")
         suffix = f"  [{', '.join(suffix_parts)}]" if suffix_parts else ""
 
-        lines.append(f"  {obs_type}: {committed} committed, {total_rejected} rejected{suffix}")
+        rejected_display = (
+            f"{_REJECTION_LOG_CAP}+ (capped)" if total_rejected >= _REJECTION_LOG_CAP else str(total_rejected)
+        )
+        lines.append(f"  {obs_type}: {committed} committed, {rejected_display} rejected{suffix}")
         if total_rejected == 0:
             lines.append("    — no rejections")
         else:

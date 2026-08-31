@@ -176,21 +176,48 @@ class TestResolveTouPhase:
         assert resolution.target == 64.0
 
     def test_lead_minutes_falls_back_when_rate_missing(self):
-        """No thermal model rate -> fallback lead time (120 min, clamped [30,240])."""
+        """No thermal model rate, no configured override -> default fallback lead time
+        (45 min, Issue #797, clamped [30,240])."""
         schedule = Schedule(id="s1", name="s", days=("all",), start="16:00", end="21:00", cost_tag=COST_TAG_HIGH)
-        # Fallback lead = 120 min -> window [14:00, 16:00). now=14:30 is inside it.
-        resolution = resolve_tou_phase([schedule], _dt(2026, 1, 5, 14, 30), 76.0, "cool", {}, _BASE_CONFIG)
+        # Fallback lead = 45 min -> window [15:15, 16:00). now=15:30 is inside it.
+        resolution = resolve_tou_phase([schedule], _dt(2026, 1, 5, 15, 30), 76.0, "cool", {}, _BASE_CONFIG)
         assert resolution.phase == TOUPhase.PRECONDITIONING
-        # now=13:00 is before the fallback window opens (14:00) -> NONE.
-        resolution2 = resolve_tou_phase([schedule], _dt(2026, 1, 5, 13, 0), 76.0, "cool", {}, _BASE_CONFIG)
+        # now=15:00 is before the fallback window opens (15:15) -> NONE.
+        resolution2 = resolve_tou_phase([schedule], _dt(2026, 1, 5, 15, 0), 76.0, "cool", {}, _BASE_CONFIG)
         assert resolution2.phase == TOUPhase.NONE
+
+    def test_lead_minutes_fallback_honors_configured_override(self):
+        """A configured "default_tou_lead_minutes" overrides the built-in 45-min default
+        when the thermal model rate is unavailable (Issue #797)."""
+        schedule = Schedule(id="s1", name="s", days=("all",), start="16:00", end="21:00", cost_tag=COST_TAG_HIGH)
+        config = {**_BASE_CONFIG, "default_tou_lead_minutes": 90}
+        # Configured fallback lead = 90 min -> window [14:30, 16:00). now=14:45 is inside it.
+        resolution = resolve_tou_phase([schedule], _dt(2026, 1, 5, 14, 45), 76.0, "cool", {}, config)
+        assert resolution.phase == TOUPhase.PRECONDITIONING
+        assert resolution.precondition_start == _dt(2026, 1, 5, 14, 30)
+        # now=14:00 is before the configured window opens (14:30) -> NONE.
+        resolution2 = resolve_tou_phase([schedule], _dt(2026, 1, 5, 14, 0), 76.0, "cool", {}, config)
+        assert resolution2.phase == TOUPhase.NONE
+
+    def test_lead_minutes_configured_override_is_clamped(self):
+        """A configured value outside [_TOU_LEAD_MIN_FLOOR, _TOU_LEAD_MIN_CEIL] (30-240)
+        still gets clamped to that range, same as the learned-rate path (Issue #797) —
+        the config field's own selector bounds already prevent this in the UI, but the
+        resolver must not trust that alone."""
+        schedule = Schedule(id="s1", name="s", days=("all",), start="16:00", end="21:00", cost_tag=COST_TAG_HIGH)
+        config = {**_BASE_CONFIG, "default_tou_lead_minutes": 5}
+        # Clamped to the 30-min floor -> window [15:30, 16:00), not [15:55, 16:00).
+        resolution = resolve_tou_phase([schedule], _dt(2026, 1, 5, 15, 30), 76.0, "cool", {}, config)
+        assert resolution.phase == TOUPhase.PRECONDITIONING
+        assert resolution.precondition_start == _dt(2026, 1, 5, 15, 30)
 
     def test_earliest_of_multiple_high_schedules_wins(self):
         later = Schedule(id="later", name="later", days=("all",), start="20:00", end="22:00", cost_tag=COST_TAG_HIGH)
         earlier = Schedule(
             id="earlier", name="earlier", days=("all",), start="16:00", end="18:00", cost_tag=COST_TAG_HIGH
         )
-        resolution = resolve_tou_phase([later, earlier], _dt(2026, 1, 5, 14, 30), 76.0, "cool", {}, _BASE_CONFIG)
+        # "earlier"'s fallback window is [15:15, 16:00) (45-min default, Issue #797).
+        resolution = resolve_tou_phase([later, earlier], _dt(2026, 1, 5, 15, 30), 76.0, "cool", {}, _BASE_CONFIG)
         assert resolution.phase == TOUPhase.PRECONDITIONING
         assert resolution.schedule_id == "earlier"
 
@@ -209,15 +236,16 @@ class TestResolveTouPhase:
         """
         schedule = Schedule(id="s1", name="s", days=("all",), start="16:00", end="21:00", cost_tag=COST_TAG_HIGH)
         # now=13:00 is within the lookahead (schedule starts within 4h) but before the
-        # fallback lead window opens (14:00) -> phase=NONE, but the window fields (needed
-        # for chart rendering of the upcoming window, not just "act now") must still resolve.
+        # fallback lead window opens (15:15, 45-min default per Issue #797) -> phase=NONE,
+        # but the window fields (needed for chart rendering of the upcoming window, not
+        # just "act now") must still resolve.
         resolution = resolve_tou_phase([schedule], _dt(2026, 1, 5, 13, 0), 76.0, "cool", {}, _BASE_CONFIG)
         assert resolution.phase == TOUPhase.NONE
         assert resolution.target == 68.0
         assert resolution.mode == "cool"
         assert resolution.schedule_id == "s1"
         assert resolution.schedule_start == _dt(2026, 1, 5, 16, 0)
-        assert resolution.precondition_start == _dt(2026, 1, 5, 14, 0)
+        assert resolution.precondition_start == _dt(2026, 1, 5, 15, 15)
 
     def test_dst_spring_forward_nonexistent_hour_does_not_crash(self):
         """A schedule window inside the local hour that US spring-forward skips

@@ -1077,7 +1077,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 17
+        assert entry.version == 18
 
     def test_chain_from_v1_includes_temp_unit(self):
         """v1 entry chains through all migrations and ends up with temp_unit."""
@@ -1109,7 +1109,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 17
+        assert entry.version == 18
 
 
 # ---------------------------------------------------------------------------
@@ -1170,7 +1170,7 @@ class TestMigrationV9ToV10:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
-        assert entry.version == 17
+        assert entry.version == 18
 
     def test_chain_from_v1_includes_debounce(self):
         """v1 entry chains through all migrations and ends up with welcome_home_debounce_seconds."""
@@ -1202,7 +1202,7 @@ class TestMigrationV9ToV10:
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 17
+        assert entry.version == 18
 
 
 class TestMigrationV10ToV11:
@@ -1258,7 +1258,7 @@ class TestMigrationV10ToV11:
         assert final_data.get("adaptive_preheat_enabled") is True
         assert final_data.get("adaptive_setback_enabled") is True
         assert final_data.get("weather_bias_enabled") is True
-        assert entry.version == 17
+        assert entry.version == 18
 
 
 class TestMigrationV11ToV12:
@@ -1286,7 +1286,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 120
         assert final_data.get("preheat_safety_margin") == 1.3
         assert final_data.get("max_setback_depth_f") == 8.0
-        assert entry.version == 17
+        assert entry.version == 18
 
     def test_v11_to_v12_existing_values_preserved(self):
         """v11 entry with all threshold keys set retains those values after migration."""
@@ -1318,7 +1318,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 90
         assert final_data.get("preheat_safety_margin") == 1.5
         assert final_data.get("max_setback_depth_f") == 6.0
-        assert entry.version == 17
+        assert entry.version == 18
 
     def test_v11_to_v12_invalid_type_replaced(self):
         """v11 entry where min_preheat_minutes is a non-numeric string gets the default."""
@@ -1339,7 +1339,7 @@ class TestMigrationV11ToV12:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("min_preheat_minutes") == 30
-        assert entry.version == 17
+        assert entry.version == 18
 
     def test_v11_to_v12_from_v10_chain(self):
         """v10 entry chains through v11 and v12 migrations; all five threshold keys get defaults."""
@@ -1358,7 +1358,7 @@ class TestMigrationV11ToV12:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 17
+        assert entry.version == 18
         assert final_data.get("min_preheat_minutes") == 30
         assert final_data.get("max_preheat_minutes") == 240
         assert final_data.get("default_preheat_minutes") == 120
@@ -1460,7 +1460,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 17
+        assert entry.version == 18
         assert final_data.get("ai_enabled") is DEFAULT_AI_ENABLED
         assert final_data.get("ai_api_key") == ""
         assert final_data.get("ai_model") == DEFAULT_AI_MODEL
@@ -1488,7 +1488,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 17
+        assert entry.version == 18
         assert final_data.get("ai_enabled") is False
         assert final_data.get("ai_model") == "claude-sonnet-5"
         assert final_data.get("ai_max_tokens") == 4096
@@ -1546,13 +1546,17 @@ class TestMigrationV13ToV14:
         assert result.get("ai_investigator_requests_per_day") == DEFAULT_AI_INVESTIGATOR_RPD
 
     def test_v13_to_v14_adds_exactly_five_investigator_keys_plus_sleep_keys(self):
-        """Migration v13→v16 adds the five investigator keys, two sleep keys, and four threshold keys."""
+        """Migration v13→v18 adds the five investigator keys, two sleep keys, four
+        threshold keys, and (Issue #797) default_tou_lead_minutes."""
         result = self._run_v13_to_v14_migration(dict(FULL_CONFIG))
         new_keys = set(result) - set(FULL_CONFIG)
         # v13→v14 adds 5 investigator keys; v14→v15 adds sleep_heat + sleep_cool;
-        # v15→v16 adds threshold_hot/warm/mild/cool
+        # v15→v16 adds threshold_hot/warm/mild/cool; v16→v17 adds no new keys (fan_mode
+        # coercion only); v17→v18 adds default_tou_lead_minutes (Issue #797)
         _threshold_keys = {"threshold_hot", "threshold_warm", "threshold_mild", "threshold_cool"}
-        assert new_keys == set(_INVESTIGATOR_KEYS) | {"sleep_heat", "sleep_cool"} | _threshold_keys
+        assert new_keys == (
+            set(_INVESTIGATOR_KEYS) | {"sleep_heat", "sleep_cool"} | _threshold_keys | {"default_tou_lead_minutes"}
+        )
 
     def test_v13_to_v14_preserves_existing_fields(self):
         """All existing v13 fields survive migration unchanged."""
@@ -1590,7 +1594,7 @@ class TestMigrationV13ToV14:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 17
+        assert entry.version == 18
         assert final_data.get("ai_investigator_enabled") is DEFAULT_AI_INVESTIGATOR_ENABLED
         assert final_data.get("ai_investigator_model") == DEFAULT_AI_INVESTIGATOR_MODEL
         assert final_data.get("ai_investigator_reasoning_effort") == DEFAULT_AI_INVESTIGATOR_REASONING
@@ -1761,7 +1765,7 @@ class TestMigrationV14ToV15:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert final_version[0] == 17
+        assert final_version[0] == 18
 
 
 # ---------------------------------------------------------------------------
@@ -1811,7 +1815,7 @@ class TestMigrationV16ToV17:
 
         assert result is True
         assert entry.data["fan_mode"] == FAN_MODE_WHOLE_HOUSE
-        assert entry.version == 17
+        assert entry.version == 18
 
     def test_non_both_fan_mode_is_preserved(self):
         """fan_mode values other than 'both' are left unchanged."""
@@ -1823,6 +1827,59 @@ class TestMigrationV16ToV17:
         config_without_fan_mode = {k: v for k, v in FULL_CONFIG.items() if k != "fan_mode"}
         data = self._run_migration(config_without_fan_mode)
         assert "fan_mode" not in data
+
+
+class TestMigrationV17ToV18:
+    """Tests for config entry migration from version 17 to version 18.
+
+    Issue #797: "default_tou_lead_minutes" (the TOU pre-conditioning fallback lead
+    time when the thermal model hasn't learned a rate yet) becomes a configurable
+    option, default 45 (was a fixed 120-minute constant).
+    """
+
+    def _run_migration(self, initial_data: dict) -> dict:
+        from custom_components.climate_advisor import async_migrate_entry
+
+        entry = _make_config_entry(dict(initial_data), version=17)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        asyncio.run(async_migrate_entry(hass, entry))
+        return final_data
+
+    def test_v17_to_v18_default_set(self):
+        """v17 entry with no default_tou_lead_minutes key gets the new default (45)."""
+        data = self._run_migration(FULL_CONFIG)
+        assert data.get("default_tou_lead_minutes") == 45
+
+    def test_v17_to_v18_existing_value_preserved(self):
+        """A pre-existing default_tou_lead_minutes value (e.g. set via a future manual
+        config edit) is not overwritten by the migration's default."""
+        data = self._run_migration({**FULL_CONFIG, "default_tou_lead_minutes": 90})
+        assert data.get("default_tou_lead_minutes") == 90
+
+    def test_v17_to_v18_bumps_version(self):
+        entry = _make_config_entry(dict(FULL_CONFIG), version=17)
+        hass = _make_hass()
+
+        def capture_update(entry, *, data, version):
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+
+        from custom_components.climate_advisor import async_migrate_entry
+
+        result = asyncio.run(async_migrate_entry(hass, entry))
+        assert result is True
+        assert entry.version == 18
 
 
 class TestFanModeOptionsNoBoth:

@@ -1,20 +1,20 @@
 {
   "name": "issue_786_tou_precondition_defers_to_manual_override",
-  "description": "A cost_period schedule tagged 'high' from 16:15-21:00, same shape as issue_786_tou_precondition_banks_then_coasts. Before the schedule's lead-time window opens, the home holds its normal comfort band (ceiling=comfort_cool=76F, cool mode). At 13:30 the user manually bumps the thermostat to heat mode -- a real override, detected and (10 minutes later, at 13:40) confirmed by the coordinator's own listener, exactly like override_detection_and_confirmation.json. When the schedule's lead-time window opens at 14:15 (fallback 120min lead, since no thermal model observations exist -> 16:15 - 120min = 14:15), the override is still active (manual_grace_seconds=3600 keeps it alive well past 14:15). Fix 1 (Issue #786 post-implementation audit) made apply_tou_precondition() call the same decide_scheduled_band_gate() every other scheduled-trigger action (handle_bedtime(), handle_morning_wakeup(), handle_pre_cool()) already uses -- so at 14:15 the gate returns DEFER_OVERRIDE and TOU pre-conditioning is skipped entirely: no tou_precondition_applied event, no setpoint write toward the comfort_heat=68F banking target. Before Fix 1, apply_tou_precondition() only checked door/window state and would have silently overwritten the user's manual override with the TOU banking setpoint.",
-  "source": "Issue #786 post-implementation audit, Fix 1 verification",
+  "description": "A cost_period schedule tagged 'high' from 16:15-21:00, same shape as issue_786_tou_precondition_banks_then_coasts. Before the schedule's lead-time window opens, the home holds its normal comfort band (ceiling=comfort_cool=76F, cool mode). At 13:30 the user manually bumps the thermostat to heat mode -- a real override, detected and (10 minutes later, at 13:40) confirmed by the coordinator's own listener, exactly like override_detection_and_confirmation.json. When the schedule's lead-time window opens at 15:30 (fallback 45min lead, Issue #797's configurable default, since no thermal model observations exist -> 16:15 - 45min = 15:30), the override is still active (manual_grace_seconds=7200 keeps it alive well past 15:30). Fix 1 (Issue #786 post-implementation audit) made apply_tou_precondition() call the same decide_scheduled_band_gate() every other scheduled-trigger action (handle_bedtime(), handle_morning_wakeup(), handle_pre_cool()) already uses -- so at 15:30 the gate returns DEFER_OVERRIDE and TOU pre-conditioning is skipped entirely: no tou_precondition_applied event, no setpoint write toward the comfort_heat=68F banking target. Before Fix 1, apply_tou_precondition() only checked door/window state and would have silently overwritten the user's manual override with the TOU banking setpoint.",
+  "source": "Issue #786 post-implementation audit, Fix 1 verification; fallback lead time and grace period updated for the Issue #797 default (45min, was 120min) -- see note below on why this required re-deriving the grace period, not just shifting timestamps",
   "issue": 786,
   "use_coordinator": true,
   "skip_startup_coalesce": true,
   "notes": [
     "Three-exercise protocol (CLAUDE.md #10):",
-    "(a) Scenario effectiveness: with apply_tou_precondition()'s guard reverted to the old bespoke door/window-only check (pre-Fix-1), this scenario's 14:15 assertion (tou_precondition_not_applied) FAILS -- a tou_precondition_applied event fires at 14:15 banking to comfort_heat=68F, silently overwriting the user's still-active manual heat-mode override. Empirically confirmed: see verification log below.",
+    "(a) Scenario effectiveness: with apply_tou_precondition()'s guard reverted to the old bespoke door/window-only check (pre-Fix-1), this scenario's 15:30 assertion (tou_precondition_not_applied) FAILS -- a tou_precondition_applied event fires at 15:30 banking to comfort_heat=68F, silently overwriting the user's still-active manual heat-mode override.",
     "(b) Docs<->production alignment: docs/scheduler-spec.md (post Fix 5) documents that the SAME decide_scheduled_band_gate() call governs both the Status-card display precedence AND the actual TOU write -- this scenario is the golden proof that production's write path genuinely defers, not just its display text.",
     "(c) Occupant experience: without Fix 1, a user who manually overrides their thermostat during a scheduled high-cost pre-conditioning window (e.g. they turn on heat because they're cold, right as TOU wants to pre-cool the house) would have their override silently discarded 30 minutes later when the next TOU cycle runs -- the exact failure mode the manual-override grace period exists to prevent everywhere else in the engine. With Fix 1, the override holds through the entire lead-time window, exactly as it does against every other scheduled-trigger action (bedtime, morning wakeup, pre-cool).",
+    "Issue #797 re-derivation (not just a timestamp shift): dropping the fallback default from 120min to 45min moved the lead window's open instant from 14:15 to 15:30 -- 75 minutes later. The scenario's ORIGINAL manual_grace_seconds=3600 (60min from the 13:40 confirm, expiring 14:40) would have made the override already-expired by 15:30, silently turning the 15:30 'tou_precondition_not_applied' assertion into a vacuous pass (true because the window hadn't even opened at the old fallback's timing coincidence, or -- worse, at 15:30 specifically -- true because the override already lapsed, not because decide_scheduled_band_gate() actually deferred to it). manual_grace_seconds is raised to 7200 (120min from the 13:40 confirm, expiring 15:40) so the override is still genuinely active with 10 minutes of margin at the 15:30 assertion -- the scenario's actual premise (TOU attempting to write while an override is live) stays real, not accidentally satisfied by unrelated timing.",
     "Verification (empirical, per Testing Strategy):",
-    "1. Ran `python tools/simulate.py --pending -v` against current (fixed) automation.py: PASS -- all assertions pass, including the new tou_precondition_not_applied check at 14:15.",
-    "2. Manually reverted apply_tou_precondition()'s gate block back to the pre-Fix-1 bespoke door/window-only check (git stash of automation.py), re-ran: FAILS as expected -- a tou_precondition_applied event (schedule_id=peak1, target=68.0, mode=cool) fires at 14:15 despite the active override, so the tou_precondition_not_applied assertion returns False. This is exactly the confirmed bug Fix 1 closed.",
-    "3. Restored the fix (git stash pop), re-ran: PASS again, clean `git diff --stat` on automation.py (identical to Executor 1's landed state), empty `git stash list`.",
-    "manual_grace_seconds set to 3600 (matching override_detection_and_confirmation.json's precedent) so the override stays genuinely active through the 14:15 assertion -- the harness default of 900s would let grace auto-expire at 13:55, before the lead window even opens, making the scenario premise (override active during TOU's attempted write) false."
+    "1. Ran `python tools/simulate.py --pending -v` against current (fixed) automation.py: PASS -- all assertions pass, including the tou_precondition_not_applied check at 15:30.",
+    "2. Manually reverted apply_tou_precondition()'s gate block back to the pre-Fix-1 bespoke door/window-only check, re-ran: FAILS as expected -- a tou_precondition_applied event (schedule_id=peak1, target=68.0, mode=cool) fires at 15:30 despite the active override, so the tou_precondition_not_applied assertion returns False. This is exactly the confirmed bug Fix 1 closed.",
+    "3. Restored the fix, re-ran: PASS again."
   ],
   "config": {
     "comfort_heat": 68,
@@ -25,7 +25,7 @@
     "sleep_cool": 72,
     "sleep_time": "22:30",
     "wake_time": "06:30",
-    "manual_grace_seconds": 3600,
+    "manual_grace_seconds": 7200,
     "override_confirm_seconds": 600,
     "initial_thermostat_mode": "cool",
     "schedules": [
@@ -46,7 +46,7 @@
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Before the TOU lead window opens (16:15 - 120min fallback lead = 14:15). Normal comfort band arms: ceiling=comfort_cool=76F, cool mode."
+      "note": "Before the TOU lead window opens (16:15 - 45min default fallback lead = 15:30). Normal comfort band arms: ceiling=comfort_cool=76F, cool mode."
     },
     {
       "time": "2026-07-20T13:30:00",
@@ -62,7 +62,7 @@
       "note": "10 minutes elapsed, thermostat still in heat mode. Forces scheduler.advance_to() past override_confirm_seconds=600 so the real async_call_later confirm timer genuinely fires -> override confirmed."
     },
     {
-      "time": "2026-07-20T14:15:00",
+      "time": "2026-07-20T15:30:00",
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
@@ -95,13 +95,13 @@
       "track": "integration"
     },
     {
-      "at": "2026-07-20T14:15:00",
+      "at": "2026-07-20T15:30:00",
       "expect": "override_active",
-      "reason": "manual_grace_seconds=3600 keeps the override genuinely active through the 14:15 lead-window-open instant -- the premise this scenario needs (TOU attempting to write while an override is live) is real, not already-expired.",
+      "reason": "manual_grace_seconds=7200 (Issue #797: re-derived from the new 45-min default fallback lead time, not the scenario's original 3600) keeps the override genuinely active through the 15:30 lead-window-open instant, with 10 minutes of margin before it would expire at 15:40 -- the premise this scenario needs (TOU attempting to write while an override is live) is real, not already-expired.",
       "track": "integration"
     },
     {
-      "at": "2026-07-20T14:15:00",
+      "at": "2026-07-20T15:30:00",
       "expect": "tou_precondition_not_applied",
       "reason": "Fix 1: apply_tou_precondition() calls decide_scheduled_band_gate() with manual_override_active=True, which returns DEFER_OVERRIDE -- the function logs INFO and returns before ever emitting tou_precondition_applied or calling _set_temperature_for_mode(). No banking write toward comfort_heat=68F occurs; the user's manual override is left untouched, exactly as it is against every other scheduled-trigger action (bedtime, morning wakeup, pre-cool).",
       "track": "integration"
@@ -110,7 +110,7 @@
   "verdict": {
     "type": "positive",
     "summary": "TOU pre-conditioning defers to an active manual override at the exact instant it would otherwise write a banking setpoint, using the same shared decide_scheduled_band_gate() every other scheduled-trigger action already uses.",
-    "observed_behavior": "Normal comfort_cool ceiling (76F) held before override and lead window -> user manually overrides to heat mode at 13:30, confirmed at 13:40 -> at 14:15, the TOU lead window opens but apply_tou_precondition() detects the still-active override via decide_scheduled_band_gate() and skips its write entirely -- no tou_precondition_applied event, no setpoint change.",
+    "observed_behavior": "Normal comfort_cool ceiling (76F) held before override and lead window -> user manually overrides to heat mode at 13:30, confirmed at 13:40 -> at 15:30, the TOU lead window opens but apply_tou_precondition() detects the still-active override via decide_scheduled_band_gate() and skips its write entirely -- no tou_precondition_applied event, no setpoint change.",
     "expected_behavior": "A user's manual thermostat override is protected from being silently overwritten by TOU pre-conditioning during its lead-time window, matching the protection every other scheduled-trigger action (bedtime, morning wakeup, pre-cool) already provides. Before Fix 1, apply_tou_precondition() only checked door/window state and had zero override awareness -- this scenario is the regression guard for that confirmed bug."
   },
   "pending_issue": 786

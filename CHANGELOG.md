@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.89] — 2026-08-31
+
+- Feat #797: TOU pre-conditioning's fallback lead time (used before your thermal model has learned your home's response rate) is now 45 minutes by default instead of 120, and configurable in Settings → Advanced.
+
 ## [0.6.88] — 2026-08-31
 
 - Feat #794: the TOU Scheduler setup screen now shows one consistent "TOU Scheduler" title throughout, a compact collapsed day picker instead of an always-open checkbox list, and no longer wipes out what you typed in other fields when one field fails validation. The unused cost-tag choice is hidden. A savings schedule can now tell you when it's active even on a day it correctly decides not to act (e.g. windows already open, HVAC off) — the Status card and Activity Record now say so instead of showing nothing. The chart's overlay is now a single, bold "Target" line showing the real system target at any point in time — whatever the source (normal comfort-band operation, whole-house-fan/nat-vent cycling, or TOU pre-conditioning) — for both past and predicted-future hours, replacing two thinner, less accurate lines.

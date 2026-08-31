@@ -1,12 +1,12 @@
 {
   "name": "issue_786_tou_precondition_banks_then_coasts",
-  "description": "A cost_period schedule tagged 'high' from 16:15-21:00. Before the schedule's lead-time window opens, the home holds its normal comfort band (ceiling=comfort_cool=76F, cool mode). Once the window opens (fallback lead time 120min, since no thermal model observations exist -> opens 14:15), the automation engine banks toward the OPPOSITE comfort-band edge (comfort_heat=68F) instead -- no user-authored temperature field anywhere drove this, it is derived automatically from the existing comfort band. Once the schedule's own start time (16:15) is reached, pre-conditioning stops being called and the very next cycle's normal apply_classification() call re-arms the plain comfort_cool=76F ceiling on its own -- confirming the Issue #786 prerequisite finding that 'coast' behavior needs zero new suppression code, since _apply_comfort_band() issues a single-setpoint THRESHOLD command a real thermostat only acts on when indoor crosses it, not a proactive drive-to-target.",
-  "source": "Issue #786 design/implementation session",
+  "description": "A cost_period schedule tagged 'high' from 16:15-21:00. Before the schedule's lead-time window opens, the home holds its normal comfort band (ceiling=comfort_cool=76F, cool mode). Once the window opens (fallback lead time 45min, Issue #797's configurable default, since no thermal model observations exist -> opens 15:30), the automation engine banks toward the OPPOSITE comfort-band edge (comfort_heat=68F) instead -- no user-authored temperature field anywhere drove this, it is derived automatically from the existing comfort band. Once the schedule's own start time (16:15) is reached, pre-conditioning stops being called and the very next cycle's normal apply_classification() call re-arms the plain comfort_cool=76F ceiling on its own -- confirming the Issue #786 prerequisite finding that 'coast' behavior needs zero new suppression code, since _apply_comfort_band() issues a single-setpoint THRESHOLD command a real thermostat only acts on when indoor crosses it, not a proactive drive-to-target.",
+  "source": "Issue #786 design/implementation session; fallback lead time updated to the Issue #797 default (45min, was 120min) and made configurable",
   "issue": 786,
   "use_coordinator": true,
   "notes": [
     "Three-exercise protocol (CLAUDE.md §10):",
-    "(a) Scenario effectiveness: deleting coordinator._resolve_tou_schedule_state()/_apply_tou_schedule()'s call sites (or automation.py's apply_tou_precondition()) causes the 14:15 assertion (tou_precondition_applied, target=68.0) to FAIL -- no such event would ever fire, reproducing 'the TOU feature silently does nothing' exactly.",
+    "(a) Scenario effectiveness: deleting coordinator._resolve_tou_schedule_state()/_apply_tou_schedule()'s call sites (or automation.py's apply_tou_precondition()) causes the 15:30 assertion (tou_precondition_applied, target=68.0) to FAIL -- no such event would ever fire, reproducing 'the TOU feature silently does nothing' exactly.",
     "(b) Docs<->production alignment: docs/scheduler-spec.md documents this exact resolve-then-act sequence and the coast-is-free finding; this scenario is the golden proof that production actually does what the spec says.",
     "(c) Occupant experience: without this feature, the home runs the AC at its normal comfort_cool ceiling straight through a scheduled high-cost window (e.g. 4:15-9:00pm peak electricity rates), paying peak-rate cost with no cost-aware behavior. With it, the home banks extra coolness to comfort_heat before the window starts and coasts on that banked cool air through the expensive hours -- lower cost, and the occupant configured zero new temperature settings to get it; the system derived the banking target from settings they already had (comfort_heat) and the home's own learned response rate."
   ],
@@ -37,15 +37,15 @@
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Before the TOU lead window opens (16:15 - 120min fallback lead = 14:15, since no thermal model observations exist yet). Normal comfort band arms: ceiling=comfort_cool=76F, cool mode."
+      "note": "Before the TOU lead window opens (16:15 - 45min fallback lead = 15:30, since no thermal model observations exist yet and no custom default_tou_lead_minutes is configured in this scenario). Normal comfort band arms: ceiling=comfort_cool=76F, cool mode."
     },
     {
-      "time": "2026-07-13T14:15:00",
+      "time": "2026-07-13T15:30:00",
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Next 30-min cycle -- now sits exactly at the lead window's open instant (14:15). TOU pre-conditioning fires: banks to comfort_heat=68F (the OPPOSITE edge from the normal ceiling), cool mode, ahead of the 16:15 high-cost window. No temperature field was configured for this -- 68F is the home's own existing comfort_heat value."
+      "note": "Next 30-min cycle -- now sits exactly at the lead window's open instant (15:30). TOU pre-conditioning fires: banks to comfort_heat=68F (the OPPOSITE edge from the normal ceiling), cool mode, ahead of the 16:15 high-cost window. No temperature field was configured for this -- 68F is the home's own existing comfort_heat value."
     },
     {
       "time": "2026-07-13T16:15:00",
@@ -69,10 +69,10 @@
       "reason": "Before the TOU lead window opens, the plain comfort_cool ceiling (76F) is armed -- no TOU influence yet."
     },
     {
-      "at": "2026-07-13T14:15:00",
+      "at": "2026-07-13T15:30:00",
       "expect": "tou_precondition_applied",
       "tou_precondition": { "schedule_id": "peak1", "target": 68.0, "mode": "cool" },
-      "reason": "The lead window has opened -- production banks to comfort_heat=68F (cool mode) ahead of the 16:15 high-cost window, derived automatically from the existing comfort_heat config value and the home's own thermal response rate (fallback lead time here, since no observations exist)."
+      "reason": "The lead window has opened -- production banks to comfort_heat=68F (cool mode) ahead of the 16:15 high-cost window, derived automatically from the existing comfort_heat config value and the home's own thermal response rate (default 45-minute fallback lead time here, since no observations exist and no custom default_tou_lead_minutes is configured)."
     },
     {
       "at": "2026-07-13T16:15:00",
@@ -84,7 +84,7 @@
   "verdict": {
     "type": "positive",
     "summary": "TOU pre-conditioning banks to the comfort-band floor ahead of a scheduled high-cost window using zero user-authored temperature settings, then coasts back to normal comfort-band behavior automatically once the window starts, with zero new suppression code.",
-    "observed_behavior": "Normal comfort_cool ceiling (76F) held before the lead window opens -> banks to comfort_heat (68F) once the fallback 120-minute lead window opens ahead of the 16:15 schedule -> reverts to the normal comfort_cool ceiling (76F) the instant the schedule's own start time is reached, with no dedicated coast-phase code involved.",
+    "observed_behavior": "Normal comfort_cool ceiling (76F) held before the lead window opens -> banks to comfort_heat (68F) once the default 45-minute fallback lead window opens ahead of the 16:15 schedule -> reverts to the normal comfort_cool ceiling (76F) the instant the schedule's own start time is reached, with no dedicated coast-phase code involved.",
     "expected_behavior": "The occupant pays less to run AC during a scheduled expensive electricity window by having the home pre-cool using thermal mass it already has, using only settings (comfort_heat) and behavior (learned thermal rate) the system already knew about -- no new temperature configuration required for this feature to work."
   }
 }

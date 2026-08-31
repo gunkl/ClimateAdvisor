@@ -58,6 +58,7 @@ EXPECTED_KEYS = {
     "min_preheat_minutes",
     "max_preheat_minutes",
     "default_preheat_minutes",
+    "default_tou_lead_minutes",
     "preheat_safety_margin",
     "max_setback_depth_f",
     "ai_enabled",

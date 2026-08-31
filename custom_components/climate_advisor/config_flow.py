@@ -210,7 +210,7 @@ def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, fl
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 17
+    VERSION = 18
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -1383,6 +1383,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         default=current.get("default_preheat_minutes", 120),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=10, max=120, step=5, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(
+                        "default_tou_lead_minutes",
+                        default=current.get("default_tou_lead_minutes", 45),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=30, max=240, step=5, mode=selector.NumberSelectorMode.BOX)
                     ),
                     vol.Required(
                         "preheat_safety_margin",

@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.88"
+VERSION = "0.6.89"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -79,6 +79,12 @@ CONF_MAX_PREHEAT_MINUTES = "max_preheat_minutes"
 CONF_DEFAULT_PREHEAT_MINUTES = "default_preheat_minutes"
 CONF_PREHEAT_SAFETY_MARGIN = "preheat_safety_margin"
 CONF_MAX_SETBACK_DEPTH = "max_setback_depth_f"
+
+# TOU pre-conditioning fallback lead time (Issue #797) — used by resolve_tou_phase()
+# when the thermal model hasn't learned k_active_heat/k_active_cool yet. Bounds stay
+# the module's own _TOU_LEAD_MIN_FLOOR/_TOU_LEAD_MIN_CEIL (30-240 min); this is only
+# the default/fallback value within that range.
+CONF_DEFAULT_TOU_LEAD_MINUTES = "default_tou_lead_minutes"
 
 # Debounce and grace period config keys
 CONF_SENSOR_DEBOUNCE = "sensor_debounce_seconds"
@@ -718,6 +724,14 @@ CONFIG_METADATA = {
         "description": "Pre-heat duration used before enough observations are collected.",
         "category": "advanced",
     },
+    "default_tou_lead_minutes": {
+        "label": "Default TOU Pre-conditioning Lead Time (min)",
+        "description": (
+            "How long before a scheduled high-cost period the system starts pre-conditioning,"
+            " used until enough heat/cool cycles are observed to compute your home's actual rate."
+        ),
+        "category": "advanced",
+    },
     "preheat_safety_margin": {
         "label": "Pre-heat Safety Margin",
         "description": ("Multiplier applied to model-computed pre-heat time as a buffer (e.g. 1.2 = 20% extra)."),
@@ -931,6 +945,7 @@ THERMAL_MAX_ACTIVE_SAMPLES = 120  # cap on active_samples list per event
 THERMAL_MAX_POST_HEAT_SAMPLES = 45  # cap on post_heat_samples list per event
 DEFAULT_PREHEAT_MINUTES = 120  # fallback when no model data
 MIN_PREHEAT_MINUTES = 30  # clamp floor
+DEFAULT_TOU_LEAD_MINUTES = 45  # fallback lead time when k_active_heat/k_active_cool not yet learned (Issue #797)
 MAX_PREHEAT_MINUTES = 240  # clamp ceiling (4 hrs)
 PREHEAT_SAFETY_MARGIN = 1.3  # multiply computed time by this
 DEFAULT_SETBACK_DEPTH_F = 4.0  # preserved fallback (current heat setback)

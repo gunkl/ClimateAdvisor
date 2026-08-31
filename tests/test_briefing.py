@@ -14,6 +14,7 @@ import pytest
 from custom_components.climate_advisor.briefing import (
     _derive_warm_day_events,
     _generate_tldr_table,
+    _grace_period_section,
     _warm_day_plan,
     generate_briefing,
 )
@@ -1792,6 +1793,63 @@ class TestWarmDayPlanFloorWording:
         text = "\n".join(lines)
         assert "hold the heat in" in text
         assert "outdoor air will be warmer than inside" not in text
+
+
+class TestWarmDayPlanReopenWording:
+    """Issue #788: the reopen/recovery sentence must also pick its wording based
+    on nat_vent_cutoff_reason, not always claim it's evening. A comfort_floor
+    close can recover the same morning, which previously produced self-
+    contradictory text (e.g. "hold the heat in" at 7am, then "evening air" at 8am)."""
+
+    def test_comfort_floor_reason_reopen_avoids_evening_wording(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        cutoff = datetime(2026, 5, 11, 7, 0, 0, tzinfo=UTC)
+        recovery = datetime(2026, 5, 11, 8, 0, 0, tzinfo=UTC)
+        warm_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "comfort_floor",
+            "ceiling_breach_time": None,
+            "nat_vent_recovers": True,
+            "recovery_time": recovery,
+        }
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        text = "\n".join(lines)
+        assert "evening" not in text
+        assert "Reopen windows around 8:00 AM" in text
+
+    def test_outdoor_rise_reason_reopen_keeps_evening_wording(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        cutoff = datetime(2026, 5, 11, 11, 0, 0, tzinfo=UTC)
+        recovery = datetime(2026, 5, 11, 19, 0, 0, tzinfo=UTC)
+        warm_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "ceiling_breach_time": None,
+            "nat_vent_recovers": True,
+            "recovery_time": recovery,
+        }
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        text = "\n".join(lines)
+        assert "evening air cools back down" in text
+
+
+class TestGracePeriodSectionWording:
+    """Issue #788: the manual-grace branch hardcoded "this morning", but the
+    briefing containing this text can be regenerated and displayed at any
+    hour (mid-day reclassification cycle, REST API, ATTR_BRIEFING), not just
+    the once-daily morning briefing send."""
+
+    def test_manual_grace_does_not_claim_morning(self):
+        lines = _grace_period_section(grace_active=True, grace_source="manual")
+        text = "\n".join(lines)
+        assert "this morning" not in text
+        assert "manually turned the HVAC back on" in text
+
+    def test_automation_grace_wording_unaffected(self):
+        lines = _grace_period_section(grace_active=True, grace_source="automation")
+        text = "\n".join(lines)
+        assert "this morning" not in text
+        assert "resumed the HVAC" in text
 
 
 class TestWarmDayBriefWithPrediction:

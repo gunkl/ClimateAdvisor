@@ -775,16 +775,23 @@ def _warm_day_plan(
         _recovery_ts = _events["recovery_time"]
         if _recovery_ts is not None:
             rec_t = _recovery_ts.strftime(_FMT_HOUR)
+            # Issue #788: the "evening air cools back down" phrasing only holds when
+            # the cutoff that preceded it was the midday outdoor_rise crossing. When
+            # the cutoff was a comfort_floor close (an early/cold-morning close held
+            # for comfort, not outdoor heat), recovery can happen the same morning \u2014
+            # "evening" would contradict the close sentence a paragraph earlier.
+            if _nat_vent_cutoff_reason == "comfort_floor":
+                recovery_reason = "once outdoor air cools back below indoor"
+            else:
+                recovery_reason = "when the evening air cools back down"
             # Issue #518: only claim "I'll turn off the AC" when the AC could
             # plausibly have engaged first (breach predicted before recovery) \u2014
             # otherwise this contradicted itself by canceling an action that was
             # never actually started.
             if _ceiling_breach is not None and _ceiling_breach < _recovery_ts:
-                lines.append(
-                    f"Reopen windows around {rec_t} when the evening air cools back down \u2014 I'll turn off the AC."
-                )
+                lines.append(f"Reopen windows around {rec_t} {recovery_reason} \u2014 I'll turn off the AC.")
             else:
-                lines.append(f"Reopen windows around {rec_t} when the evening air cools back down.")
+                lines.append(f"Reopen windows around {rec_t} {recovery_reason}.")
 
     return lines
 
@@ -1029,7 +1036,7 @@ def _grace_period_section(
         grace_minutes = max(1, manual_grace_seconds // 60)
         grace_desc = f"{grace_minutes} minute" if grace_minutes == 1 else f"{grace_minutes} minutes"
         return [
-            f"One heads-up for this morning: you manually turned the HVAC back on"
+            f"One heads-up: you manually turned the HVAC back on"
             f" earlier, so I'm in a {grace_desc} hands-off window right now. During"
             f" that window, opening a door or window won't trigger a pause \u2014 I'm"
             f" giving you space to settle in without the system jumping in. Once the"

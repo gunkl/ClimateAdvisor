@@ -4621,8 +4621,50 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             return
 
-        on_states = {"on"}
-        is_on = new_state.state in on_states
+        # Issue #787: `unavailable` on this entity can reflect a transient connectivity/API
+        # dropout (e.g. an ESPHome encryption-handshake hiccup between Home Assistant and the
+        # device) rather than a real physical change. The sibling remote listener
+        # (_async_fan_remote_changed, Issue #495) already guards `unavailable` for the same
+        # physical device family; this listener never had the equivalent treatment, so a brief
+        # connectivity blip was misread as a manual override (going unavailable->on) followed
+        # immediately by a manual cancel (on->unavailable), each starting its own bogus grace
+        # period. Cross-check the ground-truth fan_state_entity (when fan_state_feedback is
+        # enabled) before trusting either direction of an `unavailable` transition.
+        if new_state.state == "unavailable" or old_state.state == "unavailable":
+            ground_truth_on = self._get_fan_physical_state()
+            if ground_truth_on is not None:
+                # Use the ground-truth reading in place of the (possibly bogus) raw
+                # entity state for the dispatch decision below. The existing dispatch
+                # conditions already produce "no dispatch" whenever this matches what
+                # CA currently believes (_fan_active) — no separate early-return needed
+                # here, and none should be added: an `unavailable->on` recovery must
+                # still correctly dispatch handle_fan_manual_override() if ground truth
+                # shows a real state CA doesn't already expect (e.g. a genuine override
+                # that happens to coincide with a connectivity blip).
+                _LOGGER.info(
+                    "Fan entity availability blip (%s -> %s) — using ground truth"
+                    " (fan_state_entity) instead of the raw transition: physically %s",
+                    old_state.state,
+                    new_state.state,
+                    "on" if ground_truth_on else "off",
+                )
+                is_on = ground_truth_on
+            else:
+                # No ground-truth fan_state_entity configured (Type-1 install) — there is no
+                # way to confidently distinguish a connectivity blip from a real physical
+                # change here. Do not dispatch a manual override/cancel off an `unavailable`
+                # transition with no corroborating signal; a debounce-based mitigation for
+                # this case is tracked as a follow-up (see Issue #787).
+                _LOGGER.warning(
+                    "Fan entity unavailable transition (%s -> %s) with no fan_state_entity"
+                    " configured — cannot confirm this is a real change; skipping"
+                    " override/cancel classification",
+                    old_state.state,
+                    new_state.state,
+                )
+                return
+        else:
+            is_on = new_state.state in {"on"}
 
         # Skip if fan override is already active AND this is not the fan turning off — the
         # display refresh already happened unconditionally above (Issue #510); an "on"

@@ -289,6 +289,149 @@ class TestWHFDualEntity:
 
 
 # ---------------------------------------------------------------------------
+# TestUnavailableBlipGroundTruthCheck (Issue #787)
+# ---------------------------------------------------------------------------
+
+
+class TestUnavailableBlipGroundTruthCheck:
+    """Issue #787: a fan_entity `unavailable` blip (e.g. an ESPHome connectivity
+    dropout) must not be dispatched as a manual override/cancel when the
+    ground-truth fan_state_entity shows no real corresponding change."""
+
+    def test_on_to_unavailable_with_ground_truth_still_on_suppresses_cancel(self):
+        """Reproduces the 03:01/03:06 incident: fan_entity blips on->unavailable while
+        the ground-truth power sensor shows the fan was never actually off."""
+        config = {
+            CONF_FAN_ENTITY: "fan.basement_quietcool_transmitter_quietcool_whole_house_fan",
+            CONF_FAN_STATE_ENTITY: "input_boolean.quietcool_detectpower",
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        coord = _make_coord_stub(config)
+        coord._get_fan_physical_state = MagicMock(return_value=True)  # ground truth: still on
+        ae = coord.automation_engine
+        ae._fan_active = True  # CA already believes the fan is on (it never stopped)
+        ae._fan_override_active = False
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("on")
+        new_state = _make_fake_state("unavailable")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        ae.on_fan_turned_off.assert_not_called()
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_unavailable_to_on_with_ground_truth_still_on_suppresses_override(self):
+        """The recovery half of the same blip: unavailable->on must not be read as a
+        fresh manual override when ground truth confirms nothing changed."""
+        config = {
+            CONF_FAN_ENTITY: "fan.basement_quietcool_transmitter_quietcool_whole_house_fan",
+            CONF_FAN_STATE_ENTITY: "input_boolean.quietcool_detectpower",
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        coord = _make_coord_stub(config)
+        coord._get_fan_physical_state = MagicMock(return_value=True)  # ground truth: still on
+        ae = coord.automation_engine
+        ae._fan_active = True
+        ae._fan_override_active = False
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("unavailable")
+        new_state = _make_fake_state("on")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        ae.handle_fan_manual_override.assert_not_called()
+        ae.on_fan_turned_off.assert_not_called()
+
+    def test_unavailable_to_on_with_ground_truth_confirming_real_override_still_dispatches(self):
+        """A genuine override that happens to coincide with recovery from `unavailable`
+        must still be detected: ground truth confirms physically on while CA expected
+        the fan off."""
+        config = {
+            CONF_FAN_ENTITY: "fan.basement_quietcool_transmitter_quietcool_whole_house_fan",
+            CONF_FAN_STATE_ENTITY: "input_boolean.quietcool_detectpower",
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        coord = _make_coord_stub(config)
+        coord._get_fan_physical_state = MagicMock(return_value=True)  # ground truth: on
+        ae = coord.automation_engine
+        ae._fan_active = False  # CA believes the fan is off
+        ae._fan_override_active = False
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("unavailable")
+        new_state = _make_fake_state("on")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        ae.handle_fan_manual_override.assert_called_once()
+        ae.on_fan_turned_off.assert_not_called()
+
+    def test_on_to_unavailable_with_ground_truth_off_dispatches_real_cancel(self):
+        """Ground truth confirms a real off during the unavailable transition — this must
+        still be dispatched as a real cancel, not suppressed."""
+        config = {
+            CONF_FAN_ENTITY: "fan.basement_quietcool_transmitter_quietcool_whole_house_fan",
+            CONF_FAN_STATE_ENTITY: "input_boolean.quietcool_detectpower",
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        coord = _make_coord_stub(config)
+        coord._get_fan_physical_state = MagicMock(return_value=False)  # ground truth: off
+        ae = coord.automation_engine
+        ae._fan_active = True
+        ae._fan_override_active = False
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("on")
+        new_state = _make_fake_state("unavailable")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        ae.on_fan_turned_off.assert_called_once()
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_unavailable_transition_with_no_ground_truth_skips_classification(self):
+        """Type-1 install (no fan_state_entity configured): an `unavailable` transition
+        cannot be confidently classified — must not dispatch override/cancel."""
+        config = {CONF_FAN_ENTITY: "fan.whole_house"}  # no CONF_FAN_STATE_ENTITY, feedback off
+        coord = _make_coord_stub(config)
+        coord._get_fan_physical_state = MagicMock(return_value=None)  # command-only mode
+        ae = coord.automation_engine
+        ae._fan_active = True
+        ae._fan_override_active = False
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("on")
+        new_state = _make_fake_state("unavailable")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        ae.on_fan_turned_off.assert_not_called()
+        ae.handle_fan_manual_override.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # TestComputeFanStatusWHF
 # ---------------------------------------------------------------------------
 

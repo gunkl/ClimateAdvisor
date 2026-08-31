@@ -2273,8 +2273,6 @@ class TestOptionsFlowScheduler:
         submitted name/start/end preserved, not reverted to blank/pre-edit defaults.
         Before the fix, `defaults = existing or {}` ignored `user_input` entirely on
         the error-redisplay path, silently wiping every field the user just typed."""
-        from homeassistant.helpers import selector as ha_selector
-
         entry_data = dict(FULL_CONFIG)
         entry_data["schedules"] = []
         flow, captured = _make_options_flow(entry_data)
@@ -2285,29 +2283,34 @@ class TestOptionsFlowScheduler:
                 _schedule_fields(name="My Custom Name", start="17:30:00", end="19:45:00", days=[])
             )
 
-        # selector.TextSelector()/TimeSelector() etc. are MagicMock instances in this
-        # test environment — calling one (as voluptuous does when validating a
-        # present-but-defaulted value) returns a fresh, non-idempotent mock rather
-        # than passing the value through. Patch them to real pass-through callables
-        # for this test only, so `data_schema({})` — voluptuous's own, authoritative
-        # notion of "what defaults does this schema fill in" — can be used directly
-        # instead of this test independently reimplementing marker/schema
-        # introspection (which is what actually broke: see git history/PR discussion
-        # for the prior flaky version of this test).
-        with (
-            patch.object(ha_selector, "TextSelector", lambda *a, **k: str),
-            patch.object(ha_selector, "TimeSelector", lambda *a, **k: str),
-        ):
+        # Whether `voluptuous`/`vol.Schema` are the real library or mocked varies by
+        # test environment (confirmed: this test flaked in CI specifically because
+        # `vol.Schema` was NOT the real class there, while it is in some local dev
+        # setups) — so assert on what `config_flow.py` actually PASSES to
+        # `vol.Required(...)` when building the redisplay schema, not on behavior of
+        # the resulting Schema object, which depends on whether voluptuous is real.
+        # Mirrors this file's existing `selector.SelectSelectorConfig.call_args_list`
+        # spy pattern (see `test_days_selector_dropdown_mode_...` above), which is
+        # already proven stable in CI.
+        import voluptuous as vol
+
+        real_required = vol.Required
+        captured_defaults: dict[str, object] = {}
+
+        def _spy_required(key, *args, **kwargs):
+            if "default" in kwargs:
+                captured_defaults[key] = kwargs["default"]() if callable(kwargs["default"]) else kwargs["default"]
+            return real_required(key, *args, **kwargs)
+
+        with patch("custom_components.climate_advisor.config_flow.vol.Required", new=_spy_required):
             result = asyncio.run(_drive())
 
         assert result["type"] == "form"
         assert result["errors"] == {"days": "schedule_days_required"}
         assert "data" not in captured  # nothing was committed
-
-        schema_defaults = result["data_schema"]({})
-        assert schema_defaults["name"] == "My Custom Name"
-        assert schema_defaults["start"] == "17:30:00"
-        assert schema_defaults["end"] == "19:45:00"
+        assert captured_defaults["name"] == "My Custom Name"
+        assert captured_defaults["start"] == "17:30:00"
+        assert captured_defaults["end"] == "19:45:00"
 
     def test_scheduler_edit_cost_tag_always_persists_as_high(self):
         """The cost_tag selector no longer exists in the schema (Fix 5) — every

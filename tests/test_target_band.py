@@ -340,3 +340,59 @@ class TestComputeBedtimeSetbackIntegration:
         assert entry["lower"] == 66.0, (
             f"Without thermal_model: expected lower=66.0 (config default), got {entry['lower']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TOU pre-conditioning override (Issue #786)
+# ---------------------------------------------------------------------------
+class TestTouPreconditionWindow:
+    """tou_precondition_window overrides lower/upper during the pre-conditioning lead
+    time — the additive-override-layer mechanism, same shape as pre_cool_target."""
+
+    def test_cool_mode_overrides_lower_inside_window(self):
+        """mode="cool" (banking toward the floor) overrides lower; upper is untouched."""
+        ts_awake = _ts(12)  # noon — normally comfort band [70, 75]
+        window = (_ts(11), _ts(13), 64.0, "cool")
+        result = _compute_target_band_schedule([ts_awake], _BASE_CONFIG, "home", _NOW, tou_precondition_window=window)
+        assert result[0]["lower"] == 64.0
+        assert result[0]["upper"] == 75.0
+
+    def test_heat_mode_overrides_upper_inside_window(self):
+        """mode="heat" (banking toward the ceiling) overrides upper; lower is untouched."""
+        ts_awake = _ts(12)
+        window = (_ts(11), _ts(13), 79.0, "heat")
+        result = _compute_target_band_schedule([ts_awake], _BASE_CONFIG, "home", _NOW, tou_precondition_window=window)
+        assert result[0]["lower"] == 70.0
+        assert result[0]["upper"] == 79.0
+
+    def test_no_override_outside_window(self):
+        """A timestamp outside [window_start, window_end) is unaffected."""
+        ts_outside = _ts(15)
+        window = (_ts(11), _ts(13), 64.0, "cool")
+        result = _compute_target_band_schedule([ts_outside], _BASE_CONFIG, "home", _NOW, tou_precondition_window=window)
+        assert result[0]["lower"] == 70.0
+        assert result[0]["upper"] == 75.0
+
+    def test_window_end_is_exclusive(self):
+        """A timestamp exactly at window_end is NOT overridden (half-open interval,
+        matching resolve_tou_phase()'s own [start, end) convention)."""
+        window_end = _ts(13)
+        window = (_ts(11), window_end, 64.0, "cool")
+        result = _compute_target_band_schedule([window_end], _BASE_CONFIG, "home", _NOW, tou_precondition_window=window)
+        assert result[0]["lower"] == 70.0
+
+    def test_overrides_sleep_band_too(self):
+        """The override applies regardless of which base-band branch computed the value —
+        here overriding during a sleep-window timestamp, not just the awake comfort band."""
+        ts_sleep = _ts(2)
+        window = (_ts(1), _ts(3), 62.0, "cool")
+        result = _compute_target_band_schedule([ts_sleep], _BASE_CONFIG, "home", _NOW, tou_precondition_window=window)
+        assert result[0]["lower"] == 62.0
+
+    def test_none_window_is_a_no_op(self):
+        """Omitting tou_precondition_window (the default) must produce identical output to
+        not passing it at all — no accidental behavior change for every existing caller."""
+        ts_awake = _ts(12)
+        with_none = _compute_target_band_schedule([ts_awake], _BASE_CONFIG, "home", _NOW, tou_precondition_window=None)
+        without_param = _compute_target_band_schedule([ts_awake], _BASE_CONFIG, "home", _NOW)
+        assert with_none == without_param

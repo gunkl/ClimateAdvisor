@@ -86,6 +86,16 @@ def _resolve_comfort_heat(inputs: NatVentGateInputs) -> float:
     return resolve_comfort_heat(inputs.comfort_heat_raw, inputs.sleep_heat, inputs.in_sleep_window)
 
 
+def resolve_comfort_cool(comfort_cool_raw: float, sleep_cool: float, in_sleep_window: bool) -> float:
+    """Cool-side counterpart to :func:`resolve_comfort_heat` (Issue #786).
+
+    Standalone for the same reason: callers that only need the comfort-ceiling resolution
+    (e.g. the TOU scheduler's pre-conditioning heat-banking target) can use it without
+    constructing a NatVentGateInputs.
+    """
+    return sleep_cool if in_sleep_window else comfort_cool_raw
+
+
 def _resolve_ceiling_threshold(inputs: NatVentGateInputs) -> float | None:
     """Pure reimplementation of _ceiling_threshold()."""
     if inputs.fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):

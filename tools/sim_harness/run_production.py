@@ -588,6 +588,15 @@ def _dispatch_event(
             # weather), silently blocking setpoint-only override detection.
             coordinator._ensure_today_record(classification)
         run_coro(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
+        # Issue #786: TOU scheduler — mirrors real production's per-cycle sequence
+        # (coordinator.py's _async_update_data_impl(): apply_classification() then
+        # _resolve_tou_schedule_state() then _apply_tou_schedule()). Purely additive: every
+        # existing scenario has no "schedules" key in its config, and
+        # _resolve_tou_schedule_state() no-ops immediately when config.get("schedules") is
+        # empty — so this changes nothing for any scenario that doesn't opt in.
+        if coordinator is not None:
+            coordinator._resolve_tou_schedule_state()
+            run_coro(coordinator._apply_tou_schedule())
 
     elif etype == "occupancy_away":
         engine.set_occupancy_mode("away")

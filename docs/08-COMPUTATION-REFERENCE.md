@@ -2757,6 +2757,7 @@ This logic table MUST be kept current for any changes to automation behavior.
 | All×E9 (last-wins refresh; grace expiry clears override and resumes) | test_fan_remote.py | TestLastWinsRefresh, TestGraceExpiryResumes |
 | All×E8/E9 (RF timer does not survive restart — clean-slate) | test_fan_remote.py | TestRestartCleanSlate |
 | All×E9 (coordinator dispatch: event → shared `handle_fan_manual_override()`) | test_fan_remote.py | TestCoordinatorFanRemoteDispatch |
+| Any C×any E, during a configured `cost_period` schedule's lead-time window (TOU scheduler, Issue #786 — orthogonal to day classification, not a new C/E code) | test_scheduler.py, test_tou_precondition.py, test_target_band.py, test_status_sensors.py, tools/simulations/pending/issue_786_*.json | Pre-conditions toward the comfort-band floor/ceiling (whichever `resolve_comfort_heat()`/`resolve_comfort_cool()` resolves) ahead of a scheduled `cost_tag="high"` window; zero new "coast" code once the window starts — see [TOU Scheduler Spec](scheduler-spec.md) |
 
 ---
 

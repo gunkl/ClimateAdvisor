@@ -321,6 +321,18 @@ def _map_event_to_outcome(
     if event_type == "comfort_band_applied":
         return None  # handled via check_assertion custom types only
 
+    # --- TOU scheduler pre-conditioning (Issue #786) ---
+    # apply_tou_precondition() emits this after banking toward the resolved TOU target.
+    # Same reasoning as comfort_band_applied directly above: intentionally NOT mapped to
+    # a decisions-list outcome (would break every pre-existing golden assertion keyed to
+    # a timestamp this event also fires at, since it can co-occur with normal 30-min
+    # classification cycles). Handled ONLY via the "tou_precondition_applied" check_assertion
+    # custom type below. §8 justification: purely additive — brand-new event type, brand-new
+    # assertion type, no existing scenario uses either string, so this cannot silently pass
+    # a real regression predating this event's existence.
+    if event_type == "tou_precondition_applied":
+        return None  # handled via check_assertion custom types only
+
     # --- Natural ventilation exit events ---
     if event_type == "nat_vent_comfort_floor_exit":
         return ProductionDecision(ts_str, event_type, "nat_vent_comfort_floor_exit")
@@ -759,6 +771,51 @@ def check_assertion(
             got_ceil is not None and abs(float(got_ceil) - float(expected_ceiling)) < _tol
         )
         return expect if (floor_ok and ceil_ok) else False
+
+    # --- tou_precondition_applied (Issue #786) ---
+    # Asserts the most recent tou_precondition_applied event at or before the assertion
+    # time matches the given schedule_id/target/mode (any subset — omitted keys are not
+    # checked). Reads from event_log directly, same shape as expect_band above.
+    if expect == "tou_precondition_applied":
+        spec = assertion.get("tou_precondition", {})
+        expected_schedule_id = spec.get("schedule_id")
+        expected_target = spec.get("target")
+        expected_mode = spec.get("mode")
+        at_str = assertion["at"]
+        last_payload: dict | None = None
+        last_ts: str = ""
+        for ev_type, ev_payload, ev_ts in result.event_log:
+            if ev_type != "tou_precondition_applied" or ev_ts is None:
+                continue
+            ts_naive = _naive_iso(ev_ts)
+            if ts_naive <= at_str and ts_naive >= last_ts:
+                last_payload = ev_payload
+                last_ts = ts_naive
+        if last_payload is None:
+            return False
+        schedule_ok = expected_schedule_id is None or last_payload.get("schedule_id") == expected_schedule_id
+        mode_ok = expected_mode is None or last_payload.get("mode") == expected_mode
+        got_target = last_payload.get("target")
+        target_ok = expected_target is None or (
+            got_target is not None and abs(float(got_target) - float(expected_target)) < 0.01
+        )
+        return expect if (schedule_ok and mode_ok and target_ok) else False
+
+    # --- tou_precondition_not_applied (Issue #786 Fix 1 regression guard) ---
+    # Verifies the GUARANTEE that no tou_precondition_applied event was emitted at or
+    # before the assertion time. Mirrors override_not_detected's full-event-log-scan
+    # shape directly below: a positive assertion (tou_precondition_applied, above)
+    # already existed for "the write happened"; this is its absence counterpart for
+    # "the write was correctly deferred" — needed because apply_tou_precondition() now
+    # gates on decide_scheduled_band_gate() (manual override / paused door / nat-vent),
+    # and a scenario proving that gate closes the write must be able to assert the
+    # event never fired, not just that some other event fired instead.
+    if expect == "tou_precondition_not_applied":
+        at_str = assertion["at"]
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if ev_type == "tou_precondition_applied" and ev_ts is not None and _naive_iso(ev_ts) <= at_str:
+                return False
+        return "tou_precondition_not_applied"
 
     # --- nat_vent_fan_preserved (Issue #236 C) ---
     # Legacy emits a distinct "nat_vent_fan_preserved" outcome; production keeps

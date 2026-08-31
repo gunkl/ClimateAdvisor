@@ -442,14 +442,11 @@ calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERE
 
 ### Warm-Day Classification Behavior
 
-**Decision**: On a warm day (forecast high ≥ 75°F), the classifier sets `hvac_mode = "off"` in the `DayClassification`. The automation engine applies a comfort-floor guard before executing the shutoff.
+**Decision (P3, Issue #249 — supersedes the pre-P3 "off + comfort-floor guard" design below)**: On a warm day, the automation engine unconditionally arms a **persistent comfort band** `[comfort_heat, comfort_cool]` via `select_comfort_band()`/`_apply_comfort_band()` — there is no `hvac_mode = "off"` branch left for the occupied/awake case, and no separate comfort-floor pre-check runs before it. `_apply_comfort_band()` issues one `set_temperature` call per cycle with the day's active edge (ceiling on a warm/hot day); a real thermostat only acts once indoor crosses that edge, so the floor setpoint (`comfort_heat`) provides the cold-floor backstop **implicitly**, without a dedicated guard branch. See `test_warm_day_comfort_gap.py`'s module docstring and `docs/scheduler-spec.md`'s [Coast Phase](scheduler-spec.md#coast-phase--confirmed-not-assumed) section (Issue #786) for the same threshold-command mechanism verified independently for a different feature.
 
-**Guard logic** (`automation.py` `apply_classification()`):
-- If `current_indoor_temp < comfort_heat`: heat to `comfort_heat` first; emit `warm_day_comfort_gap` event; do NOT set HVAC off yet
-- If `current_indoor_temp >= comfort_heat` (or temp unavailable): set HVAC off as normal
-- `apply_classification()` is called every 30 min — once indoor reaches the comfort floor, the guard stops firing and HVAC goes off naturally
+**Stale — do not follow (pre-P3, kept only so this correction is legible against what it replaces)**: an older design had the classifier set `hvac_mode = "off"` directly, guarded by "if `current_indoor_temp < comfort_heat`: heat to `comfort_heat` first, emit `warm_day_comfort_gap`, don't set off yet." **Neither the `hvac_mode = "off"` branch nor the `warm_day_comfort_gap` event exist in current code** — confirmed via source read and grep (zero emit sites) during Issue #786's design work, 2026-08-30. `warm_day_comfort_gap` survives only as a legacy log-classification entry in `ai_skills_context.py` for interpreting old persisted event logs, not as something production ever emits today. If you find yourself about to write code that checks for a `warm_day_comfort_gap` event or an `hvac_mode == "off"` warm-day branch, stop — you are working from this stale description, not current behavior.
 
-**Why**: Without this guard, warm-day shutoffs can leave the home 2–3°F below the comfort floor all morning, accumulating comfort violations and driving `comfort_score` toward 0.
+**Why (still accurate)**: without a floor backstop of some kind, warm-day shutoffs could leave the home 2–3°F below the comfort floor all morning, accumulating comfort violations and driving `comfort_score` toward 0. P3 achieves the same outcome via the band's own floor setpoint rather than a dedicated pre-check.
 
 **Compliance display in investigator**: `window_rec=` in daily records shows `opened/not-opened/n/a` based on whether windows were recommended and whether they were physically opened. A `?` value is always wrong — it means a field named `window_compliance` was read, which does not exist in `DailyRecord`.
 

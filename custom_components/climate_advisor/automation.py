@@ -186,6 +186,7 @@ from .temperature import (
     from_fahrenheit,
     to_fahrenheit,
 )
+from .thermal_lead_time import compute_lead_minutes_from_rate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2828,7 +2829,14 @@ class AutomationEngine:
         finally:
             self._hvac_command_pending = False
 
-    async def _set_temperature(self, temperature: float, *, reason: str, mode: str = "cool") -> None:
+    async def _set_temperature(
+        self,
+        temperature: float,
+        *,
+        reason: str,
+        mode: str = "cool",
+        skip_setpoint_sanity_check: bool = False,
+    ) -> None:
         """Set the thermostat target temperature with hvac_mode in a single call.
 
         Args:
@@ -2838,6 +2846,14 @@ class AutomationEngine:
                 ``hvac_mode`` in the service call so the thermostat is always in the
                 correct mode and HA deduplication is bypassed (the mode key makes
                 every call distinct even when temperature hasn't changed).
+            skip_setpoint_sanity_check: Issue #786 post-implementation audit, Fix 3.
+                When True, skips the comfort_heat/comfort_cool sanity bounds check
+                below. Only the TOU pre-conditioning call site
+                (``apply_tou_precondition()``) passes True — by design it intentionally
+                banks a cool-mode setpoint down toward (or below) ``comfort_heat`` (e.g.
+                a sleep_heat-derived target), which is not a bug for that call path.
+                Every other caller (``_apply_comfort_band()`` and all its other callers)
+                keeps the default False and still gets the full sanity check.
         """
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every call site.
@@ -2873,8 +2889,14 @@ class AutomationEngine:
                 self.role,
             )
             return
-        # Check setpoint is appropriate for commanded mode
-        if mode == "cool" and temperature < (self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT) - 1.0):
+        # Check setpoint is appropriate for commanded mode. Skipped for intentional
+        # target-override writes (Issue #786 post-implementation audit, Fix 3) — TOU
+        # pre-conditioning banks a cool-mode setpoint down toward comfort_heat (or below
+        # it, to a sleep_heat-derived target) by design; that is not the bug this check
+        # exists to catch in normal comfort-band writes.
+        if skip_setpoint_sanity_check:
+            pass
+        elif mode == "cool" and temperature < (self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT) - 1.0):
             _LOGGER.error(
                 "SETPOINT INCONSISTENCY: cool mode but target %.1fF is below comfort_heat threshold",
                 temperature,
@@ -3096,11 +3118,31 @@ class AutomationEngine:
         )
         self._record_action(f"Set temp to {format_temp(temperature, unit)} (mode={mode})", reason)
 
-    async def _set_temperature_for_mode(self, c: DayClassification, *, reason: str) -> None:
+    async def _set_temperature_for_mode(
+        self,
+        c: DayClassification,
+        *,
+        reason: str,
+        target_override: float | None = None,
+        skip_setpoint_sanity_check: bool = False,
+    ) -> None:
         """Set temperature based on the classification and current period.
 
         Safety net: redirects to setback handlers when occupancy is away/vacation
         so that any code path calling this function respects occupancy mode (Issue #85).
+
+        ``target_override`` (Issue #786): use this value instead of
+        ``self.config["comfort_heat"/"comfort_cool"]`` — the TOU scheduler's
+        pre-conditioning banks toward a resolved target that may differ from the plain
+        comfort value (e.g. the sleep-window edge, via ``scheduler.resolve_tou_phase()``).
+        The occupancy safety net above still applies unconditionally regardless.
+
+        ``skip_setpoint_sanity_check`` (Issue #786 post-implementation audit, Fix 3):
+        forwarded to ``_set_temperature()`` unchanged. Only TOU pre-conditioning passes
+        ``True`` — its whole design intentionally banks a cool-mode setpoint down toward
+        (or below) ``comfort_heat`` (e.g. to a sleep_heat-derived target), which the
+        sanity check would otherwise flag as a false ``SETPOINT INCONSISTENCY``. Every
+        other caller keeps the default ``False`` and is unaffected.
         """
         # Issue #85: redirect to setback when not home/guest. Gate unified via
         # should_defer_to_occupancy_setback() (Issue #460); which handler to redirect
@@ -3115,15 +3157,111 @@ class AutomationEngine:
             return
 
         if c.hvac_mode == "heat":
-            floor_target = float(self.config["comfort_heat"])
-            await self._set_temperature(floor_target, reason=reason, mode="heat")
+            floor_target = target_override if target_override is not None else float(self.config["comfort_heat"])
+            await self._set_temperature(
+                floor_target, reason=reason, mode="heat", skip_setpoint_sanity_check=skip_setpoint_sanity_check
+            )
             return
         elif c.hvac_mode == "cool":
-            ceiling_target = float(self.config["comfort_cool"])
-            await self._set_temperature(ceiling_target, reason=reason, mode="cool")
+            ceiling_target = target_override if target_override is not None else float(self.config["comfort_cool"])
+            await self._set_temperature(
+                ceiling_target, reason=reason, mode="cool", skip_setpoint_sanity_check=skip_setpoint_sanity_check
+            )
             return
         else:
             return
+
+    async def apply_tou_precondition(self, classification: DayClassification, target: float, schedule_id: str) -> None:
+        """Drive the setpoint toward the resolved TOU banking target ahead of a scheduled
+        high-cost window (Issue #786).
+
+        Routes through ``_set_temperature_for_mode()`` for the Issue #85 occupancy safety
+        net. ``mode`` is not passed explicitly — ``classification.hvac_mode`` already
+        matches the day's anticipated HVAC need, which is also the direction
+        ``scheduler.resolve_tou_phase()`` banks in (see its docstring): pre-*cool* on a
+        cooling day, pre-*heat* on a heating day.
+
+        Defers (no HVAC command) via the same shared gate ``handle_bedtime()``/
+        ``handle_morning_wakeup()``/``handle_pre_cool()`` already use
+        (``desired_state.decide_scheduled_band_gate()``) — a manual override, a paused
+        door/window, or an active nat-vent/WHF session all take precedence over TOU
+        banking, exactly as they do for every other scheduled-trigger action. This
+        replaced a bespoke door/window-only check that mirrored only
+        ``_apply_comfort_band()``'s own guard and never checked override/paused state at
+        all (Issue #786 post-implementation audit, Fix 1) — silently overwriting a
+        protected manual override was the confirmed bug. ``DEFER_OCCUPANCY`` and
+        ``PROCEED`` both fall through unchanged to ``_set_temperature_for_mode()`` below,
+        whose existing Issue #85 occupancy safety net already redirects
+        ``DEFER_OCCUPANCY`` correctly — a second redirect here would duplicate that
+        logic.
+        """
+        # Issue #786 post-implementation audit, Fix 2: `decide_scheduled_band_gate()`
+        # only sees `_manual_override_active`, which is set only after the confirm
+        # window (`DEFAULT_OVERRIDE_CONFIRM_SECONDS`) elapses via
+        # `_confirm_override_action()`. During that window `_override_confirm_pending`
+        # is True but `_manual_override_active` is still False, so the gate above would
+        # pass through and let TOU banking overwrite a not-yet-confirmed manual change.
+        # `apply_classification()` guards this exact window separately (see its own
+        # `_override_confirm_pending` check above) — mirror that here.
+        if self._override_confirm_pending:
+            _LOGGER.info(
+                "Override confirmation pending (detected=%s at %s) — skipping TOU pre-conditioning (schedule=%s)",
+                self._override_confirm_mode,
+                self._override_confirm_time,
+                schedule_id,
+            )
+            return
+
+        await self._sync_paused_by_door_with_live_sensors()
+        _gate = decide_scheduled_band_gate(
+            occupancy_mode=self._occupancy_mode,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+        if _gate in (
+            ScheduledBandGate.DEFER_OVERRIDE,
+            ScheduledBandGate.DEFER_PAUSED,
+            ScheduledBandGate.DEFER_NAT_VENT,
+        ):
+            _LOGGER.info(
+                "TOU pre-conditioning skipped this cycle — %s (schedule=%s)",
+                _gate.value,
+                schedule_id,
+            )
+            return
+
+        _LOGGER.info(
+            "TOU pre-conditioning: banking to %.1f°F ahead of schedule %s (mode=%s)",
+            target,
+            schedule_id,
+            classification.hvac_mode,
+        )
+        await self._set_temperature_for_mode(
+            classification,
+            reason=f"tou_precondition schedule={schedule_id}",
+            target_override=target,
+            skip_setpoint_sanity_check=True,
+        )
+
+        # Emit only when the write above actually banked toward `target` — not when
+        # _set_temperature_for_mode() redirected to away/vacation setback (Issue #85),
+        # which would make a "tou_precondition_applied" event misleading. Dedup the
+        # ANNOUNCEMENT only (not the underlying write, which _set_temperature_for_mode()
+        # always issues every cycle this phase is active) — same shape as
+        # _apply_comfort_band()'s own comfort_band_applied dedup.
+        if not should_defer_to_occupancy_setback(self._occupancy_mode):
+            _signature = (schedule_id, classification.hvac_mode, round(target, 2))
+            if self._emit_event_callback and not self._recent_duplicate("tou_precondition_applied", _signature):
+                self._emit_event_callback(
+                    "tou_precondition_applied",
+                    {
+                        "schedule_id": schedule_id,
+                        "target": target,
+                        "mode": classification.hvac_mode,
+                    },
+                )
 
     async def _schedule_pre_condition(self, c: DayClassification) -> None:
         """Schedule pre-heating or pre-cooling based on trend.
@@ -3173,13 +3311,16 @@ class AutomationEngine:
                 default_min,
                 safety,
             )
-            _adaptive_preheat_active = False
-            if confidence == "none" or heating_rate is None or heating_rate <= 0:
-                minutes_needed = max(min_min, min(max_min, default_min))
-            else:
-                minutes_needed = (temp_rise / heating_rate) * 60.0 * safety
-                minutes_needed = max(min_min, min(max_min, minutes_needed))
-                _adaptive_preheat_active = True
+            _rate_usable = heating_rate if (confidence != "none" and heating_rate and heating_rate > 0) else None
+            minutes_needed = compute_lead_minutes_from_rate(
+                delta_t=temp_rise,
+                rate=_rate_usable,
+                min_minutes=min_min,
+                max_minutes=max_min,
+                safety_multiplier=safety,
+                fallback_minutes=max(min_min, min(max_min, default_min)),
+            )
+            _adaptive_preheat_active = _rate_usable is not None
 
             # Compute preheat start time relative to sleep_time
             sleep_str = self.config.get("sleep_time", "22:30")

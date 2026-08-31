@@ -142,6 +142,7 @@
           "sensors": "Sensors & Fan",
           "occupancy": "Occupancy",
           "schedule": "Schedule",
+          "scheduler": "Scheduler",
           "notifications": "Notifications",
           "advanced": "Learning & Behavior",
           "classification_thresholds": "Day-Type Thresholds",
@@ -265,6 +266,25 @@
           "briefing_time": "When to deliver the daily climate briefing notification with the day's forecast and HVAC plan."
         }
       },
+      "scheduler": {
+        "title": "TOU Scheduler",
+        "description": "Define up to {max} time-of-use cost schedules ({count} currently defined). Climate Advisor automatically pre-cools or pre-heats before a High-cost period using your existing comfort range and learned response rate — there are no temperatures to set here.",
+        "data": {
+          "manage": "Manage schedule"
+        }
+      },
+      "scheduler_edit": {
+        "title": "Schedule",
+        "description": "No temperature fields — Climate Advisor banks toward your existing comfort range automatically before a High-cost window.",
+        "data": {
+          "name": "Name",
+          "days": "Days",
+          "start": "Starts",
+          "end": "Ends",
+          "cost_tag": "Cost",
+          "delete_schedule": "Delete this schedule"
+        }
+      },
       "notifications": {
         "title": "Notification Preferences",
         "description": "Choose which notifications you receive and on which channels. Push notifications go to your mobile app; email notifications go via the send_email service.",
@@ -382,6 +402,8 @@
     },
     "error": {
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
+      "schedule_days_required": "Select at least one day",
+      "schedule_start_end_equal": "Start and end time must be different",
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
       "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
       "preheat_min_exceeds_max": "Minimum pre-heat time must not exceed maximum pre-heat time",

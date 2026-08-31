@@ -45,6 +45,7 @@ You are helping David build, iterate on, and improve **Climate Advisor**, a cust
 | What are the harness modules — FakeHass, FakeScheduler, build_engine, run_production, outcomes — and how do they fit together? | FakeHass intercepts service calls → action_log; FakeScheduler is a virtual clock priority queue; build_engine assembles the headless engine; run_production dispatches scenario events; outcomes maps event_log to legacy assertion vocab. | [Sim Harness Spec](sim-harness-spec.md) |
 | hacs-compliance | HACS compliance requirements, manifest fields, review process, maintenance rules | [docs/hacs-compliance.md](hacs-compliance.md) |
 | How does CA hear a QuietCool RF wall remote timer/speed selection, and what does it do? | Optional `fan_remote_entity` integrates RF timer presses and speed changes as fan override events. See [Fan Remote Spec](fan-remote-spec.md) for details (Issue #486). | [Fan Remote Spec](fan-remote-spec.md) |
+| How does the TOU (time-of-use) scheduler pre-cool/pre-heat before a scheduled high-cost period, and why are there no temperature settings for it? | Up to 5 `cost_period` schedules (day-of-week, start/end, `high`/`low` cost tag — no temperature field). Pre-conditioning banks toward the home's own existing comfort-band edge (or sleep-window edge) automatically, using the learned thermal rate; "coast" afterward needs zero new code since `_apply_comfort_band()` is already a threshold command. Issue #786. | [TOU Scheduler Spec](scheduler-spec.md) |
 
 ## Context
 

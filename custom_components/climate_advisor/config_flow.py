@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from typing import Any
 
 import voluptuous as vol
@@ -101,6 +102,7 @@ from .const import (
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_WEATHER_SERVICE,
 )
+from .scheduler import ALL_DAYS, COST_TAG_HIGH, COST_TAG_LOW, MAX_SCHEDULES, WEEKDAY_ABBREVS, _parse_hhmm
 from .temperature import CELSIUS, FAHRENHEIT, from_fahrenheit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
@@ -137,6 +139,7 @@ OPTIONS_MENU_OPTIONS = [
     "sensors",
     "occupancy",
     "schedule",
+    "scheduler",
     "notifications",
     "advanced",
     "classification_thresholds",
@@ -596,6 +599,9 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         # submitted input). Applied as deletions in _commit_section() so
         # optional entity fields can actually be emptied (Issue #434).
         self._removed: set[str] = set()
+        # Which schedule (by id) async_step_scheduler_edit() is editing, set by
+        # async_step_scheduler() before navigating in; None means "add new" (Issue #786).
+        self._editing_schedule_id: str | None = None
 
     def _apply_step_input(self, user_input: dict[str, Any], clearable_keys: tuple[str, ...]) -> None:
         """Merge a step's input; treat any omitted clearable optional-entity key as an explicit clear.
@@ -1126,6 +1132,122 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): _time_selector,
                 }
             ),
+        )
+
+    # ---- Scheduler: TOU cost-period schedules (Issue #786) ----
+    #
+    # No temperature fields anywhere in this section — pre-conditioning banks toward the
+    # home's own existing comfort-band edge automatically, using its learned thermal
+    # response rate, rather than asking the user to configure a target. See
+    # scheduler.py's module docstring and docs/scheduler-spec.md for the full design.
+
+    @staticmethod
+    def _format_schedule_summary(schedule: dict[str, Any]) -> str:
+        """One-line summary for the scheduler list step's option labels."""
+        days = schedule.get("days", [])
+        days_label = "All days" if ALL_DAYS in days else "/".join(d.capitalize() for d in days)
+        tag_label = "High" if schedule.get("cost_tag") == COST_TAG_HIGH else "Low"
+        name = schedule.get("name", "(unnamed)")
+        window = f"{schedule.get('start')}-{schedule.get('end')}"
+        return f"{name} — {days_label} {window} ({tag_label})"
+
+    async def async_step_scheduler(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """List existing TOU cost-period schedules; choose one to edit, or add a new one."""
+        schedules: list[dict[str, Any]] = list(self.config_entry.data.get("schedules", []))
+
+        if user_input is not None:
+            selection = user_input["manage"]
+            self._editing_schedule_id = None if selection == "__add__" else selection
+            return await self.async_step_scheduler_edit()
+
+        options = [selector.SelectOptionDict(value=s["id"], label=self._format_schedule_summary(s)) for s in schedules]
+        if len(schedules) < MAX_SCHEDULES:
+            options.append(selector.SelectOptionDict(value="__add__", label="+ Add a new schedule"))
+
+        return self.async_show_form(
+            step_id="scheduler",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("manage"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.LIST)
+                    ),
+                }
+            ),
+            description_placeholders={"count": str(len(schedules)), "max": str(MAX_SCHEDULES)},
+        )
+
+    async def async_step_scheduler_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Add, edit, or delete one TOU cost-period schedule."""
+        errors: dict[str, str] = {}
+        schedules: list[dict[str, Any]] = list(self.config_entry.data.get("schedules", []))
+        editing_id = self._editing_schedule_id
+        existing = next((s for s in schedules if s["id"] == editing_id), None) if editing_id else None
+
+        if user_input is not None:
+            if existing is not None and user_input.get("delete_schedule"):
+                schedules = [s for s in schedules if s["id"] != editing_id]
+                await self._commit_section({"schedules": schedules})
+                self._editing_schedule_id = None
+                return await self.async_step_scheduler()
+
+            if not user_input.get("days"):
+                errors["days"] = "schedule_days_required"
+            start_raw = user_input.get("start")
+            end_raw = user_input.get("end")
+            # Compare parsed hour/minute values (seconds ignored), matching
+            # scheduler.py's _parse_hhmm()/is_schedule_active_at() semantics exactly —
+            # otherwise "16:00:00" vs "16:00:30" passes this raw-string check but both
+            # resolve to the identical 16.0-hour boundary, producing the same degenerate
+            # near-24-hour-active window this validation exists to prevent.
+            if start_raw is not None and end_raw is not None and _parse_hhmm(start_raw) == _parse_hhmm(end_raw):
+                errors["end"] = "schedule_start_end_equal"
+            if not errors:
+                new_schedule = {
+                    "id": existing["id"] if existing else uuid.uuid4().hex,
+                    "name": user_input["name"],
+                    "days": list(user_input["days"]),
+                    "start": user_input["start"],
+                    "end": user_input["end"],
+                    "cost_tag": user_input["cost_tag"],
+                }
+                if existing is not None:
+                    schedules = [new_schedule if s["id"] == editing_id else s for s in schedules]
+                elif len(schedules) < MAX_SCHEDULES:
+                    schedules = [*schedules, new_schedule]
+                # else: an add attempted past the cap is silently ignored — defensive
+                # only, since the list step already omits "+ Add" once at MAX_SCHEDULES.
+                await self._commit_section({"schedules": schedules})
+                self._editing_schedule_id = None
+                return await self.async_step_scheduler()
+
+        day_options = [selector.SelectOptionDict(value=d, label=d.capitalize()) for d in WEEKDAY_ABBREVS]
+        day_options.append(selector.SelectOptionDict(value=ALL_DAYS, label="All days"))
+        cost_tag_options = [
+            selector.SelectOptionDict(value=COST_TAG_HIGH, label="High cost"),
+            selector.SelectOptionDict(value=COST_TAG_LOW, label="Low cost"),
+        ]
+        defaults = existing or {}
+
+        schema_dict: dict[Any, Any] = {
+            vol.Required("name", default=defaults.get("name", "")): selector.TextSelector(),
+            vol.Required("days", default=list(defaults.get("days", []))): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=day_options, multiple=True, mode=selector.SelectSelectorMode.LIST)
+            ),
+            vol.Required("start", default=defaults.get("start", "16:00:00")): selector.TimeSelector(),
+            vol.Required("end", default=defaults.get("end", "21:00:00")): selector.TimeSelector(),
+            vol.Required("cost_tag", default=defaults.get("cost_tag", COST_TAG_HIGH)): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=cost_tag_options, mode=selector.SelectSelectorMode.LIST)
+            ),
+        }
+        if existing is not None:
+            schema_dict[vol.Optional("delete_schedule", default=False)] = selector.BooleanSelector()
+
+        return self.async_show_form(
+            step_id="scheduler_edit",
+            data_schema=vol.Schema(schema_dict),
+            errors=errors,
         )
 
     # ---- Notifications (Issue #50) ----

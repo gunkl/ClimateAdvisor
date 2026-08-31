@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.85] — 2026-08-31
+
+- Fix #788: warm-day briefings could tell you to reopen windows "when the evening air cools back down" at 8:00 AM, right after telling you to close them "to hold the heat in" at 7:00 AM — a regression from #535, which made the close sentence aware of why the cutoff happened (outdoor air rising vs. hitting your comfort floor) but never updated the reopen sentence to match. It now uses the same reason-aware wording. Also fixed: the grace-period heads-up after a manual HVAC override said "this morning" even when it could be regenerated and shown on the dashboard or API at any hour of the day.
+
 ## [0.6.84] — 2026-08-30
 
 - No user-visible behavior change. Fix #585: automation.py logged routine, correctly-executed operations (setting the HVAC mode, writing a setpoint, accepting a manual thermostat override, activating/deactivating a fan) at WARNING — a holdover from Issue #37, which promoted them purely so they'd survive Home Assistant's default log level, not because they represented problems. These 19 log lines now log at INFO; WARNING is reserved for actual anomalies, guard-clamped/overridden writes, and safety-guard firings. Diagnostic visibility is unaffected: the dashboard's Activity Record tab and the AI Investigator's Activity Timeline read the automation event log directly, independent of Python log level.

@@ -3,11 +3,11 @@
 Covers:
 - handle_bedtime() returns early when _manual_override_active=True,
   emits bedtime_setback_skipped event, does NOT clear the override
-- handle_bedtime() proceeds, logs WARNING, and clears override
+- handle_bedtime() proceeds, logs (INFO — Issue #585), and clears override
   when _manual_override_active=False
 - handle_morning_wakeup() returns early when _manual_override_active=True,
   emits morning_wakeup_skipped event, does NOT clear the override
-- handle_morning_wakeup() proceeds, logs WARNING, and clears override
+- handle_morning_wakeup() proceeds, logs (INFO — Issue #585), and clears override
   when _manual_override_active=False
 - clear_manual_override(reason=...) includes the reason string in the log
 """
@@ -142,23 +142,22 @@ class TestBedtimeSetbackOverrideGuard:
             f"Expected skip log in: {[r.message for r in caplog.records]}"
         )
 
-    def test_no_override_clears_and_warns(self, caplog):
-        """When _manual_override_active=False, logs WARNING and clears override state."""
+    def test_no_override_clears_and_logs(self, caplog):
+        """When _manual_override_active=False, logs (INFO — Issue #585: routine, not a
+        malfunction) and clears override state."""
         engine = _make_engine()
         engine._occupancy_mode = OCCUPANCY_HOME
         # No active override; set classification so handler can proceed
         engine._current_classification = _make_classification(hvac_mode="heat")
 
         with (
-            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.automation"),
+            caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.automation"),
             patch.object(engine, "_set_temperature", new_callable=AsyncMock),
         ):
             asyncio.run(engine.handle_bedtime())
 
-        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("Bedtime setback: clearing" in m for m in warning_messages), (
-            f"Expected warning log in: {warning_messages}"
-        )
+        info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
+        assert any("Bedtime setback: clearing" in m for m in info_messages), f"Expected info log in: {info_messages}"
         # Override should remain cleared (was already False; cleared state is consistent)
         assert engine._manual_override_active is False
 
@@ -227,22 +226,21 @@ class TestMorningWakeupOverrideGuard:
             f"Expected skip log in: {[r.message for r in caplog.records]}"
         )
 
-    def test_no_override_clears_and_warns(self, caplog):
-        """When _manual_override_active=False, logs WARNING and clears override state."""
+    def test_no_override_clears_and_logs(self, caplog):
+        """When _manual_override_active=False, logs (INFO — Issue #585: routine, not a
+        malfunction) and clears override state."""
         engine = _make_engine()
         engine._occupancy_mode = OCCUPANCY_HOME
         engine._current_classification = _make_classification(hvac_mode="heat")
 
         with (
-            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.automation"),
+            caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.automation"),
             patch.object(engine, "_set_temperature", new_callable=AsyncMock),
         ):
             asyncio.run(engine.handle_morning_wakeup())
 
-        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("Morning wakeup: clearing" in m for m in warning_messages), (
-            f"Expected warning log in: {warning_messages}"
-        )
+        info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
+        assert any("Morning wakeup: clearing" in m for m in info_messages), f"Expected info log in: {info_messages}"
         assert engine._manual_override_active is False
 
     def test_no_override_does_not_emit_skipped_event(self):

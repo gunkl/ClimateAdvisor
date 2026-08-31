@@ -2231,17 +2231,22 @@ Only one pending revisit is active at a time. If `_schedule_revisit()` is called
 
 ## 13. Logging Level
 
-HVAC action log statements use `_LOGGER.warning()` rather than `_LOGGER.info()`. This applies to the following operations:
+**Issue #585 superseded the original #37 rationale below.** Issue #37 promoted routine HVAC-action log statements to `_LOGGER.warning()` purely so they'd survive HA's default (unconfigured) log level for custom components — a visibility hack, not a statement about severity. That conflated "needs to be visible" with "something is wrong." `WARNING` is reserved for an actual anomaly, a value clamped or overridden by a guard, or a safety guard firing that would otherwise leave the HVAC in an unexpected state (see `docs/06-LOGGING-GUIDELINES.md` §Level Semantics, and CLAUDE.md's Observability Requirements). A routine, correctly-executed mode change, setpoint write, classification application, override acceptance, or fan activation is not a malfunction, regardless of how visible operators want it — so as of #585 these all log at `_LOGGER.info()`:
 
-- `_set_hvac_mode()` — mode changes (on, off, cool, heat)
-- `_set_temperature()` — setpoint changes
-- `_record_action()` — action history entries
-- `handle_manual_override()` — override detection and grace period start
-- `apply_classification()` — day classification application
+- `_set_hvac_mode()` — successful mode writes (line ~2807); the guard-blocked branch when WHF owns the thermostat (line ~2772) is a genuine guard override and stays `WARNING`
+- `_set_temperature()` — successful setpoint writes (line ~3090); its guard-blocked branch (line ~2845) likewise stays `WARNING`
+- `_record_action()` — action history bookkeeping
+- `apply_classification()` — day classification application announcement; its door/window-pause `DEFER_PAUSED` branch (a guard suppressing the band) stays `WARNING`
+- `start_override_confirmation()` / `_confirm_override_action()` — override detected/confirmed/activated (the system correctly deferring to the user, not an error)
+- Nat-vent/WHF manual-override conflict stand-downs (3 call sites) — correct conflict resolution
+- Bedtime/morning-wakeup pending-override clearing — routine lifecycle transitions
+- Fan activate/deactivate (WHF and HVAC fan-only), including the RF-remote-timer suppress/force cases (Issues #486/#748) — the mutex/timer logic working as designed is not a malfunction
 
-Home Assistant's default log level for custom components is `warning`. Using `_LOGGER.info()` for these calls would make them invisible in the HA log under default settings, which makes diagnosing automation behavior in production impossible without a config change. Promoting these calls to `warning` means they appear in the log out of the box, without requiring the user to add a `logger:` block to `configuration.yaml`.
+**Still `WARNING`, because these describe an actual anomaly, a guard clamping/overriding a write, or a safety condition:** invalid occupancy mode input; a stale `_fan_override_active` flag being corrected; `_apply_comfort_band()`'s own door/window choke-point guard refusing to arm an active mode; a rejected setpoint write being retried; a nat-vent session force-closed due to an internal flag/sensor mismatch; a pre-cool target clamped to the comfort floor; a pre-cool overshoot below `comfort_heat`; a stale nat-vent FSM decision caught and corrected; a WHF control/physical-state disagreement being forced back into sync; a confirmed physical fan-state drift; a non-numeric sensor state; and `handle_occupancy_away()`'s "no day classification available" skip. Each of these is either malformed/missing input, an internal state inconsistency being corrected, or a guard actively preventing/clamping a write — genuinely warning-worthy, independent of HA's default log-viewer behavior.
 
 Routine diagnostic messages (coordinator polling, entity state reads, skip-due-to-grace-period notices) remain at `_LOGGER.debug()` and are suppressed under normal operation.
+
+**Visibility note:** the AI Investigator's SYSTEM LOG RECORDS block (`log_capture.py`) captures WARNING+ only, so the reclassified lines above no longer appear there — visibility is instead provided by the (deduplicated) Activity Timeline and the dashboard's Activity Record tab, both of which read `coordinator._event_log` directly, independent of Python log level. An install with an existing `logger:` override at info/debug for `custom_components.climate_advisor` sees no change in Settings → System → Logs either way — level is a filter threshold, not a data-loss operation.
 
 ---
 

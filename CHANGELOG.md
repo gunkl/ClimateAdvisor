@@ -3,9 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.6.83] — 2026-08-30
+## [0.6.84] — 2026-08-30
 
 - No user-visible behavior change. Fix #585: automation.py logged routine, correctly-executed operations (setting the HVAC mode, writing a setpoint, accepting a manual thermostat override, activating/deactivating a fan) at WARNING — a holdover from Issue #37, which promoted them purely so they'd survive Home Assistant's default log level, not because they represented problems. These 19 log lines now log at INFO; WARNING is reserved for actual anomalies, guard-clamped/overridden writes, and safety-guard firings. Diagnostic visibility is unaffected: the dashboard's Activity Record tab and the AI Investigator's Activity Timeline read the automation event log directly, independent of Python log level.
+
+## [0.6.83] — 2026-08-30
+
+- Fix #586: the AI Investigator's thermal report could show two observation counts that look like they should match and don't (e.g. an all-time count of 24 next to a "0 committed" figure for the same category), with no explanation. The report now labels these explicitly as different scopes — an all-time cumulative counter vs. a 90-day-windowed, capped count — so a large gap reads as expected, not as lost data. A rejection count sitting exactly at its cap now displays as "100+ (capped)" instead of an exact "100".
 
 ## [0.6.82] — 2026-08-30
 

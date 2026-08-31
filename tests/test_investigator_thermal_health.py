@@ -377,3 +377,81 @@ class TestThermalPipelineSection:
             "Expected pipeline failure signal when hvac_heat/hvac_cool have 0 committed + rejections; "
             f"excerpt: {pipeline_excerpt[:600]}"
         )
+
+
+class TestCumulativeVsWindowedCountScope:
+    """Issue #586: observation_count_heat/cool (all-time cumulative) and committed/rejected
+    (90-day windowed, capped) must never appear unlabeled — a large gap between them looks
+    like a bug/data-loss without an explicit scope note."""
+
+    def test_thermal_model_block_labels_cumulative_counters(self):
+        """LEARNING — THERMAL MODEL must carry a NOTE explaining observation_count_heat/cool
+        are all-time cumulative counters distinct from the pipeline section's committed count."""
+        learning = _make_learning_mock(
+            thermal_model_overrides={"observation_count_heat": 24, "observation_count_cool": 0},
+        )
+        coord = _make_coordinator(learning=learning)
+        hass = _make_hass()
+
+        with patch(
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
+            return_value="",
+        ):
+            ctx = _run(async_build_investigator_context(hass, coord))
+
+        model_start = ctx.find("LEARNING — THERMAL MODEL")
+        assert model_start != -1, "LEARNING — THERMAL MODEL section not found"
+        model_excerpt = ctx[model_start : model_start + 800]
+        assert "NOTE" in model_excerpt and "cumulative" in model_excerpt, (
+            f"Expected a NOTE explaining observation_count_heat/cool are cumulative counters; excerpt: {model_excerpt}"
+        )
+
+    def test_pipeline_section_labels_windowed_committed_count(self):
+        """THERMAL OBSERVATION PIPELINE must carry a scope note distinguishing its windowed/
+        capped committed/rejected counts from the cumulative observation_count_heat/cool."""
+        coord = _make_coordinator()
+        hass = _make_hass()
+
+        with patch(
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
+            return_value="",
+        ):
+            ctx = _run(async_build_investigator_context(hass, coord))
+
+        pipeline_start = ctx.find("THERMAL OBSERVATION PIPELINE")
+        assert pipeline_start != -1, "THERMAL OBSERVATION PIPELINE section not found"
+        pipeline_excerpt = ctx[pipeline_start : pipeline_start + 600]
+        assert "windowed" in pipeline_excerpt and "capped" in pipeline_excerpt, (
+            f"Expected a scope note distinguishing committed/rejected from observation_count_heat/cool; "
+            f"excerpt: {pipeline_excerpt}"
+        )
+
+    def test_rejection_count_at_cap_rendered_as_capped_floor(self):
+        """A per-type rejected count landing exactly on _REJECTION_LOG_CAP (100) is a floor,
+        not an exact measurement — it must render as '100+ (capped)', not a bare '100'."""
+        from custom_components.climate_advisor.coordinator import _REJECTION_LOG_CAP
+
+        health = _make_learning_health(
+            hvac_heat_committed=0,
+            hvac_heat_rejections=_REJECTION_LOG_CAP,
+            hvac_heat_top_reason="too_few_samples",
+        )
+        coord = _make_coordinator()
+        coord._build_learning_health.return_value = health
+        hass = _make_hass()
+
+        with patch(
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
+            return_value="",
+        ):
+            ctx = _run(async_build_investigator_context(hass, coord))
+
+        pipeline_start = ctx.find("THERMAL OBSERVATION PIPELINE")
+        assert pipeline_start != -1, "THERMAL OBSERVATION PIPELINE section not found"
+        pipeline_excerpt = ctx[pipeline_start : pipeline_start + 1500]
+        assert f"{_REJECTION_LOG_CAP}+ (capped)" in pipeline_excerpt, (
+            f"Expected rejected count at cap to render as '{_REJECTION_LOG_CAP}+ (capped)'; excerpt: {pipeline_excerpt}"
+        )
+        assert f"{_REJECTION_LOG_CAP} rejected" not in pipeline_excerpt, (
+            "A capped count must not render as a bare exact number"
+        )

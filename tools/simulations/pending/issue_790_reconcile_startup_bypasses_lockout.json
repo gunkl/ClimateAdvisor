@@ -1,0 +1,74 @@
+{
+  "name": "issue_790_reconcile_startup_bypasses_lockout",
+  "description": "reconcile_fan_on_startup() previously hardcoded paused_by_door=False into the FSM inputs it feeds the reactivation lockout check, for all 4 of its trigger sites (ha_restart, backstop_30min, thermostat_state_change, post_grace_expiry) -- the lockout module's own docstring excused this as safe because the function 'runs at most once per restart/30-min backstop, structurally incapable of sub-minute repeats', which is false for the two event-driven triggers. This scenario drives the real, public reconcile_fan_on_startup() entry point twice in quick succession -- the same method every one of the 4 triggers calls, sharing the exact code this issue fixes -- to prove both halves of the fix together: the first call's turn-off branch must now arm the reactivation lockout (the arm-side gap), and the second call, landing inside that lockout window, must honor it instead of bypassing it via the hardcoded paused_by_door=False (the check-side bug).",
+  "source": "code_audit",
+  "issue": 790,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-08-31T12:59:58",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 80.0,
+      "note": "Baseline temps, unfavorable for nat-vent -- keeps the sensor_open below from accidentally activating nat-vent on its own before the reconcile events run."
+    },
+    {
+      "time": "2026-08-31T12:59:59",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "A monitored window is open -- gives _exit_nat_vent()'s internal live-sensor check (self._any_sensor_open(), independent of the any_sensor_open parameter passed to reconcile_fan_on_startup itself) something real to find, so the first reconcile call's turn-off branch takes the pause path (_paused_by_door=True) rather than the restore-HVAC path."
+    },
+    {
+      "time": "2026-08-31T13:00:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 72.0,
+      "outdoor_f": 80.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": true,
+      "note": "Fan physically running (e.g. thermostat's own blower) but outdoor(80) >= indoor(72) -- decide_nat_vent_gate() clearly fails, nat_vent_eligible=False. Turn-off branch fires: _exit_nat_vent() pauses (a monitored sensor is open) rather than restores -- _paused_by_door=True -- and, since the Issue #790 arm-side fix, now also arms the 300s reactivation lockout (set_outdoor_exit_time=True) the same way every other _exit_nat_vent() call site does. Before that fix, this call site was the one exemption left on the debunked 'runs at most once per restart/30-min backstop' cadence claim, leaving no lockout timer for a subsequent trigger to check."
+    },
+    {
+      "time": "2026-08-31T13:01:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 72.0,
+      "outdoor_f": 65.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": true,
+      "note": "60s later (comfortably inside the 300s default lockout): outdoor has dropped back to a favorable 65F -- decide_nat_vent_gate() would clear again on its own. Pre-fix: the check-side bug hardcoded paused_by_door=False into the FSM inputs regardless of trigger, so this call would re-adopt nat-vent despite the live lockout armed 60s earlier. Post-fix: the real paused_by_door=True is fed through, the FSM lands on PAUSED_REACTIVATION_LOCKOUT, and this call takes its turn-off branch instead -- re-arming the lockout rather than leaving a stale timer for whichever trigger calls next."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-31T13:01:00",
+      "expect": "nat_vent_not_active",
+      "reason": "Occupant framing: without this fix, the fan (whole-house or HVAC fan-only mode) could switch back on within about a minute of having been legitimately shut off for unfavorable outdoor conditions, purely because reconcile_fan_on_startup() -- which every one of its 4 real trigger sites calls, two of them event-driven and able to fire sub-minute -- never checked the live reactivation lockout at all. reconcile_fan_on_startup() must honor the same lockout every other reactivation path already does, not bypass it via a hardcoded paused_by_door=False."
+    },
+    {
+      "at": "2026-08-31T13:01:00",
+      "expect": "paused_by_door",
+      "reason": "The lockout armed by the first call's turn-off branch (the Issue #790 arm-side fix) must still be governing state 60s later -- confirms the suppression is the lockout kicking in, not some unrelated gate failure, and that the arm-side fix actually left a timer for the check-side fix to find."
+    },
+    {
+      "at": "2026-08-31T13:01:00",
+      "expect": "fan_not_active",
+      "reason": "The fan must stay physically off at this tick -- before the fix, reconcile would have re-commanded it on via the check-side bypass despite the live lockout."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "reconcile_fan_on_startup() now arms the reactivation lockout on its own turn-off branch and honors a live lockout on its adopt-on gate, closing both the check-side and arm-side gaps Issue #790 found in the one method all 4 of its trigger sites share."
+  },
+  "notes": [
+    "Uses the harness's reconcile_fan_on_startup event type (tools/sim_harness/run_production.py) -- a direct call to the real, public AutomationEngine.reconcile_fan_on_startup() method with externally-supplied inputs, the same legitimate Tier A pattern already documented for the classification/economizer_check/pre_cool event types (not a coordinator-dispatch approximation; see that event handler's own comment). Both calls in this scenario go through the exact same code (automation.py ~5401-5415 for the check-side fix, ~5533 for the arm-side fix) that all 4 of the real triggers (ha_restart, backstop_30min, thermostat_state_change, post_grace_expiry) share -- proving the fix here proves it for all 4, since the bug was never trigger-specific logic, just a hardcoded value shared by every caller.",
+    "A fully coordinator-routed version of this scenario (driving the real _async_thermostat_changed listener via a thermostat_state_changed event with hvac_action='fan', per Issue #347's real production entry point) was attempted first and abandoned: production's P3 comfort-band behavior (Issue #249 -- apply_classification() unconditionally arms a persistent [comfort_heat, comfort_cool] band via select_comfort_band(), even for classification.hvac_mode='off' input) commands the thermostat into 'cool' mode as soon as classification is applied, which made a same-scenario thermostat_state_changed event with hvac_mode='off' read as a spurious manual override (old_state.state='cool' != new_state.state='off'), rather than isolating the reconcile trigger this scenario is about. Chasing the exact post-classification thermostat mode string to avoid that false override cost more investigation than the coordinator-listener fidelity was worth here, given the engine-level reconcile_fan_on_startup event type already exercises the identical shared code path with much less incidental complexity.",
+    "Engine-level coverage of the same two gaps, with additional cases (lockout recovery once the window elapses, and both the FSM-authoritative and legacy flag states) lives in tests/test_nat_vent_fsm_phase2b_wiring.py::TestSite4ReconcileFanOnStartup::test_authoritative_honors_reactivation_lockout and ::test_authoritative_adopts_once_lockout_elapses, and the arm-side fix's own positive-control test is tests/test_nat_vent_exit_lockout_coverage.py::TestExitNatVentLockoutCoverageRegistry::test_arms_lockout_claims_match_the_actual_code.",
+    "Revert-test performed during development: with the check-side fix reverted (paused_by_door=False restored at automation.py's FSM-input construction), the second call at 13:01:00 re-adopts nat-vent (_natural_vent_active becomes True, nat_vent_not_active assertion fails) -- confirms this scenario is a genuine regression test, not a vacuous pass."
+  ]
+}

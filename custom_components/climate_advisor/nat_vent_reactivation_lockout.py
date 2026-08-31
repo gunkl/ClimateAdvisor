@@ -37,17 +37,31 @@ production on 2026-08-23 (WHF reactivated ~5 minutes after a comfort-floor
 exit, unblocked, because the idle-open path never checked this lockout). See
 Issue #696 for the full incident.
 
-The other 3 reactivation-gate call sites (`handle_door_window_open`,
-`reconcile_fan_on_startup`, `_re_pause_for_open_sensor`) were individually
-re-read (not assumed) during the #696 fix and their exemptions do hold, each
-for its own distinct reason — `handle_door_window_open` genuinely guards on
-plain `not self._paused_by_door`; `reconcile_fan_on_startup` is exempted by
-call cadence (runs at most once per restart/30-min backstop, structurally
-incapable of sub-minute repeats) rather than by reachability;
+The other 2 reactivation-gate call sites (`handle_door_window_open`,
+`_re_pause_for_open_sensor`) were individually re-read (not assumed) during
+the #696 fix and their exemptions do hold, each for its own distinct reason —
+`handle_door_window_open` genuinely guards on plain `not self._paused_by_door`;
 `_re_pause_for_open_sensor` only fires after a grace-period expiry, a
 different branch of the exit lifecycle than the pause branch this lockout
-protects. Re-verify each individually before trusting this summary if any of
-their guards change.
+protects.
+
+`reconcile_fan_on_startup` was ALSO believed exempt at that time, on the claim
+that it "runs at most once per restart/30-min backstop, structurally
+incapable of sub-minute repeats." Issue #790 found that claim false: 2 of its
+4 real trigger sites (`thermostat_state_change`, `post_grace_expiry`) are
+event-driven, not cadence-bound, and can fire sub-minute with no debounce on
+the adopt path. It bypassed this lockout on BOTH sides — the check side
+(hardcoded `paused_by_door=False` into the FSM inputs it feeds this lockout
+check through) and the arm side (its own turn-off branch's `_exit_nat_vent()`
+call never armed `_nat_vent_outdoor_exit_time`). Fixed by passing
+`self._paused_by_door`'s real value on the check side and
+`set_outdoor_exit_time=True` on the arm side — safe uniformly across all 4
+triggers because `_nat_vent_outdoor_exit_time` is never persisted across HA
+restarts (see `state.py`), so this lockout can only fire when a real exit was
+armed earlier in the same running process; there is no restart-staleness
+hazard that would justify treating the 2 cadence-bound triggers differently
+from the 2 event-driven ones. Re-verify each individually before trusting
+this summary if any of their guards change.
 """
 
 from __future__ import annotations

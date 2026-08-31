@@ -113,9 +113,12 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "higher-frequency trigger than #696's, so now sets set_outdoor_exit_time=True too."
     ),
     ("_reconcile_fan_on_startup_locked", 1): (
-        "exempted: startup/periodic reconciliation, not a per-tick decision path — runs at "
-        "most once per restart or 30-min backstop, structurally incapable of the sub-minute "
-        "repeating cadence this lockout exists to prevent"
+        "arms lockout — Issue #790: previously exempted on the same 'runs at most once per "
+        "restart/30-min backstop' claim disproven for this method's check-side bypass (see "
+        "nat_vent_reactivation_lockout.py's module docstring) — 2 of this method's 4 real "
+        "triggers (thermostat_state_change, post_grace_expiry) are event-driven and can fire "
+        "sub-minute. Without this, a turn-off issued from this call site left no lockout "
+        "timer for a subsequent reconcile call to check."
     ),
     ("on_fan_turned_off", 1): (
         "exempted: fires once per real fan-off state-change event (RF timer boundary settle "

@@ -19,6 +19,7 @@ from datetime import datetime, time, timedelta
 from .automation import _in_sleep_window, compute_pre_cool_target, resolve_pre_cool_modifier
 from .classifier import DayClassification
 from .const import (
+    CEILING_PRECOOL_FALLBACK_MIN,
     COLD_DAY_SETBACK_DEPTH_F,
     DAY_TYPE_COLD,
     DAY_TYPE_COOL,
@@ -38,6 +39,7 @@ from .const import (
 )
 from .nat_vent_gate import resolve_comfort_heat
 from .temperature import FAHRENHEIT, find_temperature_crossing, format_temp, format_temp_delta
+from .thermal_lead_time import compute_lead_minutes_from_rate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -539,8 +541,6 @@ def _hot_day_plan(
     return lines
 
 
-_CEILING_PRECOOL_FALLBACK_MIN = 120  # default lead time when k_active_cool is unavailable
-
 _NAT_VENT_CUTOFF_MARGIN_F = 1.0  # forecast-hour margin — distinct from the live-control gates'
 # own boundary choices (nat_vent_gate.py's strict <, fan_thermostat_decision.py's non-strict >=);
 # this is a PREDICTIVE identification of "the hour nat-vent stops being viable", not a live
@@ -651,11 +651,14 @@ def _derive_warm_day_events(
     # precool_start_time = ceiling_breach_time - lead_time
     if result["ceiling_breach_time"] is not None:
         t_in_now = predicted_indoor[0].get("temp", comfort_cool - 2.0)
-        if k_active_cool is not None and abs(k_active_cool) > 0:
-            lead_min = ((comfort_cool - t_in_now) / abs(k_active_cool)) * 60 * 1.3
-        else:
-            lead_min = float(_CEILING_PRECOOL_FALLBACK_MIN)
-        lead_min = max(30.0, min(240.0, lead_min))
+        lead_min = compute_lead_minutes_from_rate(
+            delta_t=comfort_cool - t_in_now,
+            rate=k_active_cool,
+            min_minutes=30.0,
+            max_minutes=240.0,
+            safety_multiplier=1.3,
+            fallback_minutes=float(CEILING_PRECOOL_FALLBACK_MIN),
+        )
         result["precool_start_time"] = result["ceiling_breach_time"] - timedelta(minutes=lead_min)
 
     # nat_vent_recovers / recovery_time: outdoor drops back below indoor AFTER the cutoff

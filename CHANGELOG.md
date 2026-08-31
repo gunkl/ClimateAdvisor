@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.87] — 2026-08-31
+
+- Feat #786: Climate Advisor can now pre-cool or pre-heat automatically ahead of a scheduled high electricity-rate window, banking toward the comfort band's own floor or ceiling using the home's learned thermal response rate — no new temperature settings to configure. Up to 5 schedules (day-of-week and time-of-day, midnight-spanning windows handled correctly) are configurable from Settings → Options → Scheduler. Pre-conditioning never overrides an active or not-yet-confirmed manual thermostat change, and never runs the compressor while a monitored door/window is open or the whole-house fan is running — it defers automatically and resumes on the next cycle.
+
 ## [0.6.86] — 2026-08-31
 
 - Fix #787: a brief network dropout on the whole-house fan's Wi-Fi module (confirmed via Home Assistant logs to be an ESPHome encryption-handshake error, not a real physical change) was being misread as someone manually turning the fan off and back on, starting a needless 3-hour "hands off" grace period each time. This produced a confusing overnight cascade of fan cycling and HVAC pausing/resuming. Climate Advisor now cross-checks the fan's own dedicated power-detection sensor (when configured) before treating an "unavailable" state as human action — a brief connectivity blip is now correctly ignored instead of triggering a false override.

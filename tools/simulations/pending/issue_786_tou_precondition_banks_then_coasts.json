@@ -1,0 +1,90 @@
+{
+  "name": "issue_786_tou_precondition_banks_then_coasts",
+  "description": "A cost_period schedule tagged 'high' from 16:15-21:00. Before the schedule's lead-time window opens, the home holds its normal comfort band (ceiling=comfort_cool=76F, cool mode). Once the window opens (fallback lead time 120min, since no thermal model observations exist -> opens 14:15), the automation engine banks toward the OPPOSITE comfort-band edge (comfort_heat=68F) instead -- no user-authored temperature field anywhere drove this, it is derived automatically from the existing comfort band. Once the schedule's own start time (16:15) is reached, pre-conditioning stops being called and the very next cycle's normal apply_classification() call re-arms the plain comfort_cool=76F ceiling on its own -- confirming the Issue #786 prerequisite finding that 'coast' behavior needs zero new suppression code, since _apply_comfort_band() issues a single-setpoint THRESHOLD command a real thermostat only acts on when indoor crosses it, not a proactive drive-to-target.",
+  "source": "Issue #786 design/implementation session",
+  "issue": 786,
+  "use_coordinator": true,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: deleting coordinator._resolve_tou_schedule_state()/_apply_tou_schedule()'s call sites (or automation.py's apply_tou_precondition()) causes the 14:15 assertion (tou_precondition_applied, target=68.0) to FAIL -- no such event would ever fire, reproducing 'the TOU feature silently does nothing' exactly.",
+    "(b) Docs<->production alignment: docs/scheduler-spec.md documents this exact resolve-then-act sequence and the coast-is-free finding; this scenario is the golden proof that production actually does what the spec says.",
+    "(c) Occupant experience: without this feature, the home runs the AC at its normal comfort_cool ceiling straight through a scheduled high-cost window (e.g. 4:15-9:00pm peak electricity rates), paying peak-rate cost with no cost-aware behavior. With it, the home banks extra coolness to comfort_heat before the window starts and coasts on that banked cool air through the expensive hours -- lower cost, and the occupant configured zero new temperature settings to get it; the system derived the banking target from settings they already had (comfort_heat) and the home's own learned response rate."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "schedules": [
+      { "id": "peak1", "name": "Weekday Peak", "days": ["all"], "start": "16:15", "end": "21:00", "cost_tag": "high" }
+    ]
+  },
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0,
+      "note": "Hot afternoon. Indoor already at the normal comfort ceiling."
+    },
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Before the TOU lead window opens (16:15 - 120min fallback lead = 14:15, since no thermal model observations exist yet). Normal comfort band arms: ceiling=comfort_cool=76F, cool mode."
+    },
+    {
+      "time": "2026-07-13T14:15:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Next 30-min cycle -- now sits exactly at the lead window's open instant (14:15). TOU pre-conditioning fires: banks to comfort_heat=68F (the OPPOSITE edge from the normal ceiling), cool mode, ahead of the 16:15 high-cost window. No temperature field was configured for this -- 68F is the home's own existing comfort_heat value."
+    },
+    {
+      "time": "2026-07-13T16:15:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Schedule's own start time reached -- TOU phase reverts to NONE (pre-conditioning stops being called this cycle). apply_classification()'s normal comfort-band arm (ceiling=comfort_cool=76F) is the only thing that runs -- confirming coast resumes with zero new suppression code, per the Issue #786 prerequisite finding."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T13:00:00",
+      "expect": "classification_applied",
+      "reason": "Normal 30-min classification cycle runs as always."
+    },
+    {
+      "at": "2026-07-13T13:00:00",
+      "expect": "expect_band",
+      "expect_band": { "ceiling": 76.0 },
+      "reason": "Before the TOU lead window opens, the plain comfort_cool ceiling (76F) is armed -- no TOU influence yet."
+    },
+    {
+      "at": "2026-07-13T14:15:00",
+      "expect": "tou_precondition_applied",
+      "tou_precondition": { "schedule_id": "peak1", "target": 68.0, "mode": "cool" },
+      "reason": "The lead window has opened -- production banks to comfort_heat=68F (cool mode) ahead of the 16:15 high-cost window, derived automatically from the existing comfort_heat config value and the home's own thermal response rate (fallback lead time here, since no observations exist)."
+    },
+    {
+      "at": "2026-07-13T16:15:00",
+      "expect": "expect_band",
+      "expect_band": { "ceiling": 76.0 },
+      "reason": "Schedule start reached -- pre-conditioning stops firing, and the very next classification cycle's own normal comfort-band arm (ceiling=76F) is the final word. This is the coast confirmation: no separate suppression/coast-phase code exists anywhere in this feature -- the single-setpoint threshold command _apply_comfort_band() already issues is naturally idle while indoor sits below it, and simply resumes normal operation once pre-conditioning stops overriding it."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "TOU pre-conditioning banks to the comfort-band floor ahead of a scheduled high-cost window using zero user-authored temperature settings, then coasts back to normal comfort-band behavior automatically once the window starts, with zero new suppression code.",
+    "observed_behavior": "Normal comfort_cool ceiling (76F) held before the lead window opens -> banks to comfort_heat (68F) once the fallback 120-minute lead window opens ahead of the 16:15 schedule -> reverts to the normal comfort_cool ceiling (76F) the instant the schedule's own start time is reached, with no dedicated coast-phase code involved.",
+    "expected_behavior": "The occupant pays less to run AC during a scheduled expensive electricity window by having the home pre-cool using thermal mass it already has, using only settings (comfort_heat) and behavior (learned thermal rate) the system already knew about -- no new temperature configuration required for this feature to work."
+  }
+}

@@ -70,6 +70,7 @@ def _make_options_flow(entry_data: dict):
     flow = object.__new__(ClimateAdvisorOptionsFlow)
     flow._updates = {}
     flow._removed = set()
+    flow._editing_schedule_id = None
     flow.config_entry = _make_config_entry(entry_data)
 
     captured: dict = {}
@@ -1860,6 +1861,7 @@ class TestOptionsFlowMenu:
             "sensors",
             "occupancy",
             "schedule",
+            "scheduler",
             "notifications",
             "advanced",
             "classification_thresholds",
@@ -2089,6 +2091,180 @@ class TestOptionsFlowMultiStep:
         assert defaults["notify_service"] == "notify.notify"
         assert defaults["wake_time"] == "06:30:00"
         assert defaults["learning_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Options flow — TOU scheduler (Issue #786)
+# ---------------------------------------------------------------------------
+
+
+def _schedule_fields(**overrides) -> dict:
+    fields = {
+        "name": "Weekday peak",
+        "days": ["mon", "tue", "wed", "thu", "fri"],
+        "start": "16:15:00",
+        "end": "21:00:00",
+        "cost_tag": "high",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _seed_schedule(schedule_id: str, name: str, day: str, start: str, end: str, cost_tag: str = "low") -> dict:
+    return {"id": schedule_id, "name": name, "days": [day], "start": start, "end": end, "cost_tag": cost_tag}
+
+
+class TestOptionsFlowScheduler:
+    """Issue #786 — TOU scheduler options-flow steps (REAL handlers, no mirroring)."""
+
+    def test_scheduler_menu_step_lists_existing_schedules(self):
+        """async_step_scheduler's rendered form is reachable with existing schedules seeded,
+        and does not raise — the list-rendering path itself is exercised."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = [
+            {"id": "a", "name": "A", "days": ["mon"], "start": "16:00:00", "end": "21:00:00", "cost_tag": "high"},
+            {"id": "b", "name": "B", "days": ["all"], "start": "09:00:00", "end": "12:00:00", "cost_tag": "low"},
+        ]
+        flow, _ = _make_options_flow(entry_data)
+        result = asyncio.run(flow.async_step_scheduler(None))
+        assert result["type"] == "form"
+        assert result["step_id"] == "scheduler"
+
+    def test_scheduler_edit_persists_new_schedule_via_commit_section(self):
+        """Adding a schedule appends to config_entry.data["schedules"] without touching
+        any other existing entries."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = [_seed_schedule("existing1", "Existing", "mon", "09:00:00", "10:00:00")]
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler_edit", _schedule_fields()),
+            ],
+        )
+        schedules = data["schedules"]
+        assert len(schedules) == 2
+        existing = next(s for s in schedules if s["id"] == "existing1")
+        assert existing == entry_data["schedules"][0]
+        new = next(s for s in schedules if s["id"] != "existing1")
+        assert new["name"] == "Weekday peak"
+        assert new["days"] == ["mon", "tue", "wed", "thu", "fri"]
+        assert new["cost_tag"] == "high"
+
+    def test_scheduler_edit_empty_days_rejected(self):
+        """Submitting with no days selected must not persist — errors dict is populated
+        and the form is re-shown instead of committing."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        flow, captured = _make_options_flow(entry_data)
+
+        async def _drive():
+            await flow.async_step_scheduler({"manage": "__add__"})
+            return await flow.async_step_scheduler_edit(_schedule_fields(days=[]))
+
+        result = asyncio.run(_drive())
+        assert result["type"] == "form"
+        assert result["errors"] == {"days": "schedule_days_required"}
+        assert "data" not in captured  # nothing was committed
+
+    def test_scheduler_edit_rejects_equal_start_end(self):
+        """Submitting with start == end must not persist — a schedule with a
+        degenerate (zero-width) window is treated by is_schedule_active_at() as
+        midnight-spanning and would be active nearly 24 hours a day (Issue #786
+        Fix 4). The form must re-show with the error instead of committing."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        flow, captured = _make_options_flow(entry_data)
+
+        async def _drive():
+            await flow.async_step_scheduler({"manage": "__add__"})
+            return await flow.async_step_scheduler_edit(_schedule_fields(start="18:00:00", end="18:00:00"))
+
+        result = asyncio.run(_drive())
+        assert result["type"] == "form"
+        assert result["errors"] == {"end": "schedule_start_end_equal"}
+        assert "data" not in captured  # nothing was committed
+
+    def test_scheduler_edit_rejects_equal_times_differing_only_by_seconds(self):
+        """ "16:00:00" and "16:00:30" are distinct raw strings but both parse to the
+        identical 16.0-hour boundary under scheduler.py's _parse_hhmm(), which ignores
+        seconds. Validation must compare parsed hour/minute values, not raw strings, or
+        this passes Fix 4's check and still produces the degenerate near-24-hour-active
+        window the fix exists to prevent."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        flow, captured = _make_options_flow(entry_data)
+
+        async def _drive():
+            await flow.async_step_scheduler({"manage": "__add__"})
+            return await flow.async_step_scheduler_edit(_schedule_fields(start="16:00:00", end="16:00:30"))
+
+        result = asyncio.run(_drive())
+        assert result["type"] == "form"
+        assert result["errors"] == {"end": "schedule_start_end_equal"}
+        assert "data" not in captured  # nothing was committed
+
+    def test_scheduler_edit_updates_only_the_target_schedule(self):
+        """Editing an existing schedule replaces only that entry, byte-for-byte leaving
+        the others untouched."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = [
+            _seed_schedule("keep1", "Keep One", "mon", "08:00:00", "09:00:00"),
+            _seed_schedule("target", "Old Name", "tue", "10:00:00", "11:00:00"),
+            _seed_schedule("keep2", "Keep Two", "wed", "12:00:00", "13:00:00", cost_tag="high"),
+        ]
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "target"}),
+                ("async_step_scheduler_edit", _schedule_fields(name="New Name")),
+            ],
+        )
+        schedules = data["schedules"]
+        assert len(schedules) == 3
+        assert schedules[0] == entry_data["schedules"][0]
+        assert schedules[2] == entry_data["schedules"][2]
+        updated = next(s for s in schedules if s["id"] == "target")
+        assert updated["name"] == "New Name"
+        assert updated["days"] == ["mon", "tue", "wed", "thu", "fri"]
+
+    def test_scheduler_delete_removes_only_target(self):
+        """Deleting removes exactly the targeted schedule; the other two are unchanged."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = [
+            {"id": "a", "name": "A", "days": ["mon"], "start": "08:00:00", "end": "09:00:00", "cost_tag": "low"},
+            {"id": "b", "name": "B", "days": ["tue"], "start": "10:00:00", "end": "11:00:00", "cost_tag": "low"},
+            {"id": "c", "name": "C", "days": ["wed"], "start": "12:00:00", "end": "13:00:00", "cost_tag": "high"},
+        ]
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "b"}),
+                ("async_step_scheduler_edit", _schedule_fields(delete_schedule=True)),
+            ],
+        )
+        schedules = data["schedules"]
+        assert [s["id"] for s in schedules] == ["a", "c"]
+        assert schedules[0] == entry_data["schedules"][0]
+        assert schedules[1] == entry_data["schedules"][2]
+
+    def test_scheduler_add_past_cap_is_defensively_ignored(self):
+        """Even if "add" is somehow submitted while 5 schedules already exist, the
+        resulting list stays at 5 — the list step normally omits "+ Add" at the cap, but
+        this is the data-integrity backstop, not just a UI nicety."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = [
+            {"id": f"s{i}", "name": f"s{i}", "days": ["mon"], "start": "08:00:00", "end": "09:00:00", "cost_tag": "low"}
+            for i in range(5)
+        ]
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler_edit", _schedule_fields()),
+            ],
+        )
+        assert len(data["schedules"]) == 5
 
 
 # ---------------------------------------------------------------------------

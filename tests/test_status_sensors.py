@@ -94,7 +94,9 @@ def _make_automation_engine(
     return ae
 
 
-def _make_real_coordinator(automation_enabled: bool, automation_engine, occupancy_mode: str = "home"):
+def _make_real_coordinator(
+    automation_enabled: bool, automation_engine, occupancy_mode: str = "home", tou_phase_resolution=None
+):
     """Build a bare ClimateAdvisorCoordinator bound to the real status-computation methods.
 
     Uses object.__new__() + types.MethodType() (the established coordinator
@@ -119,6 +121,7 @@ def _make_real_coordinator(automation_enabled: bool, automation_engine, occupanc
     coord._door_open_timer_expiry = {}
     coord._pre_cool_trigger_dt = None
     coord._pre_cool_target = None
+    coord._tou_phase_resolution = tou_phase_resolution
     coord.config = {}
     coord._compute_automation_status = types.MethodType(ClimateAdvisorCoordinator._compute_automation_status, coord)
     coord._compute_next_automation_action = types.MethodType(
@@ -127,7 +130,9 @@ def _make_real_coordinator(automation_enabled: bool, automation_engine, occupanc
     return coord
 
 
-def _compute_automation_status(automation_enabled: bool, automation_engine, now_dt: datetime | None = None) -> str:
+def _compute_automation_status(
+    automation_enabled: bool, automation_engine, now_dt: datetime | None = None, tou_phase_resolution=None
+) -> str:
     """Call the real ClimateAdvisorCoordinator._compute_automation_status().
 
     now_dt: when given, patches dt_util.now/parse_datetime/as_local so
@@ -136,7 +141,7 @@ def _compute_automation_status(automation_enabled: bool, automation_engine, now_
     """
     from custom_components.climate_advisor import coordinator as _coord_mod
 
-    coord = _make_real_coordinator(automation_enabled, automation_engine)
+    coord = _make_real_coordinator(automation_enabled, automation_engine, tou_phase_resolution=tou_phase_resolution)
     if now_dt is None:
         return coord._compute_automation_status()
     with (
@@ -240,6 +245,78 @@ class TestComputeAutomationStatus:
         ae = _make_automation_engine(is_paused_by_door=True)
         result = _compute_automation_status(False, ae)
         assert result == "disabled"
+
+    def test_tou_preconditioning_cool_mode(self):
+        """TOUPhase.PRECONDITIONING with mode='cool' -> 'pre-cooling — ...' (Issue #786)."""
+        from custom_components.climate_advisor.scheduler import TOUPhase, TOUPhaseResolution
+
+        resolution = TOUPhaseResolution(
+            phase=TOUPhase.PRECONDITIONING,
+            target=68.0,
+            mode="cool",
+            schedule_id="s1",
+            schedule_start=datetime(2026, 1, 5, 16, 0),
+            precondition_start=datetime(2026, 1, 5, 13, 0),
+        )
+        ae = _make_automation_engine()
+        result = _compute_automation_status(
+            True, ae, now_dt=datetime(2026, 1, 5, 13, 30), tou_phase_resolution=resolution
+        )
+        assert result.startswith("pre-cooling — TOU high-cost period")
+        assert "4:00 PM" in result
+
+    def test_tou_preconditioning_heat_mode(self):
+        """TOUPhase.PRECONDITIONING with mode='heat' -> 'pre-heating — ...' (Issue #786)."""
+        from custom_components.climate_advisor.scheduler import TOUPhase, TOUPhaseResolution
+
+        resolution = TOUPhaseResolution(
+            phase=TOUPhase.PRECONDITIONING,
+            target=76.0,
+            mode="heat",
+            schedule_id="s2",
+            schedule_start=datetime(2026, 1, 5, 16, 0),
+            precondition_start=datetime(2026, 1, 5, 13, 0),
+        )
+        ae = _make_automation_engine()
+        result = _compute_automation_status(
+            True, ae, now_dt=datetime(2026, 1, 5, 13, 30), tou_phase_resolution=resolution
+        )
+        assert result.startswith("pre-heating — TOU high-cost period")
+
+    def test_tou_none_phase_does_not_affect_status(self):
+        """TOUPhase.NONE (window fields populated but not currently preconditioning,
+        per the chart-rendering use case) must NOT change the status string."""
+        from custom_components.climate_advisor.scheduler import TOUPhase, TOUPhaseResolution
+
+        resolution = TOUPhaseResolution(
+            phase=TOUPhase.NONE,
+            target=68.0,
+            mode="cool",
+            schedule_id="s1",
+            schedule_start=datetime(2026, 1, 5, 16, 0),
+            precondition_start=datetime(2026, 1, 5, 14, 0),
+        )
+        ae = _make_automation_engine()
+        result = _compute_automation_status(True, ae, tou_phase_resolution=resolution)
+        assert result == "active"
+
+    def test_grace_period_takes_priority_over_tou_preconditioning(self):
+        """A door/window grace period is a higher-priority mechanism reason than TOU
+        pre-conditioning — the Status card shows only one reason at a time."""
+        from custom_components.climate_advisor.scheduler import TOUPhase, TOUPhaseResolution
+
+        resolution = TOUPhaseResolution(
+            phase=TOUPhase.PRECONDITIONING,
+            target=68.0,
+            mode="cool",
+            schedule_id="s1",
+            schedule_start=datetime(2026, 1, 5, 16, 0),
+            precondition_start=datetime(2026, 1, 5, 13, 0),
+        )
+        ae = _make_automation_engine(grace_active=True, last_resume_source="manual")
+        result = _compute_automation_status(True, ae, tou_phase_resolution=resolution)
+        assert "grace period" in result
+        assert "pre-cooling" not in result
 
 
 # ---------------------------------------------------------------------------

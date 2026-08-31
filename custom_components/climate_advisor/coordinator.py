@@ -239,6 +239,7 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
+from .scheduler import Schedule, TOUPhase, resolve_active_schedules, resolve_tou_phase
 from .state import StatePersistence
 from .temperature import (
     convert_delta,
@@ -455,6 +456,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # service call is observed before shutdown, so async_shutdown() can distinguish a
         # user-initiated restart from a crash.
         self._user_initiated_shutdown = False
+        # TOU scheduler (Issue #786): resolved once per apply_classification() cycle by
+        # _apply_tou_schedule() — cached (not recomputed per-request) so chart rendering
+        # (get_chart_data(), _build_predicted_indoor_future()) and status/API reads all see
+        # the same resolution, matching the project's "computed once, not per-hour"
+        # invariant already established for _compute_target_band_schedule().
+        self._tou_phase_resolution: Any = None
+        self._tou_active_cost_resolution: Any = None
 
         # Sub-components
         self._state_persistence = StatePersistence(Path(hass.config.config_dir))
@@ -2379,6 +2387,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._solar_phase_offset,
                 )
 
+            # Issue #786: resolve TOU schedule state before the ODE prediction executor
+            # call below, which computes its own internal band (see
+            # _resolve_tou_schedule_state()'s docstring on why the ordering matters).
+            self._resolve_tou_schedule_state()
+
             # Compute and cache ODE prediction for ceiling guard + chart reuse.
             # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
             self._last_predicted_indoor = await self.hass.async_add_executor_job(
@@ -2391,6 +2404,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     thermal_model=self.automation_engine._thermal_model if self.automation_engine else {},
                     occupancy_mode=self._occupancy_mode,
                     classification=self._current_classification,
+                    tou_precondition_window=self._tou_precondition_window_tuple(),
                 )
             )
             _LOGGER.debug(
@@ -2451,6 +2465,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     indoor_temp=self._get_indoor_temp(),
                 )
                 _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
+
+            # Issue #786: TOU scheduler — resolve cost-period schedule state and, if a
+            # pre-conditioning window is active, drive the banking setpoint. Runs after
+            # apply_classification() regardless of which branch above ran it, so
+            # self._current_classification is always fresh.
+            await self._apply_tou_schedule()
 
             # If the day type changed since the briefing was generated,
             # regenerate the briefing text without re-sending notifications (Issue #78).
@@ -3415,6 +3435,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             thermal_model.get("heating_rate_f_per_hour"),
             thermal_model.get("cooling_rate_f_per_hour"),
         )
+        # Issue #786: refresh TOU schedule state before this executor call, same
+        # ordering reason as the main update cycle (_resolve_tou_schedule_state()'s
+        # docstring) — this path recomputes classification/thermal_model locally above,
+        # so re-resolving here keeps the ODE curve's TOU override in sync with them.
+        self._resolve_tou_schedule_state()
+
         # Update cached ODE prediction for ceiling guard.
         # thermal_model is already computed from self.learning.get_thermal_model() above.
         # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
@@ -3428,6 +3454,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermal_model=thermal_model,
                 occupancy_mode=self._occupancy_mode,
                 classification=classification,
+                tou_precondition_window=self._tou_precondition_window_tuple(),
             )
         )
         _LOGGER.debug(
@@ -3496,6 +3523,68 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _was_overridden = self._any_override_active()
         await self.automation_engine.handle_bedtime()
         self._feed_override_grace_fsm_if_cleared(_was_overridden)
+
+    def _resolve_tou_schedule_state(self) -> None:
+        """Resolve TOU cost-period schedule state for this cycle (Issue #786) — cheap,
+        pure (no HVAC writes), cached on ``self._tou_phase_resolution``/
+        ``_tou_active_cost_resolution``.
+
+        Called EARLY in ``_async_update_data_impl()`` — right after the classification/
+        thermal-model refresh but BEFORE the ODE prediction executor call — so that when
+        that executor call computes its own internal band (it doesn't receive a
+        pre-computed ``band_schedule``, see ``_build_predicted_indoor_future()``'s
+        docstring), it sees THIS cycle's fresh resolution rather than last cycle's stale
+        one. ``get_chart_data()`` reuses the same cached value later in the cycle.
+        Actually acting on a ``PRECONDITIONING`` result happens later, in
+        ``_apply_tou_schedule()``, after ``apply_classification()`` has run (so the
+        pre-conditioning setpoint is the final word for the thermostat that cycle, not the
+        day's normal comfort-band edge).
+        """
+        raw_schedules = self.config.get("schedules") or []
+        if not raw_schedules or self._current_classification is None:
+            self._tou_phase_resolution = None
+            self._tou_active_cost_resolution = None
+            return
+
+        schedules = [Schedule(**s) for s in raw_schedules]
+        now = dt_util.now()
+        self._tou_active_cost_resolution = resolve_active_schedules(schedules, now)
+        self._tou_phase_resolution = resolve_tou_phase(
+            schedules,
+            now,
+            self._get_indoor_temp(),
+            self._current_classification.hvac_mode,
+            self.automation_engine._thermal_model if self.automation_engine else None,
+            self.config,
+        )
+
+    async def _apply_tou_schedule(self) -> None:
+        """Act on ``self._tou_phase_resolution`` (resolved earlier this cycle by
+        ``_resolve_tou_schedule_state()``) — drives the banking setpoint if a
+        pre-conditioning window is currently active (Issue #786).
+        """
+        resolution = self._tou_phase_resolution
+        if resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING:
+            await self.automation_engine.apply_tou_precondition(
+                self._current_classification, resolution.target, resolution.schedule_id
+            )
+
+    def _tou_precondition_window_tuple(self) -> tuple[datetime, datetime, float, str] | None:
+        """Build the ``tou_precondition_window`` tuple ``_compute_target_band_schedule()``
+        expects from the cached ``self._tou_phase_resolution`` (Issue #786), or ``None`` if
+        no upcoming ``high`` schedule was resolved this cycle. Shared by both call sites
+        (chart band builder, ODE curve builder) so they always agree — mandatory Chart
+        Coverage rule.
+
+        ``getattr`` with a default (not a plain attribute read): several tests
+        partially-instantiate the coordinator via ``object.__new__()`` + bound methods
+        (bypassing ``__init__`` — an established, accepted pattern in this codebase, see
+        CLAUDE.md's Testing Requirements), so this attribute may not exist yet.
+        """
+        resolution = getattr(self, "_tou_phase_resolution", None)
+        if resolution is None or resolution.schedule_id is None:
+            return None
+        return (resolution.precondition_start, resolution.schedule_start, resolution.target, resolution.mode)
 
     def _compute_pre_cool_trigger_time(self) -> datetime | None:
         """Compute the pre-cool trigger time for tonight.
@@ -7538,6 +7627,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _trigger_label = _GRACE_TRIGGER_LABELS.get(self.automation_engine._last_grace_trigger or "", "")
             _cause_suffix = f" — {_trigger_label}" if _trigger_label else ""
             return f"grace period ({source}){_cause_suffix}{self._format_grace_remaining(self.automation_engine)}"
+        # Issue #786: TOU scheduler pre-conditioning — a mechanism reason, per the Status
+        # Card Ontology this is the one card it belongs on. Same compact "short label —
+        # duration (ends HH:MM)" shape _format_grace_remaining() already established.
+        _tou = getattr(self, "_tou_phase_resolution", None)
+        if _tou is not None and _tou.phase == TOUPhase.PRECONDITIONING:
+            _label = "pre-cooling" if _tou.mode == "cool" else "pre-heating"
+            _ends = self._format_tou_ends(_tou.schedule_start)
+            return f"{_label} — TOU high-cost period{_ends}"
         if self._occupancy_mode == OCCUPANCY_VACATION:
             return "active (vacation)"
         if self._occupancy_mode == OCCUPANCY_AWAY:
@@ -7841,6 +7938,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 }
             )
         return details
+
+    def _format_tou_ends(self, schedule_start: datetime | None) -> str:
+        """Format the TOU pre-conditioning window's end (the schedule's own start instant)
+        as " (ends H:MM AM)", same convention as _format_grace_remaining(). Returns "" if
+        unavailable — never raises."""
+        if not isinstance(schedule_start, datetime):
+            return ""
+        end_str = dt_util.as_local(schedule_start).strftime("%I:%M %p").lstrip("0")
+        return f" (ends {end_str})"
 
     def _format_grace_remaining(self, ae: AutomationEngine) -> str:
         """Format grace duration + end time as ' — 30 min (ends H:MM AM)', matching the
@@ -8279,6 +8385,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification=self._current_classification,
                 pre_cool_trigger_h=_pc_trigger_h,
                 pre_cool_target=_pc_target,
+                tou_precondition_window=self._tou_precondition_window_tuple(),
             )
         )
         _hvac_mode = getattr(self._current_classification, "hvac_mode", None) if self._current_classification else None
@@ -9110,6 +9217,7 @@ def _compute_target_band_schedule(
     classification: Any | None = None,
     pre_cool_trigger_h: float | None = None,
     pre_cool_target: float | None = None,
+    tou_precondition_window: tuple[datetime, datetime, float, str] | None = None,
 ) -> list[dict]:
     """Compute the dynamic target band (lower/upper) for each hourly timestamp.
 
@@ -9128,6 +9236,17 @@ def _compute_target_band_schedule(
 
     When thermal_model and classification are both provided, sleep_heat is derived
     via compute_bedtime_setback() — matching automation.py's adaptive setpoint logic.
+
+    ``tou_precondition_window`` (Issue #786): ``(window_start, window_end, target, mode)``
+    — when a timestamp falls in ``[window_start, window_end)``, the resolved TOU banking
+    target overrides ``lower`` (mode="cool", banking toward the floor) or ``upper``
+    (mode="heat", banking toward the ceiling), applied as the final step after whichever
+    branch above computed the base band — an additive override layer, same shape as the
+    existing ``pre_cool_target`` mechanism. This guards the rare case where the
+    pre-conditioning window overlaps a wake/sleep ramp transition, where the base band's
+    computed value would otherwise not exactly match the commanded setpoint (mandatory
+    Chart Coverage rule — the chart must never show a band conflicting with what the
+    engine actually commands).
     """
     comfort_heat = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
     comfort_cool = float(config.get("comfort_cool", DEFAULT_COMFORT_COOL))
@@ -9212,6 +9331,16 @@ def _compute_target_band_schedule(
                 else:
                     upper = sleep_cool
 
+        # Issue #786: TOU pre-conditioning override — additive, applied after whichever
+        # branch above computed the base band (see docstring).
+        if tou_precondition_window is not None:
+            _window_start, _window_end, _tou_target, _tou_mode = tou_precondition_window
+            if _window_start <= ts < _window_end:
+                if _tou_mode == "cool":
+                    lower = _tou_target
+                elif _tou_mode == "heat":
+                    upper = _tou_target
+
         result.append({"ts": ts.isoformat(), "lower": round(lower, 1), "upper": round(upper, 1)})
 
     return result
@@ -9257,6 +9386,7 @@ def _build_predicted_indoor_future(
     occupancy_mode: str = OCCUPANCY_HOME,
     classification: Any | None = None,
     band_schedule: list[dict] | None = None,
+    tou_precondition_window: tuple[datetime, datetime, float, str] | None = None,
 ) -> list[dict]:
     """Build future predicted indoor temps from the automation plan.
 
@@ -9514,6 +9644,7 @@ def _build_predicted_indoor_future(
             classification=classification,
             pre_cool_trigger_h=_ode_pc_trigger_h,
             pre_cool_target=_ode_pc_target,
+            tou_precondition_window=tou_precondition_window,
         )
         _band_lookup = {b["ts"]: b for b in _computed_band_schedule}
 

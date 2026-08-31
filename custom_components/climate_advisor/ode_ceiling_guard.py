@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 
+from .thermal_lead_time import compute_lead_minutes_from_rate
+
 # Mirrors const.py's CEILING_PRECOOL_FALLBACK_MIN / CEILING_BRIDGE_TOLERANCE_F —
 # duplicated here (plain scalar constants, not logic), matching every other pure
 # leaf module's own "never import from const.py or automation.py" convention.
@@ -205,12 +207,14 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
 
     hours_to_breach = (_to_utc(breach_ts) - _to_utc(inputs.now)).total_seconds() / 3600
 
-    if inputs.k_active_cool is not None and abs(inputs.k_active_cool) > 0:
-        _raw_lead_hr = (inputs.comfort_cool - inputs.indoor) / abs(inputs.k_active_cool)
-        lead_min = _raw_lead_hr * 60 * _LEAD_MIN_LOOKAHEAD_MULTIPLIER
-    else:
-        lead_min = _CEILING_PRECOOL_FALLBACK_MIN
-    lead_min = max(_LEAD_MIN_FLOOR, min(_LEAD_MIN_CEIL, lead_min))
+    lead_min = compute_lead_minutes_from_rate(
+        delta_t=inputs.comfort_cool - inputs.indoor,
+        rate=inputs.k_active_cool,
+        min_minutes=_LEAD_MIN_FLOOR,
+        max_minutes=_LEAD_MIN_CEIL,
+        safety_multiplier=_LEAD_MIN_LOOKAHEAD_MULTIPLIER,
+        fallback_minutes=_CEILING_PRECOOL_FALLBACK_MIN,
+    )
 
     if hours_to_breach <= lead_min / 60:
         return OdeCeilingGuardDecision(

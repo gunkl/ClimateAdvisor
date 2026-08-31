@@ -18,6 +18,7 @@ from custom_components.climate_advisor.nat_vent_gate import (
     _resolve_comfort_heat,
     decide_nat_vent_gate,
     decide_nat_vent_soft_start_gate,
+    resolve_comfort_cool,
     resolve_comfort_heat,
 )
 
@@ -129,6 +130,18 @@ class TestResolveComfortHeatStandalone:
             assert resolve_comfort_heat(inputs.comfort_heat_raw, inputs.sleep_heat, in_sleep_window) == (
                 _resolve_comfort_heat(inputs)
             )
+
+
+class TestResolveComfortCoolStandalone:
+    """Issue #786: cool-side counterpart to resolve_comfort_heat(), added for the TOU
+    scheduler's pre-conditioning heat-banking target (drives to comfort_cool ahead of a
+    high-cost heating window)."""
+
+    def test_daytime_uses_raw_comfort_cool(self):
+        assert resolve_comfort_cool(comfort_cool_raw=76.0, sleep_cool=72.0, in_sleep_window=False) == 76.0
+
+    def test_sleep_window_uses_sleep_cool(self):
+        assert resolve_comfort_cool(comfort_cool_raw=76.0, sleep_cool=72.0, in_sleep_window=True) == 72.0
 
 
 class TestResolveCeilingThreshold:

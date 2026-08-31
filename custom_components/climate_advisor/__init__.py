@@ -40,6 +40,7 @@ from .const import (
     CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_DEFAULT_TOU_LEAD_MINUTES,
     CONF_EMAIL_BRIEFING,
     CONF_EMAIL_DOOR_WINDOW_PAUSE,
     CONF_EMAIL_GRACE_EXPIRED,
@@ -90,6 +91,7 @@ from .const import (
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
     DEFAULT_THRESHOLD_WARM,
+    DEFAULT_TOU_LEAD_MINUTES,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
     FAN_MODE_BOTH,
@@ -345,6 +347,13 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             _LOGGER.warning("fan_mode 'both' is no longer supported — migrated to 'whole_house_fan'")
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=17)
         _LOGGER.info("Migration to version 17 complete")
+
+    if config_entry.version == 17:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 17 to 18")
+        new_data = {**config_entry.data}
+        new_data.setdefault(CONF_DEFAULT_TOU_LEAD_MINUTES, DEFAULT_TOU_LEAD_MINUTES)
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=18)
+        _LOGGER.info("Migration to version 18 complete")
 
     return True
 

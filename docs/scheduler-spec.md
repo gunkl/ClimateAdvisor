@@ -115,7 +115,7 @@ Consequence: once a schedule's own `start` time arrives, `resolve_tou_phase()` r
 
 | Caller | `min`/`max` | `safety_multiplier` | `fallback_minutes` |
 |---|---|---|---|
-| `scheduler.py::resolve_tou_phase()` | 30 / 240 | 1.3 | 120 (`_TOU_LEAD_MIN_FALLBACK`) |
+| `scheduler.py::resolve_tou_phase()` | 30 / 240 | 1.3 | configurable, default 45 (`default_tou_lead_minutes` config key, Issue #797; falls back to `_TOU_LEAD_MIN_FALLBACK`=45.0 if the key is absent from an older config entry) |
 | `automation.py::_schedule_pre_condition()` (adaptive pre-heat) | config `CONF_MIN_PREHEAT_MINUTES`/`CONF_MAX_PREHEAT_MINUTES` | config `CONF_PREHEAT_SAFETY_MARGIN` | clamped `default_preheat_minutes` |
 | `ode_ceiling_guard.py` (ceiling-guard escalation) | `_LEAD_MIN_FLOOR`/`_LEAD_MIN_CEIL` (30/240) | `_LEAD_MIN_LOOKAHEAD_MULTIPLIER` (1.3) | `_CEILING_PRECOOL_FALLBACK_MIN` (120) |
 | `briefing.py::_derive_warm_day_events()` (warm-day pre-cool lead) | 30 / 240 | 1.3 | `const.CEILING_PRECOOL_FALLBACK_MIN` (120) — previously a locally-redefined duplicate constant, now imported directly |
@@ -250,7 +250,7 @@ No new API field was needed: `ATTR_AUTOMATION_STATUS` already flows `_compute_au
 
 ## Golden Scenario Coverage
 
-`tools/simulations/pending/issue_786_tou_precondition_banks_then_coasts.json` (not yet promoted to `golden/` — awaiting David's review per the project's Golden Simulation Test Policy) exercises the full stack via `use_coordinator: true`: a `cost_tag="high"` schedule 16:15–21:00, asserting (a) the plain comfort band holds before the lead window opens, (b) `tou_precondition_applied` fires with the correct target/mode once the fallback 120-minute lead window opens, and (c) the plain comfort band is re-armed the instant the schedule's own start time is reached — direct end-to-end proof of the [Coast Phase](#coast-phase--confirmed-not-assumed) finding. Verified to actually fail (not vacuously pass) when the feature's action call site is disabled, per the project's Three-Exercise Protocol.
+`tools/simulations/pending/issue_786_tou_precondition_banks_then_coasts.json` (not yet promoted to `golden/` — awaiting David's review per the project's Golden Simulation Test Policy) exercises the full stack via `use_coordinator: true`: a `cost_tag="high"` schedule 16:15–21:00, asserting (a) the plain comfort band holds before the lead window opens, (b) `tou_precondition_applied` fires with the correct target/mode once the default 45-minute fallback lead window opens (Issue #797 — configurable via `default_tou_lead_minutes`, was a fixed 120 minutes), and (c) the plain comfort band is re-armed the instant the schedule's own start time is reached — direct end-to-end proof of the [Coast Phase](#coast-phase--confirmed-not-assumed) finding. Verified to actually fail (not vacuously pass) when the feature's action call site is disabled, per the project's Three-Exercise Protocol.
 
 Required a small, purely-additive harness change (`tools/sim_harness/run_production.py`'s `"classification"` event handler now also calls `coordinator._resolve_tou_schedule_state()`/`_apply_tou_schedule()` when a real coordinator is present — mirroring the exact production sequence) and two new `outcomes.py` additions (a `tou_precondition_applied` → `None` mapping, handled only via a new `check_assertion` custom type, exactly the precedent `comfort_band_applied` already established — see `outcomes.py` for the full §8 justification).
 

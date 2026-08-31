@@ -67,7 +67,10 @@ COST_TAG_LOW = "low"
 _TOU_LEAD_MIN_FLOOR = 30.0
 _TOU_LEAD_MIN_CEIL = 240.0
 _TOU_LEAD_MIN_SAFETY_MULTIPLIER = 1.3
-_TOU_LEAD_MIN_FALLBACK = 120.0
+# Default when the "default_tou_lead_minutes" config key is absent (e.g. an entry
+# created before Issue #797 added it) — kept in sync with const.py's
+# DEFAULT_TOU_LEAD_MINUTES, which config_flow.py uses as the form's default.
+_TOU_LEAD_MIN_FALLBACK = 45.0
 
 # How far ahead resolve_tou_phase() looks for an upcoming schedule start. Must be >=
 # _TOU_LEAD_MIN_CEIL so the longest possible computed lead time is never missed.
@@ -279,13 +282,14 @@ def resolve_tou_phase(
         mode = "heat"
 
     delta_t = abs(current_indoor_temp - target)
+    fallback_minutes = float(config.get("default_tou_lead_minutes", _TOU_LEAD_MIN_FALLBACK))
     lead_minutes = compute_lead_minutes_from_rate(
         delta_t=delta_t,
         rate=rate,
         min_minutes=_TOU_LEAD_MIN_FLOOR,
         max_minutes=_TOU_LEAD_MIN_CEIL,
         safety_multiplier=_TOU_LEAD_MIN_SAFETY_MULTIPLIER,
-        fallback_minutes=_TOU_LEAD_MIN_FALLBACK,
+        fallback_minutes=fallback_minutes,
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)

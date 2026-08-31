@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.83] — 2026-08-30
+
+- No user-visible behavior change. Fix #585: automation.py logged routine, correctly-executed operations (setting the HVAC mode, writing a setpoint, accepting a manual thermostat override, activating/deactivating a fan) at WARNING — a holdover from Issue #37, which promoted them purely so they'd survive Home Assistant's default log level, not because they represented problems. These 19 log lines now log at INFO; WARNING is reserved for actual anomalies, guard-clamped/overridden writes, and safety-guard firings. Diagnostic visibility is unaffected: the dashboard's Activity Record tab and the AI Investigator's Activity Timeline read the automation event log directly, independent of Python log level.
+
 ## [0.6.82] — 2026-08-30
 
 - Fix #583: The Manual Overrides panel no longer shows a contradictory count (e.g. "1 override" alongside "no overrides recorded"). The setpoint-override counter and its detail list are now updated together, so they can never disagree.

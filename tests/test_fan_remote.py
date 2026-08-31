@@ -273,20 +273,22 @@ class TestDurationWiring:
 
 
 # ---------------------------------------------------------------------------
-# 3. Suppression across BOTH existing choke points, with WARNING logging
+# 3. Suppression across BOTH existing choke points, with logging
 # ---------------------------------------------------------------------------
 
 
 class TestSuppressionAbsoluteWithRemoteTimer:
     """While an RF timer is active, all CA-initiated fan-offs are suppressed and logged
-    as WARNING (not silently dropped at INFO) — Issue #486's "fully absolute (log-only)"
-    decision. Both _deactivate_fan (the choke point every other caller funnels through:
-    nat-vent exit, comfort-floor breach, cycle-off, min-runtime cycle-off) and
+    (not silently dropped) — Issue #486's "fully absolute (log-only)" decision. Logged
+    at INFO (Issue #585: the mutex/timer logic suppressing the fan-off is working
+    correctly, not malfunctioning — WARNING is reserved for actual anomalies/clamps/
+    guard-firings). Both _deactivate_fan (the choke point every other caller funnels
+    through: nat-vent exit, comfort-floor breach, cycle-off, min-runtime cycle-off) and
     fan_thermostat_check (which returns "keep" directly without ever reaching
     _deactivate_fan) need their own guard — this is why each has its own test.
     """
 
-    def test_deactivate_fan_suppressed_and_warns_with_remote_timer(self, caplog):
+    def test_deactivate_fan_suppressed_and_logs_with_remote_timer(self, caplog):
         import logging
 
         engine = _make_automation_engine()
@@ -294,7 +296,7 @@ class TestSuppressionAbsoluteWithRemoteTimer:
         engine._fan_active = True
         engine._fan_remote_timer_hours = 8.0
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             asyncio.run(engine._deactivate_fan(reason="nat-vent ceiling exit (away mode)"))
 
         assert any("suppressed by active RF remote timer" in r.message for r in caplog.records)
@@ -322,7 +324,7 @@ class TestSuppressionAbsoluteWithRemoteTimer:
             is False
         )
 
-    def test_fan_thermostat_check_suppressed_and_warns_with_remote_timer(self, caplog):
+    def test_fan_thermostat_check_suppressed_and_logs_with_remote_timer(self, caplog):
         import logging
 
         engine = _make_automation_engine()
@@ -330,7 +332,7 @@ class TestSuppressionAbsoluteWithRemoteTimer:
         engine._fan_active = True
         engine._fan_remote_timer_hours = 4.0
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=68.0, trigger="indoor"))
 
         assert any("cycle-off suppressed by active RF remote timer" in r.message for r in caplog.records)

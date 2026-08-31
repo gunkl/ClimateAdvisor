@@ -1155,7 +1155,7 @@ class AutomationEngine:
         """Record an HVAC action with timestamp and reason, and schedule a revisit."""
         self._last_action_time = dt_util.now().isoformat()
         self._last_action_reason = f"{action} — {reason}"
-        _LOGGER.warning("Action recorded: %s", self._last_action_reason)
+        _LOGGER.info("Action recorded: %s", self._last_action_reason)
         self._schedule_revisit()
 
     def _schedule_revisit(self) -> None:
@@ -2025,7 +2025,7 @@ class AutomationEngine:
         # which has no override awareness of its own and would silently overwrite the
         # user's just-set mode right back — the same bug this fix closes elsewhere.
         if detected_mode not in ("off", "unavailable", "unknown") and self._whf_owns_hvac():
-            _LOGGER.warning(
+            _LOGGER.info(
                 "Manual override to %s detected while WHF owns HVAC — ending free cooling session immediately",
                 detected_mode,
             )
@@ -2115,7 +2115,7 @@ class AutomationEngine:
             _setpoint_override = source == "setpoint"
             if _setpoint_override or (current_mode not in ("unavailable", "unknown") and current_mode != cls_mode):
                 # PATH A: Still divergent (or deliberate setpoint override) — formally confirm
-                _LOGGER.warning(
+                _LOGGER.info(
                     "Override confirmed after %d minutes (mode=%s, classification wants %s)",
                     confirm_seconds // 60,
                     current_mode,
@@ -2259,7 +2259,7 @@ class AutomationEngine:
         self._manual_override_mode = mode
         self._manual_override_source = source
         self._manual_override_time = dt_util.now().isoformat()
-        _LOGGER.warning(
+        _LOGGER.info(
             "Manual override activated: mode=%s source=%s",
             self._manual_override_mode,
             self._manual_override_source or "unknown",
@@ -2578,7 +2578,7 @@ class AutomationEngine:
             )
 
             unit = self.config.get("temp_unit", "fahrenheit")
-            _LOGGER.warning(
+            _LOGGER.info(
                 "Applying classification: %s (trend: %s %s)",
                 classification.day_type,
                 classification.trend_direction,
@@ -2804,7 +2804,7 @@ class AutomationEngine:
                 "set_hvac_mode",
                 {"entity_id": self.climate_entity, "hvac_mode": mode},
             )
-            _LOGGER.warning("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
+            _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
             self._record_action(f"Set HVAC to {mode}", reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
             # blowdown state. Skip if nat-vent is active — clobbering fan_mode=on
@@ -3087,7 +3087,7 @@ class AutomationEngine:
             self.hass.async_create_task(_check_single_setpoint_accepted())
 
         self._setpoint_retry_cancel = async_call_later(self.hass, 10, _schedule_check)
-        _LOGGER.warning(
+        _LOGGER.info(
             "Set temperature to %s (mode=%s) — %s role=%s",
             format_temp(temperature, unit),
             mode,
@@ -4043,7 +4043,7 @@ class AutomationEngine:
                     # the exact bug this fix closes. Release suppression without writing any
                     # mode; the thermostat already reads the user's chosen mode and that's
                     # exactly where it should stay.
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "Nat-vent exit: manual override to %s conflicts with WHF — ending free"
                         " cooling session (indoor %.1f°F)",
                         self._manual_override_mode,
@@ -4546,7 +4546,7 @@ class AutomationEngine:
                     # deliberately not routed through _exit_nat_vent(), whose sensors-closed
                     # path would restore _pre_fan_hvac_mode (captured before nat-vent started)
                     # via _set_hvac_mode(), overwriting the user's just-set mode right back.
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "Nat-vent exit: manual override to %s conflicts with WHF via temp-check —"
                         " ending free cooling session (indoor %.1f°F)",
                         self._manual_override_mode,
@@ -4768,9 +4768,11 @@ class AutomationEngine:
             if self._fan_remote_timer_hours is not None:
                 # Issue #486: this is the second suppression choke point (fan_thermostat_check
                 # never reaches _deactivate_fan() when overridden — it returns "keep" directly),
-                # so it needs its own WARNING mirroring the one in _deactivate_fan() for the
+                # so it needs its own log line mirroring the one in _deactivate_fan() for the
                 # absolute-timer behavior to be observable regardless of which guard fires.
-                _LOGGER.warning(
+                # Issue #585: INFO, not WARNING — the RF-timer mutex is working correctly here,
+                # not malfunctioning; WARNING is reserved for actual anomalies/clamps/guard-fires.
+                _LOGGER.info(
                     "Fan thermostat cycle-off suppressed by active RF remote timer (%sh):"
                     " trigger=%s indoor=%s outdoor=%s",
                     self._fan_remote_timer_hours,
@@ -4847,7 +4849,7 @@ class AutomationEngine:
             # sensors-closed branch restores _pre_fan_hvac_mode (captured before nat-vent
             # started) via _set_hvac_mode(), which has no override awareness of its own
             # and would silently overwrite the user's just-set mode right back.
-            _LOGGER.warning(
+            _LOGGER.info(
                 "Fan thermostat check: manual override to %s conflicts with WHF —"
                 " ending free cooling session (indoor %.1f°F)",
                 self._manual_override_mode,
@@ -6149,7 +6151,7 @@ class AutomationEngine:
         # _manual_override_mode/_manual_override_source.
         _fan_was_overridden = self._fan_override_active
 
-        _LOGGER.warning("Bedtime setback: clearing any pending override state before applying sleep setback")
+        _LOGGER.info("Bedtime setback: clearing any pending override state before applying sleep setback")
         self.clear_manual_override(reason="bedtime")
 
         c = self._current_classification
@@ -6475,7 +6477,7 @@ class AutomationEngine:
         # pattern already used at :3648 and now in handle_bedtime()).
         _fan_was_overridden = self._fan_override_active
 
-        _LOGGER.warning("Morning wakeup: clearing any pending override state before restoring comfort")
+        _LOGGER.info("Morning wakeup: clearing any pending override state before restoring comfort")
         self.clear_manual_override(reason="morning_wakeup")
 
         # Deactivate fan if still running from overnight — unless the user is overriding it
@@ -8770,7 +8772,7 @@ class AutomationEngine:
                     domain = fan_entity.split(".")[0]  # "fan" or "switch"
                     _commanded = await self._command_whf_control_entity(True, reason=reason)
                     if _commanded:
-                        _LOGGER.warning("Activated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
+                        _LOGGER.info("Activated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                 hvac_state = self.hass.states.get(self.climate_entity)
@@ -8786,7 +8788,7 @@ class AutomationEngine:
                     "set_fan_mode",
                     {"entity_id": self.climate_entity, "fan_mode": "on"},
                 )
-                _LOGGER.warning("Activated HVAC fan — %s role=%s", reason, self.role)
+                _LOGGER.info("Activated HVAC fan — %s role=%s", reason, self.role)
 
             # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state().
             # This is the raw hardware-activation write itself — the FSM's physical axis
@@ -9179,9 +9181,10 @@ class AutomationEngine:
             if self._fan_remote_timer_hours is not None:
                 # Issue #486: the override is absolute while an RF remote timer is active —
                 # this shutoff (nat-vent exit, comfort-floor breach, cycle-off, etc.) is
-                # suppressed and logged as a WARNING (not silently dropped at INFO) so the
-                # "log-only" absolute-timer behavior is observable in HA logs.
-                _LOGGER.warning(
+                # suppressed and logged (not silently dropped) so the "log-only" absolute-timer
+                # behavior is observable. Issue #585: INFO, not WARNING — the mutex/timer logic
+                # is working correctly here, not malfunctioning.
+                _LOGGER.info(
                     "Fan deactivation suppressed by active RF remote timer (%sh) — reason: %s",
                     self._fan_remote_timer_hours,
                     reason,
@@ -9192,10 +9195,11 @@ class AutomationEngine:
 
         if self._fan_override_active and bypass_absolute_override and self._fan_remote_timer_hours is not None:
             # Issue #748: the hard AC/WHF mutex overrides even an active RF remote timer —
-            # last setting placed wins. Logged at WARNING (not silently proceeding) so the
+            # last setting placed wins. Logged (not silently proceeding) so the
             # remote-timer-overridden outcome stays observable, matching Issue #486's own
-            # observability bar for the opposite (suppressed) outcome above.
-            _LOGGER.warning(
+            # observability bar for the opposite (suppressed) outcome above. Issue #585:
+            # INFO, not WARNING — the mutex is working correctly, not malfunctioning.
+            _LOGGER.info(
                 "Fan deactivation forced despite active RF remote timer (%sh) — hard AC/WHF"
                 " mutex overrides remote-timer protection — reason: %s",
                 self._fan_remote_timer_hours,
@@ -9358,7 +9362,7 @@ class AutomationEngine:
                     domain = fan_entity.split(".")[0]
                     _commanded = await self._command_whf_control_entity(False, reason=reason)
                     if _commanded:
-                        _LOGGER.warning("Deactivated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
+                        _LOGGER.info("Deactivated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
 
                 # Restore prior HVAC mode that was suppressed when the fan activated
                 # (Issue #277 Fix C). Only restore if we have a stored mode to go back to.
@@ -9422,7 +9426,7 @@ class AutomationEngine:
                     "set_fan_mode",
                     {"entity_id": self.climate_entity, "fan_mode": "auto"},
                 )
-                _LOGGER.warning("Deactivated HVAC fan — %s role=%s", reason, self.role)
+                _LOGGER.info("Deactivated HVAC fan — %s role=%s", reason, self.role)
 
             # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state() —
             # see _activate_fan()'s matching comment (raw hardware-deactivation write; the

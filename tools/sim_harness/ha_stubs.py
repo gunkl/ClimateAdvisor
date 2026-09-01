@@ -83,6 +83,26 @@ _HA_MODULES = [
 # ---------------------------------------------------------------------------
 
 
+class _MockHomeAssistantError(Exception):
+    """Minimal stand-in for homeassistant.exceptions.HomeAssistantError.
+
+    Issue #796 Gap 5: production's _resolve_zone_coordinator() (__init__.py)
+    raises ServiceValidationError for an unknown/unloaded entry_id. Without a
+    real Exception subclass here, ``from homeassistant.exceptions import
+    ServiceValidationError`` would resolve to a bare MagicMock attribute —
+    ``raise MagicMock(...)`` fails with "exceptions must derive from
+    BaseException" before production's own validation logic ever runs, and
+    ``pytest.raises(ServiceValidationError)`` in tests couldn't match it
+    either. homeassistant.exceptions itself stays an auto-mocked module (see
+    _HA_MODULES) — only these two names are realified, mirroring the pattern
+    already used for RepairsFlow/DataUpdateCoordinator/etc. below.
+    """
+
+
+class _MockServiceValidationError(_MockHomeAssistantError):
+    """Minimal stand-in for homeassistant.exceptions.ServiceValidationError."""
+
+
 class _MockRepairsFlow:
     """Minimal stand-in for homeassistant.components.repairs.RepairsFlow."""
 
@@ -407,6 +427,10 @@ def install_ha_stubs() -> None:
 
     core = sys.modules["homeassistant.core"]
     core.Context = _MockContext
+
+    exceptions_mod = sys.modules["homeassistant.exceptions"]
+    exceptions_mod.HomeAssistantError = _MockHomeAssistantError
+    exceptions_mod.ServiceValidationError = _MockServiceValidationError
 
     sensor = sys.modules["homeassistant.components.sensor"]
     sensor.SensorEntity = _MockSensorEntity

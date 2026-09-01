@@ -19,6 +19,8 @@ their own logic.
 
 from __future__ import annotations
 
+import pytest
+
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_multi_zone
 from tools.sim_harness.multi_zone_assertions import (
@@ -178,26 +180,30 @@ class TestMultiZoneAssertionTypes:
         assert resolve_dotted_field({"a": None}, "a.b") is _FIELD_NOT_FOUND
         assert resolve_dotted_field({}, "nope") is _FIELD_NOT_FOUND
 
-    def test_cross_zone_isolation_detects_the_known_gap_5_bleed(self):
-        """Documents current (unfixed) production behavior, not a desired outcome.
+    def test_cross_zone_isolation_unscoped_call_now_rejected_not_misdirected(self):
+        """Gap 5 FIXED (Issue #796 Step 4, see __init__.py's `_resolve_zone_coordinator`).
 
-        Two zones share the global HA service namespace (confirmed by direct
-        harness output — see build_headless_multi_zone()'s docstring): zone
-        B's async_setup_entry() overwrites zone A's `reset_learning_data`
-        handler. Calling the service therefore resets ZONE B's learning data
-        (whoever's bound last) even when a caller's mental model is "zone A".
-        This assertion type is built to CATCH that once a fix scopes the
-        service — right now it correctly reports "VIOLATED" because the bug
-        is real and unfixed. Asserting `passed is False` here is intentional:
-        flipping to True with no code change would mean this evaluator quietly
-        stopped detecting the bug it exists to catch.
+        Before the fix, this test asserted `passed is False` with "VIOLATED"
+        in the detail — a bare, unscoped `reset_learning_data` call silently
+        reset whichever zone's `async_setup_entry()` ran last (zone_1 here),
+        even though the caller's service_data said nothing about zone_1 at
+        all. That silent misdirection is the specific behavior this test
+        used to document.
+
+        Now every zone-scoped service requires call.data["entry_id"]. An
+        unscoped call (empty ``service_data``, exactly as this assertion type
+        issues it by design — see ``check_cross_zone_isolation``'s docstring)
+        no longer bleeds into whichever zone happens to be bound; it is
+        rejected outright by ``_resolve_zone_coordinator``'s
+        ``ServiceValidationError``. Fail-closed, not silently-misdirected, is
+        the correct post-fix outcome for a call with no target at all — see
+        ``test_service_zone_scoping.py`` for the "correctly-targeted call only
+        affects the named zone" coverage this test's replacement doesn't need
+        to duplicate.
         """
+        from homeassistant.exceptions import ServiceValidationError
+
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
-        # A freshly-built coordinator's learning state has nothing populated
-        # yet, so reset(scope="all") would trivially look like "no change" —
-        # seed a real, observable value first so before != after actually
-        # means something (learning.reset("all") replaces `_state` with a
-        # fresh LearningState(), which clears this back to []).
         zones["zone_1"]["coordinator"].learning._state.dismissed_suggestions = ["seeded_suggestion_key"]
         assertion = {
             "type": "cross_zone_isolation",
@@ -206,35 +212,52 @@ class TestMultiZoneAssertionTypes:
             "unaffected_zone": "zone_1",
             "unaffected_field": "learning._state.dismissed_suggestions",
         }
-        passed, detail = run_coro(check_multi_zone_assertion(zones, fake_hass, assertion))
-        assert passed is False, f"expected the known Gap 5 bleed to still reproduce; got: {detail}"
-        assert "VIOLATED" in detail
+        with pytest.raises(ServiceValidationError):
+            run_coro(check_multi_zone_assertion(zones, fake_hass, assertion))
 
-    def test_service_registry_binding_reports_last_zone_wins(self):
-        """Same underlying gap as above, from the binding-introspection side:
-        the currently-bound handler is zone_1's (set up second), never zone_0's.
+        # And the zone the unscoped call would previously have clobbered is
+        # provably untouched, since the call never reached any handler logic.
+        assert zones["zone_1"]["coordinator"].learning._state.dismissed_suggestions == ["seeded_suggestion_key"]
+
+    def test_service_registry_binding_no_longer_finds_a_static_binding(self):
+        """Gap 5 FIXED: there is no longer a single zone a handler is "bound" to.
+
+        Before the fix, this test asserted the registry-binding evaluator
+        correctly identified zone_1 (set up second, "last write wins") as the
+        sole zone `reset_learning_data` was bound to — the closure-
+        introspection side of the same Gap 5 finding as the test above.
+
+        Post-fix, `handle_reset_learning_data` no longer closes over a
+        `coordinator` or `entry` local at all — it closes only over `hass`
+        and resolves the target zone fresh from call.data["entry_id"] on
+        every invocation (see `_resolve_zone_coordinator` in __init__.py).
+        There is no static per-zone binding left for closure introspection to
+        recover, for EITHER zone's entry_id — which is exactly the intended
+        shape of the fix, not a gap in this evaluator. Confirms both
+        expected_target_entry_id values now report "could not determine"
+        rather than one of them reporting a stale True.
         """
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
-        zone_1_entry_id = zones["zone_1"]["entry"].entry_id
 
-        passed, detail = check_service_registry_binding(
-            zones,
-            fake_hass,
-            {"service": "reset_learning_data", "expected_target_entry_id": zone_1_entry_id},
-        )
-        assert passed is True, detail
-
-        zone_0_entry_id = zones["zone_0"]["entry"].entry_id
-        passed_wrong, detail_wrong = check_service_registry_binding(
-            zones,
-            fake_hass,
-            {"service": "reset_learning_data", "expected_target_entry_id": zone_0_entry_id},
-        )
-        assert passed_wrong is False, detail_wrong
+        for zone_label in ("zone_0", "zone_1"):
+            entry_id = zones[zone_label]["entry"].entry_id
+            passed, detail = check_service_registry_binding(
+                zones,
+                fake_hass,
+                {"service": "reset_learning_data", "expected_target_entry_id": entry_id},
+            )
+            assert passed is False, detail
+            assert "could not determine" in detail
 
     def test_teardown_cleanup_unloads_and_reports_panel_state(self):
-        """Unloading zone_1 (of two) removes the panel unconditionally today (Gap 8) —
-        confirmed via the real async_unload_entry(), not asserted as desired behavior.
+        """Unloading zone_1 (of two) leaves the panel in place — Gap 8, FIXED (Step 5).
+
+        Confirmed via the real async_unload_entry(). Before the Step 5 fix,
+        async_unload_entry() removed the panel unconditionally on every
+        unload, regardless of whether a sibling zone was still loaded — this
+        test used to assert `passed is False` to document that bug. See
+        tests/test_panel_zone_scoping.py for the full Gap 6/8 regression
+        coverage this fix added.
         """
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
 
@@ -245,8 +268,5 @@ class TestMultiZoneAssertionTypes:
                 {"type": "teardown_cleanup", "unload_entry": "zone_1", "expect_panel_present": True},
             )
         )
-        # expect_panel_present=True fails today because async_unload_entry()
-        # removes the panel unconditionally (Gap 8) — this is the harness
-        # correctly detecting a real, currently-unfixed gap.
-        assert passed is False
+        assert passed is True, detail
         assert "panel_present" in detail

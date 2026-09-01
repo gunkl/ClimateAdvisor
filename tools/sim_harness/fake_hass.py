@@ -121,17 +121,24 @@ class _FakeServices:
         """Return the currently-registered handler closure, or None.
 
         Test-only introspection point: a real HA installation does NOT expose
-        this (see ``diagnostics.py``'s ``active_service_bindings`` field,
-        which documents that HA's public API doesn't surface a registered
-        service's bound closure). Because this is a plain-Python fake, the
-        handler closure is a real, inspectable object — ``multi_zone_assertions
-        .py``'s ``service_registry_binding`` check uses this plus
+        this. Because this is a plain-Python fake, the handler closure is a
+        real, inspectable object — ``multi_zone_assertions.py``'s
+        ``service_registry_binding`` check uses this plus
         ``__code__.co_freevars``/``__closure__`` to recover which
-        coordinator/entry a handler is bound to. That is a harness-level
-        answer to a *different* question than the diagnostics OPEN QUESTION
-        (docs/multi-zone-spec.md): "can the test harness verify binding"
-        (yes, via closure introspection) vs. "can production code introspect
-        it through public HA APIs" (no — unresolved, unrelated).
+        coordinator/entry a handler is bound to.
+
+        Issue #796 PR4 note: as of PR4 (Gap 5), production's five zone-scoped
+        service handlers no longer close over a per-zone ``coordinator`` or
+        ``entry`` at all — each resolves its target zone per-call from
+        ``call.data["entry_id"]`` via ``_resolve_zone_coordinator()`` instead.
+        This makes ``service_registry_binding`` (and the closure-walk it
+        performs via this method) unexercisable against current production
+        handlers; it remains defined as a record of the pre-PR4 bug shape,
+        not as active regression coverage. ``diagnostics.py``'s
+        ``active_service_bindings`` field similarly no longer describes an
+        introspection limitation — post-PR4 there is no static binding left
+        for either production or this harness method to report. See
+        docs/multi-zone-spec.md Gap 5's "(as built, PR4)" note.
         """
         return self._handlers.get((domain, service))
 

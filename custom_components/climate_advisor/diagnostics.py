@@ -50,19 +50,24 @@ async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry)
         "this_entry_id": entry.entry_id,
         "entry_title": entry.title,
         "entry_setup_order": entry_setup_order,
-        # OPEN QUESTION (docs/multi-zone-spec.md, "Diagnostics and Field
-        # Feedback"): whether hass.services exposes closure/coordinator
-        # identity introspectably enough at runtime to report which entry
-        # each of the five domain-scoped services (respond_to_suggestion,
+        # Issue #796 PR4 (Gap 5) made this question moot rather than
+        # answering it: the five domain-scoped services (respond_to_suggestion,
         # force_reclassify, resend_briefing, dump_diagnostics,
-        # reset_learning_data) is currently bound to. HA's public
-        # `hass.services` API surfaces only registered service names/schemas,
-        # not the bound closure's captured `coordinator` variable — not
-        # introspectable without relying on undocumented HA internals.
-        # Documented as an explicit limitation rather than fabricated.
+        # reset_learning_data) no longer close over any one zone's
+        # `coordinator` at registration time, so there is no static
+        # per-entry "binding" left to introspect or report. Each call now
+        # resolves its target zone dynamically, at call time, from the
+        # call's own required `entry_id` field via `_resolve_zone_coordinator()`
+        # in `__init__.py` — which raises `ServiceValidationError` for an
+        # unknown/unloaded entry_id rather than silently acting on the wrong
+        # zone. Correctness is enforced per-call, not reportable as a
+        # point-in-time snapshot. See docs/multi-zone-spec.md Gap 5's
+        # "(as built, PR4)" note.
         "active_service_bindings": (
-            "not introspectable via public HA APIs — see docs/multi-zone-spec.md"
-            " 'Diagnostics and Field Feedback' open question"
+            "not applicable — since PR4, zone-scoped services are registered "
+            "once, domain-wide, and resolve their target zone per-call from "
+            "the required 'entry_id' field rather than being bound to a "
+            "single zone at registration time (see docs/multi-zone-spec.md Gap 5)"
         ),
     }
 

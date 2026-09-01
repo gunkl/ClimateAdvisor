@@ -91,9 +91,11 @@ class TestPayloadFields:
 
         assert payload["entry_setup_order"] is None
 
-    def test_active_service_bindings_is_documented_limitation_not_fabricated(self):
-        """Per the spec's OPEN QUESTION, this field must describe the limitation,
-        not invent a plausible-looking entry_id binding."""
+    def test_active_service_bindings_reports_call_time_resolution_not_a_static_binding(self):
+        """Since Issue #796 PR4, services resolve their target zone per-call from
+        entry_id rather than being bound to one zone at registration time — this
+        field must describe that design, not invent a plausible-looking static
+        entry_id binding that no longer exists."""
         entry_a = _make_entry("entry_a", "Bedroom")
         coord_a = _make_coordinator({})
         hass = _make_hass({"entry_a": coord_a}, [entry_a])
@@ -101,7 +103,8 @@ class TestPayloadFields:
         payload = asyncio.run(async_get_diagnostics_payload(hass, entry_a))
 
         assert "entry_a" not in payload["active_service_bindings"]
-        assert "not introspectable" in payload["active_service_bindings"]
+        assert "not applicable" in payload["active_service_bindings"]
+        assert "entry_id" in payload["active_service_bindings"]
 
     def test_legacy_dump_diagnostics_fields_still_present(self):
         entry_a = _make_entry("entry_a", "Bedroom")

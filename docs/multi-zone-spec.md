@@ -1,19 +1,24 @@
-<!-- Nav: ← [docs/00-PROJECT-INSTRUCTIONS.md] | → [__init__.py#L420 | api.py#L72 | learning.py#L679 | state.py#L28 | chart_log.py#L46 | config_flow.py#L602 | indoor_temp.py#L44] | ↔ [docs/02-ARCHITECTURE-REFERENCE.md] -->
+<!-- Nav: ← [docs/00-PROJECT-INSTRUCTIONS.md] | → [__init__.py#L480 | api.py#L72 | learning.py#L679 | state.py#L28 | chart_log.py#L46 | config_flow.py#L602 | indoor_temp.py#L44] | ↔ [docs/02-ARCHITECTURE-REFERENCE.md] -->
 
 # Multi-Zone Support — Territory Spec (Tier 3)
 
 > **STATUS: Design proposal — not yet implemented.**
 >
-> **Phase A implementation note (Issue #796, uncommitted on
+> **Phase A / Phase B implementation note (Issue #796, uncommitted on
 > `feature/796-multi-zone-support`):** PR1 (diagnostics hook), PR2 (two-entry
-> test harness), PR6 (entry-scoped persistence), PR8 (zone naming), and PR10
-> (indoor-temp-read dedup) are built, linted clean, and passing the full test
-> suite (5076 tests) plus all 91 golden scenarios. PR3–PR5, PR7, and PR9 (the
-> empirical Gap 6 spike, service/panel scoping, `api.py`/`zone_registry.py`
-> entry-scoping, and the dashboard selector) are **not yet started** — this
-> document's "not yet implemented" status still applies to those. Deviations
-> between this section's original design and what Phase A actually built are
-> called out inline below, each marked **(as built)**.
+> test harness), PR6 (entry-scoped persistence), PR8 (zone naming), PR10
+> (indoor-temp-read dedup), PR4 (service-handler scoping and unregistration,
+> Gaps 5/9 — Step 4), and PR5 (panel/view registration scoping, Gaps 6/8 —
+> Step 5) are built, linted clean, and passing the full test suite (5095
+> tests, 6 skipped, 1 xfailed) plus all 91 golden scenarios. PR3 (the
+> empirical Gap 6 spike) was deliberately **not run** — see the "(as built,
+> PR5)" note under [Gap 6](#gap-6--panelview-registration-needs-empirical-verification)
+> for how PR5 closes Gap 6's safety concern without needing PR3's answer.
+> PR7 and PR9 (`api.py`/`zone_registry.py` entry-scoping and the dashboard
+> selector) are **not yet started** — this document's "not yet implemented"
+> status still applies to those. Deviations between this section's original
+> design and what Phase A/B actually built are called out inline below, each
+> marked **(as built)**.
 >
 > **Known doc debt (pre-existing, not introduced by Phase A):** a Verification
 > pass found stale `file.py:NNN` citations scattered outside the areas Phase A
@@ -63,7 +68,7 @@ influence each other thermally is sketched and explicitly deferred — see
 Which code section this spec covers.
 
 - **Files:**
-  - `custom_components/climate_advisor/__init__.py` — entry setup, service/view/panel registration (Gaps 4-9 unstarted; the `handle_dump_diagnostics` redirect is PR1, **DONE**)
+  - `custom_components/climate_advisor/__init__.py` — entry setup, service/view/panel registration (Gaps 5/6/8/9, PR4/PR5, **DONE**; the `handle_dump_diagnostics` redirect is PR1, **DONE**; Gap 4/PR7 unstarted)
   - `custom_components/climate_advisor/api.py` — REST surface, coordinator resolution (Gap 4, PR7, unstarted)
   - `custom_components/climate_advisor/state.py` — `StatePersistence` (Gap 2, PR6, **DONE**)
   - `custom_components/climate_advisor/chart_log.py` — `ChartStateLog` (Gap 3, PR6, **DONE**)
@@ -75,10 +80,12 @@ Which code section this spec covers.
   - `custom_components/climate_advisor/diagnostics.py` (new, PR1, **DONE**) — native HA diagnostics hook, see [Diagnostics and Field Feedback](#diagnostics-and-field-feedback)
   - `tools/sim_harness/ha_stubs.py`, `tools/sim_harness/fake_hass.py`, `tools/sim_harness/build_coordinator.py` (extended, harness-only — no production code), `tools/sim_harness/multi_zone_assertions.py` (new, harness-only) — see [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware) (PR2, **DONE**)
 
-  **Phase A status (see the STATUS callout at the top of this document):**
-  PR1, PR2, PR6, PR8, PR10 are built, uncommitted on
-  `feature/796-multi-zone-support`. PR3, PR4, PR5, PR7, PR9 (Gaps 4-6, 8, 9 and
-  the dashboard selector) remain unstarted design only.
+  **Phase A/B status (see the STATUS callout at the top of this document):**
+  PR1, PR2, PR4, PR5, PR6, PR8, PR10 are built, uncommitted on
+  `feature/796-multi-zone-support`. PR3 (empirical spike) is a deliberate
+  non-run — see Gap 6's "(as built, PR5)" note for why it's no longer
+  load-bearing. PR7 and PR9 (Gap 4's `api.py`/`zone_registry.py`
+  entry-scoping and the dashboard selector) remain unstarted design only.
 - **Entry point:** `async_setup_entry()` in `__init__.py` — the per-entry construction path that already works correctly and that all nine gaps sit around.
 
 What this spec does NOT cover: the frontend chart rendering internals
@@ -96,7 +103,9 @@ Today, `async_setup_entry()` (`__init__.py`) already creates one
 `ClimateAdvisorCoordinator` per config entry:
 
 ```python
-# __init__.py:420
+# __init__.py:480 (was :420 pre-Phase-B — PR4/PR5 added ~150 lines above this
+# point for zone-scoped service/panel registration guards; the line itself
+# is unchanged)
 coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data), entry_id=entry.entry_id)
 ```
 
@@ -244,14 +253,17 @@ the second zone exists.
   `get_coordinator`/`iter_coordinators` serve Gap 4 (dashboard/API resolving the
   RIGHT entry) directly, and ALSO serve the future Zone Influence feature
   (enumerating siblings, resolving one by entry_id) — same underlying data
-  (`hass.data[DOMAIN]`, confirmed `__init__.py:431`:
+  (`hass.data[DOMAIN]`, confirmed `__init__.py:491` (was `:431` pre-Phase-B —
+  Phase B's PR4/PR5 additions sit above this line, not the line itself):
   `hass.data[DOMAIN][entry.entry_id] = coordinator`), one accessor surface
   designed for both consumers instead of two mechanisms built at different times.
 - **How `entry_id` reaches the 21 `api.py` call sites**: a query parameter
   (`request.query.get("entry_id")`), not a URL path segment. `api.py:744`
-  already uses a query parameter (`hours =
-  float(request.query.get("hours", 12))`) — the only existing precedent in this
-  file for a request-scoped parameter. `request.match_info` (the path-segment
+  already uses a bare `request.query` accessor (`hours =
+  float(request.query.get("hours", 12))`) — the other existing request-scoped
+  parameters in this file (lines 287, 329, 334, 940) go through
+  `request.rel_url.query` instead; `entry_id` can follow either precedent.
+  `request.match_info` (the path-segment
   mechanism) has **zero** uses anywhere in `api.py` — a path-segment approach
   would require restructuring all 21 routes' URL patterns and `aiohttp`
   registration for the same outcome, a much larger diff that also isn't needed
@@ -281,10 +293,11 @@ admin could miss.
 **Mechanism:** reuse `homeassistant.helpers.issue_registry` via this
 codebase's own `repairs.py` module, which already implements two Repairs
 flows today (`WeatherEntityRepairFlow`, `ReloadNeededRepairFlow`), raised via
-`ir.async_create_issue()` (confirmed real call sites: `__init__.py:395-404`
-for `weather_entity_not_found`, `config_flow.py:693-700` for `reload_needed`)
-and cleared via `ir.async_delete_issue()` (confirmed: `__init__.py:377,392,411`,
-`repairs.py:44,80`). Both surface in HA's own **Settings → Repairs** list,
+`ir.async_create_issue()` (confirmed real call sites: `__init__.py:455-464`
+(was `:395-404` pre-Phase-B) for `weather_entity_not_found`,
+`config_flow.py:693-700` for `reload_needed`)
+and cleared via `ir.async_delete_issue()` (confirmed: `__init__.py:437,452,471`
+(was `:377,392,411` pre-Phase-B), `repairs.py:44,80`). Both surface in HA's own **Settings → Repairs** list,
 visible regardless of whether the CA dashboard panel is open.
 
 **Boundary Rule basis:** issue-registry writes are scoped to the calling
@@ -297,8 +310,8 @@ owner approval (the two existing issues above).
 two lifecycle points:
 
 - **On raise**: at the end of `async_setup_entry()`, after
-  `hass.data[DOMAIN][entry.entry_id] = coordinator` (`__init__.py:431`),
-  recompute the zone count; if it's now `> 1`, call
+  `hass.data[DOMAIN][entry.entry_id] = coordinator` (`__init__.py:491`, was
+  `:431` pre-Phase-B), recompute the zone count; if it's now `> 1`, call
   `ir.async_create_issue(hass, DOMAIN, "zone_resolution_ambiguous",
   is_fixable=False, is_persistent=True, severity=ir.IssueSeverity.WARNING,
   translation_key="zone_resolution_ambiguous")` — mirroring
@@ -307,8 +320,11 @@ two lifecycle points:
 - **On clear**: at the start of `async_unload_entry()`, after this entry is
   popped from `hass.data[DOMAIN]`, recompute the zone count; if it's now
   `<= 1`, call `ir.async_delete_issue(hass, DOMAIN, "zone_resolution_ambiguous")`.
-  This is new code — `async_unload_entry()` (`__init__.py:545-562`) contains no
-  `ir.*` call today.
+  This is new code — `async_unload_entry()` (`__init__.py:668-706`, was
+  `:545-562` pre-Phase-B; the function grew by the Gap 8/9 teardown guards
+  described under those gaps' "(as built, PR4/PR5)" notes) contains no `ir.*`
+  call today — that part of the claim is unchanged by Phase B, only the line
+  range is.
 
 **Scope of the signal:** `get_default_coordinator()`'s fallback is a
 permanent, sanctioned feature for any caller that doesn't pass `entry_id` —
@@ -376,6 +392,68 @@ anything went wrong until that zone's automation starts behaving like a
 fresh-install default again. This is not a visibility gap — it is silent
 misdirection of a destructive action, and is the most severe item on this list.
 
+**(as built, PR4 — Step 4):** fixed. Confirmed by reading `__init__.py`.
+Occupant-facing outcome: `climate_advisor.reset_learning_data` (and the other
+four zone-scoped services) now always acts on the zone the caller actually
+named — a wrong-zone destructive call is no longer possible by omission,
+because omitting the zone is no longer accepted at all.
+
+- **Call-time resolution, not a setup-time closure.** All five handlers were
+  rewritten to stop closing over the `coordinator` local from one specific
+  `async_setup_entry()` call. Each now calls the new module-level
+  `_resolve_zone_coordinator(hass, call)` at the top of its body, which looks
+  up `hass.data[DOMAIN][call.data["entry_id"]]` fresh on every invocation —
+  the canonical per-entry table, not a captured reference that could go
+  stale or point at the wrong zone.
+- **`entry_id` is a required field on all five service schemas**, not
+  optional and not inferred. `RESPOND_SUGGESTION_SCHEMA` and
+  `RESET_LEARNING_SCHEMA` gained `vol.Required("entry_id"): cv.string`
+  alongside their existing fields; `force_reclassify`, `resend_briefing`, and
+  `dump_diagnostics` (previously `vol.Schema({})`, no fields at all) now use
+  a shared `ENTRY_ID_ONLY_SCHEMA = vol.Schema({vol.Required("entry_id"): cv.string})`.
+  `services.yaml` mirrors this with a `config_entry` selector
+  (`integration: climate_advisor`) on all five, so the UI presents a zone
+  picker rather than a free-text field. `reset_learning_data`'s field
+  description adds an explicit "double check this before calling — this
+  service is destructive" line, matching this gap's severity.
+- **Fail-closed, not fail-silent.** `_resolve_zone_coordinator()` raises
+  `ServiceValidationError` — HA's standard user-facing validation-failure
+  exception, renderable by the frontend/CLI as an error rather than an
+  unhandled traceback — for an unknown or already-unloaded `entry_id`,
+  instead of returning `None` and letting the caller silently act on nothing
+  or the wrong object. This directly closes the "no error or warning" half
+  of the occupant-facing consequence described above.
+- **Register-once, not register-per-zone.** All five `hass.services.async_register()`
+  calls are now wrapped in `if not hass.services.has_service(DOMAIN, "respond_to_suggestion"):`
+  — a second-and-later zone's `async_setup_entry()` no longer re-registers
+  (and therefore no longer overwrites) identical closures, since every
+  closure now resolves its target dynamically instead of capturing one.
+  `ZONE_SCOPED_SERVICES` (`__init__.py`, a five-element tuple of the service
+  names) is the single source of truth read by both this registration guard
+  and the Gap 9 teardown loop below, so the two can't drift out of sync with
+  each other.
+- **`handle_dump_diagnostics` nuance:** unlike the other four handlers, it
+  needs a `ConfigEntry`, not just a `ClimateAdvisorCoordinator` — the shared
+  `async_get_diagnostics_payload(hass, entry)` helper (`diagnostics.py`,
+  PR1) takes an `entry`. So it still calls `_resolve_zone_coordinator()`
+  first (for the fail-closed `entry_id` validation) and then derives the
+  entry via `hass.config_entries.async_get_entry(zone_coordinator._entry_id)`
+  rather than resolving `entry` directly — a coordinator-shaped resolution
+  used to reach an entry-shaped object, not a second, parallel lookup path.
+- **Gap 9's mirror-image teardown**, in the same PR: see the "(as built,
+  PR4)" mechanics folded into
+  [Gap 9](#gap-9--services-are-never-unregistered-on-unload) below, since
+  Gap 9's fix is the unload-side half of this exact change.
+
+Regression coverage: `tests/test_service_zone_scoping.py` (new) drives the
+real `async_setup_entry()`/`async_unload_entry()` via
+`build_headless_multi_zone()` and asserts cross-zone isolation end-to-end
+(calling a service scoped to one zone, confirming a sibling zone's state is
+unchanged) rather than introspecting closures — see the "(as built, PR4)"
+note under [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware)
+for why the PR2-era `service_registry_binding` closure-walk assertion type
+could not be reused here.
+
 #### Gap 6 — panel/view registration (needs empirical verification)
 
 `__init__.py`'s setup order, confirmed by reading the function top-to-bottom:
@@ -416,6 +494,65 @@ Two possible real-world outcomes, both must be planned for:
 
 State explicitly: this must be checked before the fix is designed in detail, not
 assumed either way. This is [PR3](#implementation-sequence).
+
+**(as built, PR5 — Step 5):** fixed, without ever answering PR3's empirical
+question. The shipped fix is **"register once, domain-wide, guarded — not
+per-entry-unique URLs"**, not the reordering approach outcome (b) originally
+called for. Confirmed by re-reading `api.py`: every one of its 21 REST view
+classes (`API_VIEWS`) has a `url = API_*` class attribute bound to a fixed
+`const.py` constant, not derived from `entry_id` — meaning the REST views are
+**a third instance of this exact collision**, not just the two originally
+named (`async_register_static_paths`'s `PANEL_URL`, `async_register_built_in_panel`'s
+`PANEL_FRONTEND_PATH`). All three are now guarded by one flag,
+`_PANEL_HASS_DATA_KEY` (`__init__.py`), checked at the top of the
+registration block: `if not hass.data.get(_PANEL_HASS_DATA_KEY):` — mirroring
+the `has_service()` guard PR4 already established for `ZONE_SCOPED_SERVICES`.
+A second-and-later zone's `async_setup_entry()` never attempts the
+registration at all.
+
+**Why this closes the safety concern without PR3's answer:** outcome (b) —
+the danger this section worried about — is specifically "a second zone's
+setup crashes AFTER the coordinator/engine already started, with no way to
+see/stop/reach that second zone." With the guard, a second-and-later zone's
+setup never calls the shared registration functions in the first place, so
+there is no duplicate-registration attempt for HA's frontend/http layer to
+ever crash on. The reordering approach (registration before
+`coordinator.async_setup()`) was designed as defense against a crash that
+could still happen even with a fix; the guard approach removes the
+crash-causing call itself for every zone but the first. PR3's spike remains
+formally un-run and its question academically open, but it is no longer
+load-bearing for Gap 6's fix.
+
+**Consistency with the dashboard direction:** this also matches, rather than
+fights, this document's own [dashboard selector design](#dashboard-a-zone-selector-over-the-existing-card-layout-not-a-new-comparisonaggregation-card) —
+a SINGLE panel with an `entry_id`-driven zone-selector row, not one physical
+panel per zone. Making each zone's `frontend_url_path` unique would have
+produced N separate panels/URLs that PR9 would then need to collapse back
+into one selector-driven panel anyway — a fix that would have had to be
+partially unwound. "Register once, guarded" is the version of Gap 6's fix
+that PR9 can build on directly.
+
+**Defense-in-depth, not the primary mechanism:** the registration block is
+additionally wrapped in a broad `try/except Exception`, logged at WARNING
+(`"Panel registration skipped: already registered by another zone
+entry_id=%s reason=%s"`) and treated as an expected no-op rather than a fatal
+setup error, in case the guard's own assumption (`hass.data` accurately
+reflects HA's internal panel/view registries) is ever violated — for example
+by an unusual reload sequence this design didn't anticipate. The `finally`
+block sets the guard flag regardless of whether the `try` succeeded or the
+`except` fired, so a caught failure is not retried by a third zone either.
+
+**REST view teardown remains a known, separate, out-of-scope gap.** Gap 9's
+scope was specifically the five zone-scoped *services*; there is still no
+`hass.http`-level "unregister a view" call anywhere in `async_unload_entry()`
+(HA does not offer one directly). This was true before PR5 and remains true
+after — not a regression PR5 introduced, and not part of Gap 6/8's scope as
+originally written. The REST views themselves are stateless dispatchers that
+resolve their target coordinator per-request (once PR7/Gap 4 lands), so a
+lingering view registration after the last zone unloads is a dormant/inert
+endpoint, not a live binding to a defunct object the way Gap 9's service
+closures were — a materially smaller risk, but flagged here for whoever
+scopes a future teardown-completeness pass.
 
 #### Gap 7 — no zone-naming field exists
 
@@ -506,6 +643,23 @@ service call — until that zone's own entry happens to reload and re-registers 
 panel. This is the mirror image of Gap 6 (panel registration on setup) and belongs
 in the same PR as that fix.
 
+**(as built, PR5 — Step 5):** fixed. `async_remove_panel(hass,
+PANEL_FRONTEND_PATH)` was moved inside the SAME `if not hass.data[DOMAIN]:`
+block `async_unload_entry()` already used for `log_capture.uninstall()` and
+(since PR4) the `ZONE_SCOPED_SERVICES` teardown loop — not a second,
+parallel guard. It now fires only once the last zone unloads. The panel/view
+registration guard flag (`_PANEL_HASS_DATA_KEY`, see the "(as built, PR5)"
+note under [Gap 6](#gap-6--panelview-registration-needs-empirical-verification))
+is also cleared inside this same block, so a zone added after every prior
+zone was removed re-registers the shared panel/views instead of finding a
+stale "already registered" flag left over from the torn-down instance.
+Regression coverage: `tests/test_panel_zone_scoping.py` (new,
+`build_headless_multi_zone()` + the `teardown_cleanup` assertion type) and
+the pre-existing `tests/test_sim_harness_multi_zone.py::TestMultiZoneAssertionTypes::test_teardown_cleanup_unloads_and_reports_panel_state`,
+which previously asserted `passed is False` to honestly document this bug
+(per this project's no-fabricated-correctness testing doctrine) and now
+asserts `passed is True` now that the bug is fixed.
+
 #### Gap 9 — services are never unregistered on unload
 
 There is no `hass.services.async_remove` call anywhere in `async_unload_entry()`.
@@ -522,6 +676,32 @@ redirect to the surviving zone — it silently acts on the deleted zone's now-de
 call appears to "succeed." This compounds Gap 5 (the live-misdirection bug) with a
 teardown-time version of the same defect: destructive services have no reliable
 binding to a zone that still exists, in either direction.
+
+**(as built, PR4 — Step 4):** fixed, in the same PR as Gap 5 — this is the
+unload-side half of that fix, not a separate change. `async_unload_entry()`
+gained a `for service_name in ZONE_SCOPED_SERVICES: hass.services.async_remove(DOMAIN, service_name)`
+loop, reading the same five-element tuple Gap 5's registration guard reads,
+so the registered-service set and the torn-down-service set cannot drift
+apart from each other. This loop sits inside the existing
+`if not hass.data[DOMAIN]:` block `async_unload_entry()` already used for
+`log_capture.uninstall()` — i.e. it fires **only once the last zone unloads**,
+not on every zone's individual unload. This is the correct lifetime for a
+domain-wide (not per-zone) resource: since Gap 5's fix, the five services
+are no longer bound to any single zone at all, so removing them while a
+sibling zone is still live would strand that surviving zone with no way to
+call any of the five services — a new, self-inflicted gap that would not
+have existed before Gap 5's own fix. Concretely, this also means the
+teardown-time defect described above — a deleted zone's now-defunct
+`coordinator` still reachable through a lingering closure — can no longer
+occur at all post-PR4, independent of the last-zone timing question: Gap 5's
+fix already means no closure captures any specific zone's `coordinator`, so
+there is nothing defunct left to silently act on even before the last zone
+unloads.
+
+Regression coverage: `tests/test_service_zone_scoping.py` (new) — unloads
+one of two zones, asserts the surviving zone's services are still callable
+via `hass.services.has_service()`, then unloads the last zone and asserts
+all five are gone.
 
 ### Why config-entry-per-zone is still right despite the longer gap list
 
@@ -788,26 +968,29 @@ debugged and tested with.
    shortly after this branch ships — if outcome (a) turns out to be true
    instead (clean crash before the control loop starts), PR5's reordering is
    still correct but unnecessary defense-in-depth, not a fix for a live gap.
-4. **PR4 — Service-handler scoping and unregistration (Gaps 5 and 9).**
-   Safety-critical; no dependency on PR3's result. Make service registration
-   per-entry-safe (entry_id-suffixed service names, or a required
-   zone-identifying parameter routed through a single domain-wide
-   registration guarded against double-registration), and add the missing
-   `hass.services.async_remove` calls to `async_unload_entry()` so a deleted
-   zone's service closures cannot linger and be silently called against a
-   defunct coordinator. Ships as soon as PR2's harness can validate it.
+4. **PR4 — Service-handler scoping and unregistration (Gaps 5 and 9). DONE
+   (Step 4).** Safety-critical; no dependency on PR3's result. Shipped as a
+   required `call.data["entry_id"]` field on all five `ZONE_SCOPED_SERVICES`,
+   resolved at call time via `_resolve_zone_coordinator()` (raises
+   `ServiceValidationError` for an unknown/unloaded entry_id) rather than a
+   closure over a specific zone's `coordinator` — plus a `has_service()`
+   registration guard so re-registering identical closures on every
+   additional zone's setup is a no-op, and the matching
+   `hass.services.async_remove()` teardown loop in `async_unload_entry()`,
+   guarded to fire only once the last zone unloads. See
+   `tests/test_service_zone_scoping.py`.
 5. **PR5 — Panel/view registration scoping on setup and unload (Gaps 6 and
-   8).** Design depends on PR3's empirical result: if PR3 confirms outcome
-   (a) (clean crash, nothing left running), the fix is a straightforward
-   per-entry-scoped `frontend_url_path`/view registration; if PR3 finds
-   outcome (b) instead (crash after the coordinator/engine already started),
-   the fix additionally requires reordering `__init__.py` so
-   panel/service/view registration happens BEFORE
-   `coordinator.async_setup()`/first refresh, so a registration failure
-   aborts before any control loop begins running. Either way,
-   `async_unload_entry()` also needs the Gap 8 guard —
-   `async_remove_panel()` must not fire unless `hass.data[DOMAIN]` is empty,
-   mirroring the existing `log_capture.uninstall()` guard six lines above it.
+   8). DONE (Step 5).** Shipped WITHOUT running PR3's empirical spike — the
+   actual fix is "register the shared REST views/static path/panel ONCE,
+   domain-wide, guarded" (mirroring PR4's `has_service()` pattern via a new
+   `_PANEL_HASS_DATA_KEY` flag), not the originally-sketched per-entry-unique
+   `frontend_url_path`/reordering approach. This closes Gap 6's safety
+   concern independent of PR3's outcome — see the "(as built, PR5)" note
+   under [Gap 6](#gap-6--panelview-registration-needs-empirical-verification)
+   for the full reasoning. `async_unload_entry()`'s Gap 8 fix folds
+   `async_remove_panel()` into the SAME `if not hass.data[DOMAIN]:` guard
+   already used for `log_capture.uninstall()`/PR4's service teardown, not a
+   second guard. See `tests/test_panel_zone_scoping.py`.
 6. **PR6 — Entry-scoped persistence (Gaps 1-3). DONE (Phase A).** No dependency on PR1-PR5.
    `LearningEngine`, `StatePersistence`, `ChartStateLog` all take
    `entry.entry_id` into their filename via `storage_paths.py`, each with a
@@ -876,8 +1059,10 @@ Two additions to `tools/sim_harness/`, no production code touched:
 2. **`FakeHass` needs `.data` and `.config_entries`.** Confirmed: zero matches
    for either attribute in `fake_hass.py` today (one incidental unrelated hit,
    `event.data.get(...)`). `.data` must be a real dict so
-   `hass.data.setdefault(DOMAIN, {})` (`__init__.py:363`) and
-   `hass.data[DOMAIN][entry.entry_id] = coordinator` (`__init__.py:431`) work
+   `hass.data.setdefault(DOMAIN, {})` (`__init__.py:423`, was `:363`
+   pre-Phase-B) and
+   `hass.data[DOMAIN][entry.entry_id] = coordinator` (`__init__.py:491`, was
+   `:431` pre-Phase-B) work
    unmodified. `.config_entries` needs `async_forward_entry_setups` (no-op),
    `async_unload_platforms` (no-op, returns `True`), and `async_entries(DOMAIN)`
    returning stub entries in stable order — the exact accessor the Transitional
@@ -953,13 +1138,20 @@ authors (Steps 4/5/7) should call directly:
   `LearningState` needs seeding first, or the assertion passes vacuously.
 - `check_service_registry_binding(zones, fake_hass, assertion) -> (bool, str)`
   — sync. Walks the registered handler's closure free-variables
-  (`__code__.co_freevars` / `__closure__`) for `coordinator` or `entry`
-  (production's `handle_dump_diagnostics` closes over `entry` directly rather
-  than `coordinator`, so both names are checked) and identity-matches the
-  captured object against the known zones. This is a **test-only** answer —
-  the diagnostics `active_service_bindings` field (below) explicitly cannot
-  do this via public HA APIs; the harness can only do it because it has
-  direct access to the live closure objects HA's own runtime doesn't expose.
+  (`__code__.co_freevars` / `__closure__`) for `coordinator` or `entry` and
+  identity-matches the captured object against the known zones. **Built
+  against pre-PR4 production code and now superseded, not just untested:**
+  as of PR4 (Gap 5, Step 4), the five handlers no longer close over any
+  per-zone `coordinator` or `entry` at all — each resolves its target zone
+  fresh, at call time, via `_resolve_zone_coordinator(hass, call)` reading
+  `call.data["entry_id"]`, so the closures' free variables are just `hass`
+  and helper functions. This check would find nothing to match against
+  current handlers; `tests/test_service_zone_scoping.py` confirms this by
+  using `cross_zone_isolation` (calling the real service end-to-end and
+  observing the outcome) instead of `service_registry_binding` for its Gap
+  5 coverage. `service_registry_binding` remains defined in
+  `multi_zone_assertions.py` and is not deleted here — it is unused, kept as
+  a record of the pre-PR4 bug shape, not exercised as regression coverage.
 - `check_teardown_cleanup(zones, fake_hass, assertion) -> (bool, str)` —
   async. Performs the unload itself (via the REAL `async_unload_entry()`) —
   a `teardown_cleanup` assertion IS the unload event, not a check that runs
@@ -982,12 +1174,15 @@ entry points above take the exact `(zones, fake_hass)` shape
 them today will not need to change when the `simulate.py` wiring is added
 later.
 
-**OPEN QUESTION:** whether `hass.services` exposes closure/coordinator identity
-introspectably enough at runtime to actually implement `service_registry_binding`
-and the `active_service_bindings` diagnostics field (see
-[Diagnostics and Field Feedback](#diagnostics-and-field-feedback) below) without
-relying on undocumented HA internals. Requires PR3-adjacent empirical
-verification; not resolved here.
+**Formerly an OPEN QUESTION, now moot (as built, PR4):** whether `hass.services`
+exposes closure/coordinator identity introspectably enough at runtime to
+implement `service_registry_binding` and the `active_service_bindings`
+diagnostics field (see [Diagnostics and Field Feedback](#diagnostics-and-field-feedback)
+below) without relying on undocumented HA internals. PR4 (Gap 5, Step 4)
+sidestepped this question rather than answering it: services no longer close
+over a per-zone `coordinator`/`entry` at all, so there is no closure identity
+left to introspect, through public APIs or otherwise. No PR3-adjacent
+empirical verification was ever needed for this specific question.
 
 ### Pre-condition 2
 
@@ -1055,12 +1250,16 @@ than requiring back-and-forth:
   `hass.config_entries.async_entries(DOMAIN)`'s stable order, the same
   accessor the Transitional Safety Window fallback uses in production —
   directly diagnostic for Gap 5/9-class reports
-- `active_service_bindings` — which entry_id each of the five domain-scoped
-  services is currently bound to, if introspectable (flagged above as needing
-  empirical confirmation, see the OPEN QUESTION in
-  [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware))
-  — the single most direct diagnostic for "I called reset_learning_data on
-  zone B and zone A's data changed"
+- `active_service_bindings` — originally scoped as "which entry_id each of
+  the five domain-scoped services is currently bound to," the single most
+  direct diagnostic for "I called reset_learning_data on zone B and zone A's
+  data changed." **(as built, PR4):** this question is now moot rather than
+  answered — see the "(as built, PR4)" note in
+  [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware).
+  Since PR4, services resolve their target zone per-call from a required
+  `entry_id` field (validated fail-closed via `ServiceValidationError`), so
+  there is no static binding left to report; the field instead states that
+  design explicitly
 - The existing `dump_diagnostics` fields (`debug_state`, chart-data counts,
   `learning_summary`, `config` minus `notify_service`, `briefing_state`)
 
@@ -1086,35 +1285,65 @@ built as `{k: v for k, v in coordinator.config.items() if k != "notify_service"}
 `ai_api_key` (the codebase's one `"sensitive": True`-flagged `CONFIG_METADATA`
 key, `const.py:833-840`) at all, so a raw API key would have flowed straight
 into the logged diagnostic dump. The new shared
-`async_get_diagnostics_payload()` (`diagnostics.py:35-86`) instead builds
+`async_get_diagnostics_payload()` (`diagnostics.py:35-91`, was `:35-86`
+pre-Phase-B — the PR4 note added to the `active_service_bindings` field's
+comment block, see [Gap 5](#gap-5--service-handler-misdirection-most-severe),
+grew the function by 5 lines) instead builds
 `"config": dict(coordinator.config)` (the full, unfiltered config) and relies
 entirely on the final `async_redact_data(payload, TO_REDACT)` call
-(`diagnostics.py:86`) to protect both `notify_service` and `ai_api_key`
+(`diagnostics.py:91`, was `:86` pre-Phase-B) to protect both `notify_service`
+and `ai_api_key`
 (`TO_REDACT = {"notify_service"} | {key for key, meta in
-CONFIG_METADATA.items() if meta.get("sensitive")}`, `diagnostics.py:32`) —
+CONFIG_METADATA.items() if meta.get("sensitive")}`, `diagnostics.py:32`,
+unchanged) —
 and HA's `async_redact_data` **replaces** a matching key's value with the
 literal string `"**REDACTED**"` wherever it appears in the payload (including
 nested dicts), rather than dropping the key, which is a stronger guarantee
 than the old handler's plain omission (a value that's present-but-redacted
 can't be mistaken for "this config has no notify service configured" the way
-a silently-missing key could). `handle_dump_diagnostics` (`__init__.py:479-497`)
+a silently-missing key could). `handle_dump_diagnostics` (`__init__.py:554-570`,
+was `:479-497` pre-Phase-B — now nested inside PR4's `has_service()` guard
+block, see [Gap 5](#gap-5--service-handler-misdirection-most-severe))
 was changed to call this same shared helper, so the log-only service call
 gets the same fix for free — this closes a real, previously-undocumented gap
 in the log-only path, not just a refactor.
 
-`active_service_bindings` ships as an explicit, honest limitation rather than
-fabricated data: `diagnostics.py:63-66` returns the literal string `"not
-introspectable via public HA APIs — see docs/multi-zone-spec.md 'Diagnostics
-and Field Feedback' open question"` for every payload, because HA's public
-`hass.services` API surfaces only registered service names/schemas, not a
-bound closure's captured `coordinator` variable. The harness-only
-`check_service_registry_binding()` (`multi_zone_assertions.py`, see
-[Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware))
-answers a *different* question — it works only because the test harness has
-direct access to the live closure objects, which production's diagnostics
-hook structurally cannot reach through public APIs. This OPEN QUESTION
-remains genuinely open pending PR3's empirical spike (see below); Phase A
-did not attempt to resolve it via undocumented internals.
+**(as built, PR1 original / PR4 superseded):** at PR1 time, `active_service_bindings`
+shipped as an explicit, honest limitation rather than fabricated data —
+`diagnostics.py` returned the literal string `"not introspectable via public
+HA APIs — see docs/multi-zone-spec.md 'Diagnostics and Field Feedback' open
+question"` for every payload, because HA's public `hass.services` API
+surfaces only registered service names/schemas, not a bound closure's
+captured `coordinator` variable.
+
+**PR4 (Step 4) changed the underlying question, so this field's text changed
+with it** — not because the introspection question got answered, but because
+it stopped applying. Once services resolve their target zone per-call from a
+required `entry_id` field (`_resolve_zone_coordinator()`, `__init__.py`)
+instead of closing over one zone's `coordinator` at registration time, there
+is no static "current binding" left for any diagnostics field to report,
+introspectable or not. `diagnostics.py` (`active_service_bindings`, near the
+top of `async_get_diagnostics_payload()`) now returns a literal string
+describing that design directly: services are registered once, domain-wide,
+and resolve their target zone per-call from `entry_id`. `tests/test_diagnostics.py`'s
+`test_active_service_bindings_reports_call_time_resolution_not_a_static_binding`
+covers this.
+
+The harness-only `check_service_registry_binding()` (`multi_zone_assertions.py`)
+was built at PR2 time to answer a *different* question than this field ever
+tried to — "can the test harness verify binding via closure introspection"
+(yes, because a `FakeHass` is a plain-Python object with inspectable
+closures) vs. "can production code introspect it through public HA APIs" (a
+question PR4 made moot for production, not merely unresolved). Because PR4
+removed the `coordinator`/`entry` closure variables this harness check walks
+for, it is no longer exercisable against current production handlers — see
+the "(as built, PR4)" note under
+[Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware)
+for how `tests/test_service_zone_scoping.py` covers Gap 5 instead
+(`cross_zone_isolation`, calling the real service end-to-end). PR3's
+empirical spike was never about this question at all — it concerns Gap 6's
+panel/view registration timing, not service binding — and remains
+deliberately un-run for the separate reasons documented under Gap 6.
 
 ### HA Boundary Rule check
 
@@ -1251,7 +1480,7 @@ Downloaded file (excerpt):
   "this_entry_id": "01J...bedroom",
   "entry_title": "Bedroom",
   "entry_setup_order": 1,
-  "active_service_bindings": { "reset_learning_data": "01J...bedroom", ... },
+  "active_service_bindings": "not applicable — since PR4, zone-scoped services ... resolve their target zone per-call from entry_id ...",
   ...
 }
 ```
@@ -1513,11 +1742,11 @@ document.
 - `build_coordinator.py:181` (`tools/sim_harness/build_coordinator.py`) — `build_headless_coordinator()`, constructs `ClimateAdvisorCoordinator` directly, bypassing `async_setup_entry()` entirely; the reason Gaps 5/6/8/9 have no regression coverage today. Left untouched by PR2 — single-zone tests keep this fast path.
 - `build_coordinator.py:177-180` — comment confirming `__init__` never touches `async_track_*`/`hass.bus`, i.e. no setup-entry side effects occur via the direct-construction path
 - [`build_headless_multi_zone()`](../tools/sim_harness/build_coordinator.py#L251) (`tools/sim_harness/build_coordinator.py:251-388`, new, PR2 **DONE**) — drives the REAL `async_setup_entry()`/`async_unload_entry()` per zone against one shared `FakeHass`; see the "(as built, PR2)" note under [Harness extension needed](#harness-extension-needed)
-- [`multi_zone_assertions.py`](../tools/sim_harness/multi_zone_assertions.py) (new, PR2 **DONE**) — `cross_zone_isolation`/`service_registry_binding`/`teardown_cleanup` assertion evaluators plus `validate_zones_schema()`; see the "(as built, PR2)" note under [Golden scenario schema extension](#golden-scenario-schema-extension)
+- [`multi_zone_assertions.py`](../tools/sim_harness/multi_zone_assertions.py) (new, PR2 **DONE**) — `cross_zone_isolation`/`service_registry_binding`/`teardown_cleanup` assertion evaluators plus `validate_zones_schema()`; see the "(as built, PR2)" note under [Golden scenario schema extension](#golden-scenario-schema-extension). Note: `service_registry_binding` is unused as of PR4 — see the "(as built, PR4)" note under [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware)
 - `ha_stubs.py:179-229,317-319` (`tools/sim_harness/ha_stubs.py`) — existing `_MockConfigFlow`/`_MockOptionsFlow` realification precedent PR2's new config-entry stub follows (PR2 **DONE**)
 - `fake_hass.py` (`tools/sim_harness/fake_hass.py`) — `.data`/`.config_entries` now added, PR2 **DONE**
 - `tests/test_api.py:43-60` — existing hand-built `hass.data = {DOMAIN: {"entry_1": coord}}` `MagicMock()` precedent for the shape `build_headless_multi_zone()` now produces via the real setup path instead
-- [`dump_diagnostics` fields](../custom_components/climate_advisor/__init__.py#L479) (`__init__.py:479-497`, PR1 **DONE** — now redirected through `diagnostics.py`'s shared helper, see the "(as built, PR1)" note under [Fix: implement HA's native diagnostics hook](#fix-implement-has-native-diagnostics-hook)) — original log-only diagnostics payload, superseded (not replaced) by the new `diagnostics.py` hook
+- [`dump_diagnostics` fields](../custom_components/climate_advisor/__init__.py#L554) (`__init__.py:554-570`, was `:479-497` pre-Phase-B, PR1 **DONE** — now redirected through `diagnostics.py`'s shared helper, see the "(as built, PR1)" note under [Fix: implement HA's native diagnostics hook](#fix-implement-has-native-diagnostics-hook)) — original log-only diagnostics payload, superseded (not replaced) by the new `diagnostics.py` hook
 - [`diagnostics.py`](../custom_components/climate_advisor/diagnostics.py) (new, PR1 **DONE**) — `async_get_config_entry_diagnostics()` / `async_get_diagnostics_payload()`, HA's native Download Diagnostics hook; see [Diagnostics and Field Feedback](#diagnostics-and-field-feedback)
 - `docs/HA-BOUNDARY-EXCEPTIONS.md` — one active exception (learning-DB file); no new entry needed for `diagnostics.py`
 - [HA Developer Docs — Implements diagnostics](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/diagnostics/) — official signature/pattern for `async_get_config_entry_diagnostics`, `TO_REDACT`, and `async_redact_data()`

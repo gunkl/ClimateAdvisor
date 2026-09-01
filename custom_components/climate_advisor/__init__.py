@@ -19,6 +19,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 
 from . import log_capture
@@ -109,6 +110,36 @@ from .coordinator import ClimateAdvisorCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor", "switch"]
+
+# Issue #796 Gap 5/9: the five zone-scoped services below are registered ONCE,
+# domain-wide (HA's service registry has no per-config-entry namespace) — see
+# _resolve_zone_coordinator()'s docstring for why every one of them now
+# requires a call.data["entry_id"] field instead of closing over a specific
+# zone's `coordinator`. This tuple is the single source of truth for the
+# service-name set, read by both the registration guard in
+# async_setup_entry() and the teardown loop in async_unload_entry().
+ZONE_SCOPED_SERVICES = (
+    "respond_to_suggestion",
+    "force_reclassify",
+    "resend_briefing",
+    "dump_diagnostics",
+    "reset_learning_data",
+)
+
+# Issue #796 Gap 6/8: the REST API views (api.py's API_VIEWS — every view's
+# `url` class attribute is a fixed `API_*` constant from const.py, not
+# per-entry-derived, confirmed by reading api.py) and the dashboard panel
+# (PANEL_URL, PANEL_FRONTEND_PATH — both fixed module-level string constants
+# in const.py) are shared, domain-wide resources, not per-zone resources — the
+# same collision shape as ZONE_SCOPED_SERVICES above. Deliberately NOT stored
+# under hass.data[DOMAIN]: api.py's _get_coordinator() does
+# `next(iter(hass.data[DOMAIN].values()))`, and log_capture.py's identical
+# comment explains why inserting a non-coordinator value into that dict would
+# break it. Tracks whether this zone's async_setup_entry() call (or an
+# earlier zone's) has already registered — or attempted and determined
+# already-registered — the shared views/panel, so a second-and-later zone's
+# setup never attempts a duplicate registration in the first place.
+_PANEL_HASS_DATA_KEY = "climate_advisor_panel_registered"
 
 
 def _resolve_weather_entity(hass: HomeAssistant, configured: str) -> str | None:
@@ -358,6 +389,35 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     return True
 
 
+def _resolve_zone_coordinator(hass: HomeAssistant, call) -> ClimateAdvisorCoordinator:
+    """Resolve the target zone's coordinator for a service call, at call time.
+
+    Issue #796 Gap 5: previously each of the five services below was a
+    closure over the `coordinator` local bound inside one specific
+    async_setup_entry() call — with two zones configured, the second zone's
+    setup silently overwrote the first zone's handler in HA's global service
+    registry, so every call (including the destructive reset_learning_data)
+    always acted on whichever zone set up last, with no error and no way for
+    the caller to target the zone they actually meant.
+
+    Every zone-scoped service now requires call.data["entry_id"] and this
+    resolves it fresh against hass.data[DOMAIN] — the canonical per-entry
+    lookup table set at async_setup_entry() — rather than any captured local.
+    Raises ServiceValidationError (not a bare KeyError/None) for an unknown
+    or already-unloaded entry_id, matching HA's convention for a user-facing
+    service-call validation failure the frontend/CLI can render as an error
+    rather than an unhandled exception.
+    """
+    entry_id = call.data.get("entry_id")
+    coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
+    if coordinator is None:
+        raise ServiceValidationError(
+            f"Unknown or unloaded Climate Advisor zone entry_id '{entry_id}'. "
+            "Check Settings > Devices & Services for the correct zone."
+        )
+    return coordinator
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Climate Advisor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -433,111 +493,173 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up sensor platform
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    RESPOND_SUGGESTION_SCHEMA = vol.Schema(
-        {
-            vol.Required("action"): vol.In(["accept", "dismiss"]),
-            vol.Required("suggestion_key"): cv.string,
-        }
-    )
-
-    # Register service for accepting/dismissing learning suggestions
-    async def handle_suggestion_response(call):
-        """Handle user response to a learning suggestion."""
-        action = call.data.get("action")  # "accept" or "dismiss"
-        suggestion_key = call.data.get("suggestion_key")
-
-        if action == "accept":
-            changes = coordinator.learning.accept_suggestion(suggestion_key)
-            await hass.async_add_executor_job(coordinator.learning.save_state)
-            _LOGGER.info("Suggestion accepted: %s → changes: %s", suggestion_key, changes)
-            # Apply changes to coordinator config
-            coordinator.config.update(changes)
-        elif action == "dismiss":
-            coordinator.learning.dismiss_suggestion(suggestion_key)
-            await hass.async_add_executor_job(coordinator.learning.save_state)
-            _LOGGER.info("Suggestion dismissed: %s", suggestion_key)
-
-    hass.services.async_register(
-        DOMAIN,
-        "respond_to_suggestion",
-        handle_suggestion_response,
-        schema=RESPOND_SUGGESTION_SCHEMA,
-    )
-
-    # Register debug services
-    async def handle_force_reclassify(call):
-        """Force a coordinator refresh / reclassification."""
-        await coordinator.async_request_refresh()
-
-    async def handle_resend_briefing(call):
-        """Re-send the daily briefing."""
-        from homeassistant.util import dt as dt_util
-
-        coordinator._briefing_sent_today = False
-        await coordinator._async_send_briefing(dt_util.now())
-
-    async def handle_dump_diagnostics(call):
-        """Log a comprehensive diagnostic snapshot for troubleshooting.
-
-        Kept (not deprecated) alongside the native `async_get_config_entry_diagnostics`
-        hook in diagnostics.py for continuity — some users may have automations that
-        already call this service. Builds its payload through the same shared helper
-        so the two surfaces stay a single source of truth for the payload shape.
-        """
-        from .diagnostics import async_get_diagnostics_payload
-
-        diag = await async_get_diagnostics_payload(hass, entry)
-        _LOGGER.info(
-            "Diagnostic dump requested:\n%s",
-            json.dumps(diag, indent=2, default=str),
+    # Issue #796 Gap 5/9: register the five zone-scoped services ONCE,
+    # domain-wide, on whichever zone's async_setup_entry() runs first — not
+    # once per zone. All five handlers now resolve their target coordinator
+    # (or entry) at CALL TIME via _resolve_zone_coordinator(), keyed off the
+    # required call.data["entry_id"] field, so re-registering identical
+    # closures on every additional zone's setup would be pure churn with no
+    # behavioral difference. has_service() is the existing HA-idiomatic
+    # "already registered" check (also used by the multi-zone test harness).
+    if not hass.services.has_service(DOMAIN, ZONE_SCOPED_SERVICES[0]):
+        RESPOND_SUGGESTION_SCHEMA = vol.Schema(
+            {
+                vol.Required("entry_id"): cv.string,
+                vol.Required("action"): vol.In(["accept", "dismiss"]),
+                vol.Required("suggestion_key"): cv.string,
+            }
         )
 
-    hass.services.async_register(DOMAIN, "force_reclassify", handle_force_reclassify, schema=vol.Schema({}))
-    hass.services.async_register(DOMAIN, "resend_briefing", handle_resend_briefing, schema=vol.Schema({}))
-    hass.services.async_register(DOMAIN, "dump_diagnostics", handle_dump_diagnostics, schema=vol.Schema({}))
+        # Register service for accepting/dismissing learning suggestions
+        async def handle_suggestion_response(call):
+            """Handle user response to a learning suggestion."""
+            zone_coordinator = _resolve_zone_coordinator(hass, call)
+            action = call.data.get("action")  # "accept" or "dismiss"
+            suggestion_key = call.data.get("suggestion_key")
 
-    # Schema for reset_learning_data service
-    RESET_LEARNING_SCHEMA = vol.Schema(
-        {vol.Optional("scope", default="all"): vol.In(["thermal_model", "weather_bias", "suggestions", "all"])}
-    )
+            if action == "accept":
+                changes = zone_coordinator.learning.accept_suggestion(suggestion_key)
+                await hass.async_add_executor_job(zone_coordinator.learning.save_state)
+                _LOGGER.info("Suggestion accepted: %s → changes: %s", suggestion_key, changes)
+                # Apply changes to coordinator config
+                zone_coordinator.config.update(changes)
+            elif action == "dismiss":
+                zone_coordinator.learning.dismiss_suggestion(suggestion_key)
+                await hass.async_add_executor_job(zone_coordinator.learning.save_state)
+                _LOGGER.info("Suggestion dismissed: %s", suggestion_key)
 
-    async def handle_reset_learning_data(call) -> None:
-        """Handle reset_learning_data service call."""
-        scope = call.data.get("scope", "all")
-        await hass.async_add_executor_job(coordinator.learning.reset, scope)
-        _LOGGER.info("Learning data reset via service: scope=%s", scope)
+        hass.services.async_register(
+            DOMAIN,
+            "respond_to_suggestion",
+            handle_suggestion_response,
+            schema=RESPOND_SUGGESTION_SCHEMA,
+        )
 
-    hass.services.async_register(
-        DOMAIN,
-        "reset_learning_data",
-        handle_reset_learning_data,
-        schema=RESET_LEARNING_SCHEMA,
-    )
+        # Register debug services
+        ENTRY_ID_ONLY_SCHEMA = vol.Schema({vol.Required("entry_id"): cv.string})
 
-    # Register REST API views for the dashboard panel
-    for view_cls in API_VIEWS:
-        hass.http.register_view(view_cls())
+        async def handle_force_reclassify(call):
+            """Force a coordinator refresh / reclassification."""
+            zone_coordinator = _resolve_zone_coordinator(hass, call)
+            await zone_coordinator.async_request_refresh()
 
-    # Register dashboard panel (iframe serving frontend/index.html)
-    frontend_path = Path(__file__).parent / "frontend"
-    from homeassistant.components.http import StaticPathConfig
+        async def handle_resend_briefing(call):
+            """Re-send the daily briefing."""
+            from homeassistant.util import dt as dt_util
 
-    await hass.http.async_register_static_paths([StaticPathConfig(PANEL_URL, str(frontend_path), cache_headers=False)])
-    import hashlib
+            zone_coordinator = _resolve_zone_coordinator(hass, call)
+            zone_coordinator._briefing_sent_today = False
+            await zone_coordinator._async_send_briefing(dt_util.now())
 
-    from homeassistant.components.frontend import async_register_built_in_panel
+        async def handle_dump_diagnostics(call):
+            """Log a comprehensive diagnostic snapshot for troubleshooting.
 
-    _panel_bytes = await hass.async_add_executor_job((frontend_path / "index.html").read_bytes)
-    _panel_hash = hashlib.md5(_panel_bytes).hexdigest()[:8]
-    async_register_built_in_panel(
-        hass,
-        "iframe",
-        sidebar_title="Climate Advisor",
-        sidebar_icon="mdi:thermostat",
-        frontend_url_path=PANEL_FRONTEND_PATH,
-        require_admin=False,
-        config={"url": f"{PANEL_URL}/index.html?v={_panel_hash}"},
-    )
+            Kept (not deprecated) alongside the native `async_get_config_entry_diagnostics`
+            hook in diagnostics.py for continuity — some users may have automations that
+            already call this service. Builds its payload through the same shared helper
+            so the two surfaces stay a single source of truth for the payload shape.
+            """
+            from .diagnostics import async_get_diagnostics_payload
+
+            zone_coordinator = _resolve_zone_coordinator(hass, call)
+            zone_entry = hass.config_entries.async_get_entry(zone_coordinator._entry_id)
+            diag = await async_get_diagnostics_payload(hass, zone_entry)
+            _LOGGER.info(
+                "Diagnostic dump requested:\n%s",
+                json.dumps(diag, indent=2, default=str),
+            )
+
+        hass.services.async_register(DOMAIN, "force_reclassify", handle_force_reclassify, schema=ENTRY_ID_ONLY_SCHEMA)
+        hass.services.async_register(DOMAIN, "resend_briefing", handle_resend_briefing, schema=ENTRY_ID_ONLY_SCHEMA)
+        hass.services.async_register(DOMAIN, "dump_diagnostics", handle_dump_diagnostics, schema=ENTRY_ID_ONLY_SCHEMA)
+
+        # Schema for reset_learning_data service
+        RESET_LEARNING_SCHEMA = vol.Schema(
+            {
+                vol.Required("entry_id"): cv.string,
+                vol.Optional("scope", default="all"): vol.In(["thermal_model", "weather_bias", "suggestions", "all"]),
+            }
+        )
+
+        async def handle_reset_learning_data(call) -> None:
+            """Handle reset_learning_data service call."""
+            zone_coordinator = _resolve_zone_coordinator(hass, call)
+            scope = call.data.get("scope", "all")
+            await hass.async_add_executor_job(zone_coordinator.learning.reset, scope)
+            _LOGGER.info("Learning data reset via service: entry_id=%s scope=%s", call.data.get("entry_id"), scope)
+
+        hass.services.async_register(
+            DOMAIN,
+            "reset_learning_data",
+            handle_reset_learning_data,
+            schema=RESET_LEARNING_SCHEMA,
+        )
+
+    # Issue #796 Gap 6: register the shared REST API views and dashboard panel
+    # ONCE, domain-wide, on whichever zone's async_setup_entry() runs first —
+    # mirrors the has_service() guard used for ZONE_SCOPED_SERVICES above.
+    # This is a deliberate architectural choice, not just a crash-avoidance
+    # patch: docs/multi-zone-spec.md's "Resolved Questions" section already
+    # designs the future dashboard zone selector as ONE panel with an
+    # entry_id-driven selector row, not one physical panel per zone — so
+    # "register once, guarded" is the fix that matches where the dashboard is
+    # headed, not a stopgap that per-entry-unique URLs would later need to be
+    # unwound.
+    #
+    # This guard also fully closes Gap 6's safety concern independent of
+    # PR3's (deliberately not run — see docs/multi-zone-spec.md Gap 6/PR3)
+    # empirical question of whether a duplicate frontend_url_path registration
+    # raises AFTER a coordinator's control loop is already live: with this
+    # guard, a second-and-later zone's setup never attempts the registration
+    # at all, so that specific crash-after-control-loop-start scenario cannot
+    # occur regardless of PR3's unconfirmed answer. The try/except below is a
+    # second line of defense only, in case this guard's own assumption is
+    # ever violated (e.g. hass.data was reset without HA's internal
+    # panel/view registries also being reset).
+    if not hass.data.get(_PANEL_HASS_DATA_KEY):
+        try:
+            # Register REST API views for the dashboard panel
+            for view_cls in API_VIEWS:
+                hass.http.register_view(view_cls())
+
+            # Register dashboard panel (iframe serving frontend/index.html)
+            frontend_path = Path(__file__).parent / "frontend"
+            from homeassistant.components.http import StaticPathConfig
+
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(PANEL_URL, str(frontend_path), cache_headers=False)]
+            )
+            import hashlib
+
+            from homeassistant.components.frontend import async_register_built_in_panel
+
+            _panel_bytes = await hass.async_add_executor_job((frontend_path / "index.html").read_bytes)
+            _panel_hash = hashlib.md5(_panel_bytes).hexdigest()[:8]
+            async_register_built_in_panel(
+                hass,
+                "iframe",
+                sidebar_title="Climate Advisor",
+                sidebar_icon="mdi:thermostat",
+                frontend_url_path=PANEL_FRONTEND_PATH,
+                require_admin=False,
+                config={"url": f"{PANEL_URL}/index.html?v={_panel_hash}"},
+            )
+        except Exception as err:  # noqa: BLE001 — see comment above: any failure here
+            # means the shared panel/views are already registered by another
+            # zone (or something HA-internal we can't predict without PR3's
+            # unrun empirical spike) — treated as expected, not fatal, so a
+            # second zone's setup still completes successfully.
+            _LOGGER.warning(
+                "Panel registration skipped: already registered by another zone entry_id=%s reason=%s",
+                entry.entry_id,
+                err,
+            )
+        finally:
+            # Set unconditionally (success or handled failure): either this
+            # zone just registered the shared resources, or we've determined
+            # they're already registered elsewhere — either way, no later
+            # zone's setup should attempt this again.
+            hass.data[_PANEL_HASS_DATA_KEY] = True
 
     _LOGGER.info("Climate Advisor v%s loaded successfully", VERSION)
     return True
@@ -554,10 +676,31 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.data[DOMAIN]:
         log_capture.uninstall(hass)
 
-    # Remove the dashboard panel
-    from homeassistant.components.frontend import async_remove_panel
+        # Issue #796 Gap 9: the five zone-scoped services (ZONE_SCOPED_SERVICES)
+        # are registered once, domain-wide, on whichever zone's
+        # async_setup_entry() ran first (see the has_service() guard there) —
+        # mirror that "domain-wide resource" lifetime here: only tear them
+        # down once the LAST zone is gone, not on every unload. Removing them
+        # per-unload while a sibling zone still exists would leave that
+        # surviving zone with no way to call reset_learning_data/etc. at all,
+        # even though its coordinator is still live in hass.data[DOMAIN].
+        for service_name in ZONE_SCOPED_SERVICES:
+            hass.services.async_remove(DOMAIN, service_name)
 
-    async_remove_panel(hass, PANEL_FRONTEND_PATH)
+        # Issue #796 Gap 8: the dashboard panel and REST API views are the
+        # same kind of domain-wide shared resource as the services above
+        # (Gap 6) — remove them only once the LAST zone is gone, not on every
+        # unload. Previously unconditional (fired on every unload regardless
+        # of remaining zones), which would strand a surviving zone with no
+        # dashboard/API access at all until its own entry happened to reload.
+        from homeassistant.components.frontend import async_remove_panel
+
+        async_remove_panel(hass, PANEL_FRONTEND_PATH)
+        # Clear the registration flag so a later zone (re-added after the
+        # last one was removed) re-registers the shared panel/views instead
+        # of finding a stale "already registered" flag from this now-torn-down
+        # instance.
+        hass.data.pop(_PANEL_HASS_DATA_KEY, None)
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return unload_ok

@@ -183,22 +183,57 @@ Per future forecast-hour timestamp, in priority order:
 1. **TOU banking target** — while the timestamp falls inside the resolved
    `[precondition_start, schedule_start)` window (`coordinator._tou_precondition_window_tuple()`,
    the same tuple the Target Band's own TOU override branch above already consumes).
-2. **Nat-vent thermostatic cycling target** — while `get_chart_data()`'s pre-existing
-   `predicted_activity[].fan_active` proxy says nat-vent is predicted active for that
-   timestamp. Fed through the same shared `nat_vent_cycling.compute_nat_vent_target()`
-   helper as the historical half and the live decision path, using *that timestamp's own*
-   `target_band.lower`/`.upper` (already sleep/wake/TOU-ramp-aware) as the day/sleep
-   floor-and-ceiling inputs. `fan_active` is a known, pre-existing, already-accepted
-   approximation (`outdoor < indoor and outdoor < band_upper + delta and indoor >
-   band_upper` — not a call into the real `decide_nat_vent_gate()`/FSM); this derivation
-   inherits that approximation rather than correcting it, and degrades gracefully to tier 3
-   (never crashes, never fabricates an out-of-band value) whenever the proxy's inputs are
-   incomplete.
-3. **Plain active comfort-band edge** — `target_band.lower` for `hvac_mode == "heat"`,
-   `.upper` for `"cool"`, `None` otherwise. Same derivation `_derive_predicted_setpoint()`
-   used before this fix; now only the fallback tier instead of the whole answer, closing
-   that function's TOU-blindness and nat-vent-blindness (both confirmed gaps — the old
-   field was never rendered by the frontend, so neither gap was previously user-visible).
+2. **Nat-vent thermostatic cycling target** — while `predicted_activity[].fan_active` says
+   nat-vent is predicted active for that timestamp. Fed through the same shared
+   `nat_vent_cycling.compute_nat_vent_target()` helper as the historical half and the live
+   decision path, using *that timestamp's own* `target_band.lower`/`.upper` (already
+   sleep/wake/TOU-ramp-aware) as the day/sleep floor-and-ceiling inputs. Degrades
+   gracefully to tier 3 (never crashes, never fabricates an out-of-band value) whenever
+   the walk's inputs are incomplete.
+3. **Plain active comfort-band edge** — `target_band.lower` for `hvac_mode_by_ts[ts] ==
+   "heat"`, `.upper` for `"cool"`, `None` otherwise. `hvac_mode_by_ts` is per-timestamp
+   (Issue #802), not one static mode for the whole forecast, so a day the forecast
+   classifies differently from today, or an hour a ceiling-guard escalation (see below)
+   overrides mid-day, picks the correct edge instead of a stale whole-forecast value.
+   Same derivation `_derive_predicted_setpoint()` used before this fix; now only the
+   fallback tier instead of the whole answer.
+
+**`predicted_activity` is a genuine forward walk of the real production decision
+functions, not an approximation (Issue #802).** The original implementation computed
+`fan_active` from a standalone temperature-inequality heuristic (`outdoor < indoor and
+outdoor < band_upper + delta and indoor > band_upper`) recomputed independently every
+hour with no session memory — self-defeating against nat-vent's own predicted cooling
+effect (the moment indoor cooled to `band_upper`, the intended outcome of running
+nat-vent, the heuristic read that as a reason to stop). `_walk_forward_regime()`
+replaces it by forward-walking the SAME pure, differentially-validated functions the
+live engine uses, fed per-hour predicted indoor/outdoor data instead of live sensor
+readings:
+
+- **Outer gate — which days are nat-vent-eligible**: `_compute_day_hvac_modes()`
+  (extracted from `_build_predicted_indoor_future()`'s existing per-day forecast-high
+  classification, today's entry overridden by the live classification) decides
+  `heat`/`cool`/`off` per calendar day. Only `off` days walk nat-vent at all.
+- **Inner walk — hour by hour on an `off` day**: `nat_vent_gate.decide_nat_vent_gate()`
+  (entry) / `nat_vent_exit.decide_nat_vent_exit()` (the real 6-reason exit chain —
+  `MANUAL_OVERRIDE_CONFLICT`, `COMFORT_FLOOR`, `AWAY_CEILING`, `PROACTIVE_FLOOR`,
+  `OUTDOOR_RISE`, `CEILING_THRESHOLD`) resolve `session_active` for that hour first.
+- **Mid-day escalation — `ode_ceiling_guard.decide_ode_ceiling_guard()`**: using that
+  same hour's just-resolved `session_active` as its `natural_vent_active` input (its
+  `DORMANT` outcome specifically depends on it — the coupling is load-bearing, not
+  incidental), checked only on `off`-classified days. On `ESCALATE`, the rest of that
+  calendar day switches to the HVAC-cool tier — an `off`-classified day predicted to
+  breach `comfort_cool` mid-day (the same condition that would make the live engine
+  override its own "off" mode early) now correctly shows the switch on the chart instead
+  of continuing to show a nat-vent-regime prediction past the point production would have
+  abandoned it.
+
+Zero new threshold math anywhere in this walk — composition of three pre-existing pure
+functions plus the day-mode lookup. All temperature inputs are raw (internal Fahrenheit),
+matching how these functions are used elsewhere (e.g.
+`_compute_next_automation_action()`'s own nat-vent-start prediction, Issue #528) — Issue
+#802 also fixed a latent double-conversion bug in this exact code path, where the display-
+unit-converted `_conv_band` was fed into `_compute_effective_target_forward()` and then
+the whole result was converted a second time.
 
 ### `nat_vent_target` DRY consolidation
 

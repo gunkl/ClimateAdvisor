@@ -450,19 +450,6 @@ class TestComputePredictedActivity:
     def _make_band(self, ts: str, lower: float = 68.0, upper: float = 76.0) -> list[dict]:
         return [{"ts": ts, "lower": lower, "upper": upper}]
 
-    def _make_forecast(self, ts: str, temp: float) -> list[dict]:
-        return [{"ts": ts, "temp": temp}]
-
-    def _make_predicted_indoor(self, ts: str, temp: float) -> list[dict]:
-        return [{"ts": ts, "temp": temp}]
-
-    def _make_classification(self, hvac_mode: str = "heat"):
-        from unittest.mock import MagicMock
-
-        c = MagicMock()
-        c.hvac_mode = hvac_mode
-        return c
-
     def _base_config(self, **overrides) -> dict:
         cfg = {
             "comfort_heat": 68.0,
@@ -473,19 +460,33 @@ class TestComputePredictedActivity:
         cfg.update(overrides)
         return cfg
 
+    # Issue #802: _compute_predicted_activity() no longer does its own temperature
+    # comparisons — it's a thin projection of the already-resolved per-hour
+    # `regime_by_ts` map (produced by `_walk_forward_regime()`, a genuine forward walk of
+    # the real decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard()
+    # functions — see tests/test_walk_forward_regime.py for coverage of THOSE decisions).
+    # The old tests here (test_fan_active_natural_vent_conditions,
+    # test_natural_vent_delta_default_matches_automation_default,
+    # test_fan_not_active_when_outdoor_warmer_than_indoor, test_fan_active_when_fan_mode_on,
+    # test_windows_recommended_when_outdoor_pleasant_indoor_warm,
+    # test_windows_not_recommended_when_outdoor_too_cold,
+    # test_windows_not_recommended_when_outdoor_warmer_than_indoor) tested a standalone
+    # temperature-inequality heuristic that has been deleted from this function entirely
+    # — keeping them patched to the new signature would silently test dead code paths that
+    # no longer exist here. The "natural_vent_delta must match production's default"
+    # regression concern that motivated one of those tests is now structurally impossible
+    # to violate: there is only one nat_vent_delta-reading formula left in the whole
+    # codebase (decide_nat_vent_gate() itself), so a chart/production divergence in that
+    # value can no longer exist by construction.
+
     # --- output shape ---
 
     def test_returns_list_with_correct_keys(self) -> None:
         """Each entry has ts, hvac_mode, fan_active, windows_recommended."""
         fn = self._import_helper()
         ts = "2026-05-18T14:00:00+00:00"
-        result = fn(
-            self._make_band(ts),
-            self._make_forecast(ts, 65.0),
-            self._make_predicted_indoor(ts, 72.0),
-            self._make_classification("heat"),
-            self._base_config(),
-        )
+        regime_by_ts = {ts: {"nat_vent_active": False, "hvac_mode": "heat"}}
+        result = fn(self._make_band(ts), regime_by_ts, self._base_config())
         assert len(result) == 1
         entry = result[0]
         assert set(entry.keys()) >= {"ts", "hvac_mode", "fan_active", "windows_recommended"}
@@ -493,145 +494,60 @@ class TestComputePredictedActivity:
     def test_empty_band_returns_empty_list(self) -> None:
         """Empty target_band → empty result."""
         fn = self._import_helper()
-        result = fn([], [], [], None, self._base_config())
+        result = fn([], {}, self._base_config())
         assert result == []
 
-    # --- hvac_mode ---
-
-    def test_hvac_mode_from_classification(self) -> None:
-        """hvac_mode in output matches classification.hvac_mode."""
+    def test_missing_ts_in_regime_map_defaults_to_off_and_inactive(self) -> None:
+        """A band timestamp with no corresponding regime_by_ts entry (e.g. the walk
+        skipped it) degrades gracefully to hvac_mode='off', fan_active=False — never
+        raises, never fabricates activity."""
         fn = self._import_helper()
         ts = "2026-05-18T14:00:00+00:00"
-        result = fn(
-            self._make_band(ts),
-            self._make_forecast(ts, 65.0),
-            self._make_predicted_indoor(ts, 72.0),
-            self._make_classification("cool"),
-            self._base_config(),
-        )
+        result = fn(self._make_band(ts), {}, self._base_config())
+        assert result[0]["hvac_mode"] == "off"
+        assert result[0]["fan_active"] is False
+        assert result[0]["windows_recommended"] is False
+
+    # --- hvac_mode / fan_active mirror the regime map verbatim ---
+
+    def test_hvac_mode_reflects_regime_map(self) -> None:
+        """hvac_mode in output matches regime_by_ts[ts]['hvac_mode'] — including a value
+        the walk assigned via ceiling-guard escalation, not just today's classification."""
+        fn = self._import_helper()
+        ts = "2026-05-18T14:00:00+00:00"
+        regime_by_ts = {ts: {"nat_vent_active": False, "hvac_mode": "cool"}}
+        result = fn(self._make_band(ts), regime_by_ts, self._base_config())
         assert result[0]["hvac_mode"] == "cool"
 
-    def test_hvac_mode_off_when_no_classification(self) -> None:
-        """No classification (None) → hvac_mode == 'off'."""
+    def test_fan_active_mirrors_regime_nat_vent_active(self) -> None:
+        """fan_active mirrors regime_by_ts[ts]['nat_vent_active'] verbatim when fan_mode
+        isn't the unconditional 'on' override."""
         fn = self._import_helper()
         ts = "2026-05-18T14:00:00+00:00"
-        result = fn(
-            self._make_band(ts),
-            self._make_forecast(ts, 72.0),
-            self._make_predicted_indoor(ts, 72.0),
-            None,  # no classification
-            self._base_config(),
-        )
-        assert result[0]["hvac_mode"] == "off"
-
-    # --- fan_active ---
-
-    def test_fan_active_natural_vent_conditions(self) -> None:
-        """Fan engages when outdoor < indoor AND indoor > comfort_cool."""
-        fn = self._import_helper()
-        ts = "2026-05-18T16:00:00+00:00"
-        result = fn(
-            self._make_band(ts, lower=68.0, upper=76.0),
-            self._make_forecast(ts, 70.0),  # outdoor 70 < indoor 78
-            self._make_predicted_indoor(ts, 78.0),  # indoor above cool comfort
-            self._make_classification("off"),
-            self._base_config(comfort_cool=76.0),
-        )
+        regime_by_ts = {ts: {"nat_vent_active": True, "hvac_mode": "off"}}
+        result = fn(self._make_band(ts), regime_by_ts, self._base_config())
         assert result[0]["fan_active"] is True
 
-    def test_natural_vent_delta_default_matches_automation_default(self) -> None:
-        """Architecture-reset latent-bug fix: when natural_vent_delta isn't explicitly
-        configured, the chart prediction's fallback must match DEFAULT_NATURAL_VENT_DELTA
-        (3.0F), the same default the real automation engine uses -- not a stray 5.0F that
-        would let the chart predict fan activity the real engine wouldn't actually produce.
-
-        band_upper=76, outdoor=78.5: with the old buggy 5.0F default, 78.5 < 76+5=81 is
-        True (fan predicted active); with the fixed 3.0F default, 78.5 < 76+3=79 is still
-        True but 79.5 would flip to False -- pinning the boundary at exactly the real
-        engine's threshold, not the wider stray one.
-        """
-        fn = self._import_helper()
-        ts = "2026-05-18T16:00:00+00:00"
-        config_without_delta = {"comfort_heat": 68.0, "comfort_cool": 76.0, "fan_mode": "auto"}
-        result = fn(
-            self._make_band(ts, lower=68.0, upper=76.0),
-            self._make_forecast(ts, 79.5),  # outdoor 79.5: below the buggy 81 threshold,
-            # ABOVE the fixed 79 threshold -- distinguishes the two defaults
-            self._make_predicted_indoor(ts, 85.0),  # indoor well above outdoor and band_upper
-            self._make_classification("off"),
-            config_without_delta,
-        )
-        assert result[0]["fan_active"] is False, (
-            "with the fixed 3.0F default (threshold=79), outdoor=79.5 must NOT predict fan "
-            "activity -- if this is True, the stray 5.0F default (threshold=81) regressed"
-        )
-
-    def test_fan_not_active_when_outdoor_warmer_than_indoor(self) -> None:
-        """Fan off when outdoor >= indoor (no benefit from ventilation)."""
+    def test_windows_recommended_mirrors_fan_active(self) -> None:
+        """windows_recommended is the same signal as fan_active — Issue #802 closed the
+        pre-existing duplication where these were two separately-computed, near-identical
+        formulas that could (and did) disagree/flicker independently."""
         fn = self._import_helper()
         ts = "2026-05-18T14:00:00+00:00"
-        result = fn(
-            self._make_band(ts, lower=68.0, upper=76.0),
-            self._make_forecast(ts, 80.0),  # outdoor 80 > indoor 72
-            self._make_predicted_indoor(ts, 72.0),
-            self._make_classification("off"),
-            self._base_config(),
-        )
-        assert result[0]["fan_active"] is False
+        regime_by_ts = {ts: {"nat_vent_active": True, "hvac_mode": "off"}}
+        result = fn(self._make_band(ts), regime_by_ts, self._base_config())
+        assert result[0]["windows_recommended"] == result[0]["fan_active"] is True
 
     def test_fan_active_when_fan_mode_on(self) -> None:
-        """Fan always active when fan_mode='on' (continuous circulation)."""
+        """Fan always active when fan_mode='on' (continuous circulation) — this
+        unconditional override is orthogonal to the walk's own regime decision and is
+        checked BEFORE consulting regime_by_ts, matching the pre-existing rule."""
         fn = self._import_helper()
         ts = "2026-05-18T02:00:00+00:00"
-        result = fn(
-            self._make_band(ts, lower=60.0, upper=82.0),
-            self._make_forecast(ts, 55.0),  # cold outdoor — would normally not trigger
-            self._make_predicted_indoor(ts, 65.0),  # indoor below comfort_cool
-            self._make_classification("heat"),
-            self._base_config(fan_mode="on"),
-        )
+        regime_by_ts = {ts: {"nat_vent_active": False, "hvac_mode": "heat"}}
+        result = fn(self._make_band(ts), regime_by_ts, self._base_config(fan_mode="on"))
         assert result[0]["fan_active"] is True
-
-    # --- windows_recommended ---
-
-    def test_windows_recommended_when_outdoor_pleasant_indoor_warm(self) -> None:
-        """Windows recommended when outdoor in comfort zone and indoor is above comfort_cool."""
-        fn = self._import_helper()
-        ts = "2026-05-18T08:00:00+00:00"
-        result = fn(
-            self._make_band(ts, lower=68.0, upper=76.0),
-            self._make_forecast(ts, 72.0),  # outdoor in comfort zone
-            self._make_predicted_indoor(ts, 79.0),  # indoor above cool ceiling
-            self._make_classification("off"),
-            self._base_config(comfort_heat=68.0, comfort_cool=76.0),
-        )
         assert result[0]["windows_recommended"] is True
-
-    def test_windows_not_recommended_when_outdoor_too_cold(self) -> None:
-        """Windows not recommended when outdoor below comfort_heat."""
-        fn = self._import_helper()
-        ts = "2026-05-18T06:00:00+00:00"
-        result = fn(
-            self._make_band(ts, lower=68.0, upper=76.0),
-            self._make_forecast(ts, 45.0),  # outdoor too cold
-            self._make_predicted_indoor(ts, 72.0),
-            self._make_classification("heat"),
-            self._base_config(comfort_heat=68.0, comfort_cool=76.0),
-        )
-        assert result[0]["windows_recommended"] is False
-
-    def test_windows_not_recommended_when_outdoor_warmer_than_indoor(self) -> None:
-        """Windows not recommended when outdoor >= indoor (would heat the house)."""
-        fn = self._import_helper()
-        ts = "2026-05-18T15:00:00+00:00"
-        result = fn(
-            self._make_band(ts, lower=68.0, upper=76.0),
-            self._make_forecast(ts, 82.0),  # outdoor 82 > indoor 78
-            self._make_predicted_indoor(ts, 78.0),
-            self._make_classification("off"),
-            self._base_config(),
-        )
-        assert result[0]["windows_recommended"] is False
 
     def test_predicted_activity_key_in_get_chart_data(self) -> None:
         """get_chart_data() source must reference 'predicted_activity' key."""

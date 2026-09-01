@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.92] — 2026-08-31
+
+- Fix #802: the forecast chart's Target line and Vent/Windows activity bars no longer flicker or show near-total gaps into the future — they now forward-walk the same real nat-vent and ceiling-guard decision logic the live automation engine uses, including correctly predicting when an off-classified day would escalate to active cooling mid-day.
+
 ## [0.6.91] — 2026-08-31
 
 - Fix #800: the forecast chart's Target line no longer draws a misleading flat line across stretches where nothing is actually setting a target (e.g. HVAC off, nat-vent not running) — it now shows a real gap instead.

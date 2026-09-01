@@ -1421,15 +1421,22 @@
     // (x <= now) come from the backend's effective_target_history array (derived
     // from state_log's setpoint/nat_vent_target fields), future points (x > now)
     // from effective_target_forecast.
+    // Issue #800: keep null-target points IN the series (don't drop them) so Chart.js
+    // breaks the line across a genuine "nothing is actively targeting a temperature"
+    // stretch (HVAC off, nat-vent not predicted, no TOU window) instead of silently
+    // bridging a straight connector between the nearest real points on either side —
+    // which, when both those points happened to be equal (e.g. the same flat daytime
+    // value before and after an overnight gap), rendered as a misleading flat line
+    // implying a target that was never actually being computed or enforced.
     const setpointVisible = document.getElementById('overlay-setpoint')?.checked ?? true;
     const histEffTargetPts = (chartData.effective_target_history || [])
       .map(e => ({ x: _parseTs(e.ts), y: e.target }))
-      .filter(p => p.y != null && p.x <= _nowMs);
+      .filter(p => p.x <= _nowMs);
     const effTargetFuturePts = (chartData.effective_target_forecast || [])
       .map(e => ({ x: _parseTs(e.ts), y: e.target }))
-      .filter(p => p.y != null && p.x > _nowMs);
+      .filter(p => p.x > _nowMs);
     const mergedEffTarget = [...histEffTargetPts, ...effTargetFuturePts].sort((a, b) => a.x - b.x);
-    const setpointHasData = mergedEffTarget.length > 0;
+    const setpointHasData = mergedEffTarget.some(p => p.y != null);
 
     const datasets = [
       {
@@ -1547,6 +1554,7 @@
       borderWidth: 4,
       pointRadius: 0,
       tension: 0,
+      spanGaps: false, // Issue #800: break the line across null stretches, never bridge them
       yAxisID: 'y',
       hidden: !setpointVisible,
       order: 8,

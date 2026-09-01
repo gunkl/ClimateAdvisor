@@ -227,6 +227,22 @@ and `_compute_defense_lines()` function are unchanged (other tests pin their con
 the frontend's use of them for rendering was removed. The `overlay-setpoint` checkbox
 (relabeled "Target") now toggles the new line instead.
 
+**Genuine gaps are shown as gaps, never bridged (Issue #800).** When none of the three tiers
+above resolve a value for an hour (HVAC off, nat-vent not predicted, no TOU window), the
+backend correctly returns `target: None` for that timestamp. The frontend keeps that `null`
+point IN the merged series rather than filtering it out, and the `Target` dataset sets
+`spanGaps: false` explicitly — so Chart.js breaks the line across that stretch instead of
+drawing a straight connector between the nearest real points on either side of it. Filtering
+nulls out (the original Phase 3c implementation) was a real bug: when the two real points
+bracketing a dropped stretch happened to be numerically equal (e.g. the same flat daytime
+value before and after an overnight off-mode gap), the connector rendered as a misleadingly
+flat line implying a target that was never actually computed or enforced. Verified by
+reproducing `_compute_target_band_schedule()` + `_compute_effective_target_forward()` locally
+against real production config values — the underlying per-hour derivation already varies
+correctly whenever a tier applies (confirmed: nat-vent tier steps from the daytime midpoint to
+`sleep_heat + hysteresis` exactly at the sleep-window boundary); the bug was purely in how the
+frontend handled the `None` case, not in the tier logic itself.
+
 ## Status Card
 
 `_compute_automation_status()` gained a branch (positioned after the grace-active check, before the occupancy-mode fallbacks — a schedule is a mechanism *reason*, the one card this belongs on per the Status Card Ontology): when `self._tou_phase_resolution.phase == TOUPhase.PRECONDITIONING`, returns `"pre-cooling — TOU high-cost period (ends H:MM AM)"` or `"pre-heating — ..."`, using the same compact "short label — duration (ends HH:MM)" convention `_format_grace_remaining()` established for the Fan (WHF) card. A higher-priority mechanism reason (grace period, door/window pause, nat-vent) still wins if simultaneously true — the Status card shows only one reason at a time.

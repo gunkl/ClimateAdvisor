@@ -107,6 +107,12 @@ class TestComputeEffectiveTargetForward:
     def _band(self, ts: str, lower: float = 68.0, upper: float = 76.0) -> list[dict]:
         return [{"ts": ts, "lower": lower, "upper": upper}]
 
+    def _mode(self, ts: str, mode: str) -> dict[str, str]:
+        """Issue #802: hvac_mode is now per-timestamp (hvac_mode_by_ts), not one static
+        string for the whole forecast — this builds a single-entry map for tests that only
+        care about one timestamp."""
+        return {ts: mode}
+
     def _config(self, **overrides) -> dict:
         cfg = {
             "sleep_time": "22:00:00",
@@ -120,19 +126,27 @@ class TestComputeEffectiveTargetForward:
         matching what _derive_predicted_setpoint() has always done for this regime."""
         fn = self._fn()
         ts = "2026-05-17T14:00:00+00:00"
-        result = fn(self._band(ts, lower=68.0, upper=76.0), [], "heat", 1.0, self._config())
+        result = fn(self._band(ts, lower=68.0, upper=76.0), [], self._mode(ts, "heat"), 1.0, self._config())
         assert result == [{"ts": ts, "target": 68.0}]
 
     def test_comfort_band_only_matches_active_edge_cool(self) -> None:
         fn = self._fn()
         ts = "2026-05-17T14:00:00+00:00"
-        result = fn(self._band(ts, lower=68.0, upper=76.0), [], "cool", 1.0, self._config())
+        result = fn(self._band(ts, lower=68.0, upper=76.0), [], self._mode(ts, "cool"), 1.0, self._config())
         assert result == [{"ts": ts, "target": 76.0}]
 
     def test_off_mode_with_no_nat_vent_or_tou_is_none(self) -> None:
         fn = self._fn()
         ts = "2026-05-17T14:00:00+00:00"
-        result = fn(self._band(ts, lower=68.0, upper=76.0), [], "off", 1.0, self._config())
+        result = fn(self._band(ts, lower=68.0, upper=76.0), [], self._mode(ts, "off"), 1.0, self._config())
+        assert result == [{"ts": ts, "target": None}]
+
+    def test_missing_ts_in_mode_map_is_none(self) -> None:
+        """A timestamp absent from hvac_mode_by_ts (e.g. the walk never resolved it)
+        degrades to tier 3 finding nothing, not a crash or a fabricated value."""
+        fn = self._fn()
+        ts = "2026-05-17T14:00:00+00:00"
+        result = fn(self._band(ts, lower=68.0, upper=76.0), [], {}, 1.0, self._config())
         assert result == [{"ts": ts, "target": None}]
 
     def test_tou_banking_target_wins_inside_window(self) -> None:
@@ -145,7 +159,7 @@ class TestComputeEffectiveTargetForward:
         result = fn(
             self._band(ts, lower=68.0, upper=76.0),
             [],
-            "heat",
+            self._mode(ts, "heat"),
             1.0,
             self._config(),
             tou_precondition_window=window,
@@ -160,7 +174,7 @@ class TestComputeEffectiveTargetForward:
         result = fn(
             self._band(ts, lower=68.0, upper=76.0),
             [],
-            "heat",
+            self._mode(ts, "heat"),
             1.0,
             self._config(),
             tou_precondition_window=window,
@@ -177,7 +191,7 @@ class TestComputeEffectiveTargetForward:
         result = fn(
             self._band(ts, lower=68.0, upper=76.0),
             predicted_activity,
-            "off",
+            self._mode(ts, "off"),
             1.0,
             self._config(),
         )
@@ -191,7 +205,7 @@ class TestComputeEffectiveTargetForward:
         result = fn(
             self._band(ts, lower=64.0, upper=76.0),
             predicted_activity,
-            "off",
+            self._mode(ts, "off"),
             1.0,
             self._config(),
         )
@@ -209,7 +223,7 @@ class TestComputeEffectiveTargetForward:
         result = fn(
             self._band(ts, lower=68.0, upper=76.0),
             predicted_activity,
-            "off",
+            self._mode(ts, "off"),
             1.0,
             self._config(),
             tou_precondition_window=window,
@@ -218,12 +232,12 @@ class TestComputeEffectiveTargetForward:
 
     def test_missing_ts_entries_are_skipped(self) -> None:
         fn = self._fn()
-        result = fn([{"lower": 68.0, "upper": 76.0}], [], "heat", 1.0, self._config())
+        result = fn([{"lower": 68.0, "upper": 76.0}], [], {}, 1.0, self._config())
         assert result == []
 
     def test_empty_band_returns_empty_list(self) -> None:
         fn = self._fn()
-        assert fn([], [], "heat", 1.0, self._config()) == []
+        assert fn([], [], {}, 1.0, self._config()) == []
 
     # --- Assumption Audit #5: graceful degradation when the fan_active proxy could
     # disagree with the real gate (e.g. AWAY_CEILING/PROACTIVE_FLOOR/MANUAL_OVERRIDE_CONFLICT
@@ -237,7 +251,7 @@ class TestComputeEffectiveTargetForward:
         ts = "2026-05-17T14:00:00+00:00"
         band = [{"ts": ts, "lower": None, "upper": 76.0}]
         predicted_activity = [{"ts": ts, "fan_active": True}]
-        result = fn(band, predicted_activity, "cool", 1.0, self._config())
+        result = fn(band, predicted_activity, self._mode(ts, "cool"), 1.0, self._config())
         # lower is None -> tier 2 guard fails -> falls through to tier 3 (cool -> upper)
         assert result == [{"ts": ts, "target": 76.0}]
 
@@ -246,6 +260,13 @@ class TestComputeEffectiveTargetForward:
         band = [{"ts": "not-a-real-timestamp", "lower": 68.0, "upper": 76.0}]
         predicted_activity = [{"ts": "not-a-real-timestamp", "fan_active": True}]
         window = (datetime.now(UTC), datetime.now(UTC) + timedelta(hours=1), 71.0, "heat")
-        result = fn(band, predicted_activity, "heat", 1.0, self._config(), tou_precondition_window=window)
+        result = fn(
+            band,
+            predicted_activity,
+            self._mode("not-a-real-timestamp", "heat"),
+            1.0,
+            self._config(),
+            tou_precondition_window=window,
+        )
         # ts_dt fails to parse -> both tier 1 and tier 2 skip -> tier 3 (heat -> lower)
         assert result == [{"ts": "not-a-real-timestamp", "target": 68.0}]

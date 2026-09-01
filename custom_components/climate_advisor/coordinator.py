@@ -237,8 +237,10 @@ from .fan_status import (
 from .invariant_watchdog import run_invariant_checks
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_cycling import compute_nat_vent_target
+from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
+from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
 from .scheduler import COST_TAG_HIGH, Schedule, TOUPhase, resolve_active_schedules, resolve_tou_phase
 from .state import StatePersistence
@@ -8609,27 +8611,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if is_historical:
             predicted_indoor = []
             forecast_outdoor = []
+            _raw_predicted_indoor: list[dict] = []
+            _raw_forecast_outdoor: list[dict] = []
         else:
-            predicted_indoor = [
-                {"ts": p["ts"], "temp": _conv(p["temp"])}
-                for p in _build_predicted_indoor_future(
-                    self._hourly_forecast_temps,
-                    self.config,
-                    now,
-                    current_indoor_temp=self._get_indoor_temp(),
-                    thermal_model=thermal_model,
-                    occupancy_mode=self._occupancy_mode,
-                    classification=self._current_classification,
-                    band_schedule=_raw_band,
-                )
-            ]
-            forecast_outdoor = [
-                {"ts": p["ts"], "temp": _conv(p["temp"])}
-                for p in _build_future_forecast_outdoor(
-                    self._hourly_forecast_temps,
-                    classification=self._current_classification,
-                )
-            ]
+            # Issue #802: kept in raw (internal Fahrenheit) units alongside the display-unit
+            # `predicted_indoor`/`forecast_outdoor` below — the regime walk's pure decision
+            # functions (decide_nat_vent_gate/decide_nat_vent_exit/decide_ode_ceiling_guard)
+            # must be fed the same unit system self.config's raw comfort_heat/comfort_cool/
+            # sleep_heat/etc. are stored in (matching the existing convention already used by
+            # _compute_next_automation_action()'s own decide_nat_vent_gate() call, which reads
+            # self._last_predicted_indoor / _build_future_forecast_outdoor() directly, never a
+            # display-unit-converted copy) — converting first and comparing against raw config
+            # thresholds would silently corrupt every decision for a non-Fahrenheit-display
+            # user. Converting only once, at the end, also fixes a pre-existing bug in this
+            # exact code path: _compute_effective_target_forward() previously received the
+            # already-converted _conv_band as its `target_band` input, then its output was
+            # converted a second time via _conv(e["target"]) below — a real double-conversion
+            # for Celsius-display users, invisible on an all-Fahrenheit install.
+            _raw_predicted_indoor = _build_predicted_indoor_future(
+                self._hourly_forecast_temps,
+                self.config,
+                now,
+                current_indoor_temp=self._get_indoor_temp(),
+                thermal_model=thermal_model,
+                occupancy_mode=self._occupancy_mode,
+                classification=self._current_classification,
+                band_schedule=_raw_band,
+            )
+            predicted_indoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_predicted_indoor]
+            _raw_forecast_outdoor = _build_future_forecast_outdoor(
+                self._hourly_forecast_temps,
+                classification=self._current_classification,
+            )
+            forecast_outdoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_forecast_outdoor]
 
         def _conv_log_entry(e: dict) -> dict:
             e = dict(e)
@@ -8652,17 +8666,41 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # resolution logic. predicted_activity is computed here (rather than inline in the
         # return dict below, as it was before this field existed) so both it and the new
         # forward effective-target series can share the one computation.
-        _predicted_activity = (
-            []
-            if is_historical
-            else _compute_predicted_activity(
-                _conv_band,
-                forecast_outdoor,
-                predicted_indoor,
-                self._current_classification,
+        #
+        # Issue #802: the forward regime (which hours are nat-vent-eligible vs. HVAC, and
+        # whether an off-classified day escalates to active cooling mid-day) is now resolved
+        # ONCE here via _walk_forward_regime() — a genuine forward walk of the same
+        # decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() pure
+        # functions production uses live — and shared by both _compute_predicted_activity()
+        # (fan_active/windows_recommended/hvac_mode per hour) and
+        # _compute_effective_target_forward()'s tier 3 (hvac_mode_by_ts). This replaces the
+        # old standalone temperature-inequality heuristic, which had no session memory and
+        # was self-defeating against nat-vent's own predicted cooling effect.
+        if is_historical:
+            _regime_by_ts: dict[str, dict] = {}
+        else:
+            _ae = getattr(self, "automation_engine", None)
+            _day_modes = _compute_day_hvac_modes(self._hourly_forecast_temps, now, self._current_classification)
+            _comfort_cool_raw = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+            _ceiling_threshold = _ae._ceiling_threshold(_comfort_cool_raw) if _ae else None
+            _regime_by_ts = _walk_forward_regime(
+                _day_modes,
+                _raw_predicted_indoor,
+                _raw_forecast_outdoor,
+                _raw_band or [],
                 self.config,
+                self._occupancy_mode,
+                thermal_model,
+                _ae._manual_override_active if _ae else False,
+                _ae._manual_override_mode if _ae else None,
+                _ceiling_threshold,
+                _ae._natural_vent_active if _ae else False,
             )
+
+        _predicted_activity = (
+            [] if is_historical else _compute_predicted_activity(_conv_band, _regime_by_ts, self.config)
         )
+        _hvac_mode_by_ts = {ts: regime.get("hvac_mode", "off") for ts, regime in _regime_by_ts.items()}
         _effective_target_history = [
             {"ts": e["ts"], "target": _conv(e["target"])} for e in _extract_historical_effective_target(log_entries)
         ]
@@ -8673,9 +8711,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _effective_target_forecast = [
                 {"ts": e["ts"], "target": _conv(e["target"])}
                 for e in _compute_effective_target_forward(
-                    _conv_band,
+                    _raw_band or [],
                     _predicted_activity,
-                    _hvac_mode,
+                    _hvac_mode_by_ts,
                     _nv_hysteresis,
                     self.config,
                     tou_precondition_window=self._tou_precondition_window_tuple(),
@@ -9683,6 +9721,75 @@ def _find_ceiling_breach_time(
     return None
 
 
+def _compute_day_hvac_modes(
+    hourly_forecast: list[dict] | None,
+    now: Any,
+    classification: Any | None = None,
+) -> dict[Any, str]:
+    """Classify each future calendar day's HVAC mode ("heat"/"cool"/"off") from its
+    forecast high (Issue #802 — extracted verbatim from
+    ``_build_predicted_indoor_future()``'s former inline block; that function now calls
+    this in place of its own copy — bit-identical output required. The chart's forward
+    regime prediction (``_walk_forward_regime()``) is this function's second caller).
+
+    Today's entry is overridden with the live classification's real ``hvac_mode`` —
+    ``_day_mode()``'s own threshold logic only sees remaining forecast entries, which in
+    the evening are cold night temps (max<60°F even on a 68°F day), causing a spurious
+    "heat" mode that triggers the Q_hvac bug.
+
+    Returns ``{}`` when ``hourly_forecast`` has no parseable entries (mirrors the
+    original code's "no valid entries" early-return path — callers must handle an empty
+    dict explicitly, the same way the original handled an empty ``day_highs``).
+    """
+    day_highs: dict = {}
+    parse_errors = 0
+    for entry in hourly_forecast or []:
+        dt_str = entry.get("datetime") or entry.get("time")
+        if not dt_str:
+            parse_errors += 1
+            continue
+        try:
+            dt_obj = datetime.fromisoformat(dt_str)
+            local_ts = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
+            temp = entry.get("temperature")
+            if temp is not None:
+                day_highs.setdefault(local_ts.date(), []).append(float(temp))
+        except (ValueError, TypeError) as exc:
+            parse_errors += 1
+            _LOGGER.debug("_compute_day_hvac_modes: skipping %r — %s", dt_str, exc)
+
+    if parse_errors:
+        _LOGGER.warning(
+            "_compute_day_hvac_modes: %d entries failed to parse",
+            parse_errors,
+        )
+    if not day_highs:
+        return {}
+
+    def _day_mode(temps: list[float]) -> str:
+        high = max(temps)
+        if high >= THRESHOLD_HOT:
+            return "cool"
+        if high >= THRESHOLD_WARM or high >= THRESHOLD_MILD:
+            return "off"
+        return "heat"
+
+    day_modes = {d: _day_mode(t) for d, t in day_highs.items()}
+    _today_date = dt_util.as_local(now).date()
+    if classification is not None and hasattr(classification, "hvac_mode"):
+        day_modes[_today_date] = classification.hvac_mode
+        _LOGGER.debug(
+            "_compute_day_hvac_modes: today mode overridden from classification: %s",
+            classification.hvac_mode,
+        )
+    _LOGGER.debug(
+        "_compute_day_hvac_modes: %d days classified: %s",
+        len(day_modes),
+        {str(d): m for d, m in sorted(day_modes.items())},
+    )
+    return day_modes
+
+
 def _build_predicted_indoor_future(
     hourly_forecast: list[dict] | None,
     config: dict[str, Any],
@@ -9761,30 +9868,11 @@ def _build_predicted_indoor_future(
     setback_temp_cool = float(config.get("sleep_cool", comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F))
     setback_temp_cool = min(setback_temp_cool, setback_cool)
 
-    # --- Classify each future day by forecast high ---
-    day_highs: dict = {}
-    parse_errors = 0
-    for entry in hourly_forecast:
-        dt_str = entry.get("datetime") or entry.get("time")
-        if not dt_str:
-            parse_errors += 1
-            continue
-        try:
-            dt_obj = datetime.fromisoformat(dt_str)
-            local_ts = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
-            temp = entry.get("temperature")
-            if temp is not None:
-                day_highs.setdefault(local_ts.date(), []).append(float(temp))
-        except (ValueError, TypeError) as exc:
-            parse_errors += 1
-            _LOGGER.debug("_build_predicted_indoor_future: skipping %r — %s", dt_str, exc)
-
-    if parse_errors:
-        _LOGGER.warning(
-            "_build_predicted_indoor_future: %d entries failed to parse",
-            parse_errors,
-        )
-    if not day_highs:
+    # --- Classify each future day by forecast high (Issue #802: extracted to
+    # _compute_day_hvac_modes() so the chart's forward regime prediction can reuse the
+    # exact same per-day classification instead of a second, divergent copy) ---
+    day_modes = _compute_day_hvac_modes(hourly_forecast, now, classification)
+    if not day_modes:
         _LOGGER.warning(
             "_build_predicted_indoor_future: no valid entries in %d-entry forecast — "
             "predicted indoor will be empty. First entry: %r",
@@ -9792,31 +9880,6 @@ def _build_predicted_indoor_future(
             hourly_forecast[0] if hourly_forecast else None,
         )
         return []
-
-    def _day_mode(temps: list[float]) -> str:
-        high = max(temps)
-        if high >= THRESHOLD_HOT:
-            return "cool"
-        if high >= THRESHOLD_WARM or high >= THRESHOLD_MILD:
-            return "off"
-        return "heat"
-
-    day_modes = {d: _day_mode(t) for d, t in day_highs.items()}
-    # Override today's mode with the current classification — _day_mode() only sees
-    # remaining forecast entries, which in the evening are cold night temps (max<60°F
-    # even on a 68°F day), causing a spurious "heat" mode that triggers the Q_hvac bug.
-    _today_date = dt_util.as_local(now).date()
-    if classification is not None and hasattr(classification, "hvac_mode"):
-        day_modes[_today_date] = classification.hvac_mode
-        _LOGGER.debug(
-            "_build_predicted_indoor_future: today mode overridden from classification: %s",
-            classification.hvac_mode,
-        )
-    _LOGGER.debug(
-        "_build_predicted_indoor_future: %d days classified: %s",
-        len(day_modes),
-        {str(d): m for d, m in sorted(day_modes.items())},
-    )
 
     # Decide whether to use physics simulation or setpoint-schedule fallback.
     # Physics requires: k_passive from any confident source, and a seed temp.
@@ -10427,47 +10490,198 @@ def _compute_defense_lines(target_band: list[dict]) -> list[dict]:
     return [{"ts": e["ts"], "heat": e.get("lower"), "cool": e.get("upper")} for e in target_band]
 
 
+def _walk_forward_regime(
+    day_modes: dict[date, str],
+    predicted_indoor: list[dict],
+    forecast_outdoor: list[dict],
+    target_band: list[dict],
+    config: dict,
+    occupancy_mode: str,
+    thermal_model: dict | None,
+    manual_override_active: bool,
+    manual_override_mode: str | None,
+    ceiling_threshold: float | None,
+    initial_session_active: bool,
+) -> dict[str, dict]:
+    """Forward-walk the real, already-validated production nat-vent gate/exit/ceiling-guard
+    functions hour by hour (Issue #802), replacing the old standalone temperature-inequality
+    heuristic that had no session memory and was self-defeating against nat-vent's own
+    predicted cooling effect.
+
+    All temperature inputs (``predicted_indoor``, ``forecast_outdoor``, ``target_band``,
+    ``config`` values, ``ceiling_threshold``) must be in the SAME (raw, internal Fahrenheit)
+    unit system — matching how ``decide_nat_vent_gate()``/``decide_nat_vent_exit()``/
+    ``decide_ode_ceiling_guard()`` are already used elsewhere in this file (e.g.
+    ``_compute_next_automation_action()``'s own nat-vent-start prediction, Issue #528).
+
+    Per calendar day (from ``day_modes``, itself derived once via
+    ``_compute_day_hvac_modes()``):
+      - Day mode ``heat``/``cool`` -> HVAC regime for the whole day; nat-vent is not
+        evaluated at all.
+      - Day mode ``off`` -> nat-vent-eligible, subject to same-day escalation. Each hour,
+        in order:
+          1. Resolve nat-vent's session-active state FIRST (``decide_nat_vent_exit()`` if
+             currently active, ``decide_nat_vent_gate()`` if not) — this hour's result, not
+             a stale one, since step 2 depends on it.
+          2. Check ``decide_ode_ceiling_guard()`` using THIS hour's session-active state as
+             its ``natural_vent_active`` input, scanning only the *remaining* predicted-indoor
+             curve from this hour forward (matching production's own "if evaluated right now"
+             semantics — never scanning past-already-walked entries, which would let an
+             already-resolved earlier breach masquerade as a future one).
+          3. On ``ESCALATE``: the rest of this calendar day becomes HVAC-cool regime; the
+             nat-vent walk stops for the remainder of the day. A new day gets a fresh
+             evaluation (escalation is a same-day event).
+
+    Returns ``{ts: {"nat_vent_active": bool, "hvac_mode": str}}`` — ``hvac_mode`` is the day's
+    classified mode, overridden to ``"cool"`` for hours at/after an escalation. No new
+    threshold math: composition of three pre-existing, differentially-validated pure
+    functions plus the day-mode lookup, per the approved plan.
+    """
+    indoor_by_ts = {e["ts"]: e.get("temp") for e in predicted_indoor if e.get("ts")}
+    outdoor_by_ts = {e["ts"]: e.get("temp") for e in forecast_outdoor if e.get("ts")}
+    predicted_indoor_index = {e["ts"]: i for i, e in enumerate(predicted_indoor) if e.get("ts")}
+
+    comfort_heat_raw = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+    sleep_heat = float(config.get("sleep_heat", comfort_heat_raw))
+    comfort_cool = float(config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+    nat_vent_delta = float(config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+    hysteresis = float(config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+    fan_mode = str(config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
+    aggressive_savings = bool(config.get("aggressive_savings", False))
+
+    _tm = thermal_model or {}
+    k_passive = _tm.get("k_passive")
+    confidence_k_passive = _tm.get("confidence_k_passive") or _tm.get("confidence", "none")
+    k_passive_via_bridge = bool(_tm.get("k_passive_via_bridge"))
+    k_active_cool = _tm.get("k_active_cool")
+
+    result: dict[str, dict] = {}
+    session_active = initial_session_active
+    current_day: date | None = None
+    escalated_to_cool = False
+
+    for entry in target_band:
+        ts_str = entry.get("ts")
+        if not ts_str:
+            continue
+        ts_dt: datetime | None = None
+        with contextlib.suppress(ValueError, TypeError):
+            ts_dt = datetime.fromisoformat(ts_str)
+        if ts_dt is None:
+            continue
+
+        local_dt = dt_util.as_local(ts_dt) if ts_dt.tzinfo else ts_dt
+        day = local_dt.date()
+        if day != current_day:
+            current_day = day
+            escalated_to_cool = False  # a fresh calendar day gets a fresh evaluation
+
+        day_mode = day_modes.get(day, "off")
+
+        if day_mode != "off" or escalated_to_cool:
+            effective_mode = "cool" if escalated_to_cool else day_mode
+            result[ts_str] = {"nat_vent_active": False, "hvac_mode": effective_mode}
+            continue
+
+        lower = entry.get("lower")
+        upper = entry.get("upper")
+        indoor = indoor_by_ts.get(ts_str)
+        outdoor = outdoor_by_ts.get(ts_str)
+        in_sleep_window = _in_sleep_window(local_dt, config)
+
+        # Step 1: resolve nat-vent's session-active state for THIS hour first.
+        if session_active:
+            exit_decision = decide_nat_vent_exit(
+                NatVentExitInputs(
+                    indoor=indoor,
+                    outdoor=outdoor,
+                    comfort_heat_raw=comfort_heat_raw,
+                    sleep_heat=sleep_heat,
+                    in_sleep_window=in_sleep_window,
+                    hysteresis=hysteresis,
+                    comfort_cool=comfort_cool,
+                    nat_vent_delta=nat_vent_delta,
+                    occupancy_mode=occupancy_mode,
+                    thermal_confidence=confidence_k_passive,
+                    k_passive=k_passive,
+                    manual_override_active=manual_override_active,
+                    manual_override_mode=manual_override_mode,
+                )
+            )
+            if exit_decision.reason != NatVentExitReason.NONE:
+                session_active = False
+        elif lower is not None and upper is not None:
+            session_active = decide_nat_vent_gate(
+                NatVentGateInputs(
+                    outdoor=outdoor,
+                    indoor=indoor,
+                    comfort_heat_raw=comfort_heat_raw,
+                    sleep_heat=sleep_heat,
+                    in_sleep_window=in_sleep_window,
+                    comfort_cool=comfort_cool,
+                    nat_vent_delta=nat_vent_delta,
+                    hysteresis=hysteresis,
+                    fan_mode=fan_mode,
+                    aggressive_savings=aggressive_savings,
+                )
+            )
+
+        # Step 2: ceiling-guard escalation check, using THIS hour's session_active — only
+        # scans the remaining predicted-indoor curve from this hour forward.
+        _idx = predicted_indoor_index.get(ts_str)
+        _remaining_predicted_indoor = predicted_indoor[_idx:] if _idx is not None else []
+        guard_decision = decide_ode_ceiling_guard(
+            OdeCeilingGuardInputs(
+                predicted_indoor=_remaining_predicted_indoor,
+                hvac_mode=day_mode,
+                k_passive=k_passive,
+                confidence_k_passive=confidence_k_passive,
+                k_passive_via_bridge=k_passive_via_bridge,
+                k_active_cool=k_active_cool,
+                comfort_cool=comfort_cool,
+                outdoor=outdoor,
+                indoor=indoor,
+                natural_vent_active=session_active,
+                ceiling_threshold=ceiling_threshold,
+                now=ts_dt,
+            )
+        )
+        if guard_decision.outcome == OdeCeilingGuardOutcome.ESCALATE:
+            escalated_to_cool = True
+            result[ts_str] = {"nat_vent_active": False, "hvac_mode": "cool"}
+            continue
+
+        result[ts_str] = {"nat_vent_active": session_active, "hvac_mode": day_mode}
+
+    return result
+
+
 def _compute_predicted_activity(
     target_band: list[dict],
-    forecast_outdoor: list[dict],
-    predicted_indoor: list[dict],
-    classification: Any | None,
+    regime_by_ts: dict[str, dict],
     config: dict,
 ) -> list[dict]:
     """Per forecast hour: hvac_mode intent, fan_active, windows_recommended.
 
-    All temperature values must be in the same display unit; band bounds are used
-    for comparisons so no separate comfort-temp conversion is needed.
+    Issue #802: reads the already-resolved per-hour regime map from
+    ``_walk_forward_regime()`` (a genuine forward walk of the real production
+    decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() functions)
+    instead of an independent, session-memory-less temperature-inequality heuristic —
+    ``fan_active`` and ``windows_recommended`` now mirror the same signal rather than being
+    two separately-computed, near-identical, similarly-flickery formulas.
     """
-    outdoor_by_ts = {e["ts"]: e.get("temp") for e in forecast_outdoor if e.get("ts")}
-    indoor_by_ts = {e["ts"]: e.get("temp") for e in predicted_indoor if e.get("ts")}
-    hvac_mode = getattr(classification, "hvac_mode", "off") if classification is not None else "off"
     fan_mode = str(config.get("fan_mode", "auto"))
-    natural_vent_delta = float(config.get("natural_vent_delta", DEFAULT_NATURAL_VENT_DELTA))
 
     result = []
     for band_entry in target_band:
         ts = band_entry.get("ts")
         if not ts:
             continue
-        band_lower = band_entry.get("lower")
-        band_upper = band_entry.get("upper")
-        outdoor = outdoor_by_ts.get(ts)
-        indoor = indoor_by_ts.get(ts)
+        regime = regime_by_ts.get(ts, {})
+        hvac_mode = regime.get("hvac_mode", "off")
 
-        if fan_mode == "on":
-            fan_active = True
-        elif outdoor is not None and indoor is not None and band_upper is not None:
-            fan_active = bool(outdoor < indoor and outdoor < band_upper + natural_vent_delta and indoor > band_upper)
-        else:
-            fan_active = False
-
-        if outdoor is not None and indoor is not None and band_lower is not None and band_upper is not None:
-            windows_recommended = bool(
-                outdoor >= band_lower and outdoor <= band_upper + 2.0 and outdoor < indoor and indoor > band_upper
-            )
-        else:
-            windows_recommended = False
+        fan_active = True if fan_mode == "on" else bool(regime.get("nat_vent_active"))
+        windows_recommended = fan_active
 
         result.append(
             {
@@ -10520,7 +10734,7 @@ def _extract_historical_effective_target(log_entries: list[dict]) -> list[dict]:
 def _compute_effective_target_forward(
     target_band: list[dict],
     predicted_activity: list[dict],
-    hvac_mode: str | None,
+    hvac_mode_by_ts: dict[str, str],
     hysteresis: float,
     config: dict,
     tou_precondition_window: tuple[datetime, datetime, float, str] | None = None,
@@ -10537,8 +10751,12 @@ def _compute_effective_target_forward(
          ``predicted_activity[].fan_active`` is true for this timestamp (Investigation
          B's pre-existing, already-accepted forward nat-vent-active proxy; not
          re-derived or made more accurate here, per Assumption Audit #5).
-      3. Else the plain active comfort-band edge for ``hvac_mode`` (heat: lower, cool:
-         upper) — the same derivation ``_derive_predicted_setpoint()`` used, now only
+      3. Else the plain active comfort-band edge for this timestamp's effective HVAC mode
+         (heat: lower, cool: upper), read from ``hvac_mode_by_ts`` — a per-timestamp map
+         (Issue #802) rather than one static mode for the whole forecast, so a day the
+         forecast classifies differently from today, or an hour the ceiling-guard walk
+         escalated to active cooling, picks the correct edge instead of a stale whole-
+         forecast value. Same derivation ``_derive_predicted_setpoint()`` used, now only
          the fallback tier instead of the whole answer.
 
     Degrades gracefully to tier 3 whenever tiers 1/2 don't apply or their inputs are
@@ -10584,11 +10802,12 @@ def _compute_effective_target_forward(
                 hysteresis=hysteresis,
             )
 
-        # Tier 3: plain active comfort-band edge.
+        # Tier 3: plain active comfort-band edge for this timestamp's effective mode.
         if target is None:
-            if hvac_mode == "heat":
+            _ts_hvac_mode = hvac_mode_by_ts.get(ts_str)
+            if _ts_hvac_mode == "heat":
                 target = lower
-            elif hvac_mode == "cool":
+            elif _ts_hvac_mode == "cool":
                 target = upper
 
         result.append({"ts": ts_str, "target": target})

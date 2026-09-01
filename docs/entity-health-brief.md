@@ -33,17 +33,23 @@
 
 ```python
 ENTITY_HEALTH_REGISTRY: dict[str, dict[str, Any]] = {
-    "climate_entity":       {"friendly_name": "Thermostat",                 "criticality": "critical"},
-    "weather_entity":       {"friendly_name": "Weather source",             "criticality": "critical"},
-    "notify_service":       {"friendly_name": "Notification service",      "criticality": "critical"},
-    "outdoor_temp_entity":  {"friendly_name": "Outdoor temperature sensor", "criticality": "degraded"},  # gated: source == sensor/input_number
-    "indoor_temp_entity":   {"friendly_name": "Indoor temperature sensor",  "criticality": "degraded"},  # gated: source == sensor/input_number
-    "fan_entity":           {"friendly_name": "Whole-house fan",           "criticality": "degraded"},   # gated: fan_mode uses a WHF
-    "fan_state_entity":     {"friendly_name": "Fan state sensor",          "criticality": "degraded"},   # gated: fan_mode uses a WHF
-    "fan_remote_entity":    {"friendly_name": "Fan RF remote",             "criticality": "optional"},
-    "home_toggle_entity":   {"friendly_name": "Home/away toggle",          "criticality": "degraded"},
-    "vacation_toggle_entity": {"friendly_name": "Vacation toggle",         "criticality": "optional"},
-    "guest_toggle_entity":  {"friendly_name": "Guest toggle",              "criticality": "optional"},
+    "climate_entity": {"friendly_name": "Thermostat", "criticality": "critical"},
+    "weather_entity": {"friendly_name": "Weather source", "criticality": "critical"},
+    "notify_service": {"friendly_name": "Notification service", "criticality": "critical"},
+    "outdoor_temp_entity": {
+        "friendly_name": "Outdoor temperature sensor",
+        "criticality": "degraded",
+    },  # gated: source == sensor/input_number
+    "indoor_temp_entity": {
+        "friendly_name": "Indoor temperature sensor",
+        "criticality": "degraded",
+    },  # gated: source == sensor/input_number
+    "fan_entity": {"friendly_name": "Whole-house fan", "criticality": "degraded"},  # gated: fan_mode uses a WHF
+    "fan_state_entity": {"friendly_name": "Fan state sensor", "criticality": "degraded"},  # gated: fan_mode uses a WHF
+    "fan_remote_entity": {"friendly_name": "Fan RF remote", "criticality": "optional"},
+    "home_toggle_entity": {"friendly_name": "Home/away toggle", "criticality": "degraded"},
+    "vacation_toggle_entity": {"friendly_name": "Vacation toggle", "criticality": "optional"},
+    "guest_toggle_entity": {"friendly_name": "Guest toggle", "criticality": "optional"},
 }
 # door_window_sensors is a list, not a scalar -- swept per member, each flagged "degraded".
 ```

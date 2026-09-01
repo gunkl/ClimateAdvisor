@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.93] — 2026-09-01
+
+- Fix #805: if your thermostat, weather source, a sensor, your whole-house fan, or another entity Climate Advisor depends on gets removed or stops responding, you'll now get a notification telling you which one and what to check — instead of Climate Advisor quietly running on stale data for hours with no warning.
+
 ## [0.6.92] — 2026-08-31
 
 - Fix #802: the forecast chart's Target line and Vent/Windows activity bars no longer flicker or show near-total gaps into the future — they now forward-walk the same real nat-vent and ceiling-guard decision logic the live automation engine uses, including correctly predicting when an off-classified day would escalate to active cooling mid-day.

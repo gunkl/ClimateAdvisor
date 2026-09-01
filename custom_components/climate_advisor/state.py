@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .const import STATE_FILE
+from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,11 +25,14 @@ STATE_VERSION = 1
 class StatePersistence:
     """Atomic JSON persistence for operational state."""
 
-    def __init__(self, config_dir: Path) -> None:
-        self._path = config_dir / STATE_FILE
+    def __init__(self, config_dir: Path, entry_id: str = "") -> None:
+        self._config_dir = config_dir
+        self._entry_id = entry_id
+        self._path = resolve_entry_scoped_path(config_dir, STATE_FILE, entry_id)
 
     def load(self) -> dict[str, Any]:
         """Load state from disk. Returns empty dict on missing/corrupt file."""
+        migrate_legacy_storage_file(self._config_dir, STATE_FILE, self._entry_id)
         if not self._path.exists():
             return {}
         try:

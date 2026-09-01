@@ -10,7 +10,7 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
@@ -109,6 +109,11 @@ _LOGGER = logging.getLogger(__name__)
 
 _NOTIFY_SERVICE_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 
+# Trailing words stripped from a climate entity's friendly name when
+# suggesting a default zone name (Gap 7, Issue #796) — e.g. "Bedroom
+# Thermostat" suggests "Bedroom" rather than reproducing the device label.
+_ZONE_NAME_SUFFIX_RE = re.compile(r"\s*(thermostat|climate)\s*$", re.IGNORECASE)
+
 FAN_MODE_OPTIONS = [
     selector.SelectOptionDict(value=FAN_MODE_DISABLED, label="Disabled (no fan control)"),
     selector.SelectOptionDict(value=FAN_MODE_WHOLE_HOUSE, label="Whole house fan (dedicated entity)"),
@@ -151,6 +156,28 @@ TEMP_UNIT_OPTIONS = [
     {"value": FAHRENHEIT, "label": "Fahrenheit (°F)"},
     {"value": CELSIUS, "label": "Celsius (°C)"},
 ]
+
+
+def _suggest_zone_name(hass: HomeAssistant, climate_entity: str | None) -> str:
+    """Suggest a default zone name derived from the climate entity's friendly name.
+
+    Gap 7 (docs/multi-zone-spec.md): the suggestion must NOT default to
+    "Climate Advisor" — that's the exact placeholder this field exists to
+    replace. Instead, derive a suggestion from the already-selected
+    ``climate_entity``'s HA friendly name (e.g. "Bedroom Thermostat" ->
+    "Bedroom"), while leaving the field fully editable. No uniqueness check
+    against sibling zone names is performed — a duplicate name is cosmetic,
+    not a functional bug.
+    """
+    friendly_name: str | None = None
+    if climate_entity:
+        state = hass.states.get(climate_entity)
+        if state is not None:
+            friendly_name = state.attributes.get("friendly_name")
+    if not friendly_name:
+        return ""
+    suggested = _ZONE_NAME_SUFFIX_RE.sub("", friendly_name).strip()
+    return suggested or friendly_name
 
 
 def _needs_entity(source: str) -> bool:
@@ -549,31 +576,48 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_schedule(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """Handle the daily schedule step."""
+        """Handle the daily schedule step — also collects the zone name (Gap 7, Issue #796)."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            self._data.update(user_input)
-            _LOGGER.info(
-                "Config entry created — wake=%s, sleep=%s, briefing=%s",
-                self._data.get("wake_time"),
-                self._data.get("sleep_time"),
-                self._data.get("briefing_time"),
-            )
-            return self.async_create_entry(
-                title="Climate Advisor",
-                data=self._data,
-            )
+            zone_name = user_input.pop("zone_name", "").strip()
+            # Validate zone_name length (Security Requirements: config flow text
+            # fields must validate format before accepting). No regex restriction —
+            # a zone name is a short display string and legitimately contains
+            # spaces, apostrophes, etc. Empty is intentionally still allowed here:
+            # it is the documented "user cleared the field" path that falls back
+            # to the "Climate Advisor" default title below, not an error.
+            if len(zone_name) > 50:
+                errors["zone_name"] = "zone_name_too_long"
+
+            if not errors:
+                self._data.update(user_input)
+                _LOGGER.info(
+                    "Config entry created — zone=%s, wake=%s, sleep=%s, briefing=%s",
+                    zone_name,
+                    self._data.get("wake_time"),
+                    self._data.get("sleep_time"),
+                    self._data.get("briefing_time"),
+                )
+                return self.async_create_entry(
+                    title=zone_name or "Climate Advisor",
+                    data=self._data,
+                )
 
         _time_selector = selector.TimeSelector()
+        _suggested_zone_name = _suggest_zone_name(self.hass, self._data.get("climate_entity"))
 
         return self.async_show_form(
             step_id="schedule",
             data_schema=vol.Schema(
                 {
+                    vol.Required("zone_name", default=_suggested_zone_name): selector.TextSelector(),
                     vol.Required("wake_time", default="06:30:00"): _time_selector,
                     vol.Required("sleep_time", default="22:30:00"): _time_selector,
                     vol.Required("briefing_time", default="06:00:00"): _time_selector,
                 }
             ),
+            errors=errors,
         )
 
     @staticmethod

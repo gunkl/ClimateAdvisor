@@ -477,24 +477,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator._async_send_briefing(dt_util.now())
 
     async def handle_dump_diagnostics(call):
-        """Log a comprehensive diagnostic snapshot for troubleshooting."""
-        from homeassistant.util import dt as dt_util
+        """Log a comprehensive diagnostic snapshot for troubleshooting.
 
-        diag = {
-            "version": VERSION,
-            "timestamp": dt_util.now().isoformat(),
-            "debug_state": coordinator.get_debug_state(),
-            "chart_data_summary": {
-                "outdoor_points": len(coordinator._outdoor_temp_history),
-                "indoor_points": len(coordinator._indoor_temp_history),
-            },
-            "learning_summary": coordinator.learning.get_compliance_summary(),
-            "config": {k: v for k, v in coordinator.config.items() if k != "notify_service"},
-            "briefing_state": {
-                "sent_today": coordinator._briefing_sent_today,
-                "briefing_length": len(coordinator._last_briefing),
-            },
-        }
+        Kept (not deprecated) alongside the native `async_get_config_entry_diagnostics`
+        hook in diagnostics.py for continuity — some users may have automations that
+        already call this service. Builds its payload through the same shared helper
+        so the two surfaces stay a single source of truth for the payload shape.
+        """
+        from .diagnostics import async_get_diagnostics_payload
+
+        diag = await async_get_diagnostics_payload(hass, entry)
         _LOGGER.info(
             "Diagnostic dump requested:\n%s",
             json.dumps(diag, indent=2, default=str),

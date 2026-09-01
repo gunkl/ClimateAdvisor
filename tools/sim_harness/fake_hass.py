@@ -61,6 +61,22 @@ class FakeEvent:
     context: Any = None
 
 
+class _FakeServiceCall:
+    """Minimal stand-in for homeassistant.core.ServiceCall.
+
+    Real HA hands the registered handler a ``ServiceCall`` exposing ``.data``
+    (and ``.context``); production's ``handle_*`` closures in ``__init__.py``
+    only ever read ``call.data.get(...)`` — that is the entire surface needed
+    here.
+    """
+
+    def __init__(self, domain: str, service: str, data: dict, context: Any = None) -> None:
+        self.domain = domain
+        self.service = service
+        self.data = data
+        self.context = context
+
+
 class _FakeServices:
     """Intercept point for all hass.services.async_call() invocations.
 
@@ -72,12 +88,52 @@ class _FakeServices:
     state — exactly as real HA would, and as the legacy ``SimState`` mirrors by
     mutating its own state after each decision. Without this, read-backs return
     the stale initial state and production diverges for the wrong reason.
+
+    Issue #796: also supports ``async_register`` for the DOMAIN-scoped custom
+    services ``__init__.py``'s ``async_setup_entry()`` registers
+    (``respond_to_suggestion``, ``force_reclassify``, ``resend_briefing``,
+    ``dump_diagnostics``, ``reset_learning_data``). Registration is a plain
+    ``dict[(domain, service), handler]`` — **last write wins**, matching real
+    HA's global (not per-config-entry) service namespace. This is
+    deliberately faithful, not idealized: it is what lets a multi-zone
+    scenario reproduce Gap 5/9 (a second zone's ``async_setup_entry()``
+    silently overwrites the first zone's service handler) rather than
+    papering over it with per-zone routing the real integration doesn't have.
     """
 
     def __init__(self, action_log: list[dict], clock_fn: Any, states: _FakeStates) -> None:
         self._action_log = action_log
         self._clock_fn = clock_fn  # callable → current sim datetime
         self._states = states
+        self._handlers: dict[tuple[str, str], Any] = {}
+
+    def async_register(self, domain: str, service: str, handler: Any, schema: Any = None) -> None:
+        """Register (or overwrite) a service handler — mirrors real HA's global namespace."""
+        self._handlers[(domain, service)] = handler
+
+    def async_remove(self, domain: str, service: str) -> None:
+        self._handlers.pop((domain, service), None)
+
+    def has_service(self, domain: str, service: str) -> bool:
+        return (domain, service) in self._handlers
+
+    def get_handler(self, domain: str, service: str) -> Any:
+        """Return the currently-registered handler closure, or None.
+
+        Test-only introspection point: a real HA installation does NOT expose
+        this (see ``diagnostics.py``'s ``active_service_bindings`` field,
+        which documents that HA's public API doesn't surface a registered
+        service's bound closure). Because this is a plain-Python fake, the
+        handler closure is a real, inspectable object — ``multi_zone_assertions
+        .py``'s ``service_registry_binding`` check uses this plus
+        ``__code__.co_freevars``/``__closure__`` to recover which
+        coordinator/entry a handler is bound to. That is a harness-level
+        answer to a *different* question than the diagnostics OPEN QUESTION
+        (docs/multi-zone-spec.md): "can the test harness verify binding"
+        (yes, via closure introspection) vs. "can production code introspect
+        it through public HA APIs" (no — unresolved, unrelated).
+        """
+        return self._handlers.get((domain, service))
 
     async def async_call(
         self,
@@ -88,7 +144,7 @@ class _FakeServices:
         context: Any = None,
         **kw: Any,
     ) -> None:
-        """Record the service call, then apply the state-feedback loop.
+        """Record the service call, invoke any registered handler, then apply state-feedback.
 
         ``context`` (Issue #482): when production passes its own ``Context``
         (see ``automation.py``'s ``_call_fan_service_with_context``), it is
@@ -96,6 +152,13 @@ class _FakeServices:
         the coordinator's context-based provenance check has real data to
         compare against, matching real HA's behavior of carrying the
         originating service call's context onto the entity's state write.
+
+        Issue #796: if a handler was registered for ``(domain, service)`` via
+        ``async_register`` (i.e. this is a Climate Advisor custom service,
+        not a ``climate``/``fan``/``switch`` HA-native call), it is actually
+        invoked — real HA does this too. Without this, ``reset_learning_data``
+        et al. would only ever be *recorded*, never *run*, and a
+        ``cross_zone_isolation`` assertion would have nothing real to observe.
         """
         data = dict(data or {})
         ts: datetime | None = None
@@ -110,6 +173,12 @@ class _FakeServices:
                 "context": context,
             }
         )
+        handler = self._handlers.get((domain, service))
+        if handler is not None:
+            call = _FakeServiceCall(domain, service, data, context=context)
+            result = handler(call)
+            if inspect.iscoroutine(result):
+                await result
         self._apply_state_feedback(domain, service, data, context=context)
 
     def _apply_state_feedback(self, domain: str, service: str, data: dict, context: Any = None) -> None:
@@ -225,6 +294,103 @@ class _FakeStates:
             self._dispatch_fn(entity_id, old_state, new_state, context=context)
 
 
+class _FakeConfigEntries:
+    """Minimal stand-in for hass.config_entries (Issue #796).
+
+    Real HA's ``ConfigEntries`` manager is a large class; ``async_setup_entry()``
+    /``async_unload_entry()`` in ``__init__.py`` only ever call
+    ``async_forward_entry_setups`` (platform forwarding — a no-op here, no real
+    sensor platform is loaded headlessly), ``async_unload_platforms`` (no-op,
+    returns True), and ``async_entries(DOMAIN)`` (must return the registered
+    entries in stable order — this is the exact accessor the Transitional
+    Safety Window fallback depends on in production, per
+    docs/multi-zone-spec.md's "Testing Without Multi-Zone Hardware" section:
+    confirmed both ``repairs.py:38,77`` and ``diagnostics.py``'s
+    ``entry_setup_order`` field read ``self.hass.config_entries
+    .async_entries(DOMAIN)`` verbatim, so the fake must model this faithfully).
+
+    ``async_update_entry``/``async_get_entry``/``async_reload`` are included
+    beyond the spec's minimum three because ``__init__.py``'s weather-entity
+    auto-resolution path and ``coordinator.py``'s AI-model auto-migration path
+    both call them — cheap to support now, and this fake's registry (a plain
+    dict keyed by entry_id) makes them trivial to implement faithfully rather
+    than stub as MagicMock no-ops.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, Any] = {}
+
+    def register_entry(self, entry: Any) -> None:
+        """Harness-only: add an entry to the registry (real HA does this at
+        config-flow-create time, before ``async_setup_entry`` is ever called —
+        this method is the harness's equivalent of that step)."""
+        self._entries[entry.entry_id] = entry
+
+    async def async_forward_entry_setups(self, entry: Any, platforms: Any) -> None:
+        """No-op — no real sensor platform is loaded in the headless harness."""
+        return None
+
+    async def async_unload_platforms(self, entry: Any, platforms: Any) -> bool:
+        """No-op — mirrors real HA's contract of returning True on success."""
+        return True
+
+    def async_entries(self, domain: str | None = None) -> list[Any]:
+        """Return registered entries in stable (insertion) order.
+
+        ``domain`` is accepted (matching the real signature,
+        ``async_entries(domain=None)``) but not filtered on — this fake only
+        ever holds Climate Advisor entries.
+        """
+        return list(self._entries.values())
+
+    def async_update_entry(
+        self,
+        entry: Any,
+        *,
+        data: dict | None = None,
+        version: int | None = None,
+        title: str | None = None,
+        options: dict | None = None,
+    ) -> None:
+        if data is not None:
+            entry.data = dict(data)
+        if version is not None:
+            entry.version = version
+        if title is not None:
+            entry.title = title
+        if options is not None:
+            entry.options = dict(options)
+
+    def async_get_entry(self, entry_id: str) -> Any:
+        return self._entries.get(entry_id)
+
+    async def async_reload(self, entry_id: str) -> bool:
+        """No-op — no scenario currently exercises a live reload mid-run."""
+        return True
+
+
+class _FakeHttp:
+    """Minimal stand-in for hass.http (Issue #796).
+
+    ``async_setup_entry()`` calls ``hass.http.register_view(view_cls())`` for
+    each REST API view and ``await hass.http.async_register_static_paths(...)``
+    to serve the dashboard frontend. Neither needs real aiohttp routing in the
+    headless harness — registered views are kept in a list purely so a future
+    test could assert on them (e.g. "the API views actually got registered"),
+    matching the same "track what happened, don't just no-op it away" approach
+    as the panel-tracking functions in ha_stubs.py.
+    """
+
+    def __init__(self) -> None:
+        self.registered_views: list[Any] = []
+
+    def register_view(self, view: Any) -> None:
+        self.registered_views.append(view)
+
+    async def async_register_static_paths(self, configs: Any) -> None:
+        return None
+
+
 class _FakeBus:
     """Minimal event bus: ``async_listen`` / ``async_listen_once`` / ``async_fire``.
 
@@ -294,6 +460,22 @@ class FakeHass:
         self.services = _FakeServices(self.action_log, self._clock_fn, self.states)
         self.bus = _FakeBus(task_runner=self.async_create_task)
         self._scheduler: Any | None = None  # set via set_scheduler()
+
+        # Issue #796: real dict (not a MagicMock attribute) so
+        # hass.data.setdefault(DOMAIN, {}) / hass.data[DOMAIN][entry.entry_id]
+        # = coordinator (__init__.py:363,431) work unmodified when
+        # async_setup_entry() is driven directly, and so log_capture.install()/
+        # uninstall() (which read/write hass.data) work too.
+        self.data: dict[str, Any] = {}
+        # False by default: async_setup_entry()'s `if hass.is_running:` branch
+        # runs weather-entity validation synchronously, which needs
+        # hass.config_entries.async_update_entry/async_reload — supported, but
+        # defaulting to False (mirroring "HA is still starting up") keeps the
+        # common multi-zone-setup path from depending on that extra surface
+        # unless a scenario deliberately sets is_running=True to exercise it.
+        self.is_running: bool = False
+        self.config_entries = _FakeConfigEntries()
+        self.http = _FakeHttp()
 
         # Minimal config stub the engine reads via hass.config.config_dir
         class _Config:

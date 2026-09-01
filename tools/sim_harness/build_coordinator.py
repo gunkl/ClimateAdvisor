@@ -248,3 +248,141 @@ def build_headless_coordinator(
         coordinator._startup_coalesce_active = False
 
     return coordinator, fake_hass, scheduler, event_log
+
+
+def build_headless_multi_zone(
+    zone_count: int = 2,
+    *,
+    configs: list[dict[str, Any]] | None = None,
+    start_time: datetime | None = None,
+    config_dir: str | None = None,
+) -> tuple[dict[str, Any], FakeHass, FakeScheduler]:
+    """Build ``zone_count`` real config entries against ONE shared FakeHass.
+
+    Issue #796 (docs/multi-zone-spec.md, "Testing Without Multi-Zone
+    Hardware"): unlike ``build_headless_coordinator()`` above, which
+    constructs ``ClimateAdvisorCoordinator`` directly and never touches
+    ``async_setup_entry()``/``async_unload_entry()`` at all, this function
+    drives the REAL ``custom_components.climate_advisor.async_setup_entry()``
+    once per zone against a shared ``hass`` — exercising service
+    registration, panel registration, and ``hass.data[DOMAIN]`` population
+    exactly as production does. This is the only harness path that can
+    regression-test Gaps 5/6/8/9 (all of which live inside
+    ``async_setup_entry()``/``async_unload_entry()``, code the single-zone
+    harness never executes). ``build_headless_coordinator()`` itself is left
+    untouched — single-zone tests keep the fast, direct-construction path.
+
+    Args:
+        zone_count: Number of zones (config entries) to set up. Ignored if
+            ``configs`` is given (its length wins).
+        configs: Optional list of per-zone config overrides, one dict per
+            zone, each merged over ``_DEFAULT_CONFIG`` the same way
+            ``build_headless_coordinator`` does. Each dict may set
+            ``climate_entity``, ``zone_title``, and any other runtime config
+            key. When omitted, ``zone_count`` zones are generated with
+            distinct synthetic entity ids (``climate.zone_a_thermostat``,
+            ``climate.zone_b_thermostat``, ...) and titles ("Zone A", "Zone
+            B", ...).
+        start_time: Shared virtual clock start time for all zones.
+        config_dir: Shared StatePersistence/ChartStateLog/LearningEngine
+            directory. Defaults to a fresh ``tempfile.mkdtemp()`` — **shared
+            across zones on purpose**, since each zone's persistence
+            filenames are expected to be entry-scoped in production (that
+            expectation is exactly what a ``teardown_cleanup``/
+            ``cross_zone_isolation`` scenario would catch if violated); pass
+            distinct directories explicitly if a scenario wants to rule out
+            file-path collision as a variable.
+
+    Returns:
+        ``(zones, fake_hass, scheduler)`` where ``zones`` is
+        ``{zone_label: {"coordinator": ..., "entry": ConfigEntry, "climate_entity": str}}``
+        in setup order. Each coordinator's own ``coordinator._event_log`` is
+        the per-zone event log (Issue #236 single-engine doctrine — read it
+        directly, there is no separate flat log for this harness function).
+    """
+    install_ha_stubs()
+
+    from custom_components.climate_advisor import async_setup_entry  # noqa: PLC0415
+    from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
+    from custom_components.climate_advisor.coordinator import (  # noqa: PLC0415
+        ClimateAdvisorCoordinator,
+    )
+    from tools.sim_harness.ha_stubs import ConfigEntry, _MockDataUpdateCoordinator  # noqa: PLC0415
+
+    # Same __bases__ guard as build_headless_coordinator() — see that
+    # function's comment for the full explanation (Issue #497 follow-up).
+    if not issubclass(ClimateAdvisorCoordinator, _MockDataUpdateCoordinator):
+        ClimateAdvisorCoordinator.__bases__ = (_MockDataUpdateCoordinator,)
+
+    if configs is None:
+        _labels = [chr(ord("a") + i) for i in range(zone_count)]
+        configs = [
+            {
+                "climate_entity": f"climate.zone_{label}_thermostat",
+                "zone_title": f"Zone {label.upper()}",
+            }
+            for label in _labels
+        ]
+
+    if start_time is None:
+        start_time = datetime(2024, 1, 15, 8, 0, 0, tzinfo=UTC)
+    scheduler = FakeScheduler(start=start_time)
+    fake_hass = FakeHass(clock_fn=scheduler.now)
+    fake_hass.set_scheduler(scheduler)
+    fake_hass.config.config_dir = config_dir or tempfile.mkdtemp(prefix="ca_sim_multi_zone_")
+
+    zones: dict[str, Any] = {}
+
+    with scheduler.installed():
+        for index, zone_config in enumerate(configs):
+            zone_config = dict(zone_config)
+            climate_entity = zone_config.pop("climate_entity", f"climate.zone_{index}_thermostat")
+            zone_title = zone_config.pop("zone_title", f"Zone {index}")
+            zone_label = zone_config.pop("zone_label", None) or f"zone_{index}"
+
+            merged_config: dict[str, Any] = {**_DEFAULT_CONFIG, **zone_config}
+            merged_config["climate_entity"] = climate_entity
+
+            # Seed this zone's thermostat state on the SHARED fake_hass —
+            # mirrors build_headless_coordinator's defaults (dual-setpoint,
+            # the most capable real-world unit).
+            _default_hvac_modes = merged_config.get(
+                "thermostat_hvac_modes",
+                ["off", "heat", "cool", "heat_cool"],
+            )
+            _default_features = int(merged_config.get("thermostat_supported_features", 2))
+            fake_hass.states.set(
+                climate_entity,
+                FakeState(
+                    state="off",
+                    attributes={
+                        "fan_mode": "auto",
+                        "hvac_modes": _default_hvac_modes,
+                        "supported_features": _default_features,
+                    },
+                ),
+            )
+
+            entry = ConfigEntry(entry_id=f"{zone_label}_entry", data=merged_config, title=zone_title)
+            # Real HA registers the entry in its config-entries registry
+            # BEFORE calling async_setup_entry() — mirror that ordering so
+            # async_entries(DOMAIN) (read by repairs.py and diagnostics.py's
+            # entry_setup_order field) sees every already-set-up zone plus
+            # itself, matching production's actual sequencing.
+            fake_hass.config_entries.register_entry(entry)
+
+            run_coro(async_setup_entry(fake_hass, entry))
+            # Settle any fire-and-forget hass.async_create_task() calls /
+            # scheduled callbacks queued during this zone's setup before
+            # moving on to the next zone — same reasoning as
+            # build_headless_coordinator's post-startup scheduler.advance_to.
+            scheduler.advance_to(scheduler.now())
+
+            coordinator = fake_hass.data[DOMAIN][entry.entry_id]
+            zones[zone_label] = {
+                "coordinator": coordinator,
+                "entry": entry,
+                "climate_entity": climate_entity,
+            }
+
+    return zones, fake_hass, scheduler

@@ -769,17 +769,25 @@ debugged and tested with.
    Its build starts concurrently with PR3, not after PR3 finishes — the
    harness is written to model both of PR3's possible outcomes as parallel
    test variants, so PR5's design work isn't blocked on PR3 completing first.
-3. **PR3 — Empirical spike, no shipped code.** Stand up two config entries
-   against a real/dev HA instance. Resolve Gap 6: does `async_setup_entry`
-   raise on the second entry (duplicate `frontend_url_path`)? If yes, is the
-   first coordinator's update loop still running afterward (check
-   `hass.data[DOMAIN]` and logs)? This gates PR5's exact design. Also the
-   natural point to resolve the OPEN QUESTION from
-   [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware) —
-   whether `hass.services` exposes closure/coordinator identity
-   introspectably enough for `service_registry_binding`/
-   `active_service_bindings` — since it's the same "confirm against a real
-   instance, not static reading" category of unknown.
+3. **PR3 — Empirical spike, NOT RUN (deliberate decision, 2026-09-01).**
+   Originally: stand up two config entries against a real/dev HA instance and
+   observe whether `async_setup_entry`'s panel registration raises on a
+   duplicate `frontend_url_path`, and whether the first coordinator's update
+   loop is already running when it does. The only HA access available in this
+   worktree (`.deploy.env`) points at the project owner's live production
+   instance — deliberately triggering a duplicate-registration crash path
+   there was judged too risky to run unsupervised, and the owner explicitly
+   chose **not** to run it live. **Decision: Phase B is designed against the
+   worst-case outcome (b) — the first zone's coordinator/automation loop is
+   already running by the time panel registration would raise — as a
+   documented assumption, not a confirmed fact.** This means PR5's fix
+   (reordering panel/service/view registration before `coordinator.async_setup()`)
+   ships unconditionally rather than being gated on which outcome PR3 found.
+   **Open validation item, not yet closed:** confirm this assumption against a
+   real HA instance (dev or production, at the owner's discretion) before or
+   shortly after this branch ships — if outcome (a) turns out to be true
+   instead (clean crash before the control loop starts), PR5's reordering is
+   still correct but unnecessary defense-in-depth, not a fix for a live gap.
 4. **PR4 — Service-handler scoping and unregistration (Gaps 5 and 9).**
    Safety-critical; no dependency on PR3's result. Make service registration
    per-entry-safe (entry_id-suffixed service names, or a required

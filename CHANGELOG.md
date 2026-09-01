@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.91] — 2026-08-31
+
+- Fix #800: the forecast chart's Target line no longer draws a misleading flat line across stretches where nothing is actually setting a target (e.g. HVAC off, nat-vent not running) — it now shows a real gap instead.
+
 ## [0.6.90] — 2026-08-31
 
 - Fix #790: the whole-house fan or HVAC fan-only mode could switch back on within seconds to minutes of being shut off for a legitimate reason (outdoor conditions changed while a window was open), because reconcile_fan_on_startup() — called by 2 event-driven triggers that can fire sub-minute — never checked or armed the 5-minute reactivation lockout every other fan-off path already respects.

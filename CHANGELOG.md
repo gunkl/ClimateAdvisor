@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.0] — 2026-09-01
+
+- Feat #796: Climate Advisor now supports running two or more zones (thermostats) at once — each zone gets its own learning history, dashboard data, and settings, with a zone switcher on the dashboard when more than one zone is configured.
+
 ## [0.6.92] — 2026-08-31
 
 - Fix #802: the forecast chart's Target line and Vent/Windows activity bars no longer flicker or show near-total gaps into the future — they now forward-walk the same real nat-vent and ceiling-guard decision logic the live automation engine uses, including correctly predicting when an off-classified day would escalate to active cooling mid-day.

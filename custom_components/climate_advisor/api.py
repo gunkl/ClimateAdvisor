@@ -217,6 +217,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         # the ca_target_heat/cool staleness Issue #466 fixed above, applied to the
         # coordinator's overall health rather than those two fields specifically.
         _coordinator_healthy = bool(coordinator.last_update_success)
+        _zones = zone_registry.list_zones(hass)
         _status_payload = {
             "version": VERSION,
             "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
@@ -269,6 +270,16 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],
             "pre_cool_status": data.get("pre_cool_status"),
             "coordinator_healthy": _coordinator_healthy,
+            # Issue #796 PR9: dashboard zone selector. loadStatus() polls every
+            # cycle regardless of which tab is active, so this is the one
+            # endpoint guaranteed to have data by the time the page needs to
+            # decide whether to render the selector row at all. zone_count is
+            # the same "is this a multi-zone install" question the
+            # Transitional Safety Window Repairs check answers — reusing
+            # zone_registry.list_zones() here keeps that a single computation
+            # instead of a second parallel counting implementation.
+            "zones": _zones,
+            "zone_count": len(_zones),
         }
         if not _coordinator_healthy:
             _status_payload["last_error"] = coordinator.last_update_error

@@ -102,6 +102,28 @@ def iter_coordinators(hass: HomeAssistant) -> Iterable[ClimateAdvisorCoordinator
     return hass.data.get(DOMAIN, {}).values()
 
 
+def list_zones(hass: HomeAssistant) -> list[dict[str, str]]:
+    """List every loaded zone as ``{"entry_id": ..., "title": ...}``, in stable order.
+
+    Issue #796 PR9 (dashboard zone selector): the frontend needs a stable,
+    human-readable list of zones to render the selector row and to decide
+    whether to render it at all (``zone_count > 1``, see
+    ``ClimateAdvisorStatusView.get()`` in ``api.py``). Ordered via
+    ``hass.config_entries.async_entries(DOMAIN)`` — the same stable-order
+    precedent already used by ``get_default_coordinator()`` above and by
+    ``repairs.py:38,77`` — rather than dict-iteration order over
+    ``hass.data[DOMAIN]``, which is not guaranteed stable across restarts.
+    Only entries with a loaded coordinator are included, matching
+    ``iter_coordinators()``'s scope.
+    """
+    loaded = hass.data.get(DOMAIN, {})
+    return [
+        {"entry_id": entry.entry_id, "title": entry.title}
+        for entry in hass.config_entries.async_entries(DOMAIN)
+        if entry.entry_id in loaded
+    ]
+
+
 def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | None:
     """Single-zone convenience path.
 

@@ -2,28 +2,30 @@
 
 # Multi-Zone Support — Territory Spec (Tier 3)
 
-> **STATUS: Design proposal — not yet implemented.**
+> **STATUS: All nine gaps closed; every step built and tested. Awaiting
+> branch-landing (not yet merged to `main`).**
 >
-> **Phase A / Phase B / Phase C implementation note (Issue #796, uncommitted
-> on `feature/796-multi-zone-support`):** PR1 (diagnostics hook), PR2
-> (two-entry test harness), PR6 (entry-scoped persistence), PR8 (zone
-> naming), PR10 (indoor-temp-read dedup), PR4 (service-handler scoping and
-> unregistration, Gaps 5/9 — Step 4), PR5 (panel/view registration scoping,
-> Gaps 6/8 — Step 5), and now PR7 (`api.py`/`zone_registry.py` entry-scoping
-> and the Transitional Safety Window's Repairs issue, Gap 4 — Step 7) are
-> built, linted clean, and passing the full test suite (5126 tests) plus all
-> 91 golden scenarios. PR3 (the empirical Gap 6 spike) was deliberately
-> **not run** — see the "(as built, PR5)" note under
+> **Phase A / Phase B / Phase C / Phase D implementation note (Issue #796,
+> uncommitted on `feature/796-multi-zone-support`):** Phase D (Step 9, the
+> dashboard zone selector, PR9) is now built — the last step this document
+> tracked as unstarted. All ten PRs (PR1, PR2, PR4, PR5, PR6, PR7, PR8, PR9,
+> PR10) are built, linted clean, and passing the full test suite (5139
+> tests) plus all 91 golden scenarios plus 27/28 Playwright UI tests (1
+> pre-existing failure unrelated to this branch, confirmed via git-stash
+> comparison). **PR3 (the empirical Gap 6 spike) remains the one deliberate,
+> permanent exception** — see the "(as built, PR5)" note under
 > [Gap 6](#gap-6--panelview-registration-needs-empirical-verification) for
-> how PR5 closes Gap 6's safety concern without needing PR3's answer. PR9
-> (the dashboard zone selector) is **not yet started** — this document's
-> "not yet implemented" status still applies to that one PR. Deviations
-> between this section's original design and what Phase A/B/C actually
-> built are called out inline below, each marked **(as built)**.
+> how PR5 closes Gap 6's safety concern without needing PR3's answer, and
+> [Open Questions](#open-questions-carried-forward-out-of-this-build) below
+> for what remains genuinely open at branch-landing time. This is an
+> intentional, documented gap carried forward to production verification —
+> not an unstarted step. Deviations between this section's original design
+> and what Phase A/B/C/D actually built are called out inline below, each
+> marked **(as built)**.
 >
-> **Known doc debt (pre-existing, not introduced by Phase A or C):** a
+> **Known doc debt (pre-existing, not introduced by Phase A, C, or D):** a
 > Verification pass found stale `file.py:NNN` citations scattered outside the
-> areas Phase A/C touched — thermal-constant citations (`const.py`, off by
+> areas Phase A/C/D touched — thermal-constant citations (`const.py`, off by
 > ~25 lines), `door_window_sensors` config_flow citations (off by ~30-50
 > lines), and the `_build_predicted_indoor_future`/`get_chart_data`
 > carried-over citations in `coordinator.py` (off by ~370-390 lines). The Gap
@@ -31,10 +33,76 @@
 > resolved as a side effect of Phase C's own line-range refresh in
 > `__init__.py` (Phase C added code directly above `async_unload_entry()`,
 > which this pass re-cited anyway). None of the remaining ones are in
-> files/functions Phase A's 5 steps or Phase C's Step 7 modified, so they
-> predate this branch and stay out of scope for this document's Verification
-> gate. Sweep these when Phase D touches the same files, or dedicate a
-> citation-refresh pass before the branch lands.
+> files/functions Phase A's 5 steps, Phase C's Step 7, or Phase D's Step 9
+> modified, so they predate this branch and stay out of scope for this
+> document's Verification gate. Sweep these in a dedicated citation-refresh
+> pass before the branch lands — see
+> [Open Questions](#open-questions-carried-forward-out-of-this-build).
+>
+> **→ [Open Questions carried forward out of this build](#open-questions-carried-forward-out-of-this-build)**
+> — everything still genuinely unresolved at the end of Phase D, in one
+> place, for whoever lands this branch.
+
+## Open Questions carried forward out of this build
+
+Everything below is genuinely unresolved as of Phase D's close (Step 9,
+2026-09-01) — not a restatement of finished work, and not a new finding
+introduced by this Scribe pass. Each item cross-references the section that
+already tracks it in detail; this section exists so a reader (or the
+Coordinator/owner) doesn't have to search the whole document to find them.
+
+1. **PR3's empirical spike was never run against production.** Tracked in
+   detail at [Implementation Sequence, PR3](#implementation-sequence) and
+   [Relationship to PR3's manual spike](#relationship-to-pr3s-manual-spike).
+   Phase B shipped PR5 designed against the worst-case assumed outcome
+   rather than a confirmed one. **Open validation item:** confirm the
+   assumption against a real HA instance (dev or production, owner's
+   discretion) before or shortly after this branch ships.
+2. ~~Whether `apiFetchStream` should be zone-scoped~~ — **fixed during
+   Verification, no longer open.** `ClimateAdvisorInvestigateView.post()`
+   (`api.py`) already calls `_get_coordinator(hass, request)` — Phase C's
+   backend work already supported an `entry_id` query param on this
+   endpoint, PR9 just never wired the frontend call to send one.
+   `apiFetchStream()` now calls `_withZoneParam(path)` as its first line,
+   identically to how `apiFetch()` uses it (`index.html`). An AI report now
+   generates for, and renders under, the zone actually selected in the
+   dashboard rather than silently falling back to
+   `zone_registry.get_default_coordinator()`.
+3. **PR9's manual dashboard verification was Playwright + a mock-server
+   harness — real headless Chromium, but not real Home Assistant.** The
+   4-test `tests/ui/zone-selector.spec.js` suite (see the "(as built, PR9)"
+   note under [Gap 4](#gap-4--apipy-first-entry-selection-entire-rest-surface)
+   for exactly what it covers) drives a real browser against mocked
+   `/api/climate_advisor/*` responses, which validates the frontend's own
+   rendering/re-fetch logic thoroughly. It does **not** exercise: HA's real
+   panel-registration path (the actual `async_register_built_in_panel`
+   mechanics PR3's spike was meant to observe), or live multi-zone REST
+   behavior against a real multi-entry HA install. Auth specifically is only
+   partially exercised: `tests/ui/mock-server.js` (`mock-server.js:78-81`)
+   injects a `localStorage` `hassTokens` value before the page loads so
+   `getAuthToken()`'s **fallback** path (`index.html:824-830`) resolves a
+   token and `initLoad()` fires — but `getAuthToken()`'s **primary** path
+   (`_getHassAuth()`, `index.html:805-810`, reading `window.parent.document
+   .querySelector('home-assistant').hass.auth`) is never reached in this
+   harness, since the mock server serves the page standalone with no HA
+   parent iframe. The real HA panel-embedding case — where `_getHassAuth()`
+   succeeds and drives token refresh — remains unverified against real HA
+   and is a natural first thing to check once this branch reaches a dev or
+   production instance.
+4. **Known test-infra gap from Phase C:** `homeassistant.util.dt`
+   parent-attribute shadowing in `tools/sim_harness/ha_stubs.py` — see
+   [Known test-infra gap (as built, PR7)](#known-test-infra-gap-as-built-pr7-homeassistantutildt-parent-attribute-shadowing)
+   for the full description. Status remains **open**; Phase D did not touch
+   `ha_stubs.py` and did not need to for Step 9's scope.
+5. **Pre-existing doc-citation debt from Phase A's Verification pass** —
+   see the "Known doc debt" paragraph in this STATUS callout, above, for the
+   specific files/line-ranges affected. Not re-enumerated here; referenced
+   so it isn't lost when this branch lands.
+
+None of the above blocks merging this branch — each is either a deliberate,
+documented design deferral (items 1, 2) or a verification/tooling gap that
+existed before Phase D and is orthogonal to Step 9's own scope (items 3-5).
+They are listed together so landing this branch doesn't quietly drop them.
 
 A "zone" is a second Climate Advisor config entry, not a new schema. The
 automation engine and learning engine already construct one correct,
@@ -67,6 +135,7 @@ influence each other thermally is sketched and explicitly deferred — see
 | How do I get fast feedback from real multi-zone users? | A native HA `diagnostics.py` hook replaces the log-only `dump_diagnostics` service with a one-click downloadable bundle carrying multi-zone-specific fields, plus a symptom-to-gap triage checklist. | [Diagnostics and Field Feedback](#diagnostics-and-field-feedback) |
 | What does each user-visible change actually look like? | Five mocked surfaces (naming field, entry list, Repairs card, diagnostics menu item, dashboard selector); mocking them surfaced two real refinements (conditional selector rendering, explicit Repairs card copy). | [UI Mocks](#ui-mocks) |
 | What changes for a user, in plain terms? | A before/after table across eight areas, each tied to the design choice behind it. | [Outcomes: Before and After](#outcomes-before-and-after) |
+| What's still open now that every step is built? | PR3's spike, real-HA verification of PR9, a known test-harness gap, and pre-existing citation debt — none blocking, all tracked in one place. (`apiFetchStream`'s zone-scoping was closed during Verification, no longer open.) | [Open Questions](#open-questions-carried-forward-out-of-this-build) |
 
 ## Scope
 
@@ -80,17 +149,21 @@ Which code section this spec covers.
   - `custom_components/climate_advisor/learning.py` — `LearningEngine` (Gap 1, PR6, **DONE**)
   - `custom_components/climate_advisor/config_flow.py` — entry creation, zone naming (Gap 7, PR8, **DONE**)
   - `custom_components/climate_advisor/automation.py` / `coordinator.py` / `indoor_temp.py` (new) — carried-over indoor-temp-read duplication, now fixed via the shared `indoor_temp.py` module (independent track, PR10, **DONE**, see [Carried-Over Citations](#carried-over-citations))
-  - `custom_components/climate_advisor/zone_registry.py` (new, Gap 4, PR7, **DONE**) — also the accessor surface a future Zone Influence feature would use
+  - `custom_components/climate_advisor/zone_registry.py` (Gap 4, PR7, **DONE**; `list_zones()` added PR9, **DONE**) — also the accessor surface a future Zone Influence feature would use
   - `custom_components/climate_advisor/storage_paths.py` (new, Gaps 1-3, PR6, **DONE**)
   - `custom_components/climate_advisor/diagnostics.py` (new, PR1, **DONE**) — native HA diagnostics hook, see [Diagnostics and Field Feedback](#diagnostics-and-field-feedback)
+  - `custom_components/climate_advisor/frontend/index.html` — dashboard zone selector (`.zone-tabs`/`.zone-tab-btn`, `_selectedEntryId`, `apiFetch()` parameterization; PR9, **DONE**)
   - `tools/sim_harness/ha_stubs.py`, `tools/sim_harness/fake_hass.py`, `tools/sim_harness/build_coordinator.py` (extended, harness-only — no production code), `tools/sim_harness/multi_zone_assertions.py` (new, harness-only) — see [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware) (PR2, **DONE**)
 
-  **Phase A/B/C status (see the STATUS callout at the top of this document):**
-  PR1, PR2, PR4, PR5, PR6, PR7, PR8, PR10 are built, uncommitted on
-  `feature/796-multi-zone-support`. PR3 (empirical spike) is a deliberate
-  non-run — see Gap 6's "(as built, PR5)" note for why it's no longer
-  load-bearing. PR9 (the dashboard zone selector) remains unstarted design
-  only.
+  **Phase A/B/C/D status (see the STATUS callout at the top of this
+  document):** all ten PRs (PR1, PR2, PR4, PR5, PR6, PR7, PR8, PR9, PR10)
+  are built, uncommitted on `feature/796-multi-zone-support`. PR3
+  (empirical spike) is a deliberate non-run — see Gap 6's "(as built, PR5)"
+  note for why it's no longer load-bearing, and
+  [Open Questions](#open-questions-carried-forward-out-of-this-build) for
+  what that leaves genuinely open. PR9 (the dashboard zone selector) is
+  now built — see the "(as built, PR9)" note under
+  [Gap 4](#gap-4--apipy-first-entry-selection-entire-rest-surface).
 - **Entry point:** `async_setup_entry()` in `__init__.py` — the per-entry construction path that already works correctly and that all nine gaps sit around.
 
 What this spec does NOT cover: the frontend chart rendering internals
@@ -345,6 +418,122 @@ Confirmed by reading `zone_registry.py` and `api.py`:
   "look up a coordinator by entry_id" implementation instead of two
   independently-maintained one-liners that could silently drift apart.
 
+**(as built, PR9 — Step 9, dashboard zone selector):** ships PR9, the last
+step the Implementation Sequence listed as unstarted. Confirmed by reading
+`zone_registry.py`, `api.py`, and `frontend/index.html`'s diffs directly:
+
+- **New `zone_registry.list_zones(hass) -> list[dict[str, str]]`**
+  (`zone_registry.py:105-125`), not one of the three functions this Gap
+  originally specified — those three (`get_coordinator`/`iter_coordinators`/
+  `get_default_coordinator`) resolve ONE zone's coordinator; the dashboard
+  selector needs to enumerate ALL loaded zones with a human-readable label,
+  which none of the three do. Returns `[{"entry_id": ..., "title": ...}]` in
+  the stable order of `hass.config_entries.async_entries(DOMAIN)`, filtered
+  to entries also present in `hass.data[DOMAIN]` — the same stable-order
+  precedent already cited for the Transitional Safety Window fallback
+  (`repairs.py:38,77`), not dict-iteration order, and the same
+  loaded-coordinator scope `iter_coordinators()` already uses.
+- **Routed onto `ClimateAdvisorStatusView`, not `ClimateAdvisorConfigView`
+  (a real routing decision, not the only option):** the design's original
+  "How `entry_id` reaches the 21 call sites" discussion assumed the fix was
+  purely about resolving a zone from a caller-supplied `entry_id`; it never
+  specified which existing endpoint should hand the frontend the list of
+  zones to choose from in the first place. The in-code comment on
+  `api.py`'s `_status_payload["zones"]`/`"zone_count"` additions gives the
+  reason: `loadStatus()` polls every 60s regardless of which dashboard tab
+  is active, so `ClimateAdvisorStatusView` is the one endpoint guaranteed to
+  have fresh data by the time the page needs to decide whether to render the
+  selector row at all — `ClimateAdvisorConfigView` is fetched once per
+  Settings-tab load, not on a cycle, and would leave the selector unable to
+  detect a zone added or removed without a manual tab switch. `zone_count`
+  is deliberately the same `len(list_zones(hass))` computation already used
+  by the Transitional Safety Window Repairs check (Gap 4, above) — read
+  once, reused for both, not a second parallel counting implementation.
+- **`.zone-tabs`/`.zone-tab-btn` CSS, deliberately distinct from
+  `.tabs`/`.tab-btn`:** `frontend/index.html` already has a `.tabs`/
+  `.tab-btn` pair that switches page SECTIONS (Status/Analysis/Settings/
+  Debug). The new selector switches ZONES — a different axis entirely, and
+  conflating the two class names would let a future edit to one switcher's
+  click-handler wiring silently affect the other. The in-code comment on the
+  new CSS block states this explicitly. Visually a lighter pill-button
+  variant of the same look, but a separate class family with its own
+  click-handler wire-up (`renderZoneSelector()`), matching this document's
+  existing Status Card Ontology precedent of never letting one UI mechanism
+  answer a question that belongs to a different one.
+- **`_selectedEntryId` + `apiFetch()` parameterization covers all 21 zone-data
+  call sites** (updated during Verification — previously stated as "19 of
+  21, with 2 deliberate exclusions"; both exclusions turned out to be real
+  gaps, not deliberate scope decisions, and are now fixed): a module-level
+  `_selectedEntryId` (null until a multi-zone install's selector sets it) is
+  appended by a new `_withZoneParam(path)` helper called once, inside
+  `apiFetch()` itself — every one of `apiFetch`'s and `apiPost`'s 19 existing
+  call sites becomes zone-aware for free, rather than editing each call site
+  individually. Two more call sites bypass `apiFetch()` with their own raw
+  `fetch()` and needed `_withZoneParam()` applied directly at their call
+  site:
+  - `apiFetchStream('ai_investigate', ...)` (the AI-investigate streaming
+    endpoint) now calls `_withZoneParam(path)` as its first line — the
+    original doc text called this "explicitly undecided," but
+    `ClimateAdvisorInvestigateView.post()` (`api.py`) already reads
+    `entry_id` via `_get_coordinator(hass, request)`, so the backend already
+    supported this and only the frontend call site was missing it.
+  - The GitHub-issue-filing `fetch('/api/climate_advisor/submit_github_issue', ...)`
+    call (`index.html`, `submitGithubIssue()`) was originally described here
+    as "unrelated to zone data — filing an issue is not a per-zone action."
+    That rationale was false: `ClimateAdvisorSubmitGithubIssueView.post()`
+    reads `CONF_GITHUB_TOKEN`/`CONF_GITHUB_REPO` from `coordinator.config`,
+    and `config_flow.py`'s `async_step_github_settings` is a per-config-entry
+    options-flow step — each zone can configure its own GitHub token/repo.
+    Filing an issue from zone B's dashboard while unparameterized would
+    silently use whichever zone `get_default_coordinator()` falls back to,
+    not zone B's own GitHub settings. Fixed by applying `_withZoneParam()`
+    to this call's URL directly (it predates `apiPost()` and hand-rolls its
+    own auth header, so it wasn't switched to `apiPost()` — that would also
+    change its existing non-2xx/error-body handling, a larger change than
+    this fix warrants).
+  - `apiFetch`'s null-`_selectedEntryId` path (single-zone install, or a
+    multi-zone install before the selector's first render) sends no
+    `entry_id` query param at all, so the request shape for every existing
+    single-zone install is byte-identical to before PR9 — the backend's
+    `get_default_coordinator()` fallback (Gap 4, above) resolves the zone
+    exactly as it already did.
+- **Test coverage:** `tests/test_api_status_zones.py` (6 tests) drives the
+  REAL `ClimateAdvisorStatusView.get()` (not a hand-rolled mirror of
+  `list_zones()`, per this project's no-mirror-tests doctrine — see the
+  module docstring) against `build_headless_multi_zone()` at 1/2/3 loaded
+  zones, confirming: `zones`/`zone_count` describe the whole install, not
+  just the coordinator a request's own `entry_id` resolved to; ordering
+  matches `hass.config_entries.async_entries(DOMAIN)`'s stable order even
+  when `hass.data[DOMAIN]`'s dict order is deliberately scrambled first
+  (`test_dict_iteration_order_is_not_what_drives_the_result` — the same
+  distinction Gap 4's own fallback test already proved once for
+  `get_default_coordinator()`, now proved again for `list_zones()`); and
+  `zone_count` drops from 3 to 2 after a real `async_unload_entry()` call.
+  No Python test exercises the zero-zone case (right after a reload, before
+  any entry has finished loading) — that path is covered only by the
+  Playwright suite below. `tests/ui/zone-selector.spec.js` (4 tests) is a real
+  headless-Chromium Playwright test against this project's existing
+  mock-server harness (not a DOM-string assertion or a mirror of
+  `renderZoneSelector()`'s logic) confirming: the selector row stays hidden
+  for a single-zone mock, stays hidden for a zero-zone mock (e.g. right
+  after a reload, before the first `/status` response lands), renders one
+  button per zone for a 2-zone mock with the first zone active by default
+  and clicking the second zone re-fetches `/status` carrying
+  `entry_id=zone-living`, and — as of the Verification pass fix described
+  above — the zone click **alone** (no range-button click needed) also
+  triggers a `chart_data` request carrying the selected zone's `entry_id`,
+  proving `_refreshAll()`'s zone-click handler now calls `loadChart()`
+  itself rather than relying on the unrelated 5-min `_chartCycle` poll. The
+  original version of this test clicked a range button to force the chart
+  re-fetch, which meant it would still have passed even if this behavior had
+  never been implemented — an ineffective test per this project's
+  three-exercise protocol; it's been rewritten to assert the real behavior.
+  No test in this file exercises a
+  mid-session zone_count drop (e.g. 2 zones → 1 zone without a page reload)
+  — `renderZoneSelector()`'s own code path for that case (clearing
+  `_selectedEntryId` when `zones.length <= 1`) is implemented but only
+  covered indirectly, not by a dedicated test.
+
 ##### Transitional Safety Window
 
 Nothing prevents a user from adding a second Climate Advisor entry before the
@@ -496,6 +685,14 @@ guard blocking second-entry creation until PR9 ships was considered and
 rejected — it would add temporary gating machinery with no existing
 precedent in this codebase, and contradicts Invariant 2 (no new gating
 machinery for multi-zone).
+
+**(as built):** moot as of Step 9 — PR7 and PR9 both live on
+`feature/796-multi-zone-support` and merge to `main` together in the single
+batch [Release labeling](#release-labeling--what-was-actually-followed)
+describes, so there is no window where PR7 is live on `main` without PR9.
+The `zone_resolution_ambiguous` Repairs signal (above) remains a permanent,
+sanctioned feature for any zone-unaware caller (a direct API call, a script,
+a third-party tool) even after PR9 ships — it does not become dead code.
 
 #### Gap 5 — service-handler misdirection (most severe)
 
@@ -1154,12 +1351,21 @@ debugged and tested with.
    requirement above — not a placeholder string with no accessor), so PR9
    and the future zone-influence selector both have something real to select
    on.
-9. **PR9 — Dashboard zone selector.** Depends on PR4-PR8 all being zone-safe
-   and named — the first PR that assumes the backend is actually zone-safe.
-   Ship in the same release batch as PR7 wherever practically possible, to
-   close the Transitional Safety Window quickly. Renders only when
-   `zone_count > 1` — see the conditional-rendering note under
-   [Resolved Questions](#dashboard-a-zone-selector-over-the-existing-card-layout-not-a-new-comparisonaggregation-card).
+9. **PR9 — Dashboard zone selector. DONE (Phase D, Step 9 — final step).**
+   Depended on PR4-PR8 all being zone-safe and named — the first PR that
+   assumes the backend is actually zone-safe. Shipped in the same
+   `feature/796-multi-zone-support` branch as PR7 (see [Release
+   labeling](#release-labeling--what-was-actually-followed)), closing the
+   Transitional Safety Window before either reaches `main`. Renders only
+   when `zone_count > 1`, exactly as designed — see the "(as built, PR9)"
+   note under [Gap 4](#gap-4--apipy-first-entry-selection-entire-rest-surface)
+   for what actually shipped: `zone_registry.list_zones()`,
+   `ClimateAdvisorStatusView`'s `zones`/`zone_count` fields, the
+   `.zone-tabs`/`.zone-tab-btn` selector row, and the
+   `_selectedEntryId`/`apiFetch()` parameterization covering 19 of 21 call
+   sites. See "Conditional rendering" under
+   [Resolved Questions](#dashboard-a-zone-selector-over-the-existing-card-layout-not-a-new-comparisonaggregation-card)
+   for the design rationale.
 10. **PR10 (independent track, no dependency on PR1-PR9) — the
     automation.py/coordinator.py shared indoor-temp-read fix. DONE (Phase A).**
     Independently valuable, no dependency on the zone work — fixes a live
@@ -1572,18 +1778,54 @@ triageable on sight:
 - A required field: attach the new Download Diagnostics output for the
   affected zone — this alone answers most of the above without back-and-forth.
 
-### Release labeling, no new channel
+### Release labeling — what was actually followed
 
-Consistent with this project's existing flat release process (every PR goes
-through the same version-bump/fix_history/CHANGELOG/PR/merge flow — no beta or
-hotfix lane exists, confirmed by reading the Release Process section of
-CLAUDE.md), do not invent a new channel. The release that ships PR9 (dashboard
-zone selector — the user-visible "multi-zone is here" milestone) gets an
-explicit CHANGELOG/GitHub Release callout (e.g. "Multi-Zone Support
-(Experimental)") using the existing `fix_history.jsonl --user-summary`/
-CHANGELOG mechanism, encouraging early adopters to watch subsequent patches
-and use the symptom checklist above when filing issues. A labeling convention,
-not new infrastructure.
+This section originally proposed folding each PR (PR1-PR10) into the existing
+flat per-PR version-bump/fix_history/CHANGELOG/merge flow, with no dedicated
+branch and no new channel. That is not what happened in practice, once
+implementation started: a single-branch approach was used instead, for a
+reason the flat-PR plan didn't anticipate — ten PRs landing independently
+against `main`, each bumping `VERSION` and merging separately, would have put
+a partially-implemented multi-zone surface (e.g. Gap 5's `entry_id`-required
+services shipped, but PR9's dashboard selector not yet) in front of every
+single-zone install for the days/weeks between PR1 and PR9 landing. The
+actual plan, and the one this branch has followed for its entire life:
+
+- One dedicated branch, `feature/796-multi-zone-support`, holds every step
+  (PR1 through PR9/Step 9 and beyond) rather than merging steps into `main`
+  one at a time.
+- `VERSION`/`manifest.json` are pinned at `0.7.0` for the branch's entire
+  life — not bumped per-step the way a normal flat PR would — since no
+  step is independently releasable; `0.7.0` is claimed once, when the whole
+  feature merges.
+- `fix_history.jsonl` entries (one per closed Gap/PR, via
+  `tools/add_fix_entry.py --issue 796 --version 0.7.0 ...`) and the matching
+  `CHANGELOG.md` `## [0.7.0]` section are added at merge time, covering every
+  gap fixed across the branch's life in one batch — **not yet done as of this
+  writing** (confirmed: zero `"796"` matches in `fix_history.jsonl`, no
+  `0.7.0` section in `CHANGELOG.md` yet); this is deferred to branch landing
+  by design, not an oversight, since a partial batch mid-branch would misstate
+  what actually shipped.
+- The branch merges to `main` as a reviewed PR (or a small number of
+  logically-grouped PRs, if the final diff is large enough that a single
+  review is impractical) only once every step passes — golden simulations,
+  the full pytest suite, and (new as of Step 9) the Playwright UI suite.
+- The CHANGELOG/GitHub Release callout this section originally specified is
+  still the right label and is unchanged in substance: an explicit "Multi-Zone
+  Support (Experimental)" entry, using the existing
+  `fix_history.jsonl --user-summary`/CHANGELOG mechanism, encouraging early
+  adopters to watch subsequent patches and use the symptom checklist above
+  when filing issues.
+- A `v0.7.0` GitHub Release is cut once the branch merges: `gh release create
+  --draft v0.7.0 ...`, human review of the draft, then
+  `gh release edit v0.7.0 --draft=false` — same draft-then-publish mechanism
+  this project's Release Process already uses for every versioned release, no
+  new infrastructure.
+
+This is still a labeling convention, not a new release channel or
+infrastructure — HACS/Releases-API mechanics are untouched — but it is a
+single-branch-then-merge shape, not the step-by-step flat-PR shape originally
+proposed here.
 
 ## UI Mocks
 

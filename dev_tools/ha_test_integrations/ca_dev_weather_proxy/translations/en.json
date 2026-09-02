@@ -1,0 +1,17 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "CA Dev Weather Proxy",
+        "description": "Create a synthetic weather source with a smooth diurnal temperature curve, for local multi-zone testing. Never shipped with the integration.",
+        "data": {
+          "name": "Name",
+          "base_temp_f": "Base temperature (°F)",
+          "diurnal_swing_f": "Diurnal swing (°F, +/- around base)",
+          "phase_offset_h": "Phase offset (hours; 15 = peak at 3pm)",
+          "condition": "Weather condition"
+        }
+      }
+    }
+  }
+}

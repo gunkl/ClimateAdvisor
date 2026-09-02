@@ -328,9 +328,11 @@ the second zone exists.
       """Resolve one zone's coordinator by entry_id, or None if not found/unloaded."""
       return hass.data.get(DOMAIN, {}).get(entry_id)
 
+
   def iter_coordinators(hass) -> Iterable[ClimateAdvisorCoordinator]:
       """All currently-loaded zone coordinators."""
       return hass.data.get(DOMAIN, {}).values()
+
 
   def get_default_coordinator(hass) -> ClimateAdvisorCoordinator | None:
       """Single-zone convenience path. Returns the coordinator when exactly one zone

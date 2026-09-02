@@ -8543,6 +8543,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 comfort_heat_raw=_comfort_heat_raw,
                 sleep_heat=_sleep_heat,
                 in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
+                window_open_time=c.window_open_time,
             )
             if _warm_events["nat_vent_cutoff"] and _warm_events["nat_vent_cutoff"] > now:
                 # Issue #534: this is a forecast for a future time, not a claim about current

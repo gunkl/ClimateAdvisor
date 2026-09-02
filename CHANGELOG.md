@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.5] — 2026-09-01
+
+- Fix #818: the Status report no longer shows a nonsensical zero-width window recommendation like "Open 6:00 AM - 6:00 AM" — the close time now always reflects a moment after windows would actually open.
+
 ## [0.7.4] — 2026-09-01
 
 - Fix #814: the Status report's Conditions card and Today's Strategy text now stay in sync with the live automation state, instead of sometimes showing a stale trend or forecast high left over from an earlier update cycle.

@@ -145,6 +145,7 @@ def generate_briefing(
             comfort_heat_raw=_comfort_heat_raw,
             sleep_heat=_sleep_heat,
             in_sleep_window_fn=_in_sleep_window_fn,
+            window_open_time=c.window_open_time,
         )
         if c.day_type == DAY_TYPE_WARM and predicted_indoor_future and predicted_outdoor_future
         else None
@@ -162,6 +163,7 @@ def generate_briefing(
             comfort_heat_raw=_comfort_heat_raw,
             sleep_heat=_sleep_heat,
             in_sleep_window_fn=_in_sleep_window_fn,
+            window_open_time=c.window_open_time,
         )
         if c.day_type == DAY_TYPE_MILD and predicted_indoor_future and predicted_outdoor_future
         else None
@@ -369,6 +371,12 @@ def _generate_tldr_table(
         # for their matching day_type).
         _events = warm_events or mild_events
         _cutoff = _events.get("nat_vent_cutoff") if _events else None
+        # Defensive second guard (belt-and-suspenders alongside _derive_warm_day_events()'s
+        # own window_open_time bound): never let the ODE cutoff produce a close time at or
+        # before the open time \u2014 fall back to the classifier's static close hour instead of
+        # displaying a zero-or-negative-width "Open 6:00 AM \u2013 6:00 AM".
+        if _cutoff is not None and _cutoff.time() <= c.window_open_time:
+            _cutoff = None
         close_t = _cutoff.strftime(_FMT_HOUR) if _cutoff is not None else c.window_close_time.strftime(_FMT_HOUR)
         windows_val = f"Open {open_t} \u2013 {close_t}"
     elif c.window_opportunity_morning and c.window_opportunity_evening:
@@ -563,6 +571,7 @@ def _derive_warm_day_events(
     comfort_heat_raw: float | None = None,
     sleep_heat: float | None = None,
     in_sleep_window_fn: Callable[[datetime], bool] | None = None,
+    window_open_time: time | None = None,
 ) -> dict:
     """Derive warm-day timing events from ODE predicted curves.
 
@@ -573,6 +582,19 @@ def _derive_warm_day_events(
             nat_vent_gate.py) requires (`indoor > comfort_heat`) but this predictive
             scan previously never modeled. When omitted, behavior is unchanged from
             before #535 (outdoor-crossing only).
+        window_open_time: optional (Issue #814 follow-up) — neither the outdoor-crossing
+            nor comfort-floor scan was bounded to start no earlier than when nat-vent
+            could actually begin, so an overnight passive-decay floor-crossing (windows
+            still closed, HVAC off) could be found and reported as the nat_vent_cutoff
+            even though it occurs at or before the window even opens — producing a
+            displayed "Open 6:00 AM – 6:00 AM" (or an even earlier, pre-open close time).
+            Confirmed live: comfort-floor scan found a crossing at exactly the
+            classifier's own window_open_time with no lower bound applied. When given,
+            both scans only consider timestamps whose time-of-day is >= this value — a
+            pure time-of-day comparison (no date anchoring needed) that correctly
+            excludes the pre-open hours on every day the curve covers, not just
+            tonight. Omitted (None), behavior is unchanged (existing callers/tests
+            that don't pass it keep today's unbounded scan).
 
     Returns a dict with keys:
       nat_vent_cutoff: datetime | None — earlier of the outdoor-crossing and (if the
@@ -609,8 +631,14 @@ def _derive_warm_day_events(
         find_temperature_crossing(predicted_indoor, predicted_outdoor, lambda _ts, o, i: o < i) is not None
     )
 
+    def _after_open(ts: datetime) -> bool:
+        # Strict > , not >= : a crossing found in the exact same hour windows open
+        # would still render as a zero-width "Open 6:00 AM – 6:00 AM" — require the
+        # close time to be strictly later than the open time for it to be worth showing.
+        return window_open_time is None or ts.time() > window_open_time
+
     outdoor_crossing = find_temperature_crossing(
-        predicted_indoor, predicted_outdoor, lambda _ts, o, i: _nat_vent_cutoff_reached(o, i)
+        predicted_indoor, predicted_outdoor, lambda ts, o, i: _after_open(ts) and _nat_vent_cutoff_reached(o, i)
     )
 
     # Issue #535: comfort-floor crossing — the real activation gate (decide_nat_vent_gate())
@@ -619,12 +647,22 @@ def _derive_warm_day_events(
     # needed — same shape as ceiling_breach_time below), but still requires a matching
     # entry in predicted_outdoor via find_temperature_crossing() so it can only fire at a
     # timestamp both curves actually cover.
+    #
+    # Issue #814 follow-up: neither this nor outdoor_crossing above was bounded to start
+    # no earlier than window_open_time — an overnight passive-decay floor-crossing (windows
+    # still closed, HVAC off, well before the window ever opens) could be found and reported
+    # as the nat_vent_cutoff, producing a displayed "Open 6:00 AM – 6:00 AM" (or worse, a
+    # close time before the open time) whenever the floor was reached before/at open. The
+    # _after_open() guard above/below restores the invariant that a reported cutoff can never
+    # be earlier than when nat-vent could actually have started.
     floor_crossing = None
     if comfort_heat_raw is not None and sleep_heat is not None and in_sleep_window_fn is not None:
         floor_crossing = find_temperature_crossing(
             predicted_indoor,
             predicted_outdoor,
-            lambda ts, _o, i: i <= resolve_comfort_heat(comfort_heat_raw, sleep_heat, in_sleep_window_fn(ts)),
+            lambda ts, _o, i: (
+                _after_open(ts) and i <= resolve_comfort_heat(comfort_heat_raw, sleep_heat, in_sleep_window_fn(ts))
+            ),
         )
 
     if outdoor_crossing is not None and (floor_crossing is None or outdoor_crossing <= floor_crossing):
@@ -707,6 +745,7 @@ def _warm_day_plan(
             predicted_indoor=predicted_indoor_future,
             predicted_outdoor=predicted_outdoor_future,
             comfort_cool=comfort_cool,
+            window_open_time=c.window_open_time,
         )
     _nat_vent_cutoff = _events["nat_vent_cutoff"] if _events else None
     _nat_vent_cutoff_reason = _events.get("nat_vent_cutoff_reason") if _events else None

@@ -747,11 +747,20 @@ def _compute_next_automation_action_with_forecast(
     """Like _compute_next_automation_action(), but also wires forecast-curve state
     (self._last_predicted_indoor / self._hourly_forecast_temps) needed by the
     Issue #528 candidates — not part of the base wrapper since most existing tests
-    don't need it."""
+    don't need it.
+
+    Issue #817: production now derives the WARM/MILD-day forecast events
+    (self._nat_vent_plan) once per cycle via _compute_and_cache_nat_vent_plan(),
+    called right after self._last_predicted_indoor is (re)built — not on demand
+    inside _compute_next_automation_action() itself anymore. Calling the real
+    method here (rather than hand-building a nat_vent_plan dict) keeps this test
+    exercising actual production code, per this project's no-mirror-tests rule.
+    """
     from custom_components.climate_advisor import coordinator as _coord_mod
 
     coord = _make_real_coordinator(True, automation_engine)
     coord.config = config
+    coord._current_classification = c
     coord._last_predicted_indoor = predicted_indoor
     coord._hourly_forecast_temps = hourly_forecast_temps or []
 
@@ -760,6 +769,7 @@ def _compute_next_automation_action_with_forecast(
         patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
         patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
     ):
+        coord._compute_and_cache_nat_vent_plan()
         return coord._compute_next_automation_action(c)
 
 
@@ -1037,6 +1047,46 @@ class TestWarmDayForecastEventCandidates:
         outdoor = _curve([65.0, 66.0, 67.0, 68.0], start_hour=13, ts_key="datetime", temp_key="temperature")
         action, _t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
         assert action != "AC turns on to hold the ceiling"
+
+    def test_nat_vent_plan_reflects_latest_classification_not_stale_one(self):
+        """Issue #817 edge case: a classification change landing mid-cycle must not
+        leave self._nat_vent_plan built from a stale classification. Simulates two
+        consecutive cycles — a MILD day (no ceiling breach candidate at these temps)
+        followed by a re-classification to WARM with a lower comfort_cool — and
+        asserts the second cycle's _compute_and_cache_nat_vent_plan() call produces a
+        plan reflecting the NEW classification's window_open_time/comfort_cool, not
+        anything cached from the first."""
+        from custom_components.climate_advisor import coordinator as _coord_mod
+
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        indoor = _curve([70.0, 72.0, 76.0, 78.0], start_hour=13)
+        outdoor = _curve([65.0, 66.0, 67.0, 68.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+
+        coord = _make_real_coordinator(True, ae)
+        coord._last_predicted_indoor = indoor
+        coord._hourly_forecast_temps = outdoor
+        now_dt = datetime.combine(date(2026, 7, 10), time(12, 0))
+
+        with (
+            patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+            patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        ):
+            # Cycle 1: MILD, high comfort_cool — no ceiling breach in range.
+            c_mild = _make_classification(day_type="mild", hvac_mode="off", windows_recommended=True)
+            coord.config = {"comfort_cool": 100.0}
+            coord._current_classification = c_mild
+            coord._compute_and_cache_nat_vent_plan()
+            assert coord._nat_vent_plan["ceiling_breach_time"] is None
+
+            # Cycle 2: re-classified to WARM with a lower comfort_cool that IS crossed
+            # by the same indoor curve — the cached plan must update to match.
+            c_warm = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
+            coord.config = {"comfort_cool": 75.0}
+            coord._current_classification = c_warm
+            coord._compute_and_cache_nat_vent_plan()
+            assert coord._nat_vent_plan["ceiling_breach_time"] is not None
+            assert coord._nat_vent_plan["ceiling_breach_time"].hour == 15  # indoor 76 > comfort_cool 75
 
 
 # ---------------------------------------------------------------------------

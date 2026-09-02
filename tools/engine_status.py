@@ -18,11 +18,9 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _zone_storage import LEARNING_DB_FILE  # noqa: E402
 from ha_logs import load_config  # noqa: E402
 from learning_db import fetch_learning_db  # noqa: E402
-
-LEARNING_DB_PATH = "/config/climate_advisor_learning.json"
-
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -167,11 +165,16 @@ def main() -> None:
         action="store_true",
         help="Output raw engine status JSON instead of formatted table",
     )
+    parser.add_argument(
+        "--entry-id",
+        default=None,
+        help="Zone config entry_id to target (multi-zone installs). Auto-detected when only one zone's file exists.",
+    )
     args = parser.parse_args()
 
     config = load_config()
-    print(f"Reading {LEARNING_DB_PATH} from {config['HA_HOST']} ...\n")
-    db = fetch_learning_db(config)
+    print(f"Reading {LEARNING_DB_FILE} from {config['HA_HOST']} ...\n")
+    db = fetch_learning_db(config, entry_id=args.entry_id)
 
     cache = db.get("thermal_model_cache")
     if not isinstance(cache, dict):

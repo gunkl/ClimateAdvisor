@@ -255,7 +255,11 @@ def _run_restore_with_state_data(state_data: dict) -> object:
     merged = {"date": _STABLE_DATE_STR, **state_data}
 
     async def _fake_executor(fn, *args):
-        if fn is coord._state_persistence.load:
+        # Issue #812: async_restore_state() routes executor offload through
+        # coordinator._executor_job(), which wraps the target with
+        # log_capture.bind_zone_for_executor() — unwrap via __wrapped__
+        # (set by functools.wraps) to keep this identity check working.
+        if getattr(fn, "__wrapped__", fn) is coord._state_persistence.load:
             return merged
         return None
 

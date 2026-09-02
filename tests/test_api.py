@@ -224,10 +224,12 @@ class TestConfigViewDisplayTransform:
             assert seconds // 60 == expected_minutes
 
     def test_transform_not_applied_to_non_time_keys(self):
-        """Non-time settings should not have a display_transform."""
+        """Non-time settings should not have the seconds_to_minutes display_transform."""
         non_time_keys = [k for k in CONFIG_METADATA if k not in self.SECONDS_KEYS]
         for key in non_time_keys:
-            assert "display_transform" not in CONFIG_METADATA[key], f"{key} should not have display_transform"
+            assert CONFIG_METADATA[key].get("display_transform") != "seconds_to_minutes", (
+                f"{key} should not have the seconds_to_minutes display_transform"
+            )
 
     def test_none_value_safe_with_transform(self):
         """Seconds-to-minutes transform should not crash on None values."""
@@ -236,6 +238,30 @@ class TestConfigViewDisplayTransform:
         if transform == "seconds_to_minutes" and isinstance(value, (int, float)):
             value = value // 60
         assert value is None
+
+    def test_indoor_temp_source_shows_friendly_label_not_raw_enum(self):
+        """Debug/Settings tab must show a friendly label, not the raw stored enum string.
+
+        Confirmed live bug: the config view returned "climate_fallback" verbatim
+        for indoor_temp_source (no display_transform existed for this field type
+        while several others already had one, e.g. seconds_to_minutes above).
+        Invokes the real ClimateAdvisorConfigView, not a reimplementation of its
+        transform logic.
+        """
+        import asyncio
+
+        from custom_components.climate_advisor.api import ClimateAdvisorConfigView
+
+        coord = MagicMock()
+        coord.config = {"indoor_temp_source": "climate_fallback", "outdoor_temp_source": "sensor"}
+
+        view = ClimateAdvisorConfigView()
+        request = _make_view_request(coord)
+        resp = asyncio.run(view.get(request))
+        settings_by_key = {s["key"]: s["value"] for s in resp.json_data["settings"]}
+
+        assert settings_by_key["indoor_temp_source"] == "Thermostat's built-in sensor"
+        assert settings_by_key["outdoor_temp_source"] == "Dedicated sensor"
 
 
 class TestToggleAutomationView:
@@ -545,6 +571,12 @@ class TestStatusViewCelsiusUnit:
         coord._last_outdoor_temp = outdoor_temp
         coord.automation_enabled = True
         coord._occupancy_mode = "home"
+        # No live classification available in this stub — an unset MagicMock
+        # attribute is truthy by default (per this project's documented
+        # AsyncMock/MagicMock testing rules), so this must be explicit or the
+        # status view's live-trend-read path (api.py) would read garbage
+        # MagicMock attributes instead of falling back to coord.data above.
+        coord.current_classification = None
         ae = MagicMock()
         ae._manual_override_active = False
         ae._override_confirm_pending = False
@@ -572,6 +604,29 @@ class TestStatusViewCelsiusUnit:
         coord = self._make_coordinator(temp_unit="celsius", trend_magnitude=9.0)
         response = _simulate_status_get(coord)
         assert response["trend_magnitude"] == pytest.approx(5.0, abs=0.1)  # 9°F delta → 5°C delta
+
+    def test_status_trend_reads_live_classification_not_stale_cache(self):
+        """trend fields must reflect the live classification, not a stale coordinator.data snapshot.
+
+        Reproduces the reported bug: coordinator.data (refreshed once per ~30-min
+        cycle) said "warming 9°F", but the classifier's own live output for the
+        current cycle was "stable, magnitude 0" — the report showed the stale
+        cached value instead of the live one. api.py must prefer
+        coordinator.current_classification when it's available.
+        """
+        import pytest
+
+        coord = self._make_coordinator(temp_unit="fahrenheit", trend_magnitude=9.0)
+        assert coord.data[ATTR_TREND] == "stable"  # sanity: stale cache disagrees with live below
+        live_classification = MagicMock()
+        live_classification.trend_direction = "warming"
+        live_classification.trend_magnitude = 3.5
+        coord.current_classification = live_classification
+
+        response = _simulate_status_get(coord)
+
+        assert response["trend_direction"] == "warming"
+        assert response["trend_magnitude"] == pytest.approx(3.5, abs=0.1)
 
     def test_status_includes_unit_field(self):
         """Status response must include a 'unit' field."""

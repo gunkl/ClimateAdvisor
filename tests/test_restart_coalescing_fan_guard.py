@@ -308,5 +308,16 @@ class TestAbandonObservationExecutorJob:
         # Must not raise — the original bug crashed here with a TypeError.
         coord._abandon_observation("passive_decay", "test_reason")
 
-        hass.async_add_executor_job.assert_called_once_with(learning.save_state)
+        # Issue #812: _abandon_observation() now routes through
+        # coordinator._executor_job(), which wraps the target callable with
+        # log_capture.bind_zone_for_executor() for zone attribution before
+        # handing it to hass.async_add_executor_job() — so the argument is no
+        # longer literally `learning.save_state` itself, but a thin wrapper
+        # around it. Assert the call happened once and that invoking whatever
+        # was passed actually calls through to learning.save_state().
+        hass.async_add_executor_job.assert_called_once()
+        (passed_fn,), _ = hass.async_add_executor_job.call_args
+        assert learning.save_state.call_count == 0
+        passed_fn()
+        assert learning.save_state.call_count == 1
         hass.async_create_task.assert_not_called()

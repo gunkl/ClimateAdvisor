@@ -628,6 +628,10 @@ class AutomationEngine:
         self.role = role
         self._active_listeners: list[Any] = []
         self._current_classification: DayClassification | None = None
+        # Issue #817: ODE-adjusted nat-vent cutoff mirrored from the coordinator's
+        # self._nat_vent_plan by apply_classification() — see
+        # _is_within_planned_window_period()'s docstring.
+        self._nat_vent_cutoff: datetime | None = None
         self._paused_by_door = False
         self._pre_pause_mode: str | None = None
         # Issue #523: distinguishes "_paused_by_door=True with HVAC already off" (nothing
@@ -1146,10 +1150,22 @@ class AutomationEngine:
             return False
         if c.hvac_mode != "off":
             return False
-        if not c.window_open_time or not c.window_close_time:
+        if not c.window_open_time:
+            return False
+        # Issue #817: prefer the ODE-adjusted cutoff (self._nat_vent_cutoff, set by
+        # apply_classification() from the coordinator's self._nat_vent_plan — the
+        # same value the briefing/status cards show this cycle) over the static
+        # classification.window_close_time. This is a real control-boundary change,
+        # not just display text: the exemption window now ends at the moment the
+        # occupant was actually told nat-vent stops helping, closing the gap where
+        # this gate could stay exempt past the displayed close time (the exact #818
+        # condition — ODE cutoff earlier than the static hour).
+        _cutoff = getattr(self, "_nat_vent_cutoff", None)
+        window_close_time = _cutoff.time() if _cutoff is not None else c.window_close_time
+        if not window_close_time:
             return False
         now_time = dt_util.now().time()
-        return c.window_open_time <= now_time <= c.window_close_time
+        return c.window_open_time <= now_time <= window_close_time
 
     def _record_action(self, action: str, reason: str) -> None:
         """Record an HVAC action with timestamp and reason, and schedule a revisit."""
@@ -2400,6 +2416,7 @@ class AutomationEngine:
         classification: DayClassification,
         predicted_indoor: list[dict] | None = None,
         indoor_temp: float | None = None,
+        nat_vent_cutoff: datetime | None = None,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -2415,9 +2432,18 @@ class AutomationEngine:
             indoor_temp: Current indoor temperature in °F. When provided, used
                 to evaluate the pre-cool achievement gate (Issue #295). When
                 None the achievement check is skipped for this cycle.
+            nat_vent_cutoff: Issue #817 — the coordinator's cached
+                ``self._nat_vent_plan["nat_vent_cutoff"]`` (the same ODE-adjusted
+                time the briefing, TLDR table, and status cards read this cycle),
+                when available. ``_is_within_planned_window_period()`` prefers this
+                over the static ``classification.window_close_time`` bound, so the
+                door/window pause exemption ends at the same moment the occupant was
+                actually told nat-vent stops helping — not a possibly-later static
+                hour. None (the pre-#817 default) falls back to the static bound.
         """
         async with self._decision_pass("apply_classification"):
             self._current_classification = classification
+            self._nat_vent_cutoff = nat_vent_cutoff
 
             if self._manual_override_active:
                 if self._override_matches_current_decision(classification):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import functools
 import logging
 import time
 from collections import deque
@@ -155,7 +156,7 @@ def detect_model_tier(model_id: str) -> str | None:
     return None
 
 
-async def fetch_available_models(api_key: str) -> list[str]:
+async def fetch_available_models(api_key: str, hass: Any | None = None) -> list[str]:
     """Fetch the live list of available Claude model IDs from Anthropic.
 
     This function must never raise — on any failure (no API key, network error,
@@ -164,11 +165,21 @@ async def fetch_available_models(api_key: str) -> list[str]:
     (cached) and directly by config_flow.py (uncached — a config-flow render is a
     one-off interaction, not a hot path) so there is exactly one implementation of
     "how to ask Anthropic what models exist and what to do if that fails" (Issue #563).
+
+    Args:
+        api_key: the Anthropic API key to use.
+        hass: Optional HomeAssistant instance. When given, the (blocking)
+            AsyncAnthropic construction is offloaded to the executor. Optional
+            and defaults to None so existing callers/tests without a hass
+            reference are unaffected.
     """
     if not api_key or not ANTHROPIC_AVAILABLE:
         return list(AI_MODELS)
     try:
-        client = AsyncAnthropic(api_key=api_key)
+        if hass is not None:
+            client = await hass.async_add_executor_job(functools.partial(AsyncAnthropic, api_key=api_key))
+        else:
+            client = AsyncAnthropic(api_key=api_key)
         page = await client.models.list()
         models = [m.id for m in page.data]
         return models if models else list(AI_MODELS)
@@ -578,8 +589,16 @@ class ClaudeAPIClient:
             }
         )
 
-    async def async_test_connection(self) -> tuple[bool, str]:
+    async def async_test_connection(self, hass: Any | None = None) -> tuple[bool, str]:
         """Validate the configured API key with a minimal API call.
+
+        Args:
+            hass: Optional HomeAssistant instance. When given, the (blocking —
+                reads local config, loads the TLS cert bundle) AsyncAnthropic
+                construction is offloaded to the executor instead of running
+                inline on the event loop. Optional and defaults to None so
+                existing callers/tests that construct this client without a
+                hass reference are unaffected.
 
         Returns:
             (True, "Connected successfully") on success, or (False, error_message).
@@ -592,7 +611,10 @@ class ClaudeAPIClient:
         if not api_key:
             return False, "No API key configured"
 
-        test_client = AsyncAnthropic(api_key=api_key)
+        if hass is not None:
+            test_client = await hass.async_add_executor_job(functools.partial(AsyncAnthropic, api_key=api_key))
+        else:
+            test_client = AsyncAnthropic(api_key=api_key)
         try:
             await test_client.messages.create(
                 model=self._config.get(CONF_AI_MODEL, DEFAULT_AI_MODEL),

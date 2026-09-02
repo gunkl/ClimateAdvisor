@@ -471,10 +471,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # handler instead of the coordinator.
     log_capture.install(hass)
 
+    # Issue #812: one-time migration off the old domain-wide (unscoped)
+    # issue ids. Any install with an open Repairs card raised under the OLD
+    # "weather_entity_not_found"/"reload_needed" ids (pre-#812) would
+    # otherwise have that card orphaned forever, since the new entry-scoped
+    # create/delete calls below never touch it. async_delete_issue() is
+    # documented as a no-op if the issue doesn't exist (see
+    # homeassistant/helpers/issue_registry.py: IssueRegistry.async_delete()
+    # does `self.issues.pop((domain, issue_id), None)`), so this is safe to
+    # run unconditionally on every zone's setup, not just once.
+    ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+    ir.async_delete_issue(hass, DOMAIN, "reload_needed")
+
+    # Issue #813: zone_resolution_ambiguous is_persistent=True, so it survives
+    # an HA restart in .storage/repairs.issue_registry — an install that had
+    # it raised under the OLD unconditional-at-setup logic (any 2+ zone
+    # install, regardless of whether ambiguity ever actually occurred) would
+    # otherwise keep showing that stale card forever after upgrading to this
+    # fix, since the new code only ever CREATES it when get_default_coordinator()
+    # actually takes the ambiguous fallback (see zone_registry.py) and never
+    # explicitly clears a pre-existing one. Clear unconditionally on every
+    # setup — safe/idempotent (no-op if absent, same as the two deletes
+    # above) — and let it be re-raised only if this session's requests
+    # actually hit the ambiguous path again. This also gives the card correct
+    # "fresh start each restart" semantics going forward, not just a one-time
+    # migration.
+    ir.async_delete_issue(hass, DOMAIN, "zone_resolution_ambiguous")
+
     # Issue #573: any setup (reload or HA restart) means whatever was saved via
     # the options flow is now the active config — clear the "reload needed"
-    # notice raised by ClimateAdvisorOptionsFlow._commit_section().
-    ir.async_delete_issue(hass, DOMAIN, "reload_needed")
+    # notice raised by ClimateAdvisorOptionsFlow._commit_section(). Entry-scoped
+    # (Issue #812) so this only clears THIS zone's own notice.
+    ir.async_delete_issue(hass, DOMAIN, f"reload_needed_{entry.entry_id}")
 
     # Defer weather entity validation until HA is fully started so all
     # entities are loaded — avoids false "not found" on startup race.
@@ -489,18 +517,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     resolved,
                 )
                 hass.config_entries.async_update_entry(entry, data={**entry.data, "weather_entity": resolved})
-                ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+                ir.async_delete_issue(hass, DOMAIN, f"weather_entity_not_found_{entry.entry_id}")
                 await hass.config_entries.async_reload(entry.entry_id)
             else:
+                # Issue #812: entry-scoped issue_id + data={"entry_id": ...}
+                # so a multi-zone install's Repairs "Fix" targets THIS zone
+                # specifically — see repairs.py's WeatherEntityRepairFlow/
+                # _resolve_target_entry().
                 ir.async_create_issue(
                     hass,
                     DOMAIN,
-                    "weather_entity_not_found",
+                    f"weather_entity_not_found_{entry.entry_id}",
                     is_fixable=True,
                     is_persistent=True,
                     severity=ir.IssueSeverity.ERROR,
                     translation_key="weather_entity_not_found",
                     translation_placeholders={"entity_id": weather_entity},
+                    data={"entry_id": entry.entry_id},
                 )
                 _LOGGER.error(
                     "Weather entity '%s' not found — open Settings > System > Repairs "
@@ -508,7 +541,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     weather_entity,
                 )
         else:
-            ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+            ir.async_delete_issue(hass, DOMAIN, f"weather_entity_not_found_{entry.entry_id}")
 
     if hass.is_running:
         # Integration reloaded after startup (e.g., from repairs flow) — validate now
@@ -530,31 +563,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # Issue #796 Transitional Safety Window: a second zone is already
-    # mechanically possible today via HA's native Add Integration flow, with
-    # no dependency on the dashboard (PR9) becoming zone-aware first. Once
-    # api.py is entry-scoped (Gap 4/PR7), any caller that doesn't send an
-    # entry_id falls back to zone_registry.get_default_coordinator()'s
-    # deterministic-first-entry selection — this Repairs issue is the
-    # persistent, Settings > Repairs-visible half of that signal (the other
-    # half is the WARNING log line get_default_coordinator() itself emits,
-    # throttled to once per distinct resolved outcome rather than once per
-    # call — see zone_registry.py's _warn_once()/_WARNED_STATE_KEY, added as
-    # a Verification fix after the unthrottled version was found to evict
-    # log_capture.py's ring buffer roughly every 40s under dashboard polling).
-    # is_fixable=False: there is nothing to
-    # configure here, it's purely informational — the condition clears on its
-    # own once zone count drops back to one (see async_unload_entry() below).
-    if len(hass.data[DOMAIN]) > 1:
-        ir.async_create_issue(
-            hass,
-            DOMAIN,
-            "zone_resolution_ambiguous",
-            is_fixable=False,
-            is_persistent=True,
-            severity=ir.IssueSeverity.WARNING,
-            translation_key="zone_resolution_ambiguous",
-        )
+    # Issue #813 correction: this used to unconditionally raise
+    # zone_resolution_ambiguous here just because a 2nd zone was loaded, with
+    # a comment claiming it was "the persistent half of the same signal" as
+    # get_default_coordinator()'s WARNING log. That was false — this fired at
+    # every setup regardless of whether get_default_coordinator() had ever
+    # actually been asked to guess. Combined with #812/#820 closing off the
+    # dashboard's own ambiguous-fallback paths, that meant every multi-zone
+    # install permanently showed "Ambiguous zone selection" in Repairs even
+    # when no ambiguity could occur anymore — the user correctly flagged
+    # still seeing this after #812 shipped. The issue is now raised from
+    # inside zone_registry.get_default_coordinator() itself, at the exact
+    # moment (and only when) it actually resolves an ambiguous fallback —
+    # same throttle token as its WARNING log line, so the two stay in
+    # lockstep by construction instead of by two independently-maintained
+    # conditions. See zone_registry.py's get_default_coordinator().
 
     # Set up sensor platform
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -580,19 +603,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def handle_suggestion_response(call):
             """Handle user response to a learning suggestion."""
             zone_coordinator = _resolve_zone_coordinator(hass, call)
-            action = call.data.get("action")  # "accept" or "dismiss"
-            suggestion_key = call.data.get("suggestion_key")
+            # Issue #812: tag every _LOGGER call reached from this handler with
+            # the resolved zone in the log_capture ring buffer. The executor
+            # job below needs the explicit bind_zone_for_executor() wrapper
+            # too — a plain zone_scope() does not propagate across the
+            # hass.async_add_executor_job() thread boundary (see
+            # log_capture.py's module docstring).
+            with log_capture.zone_scope(zone_coordinator.zone_label):
+                action = call.data.get("action")  # "accept" or "dismiss"
+                suggestion_key = call.data.get("suggestion_key")
 
-            if action == "accept":
-                changes = zone_coordinator.learning.accept_suggestion(suggestion_key)
-                await hass.async_add_executor_job(zone_coordinator.learning.save_state)
-                _LOGGER.info("Suggestion accepted: %s → changes: %s", suggestion_key, changes)
-                # Apply changes to coordinator config
-                zone_coordinator.config.update(changes)
-            elif action == "dismiss":
-                zone_coordinator.learning.dismiss_suggestion(suggestion_key)
-                await hass.async_add_executor_job(zone_coordinator.learning.save_state)
-                _LOGGER.info("Suggestion dismissed: %s", suggestion_key)
+                if action == "accept":
+                    changes = zone_coordinator.learning.accept_suggestion(suggestion_key)
+                    await hass.async_add_executor_job(
+                        log_capture.bind_zone_for_executor(zone_coordinator.learning.save_state)
+                    )
+                    _LOGGER.info("Suggestion accepted: %s → changes: %s", suggestion_key, changes)
+                    # Apply changes to coordinator config
+                    zone_coordinator.config.update(changes)
+                elif action == "dismiss":
+                    zone_coordinator.learning.dismiss_suggestion(suggestion_key)
+                    await hass.async_add_executor_job(
+                        log_capture.bind_zone_for_executor(zone_coordinator.learning.save_state)
+                    )
+                    _LOGGER.info("Suggestion dismissed: %s", suggestion_key)
 
         hass.services.async_register(
             DOMAIN,
@@ -607,15 +641,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def handle_force_reclassify(call):
             """Force a coordinator refresh / reclassification."""
             zone_coordinator = _resolve_zone_coordinator(hass, call)
-            await zone_coordinator.async_request_refresh()
+            with log_capture.zone_scope(zone_coordinator.zone_label):
+                await zone_coordinator.async_request_refresh()
 
         async def handle_resend_briefing(call):
             """Re-send the daily briefing."""
             from homeassistant.util import dt as dt_util
 
             zone_coordinator = _resolve_zone_coordinator(hass, call)
-            zone_coordinator._briefing_sent_today = False
-            await zone_coordinator._async_send_briefing(dt_util.now())
+            with log_capture.zone_scope(zone_coordinator.zone_label):
+                zone_coordinator._briefing_sent_today = False
+                await zone_coordinator._async_send_briefing(dt_util.now())
 
         async def handle_dump_diagnostics(call):
             """Log a comprehensive diagnostic snapshot for troubleshooting.
@@ -628,12 +664,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .diagnostics import async_get_diagnostics_payload
 
             zone_coordinator = _resolve_zone_coordinator(hass, call)
-            zone_entry = hass.config_entries.async_get_entry(zone_coordinator._entry_id)
-            diag = await async_get_diagnostics_payload(hass, zone_entry)
-            _LOGGER.info(
-                "Diagnostic dump requested:\n%s",
-                json.dumps(diag, indent=2, default=str),
-            )
+            with log_capture.zone_scope(zone_coordinator.zone_label):
+                zone_entry = hass.config_entries.async_get_entry(zone_coordinator._entry_id)
+                diag = await async_get_diagnostics_payload(hass, zone_entry)
+                _LOGGER.info(
+                    "Diagnostic dump requested:\n%s",
+                    json.dumps(diag, indent=2, default=str),
+                )
 
         hass.services.async_register(DOMAIN, "force_reclassify", handle_force_reclassify, schema=ENTRY_ID_ONLY_SCHEMA)
         hass.services.async_register(DOMAIN, "resend_briefing", handle_resend_briefing, schema=ENTRY_ID_ONLY_SCHEMA)
@@ -650,9 +687,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def handle_reset_learning_data(call) -> None:
             """Handle reset_learning_data service call."""
             zone_coordinator = _resolve_zone_coordinator(hass, call)
-            scope = call.data.get("scope", "all")
-            await hass.async_add_executor_job(zone_coordinator.learning.reset, scope)
-            _LOGGER.info("Learning data reset via service: entry_id=%s scope=%s", call.data.get("entry_id"), scope)
+            with log_capture.zone_scope(zone_coordinator.zone_label):
+                scope = call.data.get("scope", "all")
+                await hass.async_add_executor_job(
+                    log_capture.bind_zone_for_executor(zone_coordinator.learning.reset), scope
+                )
+                _LOGGER.info("Learning data reset via service: entry_id=%s scope=%s", call.data.get("entry_id"), scope)
 
         hass.services.async_register(
             DOMAIN,

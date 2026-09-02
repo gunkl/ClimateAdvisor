@@ -37,6 +37,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from . import log_capture
 from .automation import (
     AutomationEngine,
     AutomationEngineCallbacks,
@@ -46,7 +47,7 @@ from .automation import (
     resolve_pre_cool_modifier,
     select_comfort_band,
 )
-from .briefing import _derive_warm_day_events, generate_briefing
+from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
 from .const import (
@@ -80,6 +81,7 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     ATTR_WHF_STATUS,
+    BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F,
     CHART_LOG_MAX_DAYS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
@@ -241,6 +243,7 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .nat_vent_plan import compute_nat_vent_plan
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
@@ -521,16 +524,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Event log ring buffer (Issue #76) — timestamped automation events for debug download
         self._event_log: list[dict] = []
 
-        # AI subsystem (only if enabled and API key present)
+        # AI subsystem (only if enabled and API key present). The actual
+        # ClaudeAPIClient construction does blocking I/O (AsyncAnthropic's
+        # constructor reads ~/.config/anthropic/active_config, loads the TLS
+        # cert bundle, imports pydantic — confirmed live via HA's own
+        # "blocking call" WARNING) and __init__ is synchronous, so it can't be
+        # offloaded here. Deferred to async_restore_state() (already offloads
+        # other blocking startup I/O the same way), which sets
+        # self.claude_client once the executor job completes.
         self.claude_client: ClaudeAPIClient | None = None
         self.ai_skills: AISkillRegistry | None = None
         self._investigation_report_history: list[dict] = []
+        self._ai_client_config: dict[str, Any] | None = None
         if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
             from .ai_skills import AISkillRegistry as _AISkillRegistry
             from .ai_skills_investigator import register_investigator_skill
-            from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
 
-            self.claude_client = _ClaudeAPIClient(config)
+            self._ai_client_config = config
             self.ai_skills = _AISkillRegistry()
             # Registers whenever AI is enabled (Issue #563) — the merged skill serves
             # both the always-available narration mode (formerly "activity_report",
@@ -538,7 +548,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # no longer gates registration; api.py's ClimateAdvisorInvestigateView still
             # checks it as a cost-control gate on the on-demand/focus-driven call path.
             register_investigator_skill(self.ai_skills)
-            _LOGGER.info("AI subsystem initialized — model: %s", config.get("ai_model", "unknown"))
+            _LOGGER.debug("AI subsystem registered — client build deferred to async_restore_state()")
         else:
             _LOGGER.debug(
                 "AI subsystem disabled — enabled: %s, key present: %s",
@@ -556,6 +566,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing: str = ""
         self._last_briefing_short: str = ""
         self._briefing_day_type: str | None = None
+        # today_high baked into the last-generated briefing text, tracked
+        # alongside _briefing_day_type so the mid-day regen gate can also
+        # fire on a meaningful value drift, not just a category change.
+        self._briefing_today_high: float | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
         # Issue #645: last_changed timestamps known to be a reconnect/availability blip
@@ -589,6 +603,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._indoor_temp_history: list[tuple[str, float]] = []
         self._hourly_forecast_temps: list[dict] = []
         self._last_predicted_indoor: list[dict] = []
+        # Issue #817: the single per-cycle nat-vent window/cutoff computation — briefing
+        # text, the TLDR table, and the Next Automation/Next User Action cards all read
+        # this instead of independently recomputing it, so they can never disagree.
+        self._nat_vent_plan: dict | None = None
         self._pred_archive: dict[int, float] = {}
         self._thermal_factors: dict | None = None
 
@@ -1184,12 +1202,49 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         self._apply_outdoor_temp(self._get_outdoor_temp(weather_state.attributes), record_history=False)
 
+    @property
+    def zone_label(self) -> str | None:
+        """Identifying label for this zone's log_capture attribution (Issue #812).
+
+        `self._entry_id` is the only identifying info reliably available on
+        every coordinator instance (including the simulation harness, which
+        has no real ConfigEntry and passes ``entry_id=""``) — falls back to
+        None (log_capture's "unknown zone" marker) when unset. Uses
+        ``getattr`` (not a bare attribute read) because several existing
+        tests partially instantiate the coordinator via
+        ``object.__new__(ClimateAdvisorCoordinator)`` (bypassing ``__init__``)
+        and bind only the method(s) under test — same established pattern
+        ``_async_update_data()``'s own defensive defaults already follow.
+        """
+        return getattr(self, "_entry_id", None) or None
+
+    def _executor_job(self, fn: Any, *args: Any) -> Any:
+        """Same as ``self.hass.async_add_executor_job(fn, *args)``, zone-tagged.
+
+        Issue #812: a plain ``ContextVar`` set by ``log_capture.zone_scope()``
+        does not propagate into work submitted via
+        ``hass.async_add_executor_job()`` (verified empirically — see
+        log_capture.py's module docstring). Every coordinator call site that
+        previously called ``self.hass.async_add_executor_job()`` directly now
+        routes through here so any ``_LOGGER`` call made inside ``fn`` is
+        still tagged with the calling zone. Purely additive: same return
+        value (the executor future) and exception propagation as before.
+        """
+        return self.hass.async_add_executor_job(log_capture.bind_zone_for_executor(fn), *args)
+
     async def async_restore_state(self) -> None:
         """Restore operational state from disk after startup."""
         _LOGGER.info("Climate Advisor v%s starting up", VERSION)
+        ai_client_config = getattr(self, "_ai_client_config", None)
+        if ai_client_config is not None:
+            from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
+
+            self.claude_client = await self._executor_job(functools.partial(_ClaudeAPIClient, ai_client_config))
+            _LOGGER.info("AI subsystem initialized — model: %s", ai_client_config.get("ai_model", "unknown"))
+            self._ai_client_config = None
         # Issue #543: chart_log.load() does blocking file I/O — offload to executor.
-        await self.hass.async_add_executor_job(self._chart_log.load)
-        await self.hass.async_add_executor_job(self.learning.load_state)
+        await self._executor_job(self._chart_log.load)
+        await self._executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
         if isinstance(loaded_rl, dict):
@@ -1198,7 +1253,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             }
         else:
             self._rejection_log = {}
-        state = await self.hass.async_add_executor_job(self._state_persistence.load)
+        state = await self._executor_job(self._state_persistence.load)
         if not state:
             _LOGGER.debug("No persisted state found — starting fresh")
             return
@@ -1219,7 +1274,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     rec_data["suggestion_sent"] = [sent]
                 recovered = DailyRecord(**rec_data)
                 self.learning.record_day(recovered)
-                await self.hass.async_add_executor_job(self.learning.save_state)
+                await self._executor_job(self.learning.save_state)
                 _LOGGER.info("Recovered yesterday's record during startup")
             except (TypeError, KeyError) as err:
                 _LOGGER.warning("Failed to recover yesterday's record: %s", err)
@@ -1313,6 +1368,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing = briefing.get("last_text", "")
         self._last_briefing_short = briefing.get("last_text_short", "")
         self._briefing_day_type = briefing.get("briefing_day_type")
+        self._briefing_today_high = briefing.get("briefing_today_high")
 
         # Automation state
         auto_state = state.get("automation_state", {})
@@ -1367,7 +1423,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Load AI report history if AI subsystem is active
         if self.claude_client:
-            await self.hass.async_add_executor_job(self._load_investigation_reports)
+            await self._executor_job(self._load_investigation_reports)
 
         # Restore event log ring buffer and emit restart boundary marker
         saved_log = state.get("event_log")
@@ -1459,6 +1515,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "last_text": self._last_briefing,
                 "last_text_short": self._last_briefing_short,
                 "briefing_day_type": self._briefing_day_type,
+                "briefing_today_high": getattr(self, "_briefing_today_high", None),
             },
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
@@ -1487,7 +1544,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _async_save_state(self) -> None:
         """Persist current operational state to disk."""
         state_dict = self._build_state_dict()
-        await self.hass.async_add_executor_job(self._state_persistence.save, state_dict)
+        await self._executor_job(self._state_persistence.save, state_dict)
 
     async def async_store_investigation_report(self, result: dict) -> None:
         """Store an investigation report result in history and persist to disk."""
@@ -1500,7 +1557,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._investigation_report_history.append(entry)
         if len(self._investigation_report_history) > INVESTIGATION_REPORT_HISTORY_CAP:
             self._investigation_report_history = self._investigation_report_history[-INVESTIGATION_REPORT_HISTORY_CAP:]
-        await self.hass.async_add_executor_job(self._save_investigation_reports)
+        await self._executor_job(self._save_investigation_reports)
 
     async def async_persist_model_fallback(self, new_model: str) -> None:
         """Persist an automatic AI-model deprecation fallback (Issue #563).
@@ -2016,6 +2073,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 c,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=indoor_temp,
+                nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
             )
             _LOGGER.debug("[coalesce-diag] after apply_classification() [coalesce path]")
             hvac_commanded = True
@@ -2184,45 +2242,53 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         this reason. Persisting ``last_update_error``/``last_update_error_time``/
         ``consecutive_failure_count`` via ``_async_save_state()`` means the next
         occurrence survives both an HA restart and log rotation.
-        """
-        # Defensive defaults: several existing tests partially instantiate the
-        # coordinator via object.__new__() (bypassing __init__) and bind only the
-        # methods under test. Falling back here (rather than requiring __init__ to
-        # have run) keeps this wrapper safe under that established test pattern
-        # without needing to touch every such test file.
-        if not hasattr(self, "consecutive_failure_count"):
-            self.consecutive_failure_count = 0
-        if not hasattr(self, "last_update_error"):
-            self.last_update_error = None
-        if not hasattr(self, "last_update_error_time"):
-            self.last_update_error_time = None
 
-        try:
-            result = await self._async_update_data_impl()
-        except Exception as err:
-            self.consecutive_failure_count += 1
-            self.last_update_error = f"{type(err).__name__}: {err}"
-            self.last_update_error_time = dt_util.now().isoformat()
-            _LOGGER.error(
-                "Coordinator update failed (consecutive_failure_count=%d): %s",
-                self.consecutive_failure_count,
-                self.last_update_error,
-            )
-            with contextlib.suppress(Exception):
-                await self._async_save_state()
-            raise
-        else:
-            if self.consecutive_failure_count or self.last_update_error:
-                _LOGGER.info(
-                    "Coordinator update recovered after %d consecutive failure(s); clearing last_update_error",
-                    self.consecutive_failure_count,
-                )
+        Issue #812: the entire body runs inside ``log_capture.zone_scope()``
+        so every ``_LOGGER`` call reached from here (directly, or via any
+        awaited coroutine including ``_async_update_data_impl()``) is tagged
+        with this coordinator's zone in the log_capture ring buffer. Purely
+        additive — no change to control flow, return value, or exception
+        propagation below.
+        """
+        with log_capture.zone_scope(self.zone_label):
+            # Defensive defaults: several existing tests partially instantiate the
+            # coordinator via object.__new__() (bypassing __init__) and bind only the
+            # methods under test. Falling back here (rather than requiring __init__ to
+            # have run) keeps this wrapper safe under that established test pattern
+            # without needing to touch every such test file.
+            if not hasattr(self, "consecutive_failure_count"):
                 self.consecutive_failure_count = 0
+            if not hasattr(self, "last_update_error"):
                 self.last_update_error = None
+            if not hasattr(self, "last_update_error_time"):
                 self.last_update_error_time = None
+
+            try:
+                result = await self._async_update_data_impl()
+            except Exception as err:
+                self.consecutive_failure_count += 1
+                self.last_update_error = f"{type(err).__name__}: {err}"
+                self.last_update_error_time = dt_util.now().isoformat()
+                _LOGGER.error(
+                    "Coordinator update failed (consecutive_failure_count=%d): %s",
+                    self.consecutive_failure_count,
+                    self.last_update_error,
+                )
                 with contextlib.suppress(Exception):
                     await self._async_save_state()
-            return result
+                raise
+            else:
+                if self.consecutive_failure_count or self.last_update_error:
+                    _LOGGER.info(
+                        "Coordinator update recovered after %d consecutive failure(s); clearing last_update_error",
+                        self.consecutive_failure_count,
+                    )
+                    self.consecutive_failure_count = 0
+                    self.last_update_error = None
+                    self.last_update_error_time = None
+                    with contextlib.suppress(Exception):
+                        await self._async_save_state()
+                return result
 
     async def _async_update_data_impl(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min)."""
@@ -2429,7 +2495,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             # Compute and cache ODE prediction for ceiling guard + chart reuse.
             # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
-            self._last_predicted_indoor = await self.hass.async_add_executor_job(
+            self._last_predicted_indoor = await self._executor_job(
                 functools.partial(
                     _build_predicted_indoor_future,
                     self._hourly_forecast_temps,
@@ -2448,6 +2514,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 len(self._last_predicted_indoor),
                 f"{self._last_predicted_indoor[0]['temp']:.1f}°F" if self._last_predicted_indoor else "none",
             )
+            self._compute_and_cache_nat_vent_plan()
 
             # Populate first-write-wins prediction archive (PRED_ARCHIVE_HORIZON_HOURS lookahead).
             # setdefault ensures the earliest (most advance) prediction is kept per 30-min slot.
@@ -2499,6 +2566,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._current_classification,
                     predicted_indoor=self._last_predicted_indoor,
                     indoor_temp=self._get_indoor_temp(),
+                    nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
                 )
                 _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
 
@@ -2508,20 +2576,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # self._current_classification is always fresh.
             await self._apply_tou_schedule()
 
-            # If the day type changed since the briefing was generated,
-            # regenerate the briefing text without re-sending notifications (Issue #78).
-            if (
-                self._briefing_sent_today
-                and self._briefing_day_type is not None
-                and self._current_classification.day_type != self._briefing_day_type
-            ):
-                _LOGGER.info(
-                    "Classification changed %s → %s; regenerating briefing text",
-                    self._briefing_day_type,
-                    self._current_classification.day_type,
-                )
-                self._last_briefing, self._last_briefing_short = self._build_briefing_text(self._current_classification)
-                self._briefing_day_type = self._current_classification.day_type
+            if self._maybe_regenerate_briefing_for_drift():
                 await self._async_save_state()
 
             # Reset startup retry state on success
@@ -3000,7 +3055,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 upper=_band_upper_poll,
                 nat_vent_target=self._nat_vent_target_now(),
             )
-            await self.hass.async_add_executor_job(self._chart_log.save)
+            await self._executor_job(self._chart_log.save)
             _LOGGER.debug(
                 "chart_log pred_indoor=%.1f indoor=%.1f delta=%+.1f (%s)",
                 _pred_indoor_val if _pred_indoor_val is not None else float("nan"),
@@ -3306,6 +3361,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             timestamp=dt_util.now(),
         )
 
+    def _maybe_regenerate_briefing_for_drift(self) -> bool:
+        """Regenerate the briefing text in place if it's gone stale mid-day.
+
+        Two independent triggers, either one is sufficient:
+        - the classified day_type category changed (Issue #78's original check)
+        - today_high has drifted >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F from
+          what's baked into the currently-displayed briefing text, even within
+          the same category (added after a live report showed a stale
+          today_high for hours — the category-only check never caught this,
+          since day_type had stayed "warm" the whole time).
+
+        Does not send notifications — only updates self._last_briefing/
+        self._last_briefing_short/self._briefing_day_type/self._briefing_today_high
+        in place. Returns True if it regenerated (caller is then responsible
+        for persisting state), False otherwise (including when no briefing has
+        been sent yet today, since there is nothing to keep in sync with).
+        Extracted as its own method (rather than inline in the update cycle)
+        so this drift logic has exactly one real implementation callers can
+        invoke directly — including tests — instead of a second copy that can
+        silently drift from what production actually does.
+        """
+        if not self._briefing_sent_today:
+            return False
+        classification = self._current_classification
+        briefing_today_high = getattr(self, "_briefing_today_high", None)
+        today_high_drift = (
+            abs(classification.today_high - briefing_today_high) if briefing_today_high is not None else 0.0
+        )
+        day_type_changed = self._briefing_day_type is not None and classification.day_type != self._briefing_day_type
+        high_drifted = today_high_drift >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F
+        if not (day_type_changed or high_drifted):
+            return False
+
+        _LOGGER.info(
+            "Regenerating briefing text — day_type %s → %s, today_high drift %.1f°F (%s → %s)",
+            self._briefing_day_type,
+            classification.day_type,
+            today_high_drift,
+            briefing_today_high,
+            classification.today_high,
+        )
+        self._last_briefing, self._last_briefing_short = self._build_briefing_text(classification)
+        self._briefing_day_type = classification.day_type
+        self._briefing_today_high = classification.today_high
+        return True
+
     def _build_briefing_text(
         self, classification: DayClassification, suggestions: list | None = None
     ) -> tuple[str, str]:
@@ -3357,14 +3458,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             bedtime_setback_cool=bedtime_setback_cool,
             adaptive_thermal_active=adaptive_thermal_active,
             occupancy_mode=self._occupancy_mode,
-            predicted_indoor_future=self._last_predicted_indoor or None,
-            predicted_outdoor_future=(
-                _build_future_forecast_outdoor(
-                    self._hourly_forecast_temps,
-                    classification=classification,
-                )
-                or None
-            ),
+            nat_vent_plan=self._nat_vent_plan,
             runtime_config=self.config,
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
@@ -3410,134 +3504,147 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._today_record.forecast_low_f = classification.today_low
 
     async def _async_send_briefing(self, now: datetime) -> None:
-        """Generate and send the daily briefing."""
-        if self._briefing_sent_today:
-            return
+        """Generate and send the daily briefing.
 
-        forecast = await self._get_forecast()
-        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
-        if not forecast:
-            return
+        Issue #812: the entire body runs inside ``log_capture.zone_scope()``
+        so every ``_LOGGER`` call reached from here is tagged with this
+        coordinator's zone in the log_capture ring buffer. Purely additive —
+        no change to control flow, return value, or exception propagation
+        below.
+        """
+        with log_capture.zone_scope(self.zone_label):
+            if self._briefing_sent_today:
+                return
 
-        prev_type = self._current_classification.day_type if self._current_classification else None
-        _thresh = {
-            "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
-            "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
-            "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
-            "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
-        }
-        classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
-        self._current_classification = classification
-        # Issue #511: also mirrors to automation_engine now (previously this call
-        # site didn't — a minor pre-existing gap closed as a side effect of the
-        # single-function consolidation).
-        self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=False)
+            forecast = await self._get_forecast()
+            self._hourly_forecast_temps = await self._get_hourly_forecast_data()
+            if not forecast:
+                return
 
-        # Daily incremental solar phase re-fit (Issue #310/#312)
-        if self.config.get("learning_enabled", True):
-            self._maybe_run_periodic_solar_phase_fit()
+            prev_type = self._current_classification.day_type if self._current_classification else None
+            _thresh = {
+                "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
+                "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
+                "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
+                "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
+            }
+            classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
+            self._current_classification = classification
+            # Issue #511: also mirrors to automation_engine now (previously this call
+            # site didn't — a minor pre-existing gap closed as a side effect of the
+            # single-function consolidation).
+            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=False)
 
-        # Inject thermal model into automation engine for adaptive scheduling
-        if self.config.get("learning_enabled", True):
-            thermal_model = self.learning.get_thermal_model(
-                learning_health=self._build_learning_health(),
-                outdoor_temp_f=forecast.current_outdoor_temp,
-                solar_factor=_solar_factor(now.hour),
+            # Daily incremental solar phase re-fit (Issue #310/#312)
+            if self.config.get("learning_enabled", True):
+                self._maybe_run_periodic_solar_phase_fit()
+
+            # Inject thermal model into automation engine for adaptive scheduling
+            if self.config.get("learning_enabled", True):
+                thermal_model = self.learning.get_thermal_model(
+                    learning_health=self._build_learning_health(),
+                    outdoor_temp_f=forecast.current_outdoor_temp,
+                    solar_factor=_solar_factor(now.hour),
+                )
+                self.automation_engine._thermal_model = thermal_model
+                self._solar_phase_offset = (
+                    thermal_model.get("solar_phase_offset_h") or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+                )
+            else:
+                thermal_model = {}
+                self.automation_engine._thermal_model = {}
+            confidence = thermal_model.get("confidence", "none")
+            obs_count = thermal_model.get("observation_count_heat", 0) + thermal_model.get("observation_count_cool", 0)
+            _LOGGER.debug(
+                "Thermal model: confidence=%s observations=%d heat_rate=%s cool_rate=%s",
+                confidence,
+                obs_count,
+                thermal_model.get("heating_rate_f_per_hour"),
+                thermal_model.get("cooling_rate_f_per_hour"),
             )
-            self.automation_engine._thermal_model = thermal_model
-            self._solar_phase_offset = thermal_model.get("solar_phase_offset_h") or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
-        else:
-            thermal_model = {}
-            self.automation_engine._thermal_model = {}
-        confidence = thermal_model.get("confidence", "none")
-        obs_count = thermal_model.get("observation_count_heat", 0) + thermal_model.get("observation_count_cool", 0)
-        _LOGGER.debug(
-            "Thermal model: confidence=%s observations=%d heat_rate=%s cool_rate=%s",
-            confidence,
-            obs_count,
-            thermal_model.get("heating_rate_f_per_hour"),
-            thermal_model.get("cooling_rate_f_per_hour"),
-        )
-        # Issue #786: refresh TOU schedule state before this executor call, same
-        # ordering reason as the main update cycle (_resolve_tou_schedule_state()'s
-        # docstring) — this path recomputes classification/thermal_model locally above,
-        # so re-resolving here keeps the ODE curve's TOU override in sync with them.
-        self._resolve_tou_schedule_state()
-        # Issue #514: resolve and cache this cycle's target-band schedule, same reason —
-        # closes the divergence where this call site previously fell through to
-        # _build_predicted_indoor_future()'s own internal (not-identical) band recompute.
-        self._resolve_target_band_schedule()
+            # Issue #786: refresh TOU schedule state before this executor call, same
+            # ordering reason as the main update cycle (_resolve_tou_schedule_state()'s
+            # docstring) — this path recomputes classification/thermal_model locally above,
+            # so re-resolving here keeps the ODE curve's TOU override in sync with them.
+            self._resolve_tou_schedule_state()
+            # Issue #514: resolve and cache this cycle's target-band schedule, same reason —
+            # closes the divergence where this call site previously fell through to
+            # _build_predicted_indoor_future()'s own internal (not-identical) band recompute.
+            self._resolve_target_band_schedule()
 
-        # Update cached ODE prediction for ceiling guard.
-        # thermal_model is already computed from self.learning.get_thermal_model() above.
-        # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
-        self._last_predicted_indoor = await self.hass.async_add_executor_job(
-            functools.partial(
-                _build_predicted_indoor_future,
-                self._hourly_forecast_temps,
-                self.config,
-                dt_util.now(),
-                current_indoor_temp=self._get_indoor_temp(),
-                thermal_model=thermal_model,
-                occupancy_mode=self._occupancy_mode,
-                band_schedule=self._target_band_schedule,
-                classification=classification,
-                tou_precondition_window=self._tou_precondition_window_tuple(),
+            # Update cached ODE prediction for ceiling guard.
+            # thermal_model is already computed from self.learning.get_thermal_model() above.
+            # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
+            self._last_predicted_indoor = await self._executor_job(
+                functools.partial(
+                    _build_predicted_indoor_future,
+                    self._hourly_forecast_temps,
+                    self.config,
+                    dt_util.now(),
+                    current_indoor_temp=self._get_indoor_temp(),
+                    thermal_model=thermal_model,
+                    occupancy_mode=self._occupancy_mode,
+                    band_schedule=self._target_band_schedule,
+                    classification=classification,
+                    tou_precondition_window=self._tou_precondition_window_tuple(),
+                )
             )
-        )
-        _LOGGER.debug(
-            "Caching predicted indoor curve (briefing): %d points",
-            len(self._last_predicted_indoor),
-        )
-        await self.automation_engine.apply_classification(
-            classification,
-            predicted_indoor=self._last_predicted_indoor,
-            indoor_temp=self._get_indoor_temp(),
-        )
+            _LOGGER.debug(
+                "Caching predicted indoor curve (briefing): %d points",
+                len(self._last_predicted_indoor),
+            )
+            self._compute_and_cache_nat_vent_plan()
+            await self.automation_engine.apply_classification(
+                classification,
+                predicted_indoor=self._last_predicted_indoor,
+                indoor_temp=self._get_indoor_temp(),
+                nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+            )
 
-        # Initialize today's learning record, preserving any counters already accumulated
-        # today (e.g. after an HA restart mid-day that fires briefing again). Issue #602:
-        # extracted to _ensure_today_record() so the regular classification cycle can also
-        # call it — this call site is now just the once-daily "make sure it's current" path.
-        self._ensure_today_record(classification)
+            # Initialize today's learning record, preserving any counters already accumulated
+            # today (e.g. after an HA restart mid-day that fires briefing again). Issue #602:
+            # extracted to _ensure_today_record() so the regular classification cycle can also
+            # call it — this call site is now just the once-daily "make sure it's current" path.
+            self._ensure_today_record(classification)
 
-        # Generate briefing text and track which suggestions were sent
-        suggestions = self.learning.generate_suggestions()
-        if self._today_record:
-            self._today_record.suggestion_sent = self.learning.get_last_suggestion_keys()
+            # Generate briefing text and track which suggestions were sent
+            suggestions = self.learning.generate_suggestions()
+            if self._today_record:
+                self._today_record.suggestion_sent = self.learning.get_last_suggestion_keys()
 
-        self._last_briefing, self._last_briefing_short = self._build_briefing_text(
-            classification, suggestions=suggestions
-        )
-        self._briefing_day_type = classification.day_type
+            self._last_briefing, self._last_briefing_short = self._build_briefing_text(
+                classification, suggestions=suggestions
+            )
+            self._briefing_day_type = classification.day_type
+            self._briefing_today_high = classification.today_high
 
-        # In observe-only mode, skip sending the notification
-        if not self._automation_enabled:
-            _LOGGER.info("[DRY RUN] Briefing generated but notification skipped (automation disabled)")
+            # In observe-only mode, skip sending the notification
+            if not self._automation_enabled:
+                _LOGGER.info("[DRY RUN] Briefing generated but notification skipped (automation disabled)")
+                self._briefing_sent_today = True
+                await self._async_save_state()
+                return
+
+            # Send push notification — short TLDR summary
+            _notify_svc = self.config["notify_service"]
+            _notify_name = _notify_svc.split(".")[-1] if "." in _notify_svc else _notify_svc
+            if self.config.get("push_briefing", True):
+                await self.hass.services.async_call(
+                    "notify",
+                    _notify_name,
+                    {"message": self._last_briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
+                )
+            # Send email — full briefing
+            if self.config.get("email_briefing", True):
+                await self.hass.services.async_call(
+                    "notify",
+                    "send_email",
+                    {"message": self._last_briefing, "title": "🏠 Your Home Climate Plan for Today"},
+                )
+
             self._briefing_sent_today = True
+            _LOGGER.info("Daily briefing sent — day type: %s", classification.day_type)
             await self._async_save_state()
-            return
-
-        # Send push notification — short TLDR summary
-        _notify_svc = self.config["notify_service"]
-        _notify_name = _notify_svc.split(".")[-1] if "." in _notify_svc else _notify_svc
-        if self.config.get("push_briefing", True):
-            await self.hass.services.async_call(
-                "notify",
-                _notify_name,
-                {"message": self._last_briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
-            )
-        # Send email — full briefing
-        if self.config.get("email_briefing", True):
-            await self.hass.services.async_call(
-                "notify",
-                "send_email",
-                {"message": self._last_briefing, "title": "🏠 Your Home Climate Plan for Today"},
-            )
-
-        self._briefing_sent_today = True
-        _LOGGER.info("Daily briefing sent — day type: %s", classification.day_type)
-        await self._async_save_state()
 
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""
@@ -3753,6 +3860,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.automation_engine._thermal_model if self.automation_engine else None,
         )
 
+    def _compute_and_cache_nat_vent_plan(self) -> None:
+        """Issue #817: single per-cycle computation of warm/mild-day nat-vent window
+        and cutoff timing, cached on ``self._nat_vent_plan``.
+
+        Before this existed, briefing text, the TLDR table, and the "Next Automation"
+        status card each independently called what is now
+        ``nat_vent_plan.compute_nat_vent_plan()`` with their own locally-rebuilt
+        inputs — the exact shape of bug that let #528 silently reintroduce a duplicate
+        computation 2 days after #518 promised there'd never be one. Every consumer
+        now reads this one cached value instead.
+
+        Call this immediately after ``self._last_predicted_indoor`` is (re)built, in
+        both the main 30-min cycle and the daily-briefing pipeline — the same point in
+        the cycle ``_resolve_target_band_schedule()`` documents for the target-band
+        cache, for the same reason (downstream consumers must see this cycle's curve,
+        not a stale one).
+        """
+        c = self._current_classification
+        if c is None or not self._last_predicted_indoor:
+            self._nat_vent_plan = None
+            return
+        _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
+        _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+        self._nat_vent_plan = compute_nat_vent_plan(
+            predicted_indoor=self._last_predicted_indoor,
+            predicted_outdoor=_outdoor_curve,
+            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            comfort_heat_raw=_comfort_heat_raw,
+            sleep_heat=_sleep_heat,
+            in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
+            window_open_time=c.window_open_time,
+        )
+
     def _target_band_lower_upper_now(self) -> tuple[float | None, float | None]:
         """Return this cycle's cached target-band lower/upper for the current instant
         (Issue #514).
@@ -3929,12 +4070,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     },
                 )
             self.learning.record_day(self._today_record)
-            await self.hass.async_add_executor_job(self.learning.save_state)
+            await self._executor_job(self.learning.save_state)
             _LOGGER.info("Day record saved for learning")
 
         self._today_record = None
         self._briefing_sent_today = False
         self._briefing_day_type = None
+        self._briefing_today_high = None
         self._hvac_on_since = None
         self._last_violation_check = None
         self._outdoor_temp_history.clear()
@@ -4514,7 +4656,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
                 )
-                await self.hass.async_add_executor_job(self._chart_log.save)
+                await self._executor_job(self._chart_log.save)
 
         # Bug 3 fix: Event-driven sampling for active HVAC observations.
         # The 5-min polling tick (_sample_all_observations) can miss short HVAC cycles
@@ -5308,6 +5450,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
+                nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
             )
             _LOGGER.info(
                 "Setpoint re-asserted after fan-off echo: reasserted day_type=%s hvac_mode=%s",
@@ -5827,7 +5970,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     obs["setpoint_f"] = round(float(_sp), 1)
 
         self._pending_observations[obs_type] = obs
-        await self.hass.async_add_executor_job(self.learning.save_state)
+        await self._executor_job(self.learning.save_state)
         _LOGGER.info(
             "Thermal HVAC observation started: obs_id=%s mode=%s indoor=%.1f°F",
             obs["obs_id"],
@@ -6972,7 +7115,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 elapsed_post,
             )
             self._abandon_observation(obs_type, "post_heat timeout exceeded")
-            await self.hass.async_add_executor_job(self.learning.save_state)
+            await self._executor_job(self.learning.save_state)
             return
 
         post_samples = obs.get("post_heat_samples", [])
@@ -7042,10 +7185,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         if not self.config.get("learning_enabled", True):
             self._pending_observations.pop(obs_type, None)
-            await self.hass.async_add_executor_job(self.learning.save_state)
+            await self._executor_job(self.learning.save_state)
             return
 
-        obs_result, reject_code, r_squared = await self.hass.async_add_executor_job(
+        obs_result, reject_code, r_squared = await self._executor_job(
             self.learning._commit_event_from_dict,
             obs,
             force_grade,
@@ -7056,7 +7199,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._today_record is not None and obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
                 self._today_record.thermal_session_count += 1
             self._pending_observations.pop(obs_type, None)
-            await self.hass.async_add_executor_job(self.learning.save_state)
+            await self._executor_job(self.learning.save_state)
         else:
             # Learning engine rejected (OLS bad fit, wrong sign, bounds, etc.).
             # Route through _abandon_observation so the rejection enters _rejection_log
@@ -7068,7 +7211,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 r_squared=r_squared,
                 n_required=THERMAL_MIN_DECAY_SAMPLES,
             )
-            await self.hass.async_add_executor_job(self.learning.save_state)
+            await self._executor_job(self.learning.save_state)
 
     def _abandon_observation(
         self,
@@ -7160,7 +7303,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # wrapping it in async_create_task() (which requires a coroutine, not a Future)
         # raised "TypeError: a coroutine was expected, got <Future ...>" on every restart
         # that hit this abandonment path, crashing the whole coordinator update.
-        self.hass.async_add_executor_job(self.learning.save_state)
+        self._executor_job(self.learning.save_state)
 
     def _build_learning_health(self) -> dict:
         """Aggregate _rejection_log into a per-obs-type health dict for get_thermal_model().
@@ -7460,11 +7603,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now().time()
         direction_ok = free_cooling_direction_ok(outdoor_temp, indoor_temp)
 
+        # Issue #817: prefer the ODE-adjusted cutoff (self._nat_vent_plan, the same
+        # value the briefing/TLDR table and the Next Automation card read) over the
+        # static classifier close time — this card previously always used the static
+        # hour, which could disagree with what "Today's Strategy" told the occupant.
+        # Falls back to c.window_close_time when no plan is cached (e.g. before the
+        # first cycle) or it has no cutoff for today.
+        _plan = getattr(self, "_nat_vent_plan", None)
+        _close_time_dt = _plan.get("nat_vent_cutoff") if _plan else None
+        _effective_close_time = _close_time_dt.time() if _close_time_dt else c.window_close_time
+
         if c.windows_recommended:
             if c.window_open_time and now < c.window_open_time:
-                return _decide(f"Open windows at {c.window_open_time.strftime('%I:%M %p')}")
-            elif c.window_close_time and now < c.window_close_time:
-                return _decide(f"Close windows by {c.window_close_time.strftime('%I:%M %p')}")
+                return _decide(f"Open windows at {c.window_open_time.strftime('%I:%M %p').lstrip('0')}")
+            elif _effective_close_time and now < _effective_close_time:
+                return _decide(f"Close windows by {_effective_close_time.strftime('%I:%M %p').lstrip('0')}")
             elif now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 if windows_physically_open:
                     if outdoor_temp is not None and indoor_temp is not None and not direction_ok:
@@ -8410,35 +8563,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # production, but several test files build a coordinator via object.__new__()
         # without running __init__() — getattr() keeps those minimal stubs working
         # rather than requiring every one of them to know about this new attribute.
+        # Only needed by the nat-vent-start-prediction block below now (Issue #817
+        # moved the WARM/MILD-day events block off this and onto self._nat_vent_plan).
         _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
 
-        # Issue #535: shared comfort-floor inputs, hoisted above both the WARM/MILD-day
-        # events block and the nat-vent start-prediction block below so they don't each
-        # independently re-read the same config keys. "sleep_heat" literal, not the
-        # CONF_SLEEP_HEAT constant: the bedtime block above does a local
-        # `from .const import ... CONF_SLEEP_HEAT` inside an `if c.hvac_mode in ("heat",
-        # "cool")` branch, which makes CONF_SLEEP_HEAT a local name for this ENTIRE
-        # function regardless of whether that branch actually runs — referencing the
-        # module-level import here raises UnboundLocalError whenever hvac_mode is
-        # "off"/"auto". Same value either way.
+        # Issue #535: shared comfort-floor inputs, hoisted above the nat-vent
+        # start-prediction block below so it doesn't independently re-read the same
+        # config keys. "sleep_heat" literal, not the CONF_SLEEP_HEAT constant: the
+        # bedtime block above does a local `from .const import ... CONF_SLEEP_HEAT`
+        # inside an `if c.hvac_mode in ("heat", "cool")` branch, which makes
+        # CONF_SLEEP_HEAT a local name for this ENTIRE function regardless of whether
+        # that branch actually runs — referencing the module-level import here raises
+        # UnboundLocalError whenever hvac_mode is "off"/"auto". Same value either way.
         _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
 
         # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_cutoff/
         # ceiling_breach_time/precool_start_time/recovery_time already computed for the
-        # briefing (now timestamp-correct, see _derive_warm_day_events()), surfaced here
-        # for the first time so the dashboard doesn't have to wait for the next briefing
-        # to show them.
-        if c.windows_recommended and _predicted_indoor:
-            _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
-            _warm_events = _derive_warm_day_events(
-                predicted_indoor=_predicted_indoor,
-                predicted_outdoor=_outdoor_curve,
-                comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
-                comfort_heat_raw=_comfort_heat_raw,
-                sleep_heat=_sleep_heat,
-                in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
-            )
+        # briefing. Issue #817: this used to independently re-derive its own copy via a
+        # second compute_nat_vent_plan() call with its own locally-rebuilt inputs — now
+        # reads the coordinator's single per-cycle self._nat_vent_plan
+        # (_compute_and_cache_nat_vent_plan()) instead, so this card can never disagree
+        # with the briefing or TLDR table about the same numbers.
+        _warm_events = getattr(self, "_nat_vent_plan", None)
+        if c.windows_recommended and _warm_events:
             if _warm_events["nat_vent_cutoff"] and _warm_events["nat_vent_cutoff"] > now:
                 # Issue #534: this is a forecast for a future time, not a claim about current
                 # conditions — the qualifying time otherwise lives only in the separate
@@ -9115,7 +9263,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.learning._state.clean_shutdown = True
         self.learning._state.last_shutdown_version = VERSION
         self.learning._state.user_initiated_restart = self._user_initiated_shutdown
-        await self.hass.async_add_executor_job(self.learning.save_state)
+        await self._executor_job(self.learning.save_state)
         _LOGGER.info(
             "Shutdown diagnostics persisted: version=%s user_initiated=%s",
             VERSION,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import uuid
@@ -694,14 +695,19 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             data.pop(key, None)
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+        # Issue #812: entry-scoped issue_id + data={"entry_id": ...} so a
+        # multi-zone install's Repairs "Fix" targets THIS zone specifically,
+        # not always the first config entry — see repairs.py's
+        # ReloadNeededRepairFlow/_resolve_target_entry().
         ir.async_create_issue(
             self.hass,
             DOMAIN,
-            "reload_needed",
+            f"reload_needed_{self.config_entry.entry_id}",
             is_fixable=True,
             is_persistent=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key="reload_needed",
+            data={"entry_id": self.config_entry.entry_id},
         )
         _LOGGER.info("Options section saved (cleared=%d) — reload not yet applied", len(self._removed))
 
@@ -1599,8 +1605,11 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     from .claude_api import ClaudeAPIClient
 
                     test_config = {**current, **user_input}
-                    client = ClaudeAPIClient(test_config)
-                    success, _message = await client.async_test_connection()
+                    # ClaudeAPIClient's constructor does blocking I/O (AsyncAnthropic
+                    # reads a local config file and loads the TLS cert bundle) —
+                    # offload it instead of running that inline in this async step.
+                    client = await self.hass.async_add_executor_job(functools.partial(ClaudeAPIClient, test_config))
+                    success, _message = await client.async_test_connection(hass=self.hass)
                     if not success:
                         errors["base"] = "ai_connection_failed"
                 except Exception:  # noqa: BLE001
@@ -1645,7 +1654,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         from .claude_api import fetch_available_models  # noqa: PLC0415
 
         try:
-            model_options = await asyncio.wait_for(fetch_available_models(existing_key), timeout=5.0)
+            model_options = await asyncio.wait_for(fetch_available_models(existing_key, hass=self.hass), timeout=5.0)
         except Exception:  # noqa: BLE001 — includes asyncio.TimeoutError; must never block config flow render
             model_options = AI_MODELS
 

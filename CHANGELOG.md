@@ -3,6 +3,28 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.6] — 2026-09-02
+
+- Fix #817: the Status report's window/AC timing (Today's Strategy table, Next Automation card, and Next User Action card) was computed independently in three separate places and could disagree with itself — e.g. Next User Action still showing an old close time after the forecast changed. All three now read the exact same computed value, so they can no longer contradict each other, and the door/window pause behavior around window-close time now uses that same corrected time too.
+
+## [0.7.5] — 2026-09-01
+
+- Fix #818: the Status report no longer shows a nonsensical zero-width window recommendation like "Open 6:00 AM - 6:00 AM" — the close time now always reflects a moment after windows would actually open.
+
+## [0.7.4] — 2026-09-01
+
+- Fix #814: the Status report's Conditions card and Today's Strategy text now stay in sync with the live automation state, instead of sometimes showing a stale trend or forecast high left over from an earlier update cycle.
+- Fix #815: Home Assistant's event loop no longer stalls briefly every time the AI subsystem initializes (on zone startup, or when testing/saving your Claude API key) — that work now happens off the main thread.
+- Fix #816: the Debug tab now shows a plain-English description (e.g. "Thermostat's built-in sensor") for where indoor/outdoor temperature is read from, instead of the raw internal setting name.
+
+## [0.7.3] — 2026-09-01
+
+- Fix #813: the dashboard no longer guesses which zone to show on a brand-new browser or device's first visit to a multi-zone install, and the "Ambiguous zone selection" Repairs card no longer shows permanently on every multi-zone install — it only appears if an actual ambiguous zone resolution ever occurs.
+
+## [0.7.2] — 2026-09-01
+
+- Fix #812: the dashboard, weather/reload repair prompts, and AI Investigator reports now always act on the zone you're actually looking at instead of sometimes silently guessing which zone — and the dashboard no longer gets stuck if a saved zone selection becomes stale.
+
 ## [0.7.1] — 2026-09-01
 
 - Fix #808: Adding a second zone that points at a thermostat you've already configured now shows a clear "already configured" message instead of silently creating a conflicting duplicate zone.

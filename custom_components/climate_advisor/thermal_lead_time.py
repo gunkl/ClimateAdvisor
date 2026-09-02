@@ -3,7 +3,8 @@
 Consolidates a formula that was independently duplicated three times before this module
 existed: ``automation.py``'s adaptive pre-heat lead time (``_schedule_pre_condition()``),
 ``ode_ceiling_guard.py``'s ODE ceiling-guard escalation lead time, and ``briefing.py``'s
-warm-day pre-cool lead time (``_derive_warm_day_events()``). Each independently computed
+warm-day pre-cool lead time (``nat_vent_plan.compute_nat_vent_plan()``, moved from
+``briefing.py``'s ``_derive_warm_day_events()`` in Issue #817). Each independently computed
 ``delta_t / rate * 60 * safety_multiplier``, clamped to its own ``[min, max]``, falling back
 to its own fixed constant when the learned rate is unavailable or non-positive — same shape,
 three separate implementations and three separate constant sets (one of which,

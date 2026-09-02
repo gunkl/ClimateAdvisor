@@ -53,6 +53,12 @@ def _make_coord_stub():
 
     coord.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
+    # Issue #812: async_restore_state()/_persist_shutdown_diagnostics() route
+    # executor offload through coordinator._executor_job() (zone-tags the
+    # target callable before handing it to hass.async_add_executor_job()).
+    # `coord` here is a bare MagicMock, not a real coordinator instance, so
+    # this needs its own explicit stub matching the hass-level one above.
+    coord._executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
 
     coord.config = {"climate_entity": "climate.thermostat"}
     coord._unsub_listeners = []

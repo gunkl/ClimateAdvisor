@@ -136,6 +136,7 @@ influence each other thermally is sketched and explicitly deferred — see
 | What does each user-visible change actually look like? | Five mocked surfaces (naming field, entry list, Repairs card, diagnostics menu item, dashboard selector); mocking them surfaced two real refinements (conditional selector rendering, explicit Repairs card copy). | [UI Mocks](#ui-mocks) |
 | What changes for a user, in plain terms? | A before/after table across eight areas, each tied to the design choice behind it. | [Outcomes: Before and After](#outcomes-before-and-after) |
 | What's still open now that every step is built? | PR3's spike, real-HA verification of PR9, a known test-harness gap, and pre-existing citation debt — none blocking, all tracked in one place. (`apiFetchStream`'s zone-scoping was closed during Verification, no longer open.) | [Open Questions](#open-questions-carried-forward-out-of-this-build) |
+| Were all zone-context gaps caught by the original nine-gap review? | No — Issue #812's audit found four more (dashboard first-load, Repairs `entries[0]`, zero log attribution, non-deterministic registry fallback order), all fixed. `api.py`'s own logging remains unscoped (flagged, not fixed). | [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit) |
 
 ## Scope
 
@@ -209,6 +210,15 @@ naming) — not by severity or build order. Severity is called out per gap;
 [Gap 5](#gap-5--service-handler-misdirection-most-severe) is the single worst
 finding despite sitting fifth in this grouping. Build order is in
 [Implementation Sequence](#implementation-sequence).
+
+**Update (Issue #812):** this section's original review found nine gaps.
+A tenth, [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit)
+(itself bundling four independent findings — dashboard first-load, Repairs
+targeting, log attribution, registry fallback order), was found later by a
+follow-up audit and is documented at the end of this list, after Gap 9. The
+heading and framing below are kept as originally written (nine) rather than
+silently renumbered, since Gaps 1-9 are still exactly the original nine —
+Gap 10 is additive, not a renumbering of the set.
 
 #### Gap 1 — `LearningEngine` DB collision
 
@@ -655,11 +665,30 @@ defensive branches now warn.
 
 **Scope of the signal:** `get_default_coordinator()`'s fallback is a
 permanent, sanctioned feature for any caller that doesn't pass `entry_id` —
-not solely a shim for the window before the dashboard ships. Once PR9 ships,
-the dashboard stops hitting the ambiguous path (it sends `entry_id`), but a
-direct API call, a user's own script, or a third-party tool integrating with
-`api.py` without `entry_id` can still hit it, in any multi-zone install,
-indefinitely. This issue is an ongoing informational signal tied to zone
+not solely a shim for the window before the dashboard ships.
+
+**Stale — do not follow (superseded by Issue #812, kept only so the
+correction is legible against what it replaces):** this paragraph originally
+claimed *"Once PR9 ships, the dashboard stops hitting the ambiguous path (it
+sends `entry_id`), but a direct API call, a user's own script, or a
+third-party tool integrating with `api.py` without `entry_id` can still hit
+it, in any multi-zone install, indefinitely."* **That was wrong.** PR9's
+`_selectedEntryId` starts out `null` on every fresh page load (before
+`_loadStoredZone()` existed) — meaning the dashboard's own first-load
+requests, every single time, hit this exact ambiguous fallback until the
+first `/status` response came back and `renderZoneSelector()` set
+`_selectedEntryId`. This was not a third-party-tool edge case; it was the
+dashboard itself, on every reload, for every multi-zone install. Confirmed
+and fixed by Issue #812 (frontend/index.html's `localStorage`-backed
+`_selectedEntryId` seeding plus a stale-selection self-heal retry — see
+[Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit)
+below). The corrected claim: even after Issue #812's fix, a direct API call,
+a user's own script, or a third-party tool integrating with `api.py` without
+`entry_id` can still hit the ambiguous path, in any multi-zone install,
+indefinitely — that part of the original claim was correct, only the "dashboard
+is now excluded" part was false.
+
+This issue is an ongoing informational signal tied to zone
 count, clearing only when zone count drops back to one. (Gap 5's specific
 danger — a destructive service call resolving ambiguously — is separately
 closed by [PR4](#implementation-sequence)'s `vol.Schema` requirement that such
@@ -695,6 +724,13 @@ describes, so there is no window where PR7 is live on `main` without PR9.
 The `zone_resolution_ambiguous` Repairs signal (above) remains a permanent,
 sanctioned feature for any zone-unaware caller (a direct API call, a script,
 a third-party tool) even after PR9 ships — it does not become dead code.
+**Correction (Issue #812):** at the time this note was written, PR9's
+dashboard itself was still an unlabeled zone-unaware caller on every first
+page load — see the corrected "Scope of the signal" paragraph above and
+[Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit)
+below. "A direct API call, a script, a third-party tool" was never a
+complete list of who could hit this path; the dashboard itself belonged on
+it until #812 shipped.
 
 #### Gap 5 — service-handler misdirection (most severe)
 
@@ -1037,6 +1073,199 @@ Regression coverage: `tests/test_service_zone_scoping.py` (new) — unloads
 one of two zones, asserts the surviving zone's services are still callable
 via `hass.services.has_service()`, then unloads the last zone and asserts
 all five are gone.
+
+#### Gap 10 — residual zone-context gaps found by Issue #812's audit
+
+**Not found by this document's original nine-gap review.** Discovered when a
+user pushed back on a `zone_resolution_ambiguous` Repairs warning that didn't
+match their mental model of "the dashboard already sends `entry_id`" — that
+pushback prompted a full audit, which found four independent places where the
+codebase still silently guessed which zone a request was for, despite this
+document's Gap 4/6/8/9 fixes all being genuinely shipped and correct as far
+as they went. All four share the same root shape as the original nine: code
+that assumes a resolvable "the" zone instead of being handed one explicitly.
+**Fixed, PR/commit `7ee7595` ("Fix #812: make Climate Advisor genuinely
+zone-aware end-to-end"), 0.7.1 → 0.7.2.**
+
+##### 10a — dashboard's own first-load requests hit the ambiguous fallback
+
+**What:** the false claim corrected under [Transitional Safety
+Window](#transitional-safety-window)'s "Scope of the signal" above.
+`frontend/index.html`'s `_selectedEntryId` started `null` on every fresh page
+load, seeded only after the first `/status` response came back and
+`renderZoneSelector()` ran. Every one of `loadAll()`'s other 7 parallel
+`load*()` calls fired zone-blind on every single page load of every
+multi-zone install — not an edge case, the default first-touch behavior.
+
+**Occupant-facing consequence:** a user with two zones who opens the
+dashboard sees the ambiguous-fallback zone's data flash briefly (or, worse,
+a mismatched combination as different cards resolve to different zones
+depending on request timing) before the selector corrects it — every time
+they load the page, not just once.
+
+**Fix (`frontend/index.html`):** persist the selected zone to
+`localStorage` (`ZONE_STORAGE_KEY = 'climate_advisor_selected_zone'`) and
+seed `_selectedEntryId` from it synchronously at script init, before
+`loadAll()` ever runs — so every session after the first is zone-correct
+from the very first request. `renderZoneSelector()` and the zone-tab click
+handler both call `_storeSelectedZone()` to keep the stored value current.
+A genuine first-ever-visit (nothing stored yet, tracked via
+`_hadStoredZoneAtInit`) still awaits `loadStatus()` once before firing the
+other 7 calls, since no zone is knowable until the first response.
+
+**Verification-pass regression (state plainly, per this project's
+"Verification correction" precedent above under the WARNING throttle
+fix):** the first version of this fix — `localStorage` persistence alone,
+no self-heal — shipped a new bug that would not have existed before: a
+stale stored zone (e.g. after deleting or reinstalling a zone, so the saved
+`entry_id` no longer resolves) made the very first `loadStatus()` request
+resolve to no coordinator (`api.py`'s `_get_coordinator()` returns `None`,
+producing HTTP 503). The existing self-heal logic in
+`renderZoneSelector()` only runs on a *successful* response, so it never got
+a chance to run — the dashboard showed "Failed to load status" forever on
+every reload, with the stale value never cleared. This was caught by this
+session's own Verification pass before landing, not found later in
+production. Fixed by detecting this specific case in `loadStatus()`'s own
+`catch` block — a zone-scoped request that got back the 503 "not loaded"
+error — and self-healing: clear the stale selection, retry once unscoped
+(falling back to `get_default_coordinator()`, i.e. today's single-zone
+behavior), and re-fire the other 7 calls that failed the same way. Guarded
+to retry at most once so a genuine "Climate Advisor not loaded at all" 503
+still surfaces as a real error instead of looping. **Lesson:** a self-heal
+that only runs on the success path is not a self-heal for the failure mode
+that matters most — the one that guarantees every subsequent request fails
+the same way.
+
+**Test coverage:** `tests/ui/zone-selector.spec.js` (Playwright, real
+headless Chromium against the existing mock-server harness, actually
+executed) — `"Issue #812: zone selection persists across a page reload"` and
+`"Issue #812: a stored zone that no longer exists falls back gracefully"`.
+
+##### 10b — Repairs flows hard-coded `entries[0]`, issue_ids were domain-wide
+
+**What:** `WeatherEntityRepairFlow` and `ReloadNeededRepairFlow`
+(`repairs.py`) both resolved their target config entry via
+`hass.config_entries.async_entries(DOMAIN)[0]` — the exact "first entry"
+singleton assumption Gap 4 fixed in `api.py`, still present, unfixed, in
+`repairs.py`. Both issue types (`weather_entity_not_found`, `reload_needed`)
+also used domain-wide, non-entry-scoped `issue_id` strings, so a second
+zone's identical issue would collide with (or mask) the first's in HA's
+Repairs list.
+
+**Occupant-facing consequence:** in a 2+ zone install, clicking "Fix" on a
+weather-entity Repairs card for zone B could silently patch zone A's config
+entry instead — the same class of wrong-zone action Gap 5 (service handler
+misdirection) was rated most-severe for, just reached through the Repairs UI
+instead of a service call.
+
+**Fix (`repairs.py`, `__init__.py`, `config_flow.py`):** issue_ids are now
+entry-scoped (`f"weather_entity_not_found_{entry_id}"` /
+`f"reload_needed_{entry_id}"`), with the `entry_id` threaded through
+`ir.async_create_issue(..., data={"entry_id": entry_id})` into
+`async_create_fix_flow()`, which passes it into the flow's constructor. Both
+flows resolve their target entry via a shared `_resolve_target_entry(hass,
+entry_id)` helper that prefers the captured `entry_id` and only falls back to
+`async_entries(DOMAIN)[0]` when none was supplied (a pre-#812 unscoped issue
+still open across an upgrade). A one-time migration in
+`async_setup_entry()` clears any pre-existing unscoped issue on upgrade so it
+doesn't linger as a dead, unfixable card.
+
+**Test coverage:** `tests/test_repairs.py::TestMultiZoneRepairFlowTargeting`
+(5 tests) — entry-scoped issue_ids don't collide across zones, fixing zone
+A's weather issue touches only zone A, fixing zone B's weather/reload issues
+touches only zone B, and single-zone behavior is unchanged (no entry_id
+ambiguity possible with one zone).
+
+##### 10c — zero zone attribution anywhere in logging
+
+**What:** `log_capture.py`'s shared ring buffer (feeding the AI
+Investigator's "System Errors/Warnings" section) had no zone field, and
+every `_LOGGER` call site across the package is a bare
+`logging.getLogger(__name__)` with no zone/entry tag. With 2+ zones running
+concurrently, a WARNING from zone B's update cycle was indistinguishable
+from zone A's in the shared buffer.
+
+**Occupant-facing consequence:** investigating a problem in zone A's
+dashboard could show zone B's warnings mislabeled as zone A's (or vice
+versa) — actively misleading the occupant (or the AI Investigator acting on
+their behalf) about which zone actually has a problem.
+
+**Fix (`log_capture.py`, `coordinator.py`, `__init__.py`,
+`ai_skills_context.py`):** a `ContextVar`-based zone tag, owned by
+`log_capture.py` (`_current_zone_label`, set via `zone_scope(zone_label)`,
+read via `current_zone_label()`), tags every captured record with the
+active zone (or `None` if captured outside any `zone_scope()`).
+**Important technical finding, confirmed empirically, not assumed:**
+`ContextVar`s do **not** propagate into `hass.async_add_executor_job()` —
+HA's wrapper submits to the `ThreadPoolExecutor` via `executor.submit()`
+directly, without `contextvars.copy_context().run(...)`, so a zone label set
+in the calling coroutine reads back as the ContextVar's default inside the
+executor thread. A standalone asyncio + contextvars + `ThreadPoolExecutor`
+script reproduced this directly. The fix uses explicit
+`bind_zone_for_executor()` wrapping at every executor-job call site
+(`coordinator.py`'s `_executor_job()`, and each zone-scoped service handler
+in `__init__.py` that calls `learning.save_state()`/`learning.reset()` via
+the executor) rather than relying on ambient propagation. `zone_scope()`
+itself does cover directly-awaited async code and `hass.async_create_task()`
+work, which inherit the current `contextvars.Context` automatically.
+`ai_skills_context.py`'s `build_event_log_context()` now filters captured
+records to `this_zone_label` (the investigated coordinator's own
+`zone_label`) plus any untagged record, and renders an untagged record's
+zone explicitly as `"unknown zone"` rather than guessing or silently
+including/excluding it.
+
+**Test coverage:** `tests/test_log_capture.py` — 203 new lines, including
+`test_concurrent_coordinators_do_not_cross_contaminate_zone_tags` (genuinely
+concurrent via `asyncio.gather`, not sequential awaits — the failure mode
+this fix exists for is concurrency, so the test must actually be
+concurrent), `test_contextvar_does_not_cross_executor_boundary_unwrapped`
+(proves the executor-boundary finding above, not just documents it),
+`test_bind_zone_for_executor_restores_zone_inside_executor_thread`, and
+`test_ai_skills_context_filters_to_investigated_zone`.
+
+##### 10d — `zone_registry` fallback order was non-deterministic
+
+**What:** `get_default_coordinator()`'s two defensive fallback branches
+(covering the "shouldn't happen in practice" cases where `hass.data[DOMAIN]`
+disagrees with `hass.config_entries.async_entries()`) used
+`next(iter(entries.values()))` — dict-insertion order, not guaranteed stable
+across restarts, for a function whose entire job is picking a deterministic
+"the" zone.
+
+**Occupant-facing consequence:** in the rare case either defensive branch
+actually fires, which zone a zone-unaware request resolves to could change
+from one restart to the next with no configuration change — the WARNING
+this branch already logs would name a different "picked" zone across
+restarts, actively confusing anyone trying to diagnose why behavior seemed
+to move between zones.
+
+**Fix (`zone_registry.py`):** both branches now tie-break via
+`sorted(entries.items(), key=lambda kv: kv[0])[0][1]` — a deterministic sort
+on `entry_id` (stable, assigned once by HA and never changes), replacing
+`next(iter(entries.values()))` in both places.
+
+**Test coverage:**
+`tests/test_zone_registry.py::test_defensive_empty_config_entries_picks_lowest_entry_id_regardless_of_dict_order`
+and
+`test_defensive_no_matching_loaded_entry_picks_lowest_entry_id_regardless_of_dict_order`
+— both scramble `hass.data[DOMAIN]`'s dict-insertion order first, proving the
+result is order-independent, the same distinction this document's own Gap 4
+fallback test already proved once for the happy-path branch.
+
+##### Known residual gap — `api.py` itself is not zone-scoped in logging
+
+**Explicitly flagged, not fixed by #812, not hidden.** `api.py`'s own
+executor-job/handler code was not wrapped in `log_capture.zone_scope()` —
+confirmed by grep: `zone_scope`/`bind_zone_for_executor` appear in
+`coordinator.py` and `__init__.py` but nowhere in `api.py`. A warning raised
+while `api.py` is servicing one zone's dashboard request is tagged
+`"unknown zone"` by `ai_skills_context.py` rather than mis-attributed to the
+wrong zone — this is fail-safe by design (10c's fix explicitly renders
+untagged records as `"unknown zone"` instead of guessing), not a defect —
+but it is also not full coverage. A future pass wrapping `api.py`'s request
+handlers in `zone_scope(entry_id)` (once the request's `entry_id` is
+resolved) would close this and let the Investigator attribute API-layer
+warnings to the right zone instead of showing them as unknown.
 
 ### Why config-entry-per-zone is still right despite the longer gap list
 

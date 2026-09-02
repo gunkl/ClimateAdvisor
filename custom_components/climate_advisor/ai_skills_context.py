@@ -981,10 +981,18 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
         event_section_lines += ["=== EVENT LOG ===", "  unavailable", ""]
 
     # --- Real captured log records (Issue #578 — see log_capture.py) ---
+    # Issue #812: the ring buffer is shared across every zone (config entry) —
+    # each record carries a "zone" field (the coordinator's zone_label, or
+    # None if captured outside any log_capture.zone_scope()). Filter to the
+    # zone actually being investigated so zone B's warnings never show up in
+    # zone A's report; a record with no zone tag is shown explicitly labeled
+    # as unknown rather than silently included or excluded, since it cannot
+    # be confidently attributed to either zone.
     try:
         handler = log_capture.get_handler(hass) if hass is not None else None
         records = handler.get_records() if handler is not None else []
         cutoff_dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+        this_zone_label = getattr(coordinator, "zone_label", None)
         recent_records: list[dict[str, Any]] = []
         for r in records:
             try:
@@ -994,13 +1002,22 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
                 continue
             if record_dt >= cutoff_dt:
                 recent_records.append(r)
+        # Zone-scope the window: keep records tagged for this zone plus any
+        # untagged ("unknown zone") record — drop records confidently
+        # attributed to a *different* zone.
+        zone_filtered_records = [r for r in recent_records if r.get("zone") in (this_zone_label, None)]
         event_section_lines += [
-            f"=== SYSTEM LOG RECORDS (WARNING+, last {hours}h, {len(recent_records)} records) ===",
+            f"=== SYSTEM LOG RECORDS (WARNING+, last {hours}h, {len(zone_filtered_records)} records, "
+            f"zone={this_zone_label or 'unknown'}) ===",
         ]
-        if recent_records:
-            for r in recent_records:
+        if zone_filtered_records:
+            for r in zone_filtered_records:
                 local_time = _fmt_time(r.get("time"))
-                event_section_lines.append(f"  {local_time} {r['level']} [{r['logger_name']}] {r['message']}")
+                record_zone = r.get("zone")
+                zone_tag = record_zone if record_zone is not None else "unknown zone"
+                event_section_lines.append(
+                    f"  {local_time} {r['level']} [{r['logger_name']}] (zone={zone_tag}) {r['message']}"
+                )
         else:
             event_section_lines.append("  (none captured in window)")
         event_section_lines.append("")

@@ -63,6 +63,10 @@ def _make_coord_stub():
     coord = MagicMock()
     coord.hass = MagicMock()
     coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
+    # Issue #812: executor offload now routes through coordinator._executor_job()
+    # (zone-tags the target callable). `coord` here is a bare MagicMock, not a
+    # real coordinator instance, so this needs its own explicit stub.
+    coord._executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
 
     coord.last_update_error = None
     coord.last_update_error_time = None
@@ -82,6 +86,10 @@ def _make_restore_coord_stub(persisted_state: dict):
     coord = MagicMock()
     coord.hass = MagicMock()
     coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
+    # Issue #812: executor offload now routes through coordinator._executor_job()
+    # (zone-tags the target callable). `coord` here is a bare MagicMock, not a
+    # real coordinator instance, so this needs its own explicit stub.
+    coord._executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
 
     coord.config = {"climate_entity": "climate.thermostat"}
     coord.learning = MagicMock()

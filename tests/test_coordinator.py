@@ -286,6 +286,40 @@ class TestComputeNextAction:
         result = _compute_next_action(c, {}, time(12, 0))
         assert "Comfortable" in result
 
+    def test_next_action_prefers_ode_cutoff_over_static_close_time(self):
+        """Issue #817: when self._nat_vent_plan has an ODE-adjusted cutoff earlier than
+        the static classifier window_close_time, the card must show the earlier ODE
+        time — the exact "Today's Strategy said close earlier, but Next User Action
+        still said the old static hour" gap the plan closes. Also confirms the
+        harmonized no-leading-zero format ("9:15 AM", not "09:15 AM")."""
+        c = _make_classification(
+            day_type=DAY_TYPE_WARM,
+            windows_recommended=True,
+            window_open_time=time(6, 0),
+            window_close_time=time(WARM_WINDOW_CLOSE_HOUR, 0),
+        )
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord.config = {}
+        coord._occupancy_mode = OCCUPANCY_HOME
+        coord._nat_vent_plan = {"nat_vent_cutoff": datetime.datetime(2026, 6, 1, 9, 15)}
+        fixed_dt = datetime.datetime(2026, 6, 1, 7, 0, 0)
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=fixed_dt):
+            result = ClimateAdvisorCoordinator._compute_next_action(coord, c)
+        assert "Close windows by 9:15 AM" in result
+
+    def test_next_action_falls_back_to_static_close_time_without_plan(self):
+        """No self._nat_vent_plan cached (e.g. before the first cycle) → falls back to
+        the static classifier window_close_time, not an exception."""
+        c = _make_classification(
+            day_type=DAY_TYPE_WARM,
+            windows_recommended=True,
+            window_open_time=time(6, 0),
+            window_close_time=time(WARM_WINDOW_CLOSE_HOUR, 0),
+        )
+        result = _compute_next_action(c, {}, time(7, 0))
+        assert f"Close windows by {time(WARM_WINDOW_CLOSE_HOUR, 0).strftime('%I:%M %p').lstrip('0')}" in result
+
     def test_next_action_warm_day_after_close_before_evening(self):
         """WARM day after 10 AM close, before 5 PM — mid-day gap, no window guidance."""
         c = _make_classification(
@@ -464,7 +498,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_manual_override_active=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "09:00 AM" in result
+        assert "9:00 AM" in result
         assert "manual override" not in result.lower()
 
     def test_next_action_grace_active_does_not_preempt_schedule(self):
@@ -476,7 +510,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_grace_active=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "09:00 AM" in result
+        assert "9:00 AM" in result
         assert "grace period" not in result.lower()
 
     def test_next_action_paused_by_door_does_not_preempt_schedule(self):
@@ -491,7 +525,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(is_paused_by_door=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "09:00 AM" in result
+        assert "9:00 AM" in result
         assert "paused" not in result.lower()
 
     def test_next_action_hot_no_opportunity_free_cooling_active(self):
@@ -645,6 +679,13 @@ class TestBriefingNotificationSplit:
         # async_add_executor_job is now awaited by _async_send_briefing for ODE offload.
         # Execute the partial synchronously so patched _build_predicted_indoor_future is used.
         coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+        # Issue #812: _async_send_briefing/_async_update_data now route ODE offload
+        # through self._executor_job() (zone-tags the executor call — see
+        # coordinator.py/log_capture.py) instead of self.hass.async_add_executor_job()
+        # directly. `coord` here is a bare MagicMock, not a real coordinator instance,
+        # so `coord._executor_job` needs its own explicit stub with the same
+        # synchronous-passthrough behavior as the hass-level stub above.
+        coord._executor_job = AsyncMock(side_effect=lambda fn, *args: fn(*args))
 
         # Bind the real methods to our mock
         coord._async_send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
@@ -1012,6 +1053,7 @@ class TestBriefingRegeneration:
 
         coord._briefing_sent_today = True
         coord._briefing_day_type = DAY_TYPE_WARM
+        coord._briefing_today_high = 85
         coord._last_briefing = "Old warm briefing"
         coord._last_briefing_short = "Old warm TLDR"
         coord._automation_enabled = True
@@ -1039,8 +1081,18 @@ class TestBriefingRegeneration:
 
         # async_add_executor_job is now awaited by _async_update_data/_async_send_briefing for ODE offload.
         coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+        # Issue #812: _async_send_briefing/_async_update_data now route ODE offload
+        # through self._executor_job() (zone-tags the executor call — see
+        # coordinator.py/log_capture.py) instead of self.hass.async_add_executor_job()
+        # directly. `coord` here is a bare MagicMock, not a real coordinator instance,
+        # so `coord._executor_job` needs its own explicit stub with the same
+        # synchronous-passthrough behavior as the hass-level stub above.
+        coord._executor_job = AsyncMock(side_effect=lambda fn, *args: fn(*args))
 
         coord._build_briefing_text = types.MethodType(ClimateAdvisorCoordinator._build_briefing_text, coord)
+        coord._maybe_regenerate_briefing_for_drift = types.MethodType(
+            ClimateAdvisorCoordinator._maybe_regenerate_briefing_for_drift, coord
+        )
 
         return coord
 
@@ -1057,55 +1109,84 @@ class TestBriefingRegeneration:
         side_effect=_side_effect_regen,
     )
     def test_regenerated_on_day_type_change(self, mock_gen, mock_pred, mock_outdoor):
-        """When day_type changes and briefing was already sent, text is regenerated."""
+        """When day_type changes and briefing was already sent, text is regenerated.
+
+        Calls the real _maybe_regenerate_briefing_for_drift() — not a copy of its
+        condition — so this test actually exercises production logic.
+        """
         coord = self._make_coord()
-        new_classification = _make_classification(day_type=DAY_TYPE_HOT)
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_HOT, today_high=85)
 
-        # Simulate what _async_update_data does after classification changes
-        coord._current_classification = new_classification
-        if (
-            coord._briefing_sent_today
-            and coord._briefing_day_type is not None
-            and coord._current_classification.day_type != coord._briefing_day_type
-        ):
-            coord._last_briefing, coord._last_briefing_short = coord._build_briefing_text(coord._current_classification)
-            coord._briefing_day_type = coord._current_classification.day_type
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
 
+        assert regenerated is True
         assert coord._last_briefing == REGEN_FULL
         assert coord._last_briefing_short == REGEN_SHORT
         assert coord._briefing_day_type == DAY_TYPE_HOT
 
-    def test_not_regenerated_when_same_day_type(self):
-        """When day_type hasn't changed, briefing is NOT regenerated."""
+    def test_not_regenerated_when_same_day_type_and_high(self):
+        """When neither day_type nor today_high has meaningfully changed, no regeneration."""
         coord = self._make_coord()
-        new_classification = _make_classification(day_type=DAY_TYPE_WARM)
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_WARM, today_high=85)
 
-        coord._current_classification = new_classification
-        should_regen = (
-            coord._briefing_sent_today
-            and coord._briefing_day_type is not None
-            and coord._current_classification.day_type != coord._briefing_day_type
-        )
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
 
-        assert not should_regen
+        assert regenerated is False
         assert coord._last_briefing == "Old warm briefing"
+
+    def test_not_regenerated_on_small_today_high_jitter(self):
+        """A small forecast jitter (below the drift threshold) must not spam regeneration."""
+        coord = self._make_coord()
+        # _make_coord() bakes in _briefing_today_high=85; 1.5°F is below
+        # BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F (3.0) — should be treated as noise.
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_WARM, today_high=86.5)
+
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
+
+        assert regenerated is False
+        assert coord._last_briefing == "Old warm briefing"
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_regen,
+    )
+    def test_regenerated_on_today_high_drift_same_day_type(self, mock_gen, mock_pred, mock_outdoor):
+        """Reproduces the reported bug: today_high drifts within the same category.
+
+        Before this fix, the regen gate only fired on a day_type category
+        change — a same-category drift (e.g. 85°F baked into the briefing vs.
+        the classifier now computing 90°F, still "warm") never regenerated,
+        so the displayed high could go stale for hours.
+        """
+        coord = self._make_coord()
+        # _make_coord() bakes in _briefing_today_high=85; 5°F drift is above
+        # BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F (3.0).
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_WARM, today_high=90)
+
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
+
+        assert regenerated is True
+        assert coord._last_briefing == REGEN_FULL
+        assert coord._briefing_today_high == 90
 
     def test_not_regenerated_before_first_briefing(self):
         """Before briefing has been sent today, no regeneration."""
         coord = self._make_coord()
         coord._briefing_sent_today = False
         coord._briefing_day_type = None
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_HOT)
 
-        new_classification = _make_classification(day_type=DAY_TYPE_HOT)
-        coord._current_classification = new_classification
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
 
-        should_regen = (
-            coord._briefing_sent_today
-            and coord._briefing_day_type is not None
-            and coord._current_classification.day_type != coord._briefing_day_type
-        )
-
-        assert not should_regen
+        assert regenerated is False
         assert coord._last_briefing == "Old warm briefing"
 
     def test_briefing_day_type_set_after_send(self):

@@ -63,11 +63,26 @@ from .const import (
     DOMAIN,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
+    TEMP_SOURCE_CLIMATE_FALLBACK,
+    TEMP_SOURCE_INPUT_NUMBER,
+    TEMP_SOURCE_SENSOR,
+    TEMP_SOURCE_WEATHER_SERVICE,
     VERSION,
 )
 from .temperature import convert_delta, from_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
+
+# Friendly labels for the "temp_source_label" display_transform (CONFIG_METADATA
+# entries for indoor_temp_source/outdoor_temp_source) — without this, the Debug/
+# Settings tab showed the raw stored enum string (e.g. "climate_fallback")
+# verbatim instead of an explanation of what it means.
+_TEMP_SOURCE_LABELS = {
+    TEMP_SOURCE_SENSOR: "Dedicated sensor",
+    TEMP_SOURCE_INPUT_NUMBER: "input_number helper",
+    TEMP_SOURCE_CLIMATE_FALLBACK: "Thermostat's built-in sensor",
+    TEMP_SOURCE_WEATHER_SERVICE: "Weather service",
+}
 
 
 def _get_coordinator(hass: HomeAssistant, request: web.Request):
@@ -100,6 +115,42 @@ class ClimateAdvisorStatusView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
+
+        # Issue #813: the dashboard's very first bootstrap call on a fresh
+        # browser/device (no stored zone yet — see index.html's
+        # _hadStoredZoneAtInit) has no entry_id to send, because it's the one
+        # call that exists to DISCOVER what zones there are. Before this,
+        # that call went straight into _get_coordinator() -> (no entry_id) ->
+        # zone_registry.get_default_coordinator(), which — on a 2+-zone
+        # install — silently picked an arbitrary "first" zone and logged the
+        # "ambiguous zone selection" WARNING/Repairs signal. That is a real
+        # guess, not just a loudly-logged one, and it happened on every
+        # single genuine first visit (new browser, new device, cleared site
+        # data) regardless of Issue #812's persistence fix, since persistence
+        # can only help *after* a selection has been made once.
+        #
+        # Fix: resolve "how many zones exist" via zone_registry.list_zones()
+        # — a pure, coordinator-free lookup — BEFORE ever calling
+        # _get_coordinator(). When there's no entry_id AND more than one
+        # zone, return a minimal zone-list-only payload instead of guessing;
+        # the frontend picks a zone from it, persists the choice, and
+        # immediately re-requests this same endpoint with an explicit
+        # entry_id (see index.html's loadStatus()). zone_registry.
+        # get_default_coordinator()'s own arbitrary-pick fallback is
+        # untouched and still exists for defensive/edge-case callers — this
+        # just ensures the dashboard's own bootstrap path never reaches it.
+        if not request.query.get("entry_id"):
+            _bootstrap_zones = zone_registry.list_zones(hass)
+            if len(_bootstrap_zones) > 1:
+                return self.json(
+                    {
+                        "zone_selection_required": True,
+                        "zones": _bootstrap_zones,
+                        "zone_count": len(_bootstrap_zones),
+                        "version": VERSION,
+                    }
+                )
+
         coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
@@ -131,6 +182,15 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         unit = coordinator.config.get("temp_unit", "fahrenheit")
         indoor_temp_display = round(from_fahrenheit(indoor_temp, unit), 1) if indoor_temp is not None else None
         outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
+        # Deliberately NOT read from coordinator.data (only refreshed once per ~30-min
+        # update cycle) — same staleness class as the ca_target_heat/cool fields below,
+        # and the same fix: read the live classification instead of the cached snapshot.
+        # Before this, a report could show e.g. "warming 3.5°F" from a stale cycle while
+        # the classifier's own current output was "stable" — see docs investigation for
+        # the exact reproduction. Falls back to the coordinator.data snapshot only when no
+        # classification has run yet (e.g. right after restart), matching the fallback
+        # pattern already used for _ca_target_heat/_ca_target_cool just below.
+        trend_direction_display = data.get(ATTR_TREND, "unknown")
         trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
 
         # Issue #402: ca_target_heat/cool must reflect the sleep band during the sleep
@@ -175,6 +235,10 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             else:
                 _ca_target_heat = coordinator.config.get("comfort_heat")
                 _ca_target_cool = coordinator.config.get("comfort_cool")
+
+        if classification is not None:
+            trend_direction_display = classification.trend_direction
+            trend_magnitude_display = round(convert_delta(classification.trend_magnitude, unit), 1)
 
         # Issue #402 follow-up: surface the WHF fan's actual on/off cycling band so the
         # Natural Vent status card can show it instead of a single static midpoint number
@@ -221,7 +285,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         _status_payload = {
             "version": VERSION,
             "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
-            "trend_direction": data.get(ATTR_TREND, "unknown"),
+            "trend_direction": trend_direction_display,
             "trend_magnitude": trend_magnitude_display,
             "hvac_mode": hvac_mode,
             ATTR_HVAC_ACTION: data.get(ATTR_HVAC_ACTION, ""),
@@ -580,6 +644,8 @@ class ClimateAdvisorConfigView(HomeAssistantView):
             transform = meta.get("display_transform")
             if transform == "seconds_to_minutes" and isinstance(value, (int, float)):
                 value = value // 60
+            elif transform == "temp_source_label" and isinstance(value, str):
+                value = _TEMP_SOURCE_LABELS.get(value, value)
 
             settings.append(
                 {

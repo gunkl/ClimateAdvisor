@@ -21,6 +21,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# voluptuous may resolve to ha_stubs.py's MagicMock stub in environments where the
+# real package isn't installed (e.g. CI's requirements_test.txt intentionally omits
+# it — see test_security_validation.py's identical HAS_VOLUPTUOUS gate). A MagicMock's
+# default __iter__ yields nothing, so any assertion that inspects a real vol.Schema's
+# internal .schema dict must skip rather than false-fail against the stub.
+try:
+    import voluptuous as _vol_check
+
+    HAS_VOLUPTUOUS = not isinstance(_vol_check, MagicMock) and hasattr(_vol_check, "Schema")
+except ImportError:
+    HAS_VOLUPTUOUS = False
+
 # ---------------------------------------------------------------------------
 # Helpers shared across all test classes
 # ---------------------------------------------------------------------------
@@ -2917,6 +2929,7 @@ class TestZoneNamingDefaultSuggestion:
 class TestZoneNamingScheduleStep:
     """async_step_schedule() — zone_name field rendering and title assignment."""
 
+    @pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")
     def test_form_includes_zone_name_field_with_suggested_default(self):
         hass = _make_zone_naming_hass({"climate.bedroom_thermostat": "Bedroom Thermostat"})
         flow = _make_real_config_flow(hass, {"climate_entity": "climate.bedroom_thermostat"})

@@ -23,6 +23,7 @@ if "homeassistant" not in sys.modules:
 
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
+    CONF_BRIEFING_NOTIFICATIONS_ENABLED,
     CONF_FAN_MODE,
     DAY_TYPE_COLD,
     DAY_TYPE_HOT,
@@ -828,6 +829,229 @@ class TestBriefingNotificationSplit:
 
         assert coord._last_briefing_short  # non-empty string
         assert len(coord._last_briefing_short) < len(coord._last_briefing)
+
+
+class TestBriefingSameCycleReuse:
+    """Issue #817 Part 2: _async_send_briefing() reuses a fresh same-cycle classification
+    instead of independently re-fetching forecast + re-running classify_day() — the source
+    of two back-to-back weather.get_forecasts calls returning different today_high within
+    under a second."""
+
+    def _make_stub(self, *, fetched_at, config_overrides=None):
+        coord = TestBriefingNotificationSplit()._make_coordinator_stub(config_overrides)
+        coord._current_classification = _make_classification()
+        coord._classification_fetched_at = fetched_at
+        coord.update_interval = datetime.timedelta(minutes=30)
+        return coord
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_fresh_classification_skips_forecast_refetch(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """Within the update-interval window, no new forecast/classify_day call happens."""
+        now = datetime.datetime.now()
+        coord = self._make_stub(fetched_at=now - datetime.timedelta(minutes=5))
+        coord._last_outdoor_temp = 65.0
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
+            asyncio.run(coord._async_send_briefing(now))
+
+        coord._get_forecast.assert_not_called()
+        mock_classify.assert_not_called()
+        # Briefing still generated and sent from the reused classification.
+        assert coord._last_briefing == FULL_BRIEFING
+        calls = coord.hass.services.async_call.call_args_list
+        notify_calls = [c for c in calls if c[0][0] == "notify"]
+        assert len(notify_calls) == 2
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_stale_classification_still_refetches(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """Beyond the update-interval window, the original real-fetch behavior is preserved."""
+        mock_classify.return_value = _make_classification()
+        now = datetime.datetime.now()
+        coord = self._make_stub(fetched_at=now - datetime.timedelta(minutes=45))
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
+            asyncio.run(coord._async_send_briefing(now))
+
+        coord._get_forecast.assert_called_once()
+        mock_classify.assert_called_once()
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_no_prior_classification_refetches(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """Cold start (no classification yet) always does a real fetch, never reuses."""
+        mock_classify.return_value = _make_classification()
+        coord = TestBriefingNotificationSplit()._make_coordinator_stub()
+        coord.update_interval = datetime.timedelta(minutes=30)
+        assert coord._current_classification is None
+
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        coord._get_forecast.assert_called_once()
+        mock_classify.assert_called_once()
+
+
+class TestBriefingNotificationGating:
+    """Issue #817 Part 3/4: per-zone notification mute + Regenerate's notify=False."""
+
+    def _make_stub(self, *, config_overrides=None):
+        coord = TestBriefingNotificationSplit()._make_coordinator_stub(config_overrides)
+        return coord
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_scheduled_trigger_respects_mute(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """The scheduled (respect_notification_mute=True) trigger sends nothing when muted."""
+        mock_classify.return_value = _make_classification()
+        coord = self._make_stub(config_overrides={CONF_BRIEFING_NOTIFICATIONS_ENABLED: False})
+
+        asyncio.run(coord._async_send_briefing(MagicMock(), respect_notification_mute=True))
+
+        coord.hass.services.async_call.assert_not_called()
+        # Text is still generated/cached even though notifications were skipped.
+        assert coord._last_briefing == FULL_BRIEFING
+        assert coord._briefing_sent_today is True
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_manual_send_ignores_mute(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """A manual call (respect_notification_mute default False) always sends, even muted."""
+        mock_classify.return_value = _make_classification()
+        coord = self._make_stub(config_overrides={CONF_BRIEFING_NOTIFICATIONS_ENABLED: False})
+
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        calls = coord.hass.services.async_call.call_args_list
+        notify_calls = [c for c in calls if c[0][0] == "notify"]
+        assert len(notify_calls) == 2
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_scheduled_trigger_sends_when_not_muted(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """The notifying zone's scheduled trigger still sends normally."""
+        mock_classify.return_value = _make_classification()
+        coord = self._make_stub(config_overrides={CONF_BRIEFING_NOTIFICATIONS_ENABLED: True})
+
+        asyncio.run(coord._async_send_briefing(MagicMock(), respect_notification_mute=True))
+
+        calls = coord.hass.services.async_call.call_args_list
+        notify_calls = [c for c in calls if c[0][0] == "notify"]
+        assert len(notify_calls) == 2
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_send_notifications_false_generates_text_no_notify(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """Regenerate (send_notifications=False) refreshes text but sends nothing."""
+        mock_classify.return_value = _make_classification()
+        coord = self._make_stub()
+
+        asyncio.run(coord._async_send_briefing(MagicMock(), send_notifications=False))
+
+        coord.hass.services.async_call.assert_not_called()
+        assert coord._last_briefing == FULL_BRIEFING
+        assert coord._briefing_sent_today is True
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_send_notifications_true_still_sends(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """Send Briefing (default send_notifications=True) sends normally."""
+        mock_classify.return_value = _make_classification()
+        coord = self._make_stub()
+
+        asyncio.run(coord._async_send_briefing(MagicMock(), send_notifications=True))
+
+        calls = coord.hass.services.async_call.call_args_list
+        notify_calls = [c for c in calls if c[0][0] == "notify"]
+        assert len(notify_calls) == 2
 
 
 # ---------------------------------------------------------------------------

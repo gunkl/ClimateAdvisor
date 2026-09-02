@@ -551,7 +551,7 @@
   <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <h2 style="margin-bottom:0">Today's Strategy</h2>
-      <button class="btn secondary" style="padding:5px 12px;font-size:0.75rem" onclick="doAction('send_briefing')">Regenerate</button>
+      <button class="btn secondary" style="padding:5px 12px;font-size:0.75rem" onclick="doAction('send_briefing', {notify: false})" title="Refreshes the plan shown here — does not send a push/email notification">Regenerate</button>
     </div>
     <div id="briefing-loading" class="loading">Loading...</div>
     <div id="briefing-text" class="briefing-text" style="display:none"></div>
@@ -2298,12 +2298,12 @@
   window.shiftChartWindow = shiftChartWindow;
 
   // --- Debug tab ---
-  window.doAction = async function(action) {
+  window.doAction = async function(action, body) {
     const el = document.getElementById('action-result');
     el.className = 'action-result';
     el.style.display = 'none';
     try {
-      const data = await apiPost(action);
+      const data = await apiPost(action, body);
       el.textContent = data.message || 'Done';
       el.className = 'action-result show ok';
       el.style.display = '';

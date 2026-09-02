@@ -323,6 +323,7 @@ class TestWindowsOpenedTracking:
         """Sensor opens but _current_classification is None — no AttributeError raised."""
         coord = _make_coordinator_stub(sensor_open=True, classification=None)
         coord._current_classification = None
+        coord._classification_fetched_at = None
         coord._today_record.windows_opened = False
 
         # Should complete without raising and NOT set windows_opened
@@ -492,6 +493,7 @@ class TestDailyRecordBriefingPreservation:
         coord._briefing_sent_today = False
         coord._automation_enabled = False  # exits early after DailyRecord creation
         coord._current_classification = None
+        coord._classification_fetched_at = None
         coord._occupancy_mode = "home"
         coord._last_predicted_indoor = []
         coord._last_briefing = ""
@@ -567,6 +569,7 @@ class TestDailyRecordBriefingPreservation:
         coord._briefing_sent_today = False
         coord._automation_enabled = False
         coord._current_classification = None
+        coord._classification_fetched_at = None
         coord._occupancy_mode = "home"
         coord._last_predicted_indoor = []
         coord._last_briefing = ""

@@ -13,6 +13,7 @@ EXPECTED_KEYS = {
     "setback_heat",
     "setback_cool",
     "notify_service",
+    "briefing_notifications_enabled",
     "push_briefing",
     "push_door_window_pause",
     "push_occupancy_home",

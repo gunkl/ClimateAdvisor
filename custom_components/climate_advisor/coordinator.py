@@ -86,6 +86,7 @@ from .const import (
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_BRIEFING_NOTIFICATIONS_ENABLED,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
     CONF_FAN_REMOTE_ENTITY,
@@ -561,6 +562,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # State
         self._current_classification: DayClassification | None = None
+        # Issue #817 Part 2: when self._current_classification was last (re)computed from a
+        # real forecast fetch — lets _async_send_briefing() reuse a same-cycle classification
+        # instead of independently re-fetching/re-classifying, which was the source of two
+        # back-to-back weather.get_forecasts calls returning different today_high within under
+        # a second. Not set on state-restore (_async_restore_state) — a restored classification
+        # is intentionally treated as not fresh, so the first briefing after a restart still
+        # does a real fetch.
+        self._classification_fetched_at: datetime | None = None
         self._today_record: DailyRecord | None = None
         self._briefing_sent_today = False
         self._last_briefing: str = ""
@@ -947,7 +956,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.append(
             async_track_time_change(
                 self.hass,
-                self._async_send_briefing,
+                self._async_send_briefing_scheduled,
                 hour=briefing_time.hour,
                 minute=briefing_time.minute,
                 second=0,
@@ -2315,6 +2324,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
             }
             self._current_classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
+            self._classification_fetched_at = dt_util.now()
             # Issue #602: ensure today's DailyRecord exists on this already-resilient,
             # every-30-min classification path — not only the once-daily briefing_time
             # trigger, which has no retry and previously left setpoint-override detection
@@ -3503,7 +3513,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._today_record.forecast_high_f = classification.today_high
             self._today_record.forecast_low_f = classification.today_low
 
-    async def _async_send_briefing(self, now: datetime) -> None:
+    async def _async_send_briefing(
+        self,
+        now: datetime,
+        *,
+        send_notifications: bool = True,
+        respect_notification_mute: bool = False,
+    ) -> None:
         """Generate and send the daily briefing.
 
         Issue #812: the entire body runs inside ``log_capture.zone_scope()``
@@ -3511,29 +3527,68 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         coordinator's zone in the log_capture ring buffer. Purely additive —
         no change to control flow, return value, or exception propagation
         below.
+
+        Issue #817 Part 3/4 — two independent gates, shared by every caller (one
+        pipeline, not a forked copy per caller):
+
+        - ``send_notifications``: when False, briefing text is generated/cached exactly as
+          normal but zero ``notify.*`` service calls are made. Used by the dashboard's
+          Regenerate button — the user is already looking at the screen, so a real push/email
+          is unnecessary. Default True (every other caller: the debug tab's Send Briefing
+          button, and — see below — the scheduled daily trigger).
+        - ``respect_notification_mute``: when True, notifications are further gated by this
+          zone's own ``CONF_BRIEFING_NOTIFICATIONS_ENABLED`` config (see
+          ``zone_registry.default_briefing_notifications_enabled`` and the v19->v20 migration)
+          — on a multi-zone install, only the designated zone sends. Default False, so a
+          manual button press always means what it says regardless of this zone's mute state
+          (deliberate — a manual "Send Briefing" from the debug tab on a muted zone is a real
+          test action, not the unattended daily spam this mute exists to prevent). Only the
+          scheduled ``briefing_time`` trigger (``_async_send_briefing_scheduled`` below) passes
+          True.
         """
         with log_capture.zone_scope(self.zone_label):
             if self._briefing_sent_today:
                 return
 
-            forecast = await self._get_forecast()
-            self._hourly_forecast_temps = await self._get_hourly_forecast_data()
-            if not forecast:
-                return
+            # Issue #817 Part 2: reuse the current cycle's classification instead of
+            # independently re-fetching forecast + re-running classify_day() when it's
+            # fresh enough — this was the source of two back-to-back weather.get_forecasts
+            # calls returning different today_high within under a second. "Fresh enough"
+            # mirrors this coordinator's own update cadence (self.update_interval, 30 min):
+            # anything computed within the current cycle window is the same data the regular
+            # _async_update_data_impl() cycle already fetched and applied.
+            _fetched_at = self._classification_fetched_at
+            _reuse_classification = (
+                self._current_classification is not None
+                and _fetched_at is not None
+                and (dt_util.now() - _fetched_at) < self.update_interval
+            )
+            if _reuse_classification:
+                classification = self._current_classification
+                _LOGGER.debug(
+                    "Briefing reusing same-cycle classification (fetched %s ago) — skipping forecast re-fetch",
+                    dt_util.now() - _fetched_at,
+                )
+            else:
+                forecast = await self._get_forecast()
+                self._hourly_forecast_temps = await self._get_hourly_forecast_data()
+                if not forecast:
+                    return
 
-            prev_type = self._current_classification.day_type if self._current_classification else None
-            _thresh = {
-                "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
-                "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
-                "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
-                "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
-            }
-            classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
-            self._current_classification = classification
-            # Issue #511: also mirrors to automation_engine now (previously this call
-            # site didn't — a minor pre-existing gap closed as a side effect of the
-            # single-function consolidation).
-            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=False)
+                prev_type = self._current_classification.day_type if self._current_classification else None
+                _thresh = {
+                    "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
+                    "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
+                    "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
+                    "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
+                }
+                classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
+                self._current_classification = classification
+                self._classification_fetched_at = dt_util.now()
+                # Issue #511: also mirrors to automation_engine now (previously this call
+                # site didn't — a minor pre-existing gap closed as a side effect of the
+                # single-function consolidation).
+                self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=False)
 
             # Daily incremental solar phase re-fit (Issue #310/#312)
             if self.config.get("learning_enabled", True):
@@ -3543,7 +3598,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self.config.get("learning_enabled", True):
                 thermal_model = self.learning.get_thermal_model(
                     learning_health=self._build_learning_health(),
-                    outdoor_temp_f=forecast.current_outdoor_temp,
+                    # self._last_outdoor_temp: same reading forecast.current_outdoor_temp
+                    # would give this cycle — set by _apply_outdoor_temp() above on a real
+                    # fetch, or by the regular update cycle moments earlier when reusing.
+                    outdoor_temp_f=self._last_outdoor_temp,
                     solar_factor=_solar_factor(now.hour),
                 )
                 self.automation_engine._thermal_model = thermal_model
@@ -3625,26 +3683,50 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 await self._async_save_state()
                 return
 
-            # Send push notification — short TLDR summary
-            _notify_svc = self.config["notify_service"]
-            _notify_name = _notify_svc.split(".")[-1] if "." in _notify_svc else _notify_svc
-            if self.config.get("push_briefing", True):
-                await self.hass.services.async_call(
-                    "notify",
-                    _notify_name,
-                    {"message": self._last_briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
+            # Issue #817 Part 3/4: combine this call's own request (send_notifications — False
+            # for Regenerate) with the zone-mute gate (only checked when the caller opts in via
+            # respect_notification_mute — the scheduled trigger only). One boolean, computed
+            # once, applied uniformly to both the push and email blocks below.
+            _zone_muted = respect_notification_mute and not self.config.get(CONF_BRIEFING_NOTIFICATIONS_ENABLED, True)
+            _should_notify = send_notifications and not _zone_muted
+            if not _should_notify:
+                _LOGGER.info(
+                    "Briefing generated but notification skipped (%s)",
+                    "zone not the designated notifier" if _zone_muted else "notify=False (regenerate)",
                 )
-            # Send email — full briefing
-            if self.config.get("email_briefing", True):
-                await self.hass.services.async_call(
-                    "notify",
-                    "send_email",
-                    {"message": self._last_briefing, "title": "🏠 Your Home Climate Plan for Today"},
-                )
+            else:
+                # Send push notification — short TLDR summary
+                _notify_svc = self.config["notify_service"]
+                _notify_name = _notify_svc.split(".")[-1] if "." in _notify_svc else _notify_svc
+                if self.config.get("push_briefing", True):
+                    await self.hass.services.async_call(
+                        "notify",
+                        _notify_name,
+                        {"message": self._last_briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
+                    )
+                # Send email — full briefing
+                if self.config.get("email_briefing", True):
+                    await self.hass.services.async_call(
+                        "notify",
+                        "send_email",
+                        {"message": self._last_briefing, "title": "🏠 Your Home Climate Plan for Today"},
+                    )
+                _LOGGER.info("Daily briefing sent — day type: %s", classification.day_type)
 
             self._briefing_sent_today = True
-            _LOGGER.info("Daily briefing sent — day type: %s", classification.day_type)
             await self._async_save_state()
+
+    async def _async_send_briefing_scheduled(self, now: datetime) -> None:
+        """Scheduled ``briefing_time`` trigger — the one call site that respects this zone's mute.
+
+        Issue #817 Part 3: registered with ``async_track_time_change`` instead of
+        ``_async_send_briefing`` directly, so the automatic daily trigger (the actual source of
+        cross-zone notification spam) is the only caller that opts into
+        ``respect_notification_mute=True``. Manual invocations (both dashboard buttons, via
+        ``api.py``) call ``_async_send_briefing`` directly and never set this — see that
+        method's docstring for why.
+        """
+        await self._async_send_briefing(now, respect_notification_mute=True)
 
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""

@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.6"
+VERSION = "0.7.7"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -116,6 +116,13 @@ CONF_EMAIL_GRACE_EXPIRED = "email_grace_expired"
 CONF_EMAIL_GRACE_REPAUSE = "email_grace_repause"
 CONF_EMAIL_OCCUPANCY_HOME = "email_occupancy_home"
 CONF_EMAIL_ENTITY_HEALTH = "email_entity_health"  # Issue #805
+
+# Issue #817 Part 3: on a multi-zone install, only one zone should send the scheduled daily
+# briefing push/email — otherwise the same person gets one copy per zone. Gates only the
+# automatic/scheduled briefing_time trigger (push_briefing/email_briefing above still control
+# whether that one notifying zone sends push vs. email vs. both); manual "Send Briefing" from
+# the debug tab always sends regardless of this flag (deliberate manual test action).
+CONF_BRIEFING_NOTIFICATIONS_ENABLED = "briefing_notifications_enabled"
 
 # Startup coalescing window: suppress override detection for this many seconds after restart
 STARTUP_COALESCE_SECONDS: int = 300  # 5 minutes (Issue #321)
@@ -792,6 +799,18 @@ CONFIG_METADATA = {
             " classified as Cool; below is Cold. Default: 45°F / 7°C."
         ),
         "category": "advanced",
+    },
+    "briefing_notifications_enabled": {
+        "label": "Send Daily Briefing Notifications (This Zone)",
+        "description": (
+            "On a multi-zone install, only one zone should send the scheduled daily briefing"
+            " push/email — otherwise you get one copy per zone. Turn this ON for exactly one"
+            " zone. Manually clicking Send Briefing on the debug tab always sends, even when"
+            " this is off."
+        ),
+        "category": "notifications",
+        "sensitive": False,
+        "default": True,
     },
     "push_briefing": {
         "label": "Push: Daily Briefing",

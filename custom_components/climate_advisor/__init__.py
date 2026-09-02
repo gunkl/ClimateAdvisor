@@ -41,6 +41,7 @@ from .const import (
     CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_BRIEFING_NOTIFICATIONS_ENABLED,
     CONF_DEFAULT_TOU_LEAD_MINUTES,
     CONF_EMAIL_BRIEFING,
     CONF_EMAIL_DOOR_WINDOW_PAUSE,
@@ -419,6 +420,29 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=19, unique_id=new_unique_id)
         _LOGGER.info("Migration to version 19 complete")
+
+    if config_entry.version == 19:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 19 to 20")
+        # Issue #817 Part 3: on a multi-zone install, every zone independently sending its own
+        # briefing push/email spams the same person with one copy per zone. Backfill the new
+        # per-zone gate so exactly one already-configured zone defaults to notifying — the
+        # stably-first one, via the same helper config_flow.py uses for a brand-new zone
+        # (zone_registry.default_briefing_notifications_enabled — DRY, one implementation of
+        # "pick the stably-first zone" for both callers). Single-zone installs keep sending
+        # (unchanged behavior, matching every prior migration's preserve-current-behavior
+        # precedent); multi-zone installs get True on the stably-first zone, False on the rest.
+        new_data = {**config_entry.data}
+        new_data.setdefault(
+            CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+            zone_registry.default_briefing_notifications_enabled(hass, config_entry.entry_id),
+        )
+        # unique_id explicitly forwarded unchanged (not omitted) — this migration has nothing
+        # to do with zone identity, only notification defaults; passing it through avoids any
+        # ambiguity about whether an omitted kwarg here could reset it.
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=20, unique_id=config_entry.unique_id
+        )
+        _LOGGER.info("Migration to version 20 complete")
 
     return True
 

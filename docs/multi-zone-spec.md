@@ -137,6 +137,7 @@ influence each other thermally is sketched and explicitly deferred — see
 | What changes for a user, in plain terms? | A before/after table across eight areas, each tied to the design choice behind it. | [Outcomes: Before and After](#outcomes-before-and-after) |
 | What's still open now that every step is built? | PR3's spike, real-HA verification of PR9, a known test-harness gap, and pre-existing citation debt — none blocking, all tracked in one place. (`apiFetchStream`'s zone-scoping was closed during Verification, no longer open.) | [Open Questions](#open-questions-carried-forward-out-of-this-build) |
 | Were all zone-context gaps caught by the original nine-gap review? | No — Issue #812's audit found four more (dashboard first-load, Repairs `entries[0]`, zero log attribution, non-deterministic registry fallback order), all fixed. `api.py`'s own logging remains unscoped (flagged, not fixed). | [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit) |
+| Does every zone send its own copy of the daily briefing notification? | It used to — Issue #817 Part 3/4 added a per-zone mute (`CONF_BRIEFING_NOTIFICATIONS_ENABLED`), defaulting only the stably-first zone to notifying, plus made the dashboard's Regenerate button stop force-sending a real push/email. | [Gap 10e](#10e--every-zone-independently-sent-its-own-daily-briefing-notification-issue-817-part-34) |
 
 ## Scope
 
@@ -1251,6 +1252,59 @@ and
 — both scramble `hass.data[DOMAIN]`'s dict-insertion order first, proving the
 result is order-independent, the same distinction this document's own Gap 4
 fallback test already proved once for the happy-path branch.
+
+##### 10e — every zone independently sent its own daily briefing notification (Issue #817 Part 3/4)
+
+**What:** `_async_send_briefing()` unconditionally sends push+email whenever
+`push_briefing`/`email_briefing` are true, with zero awareness of sibling
+zones. Correctly, from a zone-isolation lens, each zone computes its own
+correct daily plan — but from a notification-count lens, N correctly-computed
+zones means N pushes/emails to the same person for what reads as the same
+kind of message ("your plan for the day"). #812's audit explicitly evaluated
+briefing generation from the first lens ("NOT broken") — no one had yet
+evaluated it from the second.
+
+Separately, the dashboard's Regenerate button and the debug tab's Send
+Briefing button both called the exact same code path, so a user refreshing
+what's on their own screen (already looking at it) forced a real push/email
+identical to the debug tab's deliberate manual test send — no distinction
+between the two existed at the API layer.
+
+**Occupant-facing consequence:** on any multi-zone install, the person
+receiving briefing notifications got one copy per zone every morning, and
+clicking Regenerate on the dashboard silently re-sent a real notification
+they didn't ask for.
+
+**Fix:**
+- `const.py`: new `CONF_BRIEFING_NOTIFICATIONS_ENABLED`
+  (`briefing_notifications_enabled`), category `"notifications"`, default
+  `True`.
+- `zone_registry.py`: new `default_briefing_notifications_enabled(hass,
+  entry_id=None)` — the stably-first zone (same `async_entries(DOMAIN)`
+  order as `get_default_coordinator()`/10d above) defaults to `True`; every
+  other zone defaults to `False`. Shared by both the v19→v20 migration
+  (`__init__.py`) and `config_flow.py`'s first-run default for a brand-new
+  zone — one implementation of "pick the stably-first zone," not two that
+  could silently diverge.
+- `coordinator.py`: `_async_send_briefing()` gains `send_notifications` and
+  `respect_notification_mute` parameters. Only the scheduled `briefing_time`
+  trigger (via the new `_async_send_briefing_scheduled()` wrapper, registered
+  with `async_track_time_change` in place of the bare method) passes
+  `respect_notification_mute=True` — both dashboard buttons call
+  `_async_send_briefing()` directly and never set it, so a manual send always
+  means what it says regardless of a zone's mute state. Regenerate passes
+  `send_notifications=False`; the debug tab's Send Briefing button leaves it
+  at the default `True`.
+- `api.py`: `ClimateAdvisorSendBriefingView.post()` reads an optional
+  `{"notify": bool}` JSON body (default `True`, so a caller sending no body —
+  the debug button — is unaffected).
+- `frontend/index.html`: the Regenerate button now posts `{notify: false}`.
+
+**Test coverage:** `tests/test_coordinator.py`
+(`TestBriefingSameCycleReuse`, `TestBriefingNotificationGating`),
+`tests/test_api_send_briefing.py`, `tests/test_config_flow.py`
+(`TestMigrationV19ToV20`, the new notifications-step toggle tests in
+`TestNotificationsStep`).
 
 ##### Known residual gap — `api.py` itself is not zone-scoped in logging
 

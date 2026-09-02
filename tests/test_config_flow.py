@@ -60,6 +60,13 @@ def _make_hass() -> MagicMock:
     hass = MagicMock()
     # Track the call so we can inspect what was written
     hass.config_entries.async_update_entry = MagicMock()
+    # Issue #817 Part 3: the v19->v20 migration step calls
+    # zone_registry.default_briefing_notifications_enabled(), which calls
+    # hass.config_entries.async_entries(DOMAIN) and does len(...) on the result — a bare
+    # MagicMock() return value has no __len__ and raises TypeError. Default to no other
+    # entries (this entry is the only/first zone); tests that need siblings already override
+    # this explicitly (see TestMigrationV18ToV19).
+    hass.config_entries.async_entries.return_value = []
     return hass
 
 
@@ -1180,7 +1187,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 19
+        assert entry.version == 20
 
     def test_chain_from_v1_includes_temp_unit(self):
         """v1 entry chains through all migrations and ends up with temp_unit."""
@@ -1212,7 +1219,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 19
+        assert entry.version == 20
 
 
 # ---------------------------------------------------------------------------
@@ -1273,7 +1280,7 @@ class TestMigrationV9ToV10:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
-        assert entry.version == 19
+        assert entry.version == 20
 
     def test_chain_from_v1_includes_debounce(self):
         """v1 entry chains through all migrations and ends up with welcome_home_debounce_seconds."""
@@ -1305,7 +1312,7 @@ class TestMigrationV9ToV10:
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 19
+        assert entry.version == 20
 
 
 class TestMigrationV10ToV11:
@@ -1361,7 +1368,7 @@ class TestMigrationV10ToV11:
         assert final_data.get("adaptive_preheat_enabled") is True
         assert final_data.get("adaptive_setback_enabled") is True
         assert final_data.get("weather_bias_enabled") is True
-        assert entry.version == 19
+        assert entry.version == 20
 
 
 class TestMigrationV11ToV12:
@@ -1389,7 +1396,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 120
         assert final_data.get("preheat_safety_margin") == 1.3
         assert final_data.get("max_setback_depth_f") == 8.0
-        assert entry.version == 19
+        assert entry.version == 20
 
     def test_v11_to_v12_existing_values_preserved(self):
         """v11 entry with all threshold keys set retains those values after migration."""
@@ -1421,7 +1428,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 90
         assert final_data.get("preheat_safety_margin") == 1.5
         assert final_data.get("max_setback_depth_f") == 6.0
-        assert entry.version == 19
+        assert entry.version == 20
 
     def test_v11_to_v12_invalid_type_replaced(self):
         """v11 entry where min_preheat_minutes is a non-numeric string gets the default."""
@@ -1442,7 +1449,7 @@ class TestMigrationV11ToV12:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("min_preheat_minutes") == 30
-        assert entry.version == 19
+        assert entry.version == 20
 
     def test_v11_to_v12_from_v10_chain(self):
         """v10 entry chains through v11 and v12 migrations; all five threshold keys get defaults."""
@@ -1461,7 +1468,7 @@ class TestMigrationV11ToV12:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 19
+        assert entry.version == 20
         assert final_data.get("min_preheat_minutes") == 30
         assert final_data.get("max_preheat_minutes") == 240
         assert final_data.get("default_preheat_minutes") == 120
@@ -1563,7 +1570,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 19
+        assert entry.version == 20
         assert final_data.get("ai_enabled") is DEFAULT_AI_ENABLED
         assert final_data.get("ai_api_key") == ""
         assert final_data.get("ai_model") == DEFAULT_AI_MODEL
@@ -1591,7 +1598,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 19
+        assert entry.version == 20
         assert final_data.get("ai_enabled") is False
         assert final_data.get("ai_model") == "claude-sonnet-5"
         assert final_data.get("ai_max_tokens") == 4096
@@ -1649,16 +1656,22 @@ class TestMigrationV13ToV14:
         assert result.get("ai_investigator_requests_per_day") == DEFAULT_AI_INVESTIGATOR_RPD
 
     def test_v13_to_v14_adds_exactly_five_investigator_keys_plus_sleep_keys(self):
-        """Migration v13→v18 adds the five investigator keys, two sleep keys, four
-        threshold keys, and (Issue #797) default_tou_lead_minutes."""
+        """Migration v13→v20 adds the five investigator keys, two sleep keys, four
+        threshold keys, (Issue #797) default_tou_lead_minutes, and (Issue #817 Part 3)
+        briefing_notifications_enabled."""
         result = self._run_v13_to_v14_migration(dict(FULL_CONFIG))
         new_keys = set(result) - set(FULL_CONFIG)
         # v13→v14 adds 5 investigator keys; v14→v15 adds sleep_heat + sleep_cool;
         # v15→v16 adds threshold_hot/warm/mild/cool; v16→v17 adds no new keys (fan_mode
-        # coercion only); v17→v18 adds default_tou_lead_minutes (Issue #797)
+        # coercion only); v17→v18 adds default_tou_lead_minutes (Issue #797); v18→v19 adds
+        # no new keys (unique_id backfill only, not a data key); v19→v20 adds
+        # briefing_notifications_enabled (Issue #817 Part 3)
         _threshold_keys = {"threshold_hot", "threshold_warm", "threshold_mild", "threshold_cool"}
         assert new_keys == (
-            set(_INVESTIGATOR_KEYS) | {"sleep_heat", "sleep_cool"} | _threshold_keys | {"default_tou_lead_minutes"}
+            set(_INVESTIGATOR_KEYS)
+            | {"sleep_heat", "sleep_cool"}
+            | _threshold_keys
+            | {"default_tou_lead_minutes", "briefing_notifications_enabled"}
         )
 
     def test_v13_to_v14_preserves_existing_fields(self):
@@ -1697,7 +1710,7 @@ class TestMigrationV13ToV14:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 19
+        assert entry.version == 20
         assert final_data.get("ai_investigator_enabled") is DEFAULT_AI_INVESTIGATOR_ENABLED
         assert final_data.get("ai_investigator_model") == DEFAULT_AI_INVESTIGATOR_MODEL
         assert final_data.get("ai_investigator_reasoning_effort") == DEFAULT_AI_INVESTIGATOR_REASONING
@@ -1868,7 +1881,7 @@ class TestMigrationV14ToV15:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert final_version[0] == 19
+        assert final_version[0] == 20
 
 
 # ---------------------------------------------------------------------------
@@ -1918,7 +1931,7 @@ class TestMigrationV16ToV17:
 
         assert result is True
         assert entry.data["fan_mode"] == FAN_MODE_WHOLE_HOUSE
-        assert entry.version == 19
+        assert entry.version == 20
 
     def test_non_both_fan_mode_is_preserved(self):
         """fan_mode values other than 'both' are left unchanged."""
@@ -1982,7 +1995,7 @@ class TestMigrationV17ToV18:
 
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 19
+        assert entry.version == 20
 
 
 class TestMigrationV18ToV19:
@@ -2021,7 +2034,7 @@ class TestMigrationV18ToV19:
 
         assert result is True
         assert captured["unique_id"] == "climate.living_room"
-        assert captured["version"] == 19
+        assert captured["version"] == 20
         assert entry.unique_id == "climate.living_room"
 
     def test_v18_to_v19_preserves_existing_unique_id(self):
@@ -2088,6 +2101,90 @@ class TestMigrationV18ToV19:
         result = _run_config_flow_user_step([entry], dict(TestConfigFlowDuplicateZoneGuard.USER_INPUT))
         assert result["type"] == "abort"
         assert result["reason"] == "already_configured"
+
+
+class TestMigrationV19ToV20:
+    """Issue #817 Part 3: v19->v20 backfills the per-zone briefing-notification gate.
+
+    On a multi-zone install, only the stably-first zone (by
+    hass.config_entries.async_entries(DOMAIN) order) should default to True — every other
+    already-configured zone defaults to False, closing the cross-zone notification-spam gap.
+    """
+
+    def _run_migration(self, hass, entry):
+        from custom_components.climate_advisor import async_migrate_entry
+
+        return asyncio.run(async_migrate_entry(hass, entry))
+
+    def _capture(self, hass):
+        captured: dict = {}
+
+        def capture_update(entry, *, data, version, unique_id=None):
+            captured["data"] = data
+            captured["version"] = version
+            entry.data = dict(data)
+            entry.version = version
+            entry.unique_id = unique_id
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        return captured
+
+    def test_single_zone_defaults_to_true(self):
+        """A single-zone install keeps sending — unchanged behavior."""
+        entry = _make_config_entry(dict(FULL_CONFIG), version=19, unique_id="climate.living_room")
+        entry.entry_id = "only_entry"
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = [entry]
+        captured = self._capture(hass)
+
+        result = self._run_migration(hass, entry)
+
+        assert result is True
+        assert captured["version"] == 20
+        assert captured["data"]["briefing_notifications_enabled"] is True
+
+    def test_multi_zone_only_stably_first_defaults_true(self):
+        """Of two existing zones, only the stably-first (async_entries order) gets True."""
+        first = _make_config_entry(dict(FULL_CONFIG), version=19, unique_id="climate.a")
+        first.entry_id = "entry_a"
+        second = _make_config_entry(dict(FULL_CONFIG), version=19, unique_id="climate.b")
+        second.entry_id = "entry_b"
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = [first, second]
+        captured = self._capture(hass)
+
+        self._run_migration(hass, second)
+        assert captured["data"]["briefing_notifications_enabled"] is False
+
+        self._run_migration(hass, first)
+        assert captured["data"]["briefing_notifications_enabled"] is True
+
+    def test_existing_value_preserved(self):
+        """setdefault semantics — an already-set value (e.g. from a prior partial migration
+        or manual edit) is never overwritten."""
+        data = dict(FULL_CONFIG)
+        data["briefing_notifications_enabled"] = False
+        entry = _make_config_entry(data, version=19, unique_id="climate.living_room")
+        entry.entry_id = "only_entry"
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = [entry]
+        captured = self._capture(hass)
+
+        self._run_migration(hass, entry)
+
+        assert captured["data"]["briefing_notifications_enabled"] is False
+
+    def test_unique_id_forwarded_unchanged(self):
+        """The v19->v20 step has nothing to do with zone identity — unique_id must survive."""
+        entry = _make_config_entry(dict(FULL_CONFIG), version=19, unique_id="climate.living_room")
+        entry.entry_id = "only_entry"
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = [entry]
+        self._capture(hass)
+
+        self._run_migration(hass, entry)
+
+        assert entry.unique_id == "climate.living_room"
 
 
 class TestFanModeOptionsNoBoth:
@@ -2254,6 +2351,43 @@ class TestNotificationsStep:
         )
         assert data["push_entity_health"] is False
         assert data["email_entity_health"] is False
+
+    @pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")
+    def test_briefing_notifications_field_defaults_true_when_only_zone(self):
+        """Issue #817 Part 3: sole zone defaults to notifying when the key isn't set yet."""
+        from custom_components.climate_advisor.const import CONF_BRIEFING_NOTIFICATIONS_ENABLED
+
+        flow, _ = _make_options_flow(dict(FULL_CONFIG))
+        flow.hass.config_entries.async_entries.return_value = []
+
+        result = asyncio.run(flow.async_step_notifications(None))
+
+        schema_keys = {str(k): k for k in result["data_schema"].schema}
+        assert schema_keys[CONF_BRIEFING_NOTIFICATIONS_ENABLED].default() is True
+
+    @pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")
+    def test_briefing_notifications_field_respects_stored_value(self):
+        """An already-configured value wins over the stably-first-zone default."""
+        from custom_components.climate_advisor.const import CONF_BRIEFING_NOTIFICATIONS_ENABLED
+
+        entry_data = {**FULL_CONFIG, CONF_BRIEFING_NOTIFICATIONS_ENABLED: False}
+        flow, _ = _make_options_flow(entry_data)
+        flow.hass.config_entries.async_entries.return_value = []
+
+        result = asyncio.run(flow.async_step_notifications(None))
+
+        schema_keys = {str(k): k for k in result["data_schema"].schema}
+        assert schema_keys[CONF_BRIEFING_NOTIFICATIONS_ENABLED].default() is False
+
+    def test_briefing_notifications_toggle_saves_to_updates(self):
+        """Submitted value persists through the REAL step handler."""
+        from custom_components.climate_advisor.const import CONF_BRIEFING_NOTIFICATIONS_ENABLED
+
+        data = _run_options_flow(
+            dict(FULL_CONFIG),
+            [("async_step_notifications", {CONF_BRIEFING_NOTIFICATIONS_ENABLED: False})],
+        )
+        assert data[CONF_BRIEFING_NOTIFICATIONS_ENABLED] is False
 
 
 # ---------------------------------------------------------------------------

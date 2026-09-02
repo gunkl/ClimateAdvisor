@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.7] — 2026-09-02
+
+- Fix #817: on a multi-zone install, only one zone now sends the scheduled daily briefing push/email (pick which one in Settings > Notifications) instead of every zone sending its own separate copy of the same plan. The dashboard's Regenerate button refreshes what's on screen without sending a real notification — only the debug tab's Send Briefing button does that. The briefing's forecast and day classification no longer drift from an independent second fetch moments after the regular update cycle already ran.
+- Closed #809 (dev-only mock thermostat + synthetic weather integrations, merged in v0.7.1 but never auto-closed), #633 and #639 (Block 5 FSM epic phases — merged and since fully graduated to production by #757).
+
 ## [0.7.6] — 2026-09-02
 
 - Fix #817: the Status report's window/AC timing (Today's Strategy table, Next Automation card, and Next User Action card) was computed independently in three separate places and could disagree with itself — e.g. Next User Action still showing an old close time after the forecast changed. All three now read the exact same computed value, so they can no longer contradict each other, and the door/window pause behavior around window-close time now uses that same corrected time too.

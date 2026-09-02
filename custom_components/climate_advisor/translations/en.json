@@ -302,6 +302,7 @@
         "title": "Notification Preferences",
         "description": "Choose which notifications you receive and on which channels. Push notifications go to your mobile app; email notifications go via the send_email service.",
         "data": {
+          "briefing_notifications_enabled": "Send daily briefing notifications (this zone)",
           "push_briefing": "Push: Daily briefing summary",
           "push_door_window_pause": "Push: HVAC paused (door/window open)",
           "push_occupancy_home": "Push: Welcome home",
@@ -316,6 +317,7 @@
           "email_entity_health": "Email: Entity not found"
         },
         "data_description": {
+          "briefing_notifications_enabled": "On a multi-zone install, only one zone should send the scheduled daily briefing push/email — otherwise you get one copy per zone. Turn this ON for exactly one zone. Manually clicking Send Briefing on the debug tab always sends, even when this is off.",
           "push_briefing": "Send a short TLDR briefing to your phone each morning.",
           "push_door_window_pause": "Send a push notification when HVAC is paused because a door or window has been open too long.",
           "push_occupancy_home": "Send a push notification when someone arrives home and comfort temperature is restored.",

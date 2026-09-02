@@ -523,11 +523,25 @@ class ClimateAdvisorSendBriefingView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
+        # Issue #817 Part 4: optional {"notify": bool} body, default True — backward
+        # compatible with the debug tab's "Send Briefing" button, which sends no body and
+        # must keep always sending a real push/email. The dashboard's "Regenerate" button
+        # sends {"notify": false} — the user is already looking at the screen, so a real
+        # notification is unnecessary. Either way this is a manual invocation, so it never
+        # sets respect_notification_mute — see _async_send_briefing()'s docstring.
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        notify = bool(body.get("notify", True)) if isinstance(body, dict) else True
+
         coordinator._briefing_sent_today = False
         from homeassistant.util import dt as dt_util
 
-        await coordinator._async_send_briefing(dt_util.now())
-        return self.json({"status": "ok", "message": "Briefing sent"})
+        await coordinator._async_send_briefing(dt_util.now(), send_notifications=notify)
+        return self.json(
+            {"status": "ok", "message": "Briefing sent" if notify else "Briefing regenerated (no notification)"}
+        )
 
 
 class ClimateAdvisorRespondSuggestionView(HomeAssistantView):

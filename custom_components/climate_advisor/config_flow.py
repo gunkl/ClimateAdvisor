@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
+from . import zone_registry
 from .const import (
     AI_MODELS,
     AI_REASONING_OPTIONS,
@@ -31,6 +32,7 @@ from .const import (
     CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_BRIEFING_NOTIFICATIONS_ENABLED,
     CONF_EMAIL_BRIEFING,
     CONF_EMAIL_DOOR_WINDOW_PAUSE,
     CONF_EMAIL_ENTITY_HEALTH,
@@ -240,7 +242,7 @@ def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, fl
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 19
+    VERSION = 20
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -597,6 +599,16 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if not errors:
                 self._data.update(user_input)
+                # Issue #817 Part 3: default a brand-new zone to notifying only when it will
+                # be the first zone configured (zone_registry.default_briefing_notifications_
+                # enabled with entry_id=None) — otherwise a freshly-added 2nd/3rd zone would
+                # default to True at read-time (self.config.get(..., True)) and reintroduce the
+                # exact cross-zone spam this feature exists to prevent, not just for migrated
+                # installs but for every new zone added from here on.
+                self._data.setdefault(
+                    CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+                    zone_registry.default_briefing_notifications_enabled(self.hass),
+                )
                 _LOGGER.info(
                     "Config entry created — zone=%s, wake=%s, sleep=%s, briefing=%s",
                     zone_name,
@@ -1334,6 +1346,17 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             step_id="notifications",
             data_schema=vol.Schema(
                 {
+                    # Issue #817 Part 3: on a multi-zone install, only one zone should send
+                    # the scheduled daily briefing — this gate gets its own row above the
+                    # per-event toggles below since it controls whether THIS zone's scheduled
+                    # trigger sends at all, not which content type it sends.
+                    vol.Optional(
+                        CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+                        default=current.get(
+                            CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+                            zone_registry.default_briefing_notifications_enabled(self.hass, self.config_entry.entry_id),
+                        ),
+                    ): selector.BooleanSelector(),
                     # Push notification toggles
                     vol.Optional(
                         CONF_PUSH_BRIEFING,

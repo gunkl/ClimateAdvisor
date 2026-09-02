@@ -132,6 +132,33 @@ def list_zones(hass: HomeAssistant) -> list[dict[str, str]]:
     ]
 
 
+def default_briefing_notifications_enabled(hass: HomeAssistant, entry_id: str | None = None) -> bool:
+    """Whether a zone should default to being the one that sends daily briefing notifications.
+
+    Issue #817 Part 3: on a multi-zone install, every zone independently sending its own
+    briefing push/email spams the same person with one copy per zone. True only for the
+    stably-first zone (or when this would be the only zone), via
+    ``hass.config_entries.async_entries(DOMAIN)``'s stable order — the same precedent already
+    used by ``get_default_coordinator()``/``list_zones()`` above and ``repairs.py:38,77``, never
+    dict/``hass.data`` iteration order, which is not guaranteed stable across restarts.
+
+    One function shared by two callers that must agree (the DRY point for this feature, not two
+    independent "pick the stably-first zone" implementations that could silently diverge):
+    - ``__init__.py``'s v19->v20 migration, where ``entry_id`` is the config entry being
+      migrated and every sibling entry is already registered in
+      ``hass.config_entries.async_entries()``.
+    - ``config_flow.py``'s first-run default for a brand-new zone being added, where
+      ``entry_id`` is ``None`` (the entry doesn't exist yet) — ``True`` only when no zone is
+      configured yet, i.e. this will be the first.
+    """
+    existing = hass.config_entries.async_entries(DOMAIN)
+    if entry_id is None:
+        return len(existing) == 0
+    if not existing:
+        return True
+    return existing[0].entry_id == entry_id
+
+
 def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | None:
     """Single-zone convenience path.
 

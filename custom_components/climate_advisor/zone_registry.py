@@ -33,6 +33,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
 from .const import DOMAIN
 
@@ -62,7 +63,7 @@ _LOGGER = logging.getLogger(__name__)
 _WARNED_STATE_KEY = "climate_advisor_zone_registry_warned"
 
 
-def _warn_once(hass: HomeAssistant, token: str, message: str, *args: object) -> None:
+def _warn_once(hass: HomeAssistant, token: str, message: str, *args: object) -> bool:
     """Log a WARNING at most once per distinct `token` for this hass instance.
 
     Re-logs when `token` differs from the last-logged token (a new/changed
@@ -71,12 +72,19 @@ def _warn_once(hass: HomeAssistant, token: str, message: str, *args: object) -> 
     (not a module-level global or a time-based rate limiter) is the storage
     mechanism — no live-clock dependency, and no cross-instance/cross-test
     state leakage.
+
+    Returns True when this call actually logged (a new/changed outcome),
+    False when suppressed as a repeat — Issue #813 uses this to raise the
+    zone_resolution_ambiguous Repairs issue in lockstep with the log line,
+    instead of unconditionally at zone setup regardless of whether ambiguity
+    was ever actually hit.
     """
     state = hass.data.setdefault(_WARNED_STATE_KEY, {})
     if state.get("token") == token:
-        return
+        return False
     state["token"] = token
     _LOGGER.warning(message, *args)
+    return True
 
 
 def reset_warning_state(hass: HomeAssistant) -> None:
@@ -176,14 +184,31 @@ def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | 
     for entry in ordered_entries:
         coordinator = entries.get(entry.entry_id)
         if coordinator is not None:
-            _warn_once(
+            if _warn_once(
                 hass,
                 f"ambiguous:{entry.entry_id}",
                 "Multiple Climate Advisor zones are loaded and this request did not "
                 "specify a zone — defaulting to zone entry_id=%s. Pass an explicit "
                 "entry_id to target a specific zone. See Settings > Repairs for details.",
                 entry.entry_id,
-            )
+            ):
+                # Issue #813: raised here — at the moment an ambiguous
+                # fallback is actually taken — instead of unconditionally at
+                # zone setup (the old __init__.py behavior, which showed this
+                # card on every multi-zone install regardless of whether
+                # anything ever actually hit this fallback). is_fixable=False:
+                # nothing to configure, purely informational. Cleared by
+                # __init__.py's async_unload_entry() once zone count drops to
+                # <= 1, same as before.
+                ir.async_create_issue(
+                    hass,
+                    DOMAIN,
+                    "zone_resolution_ambiguous",
+                    is_fixable=False,
+                    is_persistent=True,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="zone_resolution_ambiguous",
+                )
             return coordinator
 
     # Every ordered entry is unloaded/missing from hass.data — fall back to a

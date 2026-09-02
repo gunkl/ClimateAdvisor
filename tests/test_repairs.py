@@ -312,15 +312,40 @@ def _zone_resolution_ambiguous_calls(mock_create_or_delete) -> list:
 
 
 class TestZoneResolutionAmbiguousIssue:
-    """Issue #796: ambiguous-zone-selection Repairs issue lifecycle."""
+    """Issue #796/#813: ambiguous-zone-selection Repairs issue lifecycle.
 
-    def test_raised_when_second_zone_is_set_up(self):
+    Issue #813: this used to be raised unconditionally at zone setup, purely
+    because 2+ zones were loaded — regardless of whether anything had ever
+    actually hit the ambiguous fallback. That meant the Repairs card never
+    went away on a multi-zone install even after #812's dashboard/API fixes
+    closed off the practical guessing paths, which is exactly the "still
+    seeing the ambiguous zone error" regression the user reported. It is now
+    raised from inside zone_registry.get_default_coordinator() itself, at the
+    moment it actually resolves an ambiguous fallback — same throttle token
+    as its WARNING log line."""
+
+    def test_not_raised_merely_by_setting_up_second_zone(self):
+        """Setting up a second zone alone must NOT raise the issue — only an
+        actual ambiguous resolution should. This is the #820 regression check:
+        the old behavior raised this unconditionally right here."""
         from tools.sim_harness.build_coordinator import build_headless_multi_zone
 
-        with patch("custom_components.climate_advisor.ir.async_create_issue") as mock_create:
+        with patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create:
             zones, _fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
 
         assert len(zones) == 2
+        assert _zone_resolution_ambiguous_calls(mock_create) == []
+
+    def test_raised_when_ambiguous_fallback_is_actually_taken(self):
+        from custom_components.climate_advisor import zone_registry
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        with patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create:
+            coordinator = zone_registry.get_default_coordinator(fake_hass)
+
+        assert coordinator is not None
         calls = _zone_resolution_ambiguous_calls(mock_create)
         assert len(calls) == 1, f"expected exactly one zone_resolution_ambiguous raise, got {calls}"
         # is_fixable=False, WARNING severity — informational only, nothing to configure.
@@ -331,13 +356,32 @@ class TestZoneResolutionAmbiguousIssue:
         assert kwargs["severity"] == ir.IssueSeverity.WARNING
 
     def test_not_raised_for_single_zone(self):
+        from custom_components.climate_advisor import zone_registry
         from tools.sim_harness.build_coordinator import build_headless_multi_zone
 
-        with patch("custom_components.climate_advisor.ir.async_create_issue") as mock_create:
-            zones, _fake_hass, _scheduler = build_headless_multi_zone(zone_count=1)
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=1)
+
+        with patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create:
+            coordinator = zone_registry.get_default_coordinator(fake_hass)
 
         assert len(zones) == 1
+        assert coordinator is not None
         assert _zone_resolution_ambiguous_calls(mock_create) == []
+
+    def test_not_raised_twice_for_same_outcome(self):
+        """Repeated calls resolving to the SAME fallback zone must not re-raise
+        the issue — matches the WARNING log line's throttle (same token)."""
+        from custom_components.climate_advisor import zone_registry
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        with patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create:
+            zone_registry.get_default_coordinator(fake_hass)
+            zone_registry.get_default_coordinator(fake_hass)
+            zone_registry.get_default_coordinator(fake_hass)
+
+        assert len(_zone_resolution_ambiguous_calls(mock_create)) == 1
 
     def test_cleared_when_unloaded_back_to_one_zone(self):
         from custom_components.climate_advisor import async_unload_entry

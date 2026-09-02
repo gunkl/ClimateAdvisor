@@ -1055,9 +1055,34 @@
   }
 
   // --- Status tab ---
-  async function loadStatus(_isZoneSelfHealRetry) {
+  // _retryDepth: two independent self-corrections can each need their own
+  // retry — a stale stored entry_id (503, caught below) and Issue #813's
+  // zone_selection_required bootstrap response (caught above) — and a stale
+  // entry_id can legitimately trigger BOTH in sequence (503 -> clear
+  // selection -> retry unscoped -> backend says zone_selection_required
+  // since it's multi-zone -> pick a zone -> retry once more, now scoped). A
+  // single boolean flag can't guard two independent chained corrections
+  // without one of them silently swallowing the final real fetch, so this
+  // counts attempts instead and gives up after MAX_STATUS_RETRIES rather
+  // than looping forever on a genuinely broken backend.
+  const MAX_STATUS_RETRIES = 3;
+
+  async function loadStatus(_retryDepth) {
+    const depth = _retryDepth || 0;
     try {
       const data = await apiFetch('status');
+      // Issue #813: on a genuine first-ever visit (no stored zone), the
+      // backend now refuses to guess a zone for this bootstrap call — it
+      // returns zone_selection_required + the zone list instead of full
+      // status data. renderZoneSelector() picks zones[0] deterministically
+      // and persists it (same logic as any other stale/missing selection),
+      // then this call is retried — now with an explicit entry_id, so it
+      // comes back with the real status payload.
+      if (data.zone_selection_required) {
+        renderZoneSelector(data.zones, data.zone_count);
+        if (depth < MAX_STATUS_RETRIES) return loadStatus(depth + 1);
+        return;
+      }
       renderZoneSelector(data.zones, data.zone_count);
       const unitSym = data.unit === 'celsius' ? '°C' : '°F';
       const grid = document.getElementById('status-grid');
@@ -1208,7 +1233,7 @@
       // today's single-zone behavior). Guarded to retry at most once so a
       // genuine "Climate Advisor not loaded at all" 503 still surfaces as a
       // real error instead of looping forever.
-      if (!_isZoneSelfHealRetry && _selectedEntryId && e.message === 'HTTP 503') {
+      if (depth < MAX_STATUS_RETRIES && _selectedEntryId && e.message === 'HTTP 503') {
         _selectedEntryId = null;
         _storeSelectedZone(null);
         // The other 7 loadAll() calls fired in parallel with the same stale
@@ -1217,7 +1242,7 @@
         // next poll cycle (60s), or longer for loadChart (5min poll) /
         // loadSettings & loadAIData (next tab click).
         _loadNonStatus();
-        return loadStatus(true);
+        return loadStatus(depth + 1);
       }
       document.getElementById('status-loading').textContent = 'Failed to load status: ' + e.message;
     }

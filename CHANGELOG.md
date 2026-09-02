@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.3] — 2026-09-01
+
+- Fix #813: the dashboard no longer guesses which zone to show on a brand-new browser or device's first visit to a multi-zone install, and the "Ambiguous zone selection" Repairs card no longer shows permanently on every multi-zone install — it only appears if an actual ambiguous zone resolution ever occurs.
+
 ## [0.7.2] — 2026-09-01
 
 - Fix #812: the dashboard, weather/reload repair prompts, and AI Investigator reports now always act on the zone you're actually looking at instead of sometimes silently guessing which zone — and the dashboard no longer gets stuck if a saved zone selection becomes stale.

@@ -115,6 +115,64 @@ class TestZoneCountAndListThreeZones:
         assert [z["title"] for z in body["zones"]] == ["Zone A", "Zone B", "Zone C"]
 
 
+class TestBootstrapNeverGuesses:
+    """Issue #813: the dashboard's first-ever-visit /status call (no entry_id
+    yet — nothing to send until a zone has been discovered/selected) must
+    never resolve an arbitrary coordinator on a 2+-zone install. Before this
+    fix, that call went through _get_coordinator() -> zone_registry.
+    get_default_coordinator()'s ambiguous fallback, silently picking a zone
+    and only telling the operator via a throttled log line / Repairs card.
+    Now it returns a zone-list-only payload with no coordinator resolved at
+    all, and the frontend re-requests with an explicit entry_id."""
+
+    def test_no_entry_id_multi_zone_returns_zone_selection_required_not_a_guess(self):
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        body = _get_status(fake_hass)
+
+        assert body.get("zone_selection_required") is True
+        assert body["zone_count"] == 2
+        assert {z["entry_id"] for z in body["zones"]} == {
+            zones["zone_0"]["entry"].entry_id,
+            zones["zone_1"]["entry"].entry_id,
+        }
+        # No coordinator-dependent fields present — proves this response never
+        # resolved (guessed) a coordinator.
+        assert "hvac_mode" not in body
+        assert "day_type" not in body
+
+    def test_no_entry_id_multi_zone_never_calls_get_default_coordinator(self):
+        from unittest.mock import patch
+
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        with patch("custom_components.climate_advisor.api.zone_registry.get_default_coordinator") as mock_default:
+            body = _get_status(fake_hass)
+
+        mock_default.assert_not_called()
+        assert body.get("zone_selection_required") is True
+
+    def test_no_entry_id_single_zone_still_resolves_normally(self):
+        """Single-zone installs are unaffected — no zone_selection_required,
+        full status payload, matching today's behavior exactly."""
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=1)
+
+        body = _get_status(fake_hass)
+
+        assert "zone_selection_required" not in body
+        assert body["zone_count"] == 1
+        assert "hvac_mode" in body
+
+    def test_explicit_entry_id_multi_zone_returns_full_status_not_bootstrap(self):
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        body = _get_status(fake_hass, entry_id=zones["zone_1"]["entry"].entry_id)
+
+        assert "zone_selection_required" not in body
+        assert body["zone_count"] == 2
+        assert "hvac_mode" in body
+
+
 class TestZoneCountAfterTeardown:
     def test_zone_count_drops_after_one_of_three_unloads(self):
         from tools.sim_harness._loop import run_coro

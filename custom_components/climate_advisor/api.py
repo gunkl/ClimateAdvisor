@@ -100,6 +100,42 @@ class ClimateAdvisorStatusView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
+
+        # Issue #813: the dashboard's very first bootstrap call on a fresh
+        # browser/device (no stored zone yet — see index.html's
+        # _hadStoredZoneAtInit) has no entry_id to send, because it's the one
+        # call that exists to DISCOVER what zones there are. Before this,
+        # that call went straight into _get_coordinator() -> (no entry_id) ->
+        # zone_registry.get_default_coordinator(), which — on a 2+-zone
+        # install — silently picked an arbitrary "first" zone and logged the
+        # "ambiguous zone selection" WARNING/Repairs signal. That is a real
+        # guess, not just a loudly-logged one, and it happened on every
+        # single genuine first visit (new browser, new device, cleared site
+        # data) regardless of Issue #812's persistence fix, since persistence
+        # can only help *after* a selection has been made once.
+        #
+        # Fix: resolve "how many zones exist" via zone_registry.list_zones()
+        # — a pure, coordinator-free lookup — BEFORE ever calling
+        # _get_coordinator(). When there's no entry_id AND more than one
+        # zone, return a minimal zone-list-only payload instead of guessing;
+        # the frontend picks a zone from it, persists the choice, and
+        # immediately re-requests this same endpoint with an explicit
+        # entry_id (see index.html's loadStatus()). zone_registry.
+        # get_default_coordinator()'s own arbitrary-pick fallback is
+        # untouched and still exists for defensive/edge-case callers — this
+        # just ensures the dashboard's own bootstrap path never reaches it.
+        if not request.query.get("entry_id"):
+            _bootstrap_zones = zone_registry.list_zones(hass)
+            if len(_bootstrap_zones) > 1:
+                return self.json(
+                    {
+                        "zone_selection_required": True,
+                        "zones": _bootstrap_zones,
+                        "zone_count": len(_bootstrap_zones),
+                        "version": VERSION,
+                    }
+                )
+
         coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)

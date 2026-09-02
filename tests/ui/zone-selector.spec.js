@@ -6,6 +6,18 @@ const { test, expect } = require('@playwright/test');
 // zone, driven by /api/climate_advisor/status's zones/zone_count fields, only
 // when zone_count > 1. Selecting a zone must re-fetch status scoped to that
 // zone's entry_id (verified via the query string on the follow-up request).
+//
+// Issue #813: most tests below mock /status to return the same full-status
+// body regardless of whether entry_id is present. That's a simplification —
+// the REAL backend (api.py::ClimateAdvisorStatusView.get(), Issue #813) now
+// returns a zone-list-only { zone_selection_required: true, ... } body when
+// entry_id is absent AND 2+ zones exist, and only returns full status once
+// entry_id is present. The mocks below are fine for what THEY test (click
+// behavior, persistence, the stale-503 self-heal), since real usage always
+// ends up sending entry_id after the very first exchange either way — but
+// the bootstrap contract itself is covered explicitly by the dedicated
+// describe block at the bottom of this file, which mirrors the real
+// two-step shape instead of collapsing it into one mocked response.
 
 test.describe('Zone selector (Issue #796 PR9)', () => {
 
@@ -274,6 +286,127 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
     // the same stale lookup.
     const stored = await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
     expect(stored).toBe('zone-bedroom');
+  });
+
+  test.describe('Issue #813: real two-step bootstrap contract (no guessing, ever)', () => {
+
+    test('first-ever visit, multi-zone: bootstrap response never carries status data, second request supplies it', async ({ page }) => {
+      const zones = [
+        { entry_id: 'zone-bedroom', title: 'Bedroom' },
+        { entry_id: 'zone-living', title: 'Living Room' },
+      ];
+      let firstCallSeenWithNoEntryId = false;
+
+      await page.route('**/api/climate_advisor/status**', (route) => {
+        const url = new URL(route.request().url());
+        const entryId = url.searchParams.get('entry_id');
+        if (!entryId) {
+          firstCallSeenWithNoEntryId = true;
+          // Mirrors api.py's real bootstrap-only response exactly: no
+          // coordinator-derived field is present at all — proving the
+          // backend never resolved (guessed) a coordinator for this call.
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ zone_selection_required: true, zones, zone_count: 2 }),
+          });
+          return;
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            day_type: 'mild',
+            hvac_mode: 'off',
+            automation_enabled: true,
+            occupancy_mode: 'home',
+            automation_status: 'active',
+            compliance_score: 1.0,
+            zones,
+            zone_count: 2,
+          }),
+        });
+      });
+
+      const scopedStatusRequest = page.waitForRequest((req) =>
+        req.url().includes('/api/climate_advisor/status') && req.url().includes('entry_id=zone-bedroom')
+      );
+      await page.goto('/');
+      await scopedStatusRequest;
+      await page.waitForSelector('#status-grid', { state: 'visible' });
+
+      expect(firstCallSeenWithNoEntryId).toBe(true);
+      const buttons = page.locator('#zone-selector-row .zone-tab-btn');
+      await expect(buttons).toHaveCount(2);
+      await expect(buttons.nth(0)).toHaveClass(/active/);
+      // The status grid must reflect the real (second-request) data, not be
+      // stuck on the bootstrap response's absence of status fields.
+      await expect(page.locator('#status-grid')).toContainText('active');
+      const stored = await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
+      expect(stored).toBe('zone-bedroom');
+    });
+
+    test('stale stored entry_id chains through BOTH the 503 self-heal and the bootstrap requirement to a real result', async ({ page }) => {
+      // Worst realistic case for the shared retry-depth counter: a stale
+      // stored entry_id 503s first (self-heal #1: clear + retry unscoped),
+      // and since the install is still multi-zone, the unscoped retry comes
+      // back zone_selection_required (self-heal #2: pick a zone + retry
+      // scoped) before the third call finally succeeds. Proves the counter
+      // guard doesn't let the first correction swallow the second.
+      const zones = [
+        { entry_id: 'zone-bedroom', title: 'Bedroom' },
+        { entry_id: 'zone-living', title: 'Living Room' },
+      ];
+      await page.route('**/api/climate_advisor/status**', (route) => {
+        const url = new URL(route.request().url());
+        const entryId = url.searchParams.get('entry_id');
+        if (entryId === 'zone-removed') {
+          route.fulfill({
+            status: 503,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'Climate Advisor not loaded' }),
+          });
+          return;
+        }
+        if (!entryId) {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ zone_selection_required: true, zones, zone_count: 2 }),
+          });
+          return;
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            day_type: 'mild',
+            hvac_mode: 'off',
+            automation_enabled: true,
+            occupancy_mode: 'home',
+            automation_status: 'active',
+            compliance_score: 1.0,
+            zones,
+            zone_count: 2,
+          }),
+        });
+      });
+
+      await page.addInitScript(() => {
+        localStorage.setItem('climate_advisor_selected_zone', 'zone-removed');
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#status-grid', { state: 'visible' });
+
+      const buttons = page.locator('#zone-selector-row .zone-tab-btn');
+      await expect(buttons).toHaveCount(2);
+      await expect(buttons.nth(0)).toHaveClass(/active/);
+      await expect(page.locator('#status-grid')).toContainText('active');
+      const stored = await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
+      expect(stored).toBe('zone-bedroom');
+    });
+
   });
 
 });

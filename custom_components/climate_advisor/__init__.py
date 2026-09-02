@@ -548,31 +548,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # Issue #796 Transitional Safety Window: a second zone is already
-    # mechanically possible today via HA's native Add Integration flow, with
-    # no dependency on the dashboard (PR9) becoming zone-aware first. Once
-    # api.py is entry-scoped (Gap 4/PR7), any caller that doesn't send an
-    # entry_id falls back to zone_registry.get_default_coordinator()'s
-    # deterministic-first-entry selection — this Repairs issue is the
-    # persistent, Settings > Repairs-visible half of that signal (the other
-    # half is the WARNING log line get_default_coordinator() itself emits,
-    # throttled to once per distinct resolved outcome rather than once per
-    # call — see zone_registry.py's _warn_once()/_WARNED_STATE_KEY, added as
-    # a Verification fix after the unthrottled version was found to evict
-    # log_capture.py's ring buffer roughly every 40s under dashboard polling).
-    # is_fixable=False: there is nothing to
-    # configure here, it's purely informational — the condition clears on its
-    # own once zone count drops back to one (see async_unload_entry() below).
-    if len(hass.data[DOMAIN]) > 1:
-        ir.async_create_issue(
-            hass,
-            DOMAIN,
-            "zone_resolution_ambiguous",
-            is_fixable=False,
-            is_persistent=True,
-            severity=ir.IssueSeverity.WARNING,
-            translation_key="zone_resolution_ambiguous",
-        )
+    # Issue #813 correction: this used to unconditionally raise
+    # zone_resolution_ambiguous here just because a 2nd zone was loaded, with
+    # a comment claiming it was "the persistent half of the same signal" as
+    # get_default_coordinator()'s WARNING log. That was false — this fired at
+    # every setup regardless of whether get_default_coordinator() had ever
+    # actually been asked to guess. Combined with #812/#820 closing off the
+    # dashboard's own ambiguous-fallback paths, that meant every multi-zone
+    # install permanently showed "Ambiguous zone selection" in Repairs even
+    # when no ambiguity could occur anymore — the user correctly flagged
+    # still seeing this after #812 shipped. The issue is now raised from
+    # inside zone_registry.get_default_coordinator() itself, at the exact
+    # moment (and only when) it actually resolves an ambiguous fallback —
+    # same throttle token as its WARNING log line, so the two stay in
+    # lockstep by construction instead of by two independently-maintained
+    # conditions. See zone_registry.py's get_default_coordinator().
 
     # Set up sensor platform
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

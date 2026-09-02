@@ -62,12 +62,45 @@ def _reconstruct_inputs(self: Any, indoor: float | None, outdoor: float | None) 
     )
 
 
-def _classify_observation(exit_called: bool, deactivate_reason: str | None) -> tuple[Any, str | None]:
-    """Map observed calls to a FanThermostatOutcome. Returns (outcome, error_or_none)."""
+def _classify_observation(
+    exit_called: bool, exit_reason: str | None, deactivate_reason: str | None
+) -> tuple[Any, str | None]:
+    """Map observed calls to a FanThermostatOutcome. Returns (outcome, error_or_none).
+
+    Issue #821 fix: ``exit_called`` alone is NOT sufficient to conclude
+    ``STOP_VIA_NAT_VENT_EXIT`` — Issues #620/#755 (both predate #821) already
+    routed the ``STOP_DEACTIVATE`` and ``STOP_COOLED_TO_FLOOR`` branches of
+    ``fan_thermostat_check()`` through ``_exit_nat_vent()`` too (the same single
+    choke point, for the same sensor-open-pause-vs-restore correctness reasons
+    ``STOP_VIA_NAT_VENT_EXIT`` already needed), so all three outcomes can now
+    call ``_exit_nat_vent()``. This was a latent classification bug — CONFIRMED
+    unrelated to Issue #821's own nat-vent-exit sustain-confirmation change
+    (verified by tracing ``_resolve_fan_fsm_state()``'s own returned
+    ``thermostat_outcome`` directly for the disagreeing golden scenario,
+    2026-03-28-overnight: the real FSM-driven decision was genuinely
+    ``STOP_COOLED_TO_FLOOR``, matching the pure function's prediction exactly —
+    the comparator's ``exit_called``-only heuristic was simply misclassifying
+    it as ``STOP_VIA_NAT_VENT_EXIT``). Issue #821's sustain-confirmation change
+    only shifted which golden scenario/tick happened to exercise this
+    pre-existing gap for the first time; the golden JSON content itself is
+    untouched. Disambiguates the same way ``deactivate_reason`` below already
+    does, using the exact reason-string substrings ``fan_thermostat_check()``
+    passes to ``_exit_nat_vent()`` for each of its three exit branches
+    (automation.py's ``STOP_VIA_NAT_VENT_EXIT``/``STOP_DEACTIVATE``/
+    ``STOP_COOLED_TO_FLOOR`` handlers).
+    """
     from custom_components.climate_advisor.fan_thermostat_decision import FanThermostatOutcome  # noqa: PLC0415
 
     if exit_called:
-        return FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT, None
+        if exit_reason is None:
+            return None, "_exit_nat_vent called with no reason= kwarg — cannot disambiguate outcome"
+        if "airflow reversed" in exit_reason:
+            return FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT, None
+        if "free cooling gone" in exit_reason:
+            return FanThermostatOutcome.STOP_DEACTIVATE, None
+        if "cooled to floor" in exit_reason:
+            return FanThermostatOutcome.STOP_COOLED_TO_FLOOR, None
+        return None, f"_exit_nat_vent called with unrecognized reason: {exit_reason!r}"
     if deactivate_reason is not None:
         if "manual override to" in deactivate_reason:
             return FanThermostatOutcome.STOP_MANUAL_OVERRIDE_CONFLICT, None
@@ -140,10 +173,11 @@ def _instrumented_fan_thermostat_check(run: FanThermostatComparisonRun, scenario
         # (nat-vent-outdoor-rises-above-indoor-exit, warm_day_ceiling_breach_ac_defense).
         pre_inputs = _reconstruct_inputs(self, indoor, outdoor) if ca_fan_active and not fan_override_active else None
 
-        observed = {"exit_called": False, "deactivate_reason": None}
+        observed = {"exit_called": False, "exit_reason": None, "deactivate_reason": None}
 
         async def _tracking_exit(self2: Any, *a: Any, **kw: Any) -> Any:
             observed["exit_called"] = True
+            observed["exit_reason"] = kw.get("reason") or (a[0] if a else None)
             return await original_exit(self2, *a, **kw)
 
         async def _tracking_deactivate(self2: Any, *a: Any, **kw: Any) -> Any:
@@ -160,7 +194,9 @@ def _instrumented_fan_thermostat_check(run: FanThermostatComparisonRun, scenario
             return  # matches the real function's own early-return no-op; nothing to compare
 
         try:
-            real_outcome, obs_error = _classify_observation(observed["exit_called"], observed["deactivate_reason"])
+            real_outcome, obs_error = _classify_observation(
+                observed["exit_called"], observed["exit_reason"], observed["deactivate_reason"]
+            )
             if obs_error:
                 run.errors.append(f"{scenario_name}: {obs_error}")
                 return

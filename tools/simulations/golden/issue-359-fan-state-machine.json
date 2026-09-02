@@ -58,7 +58,13 @@
       "time": "2026-06-28T08:11:00",
       "type": "nat_vent_temperature_check",
       "indoor_f": 70.0,
-      "note": "Indoor cooled to comfort_heat floor=70°F. Nat-vent comfort-floor exit fires: session ends, fan deactivated, HVAC may resume per classification (hvac_mode=off means no HVAC restore)."
+      "note": "Indoor cooled to comfort_heat floor=70°F. The COMFORT_FLOOR exit candidate arms via decide_nat_vent_exit() but is NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s) — session still active this tick."
+    },
+    {
+      "time": "2026-06-28T08:12:35",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 70.0,
+      "note": "95s after indoor first reached the floor (> 90s NAT_VENT_EXIT_SUSTAIN_S) — indoor still at the floor. Comfort-floor exit sustain-confirms and commits: session ends, fan deactivated, HVAC may resume per classification (hvac_mode=off means no HVAC restore)."
     }
   ],
   "assertions": [
@@ -68,9 +74,9 @@
       "reason": "Sensor opened with outdoor=57°F < indoor=71°F (14°F differential exceeds hysteresis); outdoor=57°F < threshold=78°F; indoor=71°F > comfort_heat=70°F. All three nat-vent conditions met — engine activates nat-vent and turns on HVAC fan. Issue #359 validates this adoption path works after the on_fan_turned_off() refactor."
     },
     {
-      "at": "2026-06-28T08:11:00",
+      "at": "2026-06-28T08:12:35",
       "expect": "nat_vent_comfort_floor_exit",
-      "reason": "nat_vent_temperature_check called with indoor=70°F = comfort_heat floor. Comfort-floor exit fires: _natural_vent_active cleared, fan deactivated, grace period started. Occupant: free cooling ran ~32 min bringing home from 71°F to 70°F at zero energy cost."
+      "reason": "nat_vent_temperature_check called with indoor=70°F = comfort_heat floor, sustained for 95s (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s). Comfort-floor exit fires: _natural_vent_active cleared, fan deactivated, grace period started. Occupant: free cooling ran ~33 min bringing home from 71°F to 70°F at zero energy cost."
     }
   ],
   "verdict": {

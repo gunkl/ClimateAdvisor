@@ -144,8 +144,8 @@
     "issue": 229
   },
   "away_natvent_exits_at_comfort_ceiling": {
-    "sha256": "13b11561e98b75b2bc3733acd28911cb2ce1faf4c186a78b1a934d4452a8967a",
-    "signed": "2026-06-10",
+    "sha256": "4fe9c92913a5d397e8321fbc4421836d16df9af52a6425e41c7939ed5d53dad3",
+    "signed": "2026-09-02",
     "issue": 231
   },
   "mild_day_planned_window_no_pause": {
@@ -229,13 +229,13 @@
     "issue": 277
   },
   "window_close_stops_whole_house_fan": {
-    "sha256": "de37d3a7db22a37e04f430abfaf73974b5964d02724df7a0a4ce37219481089b",
-    "signed": "2026-06-13",
+    "sha256": "2ee77b7860f481e5759f488308fd2bb22f08358ccd8cad3b92dedebbd2a4914a",
+    "signed": "2026-09-02",
     "issue": 277
   },
   "nat_vent_thermostat_cycling": {
-    "sha256": "80e32b07cbb768c35901f94b3ce416e150f6b039e43319db20e295b54737650c",
-    "signed": "2026-06-15",
+    "sha256": "6b03ef1260df81f63592d620ea5cc83aa7a52bea5761b78d1c89a12b518114f6",
+    "signed": "2026-09-02",
     "issue": 321
   },
   "warming_trend_pre_cool_applied": {
@@ -319,8 +319,8 @@
     "issue": 229
   },
   "issue-359-fan-state-machine": {
-    "sha256": "3d16b68b3008476ffe02d35a9fd955103a6cb2fccd04a341362be0aef3cc2c8d",
-    "signed": "2026-07-12",
+    "sha256": "2c456304ab8289c20a91b68f8811d48c6b292cd5542760305d3dbb259b98b2a9",
+    "signed": "2026-09-02",
     "issue": 359
   },
   "issue-392-natvent-ceiling-oscillation": {
@@ -399,8 +399,8 @@
     "issue": 637
   },
   "issue_637_paused_during_grace_nat_vent_exit": {
-    "sha256": "f5230d28191b77e554719d33b3fbfa9587741a9cfafc9ad17b0f06ac71208d85",
-    "signed": "2026-08-14",
+    "sha256": "7399c938fd7bbe2299acd4f8539025b29385722355848126b493c6327e391cb7",
+    "signed": "2026-09-02",
     "issue": 637
   },
   "override_second_override_during_grace": {

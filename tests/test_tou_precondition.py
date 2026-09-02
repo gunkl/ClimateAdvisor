@@ -383,3 +383,79 @@ class TestApplyTouPrecondition:
         incident_events = [e for e in events if e[0] == "incident_detected"]
         assert len(incident_events) == 1
         assert incident_events[0][1]["incident_class"] == "setpoint_mode_inconsistency"
+
+
+class TestTouPreconditionResolverBypass:
+    """Issue #821 Verification BLOCKING #3: the comfort-family resolver
+    (_resolve_comfort_family_mode()) must NEVER override TOU pre-conditioning's own
+    explicit target/mode decision. TOU's target_override is deliberately a cool-mode
+    banking target at or below comfort_heat, written with
+    skip_setpoint_sanity_check=True — the exact safety check that would normally catch
+    a heat-mode command at a below-floor setpoint is turned off for this call site. If
+    the resolver were consulted here, indoor sitting below comfort_heat (independent of
+    TOU's own target value) could make it escalate to "heat" and command heat at TOU's
+    below-floor cool target, with no safety net catching it.
+
+    These tests construct exactly that trap: indoor genuinely below comfort_heat, AND
+    the fallback candidate pre-armed as already sustain-confirmed (so if the resolver
+    were consulted, it WOULD escalate) — proving the fix by showing "cool" is still
+    commanded regardless.
+    """
+
+    def _engine_with_sustained_fallback_candidate(self, *, indoor_temp: float, comfort_heat: float) -> AutomationEngine:
+        """Indoor below comfort_heat, with the resolver's fallback candidate pre-armed
+        as already sustained — if _set_temperature_for_mode() consulted the resolver
+        for this call, it would immediately escalate to "heat"."""
+        from datetime import datetime, timedelta
+
+        engine = _make_engine(indoor_temp=indoor_temp, comfort_heat=comfort_heat, comfort_cool=76.0)
+        _now = datetime(2026, 1, 1, 12, 0, 0)
+        engine._comfort_floor_fallback_since = _now - timedelta(hours=1)
+        return engine
+
+    def test_target_override_bypasses_resolver_even_when_escalation_would_fire(self):
+        """The trap: indoor (60F) is well below comfort_heat (68F), and the resolver's
+        fallback candidate is pre-armed as already-sustained. Without the BLOCKING #3
+        fix, _set_temperature_for_mode() would consult the resolver and escalate to
+        "heat", commanding heat at TOU's own below-floor cool target (64F) — exactly
+        the bug Verification found. With the fix, target_override bypasses the
+        resolver entirely and "cool" is commanded, matching classification.hvac_mode."""
+        engine = self._engine_with_sustained_fallback_candidate(indoor_temp=60.0, comfort_heat=68.0)
+        classification = _make_cool_day_classification()
+
+        asyncio.run(engine.apply_tou_precondition(classification, target=64.0, schedule_id="s_bypass"))
+
+        calls = engine.hass.services.async_call.call_args_list
+        temp_calls = [c for c in calls if c.args[1] == "set_temperature"]
+        assert len(temp_calls) == 1, f"expected exactly one set_temperature call, got {temp_calls}"
+        payload = temp_calls[0].args[2]
+        assert payload["hvac_mode"] == "cool", (
+            "BLOCKING #3: TOU's target_override must bypass the family resolver — got "
+            f"hvac_mode={payload['hvac_mode']!r} instead of the expected 'cool'"
+        )
+        assert payload["temperature"] == 64.0
+
+    def test_resolver_still_governs_non_tou_callers_in_the_same_state(self):
+        """Companion negative check: the SAME below-floor + sustained-candidate state
+        DOES escalate a caller with no target_override (e.g. the nat-vent floor-exit
+        restore, resume_from_pause(), etc.) — proving the bypass in the test above is
+        specific to target_override, not a blanket regression of Issue #821's own fix."""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        engine = self._engine_with_sustained_fallback_candidate(indoor_temp=60.0, comfort_heat=68.0)
+        classification = _make_cool_day_classification()
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 1, 1, 13, 0, 0),
+        ):
+            asyncio.run(engine._set_temperature_for_mode(classification, reason="no override — should escalate"))
+
+        calls = engine.hass.services.async_call.call_args_list
+        temp_calls = [c for c in calls if c.args[1] == "set_temperature"]
+        assert len(temp_calls) == 1
+        assert temp_calls[0].args[2]["hvac_mode"] == "heat", (
+            "sanity check: without target_override, the resolver should still escalate "
+            "in this exact below-floor + sustained-candidate state"
+        )

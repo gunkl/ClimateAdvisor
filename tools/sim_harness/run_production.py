@@ -1020,6 +1020,7 @@ def _snapshot_engine_state(engine: Any) -> dict[str, Any]:
         "_last_outdoor_temp",  # Issue #633
         "_outdoor_temp_today_peak",  # Issue #633
         "_outdoor_temp_today_sample_count",  # Issue #633
+        "_comfort_mode_family",  # Issue #821 — "heating"/"cooling"/None
     ):
         snap[attr] = getattr(engine, attr, None)
 

@@ -24,10 +24,13 @@ from .const import (
     CEILING_BRIDGE_TOLERANCE_F,
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
+    COMFORT_FALLBACK_CONFIRM_S,
+    COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
@@ -71,6 +74,7 @@ from .const import (
     GRACE_TRIGGERS_PROTECTING_OVERRIDE,
     HOT_DAY_PRE_COOL_MODIFIER,
     MIN_VIABLE_NAT_VENT_HOURS,
+    NAT_VENT_EXIT_SUSTAIN_S,
     NAT_VENT_HYSTERESIS_F,
     NAT_VENT_REACTIVATION_LOCKOUT_S,
     OCCUPANCY_AWAY,
@@ -109,6 +113,8 @@ from .classification_fsm import (
     ClassificationFsmInputs,
 )
 from .classification_fsm import transition as _classification_fsm_transition
+from .confirmed_transition import is_confirmed as _is_transition_confirmed
+from .confirmed_transition import resolve_candidate_since as _resolve_candidate_since
 from .door_window_lifecycle import (
     DoorWindowLifecycleInputs,
     DoorWindowLifecycleState,
@@ -145,6 +151,7 @@ from .lifecycle_dispatcher import LifecycleDispatcher
 from .lifecycle_events import LifecycleEvent, LifecycleEventType
 from .nat_vent_cycling import NatVentCyclingInputs, compute_nat_vent_target, decide_nat_vent_cycling
 from .nat_vent_exit import (
+    NatVentExitDecision,
     NatVentExitInputs,
     NatVentExitReason,
     decide_nat_vent_exit,
@@ -172,6 +179,11 @@ from .occupancy_fsm import (
     decide_home_dispatch,
 )
 from .ode_ceiling_guard import OdeCeilingGuardOutcome
+from .ode_floor_guard import (
+    OdeFloorGuardInputs,
+    OdeFloorGuardOutcome,
+    decide_ode_floor_guard,
+)
 from .override_grace_lifecycle import (
     GraceState,
     OverrideConfirmState,
@@ -632,6 +644,10 @@ class AutomationEngine:
         # self._nat_vent_plan by apply_classification() — see
         # _is_within_planned_window_period()'s docstring.
         self._nat_vent_cutoff: datetime | None = None
+        # Issue #821: comfort-floor crossing mirrored from the coordinator's
+        # self._nat_vent_plan["comfort_floor_crossing_time"] — see
+        # _resolve_comfort_family_mode()'s docstring.
+        self._comfort_floor_crossing_time: datetime | None = None
         self._paused_by_door = False
         self._pre_pause_mode: str | None = None
         # Issue #523: distinguishes "_paused_by_door=True with HVAC already off" (nothing
@@ -806,6 +822,54 @@ class AutomationEngine:
         # Timestamp of last outdoor-warm exit (outdoor ≥ indoor → pause).
         # Used for hysteresis lockout. Not serialized — resets on HA restart (acceptable for 5-min window).
         self._nat_vent_outdoor_exit_time: datetime | None = None
+
+        # Issue #821: sustain-confirmation state for decide_nat_vent_exit()'s 5
+        # non-manual-override exit reasons — shared between both call sites
+        # (check_natural_vent_conditions()'s slow loop and nat_vent_temperature_check()'s
+        # fast loop), since both are deciding the same underlying "should this session
+        # exit" question, just at different cadences. See confirmed_transition.py and
+        # _confirm_nat_vent_exit() below. Not persisted across restarts (matches
+        # _nat_vent_outdoor_exit_time's precedent) — reset whenever a fresh nat-vent
+        # session activates (see the two _natural_vent_active = True sites) so stale
+        # state from a prior session can never be mistaken for sustained confirmation
+        # in a new one.
+        self._nat_vent_exit_candidate_reason: NatVentExitReason | None = None
+        self._nat_vent_exit_candidate_since: datetime | None = None
+
+        # Issue #821 (comfort-floor defense): which HVAC "family" is currently active —
+        # "heating" or "cooling" (AC actively cooling OR WHF/nat-vent active are both
+        # members of the cooling family; only heat is the heating family). Armed
+        # whenever CA commands heat, commands active cool, or nat-vent/WHF
+        # activates/deactivates — see _arm_comfort_family(). Not persisted across
+        # restarts — a fresh process has no flapping history to guard against, same as
+        # _nat_vent_outdoor_exit_time.
+        self._comfort_mode_family: str | None = None
+        self._comfort_mode_family_entry_time: datetime | None = None
+        # Same-tick guard (folded in from Issue #699's own finding): so a family
+        # switch that already committed earlier cannot be immediately reversed by a
+        # second evaluation shortly after, even though elapsed wall-clock time alone
+        # might read as ~0s in that case.
+        #
+        # Reset scope, precisely (do not assume "this tick" means literally one
+        # coordinator cycle): only reset at the top of apply_classification() — the
+        # resolver's own primary call graph — NOT at the top of every method that can
+        # call _arm_comfort_family() (nat-vent activate/deactivate, _exit_nat_vent(),
+        # the away-ceiling exit branches, etc., several of which run outside
+        # apply_classification() entirely, e.g. from check_natural_vent_conditions()
+        # or handle_door_window_open()). A family change committed from one of those
+        # other paths therefore latches this flag until the NEXT apply_classification()
+        # call — up to ~30 minutes on the normal coordinator cadence — not "this tick"
+        # in the narrow sense the name suggests. This errs safe (over-blocks a
+        # same-cycle re-switch attempt rather than under-blocking one), so it was left
+        # as-is rather than threaded through every _arm_comfort_family() call site
+        # during Issue #821's Verification pass — but treat "changed_this_tick" as
+        # "changed since the last classification cycle" when reasoning about it, not
+        # literally "this tick".
+        self._comfort_mode_family_changed_this_tick: bool = False
+        # Sustain-confirmation state for the confidence-none fallback path (Design §3) —
+        # independent of the ODE floor guard's own state, since the fallback only
+        # engages when confidence_k_passive == "none".
+        self._comfort_floor_fallback_since: datetime | None = None
 
         # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): qualifies WHY an
         # active nat-vent session was entered — True when entered via the parity/
@@ -2417,6 +2481,7 @@ class AutomationEngine:
         predicted_indoor: list[dict] | None = None,
         indoor_temp: float | None = None,
         nat_vent_cutoff: datetime | None = None,
+        comfort_floor_crossing_time: datetime | None = None,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -2440,10 +2505,24 @@ class AutomationEngine:
                 door/window pause exemption ends at the same moment the occupant was
                 actually told nat-vent stops helping — not a possibly-later static
                 hour. None (the pre-#817 default) falls back to the static bound.
+            comfort_floor_crossing_time: Issue #821 — the coordinator's cached
+                ``self._nat_vent_plan["comfort_floor_crossing_time"]`` (added by this
+                same issue), when available. Consumed by ``_resolve_comfort_family_mode()``'s
+                ODE floor guard to decide whether a cool-classified day's comfort floor
+                needs active defense (a switch to heat) right now. None when no thermal
+                model/prediction is available — the confidence-none fallback path
+                handles that case instead.
         """
         async with self._decision_pass("apply_classification"):
             self._current_classification = classification
             self._nat_vent_cutoff = nat_vent_cutoff
+            self._comfort_floor_crossing_time = comfort_floor_crossing_time
+            # Reset here only — see self._comfort_mode_family_changed_this_tick's own
+            # __init__ comment for the precise (coarser-than-the-name-suggests) scope
+            # this actually has: a family change from a call site outside
+            # apply_classification() latches this flag until the NEXT call here, not
+            # "this tick" literally.
+            self._comfort_mode_family_changed_this_tick = False
 
             if self._manual_override_active:
                 if self._override_matches_current_decision(classification):
@@ -2738,14 +2817,25 @@ class AutomationEngine:
 
         caps = self._get_thermostat_capabilities()
 
-        if band.active == "ceiling" and caps.supports_cool:
+        # Issue #821: the shared family resolver may override the day's active edge —
+        # e.g. a cool-classified day whose comfort floor now needs active defense.
+        # See _resolve_comfort_family_mode()'s own docstring for the full contract;
+        # it only ever escalates cool->heat, never the reverse (ceiling breaches on
+        # non-"off" days are not this resolver's concern).
+        _day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, band.active)
+        _resolved_mode = self._resolve_comfort_family_mode(_day_mode, now=dt_util.now())
+        _effective_active = {"cool": "ceiling", "heat": "floor"}.get(_resolved_mode, band.active)
+
+        if _effective_active == "ceiling" and caps.supports_cool:
             await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
-        elif band.active == "floor" and caps.supports_heat:
+            self._arm_comfort_family("cooling", dt_util.now())
+        elif _effective_active == "floor" and caps.supports_heat:
             await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
+            self._arm_comfort_family("heating", dt_util.now())
         else:
             # The thermostat advertises no mode that can defend the active edge (e.g. a heat-only
             # unit on a warm day, or an unavailable entity). Surface this at INFO in real operation
@@ -2753,7 +2843,7 @@ class AutomationEngine:
             _log = _LOGGER.debug if self.dry_run else _LOGGER.info
             _log(
                 "_apply_comfort_band: no capable mode for active=%r (modes=%s) — band not armed this cycle",
-                band.active,
+                _effective_active,
                 list(caps.modes),
             )
             return
@@ -2783,7 +2873,7 @@ class AutomationEngine:
                 {
                     "floor": band.floor,
                     "ceiling": band.ceiling,
-                    "active": band.active,
+                    "active": _effective_active,
                     "mode": _cmd_shape,
                     "reason": band.reason,
                     "indoor_f": self._indoor_f_for_event(),
@@ -3219,6 +3309,19 @@ class AutomationEngine:
         (or below) ``comfort_heat`` (e.g. to a sleep_heat-derived target), which the
         sanity check would otherwise flag as a false ``SETPOINT INCONSISTENCY``. Every
         other caller keeps the default ``False`` and is unaffected.
+
+        Issue #821 Verification fix (BLOCKING #3): when ``target_override`` is given,
+        the family resolver is skipped entirely and ``c.hvac_mode`` is used as-is, same
+        as before Issue #821. A caller passing ``target_override`` (today, only
+        ``apply_tou_precondition()``) has its own explicit target and its own gate
+        deciding whether to proceed at all (``decide_scheduled_band_gate()``) — letting
+        the family resolver independently escalate on top of that would let it command
+        ``heat`` mode at a setpoint that is deliberately AT OR BELOW ``comfort_heat``
+        (TOU's own intentional below-floor cool-mode banking target), with
+        ``skip_setpoint_sanity_check=True`` turning off the exact safety check that
+        would normally catch a heat-mode command at a below-floor setpoint for this
+        call site. TOU's own gate is already the authority here; the resolver must not
+        second-guess it.
         """
         # Issue #85: redirect to setback when not home/guest. Gate unified via
         # should_defer_to_occupancy_setback() (Issue #460); which handler to redirect
@@ -3232,17 +3335,34 @@ class AutomationEngine:
                 await self.handle_occupancy_vacation()
             return
 
-        if c.hvac_mode == "heat":
+        # Issue #821: route through the same shared family resolver _apply_comfort_band()
+        # uses — one decision point, not a second parallel implementation. Only ever
+        # escalates cool->heat (comfort-floor defense); target-value computation below
+        # (target_override vs. config comfort values) is unchanged and fully decoupled
+        # from this decision, per the resolver's own docstring.
+        #
+        # BLOCKING #3 fix: a caller with its own explicit target_override (TOU
+        # pre-conditioning) bypasses the resolver entirely — see this method's own
+        # docstring for why.
+        _resolved_mode = (
+            c.hvac_mode
+            if target_override is not None
+            else self._resolve_comfort_family_mode(c.hvac_mode, now=dt_util.now())
+        )
+
+        if _resolved_mode == "heat":
             floor_target = target_override if target_override is not None else float(self.config["comfort_heat"])
             await self._set_temperature(
                 floor_target, reason=reason, mode="heat", skip_setpoint_sanity_check=skip_setpoint_sanity_check
             )
+            self._arm_comfort_family("heating", dt_util.now())
             return
-        elif c.hvac_mode == "cool":
+        elif _resolved_mode == "cool":
             ceiling_target = target_override if target_override is not None else float(self.config["comfort_cool"])
             await self._set_temperature(
                 ceiling_target, reason=reason, mode="cool", skip_setpoint_sanity_check=skip_setpoint_sanity_check
             )
+            self._arm_comfort_family("cooling", dt_util.now())
             return
         else:
             return
@@ -3696,6 +3816,32 @@ class AutomationEngine:
                 _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
             )
             _nat_vent_gate_entered = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+
+            # Issue #699: this call site never consulted the reactivation lockout at
+            # all — unlike check_natural_vent_conditions()'s idle-open path (both its
+            # FSM and legacy branches), which already does. Confirmed live (Issue #821
+            # investigation): AWAY_CEILING's exit branch deliberately does NOT set
+            # _paused_by_door, so a door/window opening moments after an AWAY_CEILING
+            # (or any other) exit could reach this method and reactivate nat-vent
+            # against the same unmoved temperature reading the exit had just reacted
+            # to, with no lockout in effect — the same-tick/near-tick thrash Issue #699
+            # described. Wiring in the same lockout check
+            # check_natural_vent_conditions()'s idle-open path already uses closes this
+            # gap; a separate, small change from the new comfort-family lockout's own
+            # same-tick guard (Design §4) — the two are not the same mechanism.
+            if _nat_vent_gate_entered and is_reactivation_locked_out(
+                outdoor_exit_time=self._nat_vent_outdoor_exit_time,
+                now=dt_util.now(),
+                lockout_seconds=float(
+                    self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
+                ),
+            ):
+                _LOGGER.info(
+                    "Nat vent reactivation via door/window open (%s) locked out — recent exit still within lockout",
+                    entity_id,
+                )
+                _nat_vent_gate_entered = False
+
             if _nat_vent_gate_entered:
                 _skip_nat_vent = False
 
@@ -4250,6 +4396,15 @@ class AutomationEngine:
                     )
                 )
 
+                # Issue #821: sustain-confirmation — a candidate exit reason must read
+                # true continuously for NAT_VENT_EXIT_SUSTAIN_S before it commits (see
+                # _confirm_nat_vent_exit()'s own docstring for the live-data root cause
+                # this closes). MANUAL_OVERRIDE_CONFLICT and NONE are exempt/no-op
+                # inside that helper. An unconfirmed candidate is treated as NONE this
+                # tick — the session continues, exactly as if nothing had matched.
+                if not self._confirm_nat_vent_exit(exit_decision.reason, dt_util.now()):
+                    exit_decision = NatVentExitDecision(reason=NatVentExitReason.NONE)
+
                 if exit_decision.reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT:
                     # Issue #714: a manual override to an active HVAC mode structurally
                     # conflicts with WHF/nat-vent — end the session immediately. Deliberately
@@ -4299,7 +4454,18 @@ class AutomationEngine:
                     # below).
                     _vent_floor = exit_decision.vent_floor
                     self._natural_vent_active = False
+                    # Issue #697: this bypass branch (like the AWAY_CEILING branch below)
+                    # never cleared _nat_vent_soft_start alongside _natural_vent_active —
+                    # the one gap among all real "_natural_vent_active = False" sites,
+                    # confirmed via a fresh grep of every site during Issue #821's
+                    # investigation. Matches every other site's own convention.
+                    self._nat_vent_soft_start = False
                     self._nat_vent_outdoor_exit_time = dt_util.now()
+                    # Issue #821 (Design §4): exiting nat-vent counts as "cooling family
+                    # was active until just now" — arm the family-switch lockout's dwell
+                    # clock at this handoff so a heat call cannot fire in the same/next
+                    # cycle purely from momentary post-exit indoor readings.
+                    self._arm_comfort_family("cooling", dt_util.now())
                     await self._deactivate_fan(
                         reason=(f"natural vent exit: indoor {indoor:.1f}°F ≤ comfort floor {_vent_floor:.1f}°F")
                     )
@@ -4360,6 +4526,7 @@ class AutomationEngine:
                     # nat-vent never actually stopped, flip-flopping right at the ceiling
                     # it was supposed to protect.
                     self._nat_vent_outdoor_exit_time = dt_util.now()
+                    self._arm_comfort_family("cooling", dt_util.now())  # Issue #821 Design §4
                     _away_ceiling_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
                     # Do NOT pause -- just let away setback handle HVAC
                     # Issue #649: skip emitting a duplicate report for a repeat block within
@@ -4721,6 +4888,12 @@ class AutomationEngine:
                     manual_override_mode=self._manual_override_mode,
                 )
             )
+
+            # Issue #821: same sustain-confirmation gate as check_natural_vent_conditions()'s
+            # slow-loop call site above — shared state (_nat_vent_exit_candidate_reason/
+            # _since), since both loops decide the same underlying question.
+            if not self._confirm_nat_vent_exit(exit_decision.reason, dt_util.now()):
+                exit_decision = NatVentExitDecision(reason=NatVentExitReason.NONE)
             _exit_reason = exit_decision.reason
 
             # Hard floor (or any of the 5 exit reasons) takes priority over cycling. Sleep
@@ -4747,6 +4920,7 @@ class AutomationEngine:
                     # arms the same reactivation lockout every other exit reason already
                     # arms, since this branch bypasses _exit_nat_vent()'s choke point too.
                     self._nat_vent_outdoor_exit_time = dt_util.now()
+                    self._arm_comfort_family("cooling", dt_util.now())  # Issue #821 Design §4
                     _away_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode) via temp_check")
                     if self._emit_event_callback and _away_result is not FanCommandResult.RATE_LIMITED_DUP:
                         self._emit_event_callback(
@@ -5052,6 +5226,24 @@ class AutomationEngine:
             in_sleep_window=in_sleep_window,
         )
         outcome = _thermostat_transition.thermostat_outcome
+
+        # Issue #821: this tick-level check's outcomes (STOP_VIA_NAT_VENT_EXIT/
+        # STOP_DEACTIVATE/STOP_COOLED_TO_FLOOR) are deliberately NOT sustain-confirmed,
+        # unlike decide_nat_vent_exit()'s 5 exit reasons (nat_vent_exit.py). This is a
+        # reasoned design boundary, not an oversight: fan_thermostat_check() exists
+        # specifically for rapid response to prevent real overshoot (Issue #327's
+        # airflow-reversal stop, Issue #402's overcooling stop) — delaying it 90s would
+        # trade flap-reduction for reintroducing the exact overshoot bugs it was built
+        # to fix. Its stops already arm the same 300s reactivation lockout
+        # (`_exit_nat_vent()`'s `set_outdoor_exit_time=True`) every sustain-confirmed
+        # exit reason also uses, so re-entry is still debounced even though the exit
+        # itself is instantaneous. It also wasn't implicated in the reported live
+        # incident that motivated Issue #821 — that traced to PROACTIVE_FLOOR, a
+        # slow-loop-only exit reason this method never evaluates. Confirmed by the
+        # project owner after independently reproducing a gating attempt here (it broke
+        # 6 additional locked golden scenarios) and tracing this method's own history
+        # and lockout coverage directly. See docs/08-COMPUTATION-REFERENCE.md §6f for
+        # the full rationale.
 
         if outcome is FanThermostatOutcome.KEEP:
             _LOGGER.debug(
@@ -5540,6 +5732,12 @@ class AutomationEngine:
             if self._fan_on_since is None:
                 self._fan_on_since = dt_util.now().isoformat()
             self._natural_vent_active = True
+            # Issue #821: a fresh session activating — reset the exit sustain-confirmation
+            # state (stale candidate/timing from a prior session must never leak into a
+            # new one) and arm the family-switch lockout's dwell clock.
+            self._nat_vent_exit_candidate_reason = None
+            self._nat_vent_exit_candidate_since = None
+            self._arm_comfort_family("cooling", dt_util.now())
             # Start the thermostatic backstop now that CA owns this fan session
             self._start_fan_thermo_backstop()
             _LOGGER.info(
@@ -6173,6 +6371,10 @@ class AutomationEngine:
                 )
                 await self._activate_fan(reason=nat_vent_reason)
                 self._natural_vent_active = True
+                # Issue #821: same fresh-session reset as the other activation site.
+                self._nat_vent_exit_candidate_reason = None
+                self._nat_vent_exit_candidate_since = None
+                self._arm_comfort_family("cooling", dt_util.now())
 
                 from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -6881,6 +7083,11 @@ class AutomationEngine:
         """
         self._natural_vent_active = False
         self._nat_vent_soft_start = False
+        # Issue #821 (Design §4): the primary nat-vent-exit choke point — arms the
+        # family-switch lockout's dwell clock for every call site that routes through
+        # here (11 of the raw sites; the 3 bypass branches that call
+        # _deactivate_fan()/_natural_vent_active=False directly arm it themselves).
+        self._arm_comfort_family("cooling", dt_util.now())
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
         sensor_open = self._any_monitored_sensor_open()
@@ -6940,6 +7147,26 @@ class AutomationEngine:
             )
         else:
             result = await self._deactivate_fan(reason=reason, emit_event=False)
+            # Issue #821 follow-up (project owner's own fix, confirmed by reading
+            # _deactivate_fan()'s restore branches directly): _deactivate_fan() above
+            # restores via self._set_hvac_mode(self._pre_fan_hvac_mode, ...) — a blind
+            # replay of whatever mode was active BEFORE nat-vent started, never
+            # consulting the shared family resolver. Since nat-vent only ever starts on
+            # a cooling day, this almost always restores "cool" — reproducing the
+            # original comfort-floor-defense bug through nat-vent's own most common
+            # exit path (PROACTIVE_FLOOR routes through this method, not through
+            # check_natural_vent_conditions()'s separate COMFORT_FLOOR branch, which
+            # already gets this right via its own follow-up _set_temperature_for_mode()
+            # call). Mirrors the exact pattern already used at the door/window-all-
+            # closed restore site and resume_from_pause(): restore the old mode first
+            # (already done, above, by _deactivate_fan()), then call
+            # _set_temperature_for_mode() so the resolver can correct it if conditions
+            # (e.g. indoor now below comfort_heat) call for a different family.
+            if self._current_classification:
+                await self._set_temperature_for_mode(
+                    self._current_classification,
+                    reason=f"nat-vent exit resume — {reason}",
+                )
             self._start_grace_period("automation", trigger="nat_vent_exit_resume")
             _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
             _log("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
@@ -7820,6 +8047,271 @@ class AutomationEngine:
             full_gate_active=full_gate_active,
         )
         return decide_nat_vent_soft_start_gate(inputs)
+
+    def _confirm_nat_vent_exit_candidate(self, candidate: Any, now: datetime, *, exempt: bool = False) -> bool:
+        """Issue #821: the generalized sustain-confirmation gate underlying
+        ``_confirm_nat_vent_exit()`` below, which is the only real caller today
+        (itself consumed from the two ``decide_nat_vent_exit()`` call sites,
+        ``check_natural_vent_conditions()``'s slow loop and
+        ``nat_vent_temperature_check()``'s fast loop).
+
+        ``fan_thermostat_check()``'s own STOP_VIA_NAT_VENT_EXIT/STOP_DEACTIVATE/
+        STOP_COOLED_TO_FLOOR outcomes (``fan_thermostat_decision.decide_fan_thermostat_check()``,
+        fired on every indoor/outdoor temperature CHANGE) do **not** consult this
+        method — that loop is deliberately left un-gated. A first attempt at wiring it
+        in here was implemented and reverted during this issue's own Verification pass
+        after it broke 6 additional locked golden scenarios; the project owner
+        subsequently confirmed leaving it un-gated is the correct, deliberate design
+        (rapid-response purpose, Issues #327/#402; already shares the 300s
+        reactivation lockout; not implicated in the reported live incident, which
+        traced to a slow-loop-only exit reason). See the comment at
+        ``fan_thermostat_check()``'s own call site (~ the block right after
+        ``outcome = _thermostat_transition.thermostat_outcome``) and
+        ``docs/08-COMPUTATION-REFERENCE.md`` §6f for the full rationale — do not
+        re-wire this method into that call site without re-reading both first.
+
+        Generalizes the shape ``_confirm_nat_vent_exit()`` needs into a candidate that
+        can be any hashable/comparable value (not just ``NatVentExitReason``), since
+        this method itself does not know or care what kind of "exit candidate" it's
+        timing — it only owns the sustain-confirmation clock's generic bookkeeping.
+
+        ``exempt=True`` commits immediately without arming/consulting the clock (used
+        for MANUAL_OVERRIDE_CONFLICT-shaped candidates — a user's own thermostat action
+        must stay instantaneous) — mirrors ``is_confirmed()``'s own documented
+        recommendation to bypass rather than pass ``sustain_seconds=0``, made visible at
+        the call site instead.
+        """
+        if candidate is None or exempt:
+            self._nat_vent_exit_candidate_reason = None
+            self._nat_vent_exit_candidate_since = None
+            return True
+
+        self._nat_vent_exit_candidate_since = _resolve_candidate_since(
+            candidate=candidate,
+            previous_candidate=getattr(self, "_nat_vent_exit_candidate_reason", None),
+            previous_since=getattr(self, "_nat_vent_exit_candidate_since", None),
+            now=now,
+        )
+        self._nat_vent_exit_candidate_reason = candidate
+        confirmed = _is_transition_confirmed(
+            candidate=candidate,
+            candidate_since=self._nat_vent_exit_candidate_since,
+            now=now,
+            sustain_seconds=NAT_VENT_EXIT_SUSTAIN_S,
+        )
+        if not confirmed:
+            _LOGGER.debug(
+                "Nat-vent exit candidate %s not yet sustain-confirmed (since %s, needs %.0fs)",
+                candidate,
+                self._nat_vent_exit_candidate_since,
+                NAT_VENT_EXIT_SUSTAIN_S,
+            )
+        return confirmed
+
+    def _confirm_nat_vent_exit(self, reason: NatVentExitReason, now: datetime) -> bool:
+        """Issue #821: sustain-confirmation gate for decide_nat_vent_exit()'s 5
+        non-manual-override exit reasons — shared state between both real call sites
+        (check_natural_vent_conditions()'s slow loop and nat_vent_temperature_check()'s
+        fast loop, since both evaluate the same underlying "should this session exit"
+        question against the same self._natural_vent_active session). Thin wrapper
+        over _confirm_nat_vent_exit_candidate() above, translating NatVentExitReason's
+        own NONE/MANUAL_OVERRIDE_CONFLICT exemptions into that shared primitive's
+        generic candidate/exempt contract.
+
+        Returns True when the reason should commit NOW: either it's the exempt
+        MANUAL_OVERRIDE_CONFLICT reason (a user's own thermostat action — must stay
+        instantaneous, never delayed by a dwell timer), or reason == NONE (nothing to
+        confirm), or the candidate has now been the standing reading for
+        NAT_VENT_EXIT_SUSTAIN_S seconds. Returns False when a real exit candidate
+        exists but hasn't been sustained long enough yet — the caller should treat this
+        tick as if no exit condition fired (session continues).
+        """
+        if reason == NatVentExitReason.NONE:
+            return self._confirm_nat_vent_exit_candidate(None, now)
+        if reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT:
+            return self._confirm_nat_vent_exit_candidate(reason, now, exempt=True)
+        return self._confirm_nat_vent_exit_candidate(reason, now)
+
+    def _arm_comfort_family(self, family: str, now: datetime) -> None:
+        """Issue #821 (Design §4): record that ``family`` ("heating" or "cooling") is
+        the currently-active HVAC family, resetting the family-switch lockout's dwell
+        clock. Called from every real family-relevant event: a heat command, an active-
+        cool command (both via _resolve_comfort_family_mode()'s own callers), and
+        nat-vent/WHF activation/deactivation.
+
+        Deliberately resets ``_comfort_mode_family_entry_time`` on EVERY call, not only
+        when ``family`` differs from the previous value — this is what makes "exiting
+        nat-vent counts as cooling family was active until just now" work: the lockout
+        clock measures "how long since anything in the current family last actually
+        happened", not just "how long since the family label last changed". Sets the
+        same-tick guard only when the family label genuinely changes (a real switch),
+        matching Issue #699's own finding that elapsed-time alone isn't a sufficient
+        guard for a same-tick exit-then-reactivate race.
+
+        "Same-tick" is coarser than it sounds: the flag this sets
+        (``_comfort_mode_family_changed_this_tick``) is only reset at the top of
+        ``apply_classification()``, not at the top of every method that can reach this
+        one (nat-vent activate/deactivate, ``_exit_nat_vent()``, the away-ceiling exit
+        branches, etc. all call this from outside ``apply_classification()``'s own call
+        graph) — see that flag's own ``__init__`` comment for the full scope note. A
+        family change from one of those other call sites latches the guard until the
+        next classification cycle, not literally "this tick".
+        """
+        # getattr-defensive: some unit tests build a partial AutomationEngine via
+        # object.__new__() (bypassing __init__) to exercise a single method in
+        # isolation — a long-established pattern in this codebase (see CLAUDE.md's
+        # "Coordinator methods" testing note). This mirrors coordinator.py's own
+        # getattr(self, "_nat_vent_plan", None) precedent for the same reason.
+        _prior_family = getattr(self, "_comfort_mode_family", None)
+        if _prior_family is not None and _prior_family != family:
+            self._comfort_mode_family_changed_this_tick = True
+        self._comfort_mode_family = family
+        self._comfort_mode_family_entry_time = now
+
+    def _family_switch_locked_out(self, *, candidate_family: str, now: datetime) -> bool:
+        """Issue #821 (Design §4): True when a switch to ``candidate_family`` should be
+        blocked by the minimum-dwell lockout. Cold start (no prior family recorded) is
+        always allowed — a fresh process has no flapping history to guard against."""
+        _family = getattr(self, "_comfort_mode_family", None)
+        if _family is None or _family == candidate_family:
+            return False
+        if getattr(self, "_comfort_mode_family_changed_this_tick", False):
+            return True
+        if getattr(self, "_comfort_mode_family_entry_time", None) is None:
+            return False
+        min_interval = float(
+            self.config.get(CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S, COMFORT_MODE_SWITCH_MIN_INTERVAL_S)
+        )
+        elapsed = (now - self._comfort_mode_family_entry_time).total_seconds()
+        return elapsed < min_interval
+
+    def _resolve_comfort_family_mode(self, day_mode: str, *, now: datetime) -> str:
+        """Issue #821: the single shared "which family should be active right now"
+        decision, consumed by BOTH ``_apply_comfort_band()`` (via ``band.active``
+        mapped to "cool"/"heat") AND ``_set_temperature_for_mode()`` (via
+        ``c.hvac_mode``) — one decision point, not a second parallel implementation,
+        closing the same DRY gap ``select_comfort_band()`` vs. ``c.hvac_mode`` used to
+        represent (the root cause of Issue #821's live incident: the comfort floor was
+        never actively defended on a day classified for cooling).
+
+        Since ``_set_temperature_for_mode()`` is itself the single choke point for its
+        7 call sites (TOU pre-conditioning, door/window-all-closed resume,
+        ``check_natural_vent_conditions()``'s own COMFORT_FLOOR restore,
+        ``resume_from_pause()``, occupancy-home restore, economizer deactivation, and
+        ``_exit_nat_vent()``'s sensors-closed restore branch — the last one added by
+        this issue's own Verification pass, since it was found to bypass the resolver
+        entirely via a blind ``_pre_fan_hvac_mode`` replay), wiring this resolver in
+        there once covers all 7 sites structurally — no per-call-site change needed
+        (except ``target_override`` callers, see below). Only decides "heat or cool, or
+        hold" — never "what temperature"; each caller keeps its own target-value
+        computation (``band.floor``/``band.ceiling`` vs. ``target_override``) fully
+        decoupled from this decision.
+
+        Exception: a caller passing ``target_override`` (today, only TOU
+        pre-conditioning) is NOT routed through this resolver at all —
+        ``_set_temperature_for_mode()`` uses ``c.hvac_mode`` directly for that caller.
+        TOU's own explicit target is deliberately a cool-mode banking value at or below
+        ``comfort_heat``, written with ``skip_setpoint_sanity_check=True`` — letting
+        this resolver independently escalate on top of that would let it command
+        ``heat`` mode at a setpoint at/below the comfort floor with the one safety
+        check that would normally catch that turned off (Issue #821 Verification
+        BLOCKING #3). TOU's own ``decide_scheduled_band_gate()`` is already the
+        authority for whether that call site should proceed at all.
+
+        Only ever considers escalating FROM cooling TO heating (the floor-defense
+        direction this issue is about) — a day classified "heat" already defends the
+        floor via the heating family itself, and a day classified "off"/other has no
+        family concept, so this function returns ``day_mode`` unchanged for both.
+        Ceiling breaches on an "off" day remain the ODE ceiling guard's own territory
+        (``ode_ceiling_guard.py``), which this function never touches.
+
+        Deliberately does NOT run at all while nat-vent/WHF owns HVAC (mirrors the
+        economizer's documented defer-not-transition asymmetry) or while
+        ``_manual_override_active`` (same override precedence every other scheduled
+        action already respects) — it only fills the gap this issue found: no active
+        nat-vent session, comfort-band/set-temperature path only.
+        """
+        if day_mode != "cool" or self._manual_override_active or self._natural_vent_active or self._whf_owns_hvac():
+            return day_mode
+
+        thermal = self._thermal_model or {}
+        confidence_k_passive = thermal.get("confidence_k_passive") or thermal.get("confidence", "none")
+        comfort_heat = self.config.get("comfort_heat")
+        indoor = self._get_indoor_temp_f()
+        comfort_heat_f = float(comfort_heat) if comfort_heat is not None else None
+
+        escalate = False
+        log_reason = ""
+
+        if confidence_k_passive == "none":
+            # Design §3 fallback path — the actual condition the reported live
+            # incident (Zone "Simulated 2") occurred under: a simple, conservative,
+            # non-ODE guard. Sustain-confirmed via the same shared primitive
+            # (COMFORT_FALLBACK_CONFIRM_S) to avoid reacting to a single noisy reading.
+            _candidate = comfort_heat_f is not None and indoor is not None and indoor < comfort_heat_f
+            if not _candidate:
+                self._comfort_floor_fallback_since = None
+            elif getattr(self, "_comfort_floor_fallback_since", None) is None:
+                self._comfort_floor_fallback_since = now
+            if _candidate and _is_transition_confirmed(
+                candidate=True,
+                candidate_since=self._comfort_floor_fallback_since,
+                now=now,
+                sustain_seconds=COMFORT_FALLBACK_CONFIRM_S,
+            ):
+                escalate = True
+                log_reason = (
+                    f"fallback (no thermal-model confidence): indoor {indoor:.1f}°F"
+                    f" < comfort_heat {comfort_heat_f:.1f}°F, sustained"
+                )
+        else:
+            self._comfort_floor_fallback_since = None
+            decision = decide_ode_floor_guard(
+                OdeFloorGuardInputs(
+                    hvac_mode=day_mode,
+                    natural_vent_active=self._natural_vent_active,
+                    floor_crossing_time=getattr(self, "_comfort_floor_crossing_time", None),
+                    confidence_k_passive=confidence_k_passive,
+                    k_active_heat=thermal.get("k_active_heat"),
+                    comfort_heat=comfort_heat_f,
+                    indoor=indoor,
+                    now=now,
+                )
+            )
+            if decision.outcome is OdeFloorGuardOutcome.ESCALATE:
+                escalate = True
+                log_reason = (
+                    f"ODE floor guard ESCALATE: breach in {decision.hours_to_breach:.2f}h"
+                    f" <= lead {decision.lead_min:.0f}min"
+                )
+            elif decision.outcome is OdeFloorGuardOutcome.STANDING_BY:
+                _LOGGER.debug(
+                    "ODE floor guard STANDING_BY: breach in %.2fh > lead %.0fmin — letting it ride out",
+                    decision.hours_to_breach or 0.0,
+                    decision.lead_min or 0.0,
+                )
+
+        if not escalate:
+            return day_mode
+
+        if self._family_switch_locked_out(candidate_family="heating", now=now):
+            _LOGGER.warning(
+                "comfort_family_switch_locked_out: floor defense wants to switch to heat (%s) but the"
+                " family-switch lockout is still armed (family=%s, entry=%s)",
+                log_reason,
+                getattr(self, "_comfort_mode_family", None),
+                getattr(self, "_comfort_mode_family_entry_time", None),
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "comfort_family_switch_locked_out",
+                    {"candidate_family": "heating", "reason": log_reason},
+                )
+            return day_mode
+
+        _LOGGER.info("Comfort floor defense: switching to heat — %s", log_reason)
+        self._arm_comfort_family("heating", now)
+        return "heat"
 
     def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.

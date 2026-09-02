@@ -64,6 +64,7 @@ EXPECTED_KEYS = {
     "default_tou_lead_minutes",
     "preheat_safety_margin",
     "max_setback_depth_f",
+    "comfort_mode_switch_min_interval_s",
     "ai_enabled",
     "ai_api_key",
     "ai_model",

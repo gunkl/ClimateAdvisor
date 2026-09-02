@@ -48,7 +48,14 @@
       "type": "temp_update",
       "indoor_f": 74.0,
       "outdoor_f": 68.0,
-      "note": "Afternoon: indoor has risen to 74F (comfort_cool ceiling). Outdoor 68F still cooler than indoor. In production (Issue #231 fix): nat-vent exits at comfort_cool ceiling to prevent further warming risk. In simulator: no exit condition fires \u00e2\u20ac\u201d nat-vent stays active (documents simulator gap)."
+      "note": "Afternoon: indoor has risen to 74F (comfort_cool ceiling). Outdoor 68F still cooler than indoor. In production (Issue #231 fix): the AWAY_CEILING exit candidate arms via decide_nat_vent_exit() but is NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s) \u2014 session still active this tick."
+    },
+    {
+      "time": "2026-07-10T14:01:35",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 68.0,
+      "note": "95s after the ceiling was first reached (> 90s NAT_VENT_EXIT_SUSTAIN_S) \u2014 indoor still at/above comfort_cool, outdoor still cooler than indoor. AWAY_CEILING exit sustain-confirms and commits: nat-vent exits at comfort_cool ceiling to prevent further warming risk."
     }
   ],
   "assertions": [
@@ -68,11 +75,11 @@
       "reason": "Away transition: setback_cool=79F applied. This is the only change production makes on occupancy_away \u00e2\u20ac\u201d nat-vent is not exited."
     },
     {
-      "at": "2026-07-10T14:00:00",
+      "at": "2026-07-10T14:01:35",
       "expect": "nat_vent_not_active",
       "track": "logic",
       "simulator_support": true,
-      "reason": "Issue #231 fix is live in production: when indoor reaches comfort_cool=74F ceiling while away and nat-vent is active, check_natural_vent_conditions() Priority-2b path exits nat-vent. Free cooling has done its job; further outdoor air risks over-cooling below the comfort band. The nat_vent_still_active assertion at 10:00 was removed \u2014 it used the final engine snapshot (which captures the 14:00 exit), making it impossible to assert mid-run state. The continue-through-away behavior is covered by away_with_active_natvent_transition."
+      "reason": "Issue #231 fix is live in production: when indoor reaches comfort_cool=74F ceiling while away and nat-vent is active, check_natural_vent_conditions() Priority-2b path exits nat-vent. Free cooling has done its job; further outdoor air risks over-cooling below the comfort band. Issue #821 retiming: the exit is sustain-confirmed (NAT_VENT_EXIT_SUSTAIN_S=90s) rather than committing on the instantaneous tick the ceiling was first reached \u2014 this assertion now sits 95s after that tick, on the follow-up temp_update that confirms indoor genuinely held at/above the ceiling. The nat_vent_still_active assertion at 10:00 was removed \u2014 it used the final engine snapshot (which captures the 14:01:35 exit), making it impossible to assert mid-run state. The continue-through-away behavior is covered by away_with_active_natvent_transition."
     }
   ],
   "verdict": {

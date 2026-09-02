@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.const import (
@@ -26,6 +26,9 @@ from custom_components.climate_advisor.const import (
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
 )
+from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason
+
+_DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
 
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 7, 29, 18, 0, 0)
 
@@ -276,7 +279,15 @@ class TestSoftStartExitHierarchy:
         # outdoor now above indoor -> Priority-3 outdoor-rise exit fires
         engine._last_outdoor_temp = 77.0
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        # Issue #821: sustain-confirmation — pre-arm the exit candidate as already
+        # sustained (well over 90s before the fixed test clock) so this test continues
+        # to exercise the exit's side effects (soft-start flag clear) rather than the
+        # sustain-confirmation timing itself (covered by test_confirmed_transition.py).
+        _now = datetime(2026, 7, 29, 18, 0, 0)
+        engine._nat_vent_exit_candidate_reason = NatVentExitReason.OUTDOOR_RISE
+        engine._nat_vent_exit_candidate_since = datetime(2026, 7, 29, 17, 0, 0)
+        with patch(_DT_NOW_PATH, return_value=_now):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
         assert engine._nat_vent_soft_start is False

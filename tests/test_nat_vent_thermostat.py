@@ -18,7 +18,7 @@ inline — same pattern as test_fan_control.py and test_contact_status.py.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
@@ -643,6 +643,14 @@ class TestNatVentSleepWindowCycling:
         emitted: list[tuple] = []
         ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
+        # Issue #821: pre-arm the COMFORT_FLOOR candidate as already sustained (well
+        # over 90s before the fixed test clock) — without this, sustain-confirmation
+        # defers the hard exit for this single call, and the test falls through to the
+        # unrelated cycling-off branch instead of the hard-exit branch it's testing.
+        from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason
+
+        ae._nat_vent_exit_candidate_reason = NatVentExitReason.COMFORT_FLOOR
+        ae._nat_vent_exit_candidate_since = _SLEEP_NOW_THERMO - timedelta(hours=1)
         with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
             asyncio.run(ae.nat_vent_temperature_check(64.0, outdoor=ae._last_outdoor_temp))
 

@@ -1,0 +1,100 @@
+{
+  "name": "issue_821_scenario_e_sustain_confirmation_noise_rejection",
+  "description": "Scenario E from the Issue #821 plan: a direct reproduction of the physical pattern behind the live 300-second-gap finding (Zone 1's real WHF, 2026-08-31 13:06:46-13:30:00Z) — a nat-vent session's PROACTIVE_FLOOR exit candidate flickers true/false as outdoor temperature noisily crosses the predictive time-to-floor threshold, rather than holding continuously. Asserts that with sustain-confirmation (NAT_VENT_EXIT_SUSTAIN_S=90s), a momentary, non-sustained crossing does NOT commit an exit — the session survives two separate flickers of the exit condition, neither of which is ever held continuously for the full 90s window.",
+  "source": "Issue #821 plan, Design's required 'Golden/pending scenario E' — Verification BLOCKING #2 (the original pass shipped without this scenario; the 5 retimed goldens pass identically with and without sustain-confirmation, so they could not stand in for it).",
+  "issue": 821,
+  "notes": [
+    "Honesty note (matches the plan's own investigator-phase caveat): the exact 2026-08-31 13:06:46Z log line could not be recovered (rotated disk logs, per the plan's Q9 finding) — this scenario reproduces the PHYSICAL PATTERN (a predictive exit candidate flickering on/off around its threshold, never sustained) at a comparable magnitude to Zone 1's real thermal rate (k_passive=-0.15 here vs. the real zone's -0.1123), not a byte-exact replay of unrecoverable log timestamps. This is the same 'high-confidence inference, not certainty' standard the plan's own Q9 answer used.",
+    "Companion negative control: tests/test_scenario_e_sustain_confirmation_negative_control.py loads this exact JSON and re-runs it twice — once normally (confirming the session survives, matching this file's own assertions) and once with _confirm_nat_vent_exit_candidate() patched to commit immediately (bypassing sustain-confirmation entirely), confirming THAT run's session does NOT survive the very first flicker at 08:10:00. That second run is the negative control the Issue #821 plan's Design required — it cannot be expressed inside this JSON scenario format alone, since JSON scenarios have no mechanism to monkeypatch production code; see that test file for the actual revert-tested proof.",
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: this scenario's own assertion (nat_vent_still_active at 08:16:20) would FAIL if sustain-confirmation were removed — proven directly by the companion negative-control test file, not just asserted here.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md §6f documents NAT_VENT_EXIT_SUSTAIN_S alongside this scenario as its test reference.",
+    "(c) Occupant experience: without sustain-confirmation, a single noisy outdoor reading crossing the predictive floor-imminence threshold ends free cooling and restores active HVAC, even though the underlying multi-hour trend never actually called for it — costing the occupant real energy and comfort disruption for no real benefit. With sustain-confirmation, the session correctly rides out momentary noise and only ends when the condition genuinely holds."
+  ],
+  "thermal_model": {
+    "confidence": "medium",
+    "k_passive": -0.15
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-08-31T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot-day classification, HVAC in cool mode."
+    },
+    {
+      "time": "2026-08-31T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 72F, outdoor 60F — favorable for nat-vent, well above the 68F floor. time_to_floor at this reading is comfortably beyond 1.0hr (MIN_VIABLE_NAT_VENT_HOURS)."
+    },
+    {
+      "time": "2026-08-31T08:00:01",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens: outdoor(60) < indoor(72) - hysteresis(1), indoor > comfort_heat(68), outdoor < threshold — nat-vent activates, WHF turns on, HVAC suppressed."
+    },
+    {
+      "time": "2026-08-31T08:10:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 59.0,
+      "note": "First flicker: indoor has drifted to 69F (1F above the 68F floor), outdoor dips to 59F (delta=10F). passive_rate = k_passive(-0.15) * delta(10) = -1.5F/hr; time_to_floor = (69-68)/1.5 = 0.667hr < 1.0hr MIN_VIABLE_NAT_VENT_HOURS -- the PROACTIVE_FLOOR exit candidate arms via decide_nat_vent_exit(), NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s). Session still active this tick."
+    },
+    {
+      "time": "2026-08-31T08:10:30",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 64.0,
+      "note": "30s later (< 90s sustain window) -- outdoor recovers to 64F (delta=5F), a real, common short-term fluctuation. passive_rate = -0.15*5 = -0.75F/hr; time_to_floor = 1/0.75 = 1.33hr > 1.0hr -- the PROACTIVE_FLOOR condition clears BEFORE ever being sustained for 90s. decide_nat_vent_exit() returns NONE this tick, resetting the candidate's timer entirely (confirmed_transition.py's own documented reset-on-clear behavior)."
+    },
+    {
+      "time": "2026-08-31T08:15:35",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 59.0,
+      "note": "305s after the first flicker (well past the unrelated 300s reactivation lockout window, and well past the 30s recovery above) -- outdoor dips back to 59F, the SAME PROACTIVE_FLOOR condition arms again, but as a genuinely FRESH candidate (the previous one was cleared at 08:10:30, not carried over) -- not yet sustain-confirmed (elapsed 0s). Session still active this tick."
+    },
+    {
+      "time": "2026-08-31T08:16:20",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 59.0,
+      "note": "45s after the second flicker's fresh arm (< 90s NAT_VENT_EXIT_SUSTAIN_S) -- still not confirmed. Session must still be active at this point: with sustain-confirmation, NEITHER flicker (30s continuous, then 45s-and-counting continuous) ever reached the full 90s of continuous below-threshold reading required to commit."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-31T08:00:01",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Nat-vent activates on window-open per the standard 4-condition gate."
+    },
+    {
+      "at": "2026-08-31T08:16:20",
+      "expect": "nat_vent_still_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Two separate flickers of the PROACTIVE_FLOOR exit condition (30s and 45s-and-counting) never individually held continuously for the full 90s NAT_VENT_EXIT_SUSTAIN_S window required to commit -- the session correctly survives noise that would have caused an instantaneous-commit design (pre-Issue #821) to exit and restore HVAC unnecessarily. See tests/test_scenario_e_sustain_confirmation_negative_control.py for the revert-tested proof that this assertion genuinely depends on sustain-confirmation being present."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A nat-vent session survives repeated momentary (noisy) crossings of the PROACTIVE_FLOOR predictive exit threshold, exiting only when the condition is genuinely sustained -- reproducing the physical pattern behind the live 300-second-gap finding and proving sustain-confirmation actually prevents it.",
+    "observed_behavior": "PROACTIVE_FLOOR candidate arms at 08:10:00, clears at 08:10:30 (recovered before 90s), re-arms fresh at 08:15:35, still unconfirmed at 08:16:20 (45s < 90s) -- nat-vent remains active throughout.",
+    "expected_behavior": "Momentary/noisy readings crossing a predictive exit threshold must not, by themselves, end a nat-vent session -- only a condition that holds continuously for the full sustain window should commit, directly addressing the reported real-world flapping."
+  }
+}

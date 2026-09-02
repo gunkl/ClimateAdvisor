@@ -1491,6 +1491,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         "aggressive_savings",
                         default=current.get("aggressive_savings", False),
                     ): selector.BooleanSelector(),
+                    vol.Required(
+                        "comfort_mode_switch_min_interval_s",
+                        default=current.get("comfort_mode_switch_min_interval_s", 600),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=60, max=1800, step=30, mode=selector.NumberSelectorMode.BOX)
+                    ),
                 }
             ),
             errors=errors,

@@ -1,0 +1,113 @@
+{
+  "name": "issue_821_exit_nat_vent_restore_defends_floor",
+  "description": "The project owner's own fix (confirmed by reading _deactivate_fan()'s restore branches directly): _exit_nat_vent()'s sensors-closed restore branch used to restore HVAC mode via a blind replay of self._pre_fan_hvac_mode (whatever mode was active BEFORE nat-vent started), never consulting the shared family resolver — reproducing the original comfort-floor-defense bug through nat-vent's own most common exit path (this method, not check_natural_vent_conditions()'s separate COMFORT_FLOOR branch, which already got this right). This scenario exercises the plain _exit_nat_vent() restore path directly (via handle_all_doors_windows_closed()'s own unconditional _exit_nat_vent() call when a monitored window closes while nat-vent is active), then lets indoor continue decaying below comfort_heat AFTER the session has already ended — proving the family resolver, reached through ordinary subsequent classification cycles, eventually commands heat rather than leaving the home stuck on a blind replay of the pre-nat-vent \"cool\" mode.",
+  "source": "Issue #821 follow-up — project owner's own diagnosis, reading automation.py's _exit_nat_vent()/_deactivate_fan() restore branches line by line (~7105-7128, ~9880-9946, ~10020+).",
+  "issue": 821,
+  "notes": [
+    "Why the window closes BEFORE indoor crosses the floor, not after: closing a monitored window while nat-vent is active ALWAYS ends the session immediately via handle_all_doors_windows_closed()'s own unconditional _exit_nat_vent() call (automation.py ~3983-3985), regardless of temperature — so there is no way to have 'windows already closed, nat-vent still active, waiting for a floor breach' as a state in production. Separately, fan_thermostat_check()'s own Check 2 (STOP_COOLED_TO_FLOOR, deliberately left ungated per this issue's fast-loop design-boundary decision) ALWAYS wins the race and exits nat-vent the instant indoor crosses the floor via any temp_update WHILE the window is still open — landing in _exit_nat_vent()'s PAUSE branch (untouched by this fix), not the restore branch. The only clean way to exercise the RESTORE branch with indoor later crossing the floor is to end the session first (window closes while indoor is still comfortably above the floor) and let indoor decay afterward, once neither fan_thermostat_check() (ca_fan_active now False) nor check_natural_vent_conditions()'s active-session block (natural_vent_active now False) has anything left to race against — leaving ordinary classification cycles, via the already-wired _apply_comfort_band()/_set_temperature_for_mode() resolver call, as the only remaining path. This is still a completely real, common production sequence (WHF session ends because the occupant closes the window; the house keeps cooling on momentum afterward) — not a contrived ordering.",
+    "Two-step timing, same shape as issue_821_comfort_floor_fallback_no_confidence.json: the first classification cycle after indoor crosses the floor (08:05:01) is the FIRST evaluation of the fallback candidate — it arms the candidate but cannot itself confirm (elapsed 0s < 90s COMFORT_FALLBACK_CONFIRM_S), so it correctly stays \"cool\" this tick. A second classification event at 08:16:00 (659s later) both sustain-confirms the fallback (>90s) and clears the family-switch lockout the 08:03:00 restore's own \"cool\" reaffirmation would otherwise still be holding (>600s comfort_mode_switch_min_interval_s default, measured from whichever \"cooling\"-family event happened last) — only then does it genuinely escalate to heat.",
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: reverting the _exit_nat_vent() fix (removing the added _set_temperature_for_mode() call after _deactivate_fan() in the sensors-closed branch) does not by itself break this scenario, since the family resolver is ALSO reached independently via the two classification events regardless — this scenario's real regression coverage is for the restore call itself not throwing/misbehaving when natural_vent_active is already False and _current_classification is present (the exact state the fix's new code runs in), and for confirming the 08:03:00 restore's own \"cool\" reaffirmation is what arms the family-switch lockout that the 08:16:00 escalation must then clear — verified by the family-lockout timing note above. issue_821_natvent_floor_exit_restore_no_flap.json remains the scenario that would directly fail if the fix's call were removed at its own restore moment.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md §6f documents this restore-path fix alongside this scenario as its test reference.",
+    "(c) Occupant experience: this models the ordinary, expected way a whole-house-fan session ends — the occupant closes the window — after which the home keeps cooling on momentum toward the heating floor. Without the fix's downstream family-resolver wiring being exercised correctly here too, the home would be left stuck on a cooling setpoint indefinitely; with it, the home is actively warmed back up once the below-floor condition is confirmed genuine."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-08-31T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot-day classification, HVAC in cool mode — comfort band arms at the ceiling. This is the mode _pre_fan_hvac_mode will capture when nat-vent activates a moment later."
+    },
+    {
+      "time": "2026-08-31T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 72F, outdoor 60F — favorable for nat-vent, well above the 68F floor."
+    },
+    {
+      "time": "2026-08-31T08:00:01",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens: outdoor(60) < indoor(72) - hysteresis(1), indoor > comfort_heat(68), outdoor < threshold — nat-vent activates, WHF turns on, HVAC suppressed (_pre_fan_hvac_mode captures \"cool\")."
+    },
+    {
+      "time": "2026-08-31T08:03:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window closes while indoor (72F) is still well above the floor. handle_all_doors_windows_closed() unconditionally calls _exit_nat_vent() while natural_vent_active is True — no sensor is open, so the RESTORE branch fires: _deactivate_fan() restores the blindly-replayed pre-nat-vent mode (\"cool\"), then the Issue #821 fix's added _set_temperature_for_mode() call runs. Indoor (72F) is not below comfort_heat, so the fallback candidate correctly does NOT arm yet — stays \"cool\", no premature escalation."
+    },
+    {
+      "time": "2026-08-31T08:05:00",
+      "type": "temp_update",
+      "indoor_f": 67.0,
+      "outdoor_f": 60.0,
+      "note": "Indoor continues decaying on momentum after the session already ended — down to 67F, below comfort_heat(68). Nat-vent is inactive and the fan is off, so neither fan_thermostat_check() nor check_natural_vent_conditions()'s active-session block has anything to race against; this temp_update alone has no decision consequence (no classification cycle yet)."
+    },
+    {
+      "time": "2026-08-31T08:05:01",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "First classification cycle with indoor below the floor. _apply_comfort_band()'s resolver call arms the fallback candidate (first evaluation, not yet confirmed — stays \"cool\" this tick, also re-affirming the \"cooling\" family and resetting the family-switch lockout's clock)."
+    },
+    {
+      "time": "2026-08-31T08:21:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "The 08:05:01 restore-adjacent grace period (armed by _exit_nat_vent()'s own _start_grace_period() call) expires at 08:10:01 and its own resume-cycle re-affirms \"cool\" one more time (the fallback candidate is not yet confirmed relative to ITS clock at that point either) — resetting the family-switch lockout's entry_time to 08:10:01. 08:21:00 is 659s after THAT reaffirmation (not the earlier 08:05:01 one), clearing both the 90s fallback sustain window and the 600s family-switch lockout measured from the true last \"cooling\" event. Indoor is still 67F. The fallback path sustain-confirms and escalates: comfort family switches to heating, engine commands heat at comfort_heat."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-31T08:00:01",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Nat-vent activates on window-open per the standard 4-condition gate."
+    },
+    {
+      "at": "2026-08-31T08:03:00",
+      "expect": "nat_vent_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "The window closing while nat-vent is active ends the session immediately via handle_all_doors_windows_closed()'s own unconditional _exit_nat_vent() call, at a moment indoor is still well above the floor."
+    },
+    {
+      "at": "2026-08-31T08:21:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The Issue #821 fix to _exit_nat_vent()'s restore branch (adding a follow-up _set_temperature_for_mode() call) proves that call runs correctly (without error, correctly declining to escalate) at the exact restore moment where indoor is still above the floor — and the subsequent classification-cycle escalation proves the family resolver genuinely reaches \"heating\" once indoor has since dropped below the floor and the condition is sustain-confirmed, closing the gap the project owner identified as the bug's most likely real trigger."
+    },
+    {
+      "at": "2026-08-31T08:21:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is genuinely \"heat\" (a real climate.set_temperature/set_hvac_mode call), not merely an internal flag — proving the comfort floor is actively defended following nat-vent's most common exit path."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After a nat-vent session ends via a window closing (its most common real-world exit trigger), and indoor continues decaying below the comfort floor afterward, the comfort family correctly escalates to heat through ordinary classification cycles — the restore itself correctly declines to escalate prematurely while indoor is still above the floor.",
+    "observed_behavior": "Window closes at 08:03:00 with indoor still comfortably above the floor — restore correctly stays cool. Indoor decays to 67F afterward; the first subsequent classification cycle (08:05:01) arms the fallback candidate, and a second cycle 659s later (08:16:00) sustain-confirms and escalates to heat.",
+    "expected_behavior": "The comfort floor is never silently left undefended following nat-vent's most common exit path, and the family resolver is proven reachable in the exact post-restore state (natural_vent_active already False, _current_classification present) the fix's new code executes in."
+  }
+}

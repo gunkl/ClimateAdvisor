@@ -74,6 +74,15 @@ def compute_nat_vent_plan(
           three optional params are given) comfort-floor crossing
       nat_vent_cutoff_reason: str | None — "outdoor_rise" or "comfort_floor", whichever
           produced nat_vent_cutoff; None if nat_vent_cutoff is None
+      comfort_floor_crossing_time: datetime | None — Issue #821: the comfort-floor
+          crossing, populated whenever the scan finds one, REGARDLESS of whether it
+          also won nat_vent_cutoff (unlike nat_vent_cutoff/nat_vent_cutoff_reason above,
+          which only surface it when it's the earlier of the two crossings). Consumed
+          by ``ode_floor_guard.py`` — a heat-day-agnostic floor-crossing scan is needed
+          for the comfort-floor defense fix independent of which crossing wins the
+          nat-vent-specific cutoff race. Still computed exactly once, here, per Issue
+          #817's single-source-of-truth architecture — ``ode_floor_guard.py`` reads this
+          cached field rather than re-scanning ``predicted_indoor`` itself.
       ceiling_breach_time: datetime | None — first hour indoor > comfort_cool
       precool_start_time: datetime | None — ceiling_breach_time minus computed lead
       any_nat_vent_window: bool — True if outdoor < indoor at any point
@@ -83,6 +92,7 @@ def compute_nat_vent_plan(
     result: dict = {
         "nat_vent_cutoff": None,
         "nat_vent_cutoff_reason": None,
+        "comfort_floor_crossing_time": None,
         "ceiling_breach_time": None,
         "precool_start_time": None,
         "any_nat_vent_window": False,
@@ -137,6 +147,10 @@ def compute_nat_vent_plan(
                 _after_open(ts) and i <= resolve_comfort_heat(comfort_heat_raw, sleep_heat, in_sleep_window_fn(ts))
             ),
         )
+
+    # Issue #821: unconditionally surfaced, unlike nat_vent_cutoff below (which only
+    # carries whichever crossing wins the race against outdoor_crossing).
+    result["comfort_floor_crossing_time"] = floor_crossing
 
     if outdoor_crossing is not None and (floor_crossing is None or outdoor_crossing <= floor_crossing):
         result["nat_vent_cutoff"] = outdoor_crossing

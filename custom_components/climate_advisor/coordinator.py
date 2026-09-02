@@ -2083,6 +2083,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=indoor_temp,
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+                comfort_floor_crossing_time=(getattr(self, "_nat_vent_plan", None) or {}).get(
+                    "comfort_floor_crossing_time"
+                ),
             )
             _LOGGER.debug("[coalesce-diag] after apply_classification() [coalesce path]")
             hvac_commanded = True
@@ -3657,6 +3660,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+                comfort_floor_crossing_time=(getattr(self, "_nat_vent_plan", None) or {}).get(
+                    "comfort_floor_crossing_time"
+                ),
             )
 
             # Initialize today's learning record, preserving any counters already accumulated
@@ -5533,6 +5539,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+                comfort_floor_crossing_time=(getattr(self, "_nat_vent_plan", None) or {}).get(
+                    "comfort_floor_crossing_time"
+                ),
             )
             _LOGGER.info(
                 "Setpoint re-asserted after fan-off echo: reasserted day_type=%s hvac_mode=%s",

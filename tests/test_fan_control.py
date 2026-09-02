@@ -44,6 +44,7 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
 )
+from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1323,6 +1324,14 @@ class TestFanSensorAttributes:
 
 
 _PATCH_CALL_LATER = "custom_components.climate_advisor.automation.async_call_later"
+# Issue #821: automation.dt_util.now() resolves to a MagicMock in this file's stub
+# environment despite the module-level sys.modules patch above (the two `dt` module
+# objects diverge by the time automation.py is imported) — harmless everywhere the
+# result is only stored/compared for truthiness, but _confirm_nat_vent_exit()'s
+# sustain-confirmation arithmetic ((now - candidate_since).total_seconds()) needs a
+# real datetime. Tests exercising a comfort-floor exit patch this explicitly.
+_DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
+_FIXED_NOW = datetime(2026, 3, 19, 14, 30, 0)
 
 
 class TestMinFanRuntime:
@@ -1573,7 +1582,17 @@ class TestFanStateCleanupOnThermostatOff:
 
 
 def _make_nat_vent_engine(indoor_temp: float) -> AutomationEngine:
-    """Create engine pre-configured for nat-vent comfort-floor-exit tests."""
+    """Create engine pre-configured for nat-vent comfort-floor-exit tests.
+
+    Issue #821: decide_nat_vent_exit()'s candidates now require sustain-confirmation
+    (NAT_VENT_EXIT_SUSTAIN_S = 90s) before the exit actually commits — these tests
+    exercise the resulting SIDE EFFECTS of a committed COMFORT_FLOOR exit, not the
+    sustain-confirmation timing itself (see tests/test_confirmed_transition.py and the
+    dedicated sustain-confirmation tests in tests/test_nat_vent_exit_sustain.py for
+    that). Pre-arming the candidate state to "already sustained" (since well over 90s
+    before the module's fixed dt_util.now()) preserves each test's original single-call
+    assertion shape.
+    """
     engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
     engine._natural_vent_active = True
     engine._paused_by_door = False
@@ -1581,6 +1600,8 @@ def _make_nat_vent_engine(indoor_temp: float) -> AutomationEngine:
     engine._fan_override_active = False
     engine._last_outdoor_temp = 62.0  # well below threshold (75+3=78) — outdoor alone won't exit
     engine._current_classification = _make_heat_classification()
+    engine._nat_vent_exit_candidate_reason = NatVentExitReason.COMFORT_FLOOR
+    engine._nat_vent_exit_candidate_since = datetime(2026, 3, 19, 14, 0, 0)
 
     mock_cs = MagicMock()
     mock_cs.attributes = {"current_temperature": indoor_temp}
@@ -1601,7 +1622,7 @@ class TestNatVentComfortFloorExit:
     def test_nat_vent_exits_when_indoor_at_comfort_heat_floor(self):
         """Indoor exactly at comfort_heat floor (70) → nat vent exits, HVAC restored to heat."""
         engine = _make_nat_vent_engine(indoor_temp=70.0)
-        with patch(_PATCH_CALL_LATER):
+        with patch(_PATCH_CALL_LATER), patch(_DT_NOW_PATH, return_value=_FIXED_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
@@ -1618,7 +1639,7 @@ class TestNatVentComfortFloorExit:
     def test_nat_vent_exits_when_indoor_below_comfort_heat_floor(self):
         """Indoor strictly below comfort_heat floor (68 < 70) → nat vent exits, HVAC restored."""
         engine = _make_nat_vent_engine(indoor_temp=68.0)
-        with patch(_PATCH_CALL_LATER):
+        with patch(_PATCH_CALL_LATER), patch(_DT_NOW_PATH, return_value=_FIXED_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
@@ -1646,7 +1667,7 @@ class TestNatVentComfortFloorExit:
         """Both comfort-floor AND outdoor-warm conditions true — comfort-floor path wins (no paused_by_door)."""
         engine = _make_nat_vent_engine(indoor_temp=70.0)
         engine._last_outdoor_temp = 80.0  # above threshold 78 too
-        with patch(_PATCH_CALL_LATER):
+        with patch(_PATCH_CALL_LATER), patch(_DT_NOW_PATH, return_value=_FIXED_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
         # Comfort-floor path does NOT set paused_by_door; outdoor-warmth path does
@@ -1661,7 +1682,7 @@ class TestNatVentComfortFloorExit:
         """No current classification → fan deactivated but no set_hvac_mode call."""
         engine = _make_nat_vent_engine(indoor_temp=70.0)
         engine._current_classification = None
-        with patch(_PATCH_CALL_LATER):
+        with patch(_PATCH_CALL_LATER), patch(_DT_NOW_PATH, return_value=_FIXED_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
@@ -1694,7 +1715,7 @@ class TestNatVentComfortFloorExit:
 
         engine = _make_nat_vent_engine(indoor_temp=70.0)
         engine._current_classification = cls_off
-        with patch(_PATCH_CALL_LATER):
+        with patch(_PATCH_CALL_LATER), patch(_DT_NOW_PATH, return_value=_FIXED_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
         fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
@@ -1711,7 +1732,7 @@ class TestNatVentComfortFloorExit:
         """
         engine = _make_nat_vent_engine(indoor_temp=70.0)
         engine._emit_event_callback = MagicMock()
-        with patch(_PATCH_CALL_LATER):
+        with patch(_PATCH_CALL_LATER), patch(_DT_NOW_PATH, return_value=_FIXED_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
         # Extract all event names fired
@@ -1735,7 +1756,7 @@ class TestNatVentComfortFloorExit:
         exit time directly, matching the AWAY_CEILING branch in the same method."""
         engine = _make_nat_vent_engine(indoor_temp=70.0)
         assert engine._nat_vent_outdoor_exit_time is None
-        with patch(_PATCH_CALL_LATER):
+        with patch(_PATCH_CALL_LATER), patch(_DT_NOW_PATH, return_value=_FIXED_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
@@ -1753,6 +1774,78 @@ class TestNatVentComfortFloorExit:
 
         assert len(engine.hass.services.async_call.call_args_list) == 0
         assert engine._natural_vent_active is False
+
+
+# ---------------------------------------------------------------------------
+# _exit_nat_vent() restore branch must consult the shared family resolver
+# (Issue #821 follow-up — project owner's own fix)
+# ---------------------------------------------------------------------------
+
+
+class TestExitNatVentRestoreConsultsResolver:
+    """_deactivate_fan() restores HVAC mode via a blind replay of
+    self._pre_fan_hvac_mode (whatever mode was active BEFORE nat-vent started),
+    never consulting the shared family resolver — reproducing the original
+    comfort-floor-defense bug through nat-vent's own most common exit path
+    (PROACTIVE_FLOOR/OUTDOOR_RISE/CEILING_THRESHOLD/window-close all route through
+    _exit_nat_vent(), unlike check_natural_vent_conditions()'s separate
+    COMFORT_FLOOR branch, which already called _set_temperature_for_mode() on its
+    own). The fix adds a follow-up _set_temperature_for_mode() call right after
+    _deactivate_fan() in the sensors-closed restore branch.
+
+    A full end-to-end golden/pending scenario
+    (issue_821_exit_nat_vent_restore_defends_floor.json) exercises this too, but
+    its own notes are explicit that reverting this exact fix does NOT make that
+    scenario fail on its own — a later grace-period expiry independently
+    re-triggers the same resolver moments later regardless, in that scenario's
+    specific timeline. These direct unit tests are the ones that actually
+    discriminate: they mock _set_temperature_for_mode() and assert it IS called,
+    with the current classification, from exactly this call site.
+    """
+
+    def test_sensors_closed_restore_calls_set_temperature_for_mode(self):
+        """The sensors-closed restore branch calls _set_temperature_for_mode()
+        with the current classification, right after restoring the old mode."""
+        engine = _make_nat_vent_engine(indoor_temp=67.0)
+        engine._current_classification = _make_heat_classification()
+        engine._current_classification.hvac_mode = "cool"
+        engine._sensor_check_callback = lambda: False  # sensors all closed
+        engine._set_temperature_for_mode = AsyncMock()
+
+        asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        engine._set_temperature_for_mode.assert_awaited_once()
+        call_args = engine._set_temperature_for_mode.call_args
+        assert call_args[0][0] is engine._current_classification, (
+            "Issue #821: the restore must consult the shared resolver via the CURRENT "
+            "classification, not a stale snapshot"
+        )
+
+    def test_sensors_closed_restore_noop_when_no_current_classification(self):
+        """Guard: no _current_classification (e.g. very early startup) must not
+        call _set_temperature_for_mode() with None — matches every other real
+        call site's own `if self._current_classification:` guard convention."""
+        engine = _make_nat_vent_engine(indoor_temp=67.0)
+        engine._current_classification = None
+        engine._sensor_check_callback = lambda: False
+        engine._set_temperature_for_mode = AsyncMock()
+
+        asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        engine._set_temperature_for_mode.assert_not_awaited()
+
+    def test_sensors_still_open_pause_branch_does_not_call_set_temperature_for_mode(self):
+        """Regression guard: the PAUSE branch (sensor still open) must NOT restore
+        anything — the fix is scoped to the sensors-closed restore branch only,
+        per the project owner's explicit instruction not to touch the pause branch."""
+        engine = _make_nat_vent_engine(indoor_temp=67.0)
+        engine._current_classification = _make_heat_classification()
+        engine._sensor_check_callback = lambda: True  # a monitored sensor is still open
+        engine._set_temperature_for_mode = AsyncMock()
+
+        asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        engine._set_temperature_for_mode.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

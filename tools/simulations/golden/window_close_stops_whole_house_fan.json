@@ -47,7 +47,14 @@
       "type": "temp_update",
       "indoor_f": 72.0,
       "outdoor_f": 72.5,
-      "note": "Outdoor warmed above indoor — nat-vent exit conditions met. Fan was running via min-runtime cycle (not nat-vent). _natural_vent_active=False, _fan_active=True after this point."
+      "note": "Outdoor warmed above indoor. The OUTDOOR_RISE exit candidate arms via decide_nat_vent_exit() but is NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s) — nat-vent still active this tick."
+    },
+    {
+      "time": "2026-06-12T10:01:35",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 72.5,
+      "note": "95s after outdoor first rose above indoor (> 90s NAT_VENT_EXIT_SUSTAIN_S) — outdoor still warmer than indoor. Nat-vent exit sustain-confirms and commits. Fan was running via min-runtime cycle (not nat-vent). _natural_vent_active=False, _fan_active=True after this point."
     },
     {
       "time": "2026-06-12T11:00:00",
@@ -68,9 +75,9 @@
       "reason": "Window opened with outdoor=71F < indoor=72F — nat-vent activates (outdoor <= threshold 77F). Whole-house fan activates."
     },
     {
-      "at": "2026-06-12T10:00:00",
+      "at": "2026-06-12T10:01:35",
       "expect": "nat_vent_outdoor_rise_exit",
-      "reason": "outdoor=72.5F >= indoor=72F — nat-vent outdoor-rise exit fires. Fan may remain active for min-runtime cycle but _natural_vent_active=False."
+      "reason": "outdoor=72.5F >= indoor=72F, sustained for 95s (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s) — nat-vent outdoor-rise exit fires. Fan may remain active for min-runtime cycle but _natural_vent_active=False."
     },
     {
       "at": "2026-06-12T11:00:00",

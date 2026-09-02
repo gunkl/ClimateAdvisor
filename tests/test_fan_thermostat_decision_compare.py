@@ -83,13 +83,23 @@ def test_comparator_intercepts_real_calls_and_agrees_on_goldens():
     assert not run.disagreements, [(c.scenario_name, c.real_outcome, c.new_outcome) for c in run.disagreements]
 
 
-def test_real_outcomes_never_include_stop_deactivate_or_stop_cooled_to_floor():
+def test_real_outcomes_never_include_stop_deactivate():
     """Guards the exact premise the positive control below depends on: STOP_DEACTIVATE
     must remain an outcome no real golden-driven call produces, or forcing it as the
     positive control's broken value would no longer be a genuinely different outcome.
-    KEEP and STOP_VIA_NAT_VENT_EXIT are both real, observed outcomes (the latter since
-    the Step-2 harness fidelity fix); STOP_DEACTIVATE and STOP_COOLED_TO_FLOOR are not
-    yet exercised by any golden — a real, separate coverage gap, not asserted away here."""
+
+    Issue #821 correction: this test previously also asserted STOP_COOLED_TO_FLOOR was
+    unexercised — that was never actually true, it was masked by a real classification
+    bug in _classify_observation() (fixed alongside this test): Issues #620/#755 (both
+    predate #821) already routed STOP_COOLED_TO_FLOOR through _exit_nat_vent(), the same
+    choke point STOP_VIA_NAT_VENT_EXIT uses, so the comparator's old exit_called-only
+    heuristic silently misclassified every real STOP_COOLED_TO_FLOOR as
+    STOP_VIA_NAT_VENT_EXIT. Issue #821's own sustain-confirmation change didn't cause
+    this — it only shifted tick timing enough for one golden
+    (2026-03-28-overnight) to exercise the gap for the first time, surfacing a
+    pre-existing bug. Now that _classify_observation() disambiguates via the
+    exit reason string, STOP_COOLED_TO_FLOOR is correctly counted as a real, observed
+    outcome — this test's premise only needs to hold for STOP_DEACTIVATE."""
     from custom_components.climate_advisor.fan_thermostat_decision import FanThermostatOutcome
 
     run = FanThermostatComparisonRun()
@@ -98,9 +108,8 @@ def test_real_outcomes_never_include_stop_deactivate_or_stop_cooled_to_floor():
 
     outcomes = Counter(c.real_outcome for c in run.calls)
     assert run.n_calls > 0
-    unexpected = {FanThermostatOutcome.STOP_DEACTIVATE, FanThermostatOutcome.STOP_COOLED_TO_FLOOR} & set(outcomes)
-    assert not unexpected, (
-        f"a golden now exercises {unexpected} — the positive control's forced STOP_DEACTIVATE value "
+    assert FanThermostatOutcome.STOP_DEACTIVATE not in outcomes, (
+        "a golden now exercises STOP_DEACTIVATE — the positive control's forced value "
         f"is no longer distinct from every real outcome; got full distribution {outcomes}"
     )
 

@@ -1,0 +1,155 @@
+{
+  "name": "issue_827_recovery_margin_prevents_sawtooth",
+  "description": "Extends issue_821_comfort_floor_fallback_no_confidence.json's own scenario shape past the point where the family first escalates to heating. Proves the new recovery-margin hysteresis (Design #1, new work -- neither ODE guard module had this before) is what prevents a naive same-threshold entry/exit pair from saw-toothing: (1) once escalated to heating, a small recovery just above the plain floor does NOT immediately revert (the recovery margin -- the same deadband value, applied in the comfort direction -- has not yet cleared); (2) only once indoor clears floor+margin AND sustain-confirms does it revert to the day's native family; (3) after reverting, a small dip back below the floor (within the plain deadband) does NOT immediately re-escalate -- the same deadband gate that protects entry also protects against an immediate re-flip right after a revert.",
+  "source": "Issue #827 Design #1 -- recovery-margin hysteresis on exit, and the Verification's own revert-test requirement ('neutralize the recovery-margin hysteresis -> saw-tooth scenario must fail').",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness (revert-test, per CLAUDE.md's Testing Requirements): if _decide_revert() in comfort_family_decision.py were reverted to a naive 'indoor >= floor' check (no recovery margin) instead of 'indoor >= floor + margin', the 08:40:00 tick would find indoor(71.5) >= floor(70) TRUE and revert to cooling immediately -- then the 08:50:00 dip below the floor again would re-arm a fresh heating candidate, and with enough repeated small oscillations the family would flap heating/cooling/heating (saw-tooth) instead of holding a stable state. This scenario's 08:40:00 assertion (comfort_family family read via expect_band ceiling-vs-floor -- see below) would FAIL under that reverted behavior, since the naive check would have already reverted to cooling (ceiling command) by then instead of still commanding heat (floor).",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents the recovery-margin hysteresis and its saw-tooth-prevention rationale alongside this scenario as its test reference.",
+    "(c) Occupant experience: without a recovery margin, a home hovering right around its comfort floor (e.g. a cold front settling in) would have its HVAC mode flap between heat and cool every time indoor crosses the floor by even a fraction of a degree -- audible, wasteful short-cycling that erodes trust in the automation. With the recovery margin, once a genuine escalation happens, the system commits to it until indoor has recovered with real margin, then only reverts to the day's native family once that recovery genuinely holds -- and even then, a plain in-deadband dip right after the revert doesn't immediately re-trigger.",
+    "Uses the same config/day-type shape as issue_821_comfort_floor_fallback_no_confidence.json (warm day, comfort_heat=70F, comfort_deadband_warm_f default 2.0F) so the escalation timing (08:00 baseline -> 08:30 breach -> 08:32 confirm/escalate) is directly comparable -- this scenario picks up exactly where that one's own final assertion leaves off and adds the revert + post-revert-stability proof neither scenario covers on its own.",
+    "Recovery margin = comfort_deadband_warm_f = 2.0F (Design #1: 'gated by a recovery-margin -- not the entry deadband ... indoor must clear the floor/ceiling by deadband_against_grain_f in the comfort direction'). floor+margin = 70+2 = 72F."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Baseline: warm day, comfort band arms at the ceiling (cool). base_family='cooling'."
+    },
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 60.0,
+      "note": "Indoor 71F, within band [70F, 74F]."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 50.0,
+      "note": "Indoor decays to 66F, 4F below comfort_heat(70) -- clears comfort_deadband_warm_f(2.0F)."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "First below-floor tick. Fallback candidate arms, not yet sustain-confirmed."
+    },
+    {
+      "time": "2026-09-01T08:32:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "120s later (>90s). Cold start -- first-ever transition, no dwell gate. Sustain-confirmed: comfort family escalates to heating, commands heat at comfort_heat(70)."
+    },
+    {
+      "time": "2026-09-01T08:40:00",
+      "type": "temp_update",
+      "indoor_f": 71.5,
+      "outdoor_f": 65.0,
+      "note": "Indoor recovers to 71.5F -- ABOVE the plain floor(70) but BELOW floor+recovery_margin(70+2=72). A naive instant-revert design would flip back to cooling here (71.5 >= 70); the recovery-margin design does not."
+    },
+    {
+      "time": "2026-09-01T08:40:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Re-evaluation while against-grain (heating). _decide_revert(): recovered = indoor(71.5) >= floor+margin(72) -> FALSE. Stays heating (HOLD, recovery margin not yet cleared)."
+    },
+    {
+      "time": "2026-09-01T08:45:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 68.0,
+      "note": "Indoor recovers further to 73F -- now clears floor+recovery_margin(72)."
+    },
+    {
+      "time": "2026-09-01T08:45:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Recovery margin cleared -- arms the recovery candidate (RECOVERING), not yet sustain-confirmed. Stays heating this tick."
+    },
+    {
+      "time": "2026-09-01T08:47:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "120s later (>90s) with indoor still holding above floor+margin (no new temp_update -- still 73F). Recovery sustain-confirms: REVERT to the day's native family (cooling)."
+    },
+    {
+      "time": "2026-09-01T08:50:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 55.0,
+      "note": "Indoor dips back to 69F -- 1F below comfort_heat(70), WITHIN comfort_deadband_warm_f(2.0F). This is the saw-tooth trigger: a naive design without deadband protection on re-entry would immediately re-arm/re-escalate right after the revert. The plain deadband gate (the same one that governed the original entry) still applies to a fresh entry from the native-family shape."
+    },
+    {
+      "time": "2026-09-01T08:50:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Re-evaluation: heat_breach_delta = 70-69 = 1F <= comfort_deadband_warm_f(2.0F) -> WITHIN_DEADBAND, no candidate armed. Comfort family stays 'cooling' -- no saw-tooth."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "expect_band",
+      "expect_band": { "floor": 70.0 },
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Confirms the base escalation from issue_821_comfort_floor_fallback_no_confidence.json's own shape: heat commanded at comfort_heat(70) once sustain-confirmed."
+    },
+    {
+      "at": "2026-09-01T08:40:00",
+      "expect": "expect_band",
+      "expect_band": { "floor": 70.0 },
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Indoor (71.5F) is above the plain floor but has not cleared floor+recovery_margin(72F) -- still commanding heat (floor), NOT reverted to cool (ceiling). A naive instant-revert design would have already flipped to the cool ceiling here; the recovery-margin design has not. Time-scoped (unlike comfort_family, which reads only the engine's final state)."
+    },
+    {
+      "at": "2026-09-01T08:50:00",
+      "expect": "comfort_family",
+      "family": "cooling",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Final state: after genuinely reverting at 08:47:00 (recovery margin cleared and sustain-confirmed), a subsequent small in-deadband dip (69F, 1F below floor) does NOT re-escalate -- the plain deadband gate still protects a fresh entry from the native-family shape, preventing the saw-tooth a same-threshold entry/exit pair would produce."
+    },
+    {
+      "at": "2026-09-01T08:50:00",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["heat"],
+      "since": "2026-09-01T08:47:00",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Since the revert at 08:47:00, heat mode must never be commanded again in this scenario -- proves the post-revert dip genuinely did not re-trigger a heat command, not just that the internal family flag reads 'cooling'."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The recovery-margin hysteresis on exit prevents a same-threshold entry/exit saw-tooth: a small recovery just above the floor does not immediately revert, and once genuinely reverted, a small in-deadband dip does not immediately re-escalate.",
+    "observed_behavior": "Escalates to heating at 08:32:00 (comfort_heat=70). Holds heating through a partial recovery to 71.5F (08:40:00, below floor+margin=72). Reverts to cooling at 08:47:00 once 73F clears floor+margin and sustain-confirms. Stays cooling through a subsequent dip to 69F (08:50:00, within deadband) -- no re-escalation, no further heat command.",
+    "expected_behavior": "A recovery-margin-gated revert (not a same-threshold instant flip) is required to prevent HVAC mode from flapping every time indoor oscillates near the comfort floor -- the specific failure mode a naive design would produce and this scenario would catch."
+  }
+}

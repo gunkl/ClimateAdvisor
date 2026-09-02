@@ -1,0 +1,89 @@
+{
+  "name": "issue_827_hot_day_deadband_cleared_escalates",
+  "description": "Companion to issue_827_hot_day_dawn_dip_within_deadband_no_escalate.json: proves that once a hot day's below-floor breach genuinely clears comfort_deadband_hot_f (default 5.0F), the family DOES escalate to heat once sustain-confirmed -- the wide hot-day deadband tolerates a modest dip but is not a blanket suppression of the safety backstop. A severe breach (well past 5F) is a real floor defense case regardless of day type.",
+  "source": "Issue #827 Design table, deadband table 'Hot' row -- companion positive case to the within-deadband negative control.",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness (revert-test): if comfort_deadband_hot_f were misconfigured/clamped to an unreasonably large value (e.g. the clamp's upper bound 8.0F raised or removed so a breach like this scenario's 7F never clears it), the final assertion (comfort_family=heating) would FAIL -- proving this scenario genuinely depends on the deadband being clamped to a bounded, real value, not an unbounded 'never escalate on a hot day' suppression.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents the deadband table's 'Hot' row (5.0F default, clamped [2,8]) and this scenario as its test reference for the escalate-past-deadband case, paired with the dawn-dip negative control.",
+    "(c) Occupant experience: a hot day's wide deadband tolerates a modest dip, but a home that has genuinely dropped 7F below its comfort floor overnight (a real cold snap, not a transient morning chill) still needs active defense -- otherwise the home could coast arbitrarily cold on a day CA expects to need cooling later, leaving occupants cold for hours before the day's own warming ever arrives.",
+    "Deliberately uses the SAME day_type/config shape as issue_827_hot_day_dawn_dip_within_deadband_no_escalate.json (comfort_heat=68, day_type='hot') -- only the indoor trajectory differs (7F breach here vs. 3F there), making the two scenarios a direct before/after-the-deadband-line comparison pair."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot-day classification at dawn. base_family='cooling' (native)."
+    },
+    {
+      "time": "2026-09-01T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 50.0,
+      "note": "Indoor 71F, within band [68F, 74F]."
+    },
+    {
+      "time": "2026-09-01T06:15:00",
+      "type": "temp_update",
+      "indoor_f": 61.0,
+      "outdoor_f": 42.0,
+      "note": "A genuine cold snap: indoor drops to 61F, 7F below comfort_heat(68) -- clears comfort_deadband_hot_f (default 5.0F, clamped [2,8]) with margin."
+    },
+    {
+      "time": "2026-09-01T06:15:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "First below-deadband tick. Fallback candidate arms, not yet sustain-confirmed (elapsed 0s < 90s). Stays 'cooling' this tick."
+    },
+    {
+      "time": "2026-09-01T06:17:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "120s later (>90s). First-ever transition for this engine (cold start, no dwell gate). Sustain-confirmed: comfort family escalates to heating, commands heat at comfort_heat(68)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T06:00:00",
+      "expect": "comfort_band_armed",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: hot day, indoor within band -- comfort band arms normally at the ceiling."
+    },
+    {
+      "at": "2026-09-01T06:17:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "A 7F breach clears comfort_deadband_hot_f (5.0F) with margin -- once sustain-confirmed, the family escalates to heating despite the hot-day classification."
+    },
+    {
+      "at": "2026-09-01T06:17:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_heat, not merely an internal flag."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A hot-day breach that genuinely clears comfort_deadband_hot_f (5.0F default) escalates to heat once sustain-confirmed, proving the wide hot-day deadband is a bounded tolerance, not a blanket suppression of the safety backstop.",
+    "observed_behavior": "Indoor drops to 61F (7F below the 68F floor, past the 5F hot-day deadband) -- comfort family escalates to heating at 06:17:00 once sustain-confirmed.",
+    "expected_behavior": "The hot-day deadband tolerates a modest dip but not a genuine, severe cold snap -- once cleared, the same sustain-confirmed escalation mechanism every other day type uses applies here too."
+  }
+}

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.11] — 2026-09-02
+
+- Fix #827: the comfort-floor/ceiling defense that still failed to reliably hold heat after #821 and #823 is now a single consolidated state machine instead of three separately-patched mechanisms (a day-type edge picker, a confidence-gated escalation fallback, and a separately-armed anti-flap timer). It no longer forgets its recovery margin between cycles — the saw-tooth pattern of a brief heat pulse followed by a blocked, cold stretch is gone — and it now defends the comfort floor on every day type and occupancy mode (previously an "off"-classified day, or a day where the forecast confidence briefly went stale, got no floor defense at all). A new day-type-scaled tolerance (2°F on mild/warm/cool days, 5°F on hot/cold days, configurable) means a transient dip or a deliberate manual override is tolerated before the system corrects — but the correction still fires regardless of cause once genuinely needed.
+
 ## [0.7.10] — 2026-09-02
 
 - Fix #825: the Nat-Vent Soft-Start toggle in Settings now shows a proper label and description instead of the raw `nat_vent_soft_start_enabled` field name.

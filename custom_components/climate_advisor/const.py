@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.10"
+VERSION = "0.7.11"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -318,6 +318,45 @@ COMFORT_FALLBACK_CONFIRM_S = 90.0
 # matching min_preheat_minutes/max_setback_depth_f-style advanced numeric settings.
 CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S = "comfort_mode_switch_min_interval_s"
 COMFORT_MODE_SWITCH_MIN_INTERVAL_S = 600.0
+
+# ---------------------------------------------------------------------------
+# Comfort-family FSM deadbands (Issue #827)
+# ---------------------------------------------------------------------------
+# Named "deadband", deliberately NOT unified with NAT_VENT_HYSTERESIS_F (line 246
+# above): NAT_VENT_HYSTERESIS_F is a symmetric, day-type-independent, override-blind
+# noise filter. These 5 values are asymmetric (native-direction family switches at a
+# near-zero deadband; only the against-grain direction is gated by these), day-type-
+# scaled (a different tolerance per classified day), and override-surviving (a manual
+# override suppresses the tight native-direction defense but never suppresses the
+# against-grain safety escalation once the deadband is cleared) — genuinely different
+# vocabulary for a genuinely different concept, not the same idea under two names.
+# Measured from the already-resolved band.floor/band.ceiling (post aggressive_savings
+# margin), not raw comfort_heat/comfort_cool, so the two tolerance mechanisms compose
+# from one anchor point instead of silently disagreeing.
+CONF_COMFORT_DEADBAND_HOT_F = "comfort_deadband_hot_f"
+CONF_COMFORT_DEADBAND_WARM_F = "comfort_deadband_warm_f"
+CONF_COMFORT_DEADBAND_MILD_F = "comfort_deadband_mild_f"
+CONF_COMFORT_DEADBAND_COOL_F = "comfort_deadband_cool_f"
+CONF_COMFORT_DEADBAND_COLD_F = "comfort_deadband_cold_f"
+DEFAULT_COMFORT_DEADBAND_HOT_F = 5.0
+DEFAULT_COMFORT_DEADBAND_WARM_F = 2.0
+DEFAULT_COMFORT_DEADBAND_MILD_F = 2.0
+DEFAULT_COMFORT_DEADBAND_COOL_F = 2.0
+DEFAULT_COMFORT_DEADBAND_COLD_F = 5.0
+# Clamp table (config_flow.py NumberSelectorConfig min/max + the manual read-time
+# clamp in automation.py's deadband lookup helper) — no vol.Range validator exists
+# anywhere in this codebase (confirmed by grep), matching the NumberSelectorConfig +
+# manual-clamp pattern already used by thermal_lead_time.py/learning.py.
+COMFORT_DEADBAND_HOT_MIN_F = 2.0
+COMFORT_DEADBAND_HOT_MAX_F = 8.0
+COMFORT_DEADBAND_WARM_MIN_F = 1.0
+COMFORT_DEADBAND_WARM_MAX_F = 5.0
+COMFORT_DEADBAND_MILD_MIN_F = 1.0
+COMFORT_DEADBAND_MILD_MAX_F = 5.0
+COMFORT_DEADBAND_COOL_MIN_F = 1.0
+COMFORT_DEADBAND_COOL_MAX_F = 5.0
+COMFORT_DEADBAND_COLD_MIN_F = 2.0
+COMFORT_DEADBAND_COLD_MAX_F = 8.0
 
 # State persistence
 STATE_FILE = "climate_advisor_state.json"
@@ -793,6 +832,46 @@ CONFIG_METADATA = {
             "How long to wait after commanding heat, active cooling, or a whole-house-fan session"
             " before switching between the heating and cooling families again — prevents rapid"
             " heat/cool hunting right after free cooling rides the house down to the comfort floor."
+        ),
+        "category": "advanced",
+    },
+    "comfort_deadband_hot_f": {
+        "label": "Comfort Deadband — Hot Days (°F)",
+        "description": (
+            "On a hot day, how far indoor temp must drop below the comfort floor before the"
+            " comfort-family FSM escalates to heat (the against-grain direction on a hot day)."
+        ),
+        "category": "advanced",
+    },
+    "comfort_deadband_warm_f": {
+        "label": "Comfort Deadband — Warm Days (°F)",
+        "description": (
+            "On a warm day, how far indoor temp must drop below the comfort floor before the"
+            " comfort-family FSM escalates to heat."
+        ),
+        "category": "advanced",
+    },
+    "comfort_deadband_mild_f": {
+        "label": "Comfort Deadband — Mild/Off Days (°F)",
+        "description": (
+            "On a mild or off-classified day, how far indoor temp must move past a comfort edge"
+            " before the comfort-family FSM escalates against the day's native direction."
+        ),
+        "category": "advanced",
+    },
+    "comfort_deadband_cool_f": {
+        "label": "Comfort Deadband — Cool Days (°F)",
+        "description": (
+            "On a cool day, how far indoor temp must rise above the comfort ceiling before the"
+            " comfort-family FSM escalates to cooling."
+        ),
+        "category": "advanced",
+    },
+    "comfort_deadband_cold_f": {
+        "label": "Comfort Deadband — Cold Days (°F)",
+        "description": (
+            "On a cold day, how far indoor temp must rise above the comfort ceiling before the"
+            " comfort-family FSM escalates to cooling (the against-grain direction on a cold day)."
         ),
         "category": "advanced",
     },

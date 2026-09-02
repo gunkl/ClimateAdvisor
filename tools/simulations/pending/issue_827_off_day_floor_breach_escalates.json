@@ -1,0 +1,91 @@
+{
+  "name": "issue_827_off_day_floor_breach_escalates",
+  "description": "GAP-1 (Issue #827 audit): before this issue, an off-classified day (mild day_type, hvac_mode='off') had ZERO comfort-floor defense at all — the old _resolve_comfort_family_mode() only ever compared against a cool-classified day's fallback path. This scenario proves the consolidated FSM now gives an off/mild day real, if conservative, protection: indoor decays well below comfort_heat and the family escalates to heating once the mild-tier deadband (comfort_deadband_mild_f, default 2.0F, clamped [1,5]) is genuinely cleared and sustain-confirmed.",
+  "source": "Issue #827 Design table, GAP-1 — off-classified days previously had no floor defense whatsoever.",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness: if comfort_family_decision.py's fallback path were reverted to only fire for a cool-classified base_family with the pre-#827 confidence-gated check (or if the mild/off day type were excluded from the deadband table entirely, defaulting to no defense as pre-#827), the final assertion (comfort_family=heating) would FAIL — the engine would keep affirming the mild-day ceiling band forever while indoor kept dropping, exactly reproducing GAP-1.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents the deadband table's 'Mild / off' row and this scenario as its test reference.",
+    "(c) Occupant experience: on a mild or 'off'-classified day, CA previously left the thermostat in its passive ceiling-only band with no floor backstop at all — a home could drift arbitrarily cold overnight or during a cold snap on a day forecast as mild, with zero corrective heating, because the pre-#827 resolver only ever considered a cool-classified base_family. With this fix, a genuine (not transient) below-floor drift on ANY day type — including mild/off — is defended at a conservative tier.",
+    "windows_recommended=true and hvac_mode='off' exactly match DayClassification._compute_recommendations()'s real DAY_TYPE_MILD branch (classifier.py) — this scenario passes those fields explicitly (per the harness's own '_build_classification_from_event bypasses __post_init__ derivation' convention) but they mirror what the real classifier would derive, so the scenario stays representative of production, not synthetic."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Mild-day classification. select_comfort_band() still arms the persistent [comfort_heat, comfort_cool] band with active='ceiling' (Issue #249 P3 — no separate hvac_mode='off' branch), so _apply_comfort_band()'s FSM call sees day_mode='cool', base_family='cooling'."
+    },
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 55.0,
+      "note": "Baseline: indoor 70F, within the comfort band [68F, 74F] — no breach."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 45.0,
+      "note": "Indoor has decayed to 64F, 4F below comfort_heat(68) — clears comfort_deadband_mild_f (default 2.0F) with margin. Native family for a mild day is None (_native_family returns None for DAY_TYPE_MILD), so heating is NOT the native direction here either — the deadband still applies at the mild/off conservative tier."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "First classification cycle with indoor below the floor by more than the deadband. Fallback candidate arms — first evaluation, not yet sustain-confirmed (elapsed 0s < 90s COMFORT_FALLBACK_CONFIRM_S). Comfort family stays 'cooling' this tick."
+    },
+    {
+      "time": "2026-09-01T08:32:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "120s later (>90s). This is the very first genuine transition this engine has ever made, so the 600s comfort_mode_switch_min_interval_s dwell floor is not in play (dwell_since starts None — cold start allows the first transition unconditionally, per comfort_family_fsm.py's own documented convention). Sustain-confirmed: comfort family switches to heating, engine commands heat at comfort_heat."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T08:00:00",
+      "expect": "comfort_band_armed",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: mild day, indoor within band — comfort band arms normally."
+    },
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "GAP-1 fix: an off/mild-classified day now gets real (conservative-tier) floor defense. By 08:32:00 the below-floor reading has been sustain-confirmed for >90s, so the family escalates to heating."
+    },
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_heat, not merely an internal flag."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "An off/mild-classified day, which previously had zero comfort-floor defense, now escalates to heat once indoor genuinely clears the mild-tier deadband and sustain-confirms — closing GAP-1 from the Issue #827 audit.",
+    "observed_behavior": "comfort family stays 'cooling' at 70F (in-band) and again at the first below-floor tick (08:30:00, unconfirmed); switches to 'heating' at 08:32:00 once the breach has cleared the deadband and sustain-confirmed.",
+    "expected_behavior": "A day classified as mild/off is never left with zero floor defense — a genuine, sustained below-floor drift is corrected at a conservative (2.0F default) tolerance, same mechanism as every other day type, just a different tier."
+  }
+}

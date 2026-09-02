@@ -1,0 +1,95 @@
+{
+  "name": "issue_827_missing_forecast_fallback_escalates",
+  "description": "GAP-2 (Issue #827 audit): the pre-#827 resolver only fell through to its sustain-confirmed fallback when confidence_k_passive was LITERALLY 'none'. A zone WITH thermal-model confidence (e.g. 'medium') but no cached comfort_floor_crossing_time (a missing forecast for this cycle) fell into a dead end instead — the ODE floor guard returns NO_BREACH_PREDICTED and nothing else picked up the slack. This scenario proves the consolidated FSM's fallback is now universal: any 'guard can't decide' outcome (NO_BREACH_PREDICTED here) falls through to the same sustain-confirm+deadband path the confidence-none case always used.",
+  "source": "Issue #827 Design table, GAP-2 — a non-none-confidence zone with a missing floor-crossing forecast previously dead-ended instead of falling back.",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness: if decide_comfort_family()'s heating-direction branch were reverted to gate the fallback strictly on confidence_k_passive=='none' (the pre-#827 shape), this scenario's NO_BREACH_PREDICTED outcome (confidence='medium', no comfort_floor_crossing_time ever supplied) would be treated as 'confidence not none, so no fallback' and the final assertion (comfort_family=heating) would FAIL — the engine would keep affirming the warm-day ceiling forever despite the confirmed floor breach.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents the universal-fallback design (not confidence-gated) alongside this scenario as its test reference.",
+    "(c) Occupant experience: a zone with SOME thermal-model history (non-none confidence) but no cached floor-crossing prediction for this particular cycle (e.g. right after a model refresh, before the next ODE run repopulates the cache) previously had its comfort floor silently undefended — worse than a brand-new zone, since the confidence-none fallback that protected a brand-new zone explicitly excluded it. With this fix, the floor is defended the same way regardless of why the ODE guard couldn't decide.",
+    "The harness's classification event dispatcher (tools/sim_harness/run_production.py) always calls apply_classification() with comfort_floor_crossing_time=None (no scenario field threads a value through) — so 'confidence not none, no floor-crossing time' is simply the harness's normal default state whenever thermal_model.confidence is set to anything but 'none'. No special event is needed to reach NO_BREACH_PREDICTED; only the thermal_model config block distinguishes this scenario from issue_821_comfort_floor_fallback_no_confidence.json's MODEL_INELIGIBLE case."
+  ],
+  "thermal_model": {
+    "confidence": "medium",
+    "k_passive": -0.12
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification. Base_family resolves to 'cooling' (active=ceiling). Thermal model confidence is 'medium' (not 'none'), but no comfort_floor_crossing_time is ever supplied by this harness's classification dispatch -> decide_ode_floor_guard() returns NO_BREACH_PREDICTED every cycle."
+    },
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 71F, within band [68F, 74F]."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 52.0,
+      "note": "Indoor has decayed to 65F, 3F below comfort_heat(68) — clears comfort_deadband_warm_f (default 2.0F)."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "First cycle with indoor below the floor. NO_BREACH_PREDICTED falls through to the universal sustain-confirm fallback (GAP-2 fix) -- arms the candidate, not yet confirmed (elapsed 0s < 90s). Stays 'cooling' this tick."
+    },
+    {
+      "time": "2026-09-01T08:32:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "120s later (>90s). First-ever transition for this engine, so the 600s dwell floor doesn't gate it (cold start allows the first transition unconditionally). Sustain-confirmed: comfort family switches to heating."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T08:00:00",
+      "expect": "comfort_band_armed",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: warm day, indoor within band — comfort band arms normally."
+    },
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "GAP-2 fix: a zone with non-none thermal-model confidence but no cached floor-crossing prediction still reaches the universal fallback (rather than dead-ending) and escalates once the below-floor reading sustain-confirms."
+    },
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_heat."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A zone with non-none thermal-model confidence but no cached floor-crossing forecast for this cycle still gets its comfort floor defended via the universal sustain-confirm fallback — closing GAP-2 from the Issue #827 audit.",
+    "observed_behavior": "comfort family stays 'cooling' at 71F (in-band) and again at the first below-floor tick (08:30:00, unconfirmed); switches to 'heating' at 08:32:00 once sustain-confirmed.",
+    "expected_behavior": "The comfort-floor fallback is never gated on confidence_k_passive literally being 'none' -- any ODE-guard outcome that can't itself decide (MODEL_INELIGIBLE, MISSING_TEMPS, or NO_BREACH_PREDICTED) falls through to the same universal fallback."
+  }
+}

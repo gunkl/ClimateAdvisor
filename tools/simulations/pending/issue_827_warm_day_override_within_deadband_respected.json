@@ -1,0 +1,113 @@
+{
+  "name": "issue_827_warm_day_override_within_deadband_respected",
+  "description": "Proves the manual-override grace window (Design #1's OVERRIDE_HELD outcome): a breach between 1x and 2x the configured deadband is held while a manual override is active -- the safety backstop does not fight an active, deliberate override for a small, arguably-intentional deviation. This exercises the ONE real production call site that reaches the comfort-family FSM while an active mismatched manual override is in force (_exit_nat_vent()'s sensors-closed restore branch, inside automation.py -- apply_classification()/handle_bedtime()/handle_morning_wakeup()/handle_pre_cool() all gate on decide_scheduled_band_gate()==DEFER_OVERRIDE and never reach the FSM while an active mismatched override exists, confirmed by direct code read during this issue's scenario authoring).",
+  "source": "Issue #827 Design #1 -- 'Manual override changes what's intentional, not the safety backstop... a breach between 1x and 2x the configured deadband is held (OVERRIDE_HELD) while override is active'.",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness (revert-test): if comfort_family_decision.py's _check_direction() were reverted to the pre-#827 behavior (override blocks escalation UNCONDITIONALLY, no 2x ceiling), this scenario's own assertion would still pass (both designs hold a breach this small) -- the DISCRIMINATING case is the companion scenario issue_827_warm_day_override_exceeds_deadband_bypasses_hold.json, where a >2x breach must NOT be held under the new design but WOULD be held under the pre-#827 unconditional block. This scenario exists to establish the WITHIN-window baseline so that companion's contrast is meaningful, and to prove OVERRIDE_HELD is reachable at all in the real engine (not just the pure leaf's unit tests).",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents the OVERRIDE_HELD outcome and the _OVERRIDE_DEADBAND_MULTIPLIER=2.0 constant alongside this scenario as its test reference. The docs rewrite also records the finding above -- that apply_classification()'s own inline override check (automation.py ~2566-2607) bails BEFORE ever reaching select_comfort_band()/the FSM whenever an override is active and mismatched (or setpoint-only), so in the CURRENT wiring, OVERRIDE_HELD is reachable end-to-end only through nat-vent's override-blind restore call site -- a genuine, documented architecture note, not an assumption.",
+    "(c) Occupant experience: a user who manually nudges their thermostat while comfort family is near (but not badly past) the floor is expressing a real, if modest, preference -- CA should not immediately fight that by forcing a heat command. With this fix, that small deviation is respected for as long as the override remains active, rather than being unconditionally ignored regardless of how it originated.",
+    "OVERRIDE_HELD does not require sustain-confirmation (unlike ESCALATE/REVERT) -- _check_direction() returns it immediately once breach_delta is between the plain deadband and 2x the deadband while override is active, so this scenario needs only ONE evaluation, achievable in a single nat-vent restore call.",
+    "fan_mode=whole_house_fan + a window-open/close cycle is used only as the vehicle to reach the FSM while the override remains active -- not because nat-vent itself is under test here. The window closes while indoor is STILL near comfort_heat (above it, no breach) so the restore branch fires (not the sensors-still-open PAUSE branch, which never reaches the FSM), then indoor decays afterward to the target breach; the restore's later re-evaluation is what carries the real assertion here.",
+    "Empirically found during authoring: the override must be introduced (a) BEFORE nat-vent activates -- once the WHF suppresses HVAC, a subsequent thermostat_state_changed did not register as an override at all in this harness's coordinator-backed run (the state change reads as 'expected' while CA itself owns/suppresses the mode) -- and (b) at least several seconds after the prior classification-triggered command, since coordinator.py's _async_thermostat_changed() suppresses detection via _is_recent_hvac_command(threshold_seconds=3.0) immediately after any CA-issued command. Both constraints are satisfied here: the override fires 5 minutes after the baseline classification and well before the window ever opens.",
+    "day_type is 'hot' (not 'warm') so the initial thermostat mode ('cool', matching config's initial_thermostat_mode) exactly matches what the baseline classification commands -- avoiding a confound where the classifier's warm-day recommendation ('off', but the P3 comfort-band mechanism still actually commands 'cool') could itself look like an unexplained pre-existing mismatch. comfort_deadband_hot_f (5.0F default) is the deadband tier in play here, not comfort_deadband_warm_f -- filed under the 'warm-day override' pair by topic (manual-override interaction with the deadband/override mechanism), not by the exact day-type tier."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "manual_grace_seconds": 7200,
+    "override_confirm_seconds": 300,
+    "initial_thermostat_mode": "cool"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot-day classification, HVAC in cool mode -- matches the initial thermostat state, so nothing about the baseline itself looks like a pre-existing mismatch."
+    },
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 72F, outdoor 60F -- favorable for nat-vent later."
+    },
+    {
+      "time": "2026-09-01T08:10:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "10 minutes after the baseline classification (well past the 3s recent-command suppression window), the user manually bumps the thermostat to heat mode -- a real, mismatched override. Detected via the real coordinator's _async_thermostat_changed listener."
+    },
+    {
+      "time": "2026-09-01T08:15:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "5 minutes later, thermostat still heat mode -> override_confirm_seconds(300) elapses -> override confirmed."
+    },
+    {
+      "time": "2026-09-01T08:15:01",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens -- nat-vent's activation gate does not check manual_override_active, so it activates normally (outdoor < indoor - hysteresis, indoor > comfort_heat, outdoor < threshold), HVAC suppressed. The override remains active and confirmed throughout."
+    },
+    {
+      "time": "2026-09-01T08:30:01",
+      "type": "temp_update",
+      "indoor_f": 60.5,
+      "outdoor_f": 45.0,
+      "note": "Indoor decays further to 60.5F, 7.5F below comfort_heat(68) -- clears the plain comfort_deadband_hot_f(5.0F) but is within the override-widened 2x window (10.0F)."
+    },
+    {
+      "time": "2026-09-01T08:30:02",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window closes -- handle_all_doors_windows_closed() calls _exit_nat_vent(); no sensor remains open, so the RESTORE branch fires: _deactivate_fan() restores the pre-nat-vent mode, then _set_temperature_for_mode() reaches the comfort-family FSM -- NOT gated by manual_override_active (unlike apply_classification()/bedtime/wakeup/pre_cool). With override still active and the breach (7.5F) between 1x and 2x comfort_deadband_hot_f, this resolves to OVERRIDE_HELD: family stays 'cooling', no fight-back against the user's active override."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T08:10:00",
+      "expect": "override_detected",
+      "track": "integration",
+      "reason": "Thermostat state changed to heat mode while classification says cool -- override detection fires in the coordinator's real listener."
+    },
+    {
+      "at": "2026-09-01T08:15:00",
+      "expect": "override_confirmed",
+      "track": "integration",
+      "reason": "5 minutes elapsed with thermostat still in heat mode -> override_confirm_seconds(300) expired -> override confirmed."
+    },
+    {
+      "at": "2026-09-01T08:30:02",
+      "expect": "comfort_family",
+      "family": "cooling",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "A 7.5F breach (between the plain 5.0F hot-day deadband and the override-widened 10.0F window) is held while the manual override remains active -- OVERRIDE_HELD, not ESCALATE. The family stays 'cooling', matching the day's base family; CA does not fight the user's active override for this deviation."
+    },
+    {
+      "at": "2026-09-01T08:30:02",
+      "expect": "override_active",
+      "track": "integration",
+      "reason": "Confirms the override genuinely remained active (manual_grace_seconds=7200 keeps it alive well past this point) at the moment of the held decision -- the premise this scenario needs (a real, still-active override) is real, not already expired."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A comfort-floor breach that clears the plain hot-day deadband but stays within the override-widened 2x window is held (not escalated) while a manual override remains active -- CA respects an active deviation rather than fighting it.",
+    "observed_behavior": "Override detected at 08:10:00, confirmed at 08:15:00. Indoor decays to 60.5F (7.5F breach). At the nat-vent exit restore (08:30:02, the one real call site that reaches the FSM while override is active), the family stays 'cooling' -- OVERRIDE_HELD.",
+    "expected_behavior": "An active manual override changes what's intentional for a moderate deviation -- the safety backstop does not immediately override the user's own recent action for a breach within the override-widened window."
+  }
+}

@@ -2630,3 +2630,228 @@ class TestSleepSetpointValidation:
             "Sleep setpoint ordering constraints were removed in Fix #318 and must "
             "not be re-introduced. See Issue #318 for history."
         )
+
+
+# ---------------------------------------------------------------------------
+# Zone naming (Gap 7, Issue #796) — config_flow.py's async_step_schedule()
+# now collects a "zone_name" field and stores it as entry.title instead of
+# hardcoding "Climate Advisor".
+# ---------------------------------------------------------------------------
+
+
+def _make_state(friendly_name: str | None):
+    """Build a minimal state object exposing .attributes.get("friendly_name")."""
+    state = MagicMock()
+    state.attributes = {"friendly_name": friendly_name} if friendly_name is not None else {}
+    return state
+
+
+def _make_zone_naming_hass(states: dict[str, str | None] | None = None):
+    """Build a fake hass supporting hass.states.get() and hass.config_entries.async_get_entry().
+
+    ``states`` maps entity_id -> friendly_name (or None for "entity has no
+    friendly_name attribute"). ``async_get_entry`` is backed by a plain dict
+    registry so a test can round-trip "create entry with this title, then read
+    it back" the same way coordinator.py:1508's real accessor
+    (``hass.config_entries.async_get_entry(entry_id)``) is used in production.
+    """
+    states = states or {}
+    hass = MagicMock()
+    hass.states.get = MagicMock(
+        side_effect=lambda entity_id: _make_state(states[entity_id]) if entity_id in states else None
+    )
+    registry: dict[str, object] = {}
+    hass.config_entries.async_get_entry = MagicMock(side_effect=lambda entry_id: registry.get(entry_id))
+    hass._zone_registry = registry  # exposed for tests to populate directly
+    return hass
+
+
+def _make_real_config_flow(hass, data: dict | None = None):
+    """Instantiate the REAL ClimateAdvisorConfigFlow for direct step invocation.
+
+    Enabled by the ha_stubs realification of ``config_entries.ConfigFlow``
+    (``_MockConfigFlow`` — same pattern as ``_make_options_flow`` above for
+    ``OptionsFlow``). DOCTRINE: exercise the real step handler, never
+    reimplement its merge/title logic in the test body.
+    """
+    from custom_components.climate_advisor.config_flow import ClimateAdvisorConfigFlow
+
+    flow = object.__new__(ClimateAdvisorConfigFlow)
+    flow._data = dict(data or {})
+    flow.hass = hass
+    return flow
+
+
+class TestZoneNamingDefaultSuggestion:
+    """_suggest_zone_name() — the default-suggestion heuristic for the new zone_name field."""
+
+    def test_strips_thermostat_suffix(self):
+        from custom_components.climate_advisor.config_flow import _suggest_zone_name
+
+        hass = _make_zone_naming_hass({"climate.bedroom_thermostat": "Bedroom Thermostat"})
+        assert _suggest_zone_name(hass, "climate.bedroom_thermostat") == "Bedroom"
+
+    def test_strips_climate_suffix(self):
+        from custom_components.climate_advisor.config_flow import _suggest_zone_name
+
+        hass = _make_zone_naming_hass({"climate.living_room": "Living Room Climate"})
+        assert _suggest_zone_name(hass, "climate.living_room") == "Living Room"
+
+    def test_leaves_friendly_name_unchanged_when_no_known_suffix(self):
+        from custom_components.climate_advisor.config_flow import _suggest_zone_name
+
+        hass = _make_zone_naming_hass({"climate.upstairs": "Upstairs"})
+        assert _suggest_zone_name(hass, "climate.upstairs") == "Upstairs"
+
+    def test_no_state_available_returns_empty_string_not_placeholder(self):
+        """Gap 7 hard requirement: must not fall back to 'Climate Advisor' — an
+        empty suggestion (user must type something, or async_step_schedule's
+        own fallback applies at submit time) is correct; the removed
+        placeholder is not."""
+        from custom_components.climate_advisor.config_flow import _suggest_zone_name
+
+        hass = _make_zone_naming_hass({})  # entity unknown to hass.states
+        assert _suggest_zone_name(hass, "climate.not_yet_available") == ""
+
+    def test_no_climate_entity_selected_yet_returns_empty_string(self):
+        from custom_components.climate_advisor.config_flow import _suggest_zone_name
+
+        hass = _make_zone_naming_hass({})
+        assert _suggest_zone_name(hass, None) == ""
+
+
+class TestZoneNamingScheduleStep:
+    """async_step_schedule() — zone_name field rendering and title assignment."""
+
+    def test_form_includes_zone_name_field_with_suggested_default(self):
+        hass = _make_zone_naming_hass({"climate.bedroom_thermostat": "Bedroom Thermostat"})
+        flow = _make_real_config_flow(hass, {"climate_entity": "climate.bedroom_thermostat"})
+
+        result = asyncio.run(flow.async_step_schedule(None))
+
+        assert result["step_id"] == "schedule"
+        schema_keys = {str(k): k for k in result["data_schema"].schema}
+        assert "zone_name" in schema_keys
+        zone_name_marker = schema_keys["zone_name"]
+        assert zone_name_marker.default() == "Bedroom"
+
+    def test_submitted_zone_name_becomes_entry_title(self):
+        hass = _make_zone_naming_hass({"climate.living_room": "Living Room Thermostat"})
+        flow = _make_real_config_flow(hass, {"climate_entity": "climate.living_room"})
+
+        result = asyncio.run(
+            flow.async_step_schedule(
+                {
+                    "zone_name": "Living Room",
+                    "wake_time": "06:30:00",
+                    "sleep_time": "22:30:00",
+                    "briefing_time": "06:00:00",
+                }
+            )
+        )
+
+        assert result["type"] == "create_entry"
+        assert result["title"] == "Living Room"
+        # zone_name must not leak into the persisted config data — it's stored
+        # as entry.title, not a data field automation/learning would read.
+        assert "zone_name" not in result["data"]
+
+    def test_blank_submitted_zone_name_falls_back_to_legacy_title(self):
+        """An edge case, not the intended flow (the field defaults to a
+        suggestion and stays user-editable) — but a user who clears it
+        entirely must not get a blank/whitespace entry.title."""
+        hass = _make_zone_naming_hass({})
+        flow = _make_real_config_flow(hass, {})
+
+        result = asyncio.run(
+            flow.async_step_schedule(
+                {
+                    "zone_name": "   ",
+                    "wake_time": "06:30:00",
+                    "sleep_time": "22:30:00",
+                    "briefing_time": "06:00:00",
+                }
+            )
+        )
+
+        assert result["title"] == "Climate Advisor"
+
+    def test_overlong_zone_name_is_rejected_and_form_reshown(self):
+        """Security Requirements (CLAUDE.md): config flow text fields must
+        validate format before accepting. zone_name has no upstream length
+        cap (TextSelector accepts arbitrary text), so async_step_schedule()
+        must reject an over-length submission itself rather than persisting
+        it as entry.title unbounded."""
+        hass = _make_zone_naming_hass({"climate.bedroom_thermostat": "Bedroom Thermostat"})
+        flow = _make_real_config_flow(hass, {"climate_entity": "climate.bedroom_thermostat"})
+
+        result = asyncio.run(
+            flow.async_step_schedule(
+                {
+                    "zone_name": "X" * 51,
+                    "wake_time": "06:30:00",
+                    "sleep_time": "22:30:00",
+                    "briefing_time": "06:00:00",
+                }
+            )
+        )
+
+        # Form must be re-shown with an error, not silently accepted and not
+        # a crash.
+        assert result["type"] == "form"
+        assert result["step_id"] == "schedule"
+        assert result["errors"] == {"zone_name": "zone_name_too_long"}
+
+    def test_max_length_zone_name_is_accepted(self):
+        """The boundary itself (exactly 50 chars) must not be rejected —
+        only strictly-over-length submissions are an error."""
+        hass = _make_zone_naming_hass({"climate.bedroom_thermostat": "Bedroom Thermostat"})
+        flow = _make_real_config_flow(hass, {"climate_entity": "climate.bedroom_thermostat"})
+
+        result = asyncio.run(
+            flow.async_step_schedule(
+                {
+                    "zone_name": "X" * 50,
+                    "wake_time": "06:30:00",
+                    "sleep_time": "22:30:00",
+                    "briefing_time": "06:00:00",
+                }
+            )
+        )
+
+        assert result["type"] == "create_entry"
+        assert result["title"] == "X" * 50
+
+    def test_entry_title_round_trips_via_async_get_entry(self):
+        """Confirms the hard requirement from docs/multi-zone-spec.md's Gap 7:
+        the zone name must be readable back via
+        hass.config_entries.async_get_entry(entry_id).title — the same
+        accessor pattern already used in production at coordinator.py:1508
+        (``self.hass.config_entries.async_get_entry(self._entry_id)``) — not
+        stored as a bare cosmetic string with no accessor.
+        """
+        from tools.sim_harness.ha_stubs import ConfigEntry
+
+        hass = _make_zone_naming_hass({"climate.bedroom_thermostat": "Bedroom Thermostat"})
+        flow = _make_real_config_flow(hass, {"climate_entity": "climate.bedroom_thermostat"})
+
+        result = asyncio.run(
+            flow.async_step_schedule(
+                {
+                    "zone_name": "Bedroom",
+                    "wake_time": "06:30:00",
+                    "sleep_time": "22:30:00",
+                    "briefing_time": "06:00:00",
+                }
+            )
+        )
+
+        # Simulate HA's flow manager persisting the created entry (this repo's
+        # own harness-side ConfigEntry stub, Issue #796), then read it back
+        # exactly the way production code does.
+        entry_id = "zone_a"
+        hass._zone_registry[entry_id] = ConfigEntry(entry_id=entry_id, data=result["data"], title=result["title"])
+
+        fetched = hass.config_entries.async_get_entry(entry_id)
+        assert fetched is not None
+        assert fetched.title == "Bedroom"

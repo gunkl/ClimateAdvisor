@@ -81,8 +81,6 @@ from .const import (
     PEAK_DECLINE_MARGIN_F,
     REVISIT_DELAY_SECONDS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
-    TEMP_SOURCE_INPUT_NUMBER,
-    TEMP_SOURCE_SENSOR,
     TIMER_BOUNDARY_SETTLE_SECONDS,
     VACATION_SETBACK_EXTRA,
 )
@@ -142,6 +140,7 @@ from .fan_toggle_rate_limit import (
     FanToggleRateLimitOutcome,
     decide_fan_toggle_rate_limit,
 )
+from .indoor_temp import resolve_indoor_temp_f
 from .lifecycle_dispatcher import LifecycleDispatcher
 from .lifecycle_events import LifecycleEvent, LifecycleEventType
 from .nat_vent_cycling import NatVentCyclingInputs, compute_nat_vent_target, decide_nat_vent_cycling
@@ -9926,28 +9925,24 @@ class AutomationEngine:
         _LOGGER.info("Economizer deactivated: outdoor=%s", format_temp(outdoor_temp, unit))
 
     def _get_indoor_temp_f(self) -> float | None:
-        """Read indoor temperature in °F from the configured source."""
-        source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
-        unit = self.config.get("temp_unit", "fahrenheit")
-        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
-            entity_id = self.config.get("indoor_temp_entity")
-            if entity_id:
-                state = self.hass.states.get(entity_id)
-                if state:
-                    try:
-                        return to_fahrenheit(float(state.state), unit)
-                    except (ValueError, TypeError):
-                        _LOGGER.warning(
-                            "Indoor temp entity %s has non-numeric state %r; skipping proximity check",
-                            entity_id,
-                            state.state,
-                        )
-            return None
-        climate_state = self.hass.states.get(self.climate_entity)
-        if climate_state:
-            temp = climate_state.attributes.get("current_temperature")
-            return to_fahrenheit(float(temp), unit) if temp is not None else None
-        return None
+        """Read indoor temperature in °F from the configured source.
+
+        Delegates to the shared ``indoor_temp.resolve_indoor_temp_f()`` helper
+        (Issue #796, Step 10) so this cannot drift out of sync with the
+        coordinator's identically-shaped ``_get_indoor_temp()`` again — that
+        drift previously meant this method's readings were never checked
+        against the plausible-indoor-range guard the coordinator already had,
+        and a non-numeric ``current_temperature`` on the climate_fallback path
+        could raise uncaught instead of being treated as unavailable. Reads
+        ``self.config``/``self.hass`` fresh on every call — no caching.
+        """
+        return resolve_indoor_temp_f(
+            hass=self.hass,
+            source=self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
+            unit=self.config.get("temp_unit", "fahrenheit"),
+            indoor_temp_entity=self.config.get("indoor_temp_entity"),
+            climate_entity=self.climate_entity,
+        )
 
     def _indoor_f_for_event(self) -> float | None:
         """Read current indoor temp from climate entity for event enrichment."""

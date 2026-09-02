@@ -117,11 +117,13 @@
         "title": "Daily Schedule",
         "description": "Set your household schedule so Climate Advisor knows when to warm up, cool down, and send briefings.",
         "data": {
+          "zone_name": "Zone Name",
           "wake_time": "Wake-up Time",
           "sleep_time": "Bedtime",
           "briefing_time": "Daily Briefing Time"
         },
         "data_description": {
+          "zone_name": "A short name for this zone (e.g. \"Bedroom\"). Shown in Settings → Devices & Services and in the dashboard zone selector. Suggested from your climate entity's name — edit as you like.",
           "wake_time": "When your household typically wakes up. Climate Advisor starts warming or cooling to your comfort temperature before this time.",
           "sleep_time": "When your household typically goes to bed. Climate Advisor switches to your away/sleep temperature at this time.",
           "briefing_time": "When to deliver the daily climate briefing notification with the day's forecast and HVAC plan."
@@ -131,7 +133,8 @@
     "error": {
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
-      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp"
+      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
+      "zone_name_too_long": "Zone name must be 50 characters or fewer"
     }
   },
   "options": {
@@ -456,6 +459,10 @@
           }
         }
       }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "Ambiguous zone selection",
+      "description": "Multiple Climate Advisor zones are configured. Some requests that don't specify a zone may resolve to the wrong one."
     }
   }
 }

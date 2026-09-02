@@ -730,6 +730,8 @@ def _make_investigate_request(coordinator: MagicMock, body: dict | None = None) 
     req.app = {"hass": hass}
     req.json = AsyncMock(return_value=body or {})
     req.headers = {}
+    # Issue #796 Gap 4: _get_coordinator() reads request.query.get("entry_id").
+    req.query = {}
     return req
 
 
@@ -750,6 +752,8 @@ async def _get_investigation_reports(coordinator: MagicMock):
     hass.data = {DOMAIN: {"entry1": coordinator}}
     req = MagicMock()
     req.app = {"hass": hass}
+    # Issue #796 Gap 4: _get_coordinator() reads request.query.get("entry_id").
+    req.query = {}
     return await view.get(req)
 
 

@@ -235,6 +235,7 @@ from .fan_status import (
     parse_remote_timer_event,
     resolve_untracked_fan_status,
 )
+from .indoor_temp import resolve_indoor_temp_f
 from .invariant_watchdog import run_invariant_checks
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_cycling import compute_nat_vent_target
@@ -285,13 +286,6 @@ _GRACE_TRIGGER_LABELS: Final[dict[str, str]] = {
     "sensor_closed_resume": "door/window closed",
     "nat_vent_exit_resume": "nat-vent exit",
 }
-
-# Plausible indoor temperature range in Fahrenheit.  Values outside this band indicate
-# a sensor glitch (e.g. a thermostat echoing its new setpoint into current_temperature
-# during a setpoint-only transition) and are treated as unavailable rather than
-# propagated into the chart log.
-_MIN_PLAUSIBLE_INDOOR_F: float = 40.0
-_MAX_PLAUSIBLE_INDOOR_F: float = 110.0
 
 
 @dataclass
@@ -485,11 +479,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._target_band_schedule: list[dict] | None = None
 
         # Sub-components
-        self._state_persistence = StatePersistence(Path(hass.config.config_dir))
+        # Issue #796: entry_id threaded through so each zone's persistence,
+        # chart log, and learning DB write to their own entry-scoped file
+        # instead of colliding on a shared fixed filename — see storage_paths.py.
+        self._state_persistence = StatePersistence(Path(hass.config.config_dir), entry_id=self._entry_id)
         # Issue #543: chart_log.load() does blocking file I/O — moved to
         # async_restore_state() where it can be awaited via the executor.
-        self._chart_log = ChartStateLog(Path(hass.config.config_dir), max_days=CHART_LOG_MAX_DAYS)
-        self.learning = LearningEngine(Path(hass.config.config_dir))
+        self._chart_log = ChartStateLog(
+            Path(hass.config.config_dir), max_days=CHART_LOG_MAX_DAYS, entry_id=self._entry_id
+        )
+        self.learning = LearningEngine(Path(hass.config.config_dir), entry_id=self._entry_id)
         # Issue #757 Phase 6 Step 8: this used to construct two live AutomationEngine
         # instances (_engine_a/_engine_b) behind a runtime-switchable primary/shadow
         # routing (automation_engine/shadow_automation_engine properties, Issue #727/
@@ -3078,54 +3077,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return to_fahrenheit(float(weather_attrs.get("temperature", 65)), unit)
 
     def _get_indoor_temp(self) -> float | None:
-        """Read indoor temperature based on configured source type."""
-        source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
-        unit = self.config.get("temp_unit", "fahrenheit")
+        """Read indoor temperature based on configured source type.
 
-        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
-            entity_id = self.config.get("indoor_temp_entity")
-            if entity_id:
-                state = self.hass.states.get(entity_id)
-                if state:
-                    try:
-                        val_f = to_fahrenheit(float(state.state), unit)
-                        if _MIN_PLAUSIBLE_INDOOR_F <= val_f <= _MAX_PLAUSIBLE_INDOOR_F:
-                            return val_f
-                        _LOGGER.warning(
-                            "Indoor temp %.1f°F from %s is outside plausible range"
-                            " [%.0f, %.0f]°F; treating as unavailable",
-                            val_f,
-                            entity_id,
-                            _MIN_PLAUSIBLE_INDOOR_F,
-                            _MAX_PLAUSIBLE_INDOOR_F,
-                        )
-                    except (ValueError, TypeError):
-                        _LOGGER.warning(
-                            "Indoor temp entity %s has non-numeric state %r; treating as unavailable",
-                            entity_id,
-                            state.state,
-                        )
-            return None
-
-        # climate_fallback source
-        climate_state = self.hass.states.get(self.config["climate_entity"])
-        if climate_state:
-            temp = climate_state.attributes.get("current_temperature")
-            if temp is not None:
-                try:
-                    val_f = to_fahrenheit(float(temp), unit)
-                    if _MIN_PLAUSIBLE_INDOOR_F <= val_f <= _MAX_PLAUSIBLE_INDOOR_F:
-                        return val_f
-                    _LOGGER.warning(
-                        "Indoor temp %.1f°F from %s is outside plausible range [%.0f, %.0f]°F; treating as unavailable",
-                        val_f,
-                        self.config["climate_entity"],
-                        _MIN_PLAUSIBLE_INDOOR_F,
-                        _MAX_PLAUSIBLE_INDOOR_F,
-                    )
-                except (ValueError, TypeError):
-                    pass
-        return None
+        Delegates to the shared ``indoor_temp.resolve_indoor_temp_f()`` helper
+        (Issue #796, Step 10) so the coordinator and ``AutomationEngine`` cannot
+        drift out of sync on source resolution or the plausibility guard again.
+        Reads ``self.config``/``self.hass`` fresh on every call — no caching.
+        """
+        return resolve_indoor_temp_f(
+            hass=self.hass,
+            source=self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
+            unit=self.config.get("temp_unit", "fahrenheit"),
+            indoor_temp_entity=self.config.get("indoor_temp_entity"),
+            climate_entity=self.config["climate_entity"],
+        )
 
     async def _get_forecast_data(self) -> list:
         """Get forecast data using the weather.get_forecasts service.

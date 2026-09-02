@@ -354,6 +354,8 @@ def _make_view_request(coordinator, climate_state=None):
     hass.states.get.return_value = climate_state
     req = MagicMock()
     req.app = {"hass": hass}
+    # Issue #796 Gap 4: see test_api.py's _make_view_request for why this is required.
+    req.query = {}
     return req
 
 

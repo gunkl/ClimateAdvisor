@@ -239,7 +239,7 @@ def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, fl
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 18
+    VERSION = 19
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -256,6 +256,8 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["notify_service"] = "invalid_notify_service"
 
             if not errors:
+                await self.async_set_unique_id(user_input["climate_entity"])
+                self._abort_if_unique_id_configured()
                 self._data.update(user_input)
                 _LOGGER.debug(
                     "Config flow — weather=%s, climate=%s",

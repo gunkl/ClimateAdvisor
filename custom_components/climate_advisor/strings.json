@@ -131,6 +131,9 @@
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
       "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
       "zone_name_too_long": "Zone name must be 50 characters or fewer"
+    },
+    "abort": {
+      "already_configured": "This thermostat already has a Climate Advisor zone configured."
     }
   },
   "options": {

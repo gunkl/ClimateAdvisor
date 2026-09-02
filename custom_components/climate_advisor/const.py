@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -57,6 +57,13 @@ DEFAULT_THRESHOLD_COOL = THRESHOLD_COOL
 # Trend thresholds (°F difference to trigger predictive behavior)
 TREND_THRESHOLD_SIGNIFICANT = 10
 TREND_THRESHOLD_MODERATE = 5
+
+# Minimum today_high drift (°F) from what was baked into the last-generated
+# briefing text to trigger a mid-day regeneration, even when day_type category
+# hasn't changed. Without this, a report could show a stale forecast high for
+# hours after the live classification had already moved on within the same
+# category — the regen gate previously fired only on a category change.
+BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F = 3.0
 
 # Timing
 DOOR_WINDOW_PAUSE_SECONDS = 180  # deprecated — use CONF_SENSOR_DEBOUNCE instead
@@ -442,6 +449,7 @@ CONFIG_METADATA = {
             " the weather service, a dedicated sensor, or an input_number helper."
         ),
         "category": "sensors",
+        "display_transform": "temp_source_label",
     },
     "indoor_temp_source": {
         "label": "Indoor Temp Source",
@@ -450,6 +458,7 @@ CONFIG_METADATA = {
             " the thermostat's built-in sensor, a dedicated sensor, or an input_number helper."
         ),
         "category": "sensors",
+        "display_transform": "temp_source_label",
     },
     "door_window_sensors": {
         "label": "Door/Window Sensors",

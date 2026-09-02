@@ -81,6 +81,7 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     ATTR_WHF_STATUS,
+    BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F,
     CHART_LOG_MAX_DAYS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
@@ -522,16 +523,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Event log ring buffer (Issue #76) — timestamped automation events for debug download
         self._event_log: list[dict] = []
 
-        # AI subsystem (only if enabled and API key present)
+        # AI subsystem (only if enabled and API key present). The actual
+        # ClaudeAPIClient construction does blocking I/O (AsyncAnthropic's
+        # constructor reads ~/.config/anthropic/active_config, loads the TLS
+        # cert bundle, imports pydantic — confirmed live via HA's own
+        # "blocking call" WARNING) and __init__ is synchronous, so it can't be
+        # offloaded here. Deferred to async_restore_state() (already offloads
+        # other blocking startup I/O the same way), which sets
+        # self.claude_client once the executor job completes.
         self.claude_client: ClaudeAPIClient | None = None
         self.ai_skills: AISkillRegistry | None = None
         self._investigation_report_history: list[dict] = []
+        self._ai_client_config: dict[str, Any] | None = None
         if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
             from .ai_skills import AISkillRegistry as _AISkillRegistry
             from .ai_skills_investigator import register_investigator_skill
-            from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
 
-            self.claude_client = _ClaudeAPIClient(config)
+            self._ai_client_config = config
             self.ai_skills = _AISkillRegistry()
             # Registers whenever AI is enabled (Issue #563) — the merged skill serves
             # both the always-available narration mode (formerly "activity_report",
@@ -539,7 +547,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # no longer gates registration; api.py's ClimateAdvisorInvestigateView still
             # checks it as a cost-control gate on the on-demand/focus-driven call path.
             register_investigator_skill(self.ai_skills)
-            _LOGGER.info("AI subsystem initialized — model: %s", config.get("ai_model", "unknown"))
+            _LOGGER.debug("AI subsystem registered — client build deferred to async_restore_state()")
         else:
             _LOGGER.debug(
                 "AI subsystem disabled — enabled: %s, key present: %s",
@@ -557,6 +565,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing: str = ""
         self._last_briefing_short: str = ""
         self._briefing_day_type: str | None = None
+        # today_high baked into the last-generated briefing text, tracked
+        # alongside _briefing_day_type so the mid-day regen gate can also
+        # fire on a meaningful value drift, not just a category change.
+        self._briefing_today_high: float | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
         # Issue #645: last_changed timestamps known to be a reconnect/availability blip
@@ -1218,6 +1230,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def async_restore_state(self) -> None:
         """Restore operational state from disk after startup."""
         _LOGGER.info("Climate Advisor v%s starting up", VERSION)
+        ai_client_config = getattr(self, "_ai_client_config", None)
+        if ai_client_config is not None:
+            from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
+
+            self.claude_client = await self._executor_job(functools.partial(_ClaudeAPIClient, ai_client_config))
+            _LOGGER.info("AI subsystem initialized — model: %s", ai_client_config.get("ai_model", "unknown"))
+            self._ai_client_config = None
         # Issue #543: chart_log.load() does blocking file I/O — offload to executor.
         await self._executor_job(self._chart_log.load)
         await self._executor_job(self.learning.load_state)
@@ -1344,6 +1363,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing = briefing.get("last_text", "")
         self._last_briefing_short = briefing.get("last_text_short", "")
         self._briefing_day_type = briefing.get("briefing_day_type")
+        self._briefing_today_high = briefing.get("briefing_today_high")
 
         # Automation state
         auto_state = state.get("automation_state", {})
@@ -1490,6 +1510,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "last_text": self._last_briefing,
                 "last_text_short": self._last_briefing_short,
                 "briefing_day_type": self._briefing_day_type,
+                "briefing_today_high": getattr(self, "_briefing_today_high", None),
             },
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
@@ -2547,20 +2568,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # self._current_classification is always fresh.
             await self._apply_tou_schedule()
 
-            # If the day type changed since the briefing was generated,
-            # regenerate the briefing text without re-sending notifications (Issue #78).
-            if (
-                self._briefing_sent_today
-                and self._briefing_day_type is not None
-                and self._current_classification.day_type != self._briefing_day_type
-            ):
-                _LOGGER.info(
-                    "Classification changed %s → %s; regenerating briefing text",
-                    self._briefing_day_type,
-                    self._current_classification.day_type,
-                )
-                self._last_briefing, self._last_briefing_short = self._build_briefing_text(self._current_classification)
-                self._briefing_day_type = self._current_classification.day_type
+            if self._maybe_regenerate_briefing_for_drift():
                 await self._async_save_state()
 
             # Reset startup retry state on success
@@ -3345,6 +3353,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             timestamp=dt_util.now(),
         )
 
+    def _maybe_regenerate_briefing_for_drift(self) -> bool:
+        """Regenerate the briefing text in place if it's gone stale mid-day.
+
+        Two independent triggers, either one is sufficient:
+        - the classified day_type category changed (Issue #78's original check)
+        - today_high has drifted >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F from
+          what's baked into the currently-displayed briefing text, even within
+          the same category (added after a live report showed a stale
+          today_high for hours — the category-only check never caught this,
+          since day_type had stayed "warm" the whole time).
+
+        Does not send notifications — only updates self._last_briefing/
+        self._last_briefing_short/self._briefing_day_type/self._briefing_today_high
+        in place. Returns True if it regenerated (caller is then responsible
+        for persisting state), False otherwise (including when no briefing has
+        been sent yet today, since there is nothing to keep in sync with).
+        Extracted as its own method (rather than inline in the update cycle)
+        so this drift logic has exactly one real implementation callers can
+        invoke directly — including tests — instead of a second copy that can
+        silently drift from what production actually does.
+        """
+        if not self._briefing_sent_today:
+            return False
+        classification = self._current_classification
+        briefing_today_high = getattr(self, "_briefing_today_high", None)
+        today_high_drift = (
+            abs(classification.today_high - briefing_today_high) if briefing_today_high is not None else 0.0
+        )
+        day_type_changed = self._briefing_day_type is not None and classification.day_type != self._briefing_day_type
+        high_drifted = today_high_drift >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F
+        if not (day_type_changed or high_drifted):
+            return False
+
+        _LOGGER.info(
+            "Regenerating briefing text — day_type %s → %s, today_high drift %.1f°F (%s → %s)",
+            self._briefing_day_type,
+            classification.day_type,
+            today_high_drift,
+            briefing_today_high,
+            classification.today_high,
+        )
+        self._last_briefing, self._last_briefing_short = self._build_briefing_text(classification)
+        self._briefing_day_type = classification.day_type
+        self._briefing_today_high = classification.today_high
+        return True
+
     def _build_briefing_text(
         self, classification: DayClassification, suggestions: list | None = None
     ) -> tuple[str, str]:
@@ -3559,6 +3613,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification, suggestions=suggestions
             )
             self._briefing_day_type = classification.day_type
+            self._briefing_today_high = classification.today_high
 
             # In observe-only mode, skip sending the notification
             if not self._automation_enabled:
@@ -3984,6 +4039,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._today_record = None
         self._briefing_sent_today = False
         self._briefing_day_type = None
+        self._briefing_today_high = None
         self._hvac_on_since = None
         self._last_violation_check = None
         self._outdoor_temp_history.clear()

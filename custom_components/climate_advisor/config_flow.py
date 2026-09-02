@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import uuid
@@ -1604,8 +1605,11 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     from .claude_api import ClaudeAPIClient
 
                     test_config = {**current, **user_input}
-                    client = ClaudeAPIClient(test_config)
-                    success, _message = await client.async_test_connection()
+                    # ClaudeAPIClient's constructor does blocking I/O (AsyncAnthropic
+                    # reads a local config file and loads the TLS cert bundle) —
+                    # offload it instead of running that inline in this async step.
+                    client = await self.hass.async_add_executor_job(functools.partial(ClaudeAPIClient, test_config))
+                    success, _message = await client.async_test_connection(hass=self.hass)
                     if not success:
                         errors["base"] = "ai_connection_failed"
                 except Exception:  # noqa: BLE001
@@ -1650,7 +1654,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         from .claude_api import fetch_available_models  # noqa: PLC0415
 
         try:
-            model_options = await asyncio.wait_for(fetch_available_models(existing_key), timeout=5.0)
+            model_options = await asyncio.wait_for(fetch_available_models(existing_key, hass=self.hass), timeout=5.0)
         except Exception:  # noqa: BLE001 — includes asyncio.TimeoutError; must never block config flow render
             model_options = AI_MODELS
 

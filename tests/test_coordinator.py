@@ -1019,6 +1019,7 @@ class TestBriefingRegeneration:
 
         coord._briefing_sent_today = True
         coord._briefing_day_type = DAY_TYPE_WARM
+        coord._briefing_today_high = 85
         coord._last_briefing = "Old warm briefing"
         coord._last_briefing_short = "Old warm TLDR"
         coord._automation_enabled = True
@@ -1055,6 +1056,9 @@ class TestBriefingRegeneration:
         coord._executor_job = AsyncMock(side_effect=lambda fn, *args: fn(*args))
 
         coord._build_briefing_text = types.MethodType(ClimateAdvisorCoordinator._build_briefing_text, coord)
+        coord._maybe_regenerate_briefing_for_drift = types.MethodType(
+            ClimateAdvisorCoordinator._maybe_regenerate_briefing_for_drift, coord
+        )
 
         return coord
 
@@ -1071,55 +1075,84 @@ class TestBriefingRegeneration:
         side_effect=_side_effect_regen,
     )
     def test_regenerated_on_day_type_change(self, mock_gen, mock_pred, mock_outdoor):
-        """When day_type changes and briefing was already sent, text is regenerated."""
+        """When day_type changes and briefing was already sent, text is regenerated.
+
+        Calls the real _maybe_regenerate_briefing_for_drift() — not a copy of its
+        condition — so this test actually exercises production logic.
+        """
         coord = self._make_coord()
-        new_classification = _make_classification(day_type=DAY_TYPE_HOT)
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_HOT, today_high=85)
 
-        # Simulate what _async_update_data does after classification changes
-        coord._current_classification = new_classification
-        if (
-            coord._briefing_sent_today
-            and coord._briefing_day_type is not None
-            and coord._current_classification.day_type != coord._briefing_day_type
-        ):
-            coord._last_briefing, coord._last_briefing_short = coord._build_briefing_text(coord._current_classification)
-            coord._briefing_day_type = coord._current_classification.day_type
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
 
+        assert regenerated is True
         assert coord._last_briefing == REGEN_FULL
         assert coord._last_briefing_short == REGEN_SHORT
         assert coord._briefing_day_type == DAY_TYPE_HOT
 
-    def test_not_regenerated_when_same_day_type(self):
-        """When day_type hasn't changed, briefing is NOT regenerated."""
+    def test_not_regenerated_when_same_day_type_and_high(self):
+        """When neither day_type nor today_high has meaningfully changed, no regeneration."""
         coord = self._make_coord()
-        new_classification = _make_classification(day_type=DAY_TYPE_WARM)
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_WARM, today_high=85)
 
-        coord._current_classification = new_classification
-        should_regen = (
-            coord._briefing_sent_today
-            and coord._briefing_day_type is not None
-            and coord._current_classification.day_type != coord._briefing_day_type
-        )
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
 
-        assert not should_regen
+        assert regenerated is False
         assert coord._last_briefing == "Old warm briefing"
+
+    def test_not_regenerated_on_small_today_high_jitter(self):
+        """A small forecast jitter (below the drift threshold) must not spam regeneration."""
+        coord = self._make_coord()
+        # _make_coord() bakes in _briefing_today_high=85; 1.5°F is below
+        # BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F (3.0) — should be treated as noise.
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_WARM, today_high=86.5)
+
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
+
+        assert regenerated is False
+        assert coord._last_briefing == "Old warm briefing"
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_regen,
+    )
+    def test_regenerated_on_today_high_drift_same_day_type(self, mock_gen, mock_pred, mock_outdoor):
+        """Reproduces the reported bug: today_high drifts within the same category.
+
+        Before this fix, the regen gate only fired on a day_type category
+        change — a same-category drift (e.g. 85°F baked into the briefing vs.
+        the classifier now computing 90°F, still "warm") never regenerated,
+        so the displayed high could go stale for hours.
+        """
+        coord = self._make_coord()
+        # _make_coord() bakes in _briefing_today_high=85; 5°F drift is above
+        # BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F (3.0).
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_WARM, today_high=90)
+
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
+
+        assert regenerated is True
+        assert coord._last_briefing == REGEN_FULL
+        assert coord._briefing_today_high == 90
 
     def test_not_regenerated_before_first_briefing(self):
         """Before briefing has been sent today, no regeneration."""
         coord = self._make_coord()
         coord._briefing_sent_today = False
         coord._briefing_day_type = None
+        coord._current_classification = _make_classification(day_type=DAY_TYPE_HOT)
 
-        new_classification = _make_classification(day_type=DAY_TYPE_HOT)
-        coord._current_classification = new_classification
+        regenerated = coord._maybe_regenerate_briefing_for_drift()
 
-        should_regen = (
-            coord._briefing_sent_today
-            and coord._briefing_day_type is not None
-            and coord._current_classification.day_type != coord._briefing_day_type
-        )
-
-        assert not should_regen
+        assert regenerated is False
         assert coord._last_briefing == "Old warm briefing"
 
     def test_briefing_day_type_set_after_send(self):

@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.4] — 2026-09-01
+
+- Fix #814: the Status report's Conditions card and Today's Strategy text now stay in sync with the live automation state, instead of sometimes showing a stale trend or forecast high left over from an earlier update cycle.
+- Fix #815: Home Assistant's event loop no longer stalls briefly every time the AI subsystem initializes (on zone startup, or when testing/saving your Claude API key) — that work now happens off the main thread.
+- Fix #816: the Debug tab now shows a plain-English description (e.g. "Thermostat's built-in sensor") for where indoor/outdoor temperature is read from, instead of the raw internal setting name.
+
 ## [0.7.3] — 2026-09-01
 
 - Fix #813: the dashboard no longer guesses which zone to show on a brand-new browser or device's first visit to a multi-zone install, and the "Ambiguous zone selection" Repairs card no longer shows permanently on every multi-zone install — it only appears if an actual ambiguous zone resolution ever occurs.

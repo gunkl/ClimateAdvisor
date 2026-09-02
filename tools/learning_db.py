@@ -25,8 +25,11 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _zone_storage import LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
 from ha_logs import load_config, ssh_args, ssh_target  # noqa: E402
 
+# Kept for backward compatibility with anything importing this name directly;
+# fetch_learning_db() now resolves the real (possibly entry-scoped) path itself.
 LEARNING_DB_PATH = "/config/climate_advisor_learning.json"
 
 OBS_TYPES = [
@@ -67,9 +70,20 @@ def _load_dotenv() -> None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_learning_db(config: dict[str, str]) -> dict:
-    """SSH into HA and read the learning JSON file. Returns parsed dict."""
-    cmd = ssh_args(config) + [ssh_target(config), f"cat {LEARNING_DB_PATH}"]
+def fetch_learning_db(config: dict[str, str], entry_id: str | None = None) -> dict:
+    """SSH into HA and read the learning JSON file. Returns parsed dict.
+
+    Since Issue #796, storage is entry-scoped in a multi-zone install. If
+    entry_id isn't given, auto-discovers a single matching zone file, or
+    falls back to the legacy unscoped path for single-zone installs.
+    """
+    remote_path = resolve_remote_path_with_discovery(
+        config,
+        LEARNING_DB_FILE,
+        entry_id,
+        lambda cfg, remote_cmd: ssh_args(cfg) + [ssh_target(cfg), remote_cmd],
+    )
+    cmd = ssh_args(config) + [ssh_target(config), f"cat {remote_path}"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -81,7 +95,7 @@ def fetch_learning_db(config: dict[str, str]) -> dict:
         if stderr:
             print(f"SSH error: {stderr}", file=sys.stderr)
         else:
-            print(f"ERROR: Could not read {LEARNING_DB_PATH} (file may not exist yet).", file=sys.stderr)
+            print(f"ERROR: Could not read {remote_path} (file may not exist yet).", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -755,6 +769,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Show last N nightly setback records (default 30)",
     )
+    parser.add_argument(
+        "--entry-id",
+        default=None,
+        help="Zone config entry_id to target (multi-zone installs). Auto-detected when only one zone's file exists.",
+    )
     return parser
 
 
@@ -780,8 +799,8 @@ def main() -> None:
 
     config = load_config()
 
-    print(f"Reading {LEARNING_DB_PATH} from {config['HA_HOST']} ...")
-    db = fetch_learning_db(config)
+    print(f"Reading {LEARNING_DB_FILE} from {config['HA_HOST']} ...")
+    db = fetch_learning_db(config, entry_id=getattr(args, "entry_id", None))
     print()
 
     if show_model:

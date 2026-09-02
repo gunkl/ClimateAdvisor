@@ -35,6 +35,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Config
@@ -549,8 +550,28 @@ def rebuild_model_cache(all_obs: list[dict]) -> dict:
 # SSH read/write
 # ---------------------------------------------------------------------------
 
-_LEARNING_DB_REMOTE = "/config/climate_advisor_learning.json"
-_CHART_LOG_REMOTE = "/config/climate_advisor_chart_log.json"
+sys.path.insert(0, str(Path(__file__).parent))
+from _zone_storage import CHART_LOG_FILE, LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
+
+# Set once in main() from --entry-id (or auto-discovery); read by the three
+# SSH helpers below so their existing call sites don't all need an entry_id
+# argument threaded through them individually. Since Issue #796, storage is
+# entry-scoped per zone — see tools/_zone_storage.py.
+_ENTRY_ID: str | None = None
+
+
+def _learning_db_remote(config: dict) -> str:
+    # _ssh_args() below already bundles the host target as its last element,
+    # so the adapter just appends the remote command after it.
+    return resolve_remote_path_with_discovery(
+        config, LEARNING_DB_FILE, _ENTRY_ID, lambda cfg, remote_cmd: _ssh_args(cfg) + [remote_cmd]
+    )
+
+
+def _chart_log_remote(config: dict) -> str:
+    return resolve_remote_path_with_discovery(
+        config, CHART_LOG_FILE, _ENTRY_ID, lambda cfg, remote_cmd: _ssh_args(cfg) + [remote_cmd]
+    )
 
 
 def _ssh_args(config: dict) -> list[str]:
@@ -566,8 +587,9 @@ def _ssh_args(config: dict) -> list[str]:
 
 
 def fetch_learning_json_ssh(config: dict) -> dict:
+    remote = _learning_db_remote(config)
     result = subprocess.run(
-        [*_ssh_args(config), f"cat {_LEARNING_DB_REMOTE}"],
+        [*_ssh_args(config), f"cat {remote}"],
         capture_output=True,
         timeout=30,
     )
@@ -577,9 +599,10 @@ def fetch_learning_json_ssh(config: dict) -> dict:
 
 
 def write_learning_json_ssh(config: dict, data: dict) -> None:
+    remote = _learning_db_remote(config)
     json_bytes = json.dumps(data, indent=2).encode()
-    tmp = f"{_LEARNING_DB_REMOTE}.replay_tmp"
-    cmd = f"cat > {tmp} && mv {tmp} {_LEARNING_DB_REMOTE}"
+    tmp = f"{remote}.replay_tmp"
+    cmd = f"cat > {tmp} && mv {tmp} {remote}"
     result = subprocess.run([*_ssh_args(config), cmd], input=json_bytes, capture_output=True, timeout=30)
     if result.returncode != 0:
         raise RuntimeError(f"SSH write failed: {result.stderr.decode()}")
@@ -587,8 +610,9 @@ def write_learning_json_ssh(config: dict, data: dict) -> None:
 
 def fetch_chart_log_ssh(config: dict) -> list[dict]:
     """SSH into HA and read the chart_log JSON. Returns the entries list."""
+    remote = _chart_log_remote(config)
     result = subprocess.run(
-        [*_ssh_args(config), f"cat {_CHART_LOG_REMOTE}"],
+        [*_ssh_args(config), f"cat {remote}"],
         capture_output=True,
         timeout=30,
     )
@@ -1765,7 +1789,15 @@ def main() -> None:
     )
     parser.add_argument("--dry-run", action="store_true", help="Show results without writing to HA")
     parser.add_argument("--write", action="store_true", help="Merge replay obs into HA learning DB via SSH")
+    parser.add_argument(
+        "--entry-id",
+        default=None,
+        help="Zone config entry_id to target (multi-zone installs). Auto-detected when only one zone's file exists.",
+    )
     args = parser.parse_args()
+
+    global _ENTRY_ID
+    _ENTRY_ID = args.entry_id
 
     _read_only_mode = args.passive_only or args.vent_overnight
     if not _read_only_mode and not args.dry_run and not args.write:

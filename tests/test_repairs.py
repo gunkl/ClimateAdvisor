@@ -326,7 +326,7 @@ class TestZoneResolutionAmbiguousIssue:
 
     def test_not_raised_merely_by_setting_up_second_zone(self):
         """Setting up a second zone alone must NOT raise the issue — only an
-        actual ambiguous resolution should. This is the #820 regression check:
+        actual ambiguous resolution should. This is the #813 regression check:
         the old behavior raised this unconditionally right here."""
         from tools.sim_harness.build_coordinator import build_headless_multi_zone
 
@@ -367,6 +367,37 @@ class TestZoneResolutionAmbiguousIssue:
         assert len(zones) == 1
         assert coordinator is not None
         assert _zone_resolution_ambiguous_calls(mock_create) == []
+
+    def test_stale_persisted_issue_from_before_the_fix_is_cleared_on_setup(self):
+        """Live-deploy regression (found via SSH inspection of
+        .storage/repairs.issue_registry on the user's real 2-zone instance,
+        not just code reading): zone_resolution_ambiguous has
+        is_persistent=True, so it survives an HA restart. An install that had
+        it raised under the OLD unconditional-at-setup logic keeps that
+        stale, now-permanently-wrong card forever after upgrading, unless
+        setup explicitly clears it — the new code only ever CREATES the
+        issue conditionally, it never clears a pre-existing one on its own.
+        async_setup_entry() must delete it unconditionally on every setup,
+        the same migration pattern already used for weather_entity_not_found/
+        reload_needed."""
+        from custom_components.climate_advisor import async_setup_entry
+        from tools.sim_harness._loop import run_coro
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        # First setup: old-style stale issue already exists in the registry
+        # (simulating an install that upgraded from before this fix).
+        with patch("custom_components.climate_advisor.ir.async_create_issue"):
+            zones, fake_hass, scheduler = build_headless_multi_zone(zone_count=2)
+
+        # Simulate a restart of just one zone (a real HA restart re-runs
+        # async_setup_entry for every config entry) and confirm the stale
+        # issue is explicitly deleted, not left standing.
+        entry = zones["zone_0"]["entry"]
+        with patch("custom_components.climate_advisor.ir.async_delete_issue") as mock_delete, scheduler.installed():
+            run_coro(async_setup_entry(fake_hass, entry))
+
+        calls = _zone_resolution_ambiguous_calls(mock_delete)
+        assert len(calls) == 1, f"expected the stale zone_resolution_ambiguous issue to be cleared, got {calls}"
 
     def test_not_raised_twice_for_same_outcome(self):
         """Repeated calls resolving to the SAME fallback zone must not re-raise

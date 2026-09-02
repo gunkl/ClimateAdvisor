@@ -483,6 +483,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
     ir.async_delete_issue(hass, DOMAIN, "reload_needed")
 
+    # Issue #813: zone_resolution_ambiguous is_persistent=True, so it survives
+    # an HA restart in .storage/repairs.issue_registry — an install that had
+    # it raised under the OLD unconditional-at-setup logic (any 2+ zone
+    # install, regardless of whether ambiguity ever actually occurred) would
+    # otherwise keep showing that stale card forever after upgrading to this
+    # fix, since the new code only ever CREATES it when get_default_coordinator()
+    # actually takes the ambiguous fallback (see zone_registry.py) and never
+    # explicitly clears a pre-existing one. Clear unconditionally on every
+    # setup — safe/idempotent (no-op if absent, same as the two deletes
+    # above) — and let it be re-raised only if this session's requests
+    # actually hit the ambiguous path again. This also gives the card correct
+    # "fresh start each restart" semantics going forward, not just a one-time
+    # migration.
+    ir.async_delete_issue(hass, DOMAIN, "zone_resolution_ambiguous")
+
     # Issue #573: any setup (reload or HA restart) means whatever was saved via
     # the options flow is now the active config — clear the "reload needed"
     # notice raised by ClimateAdvisorOptionsFlow._commit_section(). Entry-scoped

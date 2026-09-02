@@ -19,6 +19,8 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 
+from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
+
 _LOGGER = logging.getLogger(__name__)
 
 _CHART_LOG_FILE = "climate_advisor_chart_log.json"
@@ -41,8 +43,10 @@ def _parse_ts(ts_str: str) -> datetime | None:
 class ChartStateLog:
     """Rolling log of HVAC state snapshots and event markers for charting."""
 
-    def __init__(self, config_dir: Path, max_days: int = 365) -> None:
-        self._path = config_dir / _CHART_LOG_FILE
+    def __init__(self, config_dir: Path, max_days: int = 365, entry_id: str = "") -> None:
+        self._config_dir = config_dir
+        self._entry_id = entry_id
+        self._path = resolve_entry_scoped_path(config_dir, _CHART_LOG_FILE, entry_id)
         self._max_days = max_days
         self._entries: list[dict[str, Any]] = []
         # Prune on append at most once per hour to avoid O(n) work on every snapshot
@@ -54,6 +58,7 @@ class ChartStateLog:
 
     def load(self) -> None:
         """Load from disk, pruning entries older than max_days. Silent on missing file."""
+        migrate_legacy_storage_file(self._config_dir, _CHART_LOG_FILE, self._entry_id)
         if not self._path.exists():
             self._entries = []
             return

@@ -22,6 +22,9 @@ def _make_request(body: dict, coordinator) -> MagicMock:
     req = MagicMock()
     req.app = {"hass": hass}
     req.json = AsyncMock(return_value=body)
+    # Issue #796 Gap 4: _get_coordinator() reads request.query.get("entry_id") —
+    # explicit empty dict so the single-zone default-coordinator fallback applies.
+    req.query = {}
     return req
 
 

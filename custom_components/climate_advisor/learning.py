@@ -59,6 +59,7 @@ from .const import (
     THERMAL_SWING_MIN_F,
     WEATHER_BIAS_MAX_OBS,
 )
+from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -675,23 +676,29 @@ class LearningState:
 class LearningEngine:
     """Tracks patterns and generates adaptive suggestions."""
 
-    def __init__(self, storage_path: Path) -> None:
+    def __init__(self, storage_path: Path, entry_id: str = "") -> None:
         """Initialize the learning engine.
 
         Args:
             storage_path: Path to the HA config directory for persistent storage.
+            entry_id: Owning config entry's entry_id, for multi-zone storage
+                scoping (Issue #796). Empty string keeps the legacy unscoped
+                path — see `storage_paths.resolve_entry_scoped_path`.
 
         Note: Call load_state() after construction to read persisted data
         from disk.  This is intentionally not done in __init__ because
         the file I/O is blocking and must be run via
         hass.async_add_executor_job from an async context.
         """
-        self._db_path = storage_path / LEARNING_DB_FILE
+        self._storage_dir = storage_path
+        self._entry_id = entry_id
+        self._db_path = resolve_entry_scoped_path(storage_path, LEARNING_DB_FILE, entry_id)
         self._state = LearningState()
         self._last_suggestion_keys: list[str] = []
 
     def load_state(self) -> None:
         """Load learning state from disk (blocking I/O — run via executor)."""
+        migrate_legacy_storage_file(self._storage_dir, LEARNING_DB_FILE, self._entry_id)
         if self._db_path.exists():
             try:
                 data = json.loads(self._db_path.read_text())

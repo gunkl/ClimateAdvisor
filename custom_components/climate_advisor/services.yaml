@@ -2,6 +2,17 @@ respond_to_suggestion:
   name: Respond to suggestion
   description: Accept or dismiss a learning suggestion from Climate Advisor.
   fields:
+    entry_id:
+      name: Zone
+      description: >-
+        The Climate Advisor zone (config entry) this call applies to. Required
+        since Issue #796 — with more than one zone configured, HA's service
+        registry has no other way to know which zone a call is meant for.
+      required: true
+      example: "01JABCDEFGHJKMNPQRSTVWXYZ"
+      selector:
+        config_entry:
+          integration: climate_advisor
     action:
       name: Action
       description: Whether to accept or dismiss the suggestion.
@@ -23,10 +34,34 @@ respond_to_suggestion:
 force_reclassify:
   name: Force reclassify
   description: Force Climate Advisor to re-fetch forecast data and reclassify the day. Useful for debugging.
+  fields:
+    entry_id:
+      name: Zone
+      description: >-
+        The Climate Advisor zone (config entry) this call applies to. Required
+        since Issue #796 — with more than one zone configured, HA's service
+        registry has no other way to know which zone a call is meant for.
+      required: true
+      example: "01JABCDEFGHJKMNPQRSTVWXYZ"
+      selector:
+        config_entry:
+          integration: climate_advisor
 
 resend_briefing:
   name: Resend briefing
   description: Re-generate and resend the daily briefing notification, even if it was already sent today.
+  fields:
+    entry_id:
+      name: Zone
+      description: >-
+        The Climate Advisor zone (config entry) this call applies to. Required
+        since Issue #796 — with more than one zone configured, HA's service
+        registry has no other way to know which zone a call is meant for.
+      required: true
+      example: "01JABCDEFGHJKMNPQRSTVWXYZ"
+      selector:
+        config_entry:
+          integration: climate_advisor
 
 dump_diagnostics:
   name: Dump diagnostics
@@ -34,6 +69,18 @@ dump_diagnostics:
     Log a comprehensive diagnostic snapshot of Climate Advisor's internal state
     for troubleshooting. Output is logged at INFO level — check Home Assistant
     logs to view the result.
+  fields:
+    entry_id:
+      name: Zone
+      description: >-
+        The Climate Advisor zone (config entry) this call applies to. Required
+        since Issue #796 — with more than one zone configured, HA's service
+        registry has no other way to know which zone a call is meant for.
+      required: true
+      example: "01JABCDEFGHJKMNPQRSTVWXYZ"
+      selector:
+        config_entry:
+          integration: climate_advisor
 
 reset_learning_data:
   name: Reset learning data
@@ -41,6 +88,18 @@ reset_learning_data:
     Reset some or all of Climate Advisor's learned data.
     Use after changing HVAC equipment, moving to a new location, or to start fresh.
   fields:
+    entry_id:
+      name: Zone
+      description: >-
+        The Climate Advisor zone (config entry) this call applies to. Required
+        since Issue #796 — with more than one zone configured, HA's service
+        registry has no other way to know which zone a call is meant for.
+        Double check this before calling — this service is destructive.
+      required: true
+      example: "01JABCDEFGHJKMNPQRSTVWXYZ"
+      selector:
+        config_entry:
+          integration: climate_advisor
     scope:
       name: Scope
       description: >-

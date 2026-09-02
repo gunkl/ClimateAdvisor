@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.1] — 2026-09-01
+
+- Fix #808: Adding a second zone that points at a thermostat you've already configured now shows a clear "already configured" message instead of silently creating a conflicting duplicate zone.
+
+## [0.7.0] — 2026-09-01
+
+- Feat #796: Climate Advisor now supports running two or more zones (thermostats) at once — each zone gets its own learning history, dashboard data, and settings, with a zone switcher on the dashboard when more than one zone is configured.
+
 ## [0.6.93] — 2026-09-01
 
 - Fix #805: if your thermostat, weather source, a sensor, your whole-house fan, or another entity Climate Advisor depends on gets removed or stops responding, you'll now get a notification telling you which one and what to check — instead of Climate Advisor quietly running on stale data for hours with no warning.

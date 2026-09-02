@@ -286,6 +286,40 @@ class TestComputeNextAction:
         result = _compute_next_action(c, {}, time(12, 0))
         assert "Comfortable" in result
 
+    def test_next_action_prefers_ode_cutoff_over_static_close_time(self):
+        """Issue #817: when self._nat_vent_plan has an ODE-adjusted cutoff earlier than
+        the static classifier window_close_time, the card must show the earlier ODE
+        time — the exact "Today's Strategy said close earlier, but Next User Action
+        still said the old static hour" gap the plan closes. Also confirms the
+        harmonized no-leading-zero format ("9:15 AM", not "09:15 AM")."""
+        c = _make_classification(
+            day_type=DAY_TYPE_WARM,
+            windows_recommended=True,
+            window_open_time=time(6, 0),
+            window_close_time=time(WARM_WINDOW_CLOSE_HOUR, 0),
+        )
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord.config = {}
+        coord._occupancy_mode = OCCUPANCY_HOME
+        coord._nat_vent_plan = {"nat_vent_cutoff": datetime.datetime(2026, 6, 1, 9, 15)}
+        fixed_dt = datetime.datetime(2026, 6, 1, 7, 0, 0)
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=fixed_dt):
+            result = ClimateAdvisorCoordinator._compute_next_action(coord, c)
+        assert "Close windows by 9:15 AM" in result
+
+    def test_next_action_falls_back_to_static_close_time_without_plan(self):
+        """No self._nat_vent_plan cached (e.g. before the first cycle) → falls back to
+        the static classifier window_close_time, not an exception."""
+        c = _make_classification(
+            day_type=DAY_TYPE_WARM,
+            windows_recommended=True,
+            window_open_time=time(6, 0),
+            window_close_time=time(WARM_WINDOW_CLOSE_HOUR, 0),
+        )
+        result = _compute_next_action(c, {}, time(7, 0))
+        assert f"Close windows by {time(WARM_WINDOW_CLOSE_HOUR, 0).strftime('%I:%M %p').lstrip('0')}" in result
+
     def test_next_action_warm_day_after_close_before_evening(self):
         """WARM day after 10 AM close, before 5 PM — mid-day gap, no window guidance."""
         c = _make_classification(
@@ -464,7 +498,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_manual_override_active=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "09:00 AM" in result
+        assert "9:00 AM" in result
         assert "manual override" not in result.lower()
 
     def test_next_action_grace_active_does_not_preempt_schedule(self):
@@ -476,7 +510,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_grace_active=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "09:00 AM" in result
+        assert "9:00 AM" in result
         assert "grace period" not in result.lower()
 
     def test_next_action_paused_by_door_does_not_preempt_schedule(self):
@@ -491,7 +525,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(is_paused_by_door=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "09:00 AM" in result
+        assert "9:00 AM" in result
         assert "paused" not in result.lower()
 
     def test_next_action_hot_no_opportunity_free_cooling_active(self):

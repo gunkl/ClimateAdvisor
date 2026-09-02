@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import types
-from datetime import datetime
+from datetime import datetime, time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor import automation as _ae_mod
@@ -415,3 +415,86 @@ class TestGraceEndTime:
 
         assert ae._grace_end_time is None
         assert ae._grace_active is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #817: _is_within_planned_window_period() prefers the ODE-adjusted
+# nat-vent cutoff over the static classifier window_close_time
+# ---------------------------------------------------------------------------
+
+
+def _make_warm_classification(*, window_close_time) -> DayClassification:
+    """Minimal warm-day, windows-recommended, HVAC-off DayClassification."""
+    c = object.__new__(DayClassification)
+    c.__dict__.update(
+        {
+            "day_type": "warm",
+            "trend_direction": "stable",
+            "trend_magnitude": 0,
+            "today_high": 80,
+            "today_low": 60,
+            "tomorrow_high": 80,
+            "tomorrow_low": 60,
+            "hvac_mode": "off",
+            "pre_condition": False,
+            "pre_condition_target": 0.0,
+            "windows_recommended": True,
+            "window_open_time": time(6, 0),
+            "window_close_time": window_close_time,
+            "setback_modifier": 0.0,
+            "window_opportunity_morning": False,
+            "window_opportunity_evening": False,
+        }
+    )
+    return c
+
+
+class TestIsWithinPlannedWindowPeriodOdeCutoff:
+    """This is a real control-boundary change (Issue #817), not display text: the
+    door/window pause exemption must end at the ODE-adjusted cutoff — the exact
+    number already shown on the briefing/status cards — not the static classifier
+    hour, whenever the two disagree (the same #818 condition: ODE cutoff earlier
+    than the raw classifier close time)."""
+
+    def test_ode_cutoff_earlier_than_static_close_ends_exemption_early(self):
+        """ODE cutoff (9:15 AM) < static window_close_time (10:00 AM). At 9:30 AM —
+        after the ODE cutoff but still before the static close time — the exemption
+        must already be OFF (door/window events should pause HVAC normally)."""
+        ae = _make_ae_stub()
+        ae._is_within_planned_window_period = types.MethodType(
+            _ae_mod.AutomationEngine._is_within_planned_window_period, ae
+        )
+        ae._current_classification = _make_warm_classification(window_close_time=time(10, 0))
+        ae._nat_vent_cutoff = datetime(2026, 7, 10, 9, 15, 0)
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 7, 10, 9, 30, 0)
+            assert ae._is_within_planned_window_period() is False
+
+    def test_still_exempt_before_ode_cutoff(self):
+        """Same setup, but evaluated at 9:00 AM — before the ODE cutoff — the
+        exemption must still be active."""
+        ae = _make_ae_stub()
+        ae._is_within_planned_window_period = types.MethodType(
+            _ae_mod.AutomationEngine._is_within_planned_window_period, ae
+        )
+        ae._current_classification = _make_warm_classification(window_close_time=time(10, 0))
+        ae._nat_vent_cutoff = datetime(2026, 7, 10, 9, 15, 0)
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 7, 10, 9, 0, 0)
+            assert ae._is_within_planned_window_period() is True
+
+    def test_falls_back_to_static_close_time_without_cutoff(self):
+        """No ODE cutoff mirrored (e.g. before the first cycle, or a WARM day with no
+        forecast curve) — falls back to the static window_close_time unchanged."""
+        ae = _make_ae_stub()
+        ae._is_within_planned_window_period = types.MethodType(
+            _ae_mod.AutomationEngine._is_within_planned_window_period, ae
+        )
+        ae._current_classification = _make_warm_classification(window_close_time=time(10, 0))
+        ae._nat_vent_cutoff = None
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 7, 10, 9, 30, 0)
+            assert ae._is_within_planned_window_period() is True

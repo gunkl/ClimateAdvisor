@@ -47,7 +47,7 @@ from .automation import (
     resolve_pre_cool_modifier,
     select_comfort_band,
 )
-from .briefing import _derive_warm_day_events, generate_briefing
+from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
 from .const import (
@@ -243,6 +243,7 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .nat_vent_plan import compute_nat_vent_plan
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
@@ -602,6 +603,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._indoor_temp_history: list[tuple[str, float]] = []
         self._hourly_forecast_temps: list[dict] = []
         self._last_predicted_indoor: list[dict] = []
+        # Issue #817: the single per-cycle nat-vent window/cutoff computation — briefing
+        # text, the TLDR table, and the Next Automation/Next User Action cards all read
+        # this instead of independently recomputing it, so they can never disagree.
+        self._nat_vent_plan: dict | None = None
         self._pred_archive: dict[int, float] = {}
         self._thermal_factors: dict | None = None
 
@@ -2068,6 +2073,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 c,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=indoor_temp,
+                nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
             )
             _LOGGER.debug("[coalesce-diag] after apply_classification() [coalesce path]")
             hvac_commanded = True
@@ -2508,6 +2514,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 len(self._last_predicted_indoor),
                 f"{self._last_predicted_indoor[0]['temp']:.1f}°F" if self._last_predicted_indoor else "none",
             )
+            self._compute_and_cache_nat_vent_plan()
 
             # Populate first-write-wins prediction archive (PRED_ARCHIVE_HORIZON_HOURS lookahead).
             # setdefault ensures the earliest (most advance) prediction is kept per 30-min slot.
@@ -2559,6 +2566,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._current_classification,
                     predicted_indoor=self._last_predicted_indoor,
                     indoor_temp=self._get_indoor_temp(),
+                    nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
                 )
                 _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
 
@@ -3450,14 +3458,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             bedtime_setback_cool=bedtime_setback_cool,
             adaptive_thermal_active=adaptive_thermal_active,
             occupancy_mode=self._occupancy_mode,
-            predicted_indoor_future=self._last_predicted_indoor or None,
-            predicted_outdoor_future=(
-                _build_future_forecast_outdoor(
-                    self._hourly_forecast_temps,
-                    classification=classification,
-                )
-                or None
-            ),
+            nat_vent_plan=self._nat_vent_plan,
             runtime_config=self.config,
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
@@ -3592,10 +3593,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Caching predicted indoor curve (briefing): %d points",
                 len(self._last_predicted_indoor),
             )
+            self._compute_and_cache_nat_vent_plan()
             await self.automation_engine.apply_classification(
                 classification,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
+                nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
             )
 
             # Initialize today's learning record, preserving any counters already accumulated
@@ -3855,6 +3858,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._target_band_schedule = self._build_target_band_for(
             dt_util.now(),
             self.automation_engine._thermal_model if self.automation_engine else None,
+        )
+
+    def _compute_and_cache_nat_vent_plan(self) -> None:
+        """Issue #817: single per-cycle computation of warm/mild-day nat-vent window
+        and cutoff timing, cached on ``self._nat_vent_plan``.
+
+        Before this existed, briefing text, the TLDR table, and the "Next Automation"
+        status card each independently called what is now
+        ``nat_vent_plan.compute_nat_vent_plan()`` with their own locally-rebuilt
+        inputs — the exact shape of bug that let #528 silently reintroduce a duplicate
+        computation 2 days after #518 promised there'd never be one. Every consumer
+        now reads this one cached value instead.
+
+        Call this immediately after ``self._last_predicted_indoor`` is (re)built, in
+        both the main 30-min cycle and the daily-briefing pipeline — the same point in
+        the cycle ``_resolve_target_band_schedule()`` documents for the target-band
+        cache, for the same reason (downstream consumers must see this cycle's curve,
+        not a stale one).
+        """
+        c = self._current_classification
+        if c is None or not self._last_predicted_indoor:
+            self._nat_vent_plan = None
+            return
+        _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
+        _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+        self._nat_vent_plan = compute_nat_vent_plan(
+            predicted_indoor=self._last_predicted_indoor,
+            predicted_outdoor=_outdoor_curve,
+            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            comfort_heat_raw=_comfort_heat_raw,
+            sleep_heat=_sleep_heat,
+            in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
+            window_open_time=c.window_open_time,
         )
 
     def _target_band_lower_upper_now(self) -> tuple[float | None, float | None]:
@@ -5413,6 +5450,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
+                nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
             )
             _LOGGER.info(
                 "Setpoint re-asserted after fan-off echo: reasserted day_type=%s hvac_mode=%s",
@@ -7565,11 +7603,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now().time()
         direction_ok = free_cooling_direction_ok(outdoor_temp, indoor_temp)
 
+        # Issue #817: prefer the ODE-adjusted cutoff (self._nat_vent_plan, the same
+        # value the briefing/TLDR table and the Next Automation card read) over the
+        # static classifier close time — this card previously always used the static
+        # hour, which could disagree with what "Today's Strategy" told the occupant.
+        # Falls back to c.window_close_time when no plan is cached (e.g. before the
+        # first cycle) or it has no cutoff for today.
+        _plan = getattr(self, "_nat_vent_plan", None)
+        _close_time_dt = _plan.get("nat_vent_cutoff") if _plan else None
+        _effective_close_time = _close_time_dt.time() if _close_time_dt else c.window_close_time
+
         if c.windows_recommended:
             if c.window_open_time and now < c.window_open_time:
-                return _decide(f"Open windows at {c.window_open_time.strftime('%I:%M %p')}")
-            elif c.window_close_time and now < c.window_close_time:
-                return _decide(f"Close windows by {c.window_close_time.strftime('%I:%M %p')}")
+                return _decide(f"Open windows at {c.window_open_time.strftime('%I:%M %p').lstrip('0')}")
+            elif _effective_close_time and now < _effective_close_time:
+                return _decide(f"Close windows by {_effective_close_time.strftime('%I:%M %p').lstrip('0')}")
             elif now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 if windows_physically_open:
                     if outdoor_temp is not None and indoor_temp is not None and not direction_ok:
@@ -8515,36 +8563,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # production, but several test files build a coordinator via object.__new__()
         # without running __init__() — getattr() keeps those minimal stubs working
         # rather than requiring every one of them to know about this new attribute.
+        # Only needed by the nat-vent-start-prediction block below now (Issue #817
+        # moved the WARM/MILD-day events block off this and onto self._nat_vent_plan).
         _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
 
-        # Issue #535: shared comfort-floor inputs, hoisted above both the WARM/MILD-day
-        # events block and the nat-vent start-prediction block below so they don't each
-        # independently re-read the same config keys. "sleep_heat" literal, not the
-        # CONF_SLEEP_HEAT constant: the bedtime block above does a local
-        # `from .const import ... CONF_SLEEP_HEAT` inside an `if c.hvac_mode in ("heat",
-        # "cool")` branch, which makes CONF_SLEEP_HEAT a local name for this ENTIRE
-        # function regardless of whether that branch actually runs — referencing the
-        # module-level import here raises UnboundLocalError whenever hvac_mode is
-        # "off"/"auto". Same value either way.
+        # Issue #535: shared comfort-floor inputs, hoisted above the nat-vent
+        # start-prediction block below so it doesn't independently re-read the same
+        # config keys. "sleep_heat" literal, not the CONF_SLEEP_HEAT constant: the
+        # bedtime block above does a local `from .const import ... CONF_SLEEP_HEAT`
+        # inside an `if c.hvac_mode in ("heat", "cool")` branch, which makes
+        # CONF_SLEEP_HEAT a local name for this ENTIRE function regardless of whether
+        # that branch actually runs — referencing the module-level import here raises
+        # UnboundLocalError whenever hvac_mode is "off"/"auto". Same value either way.
         _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
 
         # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_cutoff/
         # ceiling_breach_time/precool_start_time/recovery_time already computed for the
-        # briefing (now timestamp-correct, see _derive_warm_day_events()), surfaced here
-        # for the first time so the dashboard doesn't have to wait for the next briefing
-        # to show them.
-        if c.windows_recommended and _predicted_indoor:
-            _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
-            _warm_events = _derive_warm_day_events(
-                predicted_indoor=_predicted_indoor,
-                predicted_outdoor=_outdoor_curve,
-                comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
-                comfort_heat_raw=_comfort_heat_raw,
-                sleep_heat=_sleep_heat,
-                in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
-                window_open_time=c.window_open_time,
-            )
+        # briefing. Issue #817: this used to independently re-derive its own copy via a
+        # second compute_nat_vent_plan() call with its own locally-rebuilt inputs — now
+        # reads the coordinator's single per-cycle self._nat_vent_plan
+        # (_compute_and_cache_nat_vent_plan()) instead, so this card can never disagree
+        # with the briefing or TLDR table about the same numbers.
+        _warm_events = getattr(self, "_nat_vent_plan", None)
+        if c.windows_recommended and _warm_events:
             if _warm_events["nat_vent_cutoff"] and _warm_events["nat_vent_cutoff"] > now:
                 # Issue #534: this is a forecast for a future time, not a claim about current
                 # conditions — the qualifying time otherwise lives only in the separate

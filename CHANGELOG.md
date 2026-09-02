@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.6] — 2026-09-02
+
+- Fix #817: the Status report's window/AC timing (Today's Strategy table, Next Automation card, and Next User Action card) was computed independently in three separate places and could disagree with itself — e.g. Next User Action still showing an old close time after the forecast changed. All three now read the exact same computed value, so they can no longer contradict each other, and the door/window pause behavior around window-close time now uses that same corrected time too.
+
 ## [0.7.5] — 2026-09-01
 
 - Fix #818: the Status report no longer shows a nonsensical zero-width window recommendation like "Open 6:00 AM - 6:00 AM" — the close time now always reflects a moment after windows would actually open.

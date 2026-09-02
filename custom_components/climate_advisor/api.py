@@ -13,6 +13,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
+from . import zone_registry
 from .ai_skills_context import build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
@@ -69,12 +70,25 @@ from .temperature import convert_delta, from_fahrenheit
 _LOGGER = logging.getLogger(__name__)
 
 
-def _get_coordinator(hass: HomeAssistant):
-    """Get the first (and usually only) Climate Advisor coordinator."""
-    entries = hass.data.get(DOMAIN, {})
-    if not entries:
-        return None
-    return next(iter(entries.values()))
+def _get_coordinator(hass: HomeAssistant, request: web.Request):
+    """Resolve the zone coordinator this request targets.
+
+    Issue #796 Gap 4: previously always returned ``next(iter(entries.values()))``
+    — an arbitrary "first" entry — regardless of how many zones were
+    configured, meaning the entire REST/dashboard surface was blind to any
+    zone beyond the first. Now reads an optional ``entry_id`` query parameter
+    and resolves it via ``zone_registry.get_coordinator()``; when absent
+    (every existing caller not yet updated to send it), falls back to
+    ``zone_registry.get_default_coordinator()`` — which preserves today's
+    single-zone behavior exactly when only one zone is loaded, and degrades
+    to a deterministic, logged, Repairs-flagged fallback selection when more
+    than one zone is loaded (see "Transitional Safety Window" in
+    docs/multi-zone-spec.md).
+    """
+    entry_id = request.query.get("entry_id")
+    if entry_id:
+        return zone_registry.get_coordinator(hass, entry_id)
+    return zone_registry.get_default_coordinator(hass)
 
 
 class ClimateAdvisorStatusView(HomeAssistantView):
@@ -86,7 +100,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -280,7 +294,7 @@ class ClimateAdvisorBriefingView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -322,7 +336,7 @@ class ClimateAdvisorChartDataView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -356,7 +370,7 @@ class ClimateAdvisorAutomationStateView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -372,7 +386,7 @@ class ClimateAdvisorLearningView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -409,7 +423,7 @@ class ClimateAdvisorForceReclassifyView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -426,7 +440,7 @@ class ClimateAdvisorSendBriefingView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -446,7 +460,7 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -525,7 +539,7 @@ class ClimateAdvisorConfigView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -594,7 +608,7 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -623,7 +637,7 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -655,7 +669,7 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -679,7 +693,7 @@ class ClimateAdvisorToggleAutomationView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -704,7 +718,7 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -736,7 +750,7 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -773,7 +787,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -914,7 +928,7 @@ class ClimateAdvisorInvestigationReportsView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -932,7 +946,7 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
         from homeassistant.util import dt as dt_util
 
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -957,7 +971,7 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -978,7 +992,7 @@ class ClimateAdvisorDeleteReportView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -1013,7 +1027,7 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
         import aiohttp
 
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
+        coordinator = _get_coordinator(hass, request)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 

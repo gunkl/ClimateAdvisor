@@ -280,3 +280,117 @@ class TestWeatherEntityRepairFlow:
 
         assert result["type"] == "create_entry"
         hass.config_entries.async_update_entry.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# zone_resolution_ambiguous Repairs issue (Issue #796 Transitional Safety
+# Window)
+#
+# Drives the REAL async_setup_entry()/async_unload_entry() via
+# build_headless_multi_zone() — per this project's no-mirror-tests doctrine
+# (CLAUDE.md) — rather than re-implementing the len(hass.data[DOMAIN]) > 1 /
+# <= 1 threshold checks in the test body. ir.async_create_issue/
+# async_delete_issue are patched per-test (matching this file's existing
+# WeatherEntityRepairFlow/ReloadNeededRepairFlow pattern above) because
+# homeassistant.helpers.issue_registry is a single shared MagicMock module
+# for the whole test process — patching scopes the call-count assertions to
+# just this test's setup/unload calls instead of accumulating across the
+# full suite.
+# ---------------------------------------------------------------------------
+
+
+def _zone_resolution_ambiguous_calls(mock_create_or_delete) -> list:
+    """Filter a mocked ir.async_create_issue/async_delete_issue call list down to
+    calls that named the zone_resolution_ambiguous issue_id specifically —
+    other issues (e.g. weather_entity_not_found) may also fire during the same
+    setup/unload and must not be mistaken for this one."""
+    return [c for c in mock_create_or_delete.call_args_list if "zone_resolution_ambiguous" in c.args]
+
+
+class TestZoneResolutionAmbiguousIssue:
+    """Issue #796: ambiguous-zone-selection Repairs issue lifecycle."""
+
+    def test_raised_when_second_zone_is_set_up(self):
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue") as mock_create:
+            zones, _fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        assert len(zones) == 2
+        calls = _zone_resolution_ambiguous_calls(mock_create)
+        assert len(calls) == 1, f"expected exactly one zone_resolution_ambiguous raise, got {calls}"
+        # is_fixable=False, WARNING severity — informational only, nothing to configure.
+        kwargs = calls[0].kwargs
+        assert kwargs["is_fixable"] is False
+        from homeassistant.helpers import issue_registry as ir  # noqa: PLC0415
+
+        assert kwargs["severity"] == ir.IssueSeverity.WARNING
+
+    def test_not_raised_for_single_zone(self):
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue") as mock_create:
+            zones, _fake_hass, _scheduler = build_headless_multi_zone(zone_count=1)
+
+        assert len(zones) == 1
+        assert _zone_resolution_ambiguous_calls(mock_create) == []
+
+    def test_cleared_when_unloaded_back_to_one_zone(self):
+        from custom_components.climate_advisor import async_unload_entry
+        from tools.sim_harness._loop import run_coro
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+        entry_to_unload = zones["zone_1"]["entry"]
+
+        with patch("custom_components.climate_advisor.ir.async_delete_issue") as mock_delete:
+            run_coro(async_unload_entry(fake_hass, entry_to_unload))
+
+        calls = _zone_resolution_ambiguous_calls(mock_delete)
+        assert len(calls) == 1, f"expected exactly one zone_resolution_ambiguous clear, got {calls}"
+
+    def test_not_cleared_while_more_than_one_zone_remains(self):
+        """Three zones, unload one: two remain — the issue must stay active, not clear."""
+        from custom_components.climate_advisor import async_unload_entry
+        from tools.sim_harness._loop import run_coro
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=3)
+        entry_to_unload = zones["zone_2"]["entry"]
+
+        with patch("custom_components.climate_advisor.ir.async_delete_issue") as mock_delete:
+            run_coro(async_unload_entry(fake_hass, entry_to_unload))
+
+        assert _zone_resolution_ambiguous_calls(mock_delete) == []
+
+    def test_cross_zone_isolation_unaffected_by_ambiguous_issue_lifecycle(self):
+        """The Repairs issue is a domain-wide signal, not per-zone state — confirm
+        raising/clearing it has no effect on a sibling zone's own coordinator state
+        (the same cross_zone_isolation evaluator used for Gap 5's service-scoping
+        tests, applied here to prove this new lifecycle code introduces no bleed)."""
+        from tools.sim_harness._loop import run_coro
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+        from tools.sim_harness.multi_zone_assertions import check_multi_zone_assertion
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue"):
+            zones, fake_hass, scheduler = build_headless_multi_zone(zone_count=2)
+
+        zones["zone_1"]["coordinator"].learning._state.dismissed_suggestions = ["seeded_suggestion_key"]
+
+        assertion = {
+            "type": "cross_zone_isolation",
+            "action_zone": "zone_0",
+            "service": "force_reclassify",
+            "service_data": {"entry_id": zones["zone_0"]["entry"].entry_id},
+            "unaffected_zone": "zone_1",
+            "unaffected_field": "learning._state.dismissed_suggestions",
+        }
+        # force_reclassify drives a REAL coordinator data-refresh cycle, which
+        # reads homeassistant.util.dt.now() internally — that only resolves to
+        # a real datetime (rather than a bare auto-mock) while the harness's
+        # FakeScheduler is installed, which build_headless_multi_zone() only
+        # keeps active for its own zone-setup phase. Re-enter it here for the
+        # duration of the service call.
+        with scheduler.installed():
+            passed, detail = run_coro(check_multi_zone_assertion(zones, fake_hass, assertion))
+        assert passed is True, detail

@@ -22,7 +22,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 
-from . import log_capture
+from . import log_capture, zone_registry
 from .api import API_VIEWS
 from .const import (
     CONF_AI_API_KEY,
@@ -132,10 +132,12 @@ ZONE_SCOPED_SERVICES = (
 # (PANEL_URL, PANEL_FRONTEND_PATH — both fixed module-level string constants
 # in const.py) are shared, domain-wide resources, not per-zone resources — the
 # same collision shape as ZONE_SCOPED_SERVICES above. Deliberately NOT stored
-# under hass.data[DOMAIN]: api.py's _get_coordinator() does
-# `next(iter(hass.data[DOMAIN].values()))`, and log_capture.py's identical
-# comment explains why inserting a non-coordinator value into that dict would
-# break it. Tracks whether this zone's async_setup_entry() call (or an
+# under hass.data[DOMAIN]: api.py's _get_coordinator() resolves via
+# zone_registry.get_coordinator()/get_default_coordinator() (Gap 4), both of
+# which assume every value in hass.data[DOMAIN] IS a coordinator (e.g.
+# `next(iter(entries.values()))`) — log_capture.py's identical comment
+# explains why inserting a non-coordinator value into that dict would still
+# break it today. Tracks whether this zone's async_setup_entry() call (or an
 # earlier zone's) has already registered — or attempted and determined
 # already-registered — the shared views/panel, so a second-and-later zone's
 # setup never attempts a duplicate registration in the first place.
@@ -407,9 +409,14 @@ def _resolve_zone_coordinator(hass: HomeAssistant, call) -> ClimateAdvisorCoordi
     or already-unloaded entry_id, matching HA's convention for a user-facing
     service-call validation failure the frontend/CLI can render as an error
     rather than an unhandled exception.
+
+    Issue #796 Gap 4 follow-up: the actual lookup delegates to
+    ``zone_registry.get_coordinator()`` — the same accessor api.py's REST
+    views use — so there is one canonical "look up a coordinator by entry_id"
+    implementation, not two independently-maintained one-liners.
     """
     entry_id = call.data.get("entry_id")
-    coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
+    coordinator = zone_registry.get_coordinator(hass, entry_id) if entry_id else None
     if coordinator is None:
         raise ServiceValidationError(
             f"Unknown or unloaded Climate Advisor zone entry_id '{entry_id}'. "
@@ -424,9 +431,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Issue #578: capture real WARNING+/ERROR log records for the AI
     # Investigator's "System Errors/Warnings" section (see log_capture.py).
-    # Stored outside hass.data[DOMAIN] on purpose — _get_coordinator() in
-    # api.py does next(iter(hass.data[DOMAIN].values())), and dicts are
-    # insertion-ordered, so putting this handler in that dict before the
+    # Stored outside hass.data[DOMAIN] on purpose — api.py's _get_coordinator()
+    # resolves via zone_registry.get_coordinator()/get_default_coordinator()
+    # (Gap 4), both of which assume every value in hass.data[DOMAIN] IS a
+    # coordinator, so putting this handler in that dict before the
     # coordinator is added would make every REST view resolve the log
     # handler instead of the coordinator.
     log_capture.install(hass)
@@ -489,6 +497,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    # Issue #796 Transitional Safety Window: a second zone is already
+    # mechanically possible today via HA's native Add Integration flow, with
+    # no dependency on the dashboard (PR9) becoming zone-aware first. Once
+    # api.py is entry-scoped (Gap 4/PR7), any caller that doesn't send an
+    # entry_id falls back to zone_registry.get_default_coordinator()'s
+    # deterministic-first-entry selection — this Repairs issue is the
+    # persistent, Settings > Repairs-visible half of that signal (the other
+    # half is the WARNING log line get_default_coordinator() itself emits,
+    # throttled to once per distinct resolved outcome rather than once per
+    # call — see zone_registry.py's _warn_once()/_WARNED_STATE_KEY, added as
+    # a Verification fix after the unthrottled version was found to evict
+    # log_capture.py's ring buffer roughly every 40s under dashboard polling).
+    # is_fixable=False: there is nothing to
+    # configure here, it's purely informational — the condition clears on its
+    # own once zone count drops back to one (see async_unload_entry() below).
+    if len(hass.data[DOMAIN]) > 1:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            "zone_resolution_ambiguous",
+            is_fixable=False,
+            is_persistent=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="zone_resolution_ambiguous",
+        )
 
     # Set up sensor platform
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -669,6 +703,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Climate Advisor config entry."""
     coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
     await coordinator.async_shutdown()
+
+    # Issue #796 Transitional Safety Window: clear side of the
+    # zone_resolution_ambiguous Repairs issue raised in async_setup_entry()
+    # above. Its own standalone check against the <= 1 threshold — NOT nested
+    # inside the "if not hass.data[DOMAIN]:" block below, which only fires at
+    # exactly 0 remaining zones (a different threshold, used for the
+    # domain-wide service/panel teardown that block owns). Going from 2 zones
+    # to 1 must clear this issue even though that block doesn't fire yet.
+    if len(hass.data[DOMAIN]) <= 1:
+        ir.async_delete_issue(hass, DOMAIN, "zone_resolution_ambiguous")
+        # Clear zone_registry's WARNING throttle state in lockstep with the
+        # Repairs issue above — see reset_warning_state()'s docstring.
+        zone_registry.reset_warning_state(hass)
 
     # The log-capture handler is process-wide, not per-entry — only detach it
     # once no other config entries (this integration is effectively single-

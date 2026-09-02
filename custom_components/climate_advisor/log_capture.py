@@ -26,10 +26,12 @@ from .const import LOG_CAPTURE_CAP
 _HANDLER_LOGGER_NAME = "custom_components.climate_advisor"
 
 # Deliberately NOT stored under hass.data[DOMAIN]: api.py's _get_coordinator()
-# does `next(iter(hass.data[DOMAIN].values()))` to find "the" coordinator, and
-# Python dicts are insertion-ordered — inserting this handler into that same
-# dict before the coordinator is added would make every REST view resolve the
-# log handler instead of the coordinator and crash with AttributeError.
+# resolves via zone_registry.get_coordinator()/get_default_coordinator()
+# (Issue #796 Gap 4), both of which assume every value in hass.data[DOMAIN]
+# IS a coordinator (e.g. `next(iter(entries.values()))`) — inserting this
+# handler into that same dict before the coordinator is added would make
+# every REST view resolve the log handler instead of the coordinator and
+# crash with AttributeError.
 _HASS_DATA_KEY = "climate_advisor_log_capture"
 
 

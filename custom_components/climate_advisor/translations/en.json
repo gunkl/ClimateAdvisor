@@ -455,6 +455,10 @@
           }
         }
       }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "Ambiguous zone selection",
+      "description": "Multiple Climate Advisor zones are configured. Some requests that don't specify a zone may resolve to the wrong one."
     }
   }
 }

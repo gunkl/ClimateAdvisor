@@ -40,24 +40,40 @@ from custom_components.climate_advisor.const import (
 from custom_components.climate_advisor.learning import DailyRecord
 
 
+def _make_request(entry_id: str | None = None) -> MagicMock:
+    """Build a minimal fake aiohttp request with an optional entry_id query param."""
+    request = MagicMock()
+    request.query = {"entry_id": entry_id} if entry_id else {}
+    return request
+
+
 class TestGetCoordinator:
-    """Tests for _get_coordinator helper."""
+    """Tests for _get_coordinator helper.
+
+    Issue #796 Gap 4: _get_coordinator() now resolves per-request via an
+    optional entry_id query param (see zone_registry.py for the underlying
+    resolution logic exercised more fully in test_zone_registry.py and
+    test_api_multi_zone.py). These three tests cover the pre-existing
+    single-zone/no-zone behavior, updated only for the new request argument —
+    the backward-compat guarantee is that absent entry_id, single-zone
+    behavior is unchanged.
+    """
 
     def test_returns_coordinator_when_loaded(self):
         coord = MagicMock()
         hass = MagicMock()
         hass.data = {DOMAIN: {"entry_1": coord}}
-        assert _get_coordinator(hass) is coord
+        assert _get_coordinator(hass, _make_request()) is coord
 
     def test_returns_none_when_not_loaded(self):
         hass = MagicMock()
         hass.data = {}
-        assert _get_coordinator(hass) is None
+        assert _get_coordinator(hass, _make_request()) is None
 
     def test_returns_none_when_domain_empty(self):
         hass = MagicMock()
         hass.data = {DOMAIN: {}}
-        assert _get_coordinator(hass) is None
+        assert _get_coordinator(hass, _make_request()) is None
 
 
 class TestAPIConstants:
@@ -271,6 +287,12 @@ def _make_view_request(coordinator, climate_state=None):
     hass.states.get.return_value = climate_state
     req = MagicMock()
     req.app = {"hass": hass}
+    # Issue #796 Gap 4: _get_coordinator() now reads request.query.get("entry_id").
+    # A bare MagicMock().query.get(...) would return a truthy MagicMock instead of
+    # None, breaking the single-zone default-coordinator fallback every one of
+    # these tests relies on — explicit empty dict matches a real aiohttp request
+    # with no query string.
+    req.query = {}
     return req
 
 
@@ -665,6 +687,7 @@ class TestCancelViewsGraceCancellation:
         hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
         req = MagicMock()
         req.app = {"hass": hass}
+        req.query = {}
         return req
 
     def _post(self, view_cls, coordinator):

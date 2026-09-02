@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.9] — 2026-09-02
+
+- Fix #823: a zone sitting below its comfort floor on a cool-classified day now actually switches to heat instead of staying locked out indefinitely. The anti-flap lockout added in #821 was being re-armed by every routine reassertion of the same setpoint, so as long as the classification cadence stayed shorter than the lockout window, the lockout could never clear — the home could sit below its comfort floor for hours with the thermostat repeatedly confirming a cooling setpoint and never heating.
+
 ## [0.7.8] — 2026-09-02
 
 - Fix #821: the comfort floor is now actively defended even when the day is classified for cooling, without causing rapid heat/cool or nat-vent cycling.

@@ -2383,6 +2383,16 @@ def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[str
     return f"Occupancy setback suppressed (windows open, {occupancy})", _render_paused_entity_settings(p)
 
 
+def _render_comfort_family_switch_locked_out(p: dict, unit: str) -> tuple[str, str]:
+    # Issue #821: the family-switch lockout (comfort_mode_switch_min_interval_s)
+    # blocked a candidate heating/cooling family switch — surfaced so a persistently
+    # blocked breach is observable, not silent (per that issue's own design note).
+    candidate = p.get("candidate_family", "")
+    reason = p.get("reason", "")
+    label = f"Family switch to {candidate} blocked by lockout" if candidate else "Family switch blocked by lockout"
+    return label, reason
+
+
 # Registry: event_type -> renderer
 EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "comfort_band_applied": _render_comfort_band_applied,
@@ -2398,6 +2408,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "classification_applied": _render_classification_applied,
     "classification_suppressed_paused": _render_classification_suppressed_paused,
     "occupancy_setback_suppressed_paused": _render_occupancy_setback_suppressed_paused,
+    "comfort_family_switch_locked_out": _render_comfort_family_switch_locked_out,
     "setpoint_rejected": _render_setpoint_rejected,
     "setpoint_nudge": _render_setpoint_nudge,
     "override_cleared": _render_override_cleared,

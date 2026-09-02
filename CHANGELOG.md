@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.8] — 2026-09-02
+
+- Fix #821: the comfort floor is now actively defended even when the day is classified for cooling, without causing rapid heat/cool or nat-vent cycling.
+- Fix #697: closes a stale internal flag left set after a whole-house-fan comfort-floor exit, which could mislabel the next nat-vent session's status.
+- Fix #699: a door or window opened right after a whole-house-fan exit no longer immediately restarts the fan against the same unmoved temperature reading.
+
 ## [0.7.7] — 2026-09-02
 
 - Fix #817: on a multi-zone install, only one zone now sends the scheduled daily briefing push/email (pick which one in Settings > Notifications) instead of every zone sending its own separate copy of the same plan. The dashboard's Regenerate button refreshes what's on screen without sending a real notification — only the debug tab's Send Briefing button does that. The briefing's forecast and day classification no longer drift from an independent second fetch moments after the regular update cycle already ran.

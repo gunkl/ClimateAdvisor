@@ -31,6 +31,20 @@ from custom_components.climate_advisor.const import (
     MIN_VIABLE_NAT_VENT_HOURS,
     NAT_VENT_REACTIVATION_LOCKOUT_S,
 )
+from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason
+
+# Issue #821: decide_nat_vent_exit()'s candidates now require sustain-confirmation
+# (NAT_VENT_EXIT_SUSTAIN_S = 90s) before an exit actually commits. Tests below that
+# exercise the SIDE EFFECTS of a committed exit (not the sustain-confirmation timing
+# itself, which is covered by tests/test_confirmed_transition.py) pre-arm the
+# candidate state to "already sustained" — since well over 90s before whatever fixed
+# `now` the test uses — preserving each test's original single-call assertion shape.
+
+
+def _arm_sustained_exit(engine: AutomationEngine, reason: NatVentExitReason, now: datetime) -> None:
+    engine._nat_vent_exit_candidate_reason = reason
+    engine._nat_vent_exit_candidate_since = now - timedelta(hours=1)
+
 
 # Patch dt_util.now so isoformat() calls inside the engine always work
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 4, 20, 10, 0, 0)
@@ -316,7 +330,9 @@ class TestNatVentOutdoorRiseExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+        _now = datetime(2026, 4, 20, 20, 0, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.OUTDOOR_RISE, _now)
+        with patch(_DT_NOW_PATH, return_value=_now):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
@@ -355,7 +371,9 @@ class TestNatVentOutdoorRiseExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+        _now = datetime(2026, 4, 20, 20, 0, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.OUTDOOR_RISE, _now)
+        with patch(_DT_NOW_PATH, return_value=_now):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False, "nat vent must exit when outdoor == indoor (Issue #690)"
@@ -372,7 +390,9 @@ class TestNatVentOutdoorRiseExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+        _now = datetime(2026, 4, 20, 20, 0, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.OUTDOOR_RISE, _now)
+        with patch(_DT_NOW_PATH, return_value=_now):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
@@ -761,6 +781,7 @@ class TestFullNatVentCycle:
         _set_engine_indoor(engine, 74.0)
         engine._last_outdoor_temp = 74.5
         exit_time = datetime(2026, 4, 20, 20, 0, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.OUTDOOR_RISE, exit_time)
         with patch(_DT_NOW_PATH, return_value=exit_time):
             asyncio.run(engine.check_natural_vent_conditions())
         assert engine._natural_vent_active is False
@@ -987,6 +1008,11 @@ class TestProactiveFloorExit:
         engine._fan_override_active = False
         engine._thermal_model = {"confidence": confidence, "k_passive": k_passive}
         engine._hourly_forecast_temps = []
+        # Issue #821: pre-arm as an already-sustained PROACTIVE_FLOOR candidate. Safe
+        # for every test using this factory, including the ones where the floor isn't
+        # actually imminent — decide_nat_vent_exit() returns NONE for those regardless
+        # of this pre-armed state, which _confirm_nat_vent_exit() then clears.
+        _arm_sustained_exit(engine, NatVentExitReason.PROACTIVE_FLOOR, datetime(2026, 4, 20, 10, 0, 0))
         return engine
 
     def test_proactive_exit_when_floor_imminent(self):
@@ -1001,7 +1027,8 @@ class TestProactiveFloorExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         assert not engine._natural_vent_active
         assert any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
@@ -1033,7 +1060,8 @@ class TestProactiveFloorExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
         assert engine._paused_by_door is True, (
@@ -1058,7 +1086,8 @@ class TestProactiveFloorExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False
         assert engine._paused_by_door is False, "sensors closed must not enter the pause state"
@@ -1080,7 +1109,8 @@ class TestProactiveFloorExit:
         engine._sensor_check_callback = lambda: True
         engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         # Never both True — and never restoring an active HVAC mode while paused.
         assert not (engine._natural_vent_active and engine._paused_by_door)
@@ -1112,7 +1142,8 @@ class TestProactiveFloorExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         floor_events = [e for e in events if e[0] == "nat_vent_predicted_floor_exit"]
         assert len(floor_events) == 1
@@ -1233,6 +1264,7 @@ class TestIssue641ExitReactivationFlipFlop:
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
         now = datetime(2026, 8, 15, 6, 36, 0)
 
+        _arm_sustained_exit(engine, NatVentExitReason.PROACTIVE_FLOOR, now)
         with patch(_DT_NOW_PATH, return_value=now):
             asyncio.run(engine.check_natural_vent_conditions())
 
@@ -1266,6 +1298,7 @@ class TestIssue641ExitReactivationFlipFlop:
             indoor_f=69.0, outdoor_f=58.6, k_passive=-0.0977, comfort_heat=68.0, comfort_cool=74.0
         )
         exit_time = datetime(2026, 8, 15, 6, 36, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.PROACTIVE_FLOOR, exit_time)
         with patch(_DT_NOW_PATH, return_value=exit_time):
             asyncio.run(engine.check_natural_vent_conditions())
         assert engine._natural_vent_active is False
@@ -1304,6 +1337,7 @@ class TestIssue641ExitReactivationFlipFlop:
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
         now = datetime(2026, 8, 15, 14, 0, 0)
 
+        _arm_sustained_exit(engine, NatVentExitReason.CEILING_THRESHOLD, now)
         with patch(_DT_NOW_PATH, return_value=now):
             asyncio.run(engine.check_natural_vent_conditions())
 
@@ -1354,7 +1388,9 @@ class TestNatVentExitEqualTemps:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+        _now = datetime(2026, 4, 20, 20, 0, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.OUTDOOR_RISE, _now)
+        with patch(_DT_NOW_PATH, return_value=_now):
             asyncio.run(engine.check_natural_vent_conditions())
 
         # Equal temps → no cooling benefit remains → exit (Issue #690)
@@ -1377,7 +1413,9 @@ class TestNatVentExitEqualTemps:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+        _now = datetime(2026, 4, 20, 20, 0, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.OUTDOOR_RISE, _now)
+        with patch(_DT_NOW_PATH, return_value=_now):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False, (

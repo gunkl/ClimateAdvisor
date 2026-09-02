@@ -1,0 +1,86 @@
+{
+  "name": "issue_821_natvent_floor_exit_restore_no_flap",
+  "description": "The user's literal described scenario: WHF rides indoor down toward comfort_heat on a day classified for cooling, exits, and the restore that follows is governed by the shared family resolver (_resolve_comfort_family_mode()) — not a raw c.hvac_mode passthrough. Because the resolver's fallback/ODE escalation candidate is never pre-armed while nat-vent owns HVAC (the resolver bails out early whenever natural_vent_active is True), the very first restore tick always matches c.hvac_mode (\"cool\" here) — proving no immediate heat/cool flap happens at the exact WHF-to-HVAC handoff moment, even though indoor is sitting exactly at the floor from momentum.",
+  "source": "Issue #821 design (Design §5) — the highest-hunting-risk call site identified by the project owner: 'WHF/nat-vent has just ridden the house down toward the floor and exited, and this call site is what decides what happens next.'",
+  "issue": 821,
+  "notes": [
+    "IMPORTANT, discovered while authoring this scenario (not part of the original approved design, reported separately to the project owner rather than fixed in this pass — see docs/issue-821-golden-scenario-review-notes.md): the exit exercised here actually commits via fan_thermostat_check()'s own STOP_COOLED_TO_FLOOR outcome (fan_thermostat_decision.decide_fan_thermostat_check(), Check 2), NOT via decide_nat_vent_exit()'s sustain-confirmed COMFORT_FLOOR reason (nat_vent_exit.py) that Issue #821's Design §0 scoped sustain-confirmation to. Both functions are dispatched from the same temp_update trigger; fan_thermostat_check() has NO sustain gate at all, so it wins the race and commits on the very FIRST below-floor tick (08:10:00), before decide_nat_vent_exit()'s own sustain-confirmed version (which would only have committed at 08:11:35, 95s later) ever gets a chance to matter. This means, as currently scoped, Issue #821's sustain-confirmation fix does not by itself prevent a real-world flap driven through this specific highest-frequency path — only through the two decide_nat_vent_exit() call sites (check_natural_vent_conditions(), nat_vent_temperature_check()). A first attempt at also gating fan_thermostat_check() (reusing the same shared primitive) was implemented and then reverted during this pass because it caused 6 additional LOCKED golden scenarios to fail beyond the 5 already flagged for owner review — a materially larger blast radius than this pass's approved scope. This is now an explicit, reported gap for the project owner's own decision, not silently absorbed into this scenario's assertions.",
+    "What THIS scenario still correctly proves, despite the above: the RESTORE step (which happens regardless of which exit path committed it) is governed by the shared family resolver and does not flap to heat on the exit's own momentary below-floor reading — that part of Design §5 is real, implemented, and unaffected by the fast-loop gap above.",
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: reverting Issue #821's _set_temperature_for_mode() wiring (routing c.hvac_mode directly instead of through _resolve_comfort_family_mode()) breaks this scenario's central assertion (last_hvac_mode=cool) only in a contrived case where the fallback/ODE guard would otherwise have escalated on this exact tick — which by construction it cannot (see note below on why the first restore tick always matches c.hvac_mode). The assertion is still meaningful as a regression guard: it proves _set_temperature_for_mode() is exercised on this path at all and produces the correct, non-flapping value.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's automation logic table documents this call site's shared-resolver routing alongside this scenario as its test reference, and separately documents the fan_thermostat_check() gap above as a known open item.",
+    "(c) Occupant experience: the home has been coasting near the heating floor on free cooling; the moment the WHF hands off, the system does not immediately swing to heat on a single momentary reading — it re-commands the day's normal cooling ceiling first (matching what the day's forecast actually calls for), and only a genuinely sustained, separately-confirmed below-floor reading afterward (not modeled in this scenario — see issue_821_comfort_floor_fallback_no_confidence.json for that path) would trigger a family switch.",
+    "Why the restore is structurally guaranteed to match c.hvac_mode on this first tick: _resolve_comfort_family_mode() returns day_mode unchanged whenever natural_vent_active is True (Design's documented defer-not-transition asymmetry) — so its own escalation candidate (_comfort_floor_fallback_since) has never been armed by the time nat-vent exits and hands off. The restore call is the FIRST evaluation, so it cannot possibly be sustain-confirmed yet. This is the anti-flap property Design §5 exists to guarantee, not an assumption.",
+    "No thermal_model block on purpose, matching issue_696's precedent — confidence_k_passive defaults to \"none\", exercising the fallback branch of _resolve_comfort_family_mode() specifically (not the ODE floor guard branch)."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-08-31T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 70F, outdoor 60F — favorable for nat-vent, above the 68F floor."
+    },
+    {
+      "time": "2026-08-31T08:00:01",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot-day classification with HVAC in cool mode — the day-classification-only logic (c.hvac_mode) this issue's root cause is about; comfort band arms at the ceiling (cooling family)."
+    },
+    {
+      "time": "2026-08-31T08:00:02",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens: outdoor(60) < indoor(70) - hysteresis(1), indoor > comfort_heat(68), outdoor < threshold — nat-vent activates, WHF turns on, HVAC suppressed."
+    },
+    {
+      "time": "2026-08-31T08:10:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 59.0,
+      "note": "Indoor has drifted down to exactly the 68F comfort floor. fan_thermostat_check()'s own (ungated) STOP_COOLED_TO_FLOOR outcome commits the exit on this SAME tick — see the scenario-level note on this known gap. Fan deactivated, restore fires via the shared family resolver."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-31T08:00:02",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Nat-vent activates on window-open per the standard 4-condition gate."
+    },
+    {
+      "at": "2026-08-31T08:10:00",
+      "expect": "nat_vent_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "The comfort-floor exit has committed by this tick (via fan_thermostat_check()'s own ungated Check 2 — see the scenario-level note)."
+    },
+    {
+      "at": "2026-08-31T08:10:00",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["heat"],
+      "since": "2026-08-31T08:09:00",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "No climate.set_hvac_mode or climate.set_temperature call commands \"heat\" from just before the exit through the end of the scenario — the exit-and-restore handoff never flaps to heat on the exit's own momentary below-floor reading, matching the anti-flap property Design §5 exists to guarantee (whichever restore mechanism actually fires — see the scenario-level note on the fan_thermostat_check()/_exit_nat_vent() restore-path gap this scenario also surfaced, which is a separate, reported finding about which mechanism restores, not about whether it flaps to heat)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A nat-vent floor-exit restore on a cool-classified day correctly re-commands the day's cooling mode rather than flapping to heat on the exit's own momentary below-floor reading — though the exit itself, in this scenario, commits via a known-ungated fast-loop path rather than the sustain-confirmed slow-loop path (see notes).",
+    "observed_behavior": "The comfort-floor exit commits on the first below-floor tick via fan_thermostat_check()'s own Check 2 (not sustain-confirmed — a reported, separate gap), then the restore commands \"cool\" — matching c.hvac_mode, no flap to heat.",
+    "expected_behavior": "The shared family resolver governs the restored mode; the anti-flap property (never pre-armed while nat-vent owns HVAC) guarantees the first restore tick cannot itself be a flap, directly answering the project owner's WHF-handoff hunting concern for the restore step specifically. The exit-timing question (fast-loop vs. sustain-confirmed slow-loop) is a separate, explicitly flagged open item."
+  }
+}

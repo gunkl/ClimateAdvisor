@@ -61,7 +61,13 @@
       "time": "2026-06-12T13:00:00",
       "type": "nat_vent_temperature_check",
       "indoor_f": 68.0,
-      "note": "Indoor reaches comfort_heat floor=68°F — hard exit condition. Nat-vent session ends, fan deactivated."
+      "note": "Indoor reaches comfort_heat floor=68°F. The COMFORT_FLOOR exit candidate arms via decide_nat_vent_exit() but is NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s) — session still active this tick."
+    },
+    {
+      "time": "2026-06-12T13:01:35",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 68.0,
+      "note": "95s after indoor first reached the floor (> 90s NAT_VENT_EXIT_SUSTAIN_S) — indoor still at the floor. Hard exit condition sustain-confirms and commits: nat-vent session ends, fan deactivated."
     }
   ],
   "assertions": [
@@ -81,9 +87,9 @@
       "reason": "nat_vent_temperature_check called with indoor=72°F = on_threshold (midpoint=71+1=72), outdoor=65°F < indoor. Fan cycles back on to resume free cooling."
     },
     {
-      "at": "2026-06-12T13:00:00",
+      "at": "2026-06-12T13:01:35",
       "expect": "nat_vent_comfort_floor_exit",
-      "reason": "Indoor=68°F reaches comfort_heat floor=68°F — hard nat-vent exit: session ends, fan deactivated, HVAC may resume."
+      "reason": "Indoor=68°F reaches comfort_heat floor=68°F, sustained for 95s (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s) — hard nat-vent exit: session ends, fan deactivated, HVAC may resume."
     }
   ],
   "verdict": {

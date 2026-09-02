@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -291,6 +291,33 @@ PEAK_DECLINE_MARGIN_F = 1.0
 # Minimum viable nat vent window — skip activation (or exit proactively) if thermal
 # model predicts indoor will hit comfort_heat floor within this many hours.
 MIN_VIABLE_NAT_VENT_HOURS = 1.0
+
+# Issue #821: sustain-confirmation windows for confirmed_transition.py's shared
+# primitive. Sized from real thermal-response data (Zone 1's real k_active_heat =
+# 6.78°F/hr, ~0.113°F/min): a 90s window moves indoor by only ~0.11-0.23°F from
+# heat's own momentum, small enough not to itself cause a false reading, and clearly
+# shorter than (and independent from) NAT_VENT_REACTIVATION_LOCKOUT_S above — that
+# lockout gates RE-ENTRY after an exit has already committed; this gates the EXIT
+# commit itself. Conflating the two durations would be a design error (Issue #821
+# plan's own explicit warning).
+NAT_VENT_EXIT_SUSTAIN_S = 90.0
+# Not a CONF_* option (matching NAT_VENT_HYSTERESIS_F/MIN_VIABLE_NAT_VENT_HOURS
+# precedent) — plain internal constant, all 5 non-manual-override exit reasons share it.
+
+# Issue #821: comfort-floor fallback path sustain window (confidence_k_passive ==
+# "none" case — the actual condition the reported live incident, Zone "Simulated 2",
+# occurred under). Same duration and same rationale as NAT_VENT_EXIT_SUSTAIN_S above —
+# avoids reacting to a single noisy indoor reading before committing a family switch.
+COMFORT_FALLBACK_CONFIRM_S = 90.0
+
+# Minimum dwell before the comfort-family switch (heating <-> cooling) may commit,
+# per the project owner's explicit request (Issue #821 Design §4). User-configurable —
+# unlike the two constants above, sizing this too short risks switching while
+# equipment/thermal readings are still settling from the PRIOR family's own command;
+# too long risks a genuine breach going uncorrected. Default 600s (10 minutes),
+# matching min_preheat_minutes/max_setback_depth_f-style advanced numeric settings.
+CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S = "comfort_mode_switch_min_interval_s"
+COMFORT_MODE_SWITCH_MIN_INTERVAL_S = 600.0
 
 # State persistence
 STATE_FILE = "climate_advisor_state.json"
@@ -758,6 +785,15 @@ CONFIG_METADATA = {
     "max_setback_depth_f": {
         "label": "Maximum Setback Depth (°F)",
         "description": "Largest overnight setback the adaptive engine may compute.",
+        "category": "advanced",
+    },
+    "comfort_mode_switch_min_interval_s": {
+        "label": "Minimum Time Between Heat/Cool Switches (sec)",
+        "description": (
+            "How long to wait after commanding heat, active cooling, or a whole-house-fan session"
+            " before switching between the heating and cooling families again — prevents rapid"
+            " heat/cool hunting right after free cooling rides the house down to the comfort floor."
+        ),
         "category": "advanced",
     },
     "aggressive_savings": {

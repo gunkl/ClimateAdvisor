@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.const import OCCUPANCY_AWAY, OCCUPANCY_HOME
+from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason
+
+_DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
 
 # ---------------------------------------------------------------------------
 # Module-level HA stubs
@@ -112,7 +115,14 @@ class TestNatVentAwayCeilingExit:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
-        asyncio.run(engine.check_natural_vent_conditions())
+        # Issue #821: AWAY_CEILING requires sustain-confirmation too (Q10 finding —
+        # only MANUAL_OVERRIDE_CONFLICT is exempt). Pre-arm as already-sustained so
+        # this test continues to exercise the exit's side effects.
+        _now = datetime(2026, 6, 7, 14, 0, 0)
+        engine._nat_vent_exit_candidate_reason = NatVentExitReason.AWAY_CEILING
+        engine._nat_vent_exit_candidate_since = _now - timedelta(hours=1)
+        with patch(_DT_NOW_PATH, return_value=_now):
+            asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False, "nat_vent should be deactivated at ceiling"
         ceiling_events = [e for e in events if e[0] == "nat_vent_away_ceiling_exit"]

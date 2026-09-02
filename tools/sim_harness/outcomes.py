@@ -584,6 +584,51 @@ def check_assertion(
             return "nat_vent_not_active"
         return False
 
+    # --- last_hvac_mode (Issue #821) ---
+    # Purely additive — reads the hvac_mode of the LAST climate command in the whole
+    # action_log, chronologically, checking BOTH set_hvac_mode and set_temperature
+    # (same "final state" limitation as setpoint_consistent_with_mode above and
+    # comfort_family/nat_vent_still_active/paused_by_door elsewhere in this
+    # function — place at the scenario's last assertion). Checking only
+    # set_hvac_mode (as the sibling _last_hvac_mode_from_action_log() helper does,
+    # used by the pre-existing setpoint_consistent_with_mode stub) would miss a
+    # mode commanded entirely through set_temperature's embedded hvac_mode
+    # parameter — the exact gap Issue #629 already found and fixed for
+    # hvac_mode_never_commanded above; a scenario built to prove this assertion
+    # type reproduced the identical gap on first use (2026-09-02) before this
+    # dedicated scan was added. Needed to prove the shared family resolver
+    # (_resolve_comfort_family_mode()), not a raw c.hvac_mode passthrough, governs
+    # what a nat-vent floor-exit restore actually commands — e.g. that a restore on
+    # a cool-classified day genuinely re-commands "cool" (matching c.hvac_mode,
+    # since the fallback/ODE escalation candidate is never pre-armed while
+    # nat-vent owned HVAC) rather than flapping to "heat" at the exact exit
+    # moment, or that a later, genuinely sustain-confirmed escalation reaches
+    # "heat" as a real service call. Payload: {"mode": "heat" | "cool"}.
+    if expect == "last_hvac_mode":
+        expected_mode = assertion.get("mode")
+        last_mode = None
+        for entry in result.action_log:
+            if entry.get("domain") == "climate" and entry.get("service") in ("set_hvac_mode", "set_temperature"):
+                last_mode = entry.get("data", {}).get("hvac_mode")
+        if last_mode == expected_mode:
+            return "last_hvac_mode"
+        return False
+
+    # --- comfort_family (Issue #821) ---
+    # Purely additive, same read-only-flag pattern as nat_vent_still_active/
+    # paused_by_door immediately above — reads the production engine's final
+    # _comfort_mode_family flag ("heating"/"cooling"/None), set by
+    # _arm_comfort_family() whenever CA commands heat, commands active cool, or
+    # nat-vent/WHF activates/deactivates. §8 justification: brand-new flag, brand-
+    # new assertion type — no pre-#821 scenario can use this string, so it cannot
+    # silently pass a real regression predating the flag's existence. Payload:
+    # {"family": "heating" | "cooling"}.
+    if expect == "comfort_family":
+        expected_family = assertion.get("family")
+        if engine_state.get("_comfort_mode_family") == expected_family:
+            return "comfort_family"
+        return False
+
     # --- fan_not_active (Issue #620) ---
     # Purely additive, same pattern as nat_vent_not_active immediately above — reads the
     # production engine's final _fan_active flag. Needed because a fan-off-grace

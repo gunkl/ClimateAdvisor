@@ -403,14 +403,29 @@ class TestTouPreconditionResolverBypass:
     """
 
     def _engine_with_sustained_fallback_candidate(self, *, indoor_temp: float, comfort_heat: float) -> AutomationEngine:
-        """Indoor below comfort_heat, with the resolver's fallback candidate pre-armed
-        as already sustained — if _set_temperature_for_mode() consulted the resolver
-        for this call, it would immediately escalate to "heat"."""
+        """Indoor below comfort_heat, with the comfort-family FSM's heat sustain-confirm
+        candidate pre-armed as already sustained — if _set_temperature_for_mode()
+        consulted the FSM for this call, it would immediately escalate to "heat".
+
+        Issue #827: the resolver this test traps is now
+        _resolve_comfort_family_via_fsm(), whose sustain-confirm bookkeeping lives in
+        comfort_family_fsm.ComfortFamilyDwellState (self._comfort_family_dwell_state),
+        not the retired _resolve_comfort_family_mode()'s flat
+        self._comfort_floor_fallback_since datetime. Seeding heat_candidate_since (with
+        heat_candidate_raw=True so the FSM's own bookkeeping update doesn't reset the
+        clock on this same call) reproduces the same "already sustained" trap against
+        the new mechanism.
+        """
         from datetime import datetime, timedelta
+
+        from custom_components.climate_advisor.comfort_family_fsm import ComfortFamilyDwellState
 
         engine = _make_engine(indoor_temp=indoor_temp, comfort_heat=comfort_heat, comfort_cool=76.0)
         _now = datetime(2026, 1, 1, 12, 0, 0)
-        engine._comfort_floor_fallback_since = _now - timedelta(hours=1)
+        engine._comfort_family_dwell_state = ComfortFamilyDwellState(
+            heat_candidate_since=_now - timedelta(hours=1),
+            heat_candidate_raw=True,
+        )
         return engine
 
     def test_target_override_bypasses_resolver_even_when_escalation_would_fire(self):

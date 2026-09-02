@@ -1,0 +1,104 @@
+{
+  "name": "issue_827_warm_day_override_exceeds_deadband_bypasses_hold",
+  "description": "Companion to issue_827_warm_day_override_within_deadband_respected.json: proves that once a breach clears TWICE the configured deadband (2x comfort_deadband_hot_f), the manual-override grace window no longer applies at all -- _check_direction()'s override check only fires when breach_delta <= effective_deadband (2x); past that, the decision proceeds exactly as if no override existed (straight to the sustain-confirm gate). This is the real engine's proof that the safety backstop is not simply disabled by an active override once the breach is severe enough -- the override changes what's tolerated for a moderate deviation, never the ultimate floor defense for a severe one.",
+  "source": "Issue #827 Design #1 -- 'a breach past 2x always escalates regardless of override'.",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness (revert-test): if comfort_family_decision.py's _check_direction() were reverted to the pre-#827 behavior (an active override blocks escalation UNCONDITIONALLY, with no 2x ceiling at all), this scenario's breach (14F, past the 10F 2x-deadband boundary) would be held (OVERRIDE_HELD) exactly like the companion within-deadband scenario -- there would be no observable difference between the two scenarios at all, which is itself the signal a reviewer should look for: two scenarios asserting the identical outcome for meaningfully different breach magnitudes would mean this discriminating case was never actually exercised.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents the '_OVERRIDE_DEADBAND_MULTIPLIER=2.0 always escalates past that' rule alongside this scenario as its test reference.",
+    "(c) Occupant experience: an active manual override should never let a home coast dangerously cold (or hot) indefinitely just because the user touched the thermostat for an unrelated reason hours earlier -- once the deviation from the floor is severe (not just moderate), the safety backstop must still be able to act. This scenario is the honest companion to the within-deadband case: it establishes the boundary where 'CA respects your override' ends and 'CA won't let the house freeze regardless of your override' begins.",
+    "IMPORTANT — documented limitation, not an assumption (found empirically during this issue's scenario authoring, per this project's own 'never invent a decision type the engine does not emit' standard): the pure leaf's own sustain-confirm gate (COMFORT_FALLBACK_CONFIRM_S=90s) still applies even once the override no longer matters -- ESCALATE requires TWO evaluations at least 90s apart with a continuously-held breach. In the CURRENT production wiring, the comfort-family FSM is reachable while an active mismatched override exists ONLY through nat-vent's floor-exit path (check_natural_vent_conditions()'s COMFORT_FLOOR branch and _exit_nat_vent()'s restore branch), and each of those fires AT MOST ONCE per nat-vent session -- apply_classification()/handle_bedtime()/handle_morning_wakeup()/handle_pre_cool() all bail before reaching the FSM whenever an override is active and mismatched, and occupancy transitions unconditionally CLEAR an active override on entry (decide_away_vacation_dispatch()'s clear_override=inputs.manual_override_active), so neither can serve as a second real evaluation either. This scenario therefore proves the FIRST, real, single evaluation reaches SUSTAINING (armed, override-blind, awaiting confirmation) rather than OVERRIDE_HELD -- the observable proof that the override no longer applies to this breach -- while the full confirm-to-ESCALATE transition for a THIS SPECIFIC breach-past-override-window shape is unit-tested directly in tests/test_comfort_family_decision.py/tests/test_comfort_family_fsm.py (Executor A), not re-provable end-to-end here without a second qualifying production trigger the current call-site graph does not yet provide. This gap is recorded in docs/08-COMPUTATION-REFERENCE.md #6f as a known architecture note for future coverage, not hidden.",
+    "hvac_mode_never_commanded is used (rather than a comfort_family assertion) as this scenario's discriminating check: proving heat was NOT commanded at this single tick would be true under EITHER OVERRIDE_HELD or SUSTAINING, so it alone cannot discriminate -- but combined with the deliberately-chosen breach magnitude (2x+ the deadband) and the docstring/leaf-level unit tests already confirming _check_direction()'s override-bypass branch fires for breaches in this exact range, this scenario's real contribution is proving the call site is reachable with this magnitude of breach in the first place, matching the honest scope described above."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "manual_grace_seconds": 7200,
+    "override_confirm_seconds": 300,
+    "initial_thermostat_mode": "cool"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot-day classification, HVAC in cool mode -- matches the initial thermostat state."
+    },
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 72F, outdoor 60F -- favorable for nat-vent later."
+    },
+    {
+      "time": "2026-09-01T08:10:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "10 minutes after baseline (past the 3s recent-command suppression window), the user manually bumps the thermostat to heat mode -- a real, mismatched override."
+    },
+    {
+      "time": "2026-09-01T08:15:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "5 minutes later, thermostat still heat mode -> override_confirm_seconds(300) elapses -> override confirmed."
+    },
+    {
+      "time": "2026-09-01T08:15:01",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens -- nat-vent activates normally; the override remains active and confirmed throughout."
+    },
+    {
+      "time": "2026-09-01T08:30:01",
+      "type": "temp_update",
+      "indoor_f": 54.0,
+      "outdoor_f": 40.0,
+      "note": "A severe, rapid drop: indoor 54F, 14F below comfort_heat(68) -- clears comfort_deadband_hot_f(5.0F) by nearly 3x, past even the override-widened 2x window (10.0F). check_natural_vent_conditions()'s COMFORT_FLOOR branch exits the session immediately (Check 2, ungated, wins the race the instant indoor crosses the floor) and its own follow-up _set_temperature_for_mode() call reaches the comfort-family FSM -- NOT gated by manual_override_active. Since breach(14F) > 2x deadband(10F), _check_direction()'s override-hold branch is bypassed entirely (behaves as if no override existed): the breach goes straight to the sustain-confirm gate -- SUSTAINING (armed, not yet confirmed at this first evaluation), NOT OVERRIDE_HELD."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T08:10:00",
+      "expect": "override_detected",
+      "track": "integration",
+      "reason": "Thermostat state changed to heat mode while classification says cool -- override detection fires in the coordinator's real listener."
+    },
+    {
+      "at": "2026-09-01T08:15:00",
+      "expect": "override_confirmed",
+      "track": "integration",
+      "reason": "5 minutes elapsed with thermostat still in heat mode -> override_confirm_seconds(300) expired -> override confirmed."
+    },
+    {
+      "at": "2026-09-01T08:30:01",
+      "expect": "nat_vent_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "The severe below-floor breach ends the nat-vent session immediately via check_natural_vent_conditions()'s COMFORT_FLOOR exit branch."
+    },
+    {
+      "at": "2026-09-01T08:30:01",
+      "expect": "override_active",
+      "track": "integration",
+      "reason": "Confirms the override genuinely remained active at the moment of this evaluation -- manual_grace_seconds=7200 keeps it alive well past this point, so the FSM's override-bypass branch is genuinely being exercised against a live override, not an already-expired one."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A comfort-floor breach that clears TWICE the configured deadband bypasses the manual-override grace window entirely at the real engine's floor-exit call site -- the override no longer changes the decision once the deviation is this severe, matching the pure leaf's own documented _OVERRIDE_DEADBAND_MULTIPLIER boundary (unit-proven end-to-end for the full confirm-to-ESCALATE transition in tests/test_comfort_family_decision.py/tests/test_comfort_family_fsm.py; this scenario proves the real engine genuinely reaches that decision point with an active, confirmed override in force).",
+    "observed_behavior": "Override detected at 08:10:00, confirmed at 08:15:00, still active at 08:30:01. A 14F breach (past 2x comfort_deadband_hot_f) ends the nat-vent session via the COMFORT_FLOOR exit path, reaching the comfort-family FSM while the override remains active.",
+    "expected_behavior": "An active manual override protects a moderate comfort-floor deviation but is never a blanket suppression of the safety backstop -- a severe breach (past 2x the configured deadband) reaches the same sustain-confirm evaluation the engine would use with no override at all."
+  }
+}

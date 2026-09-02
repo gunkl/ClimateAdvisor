@@ -1,0 +1,108 @@
+{
+  "name": "issue_827_away_setback_floor_breach",
+  "description": "GAP-6 (Issue #827 audit): the same comfort-floor defense mechanism now applies while away, at the setback floor, not just at the daytime comfort_heat floor -- occupancy's away-mode setback band (select_comfort_band(occupancy_mode=away)) routes through the exact same _apply_comfort_band() -> comfort-family FSM call every other band-arming path uses. This scenario proves an away-mode setback floor breach escalates to heat the same way, at the same (day-type-scaled) deadband tier, just anchored to setback_heat instead of comfort_heat.",
+  "source": "Issue #827 Design table, GAP-6 -- away/vacation uses the same mechanism, different bounds, not a separate code path.",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness: if _apply_occupancy_away_vacation_decision() were reverted to call _set_temperature() directly (bypassing _apply_comfort_band()/the FSM) instead of routing through _apply_comfort_band(), this scenario's final assertions (comfort_family=heating, expect_band floor=60) would FAIL -- the setback band would keep reaffirming the cool ceiling (80F) forever regardless of how far indoor dropped below setback_heat.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents 'Away/vacation uses the same table against the setback floor/ceiling -- same mechanism, different bounds' alongside this scenario as its test reference.",
+    "(c) Occupant experience: previously, an away home's setback floor had the SAME kind of undefended-floor risk the original #821 incident exposed for the occupied comfort floor -- if nobody is home to notice, an empty house drifting well below its setback floor for hours wastes energy on the eventual recovery heat-up and risks pipes/plants in a cold snap. With this fix, the setback floor gets the same active, sustain-confirmed defense the occupied comfort floor already has.",
+    "day_type is 'warm' (native family cooling, comfort_deadband_warm_f=2.0F default tier) specifically because select_comfort_band()'s away/vacation branch always resolves active='ceiling' regardless of day_type/classification.hvac_mode -- base_family is 'cooling' for ANY day type while away. 'warm' is chosen only so the DEADBAND TIER matches the existing base-case scenario (issue_821_comfort_floor_fallback_no_confidence.json) for an easy side-by-side comparison; the away/setback mechanism itself is day-type-independent for which family is 'native'.",
+    "occupancy_away is dispatched as a direct event (matching the harness's existing pattern) both to enter away mode initially and to re-tick the setback band evaluation after indoor decays -- this mirrors production's real per-cycle re-affirmation of the away setback band (apply_classification() calls handle_occupancy_away() again on every classification cycle while occupancy stays away, per desired_state.ScheduledBandGate.DEFER_OCCUPANCY)."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Baseline classification while still home."
+    },
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 58.0,
+      "note": "Indoor 65F, comfortably within the normal comfort band."
+    },
+    {
+      "time": "2026-09-01T08:00:01",
+      "type": "occupancy_away",
+      "note": "Occupant leaves. handle_occupancy_away() applies the setback band via select_comfort_band(occupancy_mode=away): floor=setback_heat(60), ceiling=setback_cool(80), active='ceiling' -> base_family='cooling'. Indoor(65) > 60, no breach."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 57.0,
+      "outdoor_f": 45.0,
+      "note": "Indoor decays to 57F, 3F below setback_heat(60) -- clears comfort_deadband_warm_f (default 2.0F)."
+    },
+    {
+      "time": "2026-09-01T08:30:00",
+      "type": "occupancy_away",
+      "note": "Re-tick (mirrors apply_classification()'s per-cycle DEFER_OCCUPANCY re-affirmation while still away). Fallback candidate arms against the setback floor -- first evaluation, not yet sustain-confirmed. Stays 'cooling' this tick."
+    },
+    {
+      "time": "2026-09-01T08:32:00",
+      "type": "occupancy_away",
+      "note": "120s later (>90s). First-ever transition for this engine (cold start, no dwell gate). Sustain-confirmed: comfort family switches to heating, commanding heat at the setback floor (60F), not comfort_heat (68F)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T08:00:01",
+      "expect": "expect_band",
+      "expect_band": { "floor": 60.0, "ceiling": 80.0 },
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: away-mode setback band [60F, 80F] armed on entry, matching setback_heat/setback_cool, not the daytime comfort band."
+    },
+    {
+      "at": "2026-09-01T08:30:00",
+      "expect": "expect_band",
+      "expect_band": { "ceiling": 80.0 },
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "First below-floor tick, not yet sustain-confirmed -- the ceiling (cool) command is still active, proving no premature escalation. Time-scoped (unlike comfort_family, which reads only the engine's final state)."
+    },
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "GAP-6 fix: the away-mode setback floor now gets the same active, sustain-confirmed defense as the occupied comfort floor -- confirmed genuine breach escalates the family to heating."
+    },
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "expect_band",
+      "expect_band": { "floor": 60.0 },
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The commanded heat target is the SETBACK floor (60F), not comfort_heat (68F) -- proving the away-mode escalation defends the correct (setback) floor, matching Design's 'same mechanism, different bounds'."
+    },
+    {
+      "at": "2026-09-01T08:32:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call, not merely an internal flag."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "An away-mode setback-floor breach is defended by the same sustain-confirmed comfort-family mechanism as the occupied comfort floor, anchored to setback_heat instead of comfort_heat -- closing GAP-6 from the Issue #827 audit.",
+    "observed_behavior": "Setback band [60F, 80F] arms on away entry; stays 'cooling' through the first below-floor tick (08:30:00, unconfirmed); escalates to 'heating' at 08:32:00 once sustain-confirmed, commanding heat at the setback floor (60F).",
+    "expected_behavior": "An empty, away home's setback floor is never left undefended -- a genuine, sustained below-floor drift while away is corrected the same way an occupied home's comfort floor is, using the setback edges as the anchor."
+  }
+}

@@ -24,12 +24,27 @@ from .const import (
     CEILING_BRIDGE_TOLERANCE_F,
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
+    COMFORT_DEADBAND_COLD_MAX_F,
+    COMFORT_DEADBAND_COLD_MIN_F,
+    COMFORT_DEADBAND_COOL_MAX_F,
+    COMFORT_DEADBAND_COOL_MIN_F,
+    COMFORT_DEADBAND_HOT_MAX_F,
+    COMFORT_DEADBAND_HOT_MIN_F,
+    COMFORT_DEADBAND_MILD_MAX_F,
+    COMFORT_DEADBAND_MILD_MIN_F,
+    COMFORT_DEADBAND_WARM_MAX_F,
+    COMFORT_DEADBAND_WARM_MIN_F,
     COMFORT_FALLBACK_CONFIRM_S,
     COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_COMFORT_DEADBAND_COLD_F,
+    CONF_COMFORT_DEADBAND_COOL_F,
+    CONF_COMFORT_DEADBAND_HOT_F,
+    CONF_COMFORT_DEADBAND_MILD_F,
+    CONF_COMFORT_DEADBAND_WARM_F,
     CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
@@ -46,8 +61,18 @@ from .const import (
     CONF_SLEEP_HEAT,
     CONF_THRESHOLD_HOT,
     CONF_WELCOME_HOME_DEBOUNCE,
+    DAY_TYPE_COLD,
+    DAY_TYPE_COOL,
+    DAY_TYPE_HOT,
+    DAY_TYPE_MILD,
+    DAY_TYPE_WARM,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_COMFORT_COOL,
+    DEFAULT_COMFORT_DEADBAND_COLD_F,
+    DEFAULT_COMFORT_DEADBAND_COOL_F,
+    DEFAULT_COMFORT_DEADBAND_HOT_F,
+    DEFAULT_COMFORT_DEADBAND_MILD_F,
+    DEFAULT_COMFORT_DEADBAND_WARM_F,
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_MANUAL_GRACE_SECONDS,
@@ -113,6 +138,14 @@ from .classification_fsm import (
     ClassificationFsmInputs,
 )
 from .classification_fsm import transition as _classification_fsm_transition
+from .comfort_family_fsm import (
+    ComfortFamilyDwellState,
+    ComfortFamilyEvent,
+    ComfortFamilyEventKind,
+    ComfortFamilyFsmInputs,
+    ComfortFamilyState,
+)
+from .comfort_family_fsm import transition as _comfort_family_fsm_transition
 from .confirmed_transition import is_confirmed as _is_transition_confirmed
 from .confirmed_transition import resolve_candidate_since as _resolve_candidate_since
 from .door_window_lifecycle import (
@@ -181,7 +214,6 @@ from .occupancy_fsm import (
 from .ode_ceiling_guard import OdeCeilingGuardOutcome
 from .ode_floor_guard import (
     OdeFloorGuardInputs,
-    OdeFloorGuardOutcome,
     decide_ode_floor_guard,
 )
 from .override_grace_lifecycle import (
@@ -644,9 +676,9 @@ class AutomationEngine:
         # self._nat_vent_plan by apply_classification() — see
         # _is_within_planned_window_period()'s docstring.
         self._nat_vent_cutoff: datetime | None = None
-        # Issue #821: comfort-floor crossing mirrored from the coordinator's
+        # Issue #821/#827: comfort-floor crossing mirrored from the coordinator's
         # self._nat_vent_plan["comfort_floor_crossing_time"] — see
-        # _resolve_comfort_family_mode()'s docstring.
+        # _resolve_comfort_family_via_fsm()'s docstring.
         self._comfort_floor_crossing_time: datetime | None = None
         self._paused_by_door = False
         self._pre_pause_mode: str | None = None
@@ -866,10 +898,16 @@ class AutomationEngine:
         # "changed since the last classification cycle" when reasoning about it, not
         # literally "this tick".
         self._comfort_mode_family_changed_this_tick: bool = False
-        # Sustain-confirmation state for the confidence-none fallback path (Design §3) —
-        # independent of the ODE floor guard's own state, since the fallback only
-        # engages when confidence_k_passive == "none".
-        self._comfort_floor_fallback_since: datetime | None = None
+        # Issue #827: the comfort-family FSM's own cross-call dwell/sustain-confirm
+        # bookkeeping (comfort_family_fsm.ComfortFamilyDwellState) — a pure leaf/FSM
+        # owns no mutable state itself, so the shell carries it across calls, same
+        # convention as _nat_vent_exit_candidate_since above. Replaces the retired
+        # _resolve_comfort_family_mode()'s heat-only _comfort_floor_fallback_since
+        # field with the FSM's own richer (dwell_since + 3 sustain-confirm
+        # candidates) bookkeeping shape. None on cold start — transition() defaults
+        # to a fresh ComfortFamilyDwellState() in that case (not persisted across
+        # restarts, matching every other FSM's documented convention).
+        self._comfort_family_dwell_state: ComfortFamilyDwellState | None = None
 
         # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): qualifies WHY an
         # active nat-vent session was entered — True when entered via the parity/
@@ -2507,9 +2545,10 @@ class AutomationEngine:
                 hour. None (the pre-#817 default) falls back to the static bound.
             comfort_floor_crossing_time: Issue #821 — the coordinator's cached
                 ``self._nat_vent_plan["comfort_floor_crossing_time"]`` (added by this
-                same issue), when available. Consumed by ``_resolve_comfort_family_mode()``'s
-                ODE floor guard to decide whether a cool-classified day's comfort floor
-                needs active defense (a switch to heat) right now. None when no thermal
+                same issue), when available. Consumed (Issue #827) by
+                ``_resolve_comfort_family_via_fsm()``'s comfort-family FSM to decide
+                whether a cool-classified day's comfort floor needs active defense
+                (a switch to heat) right now. None when no thermal
                 model/prediction is available — the confidence-none fallback path
                 handles that case instead.
         """
@@ -2817,28 +2856,34 @@ class AutomationEngine:
 
         caps = self._get_thermostat_capabilities()
 
-        # Issue #821: the shared family resolver may override the day's active edge —
-        # e.g. a cool-classified day whose comfort floor now needs active defense.
-        # See _resolve_comfort_family_mode()'s own docstring for the full contract;
-        # it only ever escalates cool->heat, never the reverse (ceiling breaches on
-        # non-"off" days are not this resolver's concern).
+        # Issue #827: the comfort-family FSM may override the day's active edge —
+        # e.g. a cool-classified day whose comfort floor now needs active defense
+        # (or the reverse, a heat-classified day whose ceiling needs it). See
+        # _resolve_comfort_family_via_fsm()'s own docstring for the full contract.
+        # floor/ceiling are the already-resolved, aggressive-savings-adjusted band
+        # edges — the FSM's against-grain deadband is measured from these, not raw
+        # comfort_heat/comfort_cool (Design §1).
         _day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, band.active)
-        _resolved_mode = self._resolve_comfort_family_mode(_day_mode, now=dt_util.now())
+        _resolved_mode = self._resolve_comfort_family_via_fsm(
+            _day_mode, floor=band.floor, ceiling=band.ceiling, now=dt_util.now()
+        )
         _effective_active = {"cool": "ceiling", "heat": "floor"}.get(_resolved_mode, band.active)
 
         if _effective_active == "ceiling" and caps.supports_cool:
             await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
-            # Issue #823: this branch runs every classification cycle regardless of
-            # real state change — only_if_changed=True so the dwell clock measures
-            # continuous time-in-family, not time-since-last-reassertion.
-            self._arm_comfort_family("cooling", dt_util.now(), only_if_changed=True)
+            # Issue #827: _resolve_comfort_family_via_fsm() above already armed
+            # self._comfort_mode_family for this cycle (via _arm_comfort_family()) —
+            # no separate call needed here. (Pre-#827, this branch called
+            # _arm_comfort_family() directly; that responsibility now lives entirely
+            # in the FSM wiring, since this call site has no target_override bypass
+            # to preserve, unlike _set_temperature_for_mode()'s two equivalent
+            # branches below.)
         elif _effective_active == "floor" and caps.supports_heat:
             await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
-            self._arm_comfort_family("heating", dt_util.now(), only_if_changed=True)
         else:
             # The thermostat advertises no mode that can defend the active edge (e.g. a heat-only
             # unit on a warm day, or an unavailable entity). Surface this at INFO in real operation
@@ -3338,19 +3383,27 @@ class AutomationEngine:
                 await self.handle_occupancy_vacation()
             return
 
-        # Issue #821: route through the same shared family resolver _apply_comfort_band()
-        # uses — one decision point, not a second parallel implementation. Only ever
-        # escalates cool->heat (comfort-floor defense); target-value computation below
-        # (target_override vs. config comfort values) is unchanged and fully decoupled
-        # from this decision, per the resolver's own docstring.
+        # Issue #827: route through the same comfort-family FSM _apply_comfort_band()
+        # uses — one decision point, not a second parallel implementation. This call
+        # site never computes a full ComfortBand, so floor/ceiling are the flat
+        # comfort_heat/comfort_cool config values (matching this method's own
+        # pre-existing target-value computation below), not a band's
+        # aggressive-savings-adjusted edges.
         #
-        # BLOCKING #3 fix: a caller with its own explicit target_override (TOU
-        # pre-conditioning) bypasses the resolver entirely — see this method's own
-        # docstring for why.
+        # BLOCKING #3 fix (Design §2, preserved contract): a caller with its own
+        # explicit target_override (TOU pre-conditioning) bypasses the FSM entirely
+        # via this call-site-level ternary — never threaded into the FSM as an input
+        # flag — see this method's own docstring for why.
         _resolved_mode = (
             c.hvac_mode
             if target_override is not None
-            else self._resolve_comfort_family_mode(c.hvac_mode, now=dt_util.now())
+            else self._resolve_comfort_family_via_fsm(
+                c.hvac_mode,
+                floor=float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
+                ceiling=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                now=dt_util.now(),
+                day_type=c.day_type,
+            )
         )
 
         if _resolved_mode == "heat":
@@ -3358,10 +3411,13 @@ class AutomationEngine:
             await self._set_temperature(
                 floor_target, reason=reason, mode="heat", skip_setpoint_sanity_check=skip_setpoint_sanity_check
             )
-            # Issue #823: this is a shared choke point called from multiple restore/
-            # reassert paths, some of which run every cycle — only_if_changed=True so
-            # the dwell clock measures continuous time-in-family, not
-            # time-since-last-reassertion.
+            # Issue #827: kept here (unlike the now-redundant equivalent in
+            # _apply_comfort_band()) because the target_override bypass above skips
+            # _resolve_comfort_family_via_fsm() entirely — this is the ONLY place
+            # that arms self._comfort_mode_family for that bypass path (e.g. TOU
+            # pre-conditioning). only_if_changed=True so a shared choke point called
+            # every cycle doesn't continuously push the (informational-only, post-
+            # #827) dwell-clock timestamp forward on mere reassertion.
             self._arm_comfort_family("heating", dt_util.now(), only_if_changed=True)
             return
         elif _resolved_mode == "cool":
@@ -8140,53 +8196,36 @@ class AutomationEngine:
         return self._confirm_nat_vent_exit_candidate(reason, now)
 
     def _arm_comfort_family(self, family: str, now: datetime, *, only_if_changed: bool = False) -> None:
-        """Issue #821 (Design §4): record that ``family`` ("heating" or "cooling") is
-        the currently-active HVAC family, resetting the family-switch lockout's dwell
-        clock. Called from every real family-relevant event: a heat command, an active-
-        cool command (both via _resolve_comfort_family_mode()'s own callers), and
-        nat-vent/WHF activation/deactivation.
+        """Issue #821 (Design §4), narrowed by Issue #827: record that ``family``
+        ("heating" or "cooling") is the currently-active HVAC family.
 
-        By default, resets ``_comfort_mode_family_entry_time`` on EVERY call, not only
-        when ``family`` differs from the previous value — this is what makes "exiting
-        nat-vent counts as cooling family was active until just now" work: the lockout
-        clock measures "how long since anything in the current family last actually
-        happened", not just "how long since the family label last changed". This is
-        correct for the 7 remaining call sites that default to always-reset: nat-vent/
-        WHF activation (2 sites), ``_exit_nat_vent()`` and its 3 documented bypass
-        branches, and the floor-defense escalation arm (``_resolve_comfort_family_mode()``
-        itself, which only ever arms "heating" and is therefore immune to
-        self-deadlock — ``_family_switch_locked_out()`` short-circuits when
-        ``candidate_family`` already equals the recorded family). Each of these either
-        fires exactly once per real physical event, or can never lock itself out, so
-        "always reset" and "reset only on change" are equivalent there.
+        As of Issue #827, the min-dwell anti-flap lockout that used to read
+        ``_comfort_mode_family_entry_time``/``_comfort_mode_family_changed_this_tick``
+        (``_family_switch_locked_out()``) has moved INTO the comfort-family FSM's own
+        ``transition()`` — see ``_resolve_comfort_family_via_fsm()``. Nothing reads
+        those two bookkeeping fields for a lockout decision anymore. This method is
+        now purely a **compatibility writer**: it keeps ``self._comfort_mode_family``
+        (and the two legacy timing fields, for any code/tests that still read them)
+        in sync for two kinds of caller:
+          1. The FSM wiring itself (``_resolve_comfort_family_via_fsm()``), on every
+             non-locked-out transition — so ``tools/sim_harness/outcomes.py``'s
+             ``"comfort_family"`` assertion type keeps reading a live, correct value
+             with zero changes to that harness (Design §2 preserved contract).
+          2. The 7 out-of-scope callers (nat-vent/WHF activation, ``_exit_nat_vent()``
+             and its bypass branches, the away-ceiling exit branches) — independently
+             migrated, working parts of the completed strangler-fig epic; untouched
+             by this issue.
 
-        ``only_if_changed=True`` (Issue #823): for the 4 call sites that instead run on
-        *every classification cycle regardless of real state change*
-        (``_apply_comfort_band()``, ``_set_temperature_for_mode()``) — skip the reset
-        entirely when ``family`` already matches the recorded family and an entry time
-        is already set. Without this, a day that stays cool-classified re-arms
-        "cooling" every single cycle merely by reasserting the same setpoint,
-        continuously pushing the dwell clock forward — including on cycles where a
-        floor-defense escalation attempt was *itself just blocked by this same
-        lockout*, making the lockout mathematically unreachable-to-clear (confirmed
-        live: Zone "Simulated 2" sat 5°F below comfort_heat for 2+ hours, locked out on
-        every 5-minute cycle, because the classification cadence was shorter than
-        ``comfort_mode_switch_min_interval_s``). Sites that fire once per genuine event
-        must keep the default — a fresh dwell window at that real transition is the
-        intended, already-verified behavior.
+        ``only_if_changed=True``: skip the ``_comfort_mode_family_entry_time`` reset
+        when ``family`` already matches the recorded family and an entry time is
+        already set — avoids continuously bumping the (now informational-only) entry
+        timestamp on every reassertion cycle. Kept for behavioral continuity with the
+        pre-#827 call sites that used it (``_apply_comfort_band()``,
+        ``_set_temperature_for_mode()``, both now reached via the FSM wiring).
 
         Sets the same-tick guard only when the family label genuinely changes (a real
-        switch), matching Issue #699's own finding that elapsed-time alone isn't a
-        sufficient guard for a same-tick exit-then-reactivate race.
-
-        "Same-tick" is coarser than it sounds: the flag this sets
-        (``_comfort_mode_family_changed_this_tick``) is only reset at the top of
-        ``apply_classification()``, not at the top of every method that can reach this
-        one (nat-vent activate/deactivate, ``_exit_nat_vent()``, the away-ceiling exit
-        branches, etc. all call this from outside ``apply_classification()``'s own call
-        graph) — see that flag's own ``__init__`` comment for the full scope note. A
-        family change from one of those other call sites latches the guard until the
-        next classification cycle, not literally "this tick".
+        switch) — see the ``_comfort_mode_family_changed_this_tick`` field's own
+        ``__init__`` comment for the full scope note on what "same-tick" means here.
         """
         # getattr-defensive: some unit tests build a partial AutomationEngine via
         # object.__new__() (bypassing __init__) to exercise a single method in
@@ -8202,150 +8241,201 @@ class AutomationEngine:
         self._comfort_mode_family = family
         self._comfort_mode_family_entry_time = now
 
-    def _family_switch_locked_out(self, *, candidate_family: str, now: datetime) -> bool:
-        """Issue #821 (Design §4): True when a switch to ``candidate_family`` should be
-        blocked by the minimum-dwell lockout. Cold start (no prior family recorded) is
-        always allowed — a fresh process has no flapping history to guard against."""
-        _family = getattr(self, "_comfort_mode_family", None)
-        if _family is None or _family == candidate_family:
-            return False
-        if getattr(self, "_comfort_mode_family_changed_this_tick", False):
-            return True
-        if getattr(self, "_comfort_mode_family_entry_time", None) is None:
-            return False
-        min_interval = float(
-            self.config.get(CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S, COMFORT_MODE_SWITCH_MIN_INTERVAL_S)
+    # Issue #827: day_type -> (CONF_* key, default, clamp-min, clamp-max) for the
+    # comfort-family FSM's against-grain deadband. "Mild" also covers an
+    # "off"-classified day (day_type is never literally "off" — see const.py's
+    # comment on DAY_TYPE_* — an off day still carries a mild/other day_type), per
+    # Design §1's table: "An off-classified day now gets real defense (was zero
+    # before) at a conservative tier rather than none."
+    _COMFORT_DEADBAND_CONF_BY_DAY_TYPE: dict[str, tuple[str, float, float, float]] = {
+        DAY_TYPE_HOT: (
+            CONF_COMFORT_DEADBAND_HOT_F,
+            DEFAULT_COMFORT_DEADBAND_HOT_F,
+            COMFORT_DEADBAND_HOT_MIN_F,
+            COMFORT_DEADBAND_HOT_MAX_F,
+        ),
+        DAY_TYPE_WARM: (
+            CONF_COMFORT_DEADBAND_WARM_F,
+            DEFAULT_COMFORT_DEADBAND_WARM_F,
+            COMFORT_DEADBAND_WARM_MIN_F,
+            COMFORT_DEADBAND_WARM_MAX_F,
+        ),
+        DAY_TYPE_MILD: (
+            CONF_COMFORT_DEADBAND_MILD_F,
+            DEFAULT_COMFORT_DEADBAND_MILD_F,
+            COMFORT_DEADBAND_MILD_MIN_F,
+            COMFORT_DEADBAND_MILD_MAX_F,
+        ),
+        DAY_TYPE_COOL: (
+            CONF_COMFORT_DEADBAND_COOL_F,
+            DEFAULT_COMFORT_DEADBAND_COOL_F,
+            COMFORT_DEADBAND_COOL_MIN_F,
+            COMFORT_DEADBAND_COOL_MAX_F,
+        ),
+        DAY_TYPE_COLD: (
+            CONF_COMFORT_DEADBAND_COLD_F,
+            DEFAULT_COMFORT_DEADBAND_COLD_F,
+            COMFORT_DEADBAND_COLD_MIN_F,
+            COMFORT_DEADBAND_COLD_MAX_F,
+        ),
+    }
+
+    def _comfort_deadband_for_day_type(self, day_type: str | None) -> float:
+        """Issue #827 Design §1: resolve the configured (and clamped) against-grain
+        deadband for ``day_type``, defaulting to the mild/off tier when ``day_type``
+        is unknown (no classification yet) — the same conservative-tier fallback the
+        Design table specifies for an off-classified day."""
+        conf_key, default, lo, hi = self._COMFORT_DEADBAND_CONF_BY_DAY_TYPE.get(
+            day_type, self._COMFORT_DEADBAND_CONF_BY_DAY_TYPE[DAY_TYPE_MILD]
         )
-        elapsed = (now - self._comfort_mode_family_entry_time).total_seconds()
-        return elapsed < min_interval
+        raw = float(self.config.get(conf_key, default))
+        return max(lo, min(hi, raw))
 
-    def _resolve_comfort_family_mode(self, day_mode: str, *, now: datetime) -> str:
-        """Issue #821: the single shared "which family should be active right now"
-        decision, consumed by BOTH ``_apply_comfort_band()`` (via ``band.active``
-        mapped to "cool"/"heat") AND ``_set_temperature_for_mode()`` (via
-        ``c.hvac_mode``) — one decision point, not a second parallel implementation,
-        closing the same DRY gap ``select_comfort_band()`` vs. ``c.hvac_mode`` used to
-        represent (the root cause of Issue #821's live incident: the comfort floor was
-        never actively defended on a day classified for cooling).
+    def _resolve_comfort_family_via_fsm(
+        self,
+        day_mode: str,
+        *,
+        floor: float | None,
+        ceiling: float | None,
+        now: datetime,
+        day_type: str | None = None,
+    ) -> str:
+        """Issue #827: the single shared "which family should be active right now"
+        decision, replacing the retired ``_resolve_comfort_family_mode()``/
+        ``_family_switch_locked_out()`` pair with a call through
+        ``comfort_family_fsm.transition()`` — consolidating the three previously
+        inconsistent authorities (``select_comfort_band()``'s day-type edge picker,
+        the old confidence-gated resolver, and the separately-armed dwell-timer
+        lockout) into one FSM, per the issue's Design §1.
 
-        Since ``_set_temperature_for_mode()`` is itself the single choke point for its
-        7 call sites (TOU pre-conditioning, door/window-all-closed resume,
-        ``check_natural_vent_conditions()``'s own COMFORT_FLOOR restore,
-        ``resume_from_pause()``, occupancy-home restore, economizer deactivation, and
-        ``_exit_nat_vent()``'s sensors-closed restore branch — the last one added by
-        this issue's own Verification pass, since it was found to bypass the resolver
-        entirely via a blind ``_pre_fan_hvac_mode`` replay), wiring this resolver in
-        there once covers all 7 sites structurally — no per-call-site change needed
-        (except ``target_override`` callers, see below). Only decides "heat or cool, or
-        hold" — never "what temperature"; each caller keeps its own target-value
-        computation (``band.floor``/``band.ceiling`` vs. ``target_override``) fully
-        decoupled from this decision.
+        Consumed by BOTH ``_apply_comfort_band()`` (``floor``/``ceiling`` = the
+        already-resolved, aggressive-savings-adjusted ``band.floor``/``band.ceiling``)
+        AND ``_set_temperature_for_mode()`` (``floor``/``ceiling`` = the flat
+        ``comfort_heat``/``comfort_cool`` config values — that call site never
+        computes a full ``ComfortBand``, matching its own pre-existing behavior).
+        Only decides "heat or cool, or hold" — never "what temperature"; each caller
+        keeps its own target-value computation fully decoupled from this decision.
 
-        Exception: a caller passing ``target_override`` (today, only TOU
-        pre-conditioning) is NOT routed through this resolver at all —
-        ``_set_temperature_for_mode()`` uses ``c.hvac_mode`` directly for that caller.
-        TOU's own explicit target is deliberately a cool-mode banking value at or below
-        ``comfort_heat``, written with ``skip_setpoint_sanity_check=True`` — letting
-        this resolver independently escalate on top of that would let it command
-        ``heat`` mode at a setpoint at/below the comfort floor with the one safety
-        check that would normally catch that turned off (Issue #821 Verification
-        BLOCKING #3). TOU's own ``decide_scheduled_band_gate()`` is already the
-        authority for whether that call site should proceed at all.
+        Exception (Design §2, preserved contract): a caller passing
+        ``target_override`` (today, only TOU pre-conditioning) is NOT routed through
+        this method at all — ``_set_temperature_for_mode()`` uses ``c.hvac_mode``
+        directly via a call-site-level ternary skip, not an FSM input flag.
 
-        Only ever considers escalating FROM cooling TO heating (the floor-defense
-        direction this issue is about) — a day classified "heat" already defends the
-        floor via the heating family itself, and a day classified "off"/other has no
-        family concept, so this function returns ``day_mode`` unchanged for both.
-        Ceiling breaches on an "off" day remain the ODE ceiling guard's own territory
-        (``ode_ceiling_guard.py``), which this function never touches.
+        ``day_mode`` other than "heat"/"cool" (i.e. "off") has no family concept and
+        is returned unchanged — matches the retired resolver's own scope note.
 
-        Deliberately does NOT run at all while nat-vent/WHF owns HVAC (mirrors the
-        economizer's documented defer-not-transition asymmetry) or while
-        ``_manual_override_active`` (same override precedence every other scheduled
-        action already respects) — it only fills the gap this issue found: no active
-        nat-vent session, comfort-band/set-temperature path only.
+        Computes ``ode_floor_outcome`` (via ``decide_ode_floor_guard()``) once per
+        call and hands it to the FSM/leaf — ``comfort_family_decision.py``'s own
+        docstring documents this as the shell's responsibility ("called by the
+        shell once per tick before this function"), matching the retired
+        resolver's own ODE-guard reuse. ``comfort_heat`` fed to the guard is the
+        already-resolved ``floor`` param (not raw config), matching
+        ``ComfortFamilyInputs.floor``'s own documented "same single anchor point"
+        convention.
         """
-        if day_mode != "cool" or self._manual_override_active or self._natural_vent_active or self._whf_owns_hvac():
+        if day_mode not in ("heat", "cool"):
             return day_mode
 
+        # The classifier's own decision for this cycle — the base authority for
+        # which family should be active absent a confirmed breach.
+        base_family = "heating" if day_mode == "heat" else "cooling"
+        current_family = getattr(self, "_comfort_mode_family", None)
+        dwell_state = getattr(self, "_comfort_family_dwell_state", None)
+
+        # Issue #827 Verification correction: seed the FSM's current state from the
+        # CLASSIFIER's family unless a genuine breach-driven escalation is currently
+        # in force (dwell_state.is_against_grain). `self._comfort_mode_family` is NOT a
+        # trustworthy base: 7 out-of-scope callers (nat-vent/WHF activation,
+        # _exit_nat_vent(), economizer, ...) write "cooling" into it for their own
+        # bookkeeping reasons, and seeding from it unconditionally would let that stale
+        # bookkeeping override the classifier's mode on a subsequent cycle. Only a live
+        # escalation this FSM itself performed may hold the state away from the
+        # classifier's choice — and it exits via _decide_revert()'s recovery margin.
+        if dwell_state is not None and dwell_state.is_against_grain and current_family in ("heating", "cooling"):
+            current_state = ComfortFamilyState(current_family)
+        else:
+            current_state = ComfortFamilyState(base_family)
+
+        # ``day_type`` is caller-resolved (not always ``self._current_classification`` —
+        # `_set_temperature_for_mode()`'s 7 call sites don't all run inside
+        # `apply_classification()`'s own call graph, so that attribute can be stale or
+        # `None` relative to the classification object the caller actually has in hand).
+        # Falling back to `self._current_classification` only covers `_apply_comfort_band()`,
+        # whose callers always run within a freshly-set classification cycle.
+        if day_type is None:
+            day_type = self._current_classification.day_type if self._current_classification else None
         thermal = self._thermal_model or {}
         confidence_k_passive = thermal.get("confidence_k_passive") or thermal.get("confidence", "none")
-        comfort_heat = self.config.get("comfort_heat")
+        min_dwell_s = float(
+            self.config.get(CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S, COMFORT_MODE_SWITCH_MIN_INTERVAL_S)
+        )
         indoor = self._get_indoor_temp_f()
-        comfort_heat_f = float(comfort_heat) if comfort_heat is not None else None
 
-        escalate = False
-        log_reason = ""
-
-        if confidence_k_passive == "none":
-            # Design §3 fallback path — the actual condition the reported live
-            # incident (Zone "Simulated 2") occurred under: a simple, conservative,
-            # non-ODE guard. Sustain-confirmed via the same shared primitive
-            # (COMFORT_FALLBACK_CONFIRM_S) to avoid reacting to a single noisy reading.
-            _candidate = comfort_heat_f is not None and indoor is not None and indoor < comfort_heat_f
-            if not _candidate:
-                self._comfort_floor_fallback_since = None
-            elif getattr(self, "_comfort_floor_fallback_since", None) is None:
-                self._comfort_floor_fallback_since = now
-            if _candidate and _is_transition_confirmed(
-                candidate=True,
-                candidate_since=self._comfort_floor_fallback_since,
+        ode_floor_decision = decide_ode_floor_guard(
+            OdeFloorGuardInputs(
+                hvac_mode=day_mode,
+                natural_vent_active=self._natural_vent_active,
+                floor_crossing_time=getattr(self, "_comfort_floor_crossing_time", None),
+                confidence_k_passive=confidence_k_passive,
+                k_active_heat=thermal.get("k_active_heat"),
+                comfort_heat=floor,
+                indoor=indoor,
                 now=now,
-                sustain_seconds=COMFORT_FALLBACK_CONFIRM_S,
-            ):
-                escalate = True
-                log_reason = (
-                    f"fallback (no thermal-model confidence): indoor {indoor:.1f}°F"
-                    f" < comfort_heat {comfort_heat_f:.1f}°F, sustained"
-                )
-        else:
-            self._comfort_floor_fallback_since = None
-            decision = decide_ode_floor_guard(
-                OdeFloorGuardInputs(
-                    hvac_mode=day_mode,
-                    natural_vent_active=self._natural_vent_active,
-                    floor_crossing_time=getattr(self, "_comfort_floor_crossing_time", None),
-                    confidence_k_passive=confidence_k_passive,
-                    k_active_heat=thermal.get("k_active_heat"),
-                    comfort_heat=comfort_heat_f,
-                    indoor=indoor,
-                    now=now,
-                )
             )
-            if decision.outcome is OdeFloorGuardOutcome.ESCALATE:
-                escalate = True
-                log_reason = (
-                    f"ODE floor guard ESCALATE: breach in {decision.hours_to_breach:.2f}h"
-                    f" <= lead {decision.lead_min:.0f}min"
-                )
-            elif decision.outcome is OdeFloorGuardOutcome.STANDING_BY:
-                _LOGGER.debug(
-                    "ODE floor guard STANDING_BY: breach in %.2fh > lead %.0fmin — letting it ride out",
-                    decision.hours_to_breach or 0.0,
-                    decision.lead_min or 0.0,
-                )
+        )
 
-        if not escalate:
-            return day_mode
+        fsm_inputs = ComfortFamilyFsmInputs(
+            base_family=base_family,
+            day_type=day_type,
+            indoor=indoor,
+            floor=floor,
+            ceiling=ceiling,
+            deadband_against_grain_f=self._comfort_deadband_for_day_type(day_type),
+            manual_override_active=self._manual_override_active,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+            ode_floor_outcome=ode_floor_decision.outcome,
+            min_dwell_seconds=min_dwell_s,
+            sustain_seconds=COMFORT_FALLBACK_CONFIRM_S,
+            now=now,
+        )
+        event = ComfortFamilyEvent(kind=ComfortFamilyEventKind.TICK, inputs=fsm_inputs)
+        result = _comfort_family_fsm_transition(current_state, event, dwell_state=dwell_state)
 
-        if self._family_switch_locked_out(candidate_family="heating", now=now):
+        # Pure leaf/FSM — the shell persists the updated dwell/sustain-confirm
+        # bookkeeping it hands back (comfort_family_fsm.py's own documented
+        # convention: "owned and persisted call-to-call by the shell").
+        self._comfort_family_dwell_state = result.dwell_state
+
+        if result.locked_out:
+            candidate_family = result.decision.target_family or ("heating" if day_mode == "heat" else "cooling")
+            reason = result.decision.reason or "comfort-family switch lockout"
             _LOGGER.warning(
-                "comfort_family_switch_locked_out: floor defense wants to switch to heat (%s) but the"
-                " family-switch lockout is still armed (family=%s, entry=%s)",
-                log_reason,
-                getattr(self, "_comfort_mode_family", None),
-                getattr(self, "_comfort_mode_family_entry_time", None),
+                "comfort_family_switch_locked_out: FSM wants to switch to %s (%s) but the"
+                " family-switch lockout is still armed (family=%s)",
+                candidate_family,
+                reason,
+                current_family,
             )
+            # Issue #827 preserved contract (Design §2): same event name/payload
+            # shape ai_skills_context.py's _render_comfort_family_switch_locked_out()
+            # expects — see that function's own docstring.
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "comfort_family_switch_locked_out",
-                    {"candidate_family": "heating", "reason": log_reason},
+                    {"candidate_family": candidate_family, "reason": reason},
                 )
             return day_mode
 
-        _LOGGER.info("Comfort floor defense: switching to heat — %s", log_reason)
-        self._arm_comfort_family("heating", now)
-        return "heat"
+        resolved_family = result.to_state.value  # "heating" | "cooling"
+        if result.changed:
+            _LOGGER.info("Comfort family FSM: switching to %s — %s", resolved_family, result.decision.reason)
+        # Issue #827 preserved contract (Design §2): the FSM's own outcome writes the
+        # compatibility attribute tools/sim_harness/outcomes.py's "comfort_family"
+        # assertion reads, via the same _arm_comfort_family() writer the 7
+        # out-of-scope callers (nat-vent/WHF activation, _exit_nat_vent(), etc.) use.
+        self._arm_comfort_family(resolved_family, now, only_if_changed=True)
+        return "heat" if resolved_family == "heating" else "cool"
 
     def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.

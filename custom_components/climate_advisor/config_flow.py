@@ -1497,6 +1497,36 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=60, max=1800, step=30, mode=selector.NumberSelectorMode.BOX)
                     ),
+                    vol.Required(
+                        "comfort_deadband_hot_f",
+                        default=current.get("comfort_deadband_hot_f", 5.0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=2.0, max=8.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(
+                        "comfort_deadband_warm_f",
+                        default=current.get("comfort_deadband_warm_f", 2.0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=1.0, max=5.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(
+                        "comfort_deadband_mild_f",
+                        default=current.get("comfort_deadband_mild_f", 2.0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=1.0, max=5.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(
+                        "comfort_deadband_cool_f",
+                        default=current.get("comfort_deadband_cool_f", 2.0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=1.0, max=5.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(
+                        "comfort_deadband_cold_f",
+                        default=current.get("comfort_deadband_cold_f", 5.0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=2.0, max=8.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
+                    ),
                 }
             ),
             errors=errors,

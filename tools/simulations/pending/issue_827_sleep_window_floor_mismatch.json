@@ -1,0 +1,120 @@
+{
+  "name": "issue_827_sleep_window_floor_mismatch",
+  "description": "GAP-5 (Issue #827 audit): the pre-#827 resolver always compared indoor against the flat, non-sleep-aware config comfort_heat, even overnight when select_comfort_band() had already armed the deeper sleep_heat floor. This scenario proves the consolidated FSM's floor input is genuinely the already-resolved band.floor (sleep_heat overnight, not comfort_heat) two ways: (1) indoor sits BELOW the daytime comfort_heat but ABOVE the correct sleep_heat floor overnight -- no escalation, proving the wrong (daytime) floor would have falsely fired; (2) indoor later drops below the correct sleep_heat floor by more than the deadband -- escalates, and the heat target it commands is sleep_heat, not comfort_heat.",
+  "source": "Issue #827 Design table, GAP-5 -- the resolver previously read a flat, non-sleep-aware comfort_heat.",
+  "issue": 827,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness: if _resolve_comfort_family_via_fsm() were reverted to read raw config comfort_heat (68F) instead of the caller-resolved band.floor, the 22:40:00 assertion (comfort_family still 'cooling') would FAIL -- indoor(61F) is below comfort_heat(68F) by 7F, well past comfort_deadband_hot_f, so the pre-#827 shape would incorrectly arm/escalate a heating candidate overnight even though indoor (61F) is comfortably above the REAL sleep floor (60F). This is a genuine false positive the fix closes, not just a cosmetic difference.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents 'Deadband is measured from the already-resolved band.floor/band.ceiling' alongside this scenario as its test reference.",
+    "(c) Occupant experience: without this fix, a home with a deep sleep-setback floor could have its overnight comfort family falsely escalated to heat well before it actually needed defending -- fighting the deliberately deeper night setback and wasting energy. With the fix, the correct (deeper) sleep floor governs both when NOT to act and, once genuinely needed, what temperature to command.",
+    "sleep_heat=60F is deliberately lower than comfort_heat=68F (a realistic deep-night setback) so the two floors disagree over a wide enough band (60-68F) to make the distinction unambiguous: 61F is a real breach against comfort_heat (7F, clears comfort_deadband_hot_f=5.0F) but NOT a breach at all against sleep_heat (60F < 61F).",
+    "Day type is 'hot' (native family cooling, deadband tier comfort_deadband_hot_f=5.0F) specifically so the daytime-floor-vs-sleep-floor comparison is unambiguous even against the widest deadband tier -- if this scenario used a tight-tier day type, a smaller daytime-floor breach could stay within-deadband either way and not discriminate the bug."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 60,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "07:00",
+    "setback_heat": 55,
+    "setback_cool": 82,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-08-31T22:35:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 55.0,
+      "note": "In the sleep window (22:35 is after sleep_time 22:30). Indoor 70F, within the sleep band [60F, 72F]."
+    },
+    {
+      "time": "2026-08-31T22:35:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot-day classification. In sleep window -> select_comfort_band() arms floor=sleep_heat(60), ceiling=sleep_cool(72), active=ceiling (hvac_mode!=heat) -> base_family='cooling'."
+    },
+    {
+      "time": "2026-08-31T22:40:00",
+      "type": "temp_update",
+      "indoor_f": 61.0,
+      "outdoor_f": 50.0,
+      "note": "Indoor drops to 61F -- 7F below the DAYTIME comfort_heat(68) (a false-positive breach if the wrong floor were used), but only 1F above the CORRECT sleep floor(60F) -- no real breach at all (heat_breach_delta = 60-61 = -1 <= 0)."
+    },
+    {
+      "time": "2026-08-31T22:40:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Re-evaluation with indoor at 61F. Against the correct sleep floor (60F), there is no breach -- comfort family correctly stays 'cooling'. GAP-5's fix is exactly what prevents this from being misread as a 7F breach against comfort_heat."
+    },
+    {
+      "time": "2026-08-31T23:10:00",
+      "type": "temp_update",
+      "indoor_f": 53.0,
+      "outdoor_f": 42.0,
+      "note": "Indoor continues down to 53F -- now 7F below the CORRECT sleep floor (60F), clearing comfort_deadband_hot_f(5.0F)."
+    },
+    {
+      "time": "2026-08-31T23:10:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "First cycle with a genuine breach against the sleep floor. Fallback candidate arms, not yet sustain-confirmed. Stays 'cooling' this tick."
+    },
+    {
+      "time": "2026-08-31T23:12:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "120s later (>90s). First-ever transition (cold start, no dwell gate). Sustain-confirmed: comfort family switches to heating, and the heat target commanded is the SLEEP floor (60F), not the daytime comfort_heat (68F) -- still in the sleep window at 23:12."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-31T22:35:00",
+      "expect": "expect_band",
+      "expect_band": { "floor": 60.0, "ceiling": 72.0 },
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: sleep window is active -- the sleep band [60F, 72F] is armed, not the daytime band [68F, 74F]."
+    },
+    {
+      "at": "2026-08-31T22:40:00",
+      "expect": "expect_band",
+      "expect_band": { "ceiling": 72.0 },
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Indoor (61F) is below daytime comfort_heat (68F) by 7F but above the correct sleep floor (60F) -- no real breach, so the band stays armed at the cool ceiling (72F), not flipped to a heat-mode floor command. expect_band reads the most recent comfort_band_applied event at-or-before this timestamp (time-scoped, unlike the comfort_family assertion which reads only the engine's FINAL state) -- the correct way to check an intermediate value in this scenario, since a later comfort_family assertion at 23:12:00 will read 'heating' by scenario end. Proves the resolver reads the sleep-resolved band.floor, not raw comfort_heat."
+    },
+    {
+      "at": "2026-08-31T23:12:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Indoor (53F) is now genuinely below the sleep floor (60F) by more than comfort_deadband_hot_f, sustain-confirmed -- the family escalates to heating."
+    },
+    {
+      "at": "2026-08-31T23:12:00",
+      "expect": "expect_band",
+      "expect_band": { "floor": 60.0 },
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The commanded heat target is the sleep floor (60F), not the daytime comfort_heat (68F) -- proving the escalation defends the CORRECT overnight floor, not a stale daytime value."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Overnight comfort-floor defense correctly uses the sleep-window-resolved floor (sleep_heat), not the flat daytime comfort_heat -- both for deciding NOT to escalate on a false-positive daytime-floor breach, and for what temperature to command once a genuine sleep-floor breach is confirmed.",
+    "observed_behavior": "At 61F (below comfort_heat but above sleep_heat) the family correctly stays 'cooling'. At 53F (genuinely below sleep_heat, deadband cleared, sustain-confirmed) the family escalates to heating and commands the sleep floor (60F).",
+    "expected_behavior": "The comfort-family FSM's floor/ceiling inputs are always the already-resolved band edges (sleep-aware overnight), never a raw, context-blind config value -- closing GAP-5 from the Issue #827 audit."
+  }
+}

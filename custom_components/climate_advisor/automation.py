@@ -2825,6 +2825,27 @@ class AutomationEngine:
                         _LOGGER.debug("Asserted fan_mode=auto alongside hvac_mode=off")
                     except Exception:
                         _LOGGER.debug("Could not assert fan_mode=auto — non-critical", exc_info=True)
+        except Exception as err:
+            # Issue #805: this is the single write point for hvac_mode (Fix 1b) — an
+            # invalid/removed climate_entity must not raise uncaught here, which would
+            # abort the whole coordinator update cycle (forecast/classification/learning
+            # bookkeeping too, not just this command). The entity-health sweep is the
+            # channel that tells the user the thermostat is gone; this handler's only
+            # job is making sure that fact doesn't also crash the cycle that hits it.
+            _LOGGER.error("HVAC command failed — mode=%s entity=%s: %s", mode, self.climate_entity, err)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "hvac_command_failed",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": mode,
+                        "comfort_heat": self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT),
+                        "comfort_cool": self.config.get("comfort_cool", DEFAULT_COMFORT_COOL),
+                        "climate_entity": self.climate_entity,
+                        "error": str(err),
+                    },
+                )
         finally:
             self._hvac_command_pending = False
 
@@ -2957,6 +2978,36 @@ class AutomationEngine:
                     "temperature": service_temp,
                 },
             )
+        except Exception as err:
+            # Issue #805: this is the single write point for temperature+mode (Fix 1b) —
+            # an invalid/removed climate_entity must not raise uncaught here, which would
+            # abort the whole coordinator update cycle. The entity-health sweep is the
+            # channel that tells the user the thermostat is gone; this handler's only job
+            # is making sure that fact doesn't also crash the cycle that hits it. Return
+            # immediately — the setpoint-verify/retry logic below assumes the write
+            # succeeded and must not be scheduled against a value never actually sent.
+            _LOGGER.error(
+                "Temperature command failed — target=%s mode=%s entity=%s: %s",
+                format_temp(temperature, unit),
+                mode,
+                self.climate_entity,
+                err,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "hvac_command_failed",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": mode,
+                        "setpoint_f": service_temp,
+                        "comfort_heat": self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT),
+                        "comfort_cool": self.config.get("comfort_cool", DEFAULT_COMFORT_COOL),
+                        "climate_entity": self.climate_entity,
+                        "error": str(err),
+                    },
+                )
+            return
         finally:
             self._temp_command_pending = False
 

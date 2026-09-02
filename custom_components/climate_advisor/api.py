@@ -238,6 +238,10 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             # Status card only, per this project's Status Card Ontology: it answers "what's
             # happening right now, and why."
             "invariant_violations": data.get("invariant_violations", []),
+            # Issue #805: entities (thermostat, weather source, sensors, fan, toggles,
+            # notify service) currently missing or unavailable — empty list when
+            # everything is fine. Same Status Card Ontology as invariant_violations above.
+            "entity_health_issues": data.get("entity_health_issues", []),
             "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
             "next_action": data.get(ATTR_NEXT_ACTION, ""),
             "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),

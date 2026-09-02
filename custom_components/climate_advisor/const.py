@@ -100,6 +100,7 @@ CONF_EMAIL_NOTIFY = "email_notify"  # DEPRECATED — replaced by per-event toggl
 CONF_PUSH_BRIEFING = "push_briefing"
 CONF_PUSH_DOOR_WINDOW_PAUSE = "push_door_window_pause"
 CONF_PUSH_OCCUPANCY_HOME = "push_occupancy_home"
+CONF_PUSH_ENTITY_HEALTH = "push_entity_health"  # Issue #805
 
 # Per-event email notification toggles (Issue #50)
 CONF_EMAIL_BRIEFING = "email_briefing"
@@ -107,6 +108,7 @@ CONF_EMAIL_DOOR_WINDOW_PAUSE = "email_door_window_pause"
 CONF_EMAIL_GRACE_EXPIRED = "email_grace_expired"
 CONF_EMAIL_GRACE_REPAUSE = "email_grace_repause"
 CONF_EMAIL_OCCUPANCY_HOME = "email_occupancy_home"
+CONF_EMAIL_ENTITY_HEALTH = "email_entity_health"  # Issue #805
 
 # Startup coalescing window: suppress override detection for this many seconds after restart
 STARTUP_COALESCE_SECONDS: int = 300  # 5 minutes (Issue #321)
@@ -797,6 +799,14 @@ CONFIG_METADATA = {
         "description": "Send a push notification when someone arrives home and comfort temperature is restored.",
         "category": "notifications",
     },
+    "push_entity_health": {
+        "label": "Push: Entity Not Found",
+        "description": (
+            "Send a push notification when a configured entity (thermostat, weather source,"
+            " sensor, fan, toggle, or notification service) is removed or stops responding."
+        ),
+        "category": "notifications",
+    },
     "email_briefing": {
         "label": "Email: Full Daily Briefing",
         "description": "Send the full daily briefing via email with complete forecast and plan details.",
@@ -820,6 +830,14 @@ CONFIG_METADATA = {
     "email_occupancy_home": {
         "label": "Email: Welcome Home",
         "description": "Send an email when someone arrives home and comfort temperature is restored.",
+        "category": "notifications",
+    },
+    "email_entity_health": {
+        "label": "Email: Entity Not Found",
+        "description": (
+            "Send an email when a configured entity (thermostat, weather source, sensor,"
+            " fan, toggle, or notification service) is removed or stops responding."
+        ),
         "category": "notifications",
     },
     "ai_enabled": {

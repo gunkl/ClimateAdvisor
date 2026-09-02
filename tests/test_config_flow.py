@@ -130,11 +130,13 @@ FULL_CONFIG = {
     "push_briefing": True,
     "push_door_window_pause": True,
     "push_occupancy_home": True,
+    "push_entity_health": True,
     "email_briefing": True,
     "email_door_window_pause": True,
     "email_grace_expired": True,
     "email_grace_repause": True,
     "email_occupancy_home": True,
+    "email_entity_health": True,
     "wake_time": "06:30:00",
     "sleep_time": "22:30:00",
     "briefing_time": "06:00:00",
@@ -2183,11 +2185,13 @@ class TestNotificationsStep:
         "push_occupancy_home",
         "manual_grace_notify",
         "automation_grace_notify",
+        "push_entity_health",
         "email_briefing",
         "email_door_window_pause",
         "email_grace_expired",
         "email_grace_repause",
         "email_occupancy_home",
+        "email_entity_health",
     ]
 
     def test_all_notification_keys_in_full_config(self):
@@ -2220,6 +2224,20 @@ class TestNotificationsStep:
         assert data["push_briefing"] is False
         assert data["email_grace_expired"] is False
         assert data["manual_grace_notify"] is True
+
+    def test_entity_health_toggles_save_to_updates(self):
+        """Issue #805: push_entity_health/email_entity_health persist through the REAL step handler."""
+        data = _run_options_flow(
+            dict(FULL_CONFIG),
+            [
+                (
+                    "async_step_notifications",
+                    {"push_entity_health": False, "email_entity_health": False},
+                )
+            ],
+        )
+        assert data["push_entity_health"] is False
+        assert data["email_entity_health"] is False
 
 
 # ---------------------------------------------------------------------------

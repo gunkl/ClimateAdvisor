@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "CA Dev Thermostat Sim",
+        "description": "Create a synthetic thermostat driven by Climate Advisor's real thermal ODE, for local multi-zone testing. Never shipped with the integration.",
+        "data": {
+          "name": "Name",
+          "initial_temp_f": "Initial indoor temperature (°F)",
+          "k_passive": "k_passive (envelope decay rate, 1/hr, negative)",
+          "k_active_heat": "k_active_heat (°F/hr)",
+          "k_active_cool": "k_active_cool (°F/hr, negative)",
+          "comfort_heat": "Comfort heat floor (°F)",
+          "comfort_cool": "Comfort cool ceiling (°F)",
+          "outdoor_source": "Outdoor temperature source",
+          "tick_seconds": "Simulation tick interval (seconds)"
+        }
+      }
+    }
+  }
+}

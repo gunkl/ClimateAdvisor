@@ -32,6 +32,7 @@ from .const import (
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_EMAIL_BRIEFING,
     CONF_EMAIL_DOOR_WINDOW_PAUSE,
+    CONF_EMAIL_ENTITY_HEALTH,
     CONF_EMAIL_GRACE_EXPIRED,
     CONF_EMAIL_GRACE_REPAUSE,
     CONF_EMAIL_OCCUPANCY_HOME,
@@ -53,6 +54,7 @@ from .const import (
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_PUSH_BRIEFING,
     CONF_PUSH_DOOR_WINDOW_PAUSE,
+    CONF_PUSH_ENTITY_HEALTH,
     CONF_PUSH_OCCUPANCY_HOME,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
@@ -1347,6 +1349,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         CONF_AUTOMATION_GRACE_NOTIFY,
                         default=current.get(CONF_AUTOMATION_GRACE_NOTIFY, True),
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_PUSH_ENTITY_HEALTH,
+                        default=current.get(CONF_PUSH_ENTITY_HEALTH, True),
+                    ): selector.BooleanSelector(),
                     # Email notification toggles
                     vol.Optional(
                         CONF_EMAIL_BRIEFING,
@@ -1367,6 +1373,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_EMAIL_OCCUPANCY_HOME,
                         default=current.get(CONF_EMAIL_OCCUPANCY_HOME, True),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_EMAIL_ENTITY_HEALTH,
+                        default=current.get(CONF_EMAIL_ENTITY_HEALTH, True),
                     ): selector.BooleanSelector(),
                 }
             ),

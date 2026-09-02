@@ -228,6 +228,7 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
+from .entity_health import run_entity_health_sweep
 from .fan_status import (
     is_ca_fan_running,
     parse_remote_speed_event,
@@ -263,6 +264,13 @@ _WINDOWS_EXTREME_COLD_MARGIN = 15.0
 # Maximum rejection events retained per obs_type in the in-memory rejection log.
 # Matches the per-obs-type cap enforced by LearningState.rejection_log on load.
 _REJECTION_LOG_CAP: int = 100
+
+# Issue #805: how often to re-notify about an entity that is still missing/unavailable
+# after the initial ok->missing transition notification. Long enough to never feel like
+# spam (one message per day, not per 30-min cycle — the original bug's failure mode),
+# short enough that a problem discovered "yesterday" surfaces again "today" if truly
+# still unresolved rather than being silently forgotten after a single missed alert.
+_ENTITY_HEALTH_REMINDER_SECONDS: float = 24 * 60 * 60
 
 # Issue #625: short, Fan(WHF)-card-style cause labels for AutomationEngine._last_grace_trigger,
 # shown on the Status card's grace branch instead of a free-text _last_action_reason sentence
@@ -601,6 +609,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._startup_hvac_initialized: bool = False  # Issue #96: prevents repeated late-start init
         self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
         self._fan_state_entity_unavailable_warned: bool = False  # Issue #359: WHF Type 2 fallback warning dedup
+        # Issue #805: transient (not persisted) entity-health transition tracker, keyed by
+        # config_key -> {"status": str, "first_seen": datetime, "last_notified": datetime}.
+        # Not persisted across restarts by design — a restart re-evaluates from scratch,
+        # which is desirable since a restart is itself the most common way an entity
+        # reappears (and is exactly when "still missing" should notify fresh, not wait
+        # out a stale reminder window from before the restart).
+        self._entity_health_state: dict[str, dict[str, Any]] = {}
         self._last_commanded_fan_state: bool | None = None  # Issue #361: command-only mode — last on/off commanded
         # Issue #495: last QuietCool RF remote event.* state (== the event's own timestamp)
         # that was actually acted on — dedups a stale unavailable->restore re-announcing an
@@ -2633,6 +2648,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # incident (#739/#748) this module exists to catch.
         _invariant_violations = self._run_invariant_watchdog(hvac_action=hvac_action)
 
+        # Issue #805: generic entity-availability sweep. Detects a removed/unavailable
+        # configured entity (thermostat, weather source, sensors, fan, toggles, notify
+        # service) that would otherwise degrade silently at every one of its own read
+        # sites. Returns transition-debounced issues and fires at most one notification
+        # per outage-start (plus a daily reminder) — see _run_entity_health_check().
+        _entity_health_issues = self._run_entity_health_check()
+
         # Emit a structured warning event when the HVAC entity reports an active action
         # (heating/cooling/fan) while hvac_mode is "off".  This surfaces the contradiction
         # in the investigator event log so it is not invisible outside the AI narrative.
@@ -2884,6 +2906,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FAN_RUNNING: fan_running,
             ATTR_HVAC_ACTION: hvac_action,
             "invariant_violations": [{"invariant": v.name, "detail": v.detail} for v in _invariant_violations],
+            "entity_health_issues": [
+                {
+                    "config_key": i.config_key,
+                    "entity_id": i.entity_id,
+                    "friendly_name": i.friendly_name,
+                    "criticality": i.criticality,
+                    "status": i.status,
+                }
+                for i in _entity_health_issues
+            ],
             "hvac_mode": hvac_mode,
             "target_temp": _target_temp,
             "target_temp_low": _target_temp_low,
@@ -5436,6 +5468,103 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             )
         return violations
+
+    def _run_entity_health_check(self) -> list:
+        """Detect missing/unavailable configured entities and notify on new outages (Issue #805).
+
+        Runs every update cycle via ``run_entity_health_sweep()`` (entity_health.py).
+        Debounced (edge-triggered): notifies once when an entity transitions from OK to
+        missing/unavailable, then at most once per ``_ENTITY_HEALTH_REMINDER_SECONDS``
+        while it stays missing — never every cycle, which is exactly the every-30-min
+        spam the reporter's own log showed for a different bug and is what motivated
+        this debounce shape here too. Recovery is logged at INFO but does not notify
+        (keeps this quiet by default).
+
+        Suppressed entirely during the startup-coalesce window
+        (``self._startup_coalesce_active``) so entities that simply haven't loaded yet
+        at boot never false-positive — the same window ``_compute_automation_status()``
+        already uses to suppress alarm-shaped states for the same race condition.
+
+        Isolated in its own try/except: a bug in this detector must never be able to
+        abort the update cycle whose only other job that instant is detecting a
+        *different* problem — this fix exists to catch silent failures, not add one.
+        """
+        if self._startup_coalesce_active:
+            return []
+        try:
+            issues = run_entity_health_sweep(self.hass, self.config)
+            self._process_entity_health_transitions(issues)
+            return issues
+        except Exception:
+            _LOGGER.error("Entity health sweep failed internally", exc_info=True)
+            return []
+
+    def _process_entity_health_transitions(self, issues: list) -> None:
+        """Diff the current sweep result against tracked state and notify on new/stale outages."""
+        now = dt_util.now()
+        current_keys = set()
+        to_notify: list = []
+
+        for issue in issues:
+            current_keys.add(issue.config_key)
+            tracked = self._entity_health_state.get(issue.config_key)
+            if tracked is None:
+                # ok -> missing/unavailable transition — a brand new outage.
+                self._entity_health_state[issue.config_key] = {
+                    "status": issue.status,
+                    "first_seen": now,
+                    "last_notified": now,
+                }
+                to_notify.append(issue)
+            else:
+                tracked["status"] = issue.status
+                if (now - tracked["last_notified"]).total_seconds() >= _ENTITY_HEALTH_REMINDER_SECONDS:
+                    tracked["last_notified"] = now
+                    to_notify.append(issue)
+
+        for config_key in list(self._entity_health_state.keys()):
+            if config_key not in current_keys:
+                _LOGGER.info("Entity health: %s is available again", config_key)
+                del self._entity_health_state[config_key]
+
+        if to_notify:
+            self._notify_entity_health_issues(to_notify)
+
+    def _notify_entity_health_issues(self, issues: list) -> None:
+        """Log every issue unconditionally, then send one batched user notification.
+
+        The unconditional log happens regardless of whether the push/email call below
+        succeeds — ``notify_service`` is itself one of the monitored entities (Issue
+        #805), so a broken notify target must not mean the failure goes unrecorded
+        anywhere. The HA log is the fallback channel of last resort.
+        """
+        for issue in issues:
+            log_fn = _LOGGER.error if issue.criticality == "critical" else _LOGGER.warning
+            log_fn("Entity health: %s (%s) is %s", issue.friendly_name, issue.entity_id, issue.status)
+
+        if len(issues) == 1:
+            issue = issues[0]
+            message = (
+                f"{issue.friendly_name} ('{issue.entity_id}') isn't responding. Climate Advisor "
+                "may not be able to control your HVAC correctly until it's fixed. Check "
+                "Settings > Devices & Services."
+            )
+        else:
+            names = ", ".join(f"{i.friendly_name} ({i.entity_id})" for i in issues)
+            message = (
+                f"{len(issues)} entities aren't responding: {names}. Climate Advisor may not be "
+                "able to control your HVAC correctly until they're fixed. Check Settings > "
+                "Devices & Services."
+            )
+
+        if self.automation_engine is not None:
+            self.hass.async_create_task(
+                self.automation_engine._notify(
+                    message,
+                    "Climate Advisor — entity not found",
+                    notification_type="entity_health",
+                )
+            )
 
     def _should_run_untracked_fan_backstop(self, is_untracked: bool) -> bool:
         """Whether the periodic ``backstop_30min`` untracked-fan reconcile should fire now.

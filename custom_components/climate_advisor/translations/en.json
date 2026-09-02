@@ -307,11 +307,13 @@
           "push_occupancy_home": "Push: Welcome home",
           "manual_grace_notify": "Push: Manual grace period expired",
           "automation_grace_notify": "Push: Automation grace period expired",
+          "push_entity_health": "Push: Entity not found",
           "email_briefing": "Email: Full daily briefing",
           "email_door_window_pause": "Email: HVAC paused (door/window open)",
           "email_grace_expired": "Email: Grace period expired",
           "email_grace_repause": "Email: Re-paused (door still open)",
-          "email_occupancy_home": "Email: Welcome home"
+          "email_occupancy_home": "Email: Welcome home",
+          "email_entity_health": "Email: Entity not found"
         },
         "data_description": {
           "push_briefing": "Send a short TLDR briefing to your phone each morning.",
@@ -319,11 +321,13 @@
           "push_occupancy_home": "Send a push notification when someone arrives home and comfort temperature is restored.",
           "manual_grace_notify": "Send a push notification when the manual grace period expires and normal sensor behavior resumes.",
           "automation_grace_notify": "Send a push notification when the automation grace period expires.",
+          "push_entity_health": "Send a push notification when a configured entity (thermostat, weather source, sensor, fan, toggle, or notification service) is removed or stops responding.",
           "email_briefing": "Send the full daily briefing via email with complete forecast and plan details.",
           "email_door_window_pause": "Send an email when HVAC is paused due to an open door or window.",
           "email_grace_expired": "Send an email when a grace period expires and normal sensor behavior resumes.",
           "email_grace_repause": "Send an email when HVAC is re-paused because a door/window is still open after grace expired.",
-          "email_occupancy_home": "Send an email when someone arrives home."
+          "email_occupancy_home": "Send an email when someone arrives home.",
+          "email_entity_health": "Send an email when a configured entity (thermostat, weather source, sensor, fan, toggle, or notification service) is removed or stops responding."
         }
       },
       "advanced": {

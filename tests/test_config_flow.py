@@ -26,12 +26,20 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def _make_config_entry(data: dict, version: int = 4) -> MagicMock:
-    """Create a mock ConfigEntry with the given data and version."""
+def _make_config_entry(data: dict, version: int = 4, unique_id: str | None = None) -> MagicMock:
+    """Create a mock ConfigEntry with the given data and version.
+
+    unique_id defaults to None (matching a real pre-#808 entry that predates
+    the duplicate-zone guard) rather than leaving it as an auto-truthy
+    MagicMock attribute, since the v18->v19 migration's
+    `existing_unique_id or climate_entity` fallback depends on it being
+    falsy when unset.
+    """
     entry = MagicMock()
     entry.data = dict(data)
     entry.entry_id = "test_entry_id"
     entry.version = version
+    entry.unique_id = unique_id
     return entry
 
 
@@ -523,6 +531,87 @@ class TestConfigFlowStepUserFields:
         assert 75 <= DEFAULT_SETBACK_COOL <= 90
 
 
+def _make_config_flow(existing_entries: list[MagicMock] | None = None):
+    """Instantiate the REAL config flow for direct invocation (Issue #808).
+
+    Enabled by the ha_stubs realification of ``config_entries.ConfigFlow``
+    (same pattern as ``_make_options_flow`` for OptionsFlow, Issue #452) plus
+    the unique_id/abort helpers added to ``_MockConfigFlow`` for this issue.
+    ``hass.config_entries.async_entries`` is stubbed to return the "existing
+    entries" the dedup check should compare against — the actual dedup
+    decision (does any entry's ``unique_id`` match?) still runs inside the
+    real ``_abort_if_unique_id_configured()``, not in the test.
+    """
+    from custom_components.climate_advisor.config_flow import ClimateAdvisorConfigFlow
+
+    flow = object.__new__(ClimateAdvisorConfigFlow)
+    flow._data = {}
+    flow.unique_id = None
+
+    hass = MagicMock()
+    hass.config_entries.async_entries = MagicMock(return_value=existing_entries or [])
+    flow.hass = hass
+    return flow
+
+
+def _run_config_flow_user_step(existing_entries: list[MagicMock] | None, user_input: dict) -> dict:
+    """Drive the REAL async_step_user against mocked existing entries.
+
+    Catches the stub's ``AbortFlow`` exception the same way HA's real
+    FlowManager does when a step raises it, converting it into an abort
+    FlowResult — this conversion is FlowManager plumbing, not the dedup
+    logic under test (which stays inside the production step handler).
+    """
+    from homeassistant.data_entry_flow import AbortFlow
+
+    flow = _make_config_flow(existing_entries)
+
+    async def _drive() -> dict:
+        try:
+            return await flow.async_step_user(user_input)
+        except AbortFlow as err:
+            return {"type": "abort", "reason": err.reason}
+
+    return asyncio.run(_drive())
+
+
+class TestConfigFlowDuplicateZoneGuard:
+    """Issue #808: adding a second zone for the same climate_entity must abort.
+
+    Adding a zone for a DIFFERENT climate_entity must proceed normally —
+    this is the multi-zone regression guard for Issue #796.
+    """
+
+    USER_INPUT = {
+        "weather_entity": "weather.forecast_home",
+        "climate_entity": "climate.living_room",
+        "notify_service": "notify.notify",
+    }
+
+    def test_duplicate_climate_entity_aborts(self):
+        """A second zone targeting an already-configured climate_entity aborts."""
+        existing_entry = MagicMock()
+        existing_entry.unique_id = "climate.living_room"
+
+        result = _run_config_flow_user_step([existing_entry], dict(self.USER_INPUT))
+
+        assert result["type"] == "abort"
+        assert result["reason"] == "already_configured"
+
+    def test_different_climate_entity_proceeds(self):
+        """A second zone targeting a DIFFERENT climate_entity is not blocked (#796)."""
+        existing_entry = MagicMock()
+        existing_entry.unique_id = "climate.bedroom"
+
+        user_input = dict(self.USER_INPUT)
+        user_input["climate_entity"] = "climate.living_room"
+
+        result = _run_config_flow_user_step([existing_entry], user_input)
+
+        assert result["type"] == "form"
+        assert result["step_id"] == "unit"
+
+
 class TestSetpointSliderRangesRegression:
     """Regression guard (architecture-reset session, #438 follow-up): the initial
     setup wizard's Fahrenheit sleep_heat/sleep_cool defaults, and ALL SIX Celsius
@@ -805,7 +894,7 @@ class TestMigrationViaRealFunction:
         written_data: dict = {}
         written_version: list[int] = []
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             # The migration calls this multiple times (once per version hop).
             # Replace with latest so we see the final state (not accumulated).
             written_data.clear()
@@ -909,7 +998,7 @@ class TestMigrationViaRealFunction:
 
         versions_seen = []
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             versions_seen.append(version)
             entry.data = dict(data)
             entry.version = version
@@ -1005,7 +1094,7 @@ class TestMigrationV7ToV8:
 
         final_data = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.update(data)
             entry.data = dict(data)
             entry.version = version
@@ -1067,7 +1156,7 @@ class TestMigrationV8ToV9:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1077,7 +1166,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 18
+        assert entry.version == 19
 
     def test_chain_from_v1_includes_temp_unit(self):
         """v1 entry chains through all migrations and ends up with temp_unit."""
@@ -1099,7 +1188,7 @@ class TestMigrationV8ToV9:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1109,7 +1198,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 18
+        assert entry.version == 19
 
 
 # ---------------------------------------------------------------------------
@@ -1160,7 +1249,7 @@ class TestMigrationV9ToV10:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1170,7 +1259,7 @@ class TestMigrationV9ToV10:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
-        assert entry.version == 18
+        assert entry.version == 19
 
     def test_chain_from_v1_includes_debounce(self):
         """v1 entry chains through all migrations and ends up with welcome_home_debounce_seconds."""
@@ -1191,7 +1280,7 @@ class TestMigrationV9ToV10:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1202,7 +1291,7 @@ class TestMigrationV9ToV10:
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 18
+        assert entry.version == 19
 
 
 class TestMigrationV10ToV11:
@@ -1246,7 +1335,7 @@ class TestMigrationV10ToV11:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1258,7 +1347,7 @@ class TestMigrationV10ToV11:
         assert final_data.get("adaptive_preheat_enabled") is True
         assert final_data.get("adaptive_setback_enabled") is True
         assert final_data.get("weather_bias_enabled") is True
-        assert entry.version == 18
+        assert entry.version == 19
 
 
 class TestMigrationV11ToV12:
@@ -1272,7 +1361,7 @@ class TestMigrationV11ToV12:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1286,7 +1375,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 120
         assert final_data.get("preheat_safety_margin") == 1.3
         assert final_data.get("max_setback_depth_f") == 8.0
-        assert entry.version == 18
+        assert entry.version == 19
 
     def test_v11_to_v12_existing_values_preserved(self):
         """v11 entry with all threshold keys set retains those values after migration."""
@@ -1304,7 +1393,7 @@ class TestMigrationV11ToV12:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1318,7 +1407,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 90
         assert final_data.get("preheat_safety_margin") == 1.5
         assert final_data.get("max_setback_depth_f") == 6.0
-        assert entry.version == 18
+        assert entry.version == 19
 
     def test_v11_to_v12_invalid_type_replaced(self):
         """v11 entry where min_preheat_minutes is a non-numeric string gets the default."""
@@ -1329,7 +1418,7 @@ class TestMigrationV11ToV12:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1339,7 +1428,7 @@ class TestMigrationV11ToV12:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("min_preheat_minutes") == 30
-        assert entry.version == 18
+        assert entry.version == 19
 
     def test_v11_to_v12_from_v10_chain(self):
         """v10 entry chains through v11 and v12 migrations; all five threshold keys get defaults."""
@@ -1349,7 +1438,7 @@ class TestMigrationV11ToV12:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1358,7 +1447,7 @@ class TestMigrationV11ToV12:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 18
+        assert entry.version == 19
         assert final_data.get("min_preheat_minutes") == 30
         assert final_data.get("max_preheat_minutes") == 240
         assert final_data.get("default_preheat_minutes") == 120
@@ -1451,7 +1540,7 @@ class TestMigrationV12ToV13:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1460,7 +1549,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 18
+        assert entry.version == 19
         assert final_data.get("ai_enabled") is DEFAULT_AI_ENABLED
         assert final_data.get("ai_api_key") == ""
         assert final_data.get("ai_model") == DEFAULT_AI_MODEL
@@ -1479,7 +1568,7 @@ class TestMigrationV12ToV13:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1488,7 +1577,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 18
+        assert entry.version == 19
         assert final_data.get("ai_enabled") is False
         assert final_data.get("ai_model") == "claude-sonnet-5"
         assert final_data.get("ai_max_tokens") == 4096
@@ -1518,7 +1607,7 @@ class TestMigrationV13ToV14:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1585,7 +1674,7 @@ class TestMigrationV13ToV14:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1594,7 +1683,7 @@ class TestMigrationV13ToV14:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 18
+        assert entry.version == 19
         assert final_data.get("ai_investigator_enabled") is DEFAULT_AI_INVESTIGATOR_ENABLED
         assert final_data.get("ai_investigator_model") == DEFAULT_AI_INVESTIGATOR_MODEL
         assert final_data.get("ai_investigator_reasoning_effort") == DEFAULT_AI_INVESTIGATOR_REASONING
@@ -1656,7 +1745,7 @@ class TestMigrationV14ToV15:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1757,7 +1846,7 @@ class TestMigrationV14ToV15:
         hass = _make_hass()
         final_version = [14]
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             entry.data = dict(data)
             entry.version = version
             final_version[0] = version
@@ -1765,7 +1854,7 @@ class TestMigrationV14ToV15:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert final_version[0] == 18
+        assert final_version[0] == 19
 
 
 # ---------------------------------------------------------------------------
@@ -1788,7 +1877,7 @@ class TestMigrationV16ToV17:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1806,7 +1895,7 @@ class TestMigrationV16ToV17:
         entry = _make_config_entry({**FULL_CONFIG, "fan_mode": "both"}, version=16)
         hass = _make_hass()
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             entry.data = dict(data)
             entry.version = version
 
@@ -1815,7 +1904,7 @@ class TestMigrationV16ToV17:
 
         assert result is True
         assert entry.data["fan_mode"] == FAN_MODE_WHOLE_HOUSE
-        assert entry.version == 18
+        assert entry.version == 19
 
     def test_non_both_fan_mode_is_preserved(self):
         """fan_mode values other than 'both' are left unchanged."""
@@ -1844,7 +1933,7 @@ class TestMigrationV17ToV18:
         hass = _make_hass()
         final_data: dict = {}
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             final_data.clear()
             final_data.update(data)
             entry.data = dict(data)
@@ -1869,7 +1958,7 @@ class TestMigrationV17ToV18:
         entry = _make_config_entry(dict(FULL_CONFIG), version=17)
         hass = _make_hass()
 
-        def capture_update(entry, *, data, version):
+        def capture_update(entry, *, data, version, unique_id=None):
             entry.data = dict(data)
             entry.version = version
 
@@ -1879,7 +1968,112 @@ class TestMigrationV17ToV18:
 
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 18
+        assert entry.version == 19
+
+
+class TestMigrationV18ToV19:
+    """Tests for config entry migration from version 18 to version 19.
+
+    Issue #808: pre-#808 entries have unique_id=None, so the config flow's
+    duplicate-zone guard (_abort_if_unique_id_configured) was a no-op for
+    every install upgrading from before this fix — including the one
+    already deployed live. This migration backfills unique_id from
+    climate_entity so the guard actually protects existing installs, not
+    just fresh ones created after 0.7.1.
+    """
+
+    def _run_migration(self, hass, entry):
+        from custom_components.climate_advisor import async_migrate_entry
+
+        return asyncio.run(async_migrate_entry(hass, entry))
+
+    def test_v18_to_v19_backfills_unique_id_from_climate_entity(self):
+        """A legacy entry with unique_id=None gets it set to climate_entity."""
+        entry = _make_config_entry(dict(FULL_CONFIG), version=18, unique_id=None)
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = []
+        captured: dict = {}
+
+        def capture_update(entry, *, data, version, unique_id=None):
+            captured["unique_id"] = unique_id
+            captured["version"] = version
+            entry.data = dict(data)
+            entry.version = version
+            entry.unique_id = unique_id
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+
+        result = self._run_migration(hass, entry)
+
+        assert result is True
+        assert captured["unique_id"] == "climate.living_room"
+        assert captured["version"] == 19
+        assert entry.unique_id == "climate.living_room"
+
+    def test_v18_to_v19_preserves_existing_unique_id(self):
+        """An entry that somehow already has a unique_id keeps it unchanged."""
+        entry = _make_config_entry(dict(FULL_CONFIG), version=18, unique_id="climate.already_set")
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = []
+        captured: dict = {}
+
+        def capture_update(entry, *, data, version, unique_id=None):
+            captured["unique_id"] = unique_id
+            entry.version = version
+            entry.unique_id = unique_id
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+
+        self._run_migration(hass, entry)
+
+        assert captured["unique_id"] == "climate.already_set"
+
+    def test_v18_to_v19_warns_on_pre_existing_duplicate(self, caplog):
+        """Two legacy entries that already share a climate_entity log a WARNING
+        pointing the user at the conflict, rather than silently backfilling
+        both to the same unique_id with no visibility (Observability Requirements)."""
+        import logging
+
+        entry = _make_config_entry(dict(FULL_CONFIG), version=18, unique_id=None)
+        sibling = MagicMock()
+        sibling.entry_id = "other_entry_id"
+        sibling.unique_id = "climate.living_room"
+
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = [sibling]
+
+        def capture_update(entry, *, data, version, unique_id=None):
+            entry.version = version
+            entry.unique_id = unique_id
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+
+        with caplog.at_level(logging.WARNING):
+            self._run_migration(hass, entry)
+
+        assert any("shares climate_entity" in record.message for record in caplog.records)
+
+    def test_v18_to_v19_legacy_entry_then_blocks_real_duplicate_add(self):
+        """End-to-end: after migration backfills a legacy entry's unique_id,
+        a subsequent attempt to add a second zone for the same climate_entity
+        is correctly blocked by the config flow guard — proving the migration
+        and the guard actually compose, not just pass in isolation."""
+        entry = _make_config_entry(dict(FULL_CONFIG), version=18, unique_id=None)
+        hass = _make_hass()
+        hass.config_entries.async_entries.return_value = []
+
+        def capture_update(entry, *, data, version, unique_id=None):
+            entry.version = version
+            entry.unique_id = unique_id
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        self._run_migration(hass, entry)
+        assert entry.unique_id == "climate.living_room"
+
+        # Now simulate a second-zone-add attempt against the migrated entry.
+        result = _run_config_flow_user_step([entry], dict(TestConfigFlowDuplicateZoneGuard.USER_INPUT))
+        assert result["type"] == "abort"
+        assert result["reason"] == "already_configured"
 
 
 class TestFanModeOptionsNoBoth:

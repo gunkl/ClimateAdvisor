@@ -211,6 +211,22 @@ class _MockHomeAssistantView:
         return _MockJsonResponse({"message": message}, status_code)
 
 
+class _MockAbortFlow(Exception):
+    """Minimal stand-in for homeassistant.data_entry_flow.AbortFlow.
+
+    Real HA raises this from ``_abort_if_unique_id_configured()`` and the
+    FlowManager catches it to build the abort FlowResult. Since tests here
+    call step handlers directly (bypassing the FlowManager), test drivers
+    must catch this themselves and convert it to an abort result — mirroring
+    what the real FlowManager does, not the config flow's own dedup logic.
+    """
+
+    def __init__(self, reason: str, description_placeholders: dict | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.description_placeholders = description_placeholders
+
+
 class _MockConfigFlow:
     """Minimal stand-in for homeassistant.config_entries.ConfigFlow.
 
@@ -222,6 +238,8 @@ class _MockConfigFlow:
     subclass become a *real* class whose methods can be exercised directly in
     tests (mirrors the SensorEntity/HomeAssistantView realification, Issue #452).
     """
+
+    unique_id: str | None = None
 
     def __init_subclass__(cls, **kwargs):  # noqa: ANN001, ANN003
         # Consume HA's ``domain=`` (and any future) class kwargs.
@@ -240,6 +258,34 @@ class _MockConfigFlow:
 
     def async_abort(self, **kwargs):  # noqa: ANN003
         return {"type": "abort", **kwargs}
+
+    # --- unique_id / dedup helpers (Issue #808) ---------------------------
+    # Minimal stand-ins for HA's ConfigFlow.async_set_unique_id() /
+    # _abort_if_unique_id_configured(). Real HA looks up existing entries via
+    # self._async_current_entries(), which resolves through
+    # self.hass.config_entries.async_entries(self.handler). Tests configure
+    # hass.config_entries.async_entries(...) to return the entries to check
+    # against — the entry-matching/dedup decision itself still runs for real.
+    async def async_set_unique_id(self, unique_id: str | None = None, *, raise_on_progress: bool = True):
+        self.unique_id = unique_id
+        return None
+
+    def _async_current_entries(self, include_ignore: bool = True):
+        entries_fn = self.hass.config_entries.async_entries
+        return list(entries_fn())
+
+    def _abort_if_unique_id_configured(
+        self,
+        updates: dict | None = None,
+        reload_on_update: bool = True,
+        *,
+        error: str | None = None,
+    ) -> None:
+        if self.unique_id is None:
+            return
+        for entry in self._async_current_entries():
+            if getattr(entry, "unique_id", None) == self.unique_id:
+                raise _MockAbortFlow(error or "already_configured")
 
 
 class _MockOptionsFlow:
@@ -464,6 +510,11 @@ def install_ha_stubs() -> None:
     # parity/forward-compatibility rather than because anything currently
     # evaluates it at import time.
     config_entries.ConfigEntry = ConfigEntry
+
+    # Issue #808: real AbortFlow exception so _abort_if_unique_id_configured()
+    # can raise it and test drivers can catch it, mirroring the real
+    # FlowManager's step-exception handling.
+    sys.modules["homeassistant.data_entry_flow"].AbortFlow = _MockAbortFlow
     # config_flow.py uses ``from homeassistant import config_entries`` (parent +
     # attribute), which otherwise binds an auto-generated child MagicMock instead
     # of the patched submodule above. Pin the parent attribute to the real

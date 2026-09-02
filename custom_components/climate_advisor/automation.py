@@ -2830,12 +2830,15 @@ class AutomationEngine:
             await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
-            self._arm_comfort_family("cooling", dt_util.now())
+            # Issue #823: this branch runs every classification cycle regardless of
+            # real state change — only_if_changed=True so the dwell clock measures
+            # continuous time-in-family, not time-since-last-reassertion.
+            self._arm_comfort_family("cooling", dt_util.now(), only_if_changed=True)
         elif _effective_active == "floor" and caps.supports_heat:
             await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
-            self._arm_comfort_family("heating", dt_util.now())
+            self._arm_comfort_family("heating", dt_util.now(), only_if_changed=True)
         else:
             # The thermostat advertises no mode that can defend the active edge (e.g. a heat-only
             # unit on a warm day, or an unavailable entity). Surface this at INFO in real operation
@@ -3355,14 +3358,18 @@ class AutomationEngine:
             await self._set_temperature(
                 floor_target, reason=reason, mode="heat", skip_setpoint_sanity_check=skip_setpoint_sanity_check
             )
-            self._arm_comfort_family("heating", dt_util.now())
+            # Issue #823: this is a shared choke point called from multiple restore/
+            # reassert paths, some of which run every cycle — only_if_changed=True so
+            # the dwell clock measures continuous time-in-family, not
+            # time-since-last-reassertion.
+            self._arm_comfort_family("heating", dt_util.now(), only_if_changed=True)
             return
         elif _resolved_mode == "cool":
             ceiling_target = target_override if target_override is not None else float(self.config["comfort_cool"])
             await self._set_temperature(
                 ceiling_target, reason=reason, mode="cool", skip_setpoint_sanity_check=skip_setpoint_sanity_check
             )
-            self._arm_comfort_family("cooling", dt_util.now())
+            self._arm_comfort_family("cooling", dt_util.now(), only_if_changed=True)
             return
         else:
             return
@@ -8132,21 +8139,45 @@ class AutomationEngine:
             return self._confirm_nat_vent_exit_candidate(reason, now, exempt=True)
         return self._confirm_nat_vent_exit_candidate(reason, now)
 
-    def _arm_comfort_family(self, family: str, now: datetime) -> None:
+    def _arm_comfort_family(self, family: str, now: datetime, *, only_if_changed: bool = False) -> None:
         """Issue #821 (Design §4): record that ``family`` ("heating" or "cooling") is
         the currently-active HVAC family, resetting the family-switch lockout's dwell
         clock. Called from every real family-relevant event: a heat command, an active-
         cool command (both via _resolve_comfort_family_mode()'s own callers), and
         nat-vent/WHF activation/deactivation.
 
-        Deliberately resets ``_comfort_mode_family_entry_time`` on EVERY call, not only
+        By default, resets ``_comfort_mode_family_entry_time`` on EVERY call, not only
         when ``family`` differs from the previous value — this is what makes "exiting
         nat-vent counts as cooling family was active until just now" work: the lockout
         clock measures "how long since anything in the current family last actually
-        happened", not just "how long since the family label last changed". Sets the
-        same-tick guard only when the family label genuinely changes (a real switch),
-        matching Issue #699's own finding that elapsed-time alone isn't a sufficient
-        guard for a same-tick exit-then-reactivate race.
+        happened", not just "how long since the family label last changed". This is
+        correct for the 7 remaining call sites that default to always-reset: nat-vent/
+        WHF activation (2 sites), ``_exit_nat_vent()`` and its 3 documented bypass
+        branches, and the floor-defense escalation arm (``_resolve_comfort_family_mode()``
+        itself, which only ever arms "heating" and is therefore immune to
+        self-deadlock — ``_family_switch_locked_out()`` short-circuits when
+        ``candidate_family`` already equals the recorded family). Each of these either
+        fires exactly once per real physical event, or can never lock itself out, so
+        "always reset" and "reset only on change" are equivalent there.
+
+        ``only_if_changed=True`` (Issue #823): for the 4 call sites that instead run on
+        *every classification cycle regardless of real state change*
+        (``_apply_comfort_band()``, ``_set_temperature_for_mode()``) — skip the reset
+        entirely when ``family`` already matches the recorded family and an entry time
+        is already set. Without this, a day that stays cool-classified re-arms
+        "cooling" every single cycle merely by reasserting the same setpoint,
+        continuously pushing the dwell clock forward — including on cycles where a
+        floor-defense escalation attempt was *itself just blocked by this same
+        lockout*, making the lockout mathematically unreachable-to-clear (confirmed
+        live: Zone "Simulated 2" sat 5°F below comfort_heat for 2+ hours, locked out on
+        every 5-minute cycle, because the classification cadence was shorter than
+        ``comfort_mode_switch_min_interval_s``). Sites that fire once per genuine event
+        must keep the default — a fresh dwell window at that real transition is the
+        intended, already-verified behavior.
+
+        Sets the same-tick guard only when the family label genuinely changes (a real
+        switch), matching Issue #699's own finding that elapsed-time alone isn't a
+        sufficient guard for a same-tick exit-then-reactivate race.
 
         "Same-tick" is coarser than it sounds: the flag this sets
         (``_comfort_mode_family_changed_this_tick``) is only reset at the top of
@@ -8163,6 +8194,9 @@ class AutomationEngine:
         # "Coordinator methods" testing note). This mirrors coordinator.py's own
         # getattr(self, "_nat_vent_plan", None) precedent for the same reason.
         _prior_family = getattr(self, "_comfort_mode_family", None)
+        _prior_entry = getattr(self, "_comfort_mode_family_entry_time", None)
+        if only_if_changed and _prior_family == family and _prior_entry is not None:
+            return
         if _prior_family is not None and _prior_family != family:
             self._comfort_mode_family_changed_this_tick = True
         self._comfort_mode_family = family

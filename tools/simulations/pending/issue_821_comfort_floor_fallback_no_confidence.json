@@ -5,11 +5,12 @@
   "issue": 821,
   "notes": [
     "Three-exercise protocol (CLAUDE.md §10):",
-    "(a) Scenario effectiveness: reverting Issue #821's fallback path (removing the confidence-none branch from _resolve_comfort_family_mode(), or removing its wiring into _apply_comfort_band()) causes the final assertion (comfort_family=heating at 09:02) to FAIL — the engine would keep affirming the cool-mode ceiling forever, exactly reproducing the reported incident.",
+    "(a) Scenario effectiveness: reverting Issue #821's fallback path (removing the confidence-none branch from _resolve_comfort_family_mode(), or removing its wiring into _apply_comfort_band()) causes the final assertion (comfort_family=heating at 08:41) to FAIL — the engine would keep affirming the cool-mode ceiling forever, exactly reproducing the reported incident.",
     "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's automation logic table now documents the comfort-floor-defense fallback row alongside this scenario as its test reference.",
     "(c) Occupant experience: without this fix, a zone with no thermal-model history yet (a freshly-added zone, or one that hasn't accumulated enough HVAC cycles) never gets its comfort floor actively defended on a cool-classified day — the home can drift arbitrarily cold with the thermostat still confirming a cooling setpoint every cycle. With the fix, the engine switches to heat once the below-floor reading has genuinely held for COMFORT_FALLBACK_CONFIRM_S (90s), not on a single noisy tick.",
     "The 08:30:00 assertion (family still 'cooling') proves the sustain-confirmation gate is genuinely load-bearing here — the first evaluation after crossing below the floor does NOT escalate immediately, matching the project owner's explicit concern about avoiding a naive instant-flip design.",
-    "The 08:41:00 assertion (family 'heating') is 660s after the 08:30:00 tick — satisfying BOTH COMFORT_FALLBACK_CONFIRM_S (90s, the sustain gate on the fallback candidate itself) AND comfort_mode_switch_min_interval_s (600s default, the family-switch lockout's own minimum dwell). The 08:30:00 tick itself re-affirms the 'cooling' family (its own candidate isn't confirmed yet, so _apply_comfort_band() still commands cool that cycle), which resets the lockout's entry_time to 08:30:00 — so the escalation attempt must clear 600s from THAT tick, not from the 08:00:00 baseline. This is a real, load-bearing interaction the scenario deliberately exercises: in production's real 30-minute classification cadence this headroom is trivial, but a synthetic scenario with closely-spaced ticks must respect it explicitly or it reproduces a false failure, not a real one."
+    "CORRECTED per Issue #823 (this scenario's own commentary previously endorsed the bug it should have caught): _arm_comfort_family() must NOT reset the family-switch lockout's dwell clock on every routine reassertion of an unchanged family (_apply_comfort_band()/_set_temperature_for_mode() now pass only_if_changed=True). The dwell clock measures continuous time since the 'cooling' family GENUINELY started (08:00:00, the scenario's baseline classification tick, the first real arm), not time since the most recent reassertion. The added 08:35:00 classification tick (below the floor, day still cool-classified, matching the ~5-minute cadence observed in the live incident) exists specifically to distinguish the fixed behavior from the pre-#823 bug: under the bug, that tick would reset entry_time to 08:35:00, leaving only 360s of headroom by 08:41:00 (< 600s comfort_mode_switch_min_interval_s) — the final assertion would FAIL, reproducing the live incident. Under the fix, entry_time stays pinned at 08:00:00 through every reassertion (08:30:00, 08:35:00), so by 08:41:00 elapsed is ~2460s, and the only real gate remaining is COMFORT_FALLBACK_CONFIRM_S (90s) from the 08:30:00 below-floor crossing — comfortably satisfied.",
+    "Negative-control equivalent for this scenario lives in tests/test_comfort_mode_family_lockout.py::TestPermanentLockoutFixIssue823 (unit-level, exercises 15 closely-spaced cycles rather than this scenario's 2) — that test's own negative control (reverting only_if_changed to a no-op) was manually confirmed to fail, i.e. the lockout never clears. This JSON scenario is the end-to-end/production-shaped counterpart, not a duplicate: it exercises the real event/classification harness path, not just the two engine methods directly."
   ],
   "config": {
     "comfort_heat": 70,
@@ -48,7 +49,15 @@
       "day_type": "warm",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Re-evaluation with indoor now below the floor. First tick the fallback candidate becomes true — armed, not yet confirmed (elapsed 0s < 90s COMFORT_FALLBACK_CONFIRM_S), so the band still commands cool this cycle, which re-affirms the cooling family and resets the family-switch lockout's entry_time to 08:30:00."
+      "note": "Re-evaluation with indoor now below the floor. First tick the fallback candidate becomes true — armed, not yet confirmed (elapsed 0s < 90s COMFORT_FALLBACK_CONFIRM_S), so the band still commands cool this cycle. Per the Issue #823 fix, this reassertion does NOT reset the family-switch lockout's entry_time (only_if_changed=True) — it stays pinned at 08:00:00, when 'cooling' genuinely became the active family."
+    },
+    {
+      "time": "2026-08-31T08:35:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Issue #823: a third, realistically-spaced re-evaluation (5 minutes after 08:30:00, matching the live incident's observed classification cadence) — indoor is still below the floor, and the fallback candidate is already sustain-confirmed (300s elapsed since the 08:30:00 crossing, past the 90s COMFORT_FALLBACK_CONFIRM_S gate). This is the tick that discriminates the Issue #823 fix from the bug it replaces. Under the FIX, entry_time has stayed pinned at 08:00:00 (the true start of the 'cooling' family) since the 08:30:00 reassertion was a no-op — elapsed is already ~2100s, past the 600s lockout, so the switch to heating actually fires HERE, at 08:35:00, not at the final 08:41:00 checkpoint. Under the pre-fix BUG, the 08:30:00 reassertion would have reset entry_time to 08:30:00, so at 08:35:00 elapsed is only 300s (< 600s) — still locked out; this tick's own reassertion then resets entry_time again to 08:35:00, so by 08:41:00 elapsed is only 360s (< 600s) — still locked out, reproducing the live incident's permanent lockout. Either way, the scenario's only assertion type here reads the engine's FINAL state (see the 08:41:00 assertion's own note), so this tick's effect is only visible indirectly via whether the final snapshot shows 'heating' or 'cooling'."
     },
     {
       "time": "2026-08-31T08:41:00",
@@ -56,7 +65,7 @@
       "day_type": "warm",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Second re-evaluation, 660s after the 08:30:00 tick — clears both the 90s fallback sustain window and the 600s family-switch lockout (armed at 08:30:00, not 08:00:00 — see notes). Fallback escalates: comfort family switches to heating, engine commands heat at comfort_heat."
+      "note": "Final re-evaluation. Elapsed since the TRUE cooling-family start (08:00:00) is ~2460s, comfortably past comfort_mode_switch_min_interval_s (600s); COMFORT_FALLBACK_CONFIRM_S (90s from the 08:30:00 below-floor crossing) was already satisfied by 08:35:00. Fallback escalates: comfort family switches to heating, engine commands heat at comfort_heat."
     }
   ],
   "assertions": [
@@ -73,7 +82,7 @@
       "family": "heating",
       "track": "logic",
       "simulator_support": false,
-      "reason": "660s after the 08:30:00 below-floor tick (> 90s COMFORT_FALLBACK_CONFIRM_S and > 600s comfort_mode_switch_min_interval_s from the 08:30:00 re-affirmation) — the confidence-none fallback path (Design §3) has sustain-confirmed and cleared the family-switch lockout, switching the comfort family to heating. This is the actual fix for the reported live incident (Zone \"Simulated 2\", confidence_k_passive == \"none\" throughout the 2+ hour incident window). NOTE: the 'comfort_family' assertion type reads the engine's FINAL state snapshot (matching the existing nat_vent_still_active/paused_by_door convention documented in outcomes.py) — it cannot verify an intermediate mid-run value, only the state at scenario end, which is why this is the only assertion of this type in the scenario and is placed on the LAST event."
+      "reason": "By 08:41:00, elapsed since the TRUE cooling-family start (08:00:00, per the Issue #823 fix — routine reassertions at 08:30:00 and 08:35:00 are no-ops for the dwell clock) is ~2460s, comfortably past comfort_mode_switch_min_interval_s (600s), and COMFORT_FALLBACK_CONFIRM_S (90s from the 08:30:00 below-floor crossing) was satisfied by 08:31:30. In practice the fallback actually escalates at the 08:35:00 tick (the first re-evaluation after both gates clear) and 'heating' is already the recorded family by the time this assertion checks — this checkpoint just confirms it holds. This is the actual fix for the reported live incident (Zone \"Simulated 2\", confidence_k_passive == \"none\" throughout the 2+ hour incident window). NOTE: the 'comfort_family' assertion type reads the engine's FINAL state snapshot (matching the existing nat_vent_still_active/paused_by_door convention documented in outcomes.py) — it cannot verify an intermediate mid-run value, only the state at scenario end, which is why this is the only assertion of this type in the scenario and is placed on the LAST event."
     }
   ],
   "verdict": {

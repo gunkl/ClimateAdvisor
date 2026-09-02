@@ -144,6 +144,13 @@ class TestFamilySwitchLockedOut:
 
 
 class TestArmComfortFamily:
+    """Default path (``only_if_changed=False``, the implicit default). This is the
+    correct, already-verified behavior for the 9 genuine one-shot transition-event
+    call sites (nat-vent/WHF activation, ``_exit_nat_vent()`` and its bypass
+    branches) — each fires exactly once per real physical event, so "always reset"
+    is intentional here. See ``TestArmComfortFamilyOnlyIfChanged`` below for the
+    Issue #823 fix covering the 4 steady-state reassertion call sites."""
+
     def test_first_arm_sets_family_and_entry_time_without_changed_flag(self):
         engine = _make_engine(indoor_temp=70.0)
         assert engine._comfort_mode_family_changed_this_tick is False
@@ -170,6 +177,66 @@ class TestArmComfortFamily:
 
         later = _T0 + timedelta(seconds=700)
         engine._arm_comfort_family("heating", later)
+
+        assert engine._comfort_mode_family == "heating"
+        assert engine._comfort_mode_family_changed_this_tick is True
+        assert engine._comfort_mode_family_entry_time == later
+
+
+# ---------------------------------------------------------------------------
+# Issue #823: only_if_changed=True path — used by _apply_comfort_band() and
+# _set_temperature_for_mode(), the 4 call sites that run every classification
+# cycle regardless of real state change. Without this, those sites re-arm the
+# same family every cycle, permanently pushing the dwell clock forward and
+# making the lockout mathematically unreachable-to-clear.
+# ---------------------------------------------------------------------------
+
+
+class TestArmComfortFamilyOnlyIfChanged:
+    def test_first_arm_still_sets_family_and_entry_time(self):
+        """No prior entry_time recorded — must still arm even with only_if_changed=True,
+        matching the default path's cold-start behavior."""
+        engine = _make_engine(indoor_temp=70.0)
+
+        engine._arm_comfort_family("cooling", _T0, only_if_changed=True)
+
+        assert engine._comfort_mode_family == "cooling"
+        assert engine._comfort_mode_family_entry_time == _T0
+
+    def test_reaffirming_same_family_does_not_reset_entry_time(self):
+        """The Issue #823 fix: repeated reassertion of the SAME family must be a true
+        no-op for the dwell clock, unlike the default path."""
+        engine = _make_engine(indoor_temp=70.0)
+        engine._arm_comfort_family("cooling", _T0, only_if_changed=True)
+
+        later = _T0 + timedelta(seconds=300)
+        engine._arm_comfort_family("cooling", later, only_if_changed=True)
+
+        assert engine._comfort_mode_family_entry_time == _T0, (
+            "reaffirming the same family with only_if_changed=True must NOT reset the "
+            "dwell clock — this is the fix for Issue #823's permanent-lockout bug"
+        )
+        assert engine._comfort_mode_family_changed_this_tick is False
+
+    def test_reaffirming_many_times_never_resets_entry_time(self):
+        """Simulates a realistic multi-cycle sequence (classification cadence shorter
+        than comfort_mode_switch_min_interval_s) — entry_time must stay pinned to the
+        very first arm no matter how many times the same family is reaffirmed."""
+        engine = _make_engine(indoor_temp=70.0)
+        engine._arm_comfort_family("cooling", _T0, only_if_changed=True)
+
+        for i in range(1, 6):
+            engine._arm_comfort_family("cooling", _T0 + timedelta(minutes=5 * i), only_if_changed=True)
+
+        assert engine._comfort_mode_family_entry_time == _T0
+
+    def test_switching_family_still_resets_entry_time_and_sets_changed_flag(self):
+        """A genuine transition must still behave exactly like the default path."""
+        engine = _make_engine(indoor_temp=70.0)
+        engine._arm_comfort_family("cooling", _T0, only_if_changed=True)
+
+        later = _T0 + timedelta(seconds=700)
+        engine._arm_comfort_family("heating", later, only_if_changed=True)
 
         assert engine._comfort_mode_family == "heating"
         assert engine._comfort_mode_family_changed_this_tick is True
@@ -296,4 +363,107 @@ class TestFamilySwitchLockoutPreventsHunting:
             f"the flap (heat -> cool -> heat only ~200s apart). Got: {resolved} — if this "
             "assertion fails, either the lockout isn't actually disabled by this patch, or "
             "the test sequence itself doesn't exercise the lockout at all."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #823: permanent-lockout regression. Reproduces the live incident (Zone
+# "Simulated 2", 2026-09-02): indoor continuously below comfort_heat, day stays
+# cool-classified, classification cadence (5 min) shorter than
+# comfort_mode_switch_min_interval_s (600s default). Drives the REAL call
+# sequence _apply_comfort_band()'s cool branch performs every cycle:
+# _resolve_comfort_family_mode() then _arm_comfort_family(..., only_if_changed=True)
+# — not a re-implementation of that logic, the same two real methods the live
+# code path calls, in the same order.
+# ---------------------------------------------------------------------------
+
+
+def _run_reassertion_sequence(engine: AutomationEngine, *, cycle_seconds: int, num_cycles: int) -> list[str]:
+    """Simulates `num_cycles` classification cycles, `cycle_seconds` apart, with
+    indoor continuously below the comfort floor the whole time (mirrors the engine's
+    own indoor-temp mock, fixed below floor via _make_engine). Each cycle calls the
+    real _resolve_comfort_family_mode() then _arm_comfort_family() exactly as
+    _apply_comfort_band()'s cool/heat branches do."""
+    resolved: list[str] = []
+    # Seed realistic prior state: "cooling" genuinely became the active family at T0
+    # (a real one-shot arm, matching the live incident — the day had just become
+    # cool-classified before the breach). A cold start (family=None) trivially
+    # bypasses the lockout via its own exemption and would not exercise this bug.
+    engine._arm_comfort_family("cooling", _T0)
+    engine._comfort_floor_fallback_since = _T0 - timedelta(hours=1)  # already sustained from cycle 1
+    for i in range(1, num_cycles + 1):
+        t = _T0 + timedelta(seconds=cycle_seconds * i)
+        with patch(_DT_NOW_PATH, return_value=t):
+            mode = engine._resolve_comfort_family_mode("cool", now=t)
+            resolved.append(mode)
+            if mode == "heat":
+                engine._arm_comfort_family("heating", t, only_if_changed=True)
+            else:
+                engine._arm_comfort_family("cooling", t, only_if_changed=True)
+    return resolved
+
+
+class TestPermanentLockoutFixIssue823:
+    """The Issue #823 fix: with only_if_changed=True at the reassertion call sites,
+    the dwell clock measures continuous time-in-family since it genuinely started,
+    not time-since-last-reassertion — so a sustained below-floor reading eventually
+    escalates to heat, exactly like a normal thermostat."""
+
+    def test_heat_eventually_fires_despite_cadence_shorter_than_lockout_window(self):
+        # 5-minute classification cadence (matches the live incident), 15 cycles
+        # (70 minutes) — well past the 600s default comfort_mode_switch_min_interval_s
+        # measured from the TRUE start of the "cooling" family, not from any single
+        # reassertion.
+        engine = _make_engine(indoor_temp=60.0, comfort_heat=68.0)
+
+        resolved = _run_reassertion_sequence(engine, cycle_seconds=300, num_cycles=15)
+
+        assert "heat" in resolved, (
+            "With the Issue #823 fix, indoor continuously below the comfort floor for "
+            "70 minutes (14 reassertion cycles, each shorter than the 600s lockout "
+            f"window) must eventually escalate to heat. Got: {resolved} — if this never "
+            "reaches 'heat', the permanent-lockout bug has reproduced."
+        )
+        # The house must not sit locked out indefinitely: heat should fire once
+        # elapsed time since the TRUE cooling-family start (T0, the first cycle)
+        # exceeds comfort_mode_switch_min_interval_s (600s = cycle index 2, since
+        # cycles are 300s apart) plus the 90s sustain-confirm gate already satisfied
+        # by the pre-armed fallback candidate.
+        first_heat_index = resolved.index("heat")
+        assert first_heat_index <= 3, (
+            f"Heat fired at cycle {first_heat_index} (t={first_heat_index * 300}s) — expected "
+            "at or shortly after t=600s (cycle index 2), not indefinitely delayed. "
+            f"Got: {resolved}"
+        )
+
+    def test_negative_control_without_the_fix_lockout_never_clears(self):
+        """Reverts to the pre-#823 always-reset behavior (only_if_changed has no
+        effect once _arm_comfort_family ignores it) — confirms the SAME sequence
+        never escalates, reproducing the live incident (indoor stuck below floor
+        indefinitely, every cycle re-arming the lockout that blocks it)."""
+        engine = _make_engine(indoor_temp=60.0, comfort_heat=68.0)
+
+        def _always_reset_arm(self, family, now, *, only_if_changed=False):
+            # only_if_changed is accepted but ignored — the pre-#823 shipped behavior.
+            # NOTE: this hand-copies the pre-fix body of the real _arm_comfort_family()
+            # rather than calling it, so it won't track future changes to that method's
+            # OTHER logic (e.g. the same-tick guard below) — only the only_if_changed
+            # branch itself is what this negative control needs to bypass. Acceptable
+            # coupling for a revert-test; if the same-tick guard logic changes, revisit.
+            _prior = getattr(self, "_comfort_mode_family", None)
+            if _prior is not None and _prior != family:
+                self._comfort_mode_family_changed_this_tick = True
+            self._comfort_mode_family = family
+            self._comfort_mode_family_entry_time = now
+
+        with patch.object(AutomationEngine, "_arm_comfort_family", _always_reset_arm):
+            resolved = _run_reassertion_sequence(engine, cycle_seconds=300, num_cycles=15)
+
+        assert "heat" not in resolved, (
+            "Negative control: without the Issue #823 fix (every call resets the dwell "
+            "clock regardless of only_if_changed), the lockout must never clear across "
+            f"15 cycles at a 300s cadence — reproducing the live permanent-lockout "
+            f"incident. Got: {resolved} — if 'heat' appears, either the patch above "
+            "isn't actually restoring the pre-fix behavior, or the test sequence "
+            "doesn't exercise the bug."
         )

@@ -523,6 +523,87 @@ class TestConfigFlowStepUserFields:
         assert 75 <= DEFAULT_SETBACK_COOL <= 90
 
 
+def _make_config_flow(existing_entries: list[MagicMock] | None = None):
+    """Instantiate the REAL config flow for direct invocation (Issue #808).
+
+    Enabled by the ha_stubs realification of ``config_entries.ConfigFlow``
+    (same pattern as ``_make_options_flow`` for OptionsFlow, Issue #452) plus
+    the unique_id/abort helpers added to ``_MockConfigFlow`` for this issue.
+    ``hass.config_entries.async_entries`` is stubbed to return the "existing
+    entries" the dedup check should compare against — the actual dedup
+    decision (does any entry's ``unique_id`` match?) still runs inside the
+    real ``_abort_if_unique_id_configured()``, not in the test.
+    """
+    from custom_components.climate_advisor.config_flow import ClimateAdvisorConfigFlow
+
+    flow = object.__new__(ClimateAdvisorConfigFlow)
+    flow._data = {}
+    flow.unique_id = None
+
+    hass = MagicMock()
+    hass.config_entries.async_entries = MagicMock(return_value=existing_entries or [])
+    flow.hass = hass
+    return flow
+
+
+def _run_config_flow_user_step(existing_entries: list[MagicMock] | None, user_input: dict) -> dict:
+    """Drive the REAL async_step_user against mocked existing entries.
+
+    Catches the stub's ``AbortFlow`` exception the same way HA's real
+    FlowManager does when a step raises it, converting it into an abort
+    FlowResult — this conversion is FlowManager plumbing, not the dedup
+    logic under test (which stays inside the production step handler).
+    """
+    from homeassistant.data_entry_flow import AbortFlow
+
+    flow = _make_config_flow(existing_entries)
+
+    async def _drive() -> dict:
+        try:
+            return await flow.async_step_user(user_input)
+        except AbortFlow as err:
+            return {"type": "abort", "reason": err.reason}
+
+    return asyncio.run(_drive())
+
+
+class TestConfigFlowDuplicateZoneGuard:
+    """Issue #808: adding a second zone for the same climate_entity must abort.
+
+    Adding a zone for a DIFFERENT climate_entity must proceed normally —
+    this is the multi-zone regression guard for Issue #796.
+    """
+
+    USER_INPUT = {
+        "weather_entity": "weather.forecast_home",
+        "climate_entity": "climate.living_room",
+        "notify_service": "notify.notify",
+    }
+
+    def test_duplicate_climate_entity_aborts(self):
+        """A second zone targeting an already-configured climate_entity aborts."""
+        existing_entry = MagicMock()
+        existing_entry.unique_id = "climate.living_room"
+
+        result = _run_config_flow_user_step([existing_entry], dict(self.USER_INPUT))
+
+        assert result["type"] == "abort"
+        assert result["reason"] == "already_configured"
+
+    def test_different_climate_entity_proceeds(self):
+        """A second zone targeting a DIFFERENT climate_entity is not blocked (#796)."""
+        existing_entry = MagicMock()
+        existing_entry.unique_id = "climate.bedroom"
+
+        user_input = dict(self.USER_INPUT)
+        user_input["climate_entity"] = "climate.living_room"
+
+        result = _run_config_flow_user_step([existing_entry], user_input)
+
+        assert result["type"] == "form"
+        assert result["step_id"] == "unit"
+
+
 class TestSetpointSliderRangesRegression:
     """Regression guard (architecture-reset session, #438 follow-up): the initial
     setup wizard's Fahrenheit sleep_heat/sleep_cool defaults, and ALL SIX Celsius

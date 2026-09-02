@@ -388,6 +388,38 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=18)
         _LOGGER.info("Migration to version 18 complete")
 
+    if config_entry.version == 18:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 18 to 19")
+        # Issue #808: config entries created before the duplicate-zone guard
+        # existed have unique_id=None, which makes _abort_if_unique_id_configured()
+        # a no-op for them — backfill it from climate_entity so the guard
+        # actually protects installs upgrading from a pre-0.7.1 version, not
+        # just fresh installs created after it.
+        new_data = {**config_entry.data}
+        climate_entity = new_data.get("climate_entity")
+        existing_unique_id = getattr(config_entry, "unique_id", None)
+        new_unique_id = existing_unique_id or climate_entity
+
+        other_entries = hass.config_entries.async_entries(DOMAIN)
+        if isinstance(other_entries, list) and climate_entity:
+            for other in other_entries:
+                if (
+                    getattr(other, "entry_id", None) != config_entry.entry_id
+                    and getattr(other, "unique_id", None) == climate_entity
+                ):
+                    _LOGGER.warning(
+                        "Zone '%s' shares climate_entity '%s' with another already-migrated "
+                        "zone; only one will be resolvable by unique_id going forward. "
+                        "Remove or repoint one of the duplicate zones in Settings -> "
+                        "Devices & Services",
+                        config_entry.entry_id,
+                        climate_entity,
+                    )
+                    break
+
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=19, unique_id=new_unique_id)
+        _LOGGER.info("Migration to version 19 complete")
+
     return True
 
 

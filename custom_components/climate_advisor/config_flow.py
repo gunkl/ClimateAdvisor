@@ -237,7 +237,7 @@ def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, fl
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 18
+    VERSION = 19
 
     def __init__(self) -> None:
         """Initialize the config flow."""

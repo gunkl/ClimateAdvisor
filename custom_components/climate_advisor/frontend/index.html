@@ -785,7 +785,42 @@
   // zone itself (today's single-zone behavior when zone_count == 1). Set by
   // the zone-selector row (see renderZoneSelector() below), which only
   // exists in the DOM when the /status response reports zone_count > 1.
-  let _selectedEntryId = null;
+  //
+  // Issue #812: on every page load this used to start out null, so all 8
+  // loadAll() calls fired zone-blind and hit the backend's "ambiguous zone
+  // selection" fallback until the first /status response came back and
+  // renderZoneSelector() picked zones[0]. We now persist the selection to
+  // localStorage and seed _selectedEntryId from it synchronously here, before
+  // loadAll() ever runs, so every session after the first one is zone-correct
+  // from the very first request with zero change to the parallel firing below.
+  const ZONE_STORAGE_KEY = 'climate_advisor_selected_zone';
+
+  function _loadStoredZone() {
+    try {
+      const stored = localStorage.getItem(ZONE_STORAGE_KEY);
+      return stored || null;
+    } catch (e) { /* localStorage unavailable (private mode, etc.) */ }
+    return null;
+  }
+
+  function _storeSelectedZone(entryId) {
+    try {
+      if (entryId) {
+        localStorage.setItem(ZONE_STORAGE_KEY, entryId);
+      } else {
+        localStorage.removeItem(ZONE_STORAGE_KEY);
+      }
+    } catch (e) { /* localStorage unavailable — selection just won't persist */ }
+  }
+
+  // True only on a genuine first-ever-visit (nothing stored yet) — used by
+  // initLoad() below to decide whether the initial load must wait for
+  // loadStatus()/renderZoneSelector() to resolve a zone before firing the
+  // other 7 load*() calls. Captured once, before the constant is possibly
+  // written to for the first time by the seed below.
+  const _hadStoredZoneAtInit = _loadStoredZone() !== null;
+
+  let _selectedEntryId = _loadStoredZone();
 
   // --- Tab switching ---
   document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -969,6 +1004,7 @@
       row.innerHTML = '';
       _zoneSelectorSignature = null;
       _selectedEntryId = null;
+      _storeSelectedZone(null);
       return;
     }
 
@@ -981,7 +1017,12 @@
     }
     _zoneSelectorSignature = signature;
     if (!_selectedEntryId || !zones.some(z => z.entry_id === _selectedEntryId)) {
+      // Either no selection yet, or the stored/current selection points at a
+      // zone that no longer exists (e.g. removed since the value was saved)
+      // — fall back to the first known zone and persist that correction so
+      // the next page load doesn't repeat the same stale-lookup miss.
       _selectedEntryId = zones[0].entry_id;
+      _storeSelectedZone(_selectedEntryId);
     }
 
     row.innerHTML = zones.map(z => `<button type="button" class="zone-tab-btn${z.entry_id === _selectedEntryId ? ' active' : ''}" data-entry-id="${escapeHtml(z.entry_id)}">${escapeHtml(z.title)}</button>`).join('');
@@ -990,6 +1031,7 @@
       btn.addEventListener('click', () => {
         if (_selectedEntryId === btn.dataset.entryId) return;
         _selectedEntryId = btn.dataset.entryId;
+        _storeSelectedZone(_selectedEntryId);
         row.querySelectorAll('.zone-tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         _refreshAll();
@@ -1013,7 +1055,7 @@
   }
 
   // --- Status tab ---
-  async function loadStatus() {
+  async function loadStatus(_isZoneSelfHealRetry) {
     try {
       const data = await apiFetch('status');
       renderZoneSelector(data.zones, data.zone_count);
@@ -1149,6 +1191,34 @@
       document.getElementById('cancel-fan-override-btn').disabled = !data.fan_override_active;
       document.getElementById('resume-pause-btn').disabled = !data.paused_by_door;
     } catch (e) {
+      // Issue #812 fix: a stored-but-now-stale zone selection (the saved
+      // entry_id was deleted, or the integration was reinstalled with new
+      // entry_ids) makes THIS request — the very first one to fire — resolve
+      // to no coordinator (api.py::_get_coordinator returns None when
+      // zone_registry.get_coordinator() can't find the entry_id, producing
+      // HTTP 503 {"error": "Climate Advisor not loaded"}). A stale
+      // _selectedEntryId normally self-heals inside renderZoneSelector()
+      // above, but that only runs on a *successful* response — it never gets
+      // a chance to run here, so without this check the dashboard would show
+      // this error forever on every reload (the stored value never gets
+      // cleared). Detect the specific case — this request WAS zone-scoped,
+      // and got back the "no coordinator resolved" 503 — and self-heal:
+      // clear the stale selection and retry once, unscoped (the backend then
+      // falls back to zone_registry.get_default_coordinator(), same as
+      // today's single-zone behavior). Guarded to retry at most once so a
+      // genuine "Climate Advisor not loaded at all" 503 still surfaces as a
+      // real error instead of looping forever.
+      if (!_isZoneSelfHealRetry && _selectedEntryId && e.message === 'HTTP 503') {
+        _selectedEntryId = null;
+        _storeSelectedZone(null);
+        // The other 7 loadAll() calls fired in parallel with the same stale
+        // entry_id and failed the same way — re-fire them now that the
+        // selection is corrected instead of leaving them broken until the
+        // next poll cycle (60s), or longer for loadChart (5min poll) /
+        // loadSettings & loadAIData (next tab click).
+        _loadNonStatus();
+        return loadStatus(true);
+      }
       document.getElementById('status-loading').textContent = 'Failed to load status: ' + e.message;
     }
   }
@@ -3553,8 +3623,13 @@
   window.submitGithubIssue = submitGithubIssue;
 
   // --- Initial load (retry until auth token is available) ---
-  function loadAll() {
-    loadStatus();
+  // Issue #812: the 7 calls other than loadStatus() are zone-blind unless
+  // _selectedEntryId is already seeded (either from localStorage at script
+  // init, or by loadStatus()'s own renderZoneSelector() call). The remaining
+  // 7 are factored out here so the true first-ever-visit case (nothing in
+  // localStorage — see _hadStoredZoneAtInit above) can await loadStatus()
+  // first without touching the parallel firing used in every other case.
+  function _loadNonStatus() {
     loadBriefing();
     loadChart();
     loadAutomationState();
@@ -3564,11 +3639,28 @@
     loadAIData();
   }
 
+  function loadAll() {
+    loadStatus();
+    _loadNonStatus();
+  }
+
   let _loadRetries = 0;
   async function initLoad() {
     const token = await getAuthToken();
     if (token) {
-      loadAll();
+      if (_hadStoredZoneAtInit) {
+        // Stored zone already seeded into _selectedEntryId — every call
+        // (including loadStatus itself) is zone-correct from the start, so
+        // preserve today's fully-parallel firing.
+        loadAll();
+      } else {
+        // Genuine first-ever-visit: zone count/selection is unknown until
+        // loadStatus()'s response comes back and renderZoneSelector() sets
+        // _selectedEntryId. Await it once here (extra latency scoped to
+        // exactly this case) so the other 7 calls fire zone-correct too.
+        await loadStatus();
+        _loadNonStatus();
+      }
     } else if (_loadRetries < 20) {
       _loadRetries++;
       setTimeout(initLoad, 250);

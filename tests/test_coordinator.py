@@ -645,6 +645,13 @@ class TestBriefingNotificationSplit:
         # async_add_executor_job is now awaited by _async_send_briefing for ODE offload.
         # Execute the partial synchronously so patched _build_predicted_indoor_future is used.
         coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+        # Issue #812: _async_send_briefing/_async_update_data now route ODE offload
+        # through self._executor_job() (zone-tags the executor call — see
+        # coordinator.py/log_capture.py) instead of self.hass.async_add_executor_job()
+        # directly. `coord` here is a bare MagicMock, not a real coordinator instance,
+        # so `coord._executor_job` needs its own explicit stub with the same
+        # synchronous-passthrough behavior as the hass-level stub above.
+        coord._executor_job = AsyncMock(side_effect=lambda fn, *args: fn(*args))
 
         # Bind the real methods to our mock
         coord._async_send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
@@ -1039,6 +1046,13 @@ class TestBriefingRegeneration:
 
         # async_add_executor_job is now awaited by _async_update_data/_async_send_briefing for ODE offload.
         coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+        # Issue #812: _async_send_briefing/_async_update_data now route ODE offload
+        # through self._executor_job() (zone-tags the executor call — see
+        # coordinator.py/log_capture.py) instead of self.hass.async_add_executor_job()
+        # directly. `coord` here is a bare MagicMock, not a real coordinator instance,
+        # so `coord._executor_job` needs its own explicit stub with the same
+        # synchronous-passthrough behavior as the hass-level stub above.
+        coord._executor_job = AsyncMock(side_effect=lambda fn, *args: fn(*args))
 
         coord._build_briefing_text = types.MethodType(ClimateAdvisorCoordinator._build_briefing_text, coord)
 

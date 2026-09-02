@@ -152,7 +152,11 @@ class TestReloadNeededRepairFlow:
 
         assert result["type"] == "create_entry"
         hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
-        mock_delete.assert_called_once_with(hass, "climate_advisor", "reload_needed")
+        # Issue #812: entry-scoped issue_id — no entry_id was passed to the
+        # flow constructor here, so it falls back to the old "first entry"
+        # resolution (matching pre-#812 single-zone behavior) but still
+        # deletes the NEW entry-scoped id, derived from that resolved entry.
+        mock_delete.assert_called_once_with(hass, "climate_advisor", f"reload_needed_{entry.entry_id}")
 
     def test_no_config_entries_graceful(self):
         """If no config entries exist, flow completes without error (no reload attempted)."""
@@ -394,3 +398,170 @@ class TestZoneResolutionAmbiguousIssue:
         with scheduler.installed():
             passed, detail = run_coro(check_multi_zone_assertion(zones, fake_hass, assertion))
         assert passed is True, detail
+
+
+# ---------------------------------------------------------------------------
+# Issue #812: repairs.py always resolved the target config entry via
+# hass.config_entries.async_entries(DOMAIN)[0] — the FIRST zone by that
+# ordering — regardless of which zone's issue was actually being fixed. With
+# 2+ zones, clicking "Fix" on either zone's card could silently patch/reload
+# the WRONG zone while deleting the issue as if the actually-broken zone were
+# resolved. Compounded by both issue_ids being domain-wide (not
+# entry-scoped), so a second zone's create call for the same issue_id could
+# collide with the first's.
+#
+# Fix: entry-scoped issue_ids (f"weather_entity_not_found_{entry_id}" /
+# f"reload_needed_{entry_id}") plus data={"entry_id": ...} threaded through
+# async_create_fix_flow() into the flow's constructor, resolved via
+# repairs.py::_resolve_target_entry() instead of "first entry".
+#
+# These tests drive the REAL async_create_fix_flow() and the REAL flow
+# classes against REAL config entries from build_headless_multi_zone() (per
+# this project's no-mirror-tests doctrine) — not a re-implementation of the
+# entry-resolution logic in the test body.
+# ---------------------------------------------------------------------------
+
+
+class TestMultiZoneRepairFlowTargeting:
+    """Issue #812: a repair Fix action must target the zone the issue was raised for."""
+
+    def test_entry_scoped_issue_ids_do_not_collide_across_zones(self):
+        """Two zones each raising 'their own' weather-entity issue must get
+        DISTINCT issue_ids — proving the old bug (both zones sharing the bare
+        "weather_entity_not_found" id, so a second create could silently
+        collide with/overwrite the first) is fixed."""
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue"):
+            zones, _fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        entry_a = zones["zone_0"]["entry"]
+        entry_b = zones["zone_1"]["entry"]
+
+        issue_id_a = f"weather_entity_not_found_{entry_a.entry_id}"
+        issue_id_b = f"weather_entity_not_found_{entry_b.entry_id}"
+        assert issue_id_a != issue_id_b
+
+        flow_a = asyncio.run(async_create_fix_flow(_fake_hass, issue_id_a, {"entry_id": entry_a.entry_id}))
+        flow_b = asyncio.run(async_create_fix_flow(_fake_hass, issue_id_b, {"entry_id": entry_b.entry_id}))
+        assert isinstance(flow_a, WeatherEntityRepairFlow)
+        assert isinstance(flow_b, WeatherEntityRepairFlow)
+        assert flow_a._entry_id == entry_a.entry_id
+        assert flow_b._entry_id == entry_b.entry_id
+        assert flow_a._entry_id != flow_b._entry_id
+
+    def test_fixing_zone_a_weather_issue_touches_only_zone_a(self):
+        """Fixing zone A's weather_entity_not_found issue must update zone A's
+        config entry and leave zone B's config entry completely untouched."""
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+        from tools.sim_harness.fake_hass import FakeState
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue"):
+            zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        entry_a = zones["zone_0"]["entry"]
+        entry_b = zones["zone_1"]["entry"]
+        original_b_data = dict(entry_b.data)
+
+        fake_hass.states.set("weather.new_forecast_for_a", FakeState(state="sunny", attributes={}))
+
+        issue_id_a = f"weather_entity_not_found_{entry_a.entry_id}"
+        flow = asyncio.run(async_create_fix_flow(fake_hass, issue_id_a, {"entry_id": entry_a.entry_id}))
+        flow.hass = fake_hass
+        # The flow defers the reload via hass.async_create_task() — close the
+        # coroutine rather than letting the harness's FakeScheduler queue it
+        # unrun, which would trigger a "coroutine was never awaited"
+        # RuntimeWarning at GC (see CLAUDE.md's async-mock testing rules).
+        fake_hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+
+        with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue") as mock_delete:
+            result = asyncio.run(flow.async_step_init(user_input={"weather_entity": "weather.new_forecast_for_a"}))
+
+        assert result["type"] == "create_entry"
+        assert entry_a.data["weather_entity"] == "weather.new_forecast_for_a"
+        # Zone B's config entry must be byte-for-byte untouched.
+        assert entry_b.data == original_b_data
+        mock_delete.assert_called_once_with(
+            fake_hass, "climate_advisor", f"weather_entity_not_found_{entry_a.entry_id}"
+        )
+
+    def test_fixing_zone_b_weather_issue_touches_only_zone_b(self):
+        """Same as above with the zones reversed — proves it's not incidentally
+        always picking one zone regardless of which entry_id was supplied."""
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+        from tools.sim_harness.fake_hass import FakeState
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue"):
+            zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        entry_a = zones["zone_0"]["entry"]
+        entry_b = zones["zone_1"]["entry"]
+        original_a_data = dict(entry_a.data)
+
+        fake_hass.states.set("weather.new_forecast_for_b", FakeState(state="sunny", attributes={}))
+
+        issue_id_b = f"weather_entity_not_found_{entry_b.entry_id}"
+        flow = asyncio.run(async_create_fix_flow(fake_hass, issue_id_b, {"entry_id": entry_b.entry_id}))
+        flow.hass = fake_hass
+        fake_hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+
+        with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue") as mock_delete:
+            result = asyncio.run(flow.async_step_init(user_input={"weather_entity": "weather.new_forecast_for_b"}))
+
+        assert result["type"] == "create_entry"
+        assert entry_b.data["weather_entity"] == "weather.new_forecast_for_b"
+        # Zone A's config entry must be byte-for-byte untouched.
+        assert entry_a.data == original_a_data
+        mock_delete.assert_called_once_with(
+            fake_hass, "climate_advisor", f"weather_entity_not_found_{entry_b.entry_id}"
+        )
+
+    def test_fixing_zone_b_reload_needed_touches_only_zone_b(self):
+        """Same targeting proof for the reload_needed issue/flow pair."""
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue"):
+            zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+
+        entry_a = zones["zone_0"]["entry"]
+        entry_b = zones["zone_1"]["entry"]
+
+        fake_hass.config_entries.async_reload = AsyncMock(return_value=True)
+
+        issue_id_b = f"reload_needed_{entry_b.entry_id}"
+        flow = asyncio.run(async_create_fix_flow(fake_hass, issue_id_b, {"entry_id": entry_b.entry_id}))
+        flow.hass = fake_hass
+
+        with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue") as mock_delete:
+            result = asyncio.run(flow.async_step_init(user_input={}))
+
+        assert result["type"] == "create_entry"
+        fake_hass.config_entries.async_reload.assert_called_once_with(entry_b.entry_id)
+        assert entry_a.entry_id not in [c.args[0] for c in fake_hass.config_entries.async_reload.call_args_list]
+        mock_delete.assert_called_once_with(fake_hass, "climate_advisor", f"reload_needed_{entry_b.entry_id}")
+
+    def test_single_zone_no_entry_id_ambiguity_unchanged(self):
+        """With exactly 1 zone, there is no ambiguity to resolve — confirm the
+        flow still resolves and fixes that zone exactly as it did before
+        Issue #812, including via the OLD unscoped issue_id/no entry_id data
+        (a stale pre-#812 issue instance, or a caller that hasn't been
+        updated to pass entry_id)."""
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+        from tools.sim_harness.fake_hass import FakeState
+
+        with patch("custom_components.climate_advisor.ir.async_create_issue"):
+            zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=1)
+
+        entry = zones["zone_0"]["entry"]
+        fake_hass.states.set("weather.only_zone_new", FakeState(state="sunny", attributes={}))
+
+        # Old unscoped issue_id, data=None — the pre-#812 call shape.
+        flow = asyncio.run(async_create_fix_flow(fake_hass, "weather_entity_not_found", None))
+        flow.hass = fake_hass
+        fake_hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+
+        with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue"):
+            result = asyncio.run(flow.async_step_init(user_input={"weather_entity": "weather.only_zone_new"}))
+
+        assert result["type"] == "create_entry"
+        assert entry.data["weather_entity"] == "weather.only_zone_new"

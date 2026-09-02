@@ -694,14 +694,19 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             data.pop(key, None)
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+        # Issue #812: entry-scoped issue_id + data={"entry_id": ...} so a
+        # multi-zone install's Repairs "Fix" targets THIS zone specifically,
+        # not always the first config entry — see repairs.py's
+        # ReloadNeededRepairFlow/_resolve_target_entry().
         ir.async_create_issue(
             self.hass,
             DOMAIN,
-            "reload_needed",
+            f"reload_needed_{self.config_entry.entry_id}",
             is_fixable=True,
             is_persistent=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key="reload_needed",
+            data={"entry_id": self.config_entry.entry_id},
         )
         _LOGGER.info("Options section saved (cleared=%d) — reload not yet applied", len(self._removed))
 

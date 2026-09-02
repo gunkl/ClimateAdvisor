@@ -2166,9 +2166,13 @@ class TestOptionsFlowMenu:
 
         mock_create.assert_called_once()
         args, kwargs = mock_create.call_args
-        assert args[2] == "reload_needed"
+        # Issue #812: issue_id is entry-scoped so a multi-zone install's
+        # Repairs "Fix" targets the correct zone; translation_key (the
+        # strings.json lookup key) stays the unscoped literal.
+        assert args[2] == f"reload_needed_{flow.config_entry.entry_id}"
         assert kwargs["is_fixable"] is True
         assert kwargs["translation_key"] == "reload_needed"
+        assert kwargs["data"] == {"entry_id": flow.config_entry.entry_id}
 
 
 # ---------------------------------------------------------------------------

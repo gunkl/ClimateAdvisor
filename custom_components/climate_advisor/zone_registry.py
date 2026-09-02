@@ -157,22 +157,21 @@ def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | 
     ordered_entries = hass.config_entries.async_entries(DOMAIN)
     if not ordered_entries:
         # Defensive: hass.data[DOMAIN] is non-empty but config_entries has no
-        # matching entries — shouldn't happen in practice. This is the LEAST
-        # deterministic of the three branches here (dict-iteration order is
-        # not guaranteed stable across restarts), so unlike the pre-fix code
-        # it's no longer silent — logged (throttled) rather than returning
-        # None outright.
+        # matching entries — shouldn't happen in practice. Unlike the pre-fix
+        # code it's no longer silent — logged (throttled) rather than
+        # returning None outright. Tie-break is sorted by entry_id (stable,
+        # assigned once by HA and never changes) rather than dict-insertion
+        # order, which is NOT guaranteed stable across restarts.
         _warn_once(
             hass,
             "defensive_empty_config_entries",
             "Climate Advisor zone fallback: %d zone(s) loaded but "
             "hass.config_entries.async_entries() returned none — falling "
-            "back to dict-insertion order, which is NOT guaranteed stable "
-            "across restarts. This should not normally happen; please file "
-            "a bug report if it persists.",
+            "back to a deterministic entry_id sort. This should not "
+            "normally happen; please file a bug report if it persists.",
             len(entries),
         )
-        return next(iter(entries.values()))
+        return sorted(entries.items(), key=lambda kv: kv[0])[0][1]
 
     for entry in ordered_entries:
         coordinator = entries.get(entry.entry_id)
@@ -187,18 +186,16 @@ def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | 
             )
             return coordinator
 
-    # Every ordered entry is unloaded/missing from hass.data — fall back to
-    # dict order rather than returning None outright. Also the least
-    # deterministic of the three branches (same caveat as above), so also
-    # logged (throttled) rather than silent.
+    # Every ordered entry is unloaded/missing from hass.data — fall back to a
+    # deterministic entry_id sort rather than returning None outright. Also
+    # logged (throttled) rather than silent, same as the branch above.
     _warn_once(
         hass,
         "defensive_no_matching_loaded_entry",
         "Climate Advisor zone fallback: none of the %d ordered config entries "
-        "matched a loaded coordinator in hass.data — falling back to "
-        "dict-insertion order, which is NOT guaranteed stable across "
-        "restarts. This should not normally happen; please file a bug "
-        "report if it persists.",
+        "matched a loaded coordinator in hass.data — falling back to a "
+        "deterministic entry_id sort. This should not normally happen; "
+        "please file a bug report if it persists.",
         len(ordered_entries),
     )
-    return next(iter(entries.values()))
+    return sorted(entries.items(), key=lambda kv: kv[0])[0][1]

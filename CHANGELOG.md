@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.2] — 2026-09-01
+
+- Fix #812: the dashboard, weather/reload repair prompts, and AI Investigator reports now always act on the zone you're actually looking at instead of sometimes silently guessing which zone — and the dashboard no longer gets stuck if a saved zone selection becomes stale.
+
 ## [0.7.1] — 2026-09-01
 
 - Fix #808: Adding a second zone that points at a thermostat you've already configured now shows a clear "already configured" message instead of silently creating a conflicting duplicate zone.

@@ -182,7 +182,14 @@ def _run_restore(coord, *, state_data: dict):
     """
 
     async def _fake_executor(fn, *args):
-        if fn is coord._state_persistence.load:
+        # Issue #812: async_restore_state() now routes executor offload
+        # through coordinator._executor_job(), which wraps the target
+        # callable with log_capture.bind_zone_for_executor() before handing
+        # it to hass.async_add_executor_job() — so `fn` here is a wrapper,
+        # not literally `coord._state_persistence.load`. Unwrap via
+        # __wrapped__ (set by functools.wraps in bind_zone_for_executor) to
+        # keep this identity check working.
+        if getattr(fn, "__wrapped__", fn) is coord._state_persistence.load:
             return state_data
         return None
 

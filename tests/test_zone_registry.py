@@ -251,6 +251,41 @@ class TestGetDefaultCoordinatorWarningThrottle:
         hass = _make_hass({"entry_a": MagicMock()})
         zone_registry.reset_warning_state(hass)  # should not raise
 
+    def test_defensive_empty_config_entries_picks_lowest_entry_id_regardless_of_dict_order(self):
+        """Defensive path (async_entries() empty): tie-break must sort by entry_id, not
+        dict-insertion order. Same zones inserted in two different orders must both
+        resolve to the SAME coordinator (the one whose entry_id sorts first)."""
+        coord_a, coord_b, coord_c = MagicMock(), MagicMock(), MagicMock()
+
+        hass_forward = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b, "entry_c": coord_c},
+            ordered_entry_ids=[],
+        )
+        hass_scrambled = _make_hass(
+            {"entry_c": coord_c, "entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=[],
+        )
+
+        assert zone_registry.get_default_coordinator(hass_forward) is coord_a
+        assert zone_registry.get_default_coordinator(hass_scrambled) is coord_a
+
+    def test_defensive_no_matching_loaded_entry_picks_lowest_entry_id_regardless_of_dict_order(self):
+        """Defensive path (no ordered entry matches hass.data): same determinism proof
+        as above, but via the second fallback branch (ordered entries all unloaded)."""
+        coord_a, coord_b, coord_c = MagicMock(), MagicMock(), MagicMock()
+
+        hass_forward = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b, "entry_c": coord_c},
+            ordered_entry_ids=["entry_pending_1", "entry_pending_2"],
+        )
+        hass_scrambled = _make_hass(
+            {"entry_c": coord_c, "entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_pending_1", "entry_pending_2"],
+        )
+
+        assert zone_registry.get_default_coordinator(hass_forward) is coord_a
+        assert zone_registry.get_default_coordinator(hass_scrambled) is coord_a
+
     def test_skips_config_entries_not_yet_in_hass_data(self):
         """async_entries() may list an entry mid-setup, before hass.data[DOMAIN] has it —
         the fallback must skip past it to the next entry that IS actually loaded."""

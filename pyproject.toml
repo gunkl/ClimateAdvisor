@@ -13,6 +13,10 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "T20", "ASYNC"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["T20"]
 "tools/*" = ["T20"]
+# dev_tools/ha_test_integrations/ — never-shipped local test tooling (Issue #809),
+# same rationale as tools/*: print() output is the point of a manual verification
+# script, not a lint smell.
+"dev_tools/*" = ["T20"]
 # take_screenshots.py runs its own private asyncio loop for Playwright, not Home
 # Assistant's shared event loop — the ASYNC240 hazard (stalling a live production
 # loop) doesn't apply to a one-off local CLI script.

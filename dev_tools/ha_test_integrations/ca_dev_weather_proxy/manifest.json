@@ -1,0 +1,13 @@
+{
+  "domain": "ca_dev_weather_proxy",
+  "name": "CA Dev Weather Proxy",
+  "codeowners": ["@gunkl"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/gunkl/ClimateAdvisor/tree/main/dev_tools/ha_test_integrations",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/gunkl/ClimateAdvisor/issues/809",
+  "requirements": [],
+  "version": "0.1.0"
+}

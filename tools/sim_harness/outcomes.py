@@ -664,6 +664,20 @@ def check_assertion(
             return "paused_during_grace"
         return False
 
+    # --- manual_origin_unclosed (Issue #829) ---
+    # Purely additive, same pattern as paused_by_door/fan_not_active above — reads the
+    # production engine's final _fan_manual_origin_unclosed flag directly. Confirms the
+    # marker was genuinely armed by a real production handoff (clear_fan_override() or
+    # _re_pause_for_open_sensor()'s reactivation branch) rather than only in a hand-picked
+    # unit-test precondition — the flag's CONSUMING behavior (on_fan_turned_off() routing
+    # a later real off through session-closing instead of a fresh grace) is proven
+    # deterministically at the unit level instead
+    # (tests/test_whole_house_fan_hvac_suppression.py::TestFanManualOriginUnclosed).
+    if expect == "manual_origin_unclosed":
+        if engine_state.get("_fan_manual_origin_unclosed") is True:
+            return "manual_origin_unclosed"
+        return False
+
     # --- ODE ceiling guard (Issue #236 D) ---
     # Production emits "ceiling_guard_fired" when it pre-cools.  The legacy scenarios use
     # bespoke labels; map them to the production decision at the asserted time.  "fires"/
@@ -1046,6 +1060,29 @@ def check_assertion(
         since = assertion.get("since")
         for ev_type, _ev_payload, ev_ts in result.event_log:
             if ev_type != "fan_manual_override" or ev_ts is None or since is None:
+                continue
+            if _naive_iso(ev_ts) >= since:
+                return False
+        return expect
+
+    # --- no_new_unprotected_grace_after (Issue #829) ---
+    # Negative GUARANTEE, sibling of no_new_manual_override_after above (same shape, same
+    # Issue #677 lineage) but for a fan-OFF rather than a fan-ON: proves no NEW
+    # unprotected_grace_started event (automation.py's _start_grace_period(), trigger=
+    # "fan_off") fires at/after "since" — the occupant-facing guarantee that a fan-off
+    # closing a session CA already has context for (a default-duration override that
+    # expired while still running, or a grace-expiry reactivation) is never misread as a
+    # fresh, unexplained override that re-locks CA out of the fan for another full
+    # manual_grace_seconds. Payload: {"since": <ISO>}.
+    # §8 justification: brand-new event-type/assertion pairing, mirroring the existing
+    # no_new_manual_override_after precedent exactly — no existing outcome/decision
+    # semantics touched; fan-on and fan-off provenance guarantees are genuinely distinct
+    # events (fan_manual_override vs. unprotected_grace_started) and were not previously
+    # assertable together.
+    if expect == "no_new_unprotected_grace_after":
+        since = assertion.get("since")
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if ev_type != "unprotected_grace_started" or ev_ts is None or since is None:
                 continue
             if _naive_iso(ev_ts) >= since:
                 return False

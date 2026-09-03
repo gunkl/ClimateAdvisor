@@ -1151,3 +1151,170 @@ class TestTimerBoundarySettleWindow:
 
         assert engine._grace_active is True
         assert engine._last_resume_source == "manual"
+
+
+class TestFanManualOriginUnclosed:
+    """Issue #829: the RF-timer settle window above only ever arms for an override tied
+    to a real remote timer selection (_fan_remote_timer_hours is not None). A
+    default-duration manual fan-on (no timer selected on the remote — falls back to the
+    configured manual_grace_seconds) has no numeric timer to anchor that window to, so its
+    eventual real end was previously always read as a brand-new unexplained override.
+
+    Live incident: a WHF-on with no timer at 17:37 armed a 180-minute default grace. That
+    grace expired at 20:37 while the fan was still physically running and nat-vent
+    conditions favored keeping it on — clear_fan_override() silently handed ownership to
+    nat-vent with no record the run had ever been user-initiated. The fan's real off, ~5
+    hours later, was read as fresh and started a brand-new 180-minute grace; the same
+    shape then repeated via a grace-expiry reactivation (_re_pause_for_open_sensor()) ~93
+    minutes later. _fan_manual_origin_unclosed is the state-based (not time-boxed) marker
+    that closes this gap.
+    """
+
+    _FIXED_NOW = datetime(2026, 9, 3, 1, 37, 28)
+
+    def setup_method(self) -> None:
+        automation_module = importlib.import_module("custom_components.climate_advisor.automation")
+        automation_module.dt_util.now = lambda: self._FIXED_NOW
+
+    def test_clear_fan_override_marks_unclosed_when_still_running_with_no_rf_timer(self):
+        """A default-duration override (no RF timer hours) clearing while the fan is still
+        physically active must mark manual-origin-unclosed instead of discarding all
+        provenance."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._fan_override_active = True
+        engine._fan_override_time = "2026-09-02T17:37:24"
+        engine._fan_remote_timer_hours = None  # no timer selected — the #829 case
+        engine._fan_active = True  # still physically running when grace expired
+        engine._natural_vent_active = True
+
+        engine.clear_fan_override()
+
+        assert engine._fan_manual_origin_unclosed is True
+        assert engine._fan_override_active is False
+        assert engine._fan_remote_timer_hours is None
+
+    def test_clear_fan_override_does_not_mark_unclosed_when_rf_timer_present(self):
+        """An RF-timer-linked override must NOT set the new marker — that case is already
+        covered by _timer_boundary_settle_until (Issue #530); this marker only fills the
+        gap that mechanism doesn't cover."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._fan_override_active = True
+        engine._fan_override_time = "2026-09-02T17:37:24"
+        engine._fan_remote_timer_hours = 2.0
+        engine._fan_active = True
+        engine._natural_vent_active = True
+
+        engine.clear_fan_override()
+
+        assert engine._fan_manual_origin_unclosed is False
+
+    def test_clear_fan_override_does_not_mark_unclosed_when_fan_already_off(self):
+        """If the fan is no longer active when the override clears, on_fan_turned_off()
+        already ran (or will run for a genuinely fresh event) — no marker needed."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._fan_override_active = True
+        engine._fan_override_time = "2026-09-02T17:37:24"
+        engine._fan_remote_timer_hours = None
+        engine._fan_active = False
+
+        engine.clear_fan_override()
+
+        assert engine._fan_manual_origin_unclosed is False
+
+    def test_fan_off_with_manual_origin_unclosed_does_not_start_fresh_grace(self):
+        """The real reported failure: a fan-off arriving long after the marker was set
+        (hours later — unlike the settle window, this marker is not time-boxed) must close
+        the existing session via _exit_nat_vent(), not start a brand-new unprotected
+        manual grace."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._fan_manual_origin_unclosed = True
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._sensor_check_callback = MagicMock(return_value=False)  # sensors closed
+
+        captured: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured.append(c))
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._fan_manual_origin_unclosed is False, "Marker must be consumed (one-shot)"
+        assert len(captured) == 1, "_exit_nat_vent() must be scheduled, not run inline"
+        asyncio.run(captured[0])
+
+        assert engine._natural_vent_active is False
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "automation", (
+            "Must close via _exit_nat_vent()'s AUTOMATION grace, never a fresh MANUAL fan-off grace"
+        )
+
+    def test_fan_off_with_manual_origin_unclosed_and_sensor_open_pauses_not_grace(self):
+        """Same marker, but the monitored sensor is still open: must pause, and must NOT
+        start any fresh grace — this is the exact 04:37->06:10 leg of the reported
+        incident (grace-expiry reactivation, then a later real off while still paused)."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._fan_manual_origin_unclosed = True
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._sensor_check_callback = MagicMock(return_value=True)  # sensor still open
+        engine._paused_by_door = False
+
+        captured: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured.append(c))
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+        asyncio.run(captured[0])
+
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+        assert engine._grace_active is False, "No fresh grace — this is the loop Issue #829 reported"
+
+    def test_fan_off_with_manual_origin_unclosed_and_fan_not_active_just_clears(self):
+        """If nothing adopted the fan as nat-vent by the time it turns off, the marker
+        still prevents a fresh grace — flags are simply cleared."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._fan_manual_origin_unclosed = True
+        engine._natural_vent_active = False
+        engine._fan_active = False
+
+        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._fan_manual_origin_unclosed is False
+        assert engine._fan_active is False
+        assert engine._grace_active is False
+        engine.hass.async_create_task.assert_not_called()
+
+    def test_settle_window_takes_priority_over_manual_origin_marker(self):
+        """When both are set, the branch must still fire exactly once (not double-handle)
+        and consume both markers — regression guard against the two checks interfering."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._timer_boundary_settle_until = self._FIXED_NOW + timedelta(seconds=60)
+        engine._fan_manual_origin_unclosed = True
+        engine._natural_vent_active = False
+        engine._fan_active = False
+
+        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._timer_boundary_settle_until is None
+        assert engine._fan_manual_origin_unclosed is False
+        assert engine._grace_active is False
+
+    def test_fan_off_with_no_marker_still_uses_normal_fresh_event_path(self):
+        """Baseline: with neither marker set, behavior is unchanged — a genuinely fresh
+        fan-off still starts its own manual grace."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        assert engine._fan_manual_origin_unclosed is False
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "manual"

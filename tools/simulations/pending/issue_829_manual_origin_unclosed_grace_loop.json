@@ -1,0 +1,149 @@
+{
+  "name": "issue_829_manual_origin_unclosed_grace_loop",
+  "description": "A default-duration WHF-on (no timer selected) whose grace expires while the fan is still physically running must not have its eventual real off, hours later, misread as a fresh unexplained override that re-locks CA out of the fan (Issue #829)",
+  "source": "issue-report",
+  "issue": 829,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant impact if this regresses: turning the whole-house fan on for a while with no",
+    "timer -- a completely ordinary interaction -- can trigger a loop where CA silently",
+    "reactivates the fan on its own after the override's grace expires, then, whenever that",
+    "reactivated run ends (minutes to hours later, not seconds), re-locks itself out of the",
+    "fan for a brand-new full manual_grace_seconds window as if the user had just done",
+    "something fresh and unexplained. Confirmed live over two nights (2026-09-01 and",
+    "2026-09-02/03): the same WHF session's real end kept restarting a fresh 180-minute",
+    "grace every time CA had quietly re-adopted it, forever unable to settle into 'the user",
+    "already told us they don't want this fan on right now'.",
+    "",
+    "This scenario reproduces the exact handoff moment end-to-end through the real",
+    "coordinator, including the parts a unit test can't reach (the real grace timer,",
+    "the real _on_grace_expired()/_post_grace_fan_check_callback() dispatch, the real",
+    "nat-vent reactivation gate): the WHF is turned on externally with no RF timer",
+    "involved (external_fan_state_change, state=on -- routes through the real",
+    "coordinator._async_fan_entity_changed -> handle_fan_manual_override(), arming a",
+    "manual_grace_seconds-duration override with no _fan_remote_timer_hours, exactly the",
+    "'no timer selected on the device' case the issue reports). A window opens shortly",
+    "before the 3h grace expires. At expiry, with the sensor still open, production's",
+    "real _on_grace_expired() takes its 're-pause, sensor still open' branch and schedules",
+    "_re_pause_for_open_sensor(), which independently re-evaluates nat-vent eligibility",
+    "and reactivates the fan on CA's own initiative (nat_vent_reactivated_while_paused) --",
+    "the exact live moment _fan_manual_origin_unclosed must be set. As observed live, this",
+    "run reached the reactivation leg (_re_pause_for_open_sensor()) rather than the",
+    "override-clear-while-still-running leg (clear_fan_override()) -- both call sites set",
+    "the same marker via the same mechanism, so this still exercises the fix's real",
+    "arming behavior through the full, unmodified production stack.",
+    "",
+    "Closing the loop with a subsequent real fan-off and confirming no fresh grace starts",
+    "is proven precisely at the unit level instead",
+    "(tests/test_whole_house_fan_hvac_suppression.py::TestFanManualOriginUnclosed) --",
+    "attempts to script a second synthetic external_fan_state_change late in this same",
+    "scenario landed inside another production reconcile cycle's own fan-state handling",
+    "(visible in the decision timeline as fan_running_untracked/fan_untracked_cleared",
+    "around the same grace-expiry tick) and could not be made to reliably assert a single",
+    "specific downstream event without over-fitting to that cycle's exact internal timing",
+    "-- a known limitation of this event-driven harness for very tightly-spaced synthetic",
+    "events, not evidence against the fix. The unit tests drive on_fan_turned_off()",
+    "directly with the marker pre-set, proving its consuming behavior deterministically.",
+    "",
+    "Three-exercise protocol (CLAUDE.md Sec 10):",
+    "(a) Scenario effectiveness: if _re_pause_for_open_sensor()'s reactivation branch",
+    "    stopped setting _fan_manual_origin_unclosed, this scenario would still show",
+    "    nat_vent_reactivated_while_paused firing (proving the reactivation itself is",
+    "    unaffected) -- the marker's own consuming effect is what the unit-level tests",
+    "    verify deterministically; this scenario's job is proving the real production",
+    "    grace-expiry/reconcile/reactivation machinery actually reaches the arming call",
+    "    site under realistic conditions, not a hand-picked unit-test precondition.",
+    "(b) Docs-production alignment: docs/grace-periods-spec.md's new",
+    "    'Manual-Origin Unclosed Marker (Issue #829)' section documents this exact mechanism",
+    "    and was written and verified against this same incident trace.",
+    "(c) User outcome: verified above in the occupant-impact note."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.front_door"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "manual_grace_seconds": 10800
+  },
+  "events": [
+    {
+      "time": "2026-09-02T17:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 60.0,
+      "note": "Evening: indoor=73F, outdoor=60F -- favorable for nat-vent (outdoor well below indoor, above comfort_heat)."
+    },
+    {
+      "time": "2026-09-02T17:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild evening: hvac_mode=off."
+    },
+    {
+      "time": "2026-09-02T17:02:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seed the fan_entity's initial baseline state -- the first-ever state write on an entity has no old_state to diff against, so the listener would otherwise never dispatch. Matches the existing manual_whf_on_suppresses_hvac.json golden scenario's pattern."
+    },
+    {
+      "time": "2026-09-02T17:37:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "User turns the WHF on directly (no RF remote timer entity involved, and no window open yet -- fan was genuinely OFF) -- the exact 'no timer selected on the device' case. Routes through the real coordinator listener to handle_fan_manual_override(), arming a manual_grace_seconds (10800s / 3h) override with no _fan_remote_timer_hours."
+    },
+    {
+      "time": "2026-09-02T20:35:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Window opens shortly before the 3h override grace expires (20:37) -- matches the live incident, where the fan kept running under nat-vent's identity once the grace cleared."
+    },
+    {
+      "time": "2026-09-02T20:40:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 60.0,
+      "note": "Just after the 3h grace expiry (20:37): still favorable for nat-vent -- the real production _on_grace_expired()/_re_pause_for_open_sensor() path reactivates the fan on CA's own initiative while the sensor stays open (nat_vent_reactivated_while_paused), the exact live moment _fan_manual_origin_unclosed must be armed."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-02T17:37:00",
+      "expect_event": "fan_manual_override",
+      "expect": "fan_external_change_classified",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "The initial no-timer WHF-on must still be correctly detected and armed as a manual override -- proves the scenario's setup actually exercises the real override path this fix builds on, not a no-op."
+    },
+    {
+      "at": "2026-09-02T20:37:00",
+      "expect_event": "nat_vent_reactivated_while_paused",
+      "expect": "fan_external_change_classified",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "The grace-expiry reactivation this fix's marker is armed against must genuinely happen through the real production gate (not assumed) -- proves the scenario reaches the code path it claims to."
+    },
+    {
+      "at": "2026-09-02T20:37:00",
+      "expect": "manual_origin_unclosed",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "Issue #829's fix: the real production _re_pause_for_open_sensor() reactivation branch must arm _fan_manual_origin_unclosed on this handoff -- proving the marker is set by actual production control flow (grace timer, reconcile callback, reactivation gate all real), not only by a unit test's hand-set precondition."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A default-duration (no-timer) WHF-on whose grace expires while the fan is still running, and is then reactivated by CA's own grace-expiry logic, correctly arms the manual-origin-unclosed marker so its eventual real off is not misread as a fresh override (Issue #829)",
+    "observed_behavior": "WHF turned on externally (manual override armed, no RF timer) -> sensor opens -> 3h later grace expires, sensor still open -> real production _re_pause_for_open_sensor() reactivates nat-vent on its own initiative -> _fan_manual_origin_unclosed is armed",
+    "expected_behavior": "CA's own grace-expiry reactivation of a still-manually-originated fan session marks provenance so a later real off is recognized as closing that session, never as a fresh unexplained override -- the marker's consuming behavior is proven deterministically in tests/test_whole_house_fan_hvac_suppression.py::TestFanManualOriginUnclosed"
+  }
+}

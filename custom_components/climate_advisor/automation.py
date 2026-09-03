@@ -785,6 +785,21 @@ class AutomationEngine:
         # fan-off report is treated as the tail of that SAME timer boundary (not a fresh,
         # unexpected event) — see on_fan_turned_off() and _on_grace_expired().
         self._timer_boundary_settle_until: datetime | None = None
+        # Issue #829: state-based sibling of _timer_boundary_settle_until above. That
+        # window only ever arms for an override tied to a real RF-remote timer selection
+        # (_fan_remote_timer_hours is not None). A default-duration manual override (no
+        # timer selected — falls back to the configured manual_grace_seconds) has no
+        # numeric timer to anchor a short window to, so when ITS grace expires while the
+        # fan is still physically running (clear_fan_override()), or CA reactivates the
+        # fan on its own after a grace expiry with the sensor still open
+        # (_re_pause_for_open_sensor()/_reconcile_fan_on_startup_locked()), this flag marks
+        # that the run's provenance still traces back to a manual event CA hasn't seen the
+        # physical end of yet. Unlike the settle window, it is NOT time-boxed — the gap
+        # between the handoff and the eventual real off was observed live to be minutes to
+        # hours, not seconds — so it stays set until on_fan_turned_off() actually observes
+        # the fan go off, at which point it's consumed (one-shot) instead of starting a
+        # fresh "unprotected" grace as if the run had no history.
+        self._fan_manual_origin_unclosed: bool = False
         # HVAC mode captured before whole-house fan activation (Issue #277 Fix C).
         # Restored when the whole-house fan deactivates so AC/heat resumes.
         self._pre_fan_hvac_mode: str | None = None
@@ -1637,22 +1652,42 @@ class AutomationEngine:
         # of starting a brand-new fan-off grace (which the orphaned-grace watchdog cannot
         # distinguish from a genuinely stuck one) and re-litigating the whole decision
         # from scratch.
+        # Issue #829: the RF-timer settle window above only protects a fan-off tied to a
+        # real remote timer selection. _fan_manual_origin_unclosed is its state-based
+        # sibling for every other case where CA handed a still-running fan's ownership to
+        # itself (default-duration override expiring while still running, or a grace-expiry
+        # reactivation) without ever seeing the physical end — see its own docstring at the
+        # attribute definition for the incident this closes.
         _settle_until = getattr(self, "_timer_boundary_settle_until", None)
-        if _settle_until is not None and dt_util.now() <= _settle_until:
+        _settle_active = _settle_until is not None and dt_util.now() <= _settle_until
+        _manual_origin_unclosed = getattr(self, "_fan_manual_origin_unclosed", False)
+        if _settle_active or _manual_origin_unclosed:
             self._timer_boundary_settle_until = None  # one-shot — consumed
-            _LOGGER.info(
-                "Fan turned off within the RF-timer boundary settle window (fan=%s->%s) —"
-                " treating as the same timer session ending, not a new event",
-                fan_before or "?",
-                fan_after or "?",
-            )
+            self._fan_manual_origin_unclosed = False  # one-shot — consumed
+            if _settle_active:
+                _LOGGER.info(
+                    "Fan turned off within the RF-timer boundary settle window (fan=%s->%s) —"
+                    " treating as the same timer session ending, not a new event",
+                    fan_before or "?",
+                    fan_after or "?",
+                )
+                _carryforward_trigger = "timer_boundary_settle"
+            else:
+                _LOGGER.info(
+                    "Fan turned off (fan=%s->%s) — closing a session that traces back to an"
+                    " earlier manual fan-on/reactivation CA hadn't yet seen the physical end"
+                    " of; not starting a fresh grace (Issue #829)",
+                    fan_before or "?",
+                    fan_after or "?",
+                )
+                _carryforward_trigger = "manual_origin_carryforward"
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_cancel",
                     {
                         "fan_before": fan_before,
                         "fan_after": fan_after,
-                        "trigger": "timer_boundary_settle",
+                        "trigger": _carryforward_trigger,
                         "fan_device": _fan_device_label(self.config),
                         "event_context_id": event_context_id,
                     },
@@ -1661,7 +1696,11 @@ class AutomationEngine:
             # routed through _resolve_fan_fsm_state(). Group-1 wiring, kept distinct
             # from USER_FAN_OFF per fan_fsm.py's own docstring (this settle branch
             # deliberately does NOT start a fresh fan-off grace and may route through
-            # _exit_nat_vent() instead of _clear_fan_flags_and_start_grace()). The
+            # _exit_nat_vent() instead of _clear_fan_flags_and_start_grace()). Issue #829:
+            # the manual-origin-carryforward case shares this same TIMER_BOUNDARY_SETTLE
+            # kind/shape — both mean "this off closes a session CA already has context
+            # for, don't start a fresh grace" — they differ only in what armed them
+            # (a short RF-timer window vs. a state-based manual-origin marker). The
             # nat-vent-active branch's real flag change happens asynchronously inside
             # the scheduled _exit_nat_vent() task (not captured synchronously here —
             # this dispatch documents that the settle event itself fired); the else
@@ -1677,8 +1716,9 @@ class AutomationEngine:
                 # expired) — let the single choke point for ending a session decide
                 # pause-vs-restore against live sensor state, instead of starting a fresh
                 # fan-off grace that only gets fought by the orphaned-grace watchdog.
+                _exit_reason_suffix = "RF timer boundary" if _settle_active else "manual origin carryforward"
                 self.hass.async_create_task(
-                    self._exit_nat_vent(reason=f"fan={fan_before or '?'}->{fan_after or '?'} (RF timer boundary)")
+                    self._exit_nat_vent(reason=f"fan={fan_before or '?'}->{fan_after or '?'} ({_exit_reason_suffix})")
                 )
             else:
                 # Reconcile didn't adopt the fan (or it was already off) — nothing further
@@ -1846,6 +1886,22 @@ class AutomationEngine:
                 "Fan override: cleared — override active since %s, resuming CA fan control",
                 self._fan_override_time,
             )
+            # Issue #829: this override's grace expired while the fan is still physically
+            # running (fan_active True — otherwise on_fan_turned_off() already handled the
+            # off and cleared this override itself) and it was never tied to a real RF
+            # remote timer (_fan_remote_timer_hours is None) — a default-duration manual
+            # override falls back to the configured manual_grace_seconds with no numeric
+            # timer to anchor the existing settle window to. Mark that this still-running
+            # session's provenance traces back to a manual fan-on, so whenever it actually
+            # turns off later — confirmed live to be anywhere from minutes to hours from
+            # here, not the settle window's few-seconds assumption — on_fan_turned_off()
+            # recognizes it as this session ending rather than a fresh unexplained override.
+            if self._fan_active and self._fan_remote_timer_hours is None:
+                self._fan_manual_origin_unclosed = True
+                _LOGGER.debug(
+                    "Fan override cleared while still physically running with no RF timer to"
+                    " anchor a settle window — marking manual origin unclosed (Issue #829)"
+                )
             self._fan_override_active = False
             self._fan_override_time = None
             self._fan_remote_timer_hours = None
@@ -5802,6 +5858,17 @@ class AutomationEngine:
             if self._fan_on_since is None:
                 self._fan_on_since = dt_util.now().isoformat()
             self._natural_vent_active = True
+            # Issue #829: this is the same "CA reactivates on its own initiative right
+            # after a grace expiry" pattern _re_pause_for_open_sensor() has, reached via
+            # the live post_grace_expiry reconcile trigger instead. Mark provenance so a
+            # later real off is recognized as closing this session rather than starting a
+            # fresh one. Scoped to post_grace_expiry only — ha_restart already has its own
+            # narrower RF-timer-provenance handling (Issue #677) above, and
+            # backstop_30min/thermostat_state_change adopting an already-running fan is a
+            # different situation (routine reconciliation, not a grace-expiry handoff) not
+            # covered by this incident.
+            if trigger == "post_grace_expiry":
+                self._fan_manual_origin_unclosed = True
             # Issue #821: a fresh session activating — reset the exit sustain-confirmation
             # state (stale candidate/timing from a prior session must never leak into a
             # new one) and arm the family-switch lockout's dwell clock.
@@ -6441,6 +6508,13 @@ class AutomationEngine:
                 )
                 await self._activate_fan(reason=nat_vent_reason)
                 self._natural_vent_active = True
+                # Issue #829: this fan run is CA reactivating on its own initiative right
+                # after a grace expiry, with the monitored sensor still open — not a fresh
+                # user action. Mark provenance so that whenever this run eventually turns
+                # off (confirmed live to be up to ~90 minutes later, not seconds),
+                # on_fan_turned_off() treats it as closing an already-known session instead
+                # of starting a brand-new fresh grace, the loop this issue reported.
+                self._fan_manual_origin_unclosed = True
                 # Issue #821: same fresh-session reset as the other activation site.
                 self._nat_vent_exit_candidate_reason = None
                 self._nat_vent_exit_candidate_since = None

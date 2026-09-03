@@ -1005,6 +1005,16 @@ class TestFanOwnershipAnnotations:
         )
         assert "user turned off" not in ev.lower()
 
+    def test_fan_cancel_renderer_manual_origin_carryforward_is_not_user_turned_off(self):
+        """Issue #829: trigger=manual_origin_carryforward closes a session CA silently
+        adopted from an earlier manual fan-on (default-duration override expiring while
+        still running, or a grace-expiry reactivation) — not a fresh user action."""
+        ev, _st = _act_mod.EVENT_RENDERERS["fan_cancel"](
+            {"trigger": "manual_origin_carryforward"},
+            "fahrenheit",
+        )
+        assert "user turned off" not in ev.lower()
+
     def test_fan_cancel_renderer_genuine_fan_off_still_says_user_turned_off(self):
         """trigger=fan_off is a genuine externally-detected physical fan-off — the one case
         that IS a real user action. Must render unchanged from before this fix."""

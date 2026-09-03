@@ -1903,6 +1903,11 @@ def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
         return "Fan ownership corrected -- stale flag cleared (was already off)", settings
     if trigger == "timer_boundary_settle":
         return "Fan cancel -- RF timer session ended", settings
+    if trigger == "manual_origin_carryforward":
+        # Issue #829: this off closes a session CA silently adopted from an earlier manual
+        # fan-on (a default-duration override that expired, or grace-expiry reactivation)
+        # while the fan kept running -- not a fresh, independent user action.
+        return "Fan cancel -- closing session from earlier manual fan-on", settings
     return "Fan cancel (user turned off)", settings
 
 

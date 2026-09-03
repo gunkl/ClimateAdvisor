@@ -18,6 +18,7 @@
 | What happens if grace is left active with no override behind it (e.g. a future callsite bypasses `cancel_override()`)? | `coordinator._check_orphaned_grace()` (Issue #508), run every regular update cycle (~30s), self-heals: if `_grace_active=True`, `_grace_protects_override=True` (Issue #530 — see next row), and neither `_manual_override_active` nor `_fan_override_active` is set, it force-cancels grace and emits `stuck_grace_recovered` with `reason="grace_without_override"`. This is the mirror of the pre-existing Issue #321 stuck-grace check (which catches the opposite shape — an override stuck active past its own due grace-end-time); the two checks are independent and cannot both fire on the same state. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
 | Can every grace type be "orphaned" in the Issue #508 sense — does the watchdog apply to fan-off/window-close/resume grace too? | No (Issue #530 fix). `_start_grace_period(trigger=...)` sets `_grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE` (only `"fan_manual_override"` and `"override_confirmed"`) — the watchdog now only fires for grace that was genuinely started to protect a real override. Before this fix, the watchdog inferred "orphaned" purely from absent override flags, which is also the NORMAL, by-design shape of fan-off/drift-correction/window-close/dashboard-resume grace — every one of those was being killed within about one event-loop tick of starting. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
 | A fan-off arrives seconds after an RF-remote-timer grace expires — is that a fresh event? | No (Issue #530). `_on_grace_expired()` arms `_timer_boundary_settle_until` (2 min) whenever the expiring grace's `_fan_remote_timer_hours` was set. A fan-off inside that window is treated as the tail of the SAME timer boundary — routed straight through `_exit_nat_vent()` instead of starting an independent new grace. | [§ RF-Timer Boundary Settle Window (Issue #530)](#rf-timer-boundary-settle-window-issue-530) |
+| A default-duration manual fan-on's grace expires while the fan is still running (or CA reactivates it after a grace expiry) — is the fan's eventual real off treated as fresh, hours later? | No, as of Issue #829. `_fan_manual_origin_unclosed` is a state-based (not time-boxed) sibling of the RF-timer settle window, armed in `clear_fan_override()`/`_re_pause_for_open_sensor()`/`_reconcile_fan_on_startup_locked()` whenever CA hands a still-running fan's ownership to itself with no real timer to anchor the settle window to. `on_fan_turned_off()` checks it alongside the settle window. | [§ Manual-Origin Unclosed Marker (Issue #829)](#manual-origin-unclosed-marker-issue-829) |
 | Does PATH B (self-resolved transient) send a notification? | Yes (Issue #200). When the thermostat reverts to the expected mode within the confirmation window, a push notification is sent: "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." | [§ State Machine — PATH B](#state-machine) |
 | What happens if the user changes to a different mode while a grace period is already active? | The current override and grace timer are cleared, and a fresh 10-minute confirmation window starts for the new mode (Issue #201). The latest user action always wins. | [§ Second Override During Active Grace](#second-override-during-active-grace-issue-201) |
 | Where can the user see how much longer an active grace period will run, and what caused it? | Debug tab shows full `grace_end_time` and `last_action_reason`. Status tab shows `_format_grace_remaining()` with a cause label from `_GRACE_TRIGGER_LABELS`, e.g. "grace period (manual) — thermostat override — 30 min (ends 7:14 AM)" — this display moved onto the Status card and reached its current duration+cause-label shape across issues #620→#498→#527→#625 (full history in git blame; current shape is what's shown here). | [§ Debounce and Grace Period System](02-ARCHITECTURE-REFERENCE.md#debounce-and-grace-period-system) |
@@ -412,6 +413,73 @@ handled as a known continuation, not re-discovered from scratch by a second mech
 **Location:** `automation.py` — `_on_grace_expired()` (arms the window),
 `on_fan_turned_off()` (consumes it), `_timer_boundary_settle_until` (instance attribute,
 reset alongside grace's other one-shot state). `const.py` — `TIMER_BOUNDARY_SETTLE_SECONDS`.
+
+---
+
+## Manual-Origin Unclosed Marker (Issue #829)
+
+**Problem:** the settle window above only ever arms when the expiring grace's
+`_fan_remote_timer_hours` was set — i.e. only for an override tied to a real RF-remote
+timer selection. A **default-duration** manual fan-on (no timer selected on the
+remote/device — falls back to the configured `manual_grace_seconds`) has no numeric
+timer value to anchor that window to, so this class of grace had no equivalent
+protection. Confirmed live (2026-09-02/03): a WHF-on with no timer at 17:37 armed a
+180-minute default override grace. That grace expired in software at 20:37 while the fan
+was still physically running and nat-vent conditions favored keeping it on —
+`clear_fan_override()` unconditionally discarded `_fan_override_active`,
+`_fan_override_time`, `_fan_remote_timer_hours`, and `_fan_remote_speed`, silently
+handing ownership to nat-vent with **no** record the run had ever been user-initiated.
+The fan's real off, ~5 hours later, was read by `on_fan_turned_off()` as a brand-new
+unexplained override and started a fresh 180-minute grace. The same shape then repeated
+one level down: that second grace expired with the monitored sensor still open,
+`_re_pause_for_open_sensor()` reactivated nat-vent on its own initiative ("adopting as
+CA-owned"), and ~93 minutes later the fan's real off was again read as fresh, restarting
+a third grace — the loop this issue reported.
+
+**Why a 120-second settle window can't fix this:** the RF-timer window works because a
+real hardware timer's own clock and CA's software clock are expected to agree to within
+seconds. Here there is no hardware timer at all — the gap between CA silently taking
+over an already-running fan and that fan's eventual real off was observed to be **minutes
+to hours**, not seconds. Widening `TIMER_BOUNDARY_SETTLE_SECONDS` or dropping the
+`_fan_remote_timer_hours is not None` condition would either still fail to cover the
+observed gaps, or risk suppressing a genuinely fresh override that happens to follow
+closely after an unrelated grace expiry.
+
+**Fix — a state-based (not time-boxed) sibling of the settle window:**
+`self._fan_manual_origin_unclosed: bool` is set (not by elapsed time, but by the handoff
+event itself) at the three points where CA hands ownership of a still-running or
+freshly-reactivated fan to itself without having seen the physical end of a manual
+session:
+- `clear_fan_override()` — when the fan is still `_fan_active` and
+  `_fan_remote_timer_hours is None` (the default-duration case the settle window
+  doesn't cover) at the moment override flags are cleared.
+- `_re_pause_for_open_sensor()` — when it reactivates nat-vent on CA's own initiative
+  after a grace expires with the sensor still open.
+- `_reconcile_fan_on_startup_locked()`'s "adopting as CA-owned" branch, scoped to
+  `trigger == "post_grace_expiry"` only (the live restart-analog of the previous case;
+  `ha_restart` already has its own narrower RF-timer-provenance handling per Issue #677,
+  and `backstop_30min`/`thermostat_state_change` adopting an already-running fan is
+  routine reconciliation, not a grace-expiry handoff).
+
+`on_fan_turned_off()` checks this flag alongside the RF-timer settle window, before
+falling through to the generic fresh-event path — if either is set, the fan-off is
+treated as closing an existing session (routed through `_exit_nat_vent()` if
+`_natural_vent_active`, otherwise flags are simply reconciled) instead of starting a
+new "unprotected" grace, and the flag is consumed (one-shot). The Activity Report's
+`fan_cancel` renderer (`ai_skills_context.py::_render_fan_cancel()`) shows a distinct
+`trigger=manual_origin_carryforward` label ("Fan cancel -- closing session from earlier
+manual fan-on") so this closure reads as legible, not as an unexplained repeat.
+
+**Relationship to the RF-Timer Boundary Settle Window above:** shares the same consuming
+choke point in `on_fan_turned_off()` and the same resulting FSM transition
+(`FanFsmEventKind.TIMER_BOUNDARY_SETTLE`) — the two differ only in what arms them (a
+short time window vs. a state-based marker) and in scope (RF-timer-linked grace only vs.
+every other CA-initiated ownership handoff of a still-running fan).
+
+**Location:** `automation.py` — `_fan_manual_origin_unclosed` (instance attribute),
+`clear_fan_override()` / `_re_pause_for_open_sensor()` / `_reconcile_fan_on_startup_locked()`
+(arm it), `on_fan_turned_off()` (consumes it). `ai_skills_context.py` —
+`_render_fan_cancel()` (renders the `manual_origin_carryforward` trigger).
 
 ---
 

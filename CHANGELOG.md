@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.12] — 2026-09-03
+
+- Fix #830: the dev-only "Simulated" test-zone thermostat used to validate multi-zone behavior was silently ignoring every heat/cool mode command sent alongside a setpoint, so its indoor temperature never actually responded no matter what the automation commanded. This made #821, #823, and #827 impossible to confirm as actually fixing anything against this zone even though each one's decision logic was correct the whole time — the automation was commanding heat correctly on every cycle, and the test fixture was silently discarding the mode change. Also added zone identifiers to key log lines (thermal trigger evaluation, next-action evaluation, classification, setpoint commands, comfort-family switching, HVAC-write-blocked warnings) so a multi-zone install's single combined HA log stream can be attributed to the correct zone instead of requiring cross-referencing by temperature values alone.
+
 ## [0.7.11] — 2026-09-02
 
 - Fix #827: the comfort-floor/ceiling defense that still failed to reliably hold heat after #821 and #823 is now a single consolidated state machine instead of three separately-patched mechanisms (a day-type edge picker, a confidence-gated escalation fallback, and a separately-armed anti-flap timer). It no longer forgets its recovery margin between cycles — the saw-tooth pattern of a brief heat pulse followed by a blocked, cold stretch is gone — and it now defends the comfort floor on every day type and occupancy mode (previously an "off"-classified day, or a day where the forecast confidence briefly went stale, got no floor defense at all). A new day-type-scaled tolerance (2°F on mild/warm/cool days, 5°F on hot/cold days, configurable) means a transient dip or a deliberate manual override is tolerated before the system corrects — but the correction still fires regardless of cause once genuinely needed.

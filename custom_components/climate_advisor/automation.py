@@ -2695,8 +2695,9 @@ class AutomationEngine:
                 # ownership" directly from logs, without reading code, next time this fires for
                 # much longer than expected.
                 _LOGGER.info(
-                    "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s"
+                    "apply_classification: zone=%s nat-vent active — enforcing nat-vent band ac_assist=%s"
                     " day_type=%s natural_vent_active=%s whf_owns_hvac=%s",
+                    self.climate_entity,
                     not _aggressive,
                     classification.day_type,
                     self._natural_vent_active,
@@ -2723,7 +2724,8 @@ class AutomationEngine:
 
             unit = self.config.get("temp_unit", "fahrenheit")
             _LOGGER.info(
-                "Applying classification: %s (trend: %s %s)",
+                "Applying classification: zone=%s %s (trend: %s %s)",
+                self.climate_entity,
                 classification.day_type,
                 classification.trend_direction,
                 format_temp_delta(classification.trend_magnitude, unit),
@@ -2933,7 +2935,9 @@ class AutomationEngine:
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every one of the ~13 call sites.
         if mode != "off" and self._whf_owns_hvac():
-            _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
+            _LOGGER.warning(
+                "HVAC write blocked — whole-house fan owns thermostat (zone=%s, %s)", self.climate_entity, reason
+            )
             # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
             # tried first and reverted — it silently swallowed the second, semantically
             # distinct guard firing at wake-up in golden/pending scenario
@@ -3042,7 +3046,9 @@ class AutomationEngine:
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every call site.
         if mode != "off" and self._whf_owns_hvac():
-            _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
+            _LOGGER.warning(
+                "HVAC write blocked — whole-house fan owns thermostat (zone=%s, %s)", self.climate_entity, reason
+            )
             # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
             # tried first and reverted — it silently swallowed the second, semantically
             # distinct guard firing at wake-up in golden/pending scenario
@@ -3324,9 +3330,10 @@ class AutomationEngine:
 
         self._setpoint_retry_cancel = async_call_later(self.hass, 10, _schedule_check)
         _LOGGER.info(
-            "Set temperature to %s (mode=%s) — %s role=%s",
+            "Set temperature to %s (mode=%s) — zone=%s %s role=%s",
             format_temp(temperature, unit),
             mode,
+            self.climate_entity,
             reason,
             self.role,
         )
@@ -8429,7 +8436,12 @@ class AutomationEngine:
 
         resolved_family = result.to_state.value  # "heating" | "cooling"
         if result.changed:
-            _LOGGER.info("Comfort family FSM: switching to %s — %s", resolved_family, result.decision.reason)
+            _LOGGER.info(
+                "Comfort family FSM: zone=%s switching to %s — %s",
+                self.climate_entity,
+                resolved_family,
+                result.decision.reason,
+            )
         # Issue #827 preserved contract (Design §2): the FSM's own outcome writes the
         # compatibility attribute tools/sim_harness/outcomes.py's "comfort_family"
         # assertion reads, via the same _arm_comfort_family() writer the 7

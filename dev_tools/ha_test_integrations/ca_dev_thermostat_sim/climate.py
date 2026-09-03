@@ -178,9 +178,37 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set a new target temperature."""
+        """Set a new target temperature, and hvac_mode when bundled in the same call.
+
+        Climate Advisor's own ``_set_temperature()`` (automation.py) deliberately sends
+        a single combined ``climate.set_temperature`` call with both ``temperature`` and
+        ``hvac_mode`` — it never calls ``climate.set_hvac_mode`` separately. HA's core
+        service dispatch does not split that back out on this entity's behalf; each
+        ClimateEntity is responsible for reading ``hvac_mode`` out of its own
+        ``async_set_temperature`` kwargs if it wants to honor a combined call. This
+        entity previously read only ``temperature`` and silently dropped ``hvac_mode``
+        entirely — the setpoint attribute updated (so CA's setpoint-confirm check, which
+        only compares ``temperature``, saw a false success) while ``self._hvac_mode``
+        stayed wherever it last was (e.g. "off"), so ``_async_tick()`` always simulated
+        passive-only decay no matter what mode CA believed it had commanded. This is what
+        Issue #830 traced to: the sim entity, not CA's decision logic, silently discarded
+        every heat/cool command sent through the (correct, by-design) combined call path.
+        """
+        hvac_mode = kwargs.get("hvac_mode")
+        if hvac_mode is not None:
+            new_mode = HVACMode(hvac_mode) if not isinstance(hvac_mode, HVACMode) else hvac_mode
+            if new_mode != self._hvac_mode:
+                _LOGGER.info(
+                    "CA Dev Thermostat Sim %s: hvac_mode %s -> %s (bundled with set_temperature)",
+                    self.entity_id,
+                    self._hvac_mode.value,
+                    new_mode.value,
+                )
+            self._hvac_mode = new_mode
+
         temperature = kwargs.get("temperature")
         if temperature is None:
+            self.async_write_ha_state()
             return
         self._target_temp = float(temperature)
         self.async_write_ha_state()

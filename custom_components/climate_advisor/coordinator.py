@@ -6183,8 +6183,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _delta = abs(indoor - outdoor)
 
             _LOGGER.debug(
-                "Thermal trigger eval: indoor=%.1f outdoor=%.1f delta=%.1f "
+                "Thermal trigger eval: zone=%s indoor=%.1f outdoor=%.1f delta=%.1f "
                 "fan=%s nat_vent=%s sensor_open=%s hvac_action=%s pending=%s",
+                self.config.get("climate_entity"),
                 indoor,
                 outdoor,
                 _delta,
@@ -7647,8 +7648,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         fan_enabled = fan_mode != FAN_MODE_DISABLED
 
         _LOGGER.info(
-            "Next-action evaluation: day_type=%s indoor=%s outdoor=%s windows_open=%s"
+            "Next-action evaluation: zone=%s day_type=%s indoor=%s outdoor=%s windows_open=%s"
             " nat_vent=%s economizer=%s override=%s grace=%s paused_by_door=%s occupancy=%s",
+            self.config.get("climate_entity"),
             c.day_type if c else "none",
             f"{indoor_temp:.1f}" if indoor_temp is not None else "?",
             f"{outdoor_temp:.1f}" if outdoor_temp is not None else "?",

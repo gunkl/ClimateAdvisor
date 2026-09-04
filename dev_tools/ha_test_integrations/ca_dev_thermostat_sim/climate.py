@@ -5,7 +5,7 @@ Dev-only, never shipped — see dev_tools/ha_test_integrations/README.md.
 Reuses the real Climate Advisor ODE step function (_simulate_indoor_physics)
 so this simulator can never drift from production thermal-model behavior
 (DRY rule, CLAUDE.md). That function lives in
-custom_components/climate_advisor/coordinator.py:9313-9363 as a pure,
+custom_components/climate_advisor/coordinator.py:9519-9569 as a pure,
 module-level function with no instance-state dependency, so it can be
 imported directly.
 
@@ -24,7 +24,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode
+from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACAction, HVACMode
+from homeassistant.components.climate.const import FAN_AUTO, FAN_ON
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -94,9 +95,21 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
     # it without implementing it left the mode silently inert (Issue #809
     # verification finding).
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL]
+    # FAN_MODE: real production call sites (automation.py's _set_hvac_mode(),
+    # _activate_fan(), _deactivate_fan()) call climate.set_fan_mode with "auto"/"on"
+    # whenever a zone's fan_mode config is hvac_fan/both — CA's "fan runs independent
+    # of heat/cool" feature. Without this feature flag, HA rejects that service call
+    # with a ServiceValidationError, and two of those three call sites don't catch it.
     _attr_supported_features = (
-        ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.FAN_MODE
+        | ClimateEntityFeature.TURN_ON
+        | ClimateEntityFeature.TURN_OFF
     )
+    # Matches the exact string values automation.py sends — HA's own FAN_AUTO/FAN_ON
+    # constants, not custom labels, so a real integration's fan_modes list is what
+    # this fixture is validated against.
+    _attr_fan_modes = [FAN_AUTO, FAN_ON]
 
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the simulated thermostat from its config entry data."""
@@ -116,6 +129,16 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._current_temp: float = float(data.get(CONF_INITIAL_TEMP_F, 70.0))
         self._target_temp: float | None = self._comfort_heat
         self._hvac_mode: HVACMode = HVACMode.OFF
+        self._fan_mode: str = FAN_AUTO
+        # Whether the last tick actually applied heating/cooling capacity (t_start was
+        # on the correct side of target_temperature) vs. having already reached
+        # setpoint — drives the hvac_action property below. Real thermostats report
+        # "idle" once they reach setpoint even while still in heat/cool mode; a sim
+        # that only ever reports the commanded mode (or nothing, pre-fix) can't
+        # distinguish "actively driving" from "holding," which several production
+        # decision points (thermal-observation gating, restart-cause classification)
+        # read via hvac_action.
+        self._actively_driving: bool = False
         self._last_update_ts: datetime = dt_util.utcnow()
 
     async def async_added_to_hass(self) -> None:
@@ -142,6 +165,10 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
 
             if last_state.state in (m.value for m in self._attr_hvac_modes):
                 self._hvac_mode = HVACMode(last_state.state)
+
+            restored_fan_mode = last_state.attributes.get("fan_mode")
+            if restored_fan_mode in self._attr_fan_modes:
+                self._fan_mode = restored_fan_mode
         else:
             _LOGGER.debug(
                 "No prior state for %s — starting from configured initial_temp_f=%.1f",
@@ -172,9 +199,44 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         """Return the current HVAC mode."""
         return self._hvac_mode
 
+    @property
+    def hvac_action(self) -> HVACAction:
+        """Return what the thermostat is actually doing right now.
+
+        Read by 12 separate production sites in coordinator.py/automation.py
+        (thermal-observation gating, restart-cause classification, fan-expectation
+        checks, etc.) — the base ClimateEntity default (None/absent) silently defeated
+        all of them for this fixture. HEATING/COOLING only while actively driving
+        toward setpoint (see _actively_driving); once setpoint is reached the mode
+        stays HEAT/COOL but the real appliance goes idle, matching a real thermostat.
+        """
+        if self._hvac_mode == HVACMode.HEAT:
+            return HVACAction.HEATING if self._actively_driving else HVACAction.IDLE
+        if self._hvac_mode == HVACMode.COOL:
+            return HVACAction.COOLING if self._actively_driving else HVACAction.IDLE
+        if self._fan_mode == FAN_ON:
+            return HVACAction.FAN
+        return HVACAction.OFF
+
+    @property
+    def fan_mode(self) -> str:
+        """Return the current fan mode."""
+        return self._fan_mode
+
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set a new HVAC mode."""
         self._hvac_mode = hvac_mode
+        self.async_write_ha_state()
+
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        """Set a new fan mode.
+
+        No thermal effect modeled — fan-only mode circulates air without meaningfully
+        heating/cooling in the real world either, so this only needs to accept the
+        command and report it back correctly (hvac_action reflects it when the
+        thermostat is otherwise idle/off).
+        """
+        self._fan_mode = fan_mode
         self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -258,6 +320,15 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             # OFF simulates as passive-only decay toward outdoor temp.
             k_active = None
             mode = None
+
+        # Mirrors _simulate_indoor_physics's own q!=0 condition exactly (coordinator.py)
+        # so hvac_action can't drift out of sync with what the ODE step actually did
+        # this tick — computed from the temperature BEFORE this tick's step, same as
+        # the ODE function reads t_start.
+        self._actively_driving = self._target_temp is not None and (
+            (mode == "heat" and self._current_temp < self._target_temp)
+            or (mode == "cool" and self._current_temp > self._target_temp)
+        )
 
         self._current_temp = _simulate_indoor_physics(
             self._current_temp,

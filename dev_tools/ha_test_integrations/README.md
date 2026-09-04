@@ -47,7 +47,26 @@ Every tick (`tick_seconds`, default 30s) it:
 4. Writes the new simulated indoor temperature to HA state.
 
 State survives HA restarts via `RestoreEntity` (current temperature, target
-temperature, and HVAC mode are restored from the last known state).
+temperature, HVAC mode, and fan mode are restored from the last known state).
+
+**`hvac_action`** reflects what the thermostat is actually doing each tick —
+`heating`/`cooling` while it's on the correct side of `target_temperature`
+(actively driving), `idle` once it reaches setpoint (still in heat/cool mode
+but not applying capacity, matching a real thermostat), `fan` when
+`hvac_mode` is off and `fan_mode` is `on`, `off` otherwise. This isn't
+cosmetic — 12 separate places in `coordinator.py`/`automation.py` key real
+decisions off a thermostat's `hvac_action` (thermal-observation gating,
+restart-cause classification, etc.); a fixture that never reported it was
+silently defeating all of them, independent of whether `hvac_mode` itself
+was being tracked correctly (Issue #830 fixed that; Issue #833 fixed this).
+
+**Fan mode** (`ClimateEntityFeature.FAN_MODE`, `auto`/`on`) is supported so
+Climate Advisor's HVAC-fan-only feature (`fan_mode: hvac_fan` or `both` in a
+zone's config) can be exercised against this fixture — those code paths call
+`climate.set_fan_mode` directly on the thermostat entity, which previously
+had no support for that service at all. No thermal effect is modeled for
+fan-only mode (matches how a real furnace fan doesn't meaningfully heat/cool
+either) — it only needs to accept and report the command correctly.
 
 ### `ca_dev_weather_proxy`
 
@@ -84,6 +103,11 @@ static, set at config time.
 5. Point Climate Advisor's config flow at the new `climate.*` and
    `weather.*` entities the same way you would point it at real hardware.
 
+To retune an already-created `ca_dev_thermostat_sim` entry (e.g. change
+`k_active_heat`/`k_active_cool` or any other field) without deleting and
+re-adding it: Settings → Devices & Services → find the entry → **⋮ →
+Reconfigure**. This reloads the entry with the new values immediately.
+
 ## Config flow field reference
 
 ### `ca_dev_thermostat_sim`
@@ -93,8 +117,8 @@ static, set at config time.
 | `name` | text | "Simulated Thermostat" | Entity name |
 | `initial_temp_f` | number | 70.0 | Starting indoor temp (°F) — only used on first setup, later ticks restore from HA state |
 | `k_passive` | number | -0.15 | Envelope decay rate (1/hr), always negative |
-| `k_active_heat` | number | 3.0 | Heating contribution (°F/hr) |
-| `k_active_cool` | number | -3.0 | Cooling contribution (°F/hr), negative |
+| `k_active_heat` | number | 6.0 | Heating contribution (°F/hr) |
+| `k_active_cool` | number | -6.0 | Cooling contribution (°F/hr), negative |
 | `comfort_heat` | number | 68 | Comfort floor (°F) — passed through to the ODE clamp logic |
 | `comfort_cool` | number | 76 | Comfort ceiling (°F) — passed through to the ODE clamp logic |
 | `outdoor_source` | entity (weather or sensor) | — required | Where outdoor temperature is read from each tick |

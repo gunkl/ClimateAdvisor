@@ -141,10 +141,11 @@ class TestLockedOutEventContract:
         assert isinstance(rendered, tuple) and len(rendered) == 2
         assert all(isinstance(part, str) and part for part in rendered)
 
-    def test_not_locked_out_emits_nothing_and_switches(self):
+    def test_not_locked_out_emits_switch_event_not_lockout(self):
         """Negative control: same engine state, dwell clock long expired -> the
-        switch goes through, no lockout event, and the compatibility attribute
-        follows."""
+        switch goes through, no lockout event (a comfort_family_switch event
+        instead — see TestComfortFamilySwitchEventContract), and the compatibility
+        attribute follows."""
         engine, events = _engine_wanting_a_heat_escalation(dwell_since=_T0 - timedelta(seconds=6000))
 
         resolved = engine._resolve_comfort_family_via_fsm(
@@ -152,7 +153,49 @@ class TestLockedOutEventContract:
         )
 
         assert resolved == "heat"
-        assert events == []
+        assert [name for name, _payload in events] == ["comfort_family_switch"]
+
+
+class TestComfortFamilySwitchEventContract:
+    """Issue #843 follow-up: an actual heat/cool family switch was previously
+    logged only to HA core logs (invisible to the briefing/investigator/activity
+    log). This class forces the shell to emit a persisted event with the payload
+    ai_skills_context.py's _render_comfort_family_switch() reads, including the
+    values (deadband_applied_f, minutes_since_*_ended) needed to tell a
+    recency-gated immediate switch apart from a genuine full-breach escalation."""
+
+    def test_switch_emits_event_with_renderer_payload(self):
+        engine, events = _engine_wanting_a_heat_escalation(dwell_since=_T0 - timedelta(seconds=6000))
+
+        resolved = engine._resolve_comfort_family_via_fsm(
+            "cool", floor=68.0, ceiling=76.0, now=_T0, day_type=DAY_TYPE_WARM
+        )
+
+        assert resolved == "heat"
+        assert len(events) == 1, f"expected exactly one emitted event, got {events}"
+        name, payload = events[0]
+        assert name == "comfort_family_switch"
+        assert payload["resolved_family"] == "heating"
+        assert isinstance(payload["reason"], str) and payload["reason"]
+        assert "deadband_applied_f" in payload
+        assert "minutes_since_cooling_ended" in payload
+        assert "minutes_since_heating_ended" in payload
+
+    def test_renderer_accepts_the_emitted_payload(self):
+        """Round-trips the real emitted payload through the real AI-skills renderer,
+        so a payload-shape drift on either side fails here rather than silently
+        producing a broken digest line."""
+        from custom_components.climate_advisor.ai_skills_context import (
+            _render_comfort_family_switch,
+        )
+
+        engine, events = _engine_wanting_a_heat_escalation(dwell_since=_T0 - timedelta(seconds=6000))
+        engine._resolve_comfort_family_via_fsm("cool", floor=68.0, ceiling=76.0, now=_T0, day_type=DAY_TYPE_WARM)
+        _name, payload = events[0]
+
+        rendered = _render_comfort_family_switch(payload, "F")
+        assert isinstance(rendered, tuple) and len(rendered) == 2
+        assert all(isinstance(part, str) and part for part in rendered)
 
 
 class TestComfortModeFamilyCompatibilityAttribute:

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.19] — 2026-09-04
+
+- Fix #847: The daily briefing and the Next Automation status card now always agree on window-close time and reason on warm/mild days.
+
 ## [0.7.18] — 2026-09-04
 
 - Fix #843: the house no longer sits several degrees below the comfort floor for hours after nat-vent/cooling ends with nothing else running. Heat now engages at the comfort boundary once nothing has cooled recently (default 2h), instead of waiting for a large breach that was never protecting against anything. Also removed a nat-vent savings-mode floor guard that force-committed heat while windows were still open, and closed a gap where the predictive ceiling guard could switch to cooling without respecting the same recency protection.

@@ -81,6 +81,7 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     ATTR_WHF_STATUS,
+    BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES,
     BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F,
     CHART_LOG_MAX_DAYS,
     CONF_AI_API_KEY,
@@ -112,6 +113,8 @@ from .const import (
     CONF_WEATHER_BIAS,
     DAY_TYPE_COLD,
     DAY_TYPE_HOT,
+    DAY_TYPE_MILD,
+    DAY_TYPE_WARM,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
@@ -245,7 +248,7 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
-from .nat_vent_plan import compute_nat_vent_plan
+from .nat_vent_plan import compute_nat_vent_plan, describe_nat_vent_cutoff_reason
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
@@ -291,6 +294,24 @@ _GRACE_TRIGGER_LABELS: Final[dict[str, str]] = {
     "sensor_closed_resume": "door/window closed",
     "nat_vent_exit_resume": "nat-vent exit",
 }
+
+# Registered exceptions to the Status Card Ontology's "Next Automation must not
+# contain time-of-day phrasing" rule (CLAUDE.md, Issue #527). Issue #534 deliberately
+# folded a clock time into the nat-vent-cutoff candidate's own action string in
+# _compute_next_automation_action() because omitting it read as a present-tense claim
+# ("windows should close now") rather than a future one, when the Automation Time card
+# showing the same time sits at a different point on the page. #527 postdated and never
+# re-audited #534's wording against the new no-duplication rule (five-whys in the
+# #847-followup plan) — rather than leaving that gap as silent prose drift, each
+# exception must be registered here AND tagged in-line with a matching
+# `# ontology-exception: <slug>` comment directly above the candidate. Both the
+# registration and the comment are required — see tests/test_status_card_ontology.py,
+# which structurally enforces that every clock-time-bearing candidate in
+# _compute_next_automation_action() is either exception-tagged and listed here, or
+# doesn't exist. Do not add an entry here without also adding the matching comment,
+# and do not add the comment without registering the slug here — the test checks both
+# directions.
+_ONTOLOGY_TIME_EXCEPTIONS: Final[set[str]] = {"nat_vent_cutoff"}
 
 
 @dataclass
@@ -594,6 +615,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # alongside _briefing_day_type so the mid-day regen gate can also
         # fire on a meaningful value drift, not just a category change.
         self._briefing_today_high: float | None = None
+        # nat_vent_cutoff/reason baked into the last-generated briefing text (Issue #847)
+        # — tracked alongside _briefing_day_type/_briefing_today_high so the mid-day
+        # regen gate can also fire when the WARM/MILD-day window-close time or its
+        # reason has drifted, even when day_type/today_high haven't moved.
+        self._briefing_nat_vent_cutoff: datetime | None = None
+        self._briefing_nat_vent_cutoff_reason: str | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
         # Issue #645: last_changed timestamps known to be a reconnect/availability blip
@@ -1393,6 +1420,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing_short = briefing.get("last_text_short", "")
         self._briefing_day_type = briefing.get("briefing_day_type")
         self._briefing_today_high = briefing.get("briefing_today_high")
+        _restored_nat_vent_cutoff = briefing.get("briefing_nat_vent_cutoff")
+        try:
+            self._briefing_nat_vent_cutoff = (
+                datetime.fromisoformat(_restored_nat_vent_cutoff) if _restored_nat_vent_cutoff else None
+            )
+        except (TypeError, ValueError):
+            self._briefing_nat_vent_cutoff = None
+        self._briefing_nat_vent_cutoff_reason = briefing.get("briefing_nat_vent_cutoff_reason")
 
         # Automation state
         auto_state = state.get("automation_state", {})
@@ -1540,6 +1575,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "last_text_short": self._last_briefing_short,
                 "briefing_day_type": self._briefing_day_type,
                 "briefing_today_high": getattr(self, "_briefing_today_high", None),
+                "briefing_nat_vent_cutoff": (
+                    getattr(self, "_briefing_nat_vent_cutoff", None).isoformat()
+                    if getattr(self, "_briefing_nat_vent_cutoff", None)
+                    else None
+                ),
+                "briefing_nat_vent_cutoff_reason": getattr(self, "_briefing_nat_vent_cutoff_reason", None),
             },
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
@@ -3408,23 +3449,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _maybe_regenerate_briefing_for_drift(self) -> bool:
         """Regenerate the briefing text in place if it's gone stale mid-day.
 
-        Two independent triggers, either one is sufficient:
+        Three independent triggers, any one is sufficient:
         - the classified day_type category changed (Issue #78's original check)
         - today_high has drifted >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F from
           what's baked into the currently-displayed briefing text, even within
           the same category (added after a live report showed a stale
           today_high for hours — the category-only check never caught this,
           since day_type had stayed "warm" the whole time).
+        - Issue #847: on a WARM/MILD day, the live self._nat_vent_plan's
+          nat_vent_cutoff has drifted >= BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES
+          from what's baked into the briefing text, or nat_vent_cutoff_reason has
+          flipped (e.g. comfort_floor -> outdoor_rise) — without this, a briefing
+          generated early in the day can bake in a comfort_floor cutoff/reason that
+          the live self._nat_vent_plan (read every cycle by the "Next Automation"
+          card) has long since moved past, producing the exact briefing-vs-card
+          contradiction this issue reported (8 AM "hold the heat in" vs. 11 AM
+          "outdoor will stop helping" for the same underlying event).
 
         Does not send notifications — only updates self._last_briefing/
-        self._last_briefing_short/self._briefing_day_type/self._briefing_today_high
-        in place. Returns True if it regenerated (caller is then responsible
-        for persisting state), False otherwise (including when no briefing has
-        been sent yet today, since there is nothing to keep in sync with).
-        Extracted as its own method (rather than inline in the update cycle)
-        so this drift logic has exactly one real implementation callers can
-        invoke directly — including tests — instead of a second copy that can
-        silently drift from what production actually does.
+        self._last_briefing_short/self._briefing_day_type/self._briefing_today_high/
+        self._briefing_nat_vent_cutoff/self._briefing_nat_vent_cutoff_reason in place.
+        Returns True if it regenerated (caller is then responsible for persisting
+        state), False otherwise (including when no briefing has been sent yet today,
+        since there is nothing to keep in sync with). Extracted as its own method
+        (rather than inline in the update cycle) so this drift logic has exactly one
+        real implementation callers can invoke directly — including tests — instead
+        of a second copy that can silently drift from what production actually does.
         """
         if not self._briefing_sent_today:
             return False
@@ -3435,20 +3485,54 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         day_type_changed = self._briefing_day_type is not None and classification.day_type != self._briefing_day_type
         high_drifted = today_high_drift >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F
-        if not (day_type_changed or high_drifted):
+
+        # nat_vent_cutoff/reason drift — only meaningful on WARM/MILD days, the only
+        # day types whose briefing text (_warm_day_plan()/_mild_day_plan()) actually
+        # renders these fields. Gating avoids regeneration thrash on other day types,
+        # where self._nat_vent_plan's cutoff (computed regardless of day type) is
+        # never shown in text anyway.
+        briefing_cutoff = getattr(self, "_briefing_nat_vent_cutoff", None)
+        briefing_cutoff_reason = getattr(self, "_briefing_nat_vent_cutoff_reason", None)
+        live_plan = getattr(self, "_nat_vent_plan", None) or {}
+        live_cutoff = live_plan.get("nat_vent_cutoff")
+        live_cutoff_reason = live_plan.get("nat_vent_cutoff_reason")
+        cutoff_drift_minutes = 0.0
+        cutoff_drifted = False
+        reason_flipped = False
+        if classification.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD):
+            if briefing_cutoff is not None and live_cutoff is not None:
+                cutoff_drift_minutes = abs((live_cutoff - briefing_cutoff).total_seconds()) / 60.0
+                cutoff_drifted = cutoff_drift_minutes >= BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES
+            elif briefing_cutoff != live_cutoff:
+                # One side has a cutoff and the other doesn't (e.g. the nat-vent
+                # window has appeared or disappeared entirely since the briefing was
+                # generated) — a meaningful change in what's shown, not just a small
+                # time shift, so always regenerate.
+                cutoff_drifted = True
+            reason_flipped = briefing_cutoff_reason != live_cutoff_reason
+
+        if not (day_type_changed or high_drifted or cutoff_drifted or reason_flipped):
             return False
 
         _LOGGER.info(
-            "Regenerating briefing text — day_type %s → %s, today_high drift %.1f°F (%s → %s)",
+            "Regenerating briefing text — day_type %s → %s, today_high drift %.1f°F (%s → %s),"
+            " nat_vent_cutoff %s → %s (drift %.1fmin), nat_vent_cutoff_reason %s → %s",
             self._briefing_day_type,
             classification.day_type,
             today_high_drift,
             briefing_today_high,
             classification.today_high,
+            briefing_cutoff,
+            live_cutoff,
+            cutoff_drift_minutes,
+            briefing_cutoff_reason,
+            live_cutoff_reason,
         )
         self._last_briefing, self._last_briefing_short = self._build_briefing_text(classification)
         self._briefing_day_type = classification.day_type
         self._briefing_today_high = classification.today_high
+        self._briefing_nat_vent_cutoff = live_cutoff
+        self._briefing_nat_vent_cutoff_reason = live_cutoff_reason
         return True
 
     def _build_briefing_text(
@@ -3504,6 +3588,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             occupancy_mode=self._occupancy_mode,
             nat_vent_plan=self._nat_vent_plan,
             runtime_config=self.config,
+            # Issue #847/#430: live readings for the WARM/MILD-day comfort_floor
+            # sanity check in _warm_day_plan()/_mild_day_plan().
+            current_indoor_temp=self._get_indoor_temp(),
+            current_outdoor_temp=self.data.get(ATTR_OUTDOOR_TEMP) if self.data else None,
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
@@ -3712,6 +3800,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self._briefing_day_type = classification.day_type
             self._briefing_today_high = classification.today_high
+            # Issue #847: bake in this cycle's nat_vent_cutoff/reason alongside
+            # day_type/today_high so _maybe_regenerate_briefing_for_drift()'s new
+            # third trigger has a correct starting point to compare against.
+            _plan_at_generation = getattr(self, "_nat_vent_plan", None) or {}
+            self._briefing_nat_vent_cutoff = _plan_at_generation.get("nat_vent_cutoff")
+            self._briefing_nat_vent_cutoff_reason = _plan_at_generation.get("nat_vent_cutoff_reason")
 
             # In observe-only mode, skip sending the notification
             if not self._automation_enabled:
@@ -4196,6 +4290,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_sent_today = False
         self._briefing_day_type = None
         self._briefing_today_high = None
+        self._briefing_nat_vent_cutoff = None
+        self._briefing_nat_vent_cutoff_reason = None
         self._hvac_on_since = None
         self._last_violation_check = None
         self._outdoor_temp_history.clear()
@@ -8718,9 +8814,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # (which can look nothing like it, hours ahead of the actual crossing) reads it as
                 # a present-tense contradiction. Folding the time into the action text itself
                 # removes the ambiguity without changing when this candidate fires.
+                # ontology-exception: nat_vent_cutoff — see CLAUDE.md Status Card Ontology (#534/#847-followup)
                 _cutoff_t = _warm_events["nat_vent_cutoff"].strftime("%I:%M %p").lstrip("0")
+                # Issue #847: phrasing now flows through describe_nat_vent_cutoff_reason()
+                # — the same shared helper briefing.py's _warm_day_plan()/_mild_day_plan()
+                # call — so this card and the briefing text can never phrase the same
+                # nat_vent_cutoff_reason differently again. Comfort-impact language only,
+                # per Status Card Ontology (CLAUDE.md): no mechanism words.
+                _cutoff_reason_fragment = describe_nat_vent_cutoff_reason(_warm_events.get("nat_vent_cutoff_reason"))
                 candidates.append(
-                    (_warm_events["nat_vent_cutoff"], f"Outdoor will stop helping around {_cutoff_t} — close windows")
+                    (
+                        _warm_events["nat_vent_cutoff"],
+                        f"Close windows around {_cutoff_t} {_cutoff_reason_fragment}",
+                    )
                 )
             if _warm_events["ceiling_breach_time"] and _warm_events["ceiling_breach_time"] > now:
                 candidates.append((_warm_events["ceiling_breach_time"], "AC turns on to hold the ceiling"))

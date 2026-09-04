@@ -14,6 +14,7 @@ import pytest
 from custom_components.climate_advisor.briefing import (
     _generate_tldr_table,
     _grace_period_section,
+    _mild_day_plan,
     _warm_day_plan,
     generate_briefing,
 )
@@ -1845,7 +1846,11 @@ class TestWarmDayPlanFloorWording:
         }
         lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
         text = "\n".join(lines)
-        assert "outdoor air will be warmer than inside" in text
+        # Issue #847: wording now flows through the shared describe_nat_vent_cutoff_reason()
+        # helper (nat_vent_plan.py), which changed the exact outdoor_rise phrase from
+        # "the outdoor air will be warmer than inside" to "before outdoor air warms past
+        # indoor" — same framing, now shared verbatim with the Next Automation card.
+        assert "before outdoor air warms past indoor" in text
         assert "hold the heat in" not in text
 
     def test_comfort_floor_reason_uses_generic_wording(self):
@@ -1862,6 +1867,64 @@ class TestWarmDayPlanFloorWording:
         text = "\n".join(lines)
         assert "hold the heat in" in text
         assert "outdoor air will be warmer than inside" not in text
+
+
+class TestMildDayPlanFloorWording:
+    """Issue #847: _mild_day_plan() must pick close-time wording based on
+    nat_vent_cutoff_reason, the same way _warm_day_plan() already does
+    (TestWarmDayPlanFloorWording, Issue #535) — see the plan's "Symmetry findings
+    across day types" section.
+
+    Before this fix, _mild_day_plan() has NO reason branch at all: it always says
+    "to trap the warmth", regardless of whether the underlying cutoff came from an
+    outdoor-air crossing or a comfort-floor crossing. This is the mirror-image bug
+    of the WARM-day one (missing branch vs. wrong branch), and left uncorrected it's
+    exactly the kind of asymmetry that lets MILD and WARM drift apart from each
+    other next. These two tests currently FAIL against pre-fix code — the phrase
+    "hold the heat in" is never emitted by _mild_day_plan() and "trap the warmth"
+    is emitted unconditionally regardless of the reason passed in.
+    """
+
+    def test_outdoor_rise_reason_uses_outdoor_wording(self):
+        c = _make_classification("mild", today_high=68, today_low=50)
+        cutoff = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        mild_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "ceiling_breach_time": None,
+            "nat_vent_recovers": False,
+            "recovery_time": None,
+        }
+        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        text = "\n".join(lines)
+        # Issue #847: shared describe_nat_vent_cutoff_reason() phrase, same as
+        # _warm_day_plan()'s counterpart above.
+        assert "before outdoor air warms past indoor" in text
+        assert "hold the heat in" not in text
+
+    def test_comfort_floor_reason_uses_generic_wording(self):
+        c = _make_classification("mild", today_high=68, today_low=50)
+        cutoff = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        mild_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "comfort_floor",
+            "ceiling_breach_time": None,
+            "nat_vent_recovers": False,
+            "recovery_time": None,
+        }
+        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        text = "\n".join(lines)
+        assert "hold the heat in" in text
+        assert "outdoor air will be warmer than inside" not in text
+
+    def test_no_events_falls_back_to_classifier_close_time(self):
+        """When mild_events is None (no forecast curve), behavior must be unchanged
+        from before this fix — falls back to c.window_close_time with the existing
+        generic "trap the warmth" wording, since there's no reason to branch on."""
+        c = _make_classification("mild", today_high=68, today_low=50)
+        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=None)
+        text = "\n".join(lines)
+        assert "trap the warmth" in text
 
 
 class TestWarmDayPlanReopenWording:

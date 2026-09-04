@@ -1278,6 +1278,16 @@ class TestBriefingRegeneration:
         coord._briefing_sent_today = True
         coord._briefing_day_type = DAY_TYPE_WARM
         coord._briefing_today_high = 85
+        # Issue #847: _maybe_regenerate_briefing_for_drift() gained a third
+        # nat_vent_cutoff/nat_vent_cutoff_reason drift trigger, which reads these
+        # three fields via getattr(..., None)/self._nat_vent_plan directly. `coord`
+        # here is a bare MagicMock() (not object.__new__()), so any unstubbed
+        # attribute silently returns a child MagicMock instead of None — comparing
+        # that against a real float/datetime in the new drift math raises. Stub
+        # them the same way _briefing_today_high already is.
+        coord._nat_vent_plan = None
+        coord._briefing_nat_vent_cutoff = None
+        coord._briefing_nat_vent_cutoff_reason = None
         coord._last_briefing = "Old warm briefing"
         coord._last_briefing_short = "Old warm TLDR"
         coord._automation_enabled = True

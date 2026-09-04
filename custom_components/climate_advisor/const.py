@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.18"
+VERSION = "0.7.19"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -64,6 +64,23 @@ TREND_THRESHOLD_MODERATE = 5
 # hours after the live classification had already moved on within the same
 # category — the regen gate previously fired only on a category change.
 BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F = 3.0
+
+# Minimum nat_vent_cutoff drift (minutes) from what was baked into the last-generated
+# briefing text to trigger a mid-day regeneration — mirrors
+# BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F's role but for the WARM/MILD-day window-close
+# time and its reason (Issue #847). A comfort_floor cutoff computed early in the day
+# (e.g. 8 AM) can resolve to an outdoor_rise cutoff hours later (e.g. 11 AM) as the
+# live forecast/ODE curves update — without this trigger the frozen briefing text
+# never catches up, producing the exact contradiction (briefing says one time/reason,
+# the live "Next Automation" card says another) this issue reported. Minutes, not
+# degrees: the underlying curves (_build_predicted_indoor_future() /
+# _build_future_forecast_outdoor()) resolve at roughly hourly steps, so a single
+# forecast refresh can legitimately shift the crossing time by up to ~60 minutes
+# without anything being wrong. 45 minutes catches a real single-step drift (the
+# reported bug moved 3 hours) while staying comfortably above hourly forecast jitter,
+# the same "flat threshold, no new hysteresis" approach the today_high check already
+# uses — see docs/08-COMPUTATION-REFERENCE.md.
+BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES = 45.0
 
 # Timing
 DOOR_WINDOW_PAUSE_SECONDS = 180  # deprecated — use CONF_SENSOR_DEBOUNCE instead

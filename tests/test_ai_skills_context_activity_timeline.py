@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from custom_components.climate_advisor.ai_skills_context import (
     build_activity_timeline_context,
+    build_event_log_context,
     get_provider_registry,
 )
 
@@ -53,3 +54,56 @@ class TestBuildActivityTimelineContext:
         registry = get_provider_registry()
         names = [p.name for p in registry.select()]
         assert "activity_timeline" in names
+
+
+class TestBuildEventLogContext:
+    """Tests for build_event_log_context() (Issue #432): the EVENT LOG section's
+    window filtering must not silently drop older-but-still-in-window events when
+    recent event volume exceeds the 200-entry display budget.
+
+    build_event_log_context uses real datetime.datetime.now(datetime.UTC) directly
+    (not dt_util.now), so fixtures use real-ish "now" timestamps rather than the
+    fixed _NOW used by TestBuildActivityTimelineContext above.
+    """
+
+    def test_events_spread_across_window_all_counted(self):
+        now = datetime.datetime.now(datetime.UTC)
+        # Position 0: sentinel, 10h ago (inside a 24h window).
+        # Positions 1-250: "noise" events, 30h ago (OUTSIDE the 24h window) — a
+        #   large block that pushes the sentinel out of a raw last-200 slice.
+        # Positions 251-300: "filler" events, 1h ago (inside the 24h window).
+        # Total in-window count = 1 (sentinel) + 50 (filler) = 51, well under
+        # the 200-entry display budget — the corrected filter-then-limit order
+        # keeps all of them, including the sentinel; the old slice-then-filter
+        # order dropped the sentinel purely due to its early raw array position.
+        sentinel = {"type": "comfort_band_applied", "time": (now - datetime.timedelta(hours=10)).isoformat()}
+        noise_events = [
+            {"type": "fan_activated", "time": (now - datetime.timedelta(hours=30, minutes=i)).isoformat()}
+            for i in range(250)
+        ]
+        filler_events = [
+            {"type": "fan_deactivated", "time": (now - datetime.timedelta(hours=1, minutes=i)).isoformat()}
+            for i in range(50)
+        ]
+        event_log = [sentinel] + noise_events + filler_events
+        coord = _make_coordinator(event_log=event_log)
+        ctx = asyncio.run(build_event_log_context(None, coord, hours=24))
+        assert "'comfort_band_applied': 1" in ctx, f"sentinel event missing from type_counts:\n{ctx}"
+
+    def test_limited_note_when_window_exceeds_200(self):
+        now = datetime.datetime.now(datetime.UTC)
+        event_log = [
+            {"type": "fan_activated", "time": (now - datetime.timedelta(minutes=i)).isoformat()} for i in range(220)
+        ]
+        coord = _make_coordinator(event_log=event_log)
+        ctx = asyncio.run(build_event_log_context(None, coord, hours=24))
+        assert "showing the most recent 200" in ctx
+
+    def test_no_limited_note_when_under_200(self):
+        now = datetime.datetime.now(datetime.UTC)
+        event_log = [
+            {"type": "fan_activated", "time": (now - datetime.timedelta(minutes=i)).isoformat()} for i in range(10)
+        ]
+        coord = _make_coordinator(event_log=event_log)
+        ctx = asyncio.run(build_event_log_context(None, coord, hours=24))
+        assert "showing the most recent 200" not in ctx

@@ -1,4 +1,5 @@
 """Tests for Issue #213 — Event log persistence (save/restore round-trip).
+Extended by Issue #432 — age-based retention alongside the count-based backstop.
 
 Covers:
   - _build_state_dict() serialises _event_log under the "event_log" key
@@ -7,6 +8,14 @@ Covers:
   - A system_restarted marker is always appended after restore
   - _event_source_label() classifies system_restarted events as "system"
   - Missing event_log key in persisted state defaults gracefully to one marker
+  - Issue #432: events older than EVENT_LOG_MAX_AGE_HOURS are pruned even when
+    well under EVENT_LOG_CAP in count
+  - Issue #432: more than EVENT_LOG_CAP recent events are still trimmed to
+    EVENT_LOG_CAP (count-based backstop)
+  - Issue #432: restore path and live emit path share the identical
+    _prune_event_log() function — no divergent re-cap logic
+  - Issue #432: a >500-event, >12h-spanning restored log still returns
+    everything actually within a 12h window afterward
 """
 
 from __future__ import annotations
@@ -15,7 +24,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 # ── HA module stubs (must happen before importing climate_advisor) ──────────
@@ -23,6 +32,11 @@ if "homeassistant" not in sys.modules:
     from conftest import _install_ha_stubs
 
     _install_ha_stubs()
+
+from custom_components.climate_advisor.const import (  # noqa: E402
+    EVENT_LOG_CAP,
+    EVENT_LOG_MAX_AGE_HOURS,
+)
 
 # Fixed datetime for tests — used via dt_mock injected into coordinator module scope
 _FIXED_NOW = datetime(2026, 6, 3, 10, 0, 0)
@@ -41,8 +55,6 @@ def _make_dt_mock():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-EVENT_LOG_CAP = 500  # must match const.py
 
 
 def _get_coordinator_class():
@@ -242,9 +254,18 @@ class TestEventLogRestore:
         assert "x" in types_
 
     def test_event_log_capped_on_restore(self):
-        """Oversized saved logs are truncated to EVENT_LOG_CAP before appending marker."""
+        """Oversized saved logs (all recent, within the age window) are truncated
+        to EVENT_LOG_CAP as a count-based backstop, keeping the most recent."""
         coord = _make_restore_coordinator()
-        oversized = [{"type": "evt", "time": "t", "i": i} for i in range(600)]
+        count = EVENT_LOG_CAP + 100
+        oversized = [
+            {
+                "type": "evt",
+                "time": (_FIXED_NOW - timedelta(minutes=count - i)).isoformat(),
+                "i": i,
+            }
+            for i in range(count)
+        ]
         state = {
             "date": _TODAY_STR,
             "event_log": oversized,
@@ -252,8 +273,34 @@ class TestEventLogRestore:
 
         _run_restore(coord, state_data=state)
 
-        # After capping to 500 + 1 system_restarted marker
+        # After capping to EVENT_LOG_CAP + 1 system_restarted marker
         assert len(coord._event_log) <= EVENT_LOG_CAP + 1
+        # Most recent events (highest "i") are kept, oldest dropped
+        types_i = [e["i"] for e in coord._event_log if e["type"] == "evt"]
+        assert min(types_i) >= 100
+
+    def test_event_log_age_pruned_on_restore(self):
+        """Events older than EVENT_LOG_MAX_AGE_HOURS are pruned on restore even
+        when the list is well under EVENT_LOG_CAP in count."""
+        coord = _make_restore_coordinator()
+        old_event = {
+            "type": "stale",
+            "time": (_FIXED_NOW - timedelta(hours=EVENT_LOG_MAX_AGE_HOURS + 1)).isoformat(),
+        }
+        recent_event = {
+            "type": "fresh",
+            "time": (_FIXED_NOW - timedelta(hours=1)).isoformat(),
+        }
+        state = {
+            "date": _TODAY_STR,
+            "event_log": [old_event, recent_event],
+        }
+
+        _run_restore(coord, state_data=state)
+
+        types_ = [e["type"] for e in coord._event_log]
+        assert "stale" not in types_
+        assert "fresh" in types_
 
     def test_system_restarted_event_emitted_after_restore(self):
         """system_restarted marker is always the last entry after restore."""
@@ -279,6 +326,107 @@ class TestEventLogRestore:
         assert len(coord._event_log) == 1
         assert coord._event_log[0]["type"] == "system_restarted"
         assert coord._event_log[0]["recovered_events"] == 0
+
+
+class TestPruneEventLog:
+    """_prune_event_log() — Issue #432: age-based retention + count backstop."""
+
+    def _prune_fn(self):
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        return mod._prune_event_log
+
+    def test_age_based_eviction_under_cap(self):
+        """An event older than EVENT_LOG_MAX_AGE_HOURS is pruned even though the
+        list is nowhere near EVENT_LOG_CAP in count."""
+        prune = self._prune_fn()
+        old_event = {
+            "type": "old",
+            "time": (_FIXED_NOW - timedelta(hours=EVENT_LOG_MAX_AGE_HOURS + 1)).isoformat(),
+        }
+        recent_event = {
+            "type": "recent",
+            "time": (_FIXED_NOW - timedelta(hours=1)).isoformat(),
+        }
+        result = prune([old_event, recent_event], _FIXED_NOW)
+
+        types_ = [e["type"] for e in result]
+        assert "old" not in types_
+        assert "recent" in types_
+
+    def test_count_based_backstop_within_age_window(self):
+        """More than EVENT_LOG_CAP events, all within the age window, are still
+        trimmed down to EVENT_LOG_CAP, keeping the most recent."""
+        prune = self._prune_fn()
+        count = EVENT_LOG_CAP + 250
+        events = [
+            {"type": "evt", "i": i, "time": (_FIXED_NOW - timedelta(minutes=count - i)).isoformat()}
+            for i in range(count)
+        ]
+        result = prune(events, _FIXED_NOW)
+
+        assert len(result) == EVENT_LOG_CAP
+        kept_i = [e["i"] for e in result]
+        assert min(kept_i) == count - EVENT_LOG_CAP
+        assert max(kept_i) == count - 1
+
+    def test_restore_and_emit_share_identical_prune_function(self):
+        """Both the live-emit path (_emit_event) and the restore path
+        (async_restore_state) call the shared module-level _prune_event_log —
+        no divergent re-cap logic in either path."""
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        calls: list[str] = []
+        real_prune = mod._prune_event_log
+
+        def _tracking_prune(event_log, now):
+            calls.append("called")
+            return real_prune(event_log, now)
+
+        # ── live emit path ──────────────────────────────────────────────
+        coord = _make_minimal_coordinator()
+        dt_mock = _make_dt_mock()
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock),
+            patch("custom_components.climate_advisor.coordinator._prune_event_log", _tracking_prune),
+        ):
+            coord._emit_event("test_evt", {})
+        assert calls == ["called"]
+
+        # ── restore path ────────────────────────────────────────────────
+        # async_restore_state() calls _prune_event_log directly on the restored
+        # log, then _emit_event() (appending the system_restarted marker) calls
+        # it again — both calls route through the same shared function.
+        calls.clear()
+        restore_coord = _make_restore_coordinator()
+        state = {"date": _TODAY_STR, "event_log": [{"type": "x", "time": "t"}]}
+        with patch("custom_components.climate_advisor.coordinator._prune_event_log", _tracking_prune):
+            _run_restore(restore_coord, state_data=state)
+        assert calls == ["called", "called"]
+
+    def test_cross_layer_12h_window_after_restore(self):
+        """A restored log seeded with >500 events spanning >12h (mixed ages) still
+        returns everything actually within a 12h window when read back — the old
+        count-only cap could silently evict hours of recent history on a busy day."""
+        coord = _make_restore_coordinator()
+
+        # 800 events spread evenly across the last 20 hours (well over the old
+        # 500-count cap, and spanning more than the 12h dashboard window).
+        total = 800
+        span_hours = 20
+        events = []
+        for i in range(total):
+            offset = timedelta(hours=span_hours) - timedelta(hours=span_hours * i / total)
+            events.append({"type": "evt", "i": i, "time": (_FIXED_NOW - offset).isoformat()})
+        state = {"date": _TODAY_STR, "event_log": events}
+
+        _run_restore(coord, state_data=state)
+
+        # Expected: every seeded event actually within the last 12h of _FIXED_NOW.
+        window_cutoff = (_FIXED_NOW - timedelta(hours=12)).isoformat()
+        expected_in_window = [e for e in events if e["time"] >= window_cutoff]
+
+        actual_in_window = [e for e in coord._event_log if e.get("type") == "evt" and e["time"] >= window_cutoff]
+
+        assert len(actual_in_window) == len(expected_in_window)
 
 
 class TestEventSourceLabel:

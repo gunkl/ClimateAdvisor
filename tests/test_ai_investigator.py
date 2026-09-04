@@ -150,6 +150,17 @@ def _make_coordinator(
     return coord
 
 
+def _make_fallback_event(event_type: str, hours_ago: float, **payload) -> dict:
+    """Build an event dict with a real UTC timestamp `hours_ago` hours in the past.
+
+    Used to exercise investigation_fallback()'s three filter_events_by_window()
+    call sites (Issue #432) — the event's actual wall-clock time determines
+    whether it falls inside the fallback's default 48h scan window.
+    """
+    ts = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours_ago)
+    return {"time": ts.isoformat(), "type": event_type, **payload}
+
+
 def _make_hass() -> MagicMock:
     """Build a mock hass with a plausible climate entity."""
     hass = MagicMock()
@@ -422,6 +433,107 @@ class TestInvestigationFallback:
         result = investigation_fallback(coord)
 
         assert "no obvious" in result["summary"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Group 2b: investigation_fallback filter-then-limit regression (Issue #432)
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackFilterThenLimitOrdering:
+    """Regression lock for Issue #432: all three deterministic scans inside
+    investigation_fallback() (error/warning scan, nat-vent cycling scan,
+    setpoint rejection scan) must filter the raw event log by time window
+    BEFORE applying the 200-entry scan budget, not after.
+
+    Before the fix, each site did `event_log[-200:]` first — a blind
+    positional slice on raw array position — and only then filtered by
+    time. For a strictly chronologically-ordered log this happens to match
+    filter-then-limit (both reduce to "the most recent N in-window
+    entries"). The bug bites when the log is NOT strictly ordered by
+    position — e.g. an in-window event sitting at an early array position,
+    followed by a large block of later-appended out-of-window entries (a
+    plausible shape after a state restore/merge). The old positional slice
+    discards the early in-window event before the time filter ever runs,
+    even though the true in-window count is well under 200.
+
+    Each test below reproduces that shape: a sentinel event (or cluster) at
+    the front of the array, a 250-entry out-of-window noise block right
+    after it (enough to push the sentinel out of a raw last-200 slice), and
+    a smaller in-window filler block after that. The corrected filter-first
+    behavior must still surface the sentinel's effect; the old slice-first
+    behavior would have silently dropped it.
+    """
+
+    def test_error_warning_scan_survives_noise_before_sentinel(self):
+        """Site 1 (~line 306): error/warning scan keeps an early in-window error
+        event even when a large out-of-window block follows it positionally."""
+        sentinel = _make_fallback_event("automation_error", hours_ago=47.0, detail="sentinel-setback-failure")
+        noise_events = [_make_fallback_event("fan_activated", hours_ago=60.0) for _ in range(250)]
+        filler_events = [_make_fallback_event("setpoint_applied", hours_ago=1.0) for _ in range(50)]
+        event_log = [sentinel] + noise_events + filler_events
+        coord = _make_coordinator(event_log=event_log)
+
+        result = investigation_fallback(coord)
+
+        assert "sentinel-setback-failure" in result["errors_warnings"], (
+            f"early in-window error event was lost by positional truncation:\n{result['errors_warnings']}"
+        )
+
+    def test_nat_vent_cycling_scan_survives_noise_before_sentinel(self):
+        """Site 2 (~line 405): nat-vent thrash detection still fires when the
+        3-transition cluster sits at the front of the array, ahead of a large
+        out-of-window noise block."""
+        sentinel_cluster = [
+            _make_fallback_event("nat_vent_comfort_floor_exit", hours_ago=47.9),
+            _make_fallback_event("nat_vent_comfort_floor_exit", hours_ago=47.85),
+            _make_fallback_event("nat_vent_comfort_floor_exit", hours_ago=47.8),
+        ]
+        noise_events = [_make_fallback_event("fan_activated", hours_ago=60.0) for _ in range(250)]
+        filler_events = [_make_fallback_event("setpoint_applied", hours_ago=1.0) for _ in range(50)]
+        event_log = sentinel_cluster + noise_events + filler_events
+        coord = _make_coordinator(event_log=event_log)
+
+        result = investigation_fallback(coord)
+
+        assert "Rapid nat-vent cycling detected" in result["incongruities"], (
+            f"early in-window nat-vent cycling cluster was lost by positional truncation:\n{result['incongruities']}"
+        )
+
+    def test_setpoint_rejection_scan_survives_noise_before_sentinel(self):
+        """Site 3 (~line 483): repeated setpoint-rejection detection still fires
+        when the two rejection events sit at the front of the array, ahead of a
+        large out-of-window noise block."""
+        sentinel_cluster = [
+            _make_fallback_event("setpoint_rejected", hours_ago=47.9, commanded=68.0),
+            _make_fallback_event("setpoint_rejected", hours_ago=47.7, commanded=68.0),
+        ]
+        noise_events = [_make_fallback_event("fan_activated", hours_ago=60.0) for _ in range(250)]
+        filler_events = [_make_fallback_event("setpoint_applied", hours_ago=1.0) for _ in range(50)]
+        event_log = sentinel_cluster + noise_events + filler_events
+        coord = _make_coordinator(event_log=event_log)
+
+        result = investigation_fallback(coord)
+
+        assert "rejected 2 times" in result["data_quality"], (
+            f"early in-window setpoint rejection pair was lost by positional truncation:\n{result['data_quality']}"
+        )
+
+    def test_error_warning_scan_limit_still_caps_at_200_when_all_in_window(self):
+        """When the in-window event count itself exceeds 200, the 200-entry
+        scan budget still applies (this is intentional, not a regression) —
+        confirms the fix only changes filter/limit ORDER, not removes the cap."""
+        events = [_make_fallback_event("automation_error", hours_ago=1.0 + i * 0.001) for i in range(250)]
+        coord = _make_coordinator(event_log=events)
+
+        result = investigation_fallback(coord)
+
+        # All entries are the same synthetic error type; just confirm the scan
+        # didn't raise and produced a bounded, non-empty result rather than
+        # silently including all 250 (which would indicate the limit is gone).
+        assert result["errors_warnings"] != "No errors or warnings in the supplied window."
+        rendered_lines = result["errors_warnings"].split("\n")
+        assert len(rendered_lines) <= 200
 
 
 # ---------------------------------------------------------------------------

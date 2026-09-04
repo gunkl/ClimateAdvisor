@@ -15,6 +15,7 @@ from .ai_skills_context import (
     _AUTOMATION_INTERVALS_SECONDS,
     _build_timing_correlations,
     _fetch_github_issues,
+    filter_events_by_window,
 )
 from .ai_skills_context import (
     build_version_context as _build_version_context_async,
@@ -301,28 +302,12 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     try:
         event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
         hours: int = int(kwargs.get("hours", 48))
-        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
-        for entry in event_log[-200:]:
-            if not isinstance(entry, dict):
-                continue
+        now_utc = datetime.datetime.now(datetime.UTC)
+        filtered_events, _limited = filter_events_by_window(event_log, hours, now_utc, limit=200)
+        for entry in filtered_events:
             etype = str(entry.get("type", ""))
             if "error" not in etype.lower() and "warning" not in etype.lower():
                 continue
-            raw_time = entry.get("time")
-            if raw_time is not None:
-                try:
-                    if isinstance(raw_time, datetime.datetime):
-                        event_dt = raw_time
-                        if event_dt.tzinfo is None:
-                            event_dt = event_dt.replace(tzinfo=datetime.UTC)
-                    else:
-                        event_dt = datetime.datetime.fromisoformat(str(raw_time))
-                        if event_dt.tzinfo is None:
-                            event_dt = event_dt.replace(tzinfo=datetime.UTC)
-                    if event_dt < cutoff:
-                        continue
-                except ValueError:
-                    pass
             errors_parts.append(f"[{entry.get('time', '?')}] type={etype}: {entry}")
     except Exception:
         _LOGGER.warning("investigator fallback: failed to scan event log")
@@ -419,7 +404,10 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     try:
         event_log_cycle: list[Any] = getattr(coordinator, "_event_log", []) or []
         hours_cycle: int = int(kwargs.get("hours", 48))
-        cutoff_cycle = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours_cycle)
+        now_utc_cycle = datetime.datetime.now(datetime.UTC)
+        filtered_events_cycle, _limited_cycle = filter_events_by_window(
+            event_log_cycle, hours_cycle, now_utc_cycle, limit=200
+        )
         _NAT_VENT_TRANSITION_TYPES = {
             "nat_vent_comfort_floor_exit",
             "nat_vent_away_ceiling_exit",
@@ -429,9 +417,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
             "fan_deactivated",
         }
         nat_vent_events: list[tuple[datetime.datetime, str]] = []
-        for entry in event_log_cycle[-200:]:
-            if not isinstance(entry, dict):
-                continue
+        for entry in filtered_events_cycle:
             etype = str(entry.get("type", ""))
             is_transition = etype in _NAT_VENT_TRANSITION_TYPES or (
                 "nat_vent" in etype.lower() and ("exit" in etype.lower() or "activ" in etype.lower())
@@ -460,8 +446,6 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                     if event_dt.tzinfo is None:
                         event_dt = event_dt.replace(tzinfo=datetime.UTC)
             except ValueError:
-                continue
-            if event_dt < cutoff_cycle:
                 continue
             nat_vent_events.append((event_dt, etype))
 
@@ -498,30 +482,15 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     try:
         event_log_setpoint: list[Any] = getattr(coordinator, "_event_log", []) or []
         hours_setpoint: int = int(kwargs.get("hours", 48))
-        cutoff_setpoint = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours_setpoint)
+        now_utc_setpoint = datetime.datetime.now(datetime.UTC)
+        filtered_events_setpoint, _limited_setpoint = filter_events_by_window(
+            event_log_setpoint, hours_setpoint, now_utc_setpoint, limit=200
+        )
         rejected_by_value: dict[float, list[str]] = {}
         nudged_values: set[float] = set()
-        for entry in event_log_setpoint[-200:]:
-            if not isinstance(entry, dict):
-                continue
+        for entry in filtered_events_setpoint:
             etype = str(entry.get("type", ""))
             if etype not in ("setpoint_rejected", "setpoint_nudge"):
-                continue
-            raw_time = entry.get("time")
-            event_dt = None
-            if raw_time is not None:
-                try:
-                    if isinstance(raw_time, datetime.datetime):
-                        event_dt = raw_time
-                        if event_dt.tzinfo is None:
-                            event_dt = event_dt.replace(tzinfo=datetime.UTC)
-                    else:
-                        event_dt = datetime.datetime.fromisoformat(str(raw_time))
-                        if event_dt.tzinfo is None:
-                            event_dt = event_dt.replace(tzinfo=datetime.UTC)
-                except ValueError:
-                    event_dt = None
-            if event_dt is not None and event_dt < cutoff_setpoint:
                 continue
             commanded = entry.get("commanded")
             if commanded is None:

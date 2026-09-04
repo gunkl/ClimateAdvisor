@@ -23,6 +23,7 @@
 | What are the full contracts for FakeHass, FakeScheduler, run_production, and outcomes? | FakeHass service-bus interception + state-feedback loop; FakeScheduler virtual clock patching contract; run_production event dispatch table including predicted_indoor ODE re-classification; outcomes custom assertion types. | [Sim Harness Spec](sim-harness-spec.md) |
 | Was there a shadow engine during the FSM migration? | During Phase 5 (Issues #613-#731), `coordinator.shadow_automation_engine` provided A/B comparison of production vs. FSM implementations. It was permanently removed in Phase 6 graduation (Issue #757) once all subsystems had migrated and proven zero divergence across the full test corpus. | [§FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer) |
 | Is there anything that catches a hard invariant violation (e.g. AC and WHF both physically on) even if the automation engine's own bookkeeping looks fine? | Yes — `invariant_watchdog.py` (Issue #749), a deliberately minimal detect-and-alert module that reads ground-truth sensor/thermostat state only (never internal override/grace flags) once per coordinator update cycle. Never issues a corrective command itself. | [Invariant Watchdog Brief](invariant-watchdog-brief.md) |
+| How is `coordinator._event_log` retention bounded, and how do live emit and restart/restore stay in sync? | `EVENT_LOG_MAX_AGE_HOURS` (168h) is primary retention; `EVENT_LOG_CAP` (4000) is a memory-safety backstop applied after. Both are enforced by one shared function, `_prune_event_log()`, called identically from `_emit_event()` and `async_restore_state()`. | [§Event Log Retention](02-ARCHITECTURE-REFERENCE.md#event-log-retention-issue-432) |
 
 ## File Structure
 
@@ -149,6 +150,17 @@ One day's tracked data: what was recommended, what actually happened, outcomes (
 | Door/window sensors | State change (open/closed) | `_async_door_window_changed` |
 | Climate entity | State change (temp, mode) | `_async_thermostat_changed` |
 | Occupancy toggle entities (home/vacation/guest) | State change (on/off) | `_async_occupancy_changed` |
+
+## Event Log Retention (Issue #432)
+
+`coordinator._event_log` is the in-memory list of automation events consumed by the dashboard Activity tab, the `event_log`/`activity_record` REST endpoints, and the AI investigator's `event_log` context provider. Retention is enforced by two bounds, checked in this order:
+
+- **`EVENT_LOG_MAX_AGE_HOURS`** (168h / 7 days, `const.py`) — primary retention. Entries older than this are evicted regardless of count.
+- **`EVENT_LOG_CAP`** (4000, `const.py`) — memory-safety backstop only, applied after the age eviction. Prior to this issue `EVENT_LOG_CAP` (then 500) was the *only* bound, which meant a busy day could silently shrink the retained history to a few hours.
+
+Both bounds are enforced by a single function, `_prune_event_log(event_log, now)` in `coordinator.py`, called identically from the live event-emit path (`_emit_event()`) and from restart/restore (`async_restore_state()`). There is no separate re-cap logic on either path, so the two can't drift out of sync with each other — and no state-file migration/version bump was needed, since both paths already funnel through the same function.
+
+**Consumer-side docs:** [Activity Report Table Spec](activity-report-table.md) covers the event timeline table renderer (used by both the dashboard and `activity_record`). [AI Skills Spec](ai-skills-spec.md#event-log-provider) covers the `event_log` context provider, including the `filter_events_by_window()` filter-then-limit helper and the distinction between a context-budget trim (`limited`) and the log not holding enough history (`is_truncated`, surfaced by the REST layer — see [REST API Brief](rest-api.md#event-log-truncation-signal)).
 
 ## Coordinator Thermal State Machine Methods
 

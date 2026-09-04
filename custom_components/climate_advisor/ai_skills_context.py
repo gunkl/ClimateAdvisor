@@ -927,6 +927,70 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     return "\n".join(lines)
 
 
+def filter_events_by_window(
+    event_log: list[Any], hours: float, now: datetime.datetime, *, limit: int | None = None
+) -> tuple[list[dict], bool]:
+    """Filter `event_log` entries to those within `hours` of `now`, in original order.
+
+    Filtering happens BEFORE any size limit is applied — this is the fix for
+    Issue #432, where three call sites previously sliced the raw log to its last
+    200 entries and only then filtered by time window. When recent event volume
+    exceeds the slice size, that ordering silently drops older-but-still-in-window
+    events before the time filter ever sees them, so a requested N-hour window can
+    return a small, misleading fraction of what actually happened.
+
+    Non-dict entries are skipped. An entry with no parseable "time" field is kept
+    (fail-open, matching prior behavior at all three call sites) unless dropped by
+    a subsequent `limit` trim.
+
+    If `limit` is given and the filtered result exceeds it, the returned list is
+    trimmed to the most recent `limit` entries (chronological order preserved) and
+    `limited` is True — this signals the result was budget-trimmed by `limit`,
+    distinct from the underlying log simply not holding that much history in the
+    requested window.
+
+    Returns:
+        (filtered_entries, limited) — filtered_entries is always in the original
+        (chronological) order of `event_log`; limited is True iff `limit` was
+        given and the time-filtered result exceeded it.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.UTC)
+    cutoff = now - datetime.timedelta(hours=hours)
+
+    filtered: list[dict] = []
+    for entry in event_log:
+        if not isinstance(entry, dict):
+            continue
+        raw_time = entry.get("time")
+        if raw_time is None:
+            filtered.append(entry)
+            continue
+        # Accept datetime objects or ISO strings
+        if isinstance(raw_time, datetime.datetime):
+            event_dt: datetime.datetime | None = raw_time
+            if event_dt.tzinfo is None:
+                event_dt = event_dt.replace(tzinfo=datetime.UTC)
+        else:
+            try:
+                event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                if event_dt.tzinfo is None:
+                    event_dt = event_dt.replace(tzinfo=datetime.UTC)
+            except (ValueError, TypeError):
+                event_dt = None
+                filtered.append(entry)
+                continue
+        if event_dt >= cutoff:
+            filtered.append(entry)
+
+    limited = False
+    if limit is not None and len(filtered) > limit:
+        filtered = filtered[-limit:]
+        limited = True
+
+    return filtered, limited
+
+
 async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
     """Build EVENT LOG, TIMING CORRELATIONS, and KNOWN OVERRIDE FALSE POSITIVES sections."""
     hours: int = min(max(int(kwargs.get("hours", 168)), 1), 720)
@@ -938,32 +1002,9 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
 
     # --- Event log ---
     try:
-        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+        now_utc = datetime.datetime.now(datetime.UTC)
         event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
-        recent_events: list[Any] = []
-
-        for entry in event_log[-200:]:
-            if not isinstance(entry, dict):
-                continue
-            raw_time = entry.get("time")
-            if raw_time is None:
-                recent_events.append(entry)
-                continue
-            # Accept datetime objects or ISO strings
-            if isinstance(raw_time, datetime.datetime):
-                event_dt = raw_time
-                if event_dt.tzinfo is None:
-                    event_dt = event_dt.replace(tzinfo=datetime.UTC)
-            else:
-                try:
-                    event_dt = datetime.datetime.fromisoformat(str(raw_time))
-                    if event_dt.tzinfo is None:
-                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
-                except ValueError:
-                    recent_events.append(entry)
-                    continue
-            if event_dt >= cutoff:
-                recent_events.append(entry)
+        recent_events, limited = filter_events_by_window(event_log, hours, now_utc, limit=200)
 
         # Count by type
         type_counts: dict[str, int] = {}
@@ -974,8 +1015,10 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
         event_section_lines += [
             f"=== EVENT LOG (last {hours}h, {len(recent_events)} events) ===",
             f"  event_type_counts: {type_counts}",
-            "",
         ]
+        if limited:
+            event_section_lines.append("  NOTE: window contains more than 200 events — showing the most recent 200")
+        event_section_lines.append("")
     except Exception:
         _LOGGER.warning("investigator: failed to read event log — skipping")
         event_section_lines += ["=== EVENT LOG ===", "  unavailable", ""]
@@ -2563,33 +2606,20 @@ def build_event_timeline_table(
     Rows are built in chronological order internally (dedup depends on forward
     iteration). When `newest_first` is True, the final row order is reversed for
     display — most recent event first, oldest last.
+
+    Events are filtered to the requested `hours` window FIRST, then capped to the
+    most recent 200 for rendering (Issue #432) — capping the raw log to its last
+    200 entries before filtering would silently drop older-but-still-in-window
+    events whenever recent event volume exceeds 200.
     """
     unit: str = config.get("temp_unit", "fahrenheit")
     if now.tzinfo is None:
         now = now.replace(tzinfo=datetime.UTC)
-    cutoff = now - datetime.timedelta(hours=hours)
 
-    # ---- filter within window ----
-    filtered: list[dict] = []
-    for entry in raw_event_log[-200:]:
-        if not isinstance(entry, dict):
-            continue
-        raw_time = entry.get("time")
-        if raw_time is not None:
-            if isinstance(raw_time, datetime.datetime):
-                event_dt: datetime.datetime | None = raw_time
-                if event_dt.tzinfo is None:
-                    event_dt = event_dt.replace(tzinfo=datetime.UTC)
-            else:
-                try:
-                    event_dt = datetime.datetime.fromisoformat(str(raw_time))
-                    if event_dt.tzinfo is None:
-                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
-                except (ValueError, TypeError):
-                    event_dt = None
-            if event_dt is not None and event_dt < cutoff:
-                continue
-        filtered.append(entry)
+    # ---- filter within window (Issue #432: filter FIRST, then apply the 200-row
+    # display budget — filtering a raw last-200 slice instead would silently drop
+    # older-but-still-in-window events whenever recent volume exceeds 200) ----
+    filtered, limited = filter_events_by_window(raw_event_log, hours, now, limit=200)
 
     if not filtered:
         table = (
@@ -2722,6 +2752,8 @@ def build_event_timeline_table(
     ordered_rows = list(reversed(rows)) if newest_first else rows
     row_lines = [f"| {t} | {ev} | {st} | {src} | {ind} | {out} |" for t, ev, st, src, ind, out in ordered_rows]
     table = "\n".join([header, sep, *row_lines])
+    if limited:
+        table = "NOTE: window contains more than 200 events — showing the most recent 200.\n\n" + table
 
     return _maybe_prepend_whf_warning(table, config)
 
@@ -2906,31 +2938,18 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
     try:
         hours = float(kwargs.get("hours", 24))
         hours = max(1.0, min(hours, 720.0))
-        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+        now_utc = datetime.datetime.now(datetime.UTC)
         raw_event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
         _own_ca = False
         _own_user = False
         fan_ownership_lines: list[str] = []
         _fan_override_count = 0
-        for entry in raw_event_log[-200:]:
-            if not isinstance(entry, dict):
-                continue
-            raw_time = entry.get("time")
-            if raw_time is not None:
-                if isinstance(raw_time, datetime.datetime):
-                    _odt = raw_time
-                    if _odt.tzinfo is None:
-                        _odt = _odt.replace(tzinfo=datetime.UTC)
-                else:
-                    try:
-                        _odt = datetime.datetime.fromisoformat(str(raw_time))
-                        if _odt.tzinfo is None:
-                            _odt = _odt.replace(tzinfo=datetime.UTC)
-                    except ValueError:
-                        _odt = None
-                if _odt is not None and _odt < cutoff:
-                    continue
-
+        # Issue #432: filter to the requested window FIRST, then cap to the most
+        # recent 200 for the ownership scan below — capping the raw log before
+        # filtering would silently drop older-but-still-in-window ownership
+        # transitions whenever recent event volume exceeds 200.
+        _filtered_events, _fan_limited = filter_events_by_window(raw_event_log, hours, now_utc, limit=200)
+        for entry in _filtered_events:
             _etype = str(entry.get("type", "unknown"))
             _edata = {k: v for k, v in entry.items() if k not in ("time", "type")}
             _ts_str = _fmt_time(entry.get("time"))
@@ -2960,6 +2979,8 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
             f"  Fan override count (window): {_fan_override_count}",
             *(fan_ownership_lines if fan_ownership_lines else ["  (no fan ownership transitions in window)"]),
         ]
+        if _fan_limited:
+            lines.append("  NOTE: window contains more than 200 events — showing the most recent 200")
     except Exception:
         _LOGGER.warning("investigator: failed to build fan ownership history -- skipping")
 

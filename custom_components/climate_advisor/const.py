@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.15"
+VERSION = "0.7.16"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -433,7 +433,10 @@ ATTR_CONTACT_STATUS = "contact_status"
 REVISIT_DELAY_SECONDS = 300  # 5 minutes
 
 # Event log ring buffer cap (Issue #76)
-EVENT_LOG_CAP = 500  # keep last 500 events
+# Issue #432: primary retention is now age-based (EVENT_LOG_MAX_AGE_HOURS); this cap
+# is a memory-safety backstop against pathological growth on unusually busy days.
+EVENT_LOG_CAP = 4000  # safety-ceiling backstop; EVENT_LOG_MAX_AGE_HOURS is primary retention
+EVENT_LOG_MAX_AGE_HOURS = 168  # 7 days — matches the API views' hours= clamp ceiling
 
 # Real WARNING+/ERROR log-record ring buffer cap (Issue #578) — see log_capture.py
 LOG_CAPTURE_CAP = 200

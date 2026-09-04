@@ -12,6 +12,7 @@
 | What HTTP status codes does the API return and when? | 400 bad input, 403 feature disabled, 429 rate limit, 500 investigation failure, 503 coordinator/AI unavailable. Out-of-range numerics are silently clamped, not rejected. | [Error Handling](#error-handling) |
 | How does api.py read coordinator state and why does it sometimes bypass the coordinator cache? | Primary reads use `coordinator.data.get(...)` with safe defaults. Live HVAC state is read via `hass.states.get(climate_entity_id)` to guarantee freshness past the 30-minute update cycle. | [Coordinator Access Pattern](#coordinator-access-pattern) |
 | What security guardrails prevent sensitive data from leaking through the config or AI status endpoints? | `ClimateAdvisorConfigView` applies the two-case redaction rule. `ClimateAdvisorAIStatusView` calls `status.pop("api_key", None)` before serialising. Unknown suggestion-accept keys are applied in-memory only and never persisted to the HA config entry. | [Security Notes](#security-notes) |
+| How does a caller know an `event_log`/`activity_record` response doesn't cover the full requested window? | Both endpoints return `is_truncated` (bool) and `oldest_available` (ISO timestamp or null) alongside their normal payload, computed by comparing the oldest stored event against the requested window's cutoff. | [Event Log Truncation Signal](#event-log-truncation-signal) |
 
 ## Scope
 
@@ -47,7 +48,8 @@ All 21 view classes set `requires_auth = True`. HA handles token validation befo
 | `/api/climate_advisor/config` | Integration configuration | `settings` list of `{key, value, label, description, category}` — sensitive values redacted |
 | `/api/climate_advisor/ai_status` | AI client health and budget | `status` (api_key removed), `recent_requests` (last 10) |
 | `/api/climate_advisor/investigation_reports` | AI investigator report history | Direct return from `coordinator.get_investigation_report_history()` |
-| `/api/climate_advisor/event_log` | Internal event log | `events`, `total`, `hours` — `hours` param silently clamped if out of range |
+| `/api/climate_advisor/event_log` | Internal event log | `events`, `total`, `hours` — `hours` param silently clamped if out of range. `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
+| `/api/climate_advisor/activity_record` | Deterministic event timeline table (no AI required) | `table` (from `build_event_timeline_table()`), `hours`, `generated_at`, `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
 
 **Chart Data Query Parameters:** `range` (string, default `24h`) and `before_ts` (Unix ms, optional). When `before_ts` is absent, the window ends at now (live mode); when present, the window is anchored at that point for historical navigation.
 
@@ -95,6 +97,17 @@ Before returning config values, `ClimateAdvisorConfigView` applies these transfo
 | 503 | Coordinator not yet loaded, or AI client unavailable |
 
 **Silent clamping**: Out-of-range numerics are never rejected with 400. The `hours` parameter in `event_log`, an unrecognised `range_str` in `chart_data`, and the `hours` field in AI activity requests are all silently clamped or reset to their defaults.
+
+## Event Log Truncation Signal
+
+**Decision (Issue #432):** Silent clamping of `hours=` (above) means a caller can request a window the stored event log doesn't actually reach back far enough to cover — before this fix, both `event_log` and `activity_record` would render whatever partial data existed with no signal that it was incomplete. Both endpoints now include two additive response fields, computed identically (each view derives `cutoff = now - hours` and compares it against the oldest stored entry's `time`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `is_truncated` | bool | `True` if the event log's oldest stored entry is newer than the requested window's cutoff — i.e. the response cannot possibly cover the full requested window, regardless of cause (fresh install, recent restart, or the `EVENT_LOG_MAX_AGE_HOURS`/`EVENT_LOG_CAP` retention backstop having already evicted older entries). `False` otherwise. |
+| `oldest_available` | string (ISO timestamp) or `null` | The `time` field of the oldest event currently in storage (`coordinator._event_log[0]`). `null` only when the event log is currently empty. |
+
+`hours=` parameter handling itself is unchanged by this fix — this is a pure additive change to both responses; existing consumers that ignore the two new fields are unaffected. See [Event Log Provider](ai-skills-spec.md#event-log-provider) and the coordinator retention brief in [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) for how the underlying log's retention window is enforced.
 
 ## Coordinator Access Pattern
 

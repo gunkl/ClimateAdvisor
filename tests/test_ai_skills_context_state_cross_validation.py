@@ -168,6 +168,72 @@ class TestBuildOverrideDetailsContext:
             ctx = asyncio.run(build_override_details_context(None, coord, hours=24))
         assert "CA owns fan" in ctx
 
+    def test_fan_ownership_filters_by_window_before_200_limit(self):
+        """Issue #432 regression: a fan-ownership transition well inside the requested
+        window must survive even though the raw event log has far more than 200
+        total entries, most of them outside the window.
+
+        Old behavior: `raw_event_log[-200:]` sliced to the last 200 RAW ARRAY
+        POSITIONS first, then filtered by time. A real ownership transition
+        (sentinel) sits at position 0, 11 hours ago (inside the 12h window); a
+        large block of 250 out-of-window "noise" entries (30h ago) is appended
+        after it, followed by 50 in-window "filler" entries (1h ago). The old
+        code's positional slice takes only the last 200 raw positions — entirely
+        within the noise+filler block — so the sentinel, despite being inside the
+        window, never even reaches the time filter. The total in-window count
+        (51) is well under the 200-entry budget, so the corrected filter-first
+        order keeps it.
+        """
+        now = datetime.datetime.now(datetime.UTC)
+        sentinel = {
+            "type": "nat_vent_fan_on",
+            "time": (now - datetime.timedelta(hours=11)).isoformat(),
+        }
+        noise_events = [
+            {
+                "type": "comfort_band_applied",
+                "time": (now - datetime.timedelta(hours=30, minutes=i)).isoformat(),
+                "mode": "home",
+                "floor": 64,
+                "ceiling": 76,
+                "active": "ceiling",
+            }
+            for i in range(250)
+        ]
+        filler_events = [
+            {
+                "type": "comfort_band_applied",
+                "time": (now - datetime.timedelta(hours=1, minutes=i)).isoformat(),
+                "mode": "home",
+                "floor": 64,
+                "ceiling": 76,
+                "active": "ceiling",
+            }
+            for i in range(50)
+        ]
+        event_log = [sentinel] + noise_events + filler_events
+        coord = _make_coordinator()
+        coord._event_log = event_log
+        with patch("custom_components.climate_advisor.ai_skills_context.dt_util.as_local", side_effect=lambda x: x):
+            ctx = asyncio.run(build_override_details_context(None, coord, hours=12))
+        assert "CA owns fan" in ctx, f"11h-old ownership transition missing from fan ownership history:\n{ctx}"
+
+    def test_fan_ownership_limited_note_when_window_exceeds_200(self):
+        now = datetime.datetime.now(datetime.UTC)
+        event_log = [
+            {
+                "type": "fan_manual_override",
+                "fan_after": "on",
+                "time": (now - datetime.timedelta(minutes=i)).isoformat(),
+            }
+            for i in range(220)
+        ]
+        coord = _make_coordinator()
+        coord._event_log = event_log
+        with patch("custom_components.climate_advisor.ai_skills_context.dt_util.as_local", side_effect=lambda x: x):
+            ctx = asyncio.run(build_override_details_context(None, coord, hours=12))
+        assert "more than 200 events" in ctx
+
 
 class TestProviderRegistration:
     def test_both_registered_in_provider_registry(self):

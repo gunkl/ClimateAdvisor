@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.15] — 2026-09-03
+
+- Fix #837: the HVAC Fan Restriction dropdown (added in #835) now shows a proper "HVAC Fan Restriction" label and description in Settings instead of the raw field name with no explanation.
+
 ## [0.7.14] — 2026-09-03
 
 - Feat #835: added a Heat/Cool/Both restriction option for the HVAC fan circulation feature, so households in humid climates can stop the blower from running (and raising indoor humidity off wet coils) shortly after an AC cooling cycle. Defaults to Both (no restriction, current behavior).

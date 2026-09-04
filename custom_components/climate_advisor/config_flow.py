@@ -1558,6 +1558,14 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=2.0, max=8.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
                     ),
+                    vol.Required(
+                        "comfort_family_recency_window_min",
+                        default=current.get("comfort_family_recency_window_min", 120.0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=15.0, max=360.0, step=15.0, mode=selector.NumberSelectorMode.BOX
+                        )
+                    ),
                 }
             ),
             errors=errors,

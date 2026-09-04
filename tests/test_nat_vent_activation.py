@@ -1738,10 +1738,17 @@ class TestNatVentAcAssist:
         """Engine in paused state, FAN_MODE_HVAC, savings=True.
 
         check_natural_vent_conditions() re-activates -> _apply_nat_vent_hvac_state
-        -> heat mode at comfort_heat (ceiling disarmed, no compressor).
+        -> no-op (Issue #843: no longer force-arms heat while nat-vent/windows-open
+        is still the active session).
 
         Occupant experience: free cooling via breeze only; AC compressor stays off
-        (savings mode). Comfort floor is protected by heat mode.
+        (savings mode). Comfort floor protection now comes from
+        decide_nat_vent_exit()'s COMFORT_FLOOR exit reason (extensively tested
+        elsewhere — test_nat_vent_exit.py, test_nat_vent_fsm.py, test_fan_control.py),
+        not from a second, contradictory heat-arm here — see
+        Issue #843: force-commanding heat while windows are open violated this
+        project's "no HVAC while windows are open, absent a manual override"
+        principle, and was redundant with that already-existing mechanism.
         """
         engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=True, indoor_f=76.0)
         engine._paused_by_door = True
@@ -1758,7 +1765,7 @@ class TestNatVentAcAssist:
             if c[0][0] == "climate" and c[0][1] == "set_hvac_mode"
         ]
         heat_calls = [c for c in hvac_calls if c[0][2].get("hvac_mode") == "heat"]
-        assert len(heat_calls) >= 1, "savings mode must arm heat at comfort floor"
+        assert len(heat_calls) == 0, "savings mode no longer force-arms heat while windows are open (Issue #843)"
 
     # ------------------------------------------------------------------
     # Test 3: door-open path (handle_door_window_open), savings ON ->
@@ -1768,10 +1775,14 @@ class TestNatVentAcAssist:
         """Sensor opens with conditions met, savings=True.
 
         handle_door_window_open() activates nat-vent -> _apply_nat_vent_hvac_state
-        -> heat mode only; no cool/heat_cool service call (ceiling disarmed).
+        -> no-op (Issue #843): no compressor cool call (ceiling still disarmed —
+        unchanged) AND no heat call either (no longer force-armed — see
+        test_path_b_floor_only_savings_on's docstring for why).
 
-        Occupant experience: compressor stays off while windows are open even if
-        indoor approaches comfort_cool -- only floor is guarded.
+        Occupant experience: compressor stays off while windows are open, in
+        either direction — floor protection is nat-vent's own thermostatic exit
+        evaluation (decide_nat_vent_exit()'s COMFORT_FLOOR reason), not a second
+        guard here.
         """
         engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=True, indoor_f=76.0)
         engine._last_outdoor_temp = 68.0
@@ -1779,19 +1790,16 @@ class TestNatVentAcAssist:
         asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
         assert engine._natural_vent_active is True
-        # Savings mode: ceiling disarmed -- verify set_temperature is called at comfort_heat
-        # (floor only), NOT at comfort_cool (which would arm the compressor for cooling).
+        # Savings mode: no HVAC write of any kind from this call path — neither a
+        # cool call (ceiling disarmed, unchanged) nor a heat call (Issue #843).
         temp_calls = [
             c
             for c in engine.hass.services.async_call.call_args_list
             if c[0][0] == "climate" and c[0][1] == "set_temperature"
         ]
-        assert len(temp_calls) >= 1, "savings mode must set a setpoint"
-        # All setpoint calls must be at the floor (comfort_heat=70), not ceiling (comfort_cool=75)
-        for call in temp_calls:
-            assert call[0][2].get("temperature") == 70.0, (
-                "savings mode must only arm the floor setpoint (comfort_heat), not comfort_cool"
-            )
+        assert len(temp_calls) == 0, (
+            "savings mode must not set any setpoint from _apply_nat_vent_hvac_state (Issue #843)"
+        )
 
     # ------------------------------------------------------------------
     # Test 4: FAN_MODE_WHOLE_HOUSE -> _apply_nat_vent_hvac_state is a no-op

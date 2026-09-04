@@ -353,7 +353,8 @@
           "preheat_safety_margin": "Pre-heat Safety Margin",
           "max_setback_depth_f": "Maximum Setback Depth (\u00b0F)",
           "comfort_mode_switch_min_interval_s": "Minimum Time Between Heat/Cool Switches (sec)",
-          "aggressive_savings": "Prefer savings over comfort"
+          "aggressive_savings": "Prefer savings over comfort",
+          "comfort_family_recency_window_min": "Recent Activity Window for Deadband (min)"
         },
         "data_description": {
           "learning_enabled": "When enabled, Climate Advisor learns from your manual adjustments and suggests improvements over time.",
@@ -367,7 +368,8 @@
           "preheat_safety_margin": "Multiplier applied to model-computed pre-heat time as a buffer (e.g. 1.2 = 20% extra).",
           "max_setback_depth_f": "Largest overnight setback the adaptive engine may compute.",
           "comfort_mode_switch_min_interval_s": "How long to wait after commanding heat, active cooling, or a whole-house-fan session before switching between the heating and cooling families again \u2014 prevents rapid heat/cool hunting right after free cooling rides the house down to the comfort floor.",
-          "aggressive_savings": "When enabled, Climate Advisor favors energy savings over comfort \u2014 for example, using wider temperature swings and earlier setbacks."
+          "aggressive_savings": "When enabled, Climate Advisor favors energy savings over comfort \u2014 for example, using wider temperature swings and earlier setbacks.",
+          "comfort_family_recency_window_min": "How long HVAC-cool, WHF, HVAC-fan, or nat-vent activity is remembered as \"recent\" for the comfort-family deadband above. An against-grain switch (e.g. to heat on a warm day) only waits for the full deadband when the opposite family ran within this window; otherwise it switches immediately at the comfort boundary, since there's nothing recent to short-cycle away from."
         }
       },
       "classification_thresholds": {

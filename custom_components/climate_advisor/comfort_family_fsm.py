@@ -152,6 +152,10 @@ class ComfortFamilyFsmInputs:
       sustain_seconds    -> config comfort_fallback_confirm_s equivalent
                             (COMFORT_FALLBACK_CONFIRM_S today), shared by the
                             leaf's three sustain-confirm checks
+      minutes_since_cooling_ended -> Issue #843, forwarded unchanged — see
+                            comfort_family_decision.ComfortFamilyInputs
+      minutes_since_heating_ended -> same
+      recency_window_min          -> config comfort_family_recency_window_min
     """
 
     # The classifier's own family for this cycle ("heating"/"cooling", derived
@@ -169,6 +173,9 @@ class ComfortFamilyFsmInputs:
     ode_floor_outcome: OdeFloorGuardOutcome
     min_dwell_seconds: float
     sustain_seconds: float
+    minutes_since_cooling_ended: float | None
+    minutes_since_heating_ended: float | None
+    recency_window_min: float
     now: datetime
 
 
@@ -223,6 +230,9 @@ def _leaf_inputs(
         cool_candidate_since=dwell_state.cool_candidate_since,
         recovery_since=dwell_state.recovery_since,
         sustain_seconds=inputs.sustain_seconds,
+        minutes_since_cooling_ended=inputs.minutes_since_cooling_ended,
+        minutes_since_heating_ended=inputs.minutes_since_heating_ended,
+        recency_window_min=inputs.recency_window_min,
         now=inputs.now,
     )
 

@@ -175,6 +175,18 @@ class ComfortFamilyInputs:
       sustain_seconds              -> caller-resolved sustain window (mirrors
                                     COMFORT_FALLBACK_CONFIRM_S's existing use),
                                     shared by all three sustain-confirm checks
+      minutes_since_cooling_ended  -> Issue #843: minutes since HVAC-cool, WHF,
+                                    HVAC-fan, or nat-vent activity was last seen
+                                    active, or None if never recorded. Used only
+                                    when the heat direction is against-grain — a
+                                    switch to heat with nothing recently cooling
+                                    behaves like the native direction (near-zero
+                                    deadband) instead of waiting for the full
+                                    configured deadband.
+      minutes_since_heating_ended  -> same, for HVAC-heat only (asymmetric by
+                                    design — no fan-equivalent counts toward
+                                    "recent heating")
+      recency_window_min           -> config comfort_family_recency_window_min
       now                           -> caller-resolved wall-clock time
                                     (dt_util.now())
     """
@@ -231,6 +243,9 @@ class ComfortFamilyInputs:
     cool_candidate_since: datetime | None
     recovery_since: datetime | None
     sustain_seconds: float
+    minutes_since_cooling_ended: float | None
+    minutes_since_heating_ended: float | None
+    recency_window_min: float
     now: datetime
 
 
@@ -246,6 +261,24 @@ def _native_family(day_type: str | None) -> str | None:
 
 def _effective_deadband(deadband: float, *, override_active: bool) -> float:
     return deadband * _OVERRIDE_DEADBAND_MULTIPLIER if override_active else deadband
+
+
+def _against_grain_deadband(
+    *,
+    is_native: bool,
+    minutes_since_opposite_ended: float | None,
+    deadband: float,
+    recency_window_min: float,
+) -> float:
+    """Issue #843: zero deadband for the native direction (unchanged), and ALSO
+    zero deadband for the against-grain direction when the opposite family's
+    last recorded activity is outside ``recency_window_min`` or was never
+    recorded — nothing recent to protect against, so it behaves like native."""
+    if is_native:
+        return 0.0
+    if minutes_since_opposite_ended is None or minutes_since_opposite_ended >= recency_window_min:
+        return 0.0
+    return deadband
 
 
 def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
@@ -333,9 +366,27 @@ def _decide_entry(inputs: ComfortFamilyInputs, native: str | None) -> ComfortFam
     direction the day's climate already favors escalates at a near-zero
     deadband, the against-grain direction must clear the configured day-type
     deadband first. It is deliberately NOT the target family — see
-    ``ComfortFamilyInputs.base_family``."""
-    heat_deadband = 0.0 if native == _FAMILY_HEATING else inputs.deadband_against_grain_f
-    cool_deadband = 0.0 if native == _FAMILY_COOLING else inputs.deadband_against_grain_f
+    ``ComfortFamilyInputs.base_family``.
+
+    Issue #843: the against-grain deadband exists to prevent short-cycling —
+    switching straight from one family to the other right after the opposite
+    family actually ran. It has no purpose when nothing has run recently: a
+    house that's been sitting untouched for hours has nothing to protect
+    against, so an against-grain breach behaves like the native direction
+    (near-zero deadband) whenever the opposite family's last recorded activity
+    is outside ``recency_window_min`` (or never recorded at all)."""
+    heat_deadband = _against_grain_deadband(
+        is_native=native == _FAMILY_HEATING,
+        minutes_since_opposite_ended=inputs.minutes_since_cooling_ended,
+        deadband=inputs.deadband_against_grain_f,
+        recency_window_min=inputs.recency_window_min,
+    )
+    cool_deadband = _against_grain_deadband(
+        is_native=native == _FAMILY_COOLING,
+        minutes_since_opposite_ended=inputs.minutes_since_heating_ended,
+        deadband=inputs.deadband_against_grain_f,
+        recency_window_min=inputs.recency_window_min,
+    )
 
     heat_breach_delta = inputs.floor - inputs.indoor
     cool_breach_delta = inputs.indoor - inputs.ceiling
@@ -349,9 +400,22 @@ def _decide_entry(inputs: ComfortFamilyInputs, native: str | None) -> ComfortFam
     heat_reason = "no floor breach" if heat_breach_delta <= 0 else "within heat deadband"
     heat_held: _DirectionCheck | None = None
 
-    if inputs.ode_floor_outcome is OdeFloorGuardOutcome.ESCALATE:
+    # Issue #843: the ODE floor guard's own ESCALATE normally fires immediately,
+    # bypassing heat_deadband entirely (its lead-time logic is the gate, not the
+    # deadband — see module docstring). That's fine when heat is native or
+    # nothing cooling-side ran recently, but a predicted-breach escalation
+    # against-grain, minutes after cooling just ran, is exactly the flip-flop
+    # this feature exists to prevent — predictive vs. reactive shouldn't matter.
+    # When heat_deadband landed at the full configured value above (against-grain
+    # AND something recent to protect against), demote ESCALATE to the same
+    # "respected, no fallback this tick" treatment STANDING_BY already gets, so
+    # the guard defers to the reactive sustain-confirm+deadband path instead.
+    ode_floor_escalate_gated = native != _FAMILY_HEATING and heat_deadband > 0.0
+    if inputs.ode_floor_outcome is OdeFloorGuardOutcome.ESCALATE and not ode_floor_escalate_gated:
         heat_target = _FAMILY_HEATING
         heat_reason = "ODE floor guard ESCALATE"
+    elif inputs.ode_floor_outcome is OdeFloorGuardOutcome.ESCALATE and ode_floor_escalate_gated:
+        heat_reason = "ODE floor guard ESCALATE deferred — recent cooling activity within recency window"
     elif inputs.ode_floor_outcome is OdeFloorGuardOutcome.STANDING_BY:
         heat_reason = "ODE floor guard STANDING_BY — respected, no fallback this tick"
     else:

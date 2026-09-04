@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.17] — 2026-09-04
+
+- Fix #843: the house no longer sits several degrees below the comfort floor for hours after nat-vent/cooling ends with nothing else running. Heat now engages at the comfort boundary once nothing has cooled recently (default 2h), instead of waiting for a large breach that was never protecting against anything. Also removed a nat-vent savings-mode floor guard that force-committed heat while windows were still open, and closed a gap where the predictive ceiling guard could switch to cooling without respecting the same recency protection.
+
 ## [0.7.16] — 2026-09-03
 
 - Fix #432: the Activity dashboard's time-window views (e.g. "last 12 hours") now return complete data instead of silently truncating during busy automation periods. Two compounding causes: the retained event history was capped by a fixed entry count with no regard for how much time those entries actually spanned (a busy day could shrink it to just a few hours), and several internal consumers sliced to the most recent 200 raw entries before applying the requested time window, which could drop in-window events on a non-chronological log. Retention is now time-based (7 days). API responses also report when the data available doesn't reach back as far as requested, instead of returning a confidently-rendered partial answer with no indication anything was missing.

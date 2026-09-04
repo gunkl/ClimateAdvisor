@@ -59,6 +59,13 @@ def _inputs(
     cool_candidate_since: datetime | None = None,
     recovery_since: datetime | None = None,
     sustain_seconds: float = _SUSTAIN_S,
+    # Issue #843: default to "opposite family just ran" (0 minutes) so every
+    # pre-#843 test below keeps exercising the deadband-enforced path unchanged
+    # — the recency gate only starts mattering once minutes_since_*_ended grows
+    # past recency_window_min. Dedicated recency tests override these.
+    minutes_since_cooling_ended: float | None = 0.0,
+    minutes_since_heating_ended: float | None = 0.0,
+    recency_window_min: float = 120.0,
     now: datetime = _NOW,
 ) -> ComfortFamilyInputs:
     return ComfortFamilyInputs(
@@ -78,6 +85,9 @@ def _inputs(
         cool_candidate_since=cool_candidate_since,
         recovery_since=recovery_since,
         sustain_seconds=sustain_seconds,
+        minutes_since_cooling_ended=minutes_since_cooling_ended,
+        minutes_since_heating_ended=minutes_since_heating_ended,
+        recency_window_min=recency_window_min,
         now=now,
     )
 
@@ -280,6 +290,151 @@ class TestAgainstGrainDeadbandCleared:
         assert decision.target_family == "cooling"  # holds current family while sustaining
 
 
+class TestRecencyGatedDeadband:
+    """Issue #843: the against-grain deadband applies only when the opposite
+    family actually ran within comfort_family_recency_window_min. Nothing
+    recorded, or nothing within the window, means the against-grain direction
+    behaves like native (near-zero deadband, still sustain-confirmed) — fixes
+    the overnight-drift bug where a static deadband made no distinction between
+    "just finished cooling" and "nothing has run in 3 hours"."""
+
+    def test_no_recent_cooling_escalates_on_small_breach_once_sustained(self):
+        # Hot day, native=cooling. Floor breach of only 3.0 (would normally be
+        # held by the 5.0 deadband — see TestAgainstGrainDeadbandHeld) escalates
+        # once sustained, because nothing cooling-side ran within the window.
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="cooling",
+                day_type=DAY_TYPE_HOT,
+                indoor=65.0,  # floor=68, breach_delta=3.0 — within the 5.0 deadband
+                floor=68.0,
+                ceiling=80.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.MODEL_INELIGIBLE,
+                heat_candidate_since=_NOW - timedelta(seconds=_SUSTAIN_S + 1),
+                minutes_since_cooling_ended=None,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.ESCALATE
+        assert decision.target_family == "heating"
+
+    def test_recent_cooling_still_holds_the_same_small_breach(self):
+        # Same breach, but cooling ended 10 minutes ago (within the 120-minute
+        # window) — deadband is enforced exactly as before Issue #843.
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="cooling",
+                day_type=DAY_TYPE_HOT,
+                indoor=65.0,
+                floor=68.0,
+                ceiling=80.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.MODEL_INELIGIBLE,
+                minutes_since_cooling_ended=10.0,
+                recency_window_min=120.0,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.WITHIN_DEADBAND
+        assert decision.target_family == "cooling"
+
+    def test_recency_window_boundary_exactly_at_window_is_not_recent(self):
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="cooling",
+                day_type=DAY_TYPE_HOT,
+                indoor=65.0,
+                floor=68.0,
+                ceiling=80.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.MODEL_INELIGIBLE,
+                heat_candidate_since=_NOW - timedelta(seconds=_SUSTAIN_S + 1),
+                minutes_since_cooling_ended=120.0,
+                recency_window_min=120.0,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.ESCALATE
+        assert decision.target_family == "heating"
+
+    def test_recency_window_just_inside_still_gates(self):
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="cooling",
+                day_type=DAY_TYPE_HOT,
+                indoor=65.0,
+                floor=68.0,
+                ceiling=80.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.MODEL_INELIGIBLE,
+                minutes_since_cooling_ended=119.9,
+                recency_window_min=120.0,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.WITHIN_DEADBAND
+        assert decision.target_family == "cooling"
+
+    def test_symmetric_no_recent_heating_escalates_to_cooling(self):
+        # Cold day, native=heating. Ceiling breach of 3.0 (within the 5.0
+        # deadband) escalates once sustained, because nothing heating-side ran
+        # within the window.
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="heating",
+                day_type=DAY_TYPE_COLD,
+                indoor=75.0,  # ceiling=72, breach_delta=3.0 — within the 5.0 deadband
+                floor=65.0,
+                ceiling=72.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.MODEL_INELIGIBLE,
+                cool_candidate_since=_NOW - timedelta(seconds=_SUSTAIN_S + 1),
+                minutes_since_heating_ended=None,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.ESCALATE
+        assert decision.target_family == "cooling"
+
+    def test_symmetric_recent_heating_still_holds(self):
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="heating",
+                day_type=DAY_TYPE_COLD,
+                indoor=75.0,
+                floor=65.0,
+                ceiling=72.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.MODEL_INELIGIBLE,
+                minutes_since_heating_ended=10.0,
+                recency_window_min=120.0,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.WITHIN_DEADBAND
+        assert decision.target_family == "heating"
+
+    def test_asymmetry_recent_cooling_does_not_gate_the_cool_direction(self):
+        # Recent WHF/nat-vent/HVAC-cool activity gates a switch TO heat, never a
+        # switch to cool — only actual heating counts toward "recent heating",
+        # per the project's explicit asymmetric-by-design decision. Cold day
+        # ceiling breach: minutes_since_cooling_ended is "recent" (irrelevant to
+        # this direction), minutes_since_heating_ended is None (nothing to
+        # protect against) — escalates exactly as the "no recent" case above,
+        # regardless of how recently cooling-side activity happened.
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="heating",
+                day_type=DAY_TYPE_COLD,
+                indoor=75.0,
+                floor=65.0,
+                ceiling=72.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.MODEL_INELIGIBLE,
+                cool_candidate_since=_NOW - timedelta(seconds=_SUSTAIN_S + 1),
+                minutes_since_cooling_ended=1.0,
+                minutes_since_heating_ended=None,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.ESCALATE
+        assert decision.target_family == "cooling"
+
+
 class TestManualOverride:
     def test_override_within_grace_window_is_held(self):
         # deadband=2.0, override doubles to 4.0. breach_delta=3.0 is past the
@@ -344,6 +499,11 @@ class TestOdeFloorGuardFallbackReachability:
     when confidence_k_passive == "none" literally."""
 
     def test_ode_escalate_bypasses_deadband_and_sustain(self):
+        # Issue #843: ESCALATE only bypasses the deadband/sustain checks when
+        # there's nothing recent to protect against (minutes_since_cooling_ended
+        # outside the recency window, or never recorded) — see
+        # test_ode_escalate_deferred_when_recent_cooling_within_window below for
+        # the new gated case this test used to not distinguish from.
         decision = decide_comfort_family(
             _inputs(
                 current_family="cooling",
@@ -353,6 +513,48 @@ class TestOdeFloorGuardFallbackReachability:
                 ceiling=80.0,
                 deadband_against_grain_f=5.0,
                 ode_floor_outcome=OdeFloorGuardOutcome.ESCALATE,
+                minutes_since_cooling_ended=None,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.ESCALATE
+        assert decision.target_family == "heating"
+
+    def test_ode_escalate_deferred_when_recent_cooling_within_window(self):
+        """Issue #843: a predicted breach minutes after cooling actually ran is
+        exactly the flip-flop the recency-gated deadband exists to prevent —
+        predictive (ODE) vs. reactive shouldn't matter. ESCALATE is demoted to
+        the same "respected, no fallback this tick" treatment STANDING_BY gets."""
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="cooling",
+                day_type=DAY_TYPE_HOT,
+                indoor=67.0,
+                floor=68.0,
+                ceiling=80.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.ESCALATE,
+                minutes_since_cooling_ended=10.0,
+                recency_window_min=120.0,
+            )
+        )
+        assert decision.outcome is ComfortFamilyOutcome.HOLD
+        assert decision.target_family == "cooling"
+
+    def test_ode_escalate_not_deferred_once_recency_window_elapsed(self):
+        """Same as above, but cooling ended 121 minutes ago (past the 120-minute
+        window) — ESCALATE fires immediately again, same as the "never recorded"
+        case."""
+        decision = decide_comfort_family(
+            _inputs(
+                current_family="cooling",
+                day_type=DAY_TYPE_HOT,
+                indoor=67.0,
+                floor=68.0,
+                ceiling=80.0,
+                deadband_against_grain_f=5.0,
+                ode_floor_outcome=OdeFloorGuardOutcome.ESCALATE,
+                minutes_since_cooling_ended=121.0,
+                recency_window_min=120.0,
             )
         )
         assert decision.outcome is ComfortFamilyOutcome.ESCALATE

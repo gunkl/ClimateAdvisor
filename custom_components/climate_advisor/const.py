@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.13"
+VERSION = "0.7.14"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -195,6 +195,16 @@ FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
 FAN_MODE_HVAC = "hvac_fan"
 FAN_MODE_BOTH = "both"
 DEFAULT_FAN_MODE = FAN_MODE_DISABLED
+
+# HVAC fan mode restriction — heat/cool/both (Issue #835). Orthogonal to CONF_FAN_MODE:
+# CONF_FAN_MODE selects which physical fan mechanism is used; this selects *when* the
+# hvac_fan/both mechanism is allowed to run, to avoid re-evaporating condensate off wet
+# coils shortly after a cooling cycle in humid climates.
+CONF_HVAC_FAN_RESTRICT_MODE = "hvac_fan_restrict_mode"
+HVAC_FAN_RESTRICT_HEAT = "heat"
+HVAC_FAN_RESTRICT_COOL = "cool"
+HVAC_FAN_RESTRICT_BOTH = "both"
+DEFAULT_HVAC_FAN_RESTRICT_MODE = HVAC_FAN_RESTRICT_BOTH
 
 # Minimum fan runtime per hour (Issue #77)
 CONF_FAN_MIN_RUNTIME_PER_HOUR = "fan_min_runtime_per_hour"
@@ -611,6 +621,18 @@ CONFIG_METADATA = {
             "Controls how fans assist ventilation. 'Whole house fan' controls a dedicated entity."
             " 'HVAC fan' uses the thermostat fan mode."
             " Fan activates during economizer maintain phase."
+        ),
+        "category": "fan",
+    },
+    "hvac_fan_restrict_mode": {
+        "label": "HVAC Fan Mode Restriction",
+        "description": (
+            "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run,"
+            " based on which HVAC mode last ran. Does not affect the whole-house fan."
+            " 'Heat only' blocks the HVAC fan while the thermostat is in cool mode, or off"
+            " within 2 hours of a cooling cycle — avoids raising humidity by re-evaporating"
+            " condensate off wet coils, useful in humid climates. 'Cool only' is the symmetric"
+            " restriction. 'Both' (default) applies no restriction — current behavior."
         ),
         "category": "fan",
     },

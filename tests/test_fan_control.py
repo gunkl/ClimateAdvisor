@@ -37,12 +37,15 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
+    CONF_HVAC_FAN_RESTRICT_MODE,
     DAY_TYPE_HOT,
     DAY_TYPE_MILD,
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    HVAC_FAN_RESTRICT_COOL,
+    HVAC_FAN_RESTRICT_HEAT,
 )
 from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason  # noqa: E402
 
@@ -214,6 +217,181 @@ class TestActivateFan:
         asyncio.run(engine._activate_fan(reason="test"))
 
         engine.hass.services.async_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# hvac_fan_restrict_mode tests (Issue #835)
+# ---------------------------------------------------------------------------
+
+
+def _thermostat_state(mode: str):
+    """Minimal state stub with just the `.state` attribute the guard reads."""
+    state = MagicMock()
+    state.state = mode
+    return state
+
+
+class TestHvacFanRestriction:
+    """Tests for the heat/cool/both hvac_fan_restrict_mode guard (Issue #835)."""
+
+    def test_restrict_both_default_unrestricted(self):
+        """No restriction configured (default) → HVAC fan activates as before."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("cool"))
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.EXECUTED
+        calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(calls) == 1
+        assert calls[0][0][2]["fan_mode"] == "on"
+
+    def test_restrict_heat_blocked_while_currently_cooling(self):
+        """restrict=heat, hvac_mode=cool → HVAC fan does not activate."""
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_HEAT}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("cool"))
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.SUPPRESSED
+        assert len(_get_service_calls(engine, "climate", "set_fan_mode")) == 0
+        assert engine._fan_active is False
+
+    def test_restrict_heat_blocked_recent_cooling_within_2h(self):
+        """restrict=heat, hvac off, cooled 30 min ago → blocked.
+
+        The module-level ``dt_util.now`` patch at the top of this file doesn't reach
+        automation.py's ``dt_util`` symbol (a known mock-harness limitation: importing
+        a submodule through a MagicMock parent binds an auto-generated child mock, not
+        the real sys.modules entry — see TestReconcileFanDriftIntegration's identical
+        explicit-patch usage elsewhere in this file), so time-relative assertions patch
+        it explicitly.
+        """
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_HEAT}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("off"))
+        _now = datetime(2026, 3, 19, 14, 30, 0)
+        engine._last_hvac_cooling_active = (_now - timedelta(minutes=30)).isoformat()
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=_now):
+            result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.SUPPRESSED
+        assert len(_get_service_calls(engine, "climate", "set_fan_mode")) == 0
+
+    def test_restrict_heat_allowed_cooling_over_2h_ago(self):
+        """restrict=heat, hvac off, cooled 3 hours ago → allowed (outside 2h window)."""
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_HEAT}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("off"))
+        _now = datetime(2026, 3, 19, 14, 30, 0)
+        engine._last_hvac_cooling_active = (_now - timedelta(hours=3)).isoformat()
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=_now):
+            result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.EXECUTED
+        assert len(_get_service_calls(engine, "climate", "set_fan_mode")) == 1
+
+    def test_restrict_heat_allowed_no_cooling_history(self):
+        """restrict=heat, hvac off, no recorded cooling ever → allowed."""
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_HEAT}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("off"))
+        assert engine._last_hvac_cooling_active is None
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.EXECUTED
+
+    def test_restrict_heat_allowed_while_heating(self):
+        """restrict=heat, hvac_mode=heat → allowed."""
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_HEAT}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("heat"))
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.EXECUTED
+
+    def test_restrict_cool_blocked_while_currently_heating(self):
+        """restrict=cool, hvac_mode=heat → HVAC fan does not activate (symmetric case)."""
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_COOL}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("heat"))
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.SUPPRESSED
+
+    def test_restrict_cool_blocked_recent_heating_within_2h(self):
+        """restrict=cool, hvac off, heated 30 min ago → blocked (symmetric case)."""
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_COOL}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("off"))
+        _now = datetime(2026, 3, 19, 14, 30, 0)
+        engine._last_hvac_heating_active = (_now - timedelta(minutes=30)).isoformat()
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=_now):
+            result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.SUPPRESSED
+
+    def test_restrict_cool_allowed_while_cooling(self):
+        """restrict=cool, hvac_mode=cool → allowed (symmetric case)."""
+        engine = _make_automation_engine(
+            {CONF_FAN_MODE: FAN_MODE_HVAC, CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_COOL}
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("cool"))
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.EXECUTED
+
+    def test_restrict_heat_both_fan_mode_whf_still_activates(self):
+        """fan_mode=both, restrict=heat, currently cooling → WHF leg still activates,
+        HVAC leg is suppressed; overall result is EXECUTED (something did activate)."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_BOTH,
+                CONF_FAN_ENTITY: "fan.attic",
+                CONF_HVAC_FAN_RESTRICT_MODE: HVAC_FAN_RESTRICT_HEAT,
+            }
+        )
+        engine.hass.states.get = MagicMock(return_value=_thermostat_state("cool"))
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        assert result == FanCommandResult.EXECUTED
+        whf_calls = _get_service_calls(engine, "fan", "turn_on")
+        assert len(whf_calls) == 1
+        # No 'on' fan_mode call — only 'auto' from the HVAC-suppression-for-WHF branch.
+        hvac_fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert all(c[0][2]["fan_mode"] != "on" for c in hvac_fan_calls)
+        assert engine._fan_active is True
+
+    def test_serializable_state_round_trip(self):
+        """last_hvac_heating_active/last_hvac_cooling_active persist across restart."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._last_hvac_heating_active = "2026-03-19T10:00:00"
+        engine._last_hvac_cooling_active = "2026-03-19T12:00:00"
+
+        state = engine.get_serializable_state()
+        assert state["last_hvac_heating_active"] == "2026-03-19T10:00:00"
+        assert state["last_hvac_cooling_active"] == "2026-03-19T12:00:00"
+
+        restored = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        restored.restore_state(state)
+        assert restored._last_hvac_heating_active == "2026-03-19T10:00:00"
+        assert restored._last_hvac_cooling_active == "2026-03-19T12:00:00"
 
 
 # ---------------------------------------------------------------------------

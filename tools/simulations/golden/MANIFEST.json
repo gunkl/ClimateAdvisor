@@ -284,8 +284,8 @@
     "issue": 221
   },
   "bedtime_natvent_continuation": {
-    "sha256": "5fc6d2ceef28e6ca691f279c86635a503972cddd6a03aa1f92fdc622c98682e7",
-    "signed": "2026-07-12",
+    "sha256": "15ea56d775655976a0121839aec0878853991bbde498120aab75b8a467bd2a25",
+    "signed": "2026-09-03",
     "issue": 371
   },
   "cold_day_heat_all_day_with_override": {

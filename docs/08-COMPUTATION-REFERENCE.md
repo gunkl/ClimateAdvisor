@@ -1269,8 +1269,8 @@ Fans activate during natural ventilation and during the economizer (both phases 
 |---|---|---|
 | `disabled` | No action | No action |
 | `whole_house_fan` | `turn_on` the configured `fan_entity` (using the entity's own domain — `fan` or `switch`) | `turn_off` the configured `fan_entity` |
-| `hvac_fan` | `climate.set_fan_mode` → `"on"` on the thermostat entity | `climate.set_fan_mode` → `"auto"` on the thermostat entity |
-| `both` | Both `whole_house_fan` and `hvac_fan` actions | Both deactivate actions |
+| `hvac_fan` | `climate.set_fan_mode` → `"on"` on the thermostat entity (subject to the `hvac_fan_restrict_mode` guard below) | `climate.set_fan_mode` → `"auto"` on the thermostat entity |
+| `both` | Both `whole_house_fan` and `hvac_fan` actions (HVAC-fan leg subject to `hvac_fan_restrict_mode`; WHF leg unaffected) | Both deactivate actions |
 
 ### Fan Archetype Behavioral Contract (Issue #277)
 
@@ -1286,6 +1286,20 @@ The HVAC fan circulates indoor air through the duct system. It is an integral pa
 | On deactivation | `climate.set_fan_mode(auto)` issued; comfort band unchanged |
 | Stops when windows close? | **No** — unless `_natural_vent_active = True` at the time all sensors close. Fan-only circulation is independent of window state; only the nat-vent path stops the fan on sensor-close. |
 | HVAC mode captured? | No — `_pre_fan_hvac_mode` is not set |
+
+##### `hvac_fan_restrict_mode` — heat/cool/both restriction (Issue #835)
+
+Orthogonal to `fan_mode` (which mechanism runs) and independently configured: `hvac_fan_restrict_mode` gates *when* the HVAC-fan leg (`fan_mode = hvac_fan` or `both`) is allowed to activate, based on which HVAC mode last ran. It does **not** affect the whole-house fan leg — a `FAN_MODE_BOTH`-configured install still activates WHF normally even while the HVAC leg is restricted. Purpose: running the blower shortly after a cooling cycle re-evaporates condensate off the still-wet evaporator coils, raising indoor humidity — a real problem in humid climates.
+
+| Value | Behavior |
+|---|---|
+| `both` (default) | No restriction — current/legacy behavior, unchanged. |
+| `heat` | Blocks HVAC-fan activation while the thermostat is currently in `cool` mode, or `off` with a cooling cycle (`hvac_action == "cooling"`) recorded within the last 2 hours. Recommended for humid climates. |
+| `cool` | Symmetric restriction: blocks activation while currently in `heat` mode, or `off` with a heating cycle within the last 2 hours. No known real-world use case; included for selector symmetry. |
+
+Implementation: `AutomationEngine._hvac_fan_restriction_block_reason()` is the single choke point, called from `_activate_fan()` right before the `climate.set_fan_mode(on)` write — both HVAC-fan trigger paths (the periodic duty-cycle circulation and the natural-vent/economizer free-cooling path) converge there before any hardware write happens, so no duplicated gate logic exists. When blocked, `_activate_fan()` returns `FanCommandResult.SUPPRESSED` and logs `"Feature suppressed: HVAC fan not activated — <reason>"` at INFO — no `fan_activated` event fires and `_fan_active` is not set, since nothing was actually commanded. This is a **start-gate only**: it does not force an already-running HVAC-fan cycle off mid-run if HVAC begins actively heating/cooling in the restricted direction partway through.
+
+`AutomationEngine._last_hvac_heating_active` / `_last_hvac_cooling_active` (ISO timestamps) track the most recent live `hvac_action` read of `"heating"`/`"cooling"`, updated once per coordinator cycle (piggybacking on the existing unconditional `hvac_action` read in `_async_update_data()` rather than polling separately). Unlike override/grace state, these two fields are **restored** (not clean-slate) across an HA restart via `get_serializable_state()`/`restore_state()` — forgetting a recent cooling cycle on restart would let the guard immediately approve activation into a still-wet coil, recreating exactly the issue the feature exists to prevent. No recorded history for the restricted mode is treated as "not recently active" (allowed) — absence of evidence isn't itself a block.
 
 #### `FAN_MODE_WHOLE_HOUSE` — Separate Exhaust / Air Exchange Fan
 

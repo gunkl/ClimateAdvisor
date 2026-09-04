@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.14] — 2026-09-03
+
+- Feat #835: added a Heat/Cool/Both restriction option for the HVAC fan circulation feature, so households in humid climates can stop the blower from running (and raising indoor humidity off wet coils) shortly after an AC cooling cycle. Defaults to Both (no restriction, current behavior).
+
 ## [0.7.13] — 2026-09-03
 
 - Fix #829: turning the whole-house fan on with no timer selected no longer risks a repeating overnight loop. That fan-on falls back to the configured default grace duration; when that grace expired while the fan was still physically running, Climate Advisor silently handed ownership to nat-vent with no record the run had ever been user-initiated — so the fan's eventual real off, however much later it arrived, was read as a brand-new unexplained override and restarted a full fresh multi-hour "leave the fan alone" period, over and over, each time it reactivated the fan on its own and it turned off again. The Activity Record now also narrates this closure explicitly instead of relabeling it a fresh manual action.

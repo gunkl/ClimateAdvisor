@@ -34,6 +34,7 @@ EXPECTED_KEYS = {
     "automation_grace_seconds",
     "automation_grace_notify",
     "fan_mode",
+    "hvac_fan_restrict_mode",
     "fan_entity",
     "fan_state_entity",
     "fan_state_feedback",

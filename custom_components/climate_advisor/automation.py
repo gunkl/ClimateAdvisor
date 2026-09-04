@@ -49,6 +49,7 @@ from .const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
+    CONF_HVAC_FAN_RESTRICT_MODE,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
@@ -75,6 +76,7 @@ from .const import (
     DEFAULT_COMFORT_DEADBAND_WARM_F,
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
+    DEFAULT_HVAC_FAN_RESTRICT_MODE,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NAT_VENT_SOFT_START_ENABLED,
     DEFAULT_NATURAL_VENT_DELTA,
@@ -98,6 +100,9 @@ from .const import (
     FAN_MODE_WHOLE_HOUSE,
     GRACE_TRIGGERS_PROTECTING_OVERRIDE,
     HOT_DAY_PRE_COOL_MODIFIER,
+    HVAC_FAN_RESTRICT_BOTH,
+    HVAC_FAN_RESTRICT_COOL,
+    HVAC_FAN_RESTRICT_HEAT,
     MIN_VIABLE_NAT_VENT_HOURS,
     NAT_VENT_EXIT_SUSTAIN_S,
     NAT_VENT_HYSTERESIS_F,
@@ -251,6 +256,7 @@ class FanCommandResult(Enum):
     RATE_LIMITED_DUP = "rate_limited_dup"
     OVERRIDDEN = "overridden"
     DISABLED = "disabled"
+    SUPPRESSED = "suppressed"  # Issue #835: hvac_fan_restrict_mode blocked activation
 
 
 # Issue #664: moved to const.py (GRACE_TRIGGERS_PROTECTING_OVERRIDE) as the single source of
@@ -767,6 +773,13 @@ class AutomationEngine:
         # Fan state tracking (Issue #37)
         self._fan_active: bool = False
         self._fan_on_since: str | None = None  # ISO timestamp
+        # Issue #835: last time the live hvac_action read was heating/cooling — used by
+        # the hvac_fan_restrict_mode guard to avoid running the HVAC fan shortly after a
+        # cooling cycle (humid climates) or, symmetrically, after a heating cycle.
+        # Persisted across restart (see get_serializable_state()/restore_state()) since
+        # forgetting a recent cycle on restart would defeat the guard's purpose.
+        self._last_hvac_heating_active: str | None = None  # ISO timestamp
+        self._last_hvac_cooling_active: str | None = None  # ISO timestamp
         self._fan_override_active: bool = False
         self._fan_override_time: str | None = None
         # RF remote timer selection in hours, for observability only (Issue #486).
@@ -9610,6 +9623,52 @@ class AutomationEngine:
         self._fan_rate_limited_direction = action
         return FanCommandResult.RATE_LIMITED_NEW
 
+    def _hvac_fan_restriction_block_reason(self) -> str | None:
+        """Return a short reason if hvac_fan_restrict_mode blocks HVAC-fan activation now.
+
+        Issue #835: 'heat' means never run the HVAC fan while the thermostat is
+        currently in cool mode, or off with a cooling cycle within the last 2 hours
+        (avoids re-evaporating condensate off wet coils and raising indoor humidity).
+        'cool' is the symmetric restriction for heat. 'both' (default) applies no
+        restriction. No recorded history for the restricted mode is treated as
+        "not recently active" — absence of evidence isn't itself a block.
+        """
+        restrict = self.config.get(CONF_HVAC_FAN_RESTRICT_MODE, DEFAULT_HVAC_FAN_RESTRICT_MODE)
+        if restrict == HVAC_FAN_RESTRICT_BOTH:
+            return None
+
+        hvac_state = self.hass.states.get(self.climate_entity)
+        hvac_mode = hvac_state.state if hvac_state else "unknown"
+        window = timedelta(hours=2)
+
+        def _recent(ts_iso: str | None) -> bool:
+            if not ts_iso:
+                return False
+            try:
+                ts = datetime.fromisoformat(ts_iso)
+            except (ValueError, TypeError):
+                return False
+            now = dt_util.now()
+            if not isinstance(now, datetime):
+                return False
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=UTC)
+            return (now - ts) < window
+
+        if restrict == HVAC_FAN_RESTRICT_HEAT:
+            if hvac_mode == "cool":
+                return "restricted to heat — HVAC currently in cool mode"
+            if hvac_mode == "off" and _recent(self._last_hvac_cooling_active):
+                return "restricted to heat — HVAC cooled within the last 2h"
+        elif restrict == HVAC_FAN_RESTRICT_COOL:
+            if hvac_mode == "heat":
+                return "restricted to cool — HVAC currently in heat mode"
+            if hvac_mode == "off" and _recent(self._last_hvac_heating_active):
+                return "restricted to cool — HVAC heated within the last 2h"
+        return None
+
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> FanCommandResult:
         """Activate fan based on configured fan_mode.
 
@@ -9719,6 +9778,8 @@ class AutomationEngine:
         self._fan_command_time = dt_util.now()
         self._fan_toggle_command_time = self._fan_command_time
         self._fan_command_pending = True
+        _activated_whf = False
+        _activated_hvac = False
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
                 # Whole-house fan exchanges outdoor air directly — running AC/heat
@@ -9726,6 +9787,13 @@ class AutomationEngine:
                 await self._suppress_hvac_for_whf(
                     reason="whole-house fan active — suppressing HVAC to prevent fighting outdoor air exchange"
                 )
+
+                # Issue #835: bookkeeping below tracks "this fan_mode has a WHF leg",
+                # matching the pre-existing contract — bookkeeping ran unconditionally
+                # for FAN_MODE_WHOLE_HOUSE/BOTH even when fan_entity isn't configured
+                # (session-intent tracking, not hardware-confirmed). Only the new
+                # restriction (HVAC leg below) introduces a real suppression case.
+                _activated_whf = True
 
                 fan_entity = self.config.get(CONF_FAN_ENTITY)
                 if fan_entity:
@@ -9735,20 +9803,36 @@ class AutomationEngine:
                         _LOGGER.info("Activated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
-                hvac_state = self.hass.states.get(self.climate_entity)
-                hvac_mode = hvac_state.state if hvac_state else "unknown"
-                if hvac_mode == "off":
-                    _LOGGER.debug(
-                        "Activating HVAC fan-only mode while HVAC is 'off' — "
-                        "this is intentional (economizer maintain phase); "
-                        "most thermostats support fan circulation independent of heating/cooling"
+                # Issue #835: heat/cool/both restriction — never affects the WHF leg
+                # above. Blocks only the HVAC-blower write when the configured
+                # restriction and recent heat/cool history say so.
+                _restrict_reason = self._hvac_fan_restriction_block_reason()
+                if _restrict_reason:
+                    _LOGGER.info("Feature suppressed: HVAC fan not activated — %s (%s)", _restrict_reason, reason)
+                else:
+                    hvac_state = self.hass.states.get(self.climate_entity)
+                    hvac_mode = hvac_state.state if hvac_state else "unknown"
+                    if hvac_mode == "off":
+                        _LOGGER.debug(
+                            "Activating HVAC fan-only mode while HVAC is 'off' — "
+                            "this is intentional (economizer maintain phase); "
+                            "most thermostats support fan circulation independent of heating/cooling"
+                        )
+                    await self.hass.services.async_call(
+                        "climate",
+                        "set_fan_mode",
+                        {"entity_id": self.climate_entity, "fan_mode": "on"},
                     )
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_fan_mode",
-                    {"entity_id": self.climate_entity, "fan_mode": "on"},
-                )
-                _LOGGER.info("Activated HVAC fan — %s role=%s", reason, self.role)
+                    _activated_hvac = True
+                    _LOGGER.info("Activated HVAC fan — %s role=%s", reason, self.role)
+
+            if not _activated_whf and not _activated_hvac:
+                # Nothing was actually turned on this call — the only way to reach
+                # this with fan_mode != DISABLED is fan_mode=hvac_fan (no WHF leg)
+                # and the restriction blocked the HVAC leg. Do not mark the fan
+                # active or emit a fan_activated event for a command that never
+                # happened.
+                return FanCommandResult.SUPPRESSED
 
             # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state().
             # This is the raw hardware-activation write itself — the FSM's physical axis
@@ -10778,6 +10862,12 @@ class AutomationEngine:
         self._last_action_reason = state.get("last_action_reason")
         self._fan_active = state.get("fan_active", False)
         self._fan_on_since = state.get("fan_on_since")
+        # Issue #835: unlike override/grace state, these ARE restored (not clean-slate)
+        # — forgetting a recent heat/cool cycle on restart would let the
+        # hvac_fan_restrict_mode guard immediately approve activation into a still-wet
+        # coil, recreating exactly the humidity issue the feature exists to prevent.
+        self._last_hvac_heating_active = state.get("last_hvac_heating_active")
+        self._last_hvac_cooling_active = state.get("last_hvac_cooling_active")
         self._fan_min_runtime_active = state.get("fan_min_runtime_active", False)
         self._pre_fan_hvac_mode = state.get("pre_fan_hvac_mode")
         # _fan_min_cycle_cancel / _fan_thermo_cancel are not serializable; timers restart
@@ -10873,6 +10963,9 @@ class AutomationEngine:
             "last_action_reason": self._last_action_reason,
             "fan_active": self._fan_active,
             "fan_on_since": self._fan_on_since,
+            # Issue #835: NOT clean-slate — restored on restart (see restore_state()).
+            "last_hvac_heating_active": self._last_hvac_heating_active,
+            "last_hvac_cooling_active": self._last_hvac_cooling_active,
             "fan_override_active": self._fan_override_active,
             "fan_override_time": self._fan_override_time,
             # Issue #486: RF remote timer hours, for observability only — like the two

@@ -2680,6 +2680,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _cs = self.hass.states.get(_climate_entity_id) if _climate_entity_id else None
         hvac_action = _cs.attributes.get("hvac_action", "") if _cs else ""
         hvac_mode = _cs.state if _cs else ""
+        # Issue #835: track last-heating/last-cooling timestamps for the
+        # hvac_fan_restrict_mode guard in _activate_fan() — the only per-cycle
+        # ground-truth read of hvac_action, so this piggybacks on it rather than
+        # polling separately.
+        if self.automation_engine:
+            _hvac_action_lower = str(hvac_action).lower()
+            if _hvac_action_lower == "heating":
+                self.automation_engine._last_hvac_heating_active = dt_util.now().isoformat()
+            elif _hvac_action_lower == "cooling":
+                self.automation_engine._last_hvac_cooling_active = dt_util.now().isoformat()
         # Issue #466: setpoint fields, so consumers that don't need live sub-cycle
         # freshness (ai_skills_activity.py/ai_skills_context.py) can read from
         # coordinator.data instead of independently re-fetching hass.states.get().

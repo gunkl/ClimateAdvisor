@@ -22,7 +22,7 @@
     "setback_heat": 60,
     "setback_cool": 79,
     "natural_vent_delta": 3.0,
-    "fan_mode": "hvac",
+    "fan_mode": "hvac_fan",
     "initial_thermostat_mode": "cool"
   },
   "events": [

@@ -51,6 +51,7 @@ from .const import (
     CONF_GUEST_TOGGLE_INVERT,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
+    CONF_HVAC_FAN_RESTRICT_MODE,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_SOFT_START_ENABLED,
@@ -84,6 +85,7 @@ from .const import (
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_FAN_MODE,
+    DEFAULT_HVAC_FAN_RESTRICT_MODE,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NAT_VENT_SOFT_START_ENABLED,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
@@ -102,6 +104,9 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    HVAC_FAN_RESTRICT_BOTH,
+    HVAC_FAN_RESTRICT_COOL,
+    HVAC_FAN_RESTRICT_HEAT,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -123,6 +128,15 @@ FAN_MODE_OPTIONS = [
     selector.SelectOptionDict(value=FAN_MODE_DISABLED, label="Disabled (no fan control)"),
     selector.SelectOptionDict(value=FAN_MODE_WHOLE_HOUSE, label="Whole house fan (dedicated entity)"),
     selector.SelectOptionDict(value=FAN_MODE_HVAC, label="HVAC fan mode"),
+]
+
+# Issue #835: restricts *when* the hvac_fan/both fan mechanism is allowed to run,
+# based on which HVAC mode last ran — avoids raising humidity by circulating air
+# over wet coils shortly after a cooling cycle.
+HVAC_FAN_RESTRICT_OPTIONS = [
+    selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_HEAT, label="Heat only (avoid humidity after cooling)"),
+    selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_COOL, label="Cool only"),
+    selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_BOTH, label="Both (no restriction)"),
 ]
 
 OUTDOOR_SOURCE_OPTIONS = [
@@ -502,6 +516,14 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_FAN_MODE, default=DEFAULT_FAN_MODE): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=FAN_MODE_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_HVAC_FAN_RESTRICT_MODE, default=DEFAULT_HVAC_FAN_RESTRICT_MODE
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=HVAC_FAN_RESTRICT_OPTIONS,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -1064,6 +1086,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=FAN_MODE_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_HVAC_FAN_RESTRICT_MODE,
+                        default=current.get(CONF_HVAC_FAN_RESTRICT_MODE, DEFAULT_HVAC_FAN_RESTRICT_MODE),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=HVAC_FAN_RESTRICT_OPTIONS,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),

@@ -8580,12 +8580,34 @@ class AutomationEngine:
 
         resolved_family = result.to_state.value  # "heating" | "cooling"
         if result.changed:
+            # Issue #843 follow-up: this switch is the single event the recency-gated
+            # deadband exists to change the timing of, so the log line and persisted
+            # event both carry the values that actually drove the decision
+            # (deadband_applied_f=0.0 means the recency gate found nothing recent to
+            # protect against; a nonzero value means a real breach cleared the
+            # day-type deadband) — not just the static reason string, which reads the
+            # same either way.
             _LOGGER.info(
-                "Comfort family FSM: zone=%s switching to %s — %s",
+                "Comfort family FSM: zone=%s switching to %s — %s"
+                " (deadband_applied_f=%s minutes_since_cooling_ended=%s minutes_since_heating_ended=%s)",
                 self.climate_entity,
                 resolved_family,
                 result.decision.reason,
+                result.decision.deadband_applied_f,
+                fsm_inputs.minutes_since_cooling_ended,
+                fsm_inputs.minutes_since_heating_ended,
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "comfort_family_switch",
+                    {
+                        "resolved_family": resolved_family,
+                        "reason": result.decision.reason,
+                        "deadband_applied_f": result.decision.deadband_applied_f,
+                        "minutes_since_cooling_ended": fsm_inputs.minutes_since_cooling_ended,
+                        "minutes_since_heating_ended": fsm_inputs.minutes_since_heating_ended,
+                    },
+                )
         # Issue #827 preserved contract (Design §2): the FSM's own outcome writes the
         # compatibility attribute tools/sim_harness/outcomes.py's "comfort_family"
         # assertion reads, via the same _arm_comfort_family() writer the 7

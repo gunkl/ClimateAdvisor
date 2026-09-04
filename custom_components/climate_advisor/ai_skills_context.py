@@ -2441,6 +2441,29 @@ def _render_comfort_family_switch_locked_out(p: dict, unit: str) -> tuple[str, s
     return label, reason
 
 
+def _render_comfort_family_switch(p: dict, unit: str) -> tuple[str, str]:
+    # Issue #843 follow-up: the actual heat/cool family switch was previously
+    # logged only to HA core logs, invisible to the briefing/investigator — this
+    # renderer is what makes "did the recency-gated deadband fire?" observable
+    # without reading raw logs. deadband_applied_f == 0 means nothing recent was
+    # found to protect against (the new behavior this issue introduced);
+    # nonzero means a real breach cleared the day-type deadband (unchanged
+    # pre-#843 behavior).
+    resolved_family = p.get("resolved_family", "")
+    deadband = p.get("deadband_applied_f")
+    label = f"Switched to {resolved_family}" if resolved_family else "Comfort family switched"
+    detail_parts = [p.get("reason", "")]
+    if deadband is not None:
+        detail_parts.append(f"deadband applied: {deadband}°F")
+    mins_cool = p.get("minutes_since_cooling_ended")
+    mins_heat = p.get("minutes_since_heating_ended")
+    if mins_cool is not None:
+        detail_parts.append(f"cooling last active {mins_cool:.0f}min ago")
+    if mins_heat is not None:
+        detail_parts.append(f"heating last active {mins_heat:.0f}min ago")
+    return label, " — ".join(part for part in detail_parts if part)
+
+
 # Registry: event_type -> renderer
 EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "comfort_band_applied": _render_comfort_band_applied,
@@ -2457,6 +2480,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "classification_suppressed_paused": _render_classification_suppressed_paused,
     "occupancy_setback_suppressed_paused": _render_occupancy_setback_suppressed_paused,
     "comfort_family_switch_locked_out": _render_comfort_family_switch_locked_out,
+    "comfort_family_switch": _render_comfort_family_switch,
     "setpoint_rejected": _render_setpoint_rejected,
     "setpoint_nudge": _render_setpoint_nudge,
     "override_cleared": _render_override_cleared,

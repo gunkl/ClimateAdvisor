@@ -31,6 +31,7 @@ The automation logic table and all threshold constants in this document are expr
 | How does comfort score accumulate and what triggers a suggestion? | `comfort_score = 1 − (total_violation_minutes / (days_recorded × 1440))`; more than 5 days with > 30 violation minutes triggers the `comfort_violations` suggestion. | [§Metric Definitions — Comfort Score](05-LEARNING-ENGINE-DESIGN.md#comfort-score-comfort_score) |
 | When does the ODE ceiling guard fire on a warm day and what activates AC? | The guard scans the predicted indoor curve on every 30-min cycle and sets HVAC to cool at `comfort_cool` when a breach is predicted within the lead time (or 120-min fallback). It is **dormant only when all 3 hold**: outdoor <= indoor AND nat-vent is actually running AND indoor still <= ceiling. So it also fires when indoor already exceeds the ceiling (even if outdoor < indoor) or when nat-vent is not running — clearing nat-vent on escalation. Guard skips when no calibrated model or occupancy is away/vacation. | [§6c. Warm-Day ODE Ceiling Guard](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136) |
 | How does MILD day window scheduling change when the ODE is available (Fix C, Issue #147)? | Before Fix C: MILD days used hardcoded `time(10, 0)` open / `time(17, 0)` close. After Fix C: constants `MILD_WINDOW_OPEN_HOUR = 10` and `MILD_WINDOW_CLOSE_HOUR = 17` are fallbacks; when the ODE is available, `nat_vent_cutoff` drives the close time — the same dynamic logic as warm days. | [§6d. MILD Day Dynamic Window Close Time](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) |
+| Why did the briefing say "hold the heat in" while Next Automation said "outdoor stops helping," for different times, on the same warm day (Issue #847)? | Two compounding bugs: the briefing froze `nat_vent_cutoff`/`nat_vent_cutoff_reason` at generation time with no staleness trigger for either field, while Next Automation recomputed both live every cycle; and the reason→sentence mapping was two independently-written inline branches (MILD had none at all). #847 unified both onto a shared `describe_nat_vent_cutoff_reason()` helper, added the missing staleness trigger, and added the live sanity check #430 had asked for. | [§6d. Issue #847 update](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) · [§7. Reason wording for the close time](08-COMPUTATION-REFERENCE.md#7-window-recommendations) |
 | What invariant must `_async_send_briefing()` maintain when replacing `_today_record`? | It must copy all accumulated counters (`hvac_runtime_minutes`, `comfort_violations_minutes`, etc.) from the existing same-day record before constructing the new one. Creating a fresh `DailyRecord` unconditionally resets all counters to zero (Issue #176 bug). | [DailyRecord Persistence Invariant](08-COMPUTATION-REFERENCE.md#dailyrecord-persistence-invariant-issue-176) |
 | Why must `_async_thermostat_changed()` check all three command-pending flags, not just `_hvac_command_pending`? | Automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()`. The fan command sets `_fan_command_pending` but leaves `_hvac_command_pending` False. Checking only `_hvac_command_pending` bypasses the override-detection guard during that window. | [§9b Compound command-pending guard](08-COMPUTATION-REFERENCE.md#compound-command-pending-guard-in-_async_thermostat_changed-issue-205206) |
 | Why was a manual mode override not detected on dual-setpoint (`heat_cool`) thermostats? | CA commands `heat_cool` mode but the old code compared the thermostat's `hvac_mode` against `classification.hvac_mode` (e.g., `"cool"`). A user switching from `heat_cool` to `cool` evaluated as equal and was ignored. Fix: compare against `_last_commanded_hvac_mode` first. | [§9b Mode Override Detection — `_last_commanded_hvac_mode`](08-COMPUTATION-REFERENCE.md#mode-override-detection--_last_commanded_hvac_mode-issue-269-bug-c) |
@@ -1016,10 +1017,77 @@ of the outdoor-crossing or floor-crossing timestamps is earlier, and a new
 air will be warmer than inside" vs. "...to hold the heat in"). `generate_briefing()` resolves
 the three optional params from its `runtime_config` argument for both `warm_events` and
 `mild_events`; when `runtime_config` is omitted (direct test calls), the floor scan is skipped
-and behavior is identical to before #535. No confirmed production incident motivated this fix —
+and behavior is identical to before #535.
+
+**UPDATE — Issue #847 (2026-09-04):** the "no confirmed production incident" caveat below is
+now historical, not current status. #535's own note that this branch shipped as *preemptive
+hardening with no live-outdoor sanity check* turned out to predict exactly the drift class that
+#847 found in production: a WARM-day briefing froze a `comfort_floor` reason at generation time
+("hold the heat in," 8:00 AM) while the Next Automation card recomputed live every cycle and
+had already moved to `outdoor_rise` ("outdoor will stop helping," 11:00 AM) — two contradictory
+framings of one fact, on the same dashboard. #847's five-whys chain traced this to the same
+recurring duplication-drift pattern documented in project memory
+(`project_natvent_duplicate_threshold_logic`): the *time* half of this value had already been
+unified onto one shared `self._nat_vent_plan` object (#814/#817/#818), but the *reason→phrase*
+mapping was still two independently-written inline branches, and the briefing's staleness check
+(`_maybe_regenerate_briefing_for_drift()`) never watched `nat_vent_cutoff`/`nat_vent_cutoff_reason`
+for drift at all.
+
+The fix, landed in #847:
+- **One shared phrase helper**, `nat_vent_plan.describe_nat_vent_cutoff_reason(reason: str |
+  None) -> str` (next to `compute_nat_vent_plan()`), is now the single source of truth for
+  reason→sentence wording. It returns a phrase *fragment*, not a full sentence — each caller
+  interpolates it into its own sentence shape: `"comfort_floor"` → `"to hold the heat in"`;
+  `"outdoor_rise"` or `None` → `"before outdoor air warms past indoor"`. `_warm_day_plan()`,
+  `_mild_day_plan()` (which previously had no reason branch at all — always said "to trap the
+  warmth" regardless of the underlying cutoff reason), and `_compute_next_automation_action()`
+  all interpolate this same fragment instead of maintaining independent branches or wording.
+- **A live sanity check** on the `comfort_floor` reason reuses the **existing**
+  `free_cooling_direction_ok(outdoor_temp, indoor_temp)` in `temperature.py` — the same #428
+  guard already used by the `next_human_action` sensor and the economizer gate — no new
+  predicate was written. Before the helper's call sites emit the `comfort_floor` fragment, they
+  confirm the comfort-floor risk still holds against current live readings; if it no longer
+  does, the phrase falls back to the `outdoor_rise` fragment instead of asserting a stale claim.
+  Each override site logs a WARNING with the indoor/outdoor temps and the original→displayed
+  reason. This is the check #430 asked for and never got — #847 closes #430 as its direct fix.
+- **A third staleness trigger** in `_maybe_regenerate_briefing_for_drift()`, alongside the
+  existing `day_type` and `today_high` triggers: new frozen-comparison state
+  `self._briefing_nat_vent_cutoff` (datetime|None) / `self._briefing_nat_vent_cutoff_reason`
+  (str|None) — mirroring the existing `_briefing_today_high` pattern exactly, persisted as
+  `briefing_state.briefing_nat_vent_cutoff` / `briefing_state.briefing_nat_vent_cutoff_reason`
+  in the state JSON — triggers regeneration when the live `nat_vent_cutoff` drifts by more than
+  `const.BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES = 45.0` (half the ~60-min
+  forecast-hour step size, well below the 3-hour drift the reported incident showed) or when
+  `nat_vent_cutoff_reason` flips, so a frozen briefing can no longer silently fall behind the
+  live card the way it did in the reported incident.
+- **Known remaining gap, deliberately out of scope for #847:** one inline
+  `nat_vent_cutoff_reason ==` check still exists outside the shared helper —
+  `briefing.py`'s Issue #788 reopen/recovery sentence branch (~line 714, "evening air cools back
+  down" vs. "once outdoor air cools back below indoor"). That branch renders a different
+  field-usage (recovery framing after a reopen event, not the prospective close-cutoff phrase
+  this issue scoped) and was left alone intentionally, not missed. See the #847 issue comments
+  for the deferred-follow-up note before assuming this is an unfixed instance of the DOC RULE
+  below.
+
+*(Superseded text retained below for historical context — do not treat "no confirmed production
+incident" as current status; see the Issue #847 update above.)*
+
+No confirmed production incident motivated this fix —
 see project memory `feedback_verify_before_confirmed_bug` — it closes a latent gap the
 recurring nat-vent duplication-drift pattern (`project_natvent_duplicate_threshold_logic`)
 predicted would eventually reappear in a forecast-curve consumer.
+
+> **DOC RULE (Issue #847):** any new `nat_vent_plan` field that is rendered as user-facing text
+> in more than one place (briefing body, Next Automation card, or any future consumer) MUST go
+> through `describe_nat_vent_cutoff_reason()` (or its successor, if the mapping's scope grows
+> beyond cutoff reasons) — do not add a second inline `if nat_vent_cutoff_reason == "..."`
+> branch anywhere else. This is the guardrail the #847 five-whys found missing after three prior
+> rounds of fixes on this exact briefing/Next-Automation pair (#428/#430, #518/#528,
+> #535/#788/#814/#817/#818) — each prior fix solved its own reported symptom without leaving
+> behind an enforcement mechanism for the next field. If you are adding a new field to
+> `nat_vent_plan` and it needs user-facing phrasing in two places, extend the shared helper;
+> if you are tempted to write a second branch "just for this one case," that temptation is
+> exactly how this bug recurred four times.
 
 When a predicted indoor/outdoor forecast curve is available (thermal model calibrated):
 - MILD day window close time = `nat_vent_cutoff` (earlier of: outdoor temp ≥ indoor − 1°F, or
@@ -1228,6 +1296,13 @@ Window advice is set by the classifier at classification time, based on `day_typ
 **Warm-day window condition formula:** `today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA` = `75 - 3 = 72°F` at defaults. Constant: `WARM_WINDOW_OPEN_HOUR = 6`, `WARM_WINDOW_CLOSE_HOUR = 10`. **Like MILD (below), the static `WARM_WINDOW_CLOSE_HOUR` is only a fallback** — `briefing.py`'s `_derive_warm_day_events()` (§9e, Issue #528) overrides it with the ODE-derived `nat_vent_cutoff` whenever a forecast curve is available, exactly the same cascade §6d documents for MILD days. This table previously omitted that caveat for WARM specifically, which read as a contradiction between a correct-but-dynamic production briefing and this static reference.
 
 **MILD-day window times (v0.3.46+):** Open time is always `MILD_WINDOW_OPEN_HOUR = 10` (10:00 AM). Close time uses `nat_vent_cutoff` when the ODE is calibrated, otherwise falls back to `MILD_WINDOW_CLOSE_HOUR = 17` (5:00 PM). See [§6d. MILD Day Dynamic Window Close Time](#6d-mild-day-dynamic-window-close-time-fix-c-issue-147).
+
+**Reason wording for the close time (Issue #847):** both WARM and MILD close-time sentences —
+and the Next Automation status card's phrasing for the same event — now derive from the shared
+`describe_nat_vent_cutoff_reason()` helper (see §6d's Issue #847 update above), not independent
+per-consumer branches. This is what keeps the briefing body, the TL;DR header, and the Next
+Automation card from drifting into contradictory framing of the same `nat_vent_cutoff_reason`
+value. See the DOC RULE in §6d before adding user-facing text for any new `nat_vent_plan` field.
 
 ---
 

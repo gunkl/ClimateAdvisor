@@ -40,6 +40,43 @@ def _nat_vent_cutoff_reached(outdoor_temp: float, indoor_temp: float) -> bool:
     return outdoor_temp >= indoor_temp - _NAT_VENT_CUTOFF_MARGIN_F
 
 
+def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
+    """Single source of truth for how ``nat_vent_cutoff_reason`` reads as text (Issue #847).
+
+    Before this existed, ``briefing.py``'s ``_warm_day_plan()`` and ``coordinator.py``'s
+    ``_compute_next_automation_action()`` each independently decided how to phrase the
+    same ``nat_vent_cutoff_reason`` value from the shared ``nat_vent_plan`` dict —
+    ``_warm_day_plan()`` said "hold the heat in" for ``comfort_floor``, while the Next
+    Automation card said "outdoor will stop helping" unconditionally, regardless of
+    which reason actually won. ``_mild_day_plan()`` had no branch at all. That let the
+    two dashboard surfaces show contradictory framing for one underlying fact even
+    after #814/#817/#818 already unified the *time* onto one cached
+    ``self._nat_vent_plan``. This mirrors that fix for the *wording*: exactly one
+    function decides what each reason means in words; every consumer calls it and
+    builds its own sentence/phrase shape around the returned fragment.
+
+    Any new field added to ``nat_vent_plan`` that gets rendered as user-facing text in
+    more than one place should get the same treatment — route through a shared
+    function here, never a second inline ``if reason == ...`` branch in a consumer.
+
+    Args:
+        reason: "comfort_floor", "outdoor_rise", or None (mirrors
+            ``compute_nat_vent_plan()``'s ``nat_vent_cutoff_reason`` return value).
+
+    Returns:
+        A short, lower-case comfort-impact phrase fragment describing *why* windows
+        should close — no automation-mechanism words (Status Card Ontology,
+        CLAUDE.md §Status Card Ontology), so it's safe to embed in both a full
+        conversational sentence (briefing.py) and a compact status-card phrase
+        (coordinator.py):
+          "comfort_floor"      -> "to hold the heat in"
+          "outdoor_rise"/None  -> "before outdoor air warms past indoor"
+    """
+    if reason == "comfort_floor":
+        return "to hold the heat in"
+    return "before outdoor air warms past indoor"
+
+
 def compute_nat_vent_plan(
     predicted_indoor: list[dict] | None,
     predicted_outdoor: list[dict] | None,

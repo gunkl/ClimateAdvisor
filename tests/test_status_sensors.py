@@ -1035,7 +1035,11 @@ class TestWarmDayForecastEventCandidates:
         indoor = _curve([70.0, 71.0, 72.0, 73.0], start_hour=13)
         outdoor = _curve([60.0, 62.0, 71.5, 74.0], start_hour=13, ts_key="datetime", temp_key="temperature")
         action, t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
-        assert action == "Outdoor will stop helping around 3:00 PM — close windows"
+        # Issue #847: phrasing now comes from the shared describe_nat_vent_cutoff_reason()
+        # helper (nat_vent_plan.py) rather than this card's own reason-agnostic string, so
+        # the Next Automation card and the briefing can no longer disagree about *why*
+        # windows close. outdoor_rise here -> "before outdoor air warms past indoor".
+        assert action == "Close windows around 3:00 PM before outdoor air warms past indoor"
         assert t == "3:00 PM"  # hour 15: outdoor 71.5 >= indoor 72 - 1
 
     def test_absent_when_windows_not_recommended(self):

@@ -36,8 +36,8 @@ from .const import (
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
 )
-from .nat_vent_plan import compute_nat_vent_plan
-from .temperature import FAHRENHEIT, format_temp, format_temp_delta
+from .nat_vent_plan import compute_nat_vent_plan, describe_nat_vent_cutoff_reason
+from .temperature import FAHRENHEIT, format_temp, format_temp_delta, free_cooling_direction_ok
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +70,8 @@ def generate_briefing(
     predicted_outdoor_future: list[dict] | None = None,
     runtime_config: dict | None = None,
     nat_vent_plan: dict | None = None,
+    current_indoor_temp: float | None = None,
+    current_outdoor_temp: float | None = None,
 ) -> str:
     """Generate the daily climate briefing message.
 
@@ -103,6 +105,14 @@ def generate_briefing(
             briefing can never disagree with them. When omitted (e.g. direct/standalone
             calls, tests), behavior is unchanged: derived locally from the prediction
             curves below.
+        current_indoor_temp / current_outdoor_temp: Issue #847/#430 — live readings used
+            only as a sanity check before the WARM/MILD-day plan text asserts a
+            ``comfort_floor`` reason for the nat-vent close time: if outdoor has already
+            risen above indoor by render time (the ``comfort_floor`` prediction's
+            underlying condition no longer holds against live data), the text falls back
+            to ``outdoor_rise`` phrasing instead of asserting a stale claim. Omitted
+            (None), the sanity check cannot rule anything out and the reason is trusted
+            as computed (unchanged prior behavior).
 
     Returns:
         Formatted briefing string suitable for email or notification.
@@ -240,11 +250,22 @@ def generate_briefing(
                 temp_unit=temp_unit,
                 warm_events=warm_events,
                 pre_cool_target=bedtime_setback_cool,
+                current_indoor_temp=current_indoor_temp,
+                current_outdoor_temp=current_outdoor_temp,
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
         lines.extend(
-            _mild_day_plan(c, comfort_heat, wake_time, sleep_time, temp_unit=temp_unit, mild_events=mild_events)
+            _mild_day_plan(
+                c,
+                comfort_heat,
+                wake_time,
+                sleep_time,
+                temp_unit=temp_unit,
+                mild_events=mild_events,
+                current_indoor_temp=current_indoor_temp,
+                current_outdoor_temp=current_outdoor_temp,
+            )
         )
     elif c.day_type == DAY_TYPE_COOL:
         lines.extend(
@@ -576,6 +597,8 @@ def _warm_day_plan(
     temp_unit: str = FAHRENHEIT,
     pre_cool_target: float | None = None,
     warm_events: dict | None = None,
+    current_indoor_temp: float | None = None,
+    current_outdoor_temp: float | None = None,
 ) -> list[str]:
     """Conversational plan for warm days (75-85\u00b0F).
 
@@ -583,6 +606,17 @@ def _warm_day_plan(
     in as `warm_events` so this never disagrees with the header table \u2014 this is now
     the only source (Issue #817 removed the local-recompute fallback, which no
     caller, production or test, ever actually reached).
+
+    Issue #847: the reason \u2192 phrase mapping now flows through the shared
+    ``describe_nat_vent_cutoff_reason()`` helper (``nat_vent_plan.py``) instead of an
+    inline branch, so this can never phrase ``nat_vent_cutoff_reason`` differently
+    than the "Next Automation" status card (``coordinator.py``'s
+    ``_compute_next_automation_action()``), which calls the same helper. Also closes
+    #430 (filed alongside #428/#535 and never fixed): before asserting a
+    ``comfort_floor`` reason in text, a live outdoor-vs-indoor sanity check
+    (``free_cooling_direction_ok()``, the same #428 guard) confirms the reason still
+    holds \u2014 if outdoor has already risen above indoor by render time, the sentence
+    falls back to ``outdoor_rise`` phrasing instead of asserting a stale claim.
     """
     lines = []
 
@@ -598,11 +632,26 @@ def _warm_day_plan(
             close_t = _nat_vent_cutoff.strftime(_FMT_HOUR)
             # Issue #535: two distinct reasons the cutoff can fire \u2014 outdoor air rising
             # above indoor (the original predicate), or indoor forecast to reach the
-            # comfort floor first. Same close time either way; different sentence why.
-            if _nat_vent_cutoff_reason == "comfort_floor":
-                close_sentence = f"Close up at {close_t} to hold the heat in."
-            else:
-                close_sentence = f"Close up at {close_t} \u2014 after that the outdoor air will be warmer than inside."
+            # comfort floor first. Same close time either way; different sentence why
+            # (Issue #847: phrasing now shared via describe_nat_vent_cutoff_reason()).
+            _effective_reason = _nat_vent_cutoff_reason
+            if _effective_reason == "comfort_floor" and not free_cooling_direction_ok(
+                current_outdoor_temp, current_indoor_temp
+            ):
+                # #430 live sanity check: comfort_floor was predicted, but outdoor has
+                # already risen above indoor by render time \u2014 the comfort_floor risk
+                # this text is about to assert is no longer live. Fall back to
+                # outdoor_rise phrasing rather than stating a stale reason.
+                _LOGGER.warning(
+                    "Nat-vent cutoff reason overridden for briefing text \u2014 comfort_floor no longer"
+                    " live at render time: indoor=%.1f\u00b0F outdoor=%.1f\u00b0F (outdoor has already risen"
+                    " above indoor). reason %s -> outdoor_rise",
+                    current_indoor_temp,
+                    current_outdoor_temp,
+                    _nat_vent_cutoff_reason,
+                )
+                _effective_reason = "outdoor_rise"
+            close_sentence = f"Close up at {close_t} {describe_nat_vent_cutoff_reason(_effective_reason)}."
             lines.append(f"Open windows around {open_t} to catch the cool morning air. {close_sentence}")
         else:
             lines.append(
@@ -679,9 +728,25 @@ def _warm_day_plan(
 
 
 def _mild_day_plan(
-    c, comfort_heat, wake_time, sleep_time, temp_unit: str = FAHRENHEIT, mild_events: dict | None = None
+    c,
+    comfort_heat,
+    wake_time,
+    sleep_time,
+    temp_unit: str = FAHRENHEIT,
+    mild_events: dict | None = None,
+    current_indoor_temp: float | None = None,
+    current_outdoor_temp: float | None = None,
 ) -> list[str]:
-    """Conversational plan for mild days (60-74\u00b0F)."""
+    """Conversational plan for mild days (60-74\u00b0F).
+
+    Issue #847: previously had no reason branch at all \u2014 always said "to trap the
+    warmth" regardless of ``nat_vent_cutoff_reason``, an asymmetry with
+    ``_warm_day_plan()`` (which branched, just via its own now-removed inline
+    if/else) that let MILD and WARM day text drift apart from each other. Now shares
+    the same ``describe_nat_vent_cutoff_reason()`` helper and the same #430 live
+    sanity check as ``_warm_day_plan()``, so the two day types (and the "Next
+    Automation" card) can't disagree about what a given reason means.
+    """
     lines = [
         f"A day where the house practically takes care of itself. I warmed to"
         f" {format_temp(comfort_heat, temp_unit)} before sunrise \u2014 now HVAC is off and the weather"
@@ -701,12 +766,32 @@ def _mild_day_plan(
     # classifier's static hour only when no forecast curve exists (fresh install, uncalibrated
     # model), same fallback pattern _generate_tldr_table() already uses for warm days.
     _mild_cutoff = mild_events.get("nat_vent_cutoff") if mild_events else None
+    _mild_cutoff_reason = mild_events.get("nat_vent_cutoff_reason") if mild_events else None
     _close_time = _mild_cutoff if _mild_cutoff is not None else c.window_close_time
     if _close_time:
         close_t = _close_time.strftime(_FMT_HOUR)
+        # Issue #847: same reason branch + #430 live sanity check as _warm_day_plan()
+        # — only meaningful when the ODE-derived cutoff (with its reason) is actually
+        # in play; the static classifier-hour fallback has no reason to branch on.
+        _effective_reason = _mild_cutoff_reason if _mild_cutoff is not None else None
+        if _effective_reason == "comfort_floor" and not free_cooling_direction_ok(
+            current_outdoor_temp, current_indoor_temp
+        ):
+            _LOGGER.warning(
+                "Nat-vent cutoff reason overridden for briefing text — comfort_floor no longer"
+                " live at render time: indoor=%.1f°F outdoor=%.1f°F (outdoor has already risen"
+                " above indoor). reason %s -> outdoor_rise",
+                current_indoor_temp,
+                current_outdoor_temp,
+                _mild_cutoff_reason,
+            )
+            _effective_reason = "outdoor_rise"
+        reason_fragment = (
+            "to trap the warmth" if _mild_cutoff is None else describe_nat_vent_cutoff_reason(_effective_reason)
+        )
         lines.append("")
         lines.append(
-            f"Close up by {close_t} to trap the warmth. If it dips below"
+            f"Close up by {close_t} {reason_fragment}. If it dips below"
             f" {format_temp(comfort_heat - 2, temp_unit)} tonight, I'll bring the heater back on"
             f" automatically."
         )

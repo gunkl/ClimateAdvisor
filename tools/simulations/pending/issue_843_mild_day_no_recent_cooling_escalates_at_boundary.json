@@ -1,0 +1,120 @@
+{
+  "name": "issue_843_mild_day_no_recent_cooling_escalates_at_boundary",
+  "description": "Direct regression scenario for the reported overnight-drift bug: a house's cooling-family activity ended, and indoor kept drifting several degrees below the comfort floor for hours before heat finally engaged -- because the against-grain deadband applied unconditionally, waiting for a large breach even though nothing had run in hours and there was nothing to short-cycle away from. Proves Issue #843's fix: with nothing cooling-side (this scenario uses a real HVAC-cool cycle ending, via the coordinator's actual hvac_action ground-truth tracking -- the same recency mechanism the live incident's nat-vent-ended case also feeds) recorded as active within comfort_family_recency_window_min, a SMALL breach (1F, well within the mild day's 2F deadband) escalates to heat quickly instead of waiting for the breach to grow to 2F+.",
+  "source": "Live incident, 2026-09-04: Temperature Forecast chart showed nat-vent ending ~1:20 AM and indoor continuing to drop, unprotected, until heat finally engaged ~3-4 AM, several degrees below the comfort floor. This scenario uses a real HVAC-cool cycle (rather than nat-vent) as the 'last cooling activity' to exercise the fix through the harness's coordinator-level hvac_action ground truth -- _minutes_since_cooling_ended() combines HVAC-cool, WHF, HVAC-fan, and nat-vent uniformly, so this proves the same underlying mechanism the live incident hit.",
+  "issue": 843,
+  "use_coordinator": true,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness (revert-test): if Issue #843's recency gate were reverted (deadband applied unconditionally, the pre-#843 design), this 1F breach would stay WITHIN_DEADBAND indefinitely (matching comfort_deadband_mild_f's 2.0F default) and the final assertions (comfort_family='heating', last_hvac_mode='heat') would FAIL -- proving this scenario genuinely depends on the recency gate, not merely on the breach eventually growing past the configured deadband.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f's deadband table and const.py's CONF_COMFORT_DEADBAND_* block comment document the against-grain deadband as now conditional on comfort_family_recency_window_min -- this scenario is the mild-day test reference for the 'opposite family last active, then nothing for hours' case, the exact shape of the reported bug.",
+    "(c) Occupant experience: this is the scenario that motivated Issue #843. The house no longer sits several degrees below its own comfort floor for hours after cooling-family activity ends with nothing else running -- the moment there's nothing recent to protect against, the automation switches to heat at the comfort boundary instead of waiting for a large breach that was never really needed as a safeguard here.",
+    "use_coordinator=true is required: _last_hvac_cooling_active is populated by the coordinator's real _async_update_data() piggyback on the per-cycle hvac_action ground-truth read (coordinator.py, Issue #835/#843), not by the bare engine."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "comfort_deadband_mild_f": 2.0,
+    "comfort_family_recency_window_min": 120,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-09-04T00:50:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling",
+      "temperature": 76,
+      "note": "HVAC actively cooling. Last cooling-family activity of the scenario -- no compressor, WHF, HVAC-fan, or nat-vent runs again after this cycle ends."
+    },
+    {
+      "time": "2026-09-04T00:50:00",
+      "type": "coordinator_refresh",
+      "note": "Real coordinator cycle while hvac_action='cooling' -- populates automation_engine._last_hvac_cooling_active via the per-cycle ground-truth piggyback (coordinator.py)."
+    },
+    {
+      "time": "2026-09-04T01:20:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "hvac_action": "idle",
+      "note": "Cooling cycle ends (matches the live incident's ~1:20 AM nat-vent-exit timing). This is the falling edge: hvac_action stops reading 'cooling', so _last_hvac_cooling_active freezes at its last-recorded value from the 00:50 refresh."
+    },
+    {
+      "time": "2026-09-04T01:20:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild-day classification. select_comfort_band() arms the persistent [comfort_heat, comfort_cool] band with active='ceiling' (Issue #249 P3), so _apply_comfort_band()'s FSM call sees day_mode='cool', base_family='cooling' -- heat is the against-grain direction."
+    },
+    {
+      "time": "2026-09-04T01:20:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 55.0,
+      "note": "Baseline immediately after the cooling cycle ends: indoor 69F, within the comfort band [68F, 76F] -- no breach yet."
+    },
+    {
+      "time": "2026-09-04T03:05:00",
+      "type": "temp_update",
+      "indoor_f": 67.0,
+      "outdoor_f": 50.0,
+      "note": "~105 minutes after cooling ended (within the 120-minute recency window still) -- indoor drifts to 67F, a small 1F breach below comfort_heat(68). Old design: WITHIN_DEADBAND (1F < 2F mild deadband) forever. New design: cooling last active 105 minutes ago, still within the 120-minute recency window -- deadband still enforced this tick, matching pre-#843 behavior while something is still recent."
+    },
+    {
+      "time": "2026-09-04T03:05:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "1F breach, cooling-family activity 105 minutes ago -- still inside the 120-minute recency window. WITHIN_DEADBAND, family stays 'cooling', no heat commanded yet -- proves the fix doesn't remove protection against a session that only just ended."
+    },
+    {
+      "time": "2026-09-04T03:25:00",
+      "type": "temp_update",
+      "indoor_f": 67.0,
+      "outdoor_f": 50.0,
+      "note": "~125 minutes after cooling ended -- now past the 120-minute recency window. Same 1F breach, but nothing cooling-side has run recently anymore."
+    },
+    {
+      "time": "2026-09-04T03:25:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "First cycle past the recency window: heat_breach_delta=1F > 0 (recency-gated deadband is now 0, since minutes_since_cooling_ended >= 120) -- candidate arms, not yet sustain-confirmed (elapsed 0s < 90s). Stays 'cooling' this tick."
+    },
+    {
+      "time": "2026-09-04T03:27:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "120s later (>90s sustain window). Sustain-confirmed: comfort family escalates to heating, commands heat at comfort_heat(68) -- a full ~2.5 hours faster than the old design would ever have escalated this 1F breach at all."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-04T03:27:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Past the 120-minute recency window with nothing cooling-side running, a 1F breach (well within the old 2F mild deadband) now escalates once sustain-confirmed -- this is the fix for the reported overnight-drift bug."
+    },
+    {
+      "at": "2026-09-04T03:27:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_heat, not merely an internal flag."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A small, sub-deadband floor breach on a mild day now escalates to heat within minutes of clearing the recency window, instead of requiring a large breach that could take hours to develop -- directly fixes the reported overnight-drift incident.",
+    "observed_behavior": "Indoor drifts 1F below comfort_heat starting ~105 minutes after the cooling cycle ended. The deadband still holds while within the 120-minute recency window (03:05), then escalates to heat once sustain-confirmed after the window elapses (03:27) -- roughly 2 hours faster than the pre-#843 design, which would have required the breach to grow to 2F+ regardless of how long ago cooling last ran.",
+    "expected_behavior": "The against-grain deadband protects against short-cycling only while there's something recent to protect against (comfort_family_recency_window_min, default 120 min). Once that window elapses, an against-grain breach behaves like the native direction -- near-zero deadband, still sustain-confirmed -- so the house is defended at the comfort boundary rather than left to drift indefinitely."
+  }
+}

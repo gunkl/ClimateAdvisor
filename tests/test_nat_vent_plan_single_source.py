@@ -36,7 +36,7 @@ _ALLOWED_CALL_SITES: set[tuple[str, int]] = {
     # coordinator.py: the ONE per-cycle computation, cached on self._nat_vent_plan.
     # Every other production consumer reads that cache — see
     # _compute_and_cache_nat_vent_plan()'s docstring.
-    ("coordinator.py", 4000),
+    ("coordinator.py", 4006),  # line drifted +6 from Issue #843's fan/nat-vent recency tracking
 }
 
 

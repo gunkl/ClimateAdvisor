@@ -41,6 +41,12 @@ _BASE = {
     "ode_floor_outcome": OdeFloorGuardOutcome.MODEL_INELIGIBLE,
     "min_dwell_seconds": _MIN_DWELL_S,
     "sustain_seconds": _SUSTAIN_S,
+    # Issue #843: default to "opposite family just ran" so every pre-#843 test
+    # below keeps exercising the deadband-enforced path unchanged — see
+    # test_comfort_family_decision.py's _inputs() for the same convention.
+    "minutes_since_cooling_ended": 0.0,
+    "minutes_since_heating_ended": 0.0,
+    "recency_window_min": 120.0,
     "now": _NOW,
 }
 

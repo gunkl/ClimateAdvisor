@@ -1,13 +1,14 @@
 {
   "name": "issue_827_hot_day_dawn_dip_within_deadband_no_escalate",
-  "description": "Proves the hot-day deadband (comfort_deadband_hot_f, default 5.0F, clamped [2,8]) genuinely tolerates a transient dawn dip below comfort_heat on a day forecast to turn hot -- a small, sub-deadband breach must NEVER escalate to heat, no matter how long it persists, since a hot day is expected to self-correct as the sun comes up. This is the design intent Design's mid-review correction specifically called out: 'day type must scale HOW MUCH TOLERANCE the system gives before correcting, not gate the mechanism on/off.'",
-  "source": "Issue #827 Design #1 mid-review correction -- a transient dawn dip on a day forecast to turn hot must not waste energy fighting a condition about to self-correct.",
-  "issue": 827,
+  "description": "REVISED under Issue #843, superseding this scenario's original #827 premise -- kept under its original name/issue tag so the revision is traceable, not silently swapped. The #827 premise was: a small, sub-deadband dawn dip on a hot day should NEVER escalate to heat, no matter how long it persists, because the day is forecast to self-correct as the sun comes up (a purely forecast-based, recency-blind tolerance). Issue #843 explicitly redefines the against-grain deadband's role: it is only a short-cycling guard against RECENT opposite-family activity, not a general 'day will self-correct, tolerate indefinitely' mechanism -- confirmed with the project owner directly (2026-09-04) after this exact scenario failed the Issue #843 regression check and the conflict was surfaced for a decision, not resolved silently. With nothing cooling-side ever recorded (a cold start, same as this scenario's original setup), the against-grain deadband is now 0 -- the breach escalates once sustain-confirmed, the same as every other 'nothing recent' case in test_comfort_family_decision.py's TestRecencyGatedDeadband. See issue_827_hot_day_deadband_cleared_escalates.json for a scenario that was ALREADY escalate-on-breach even under the old design (a large 7F breach past the literal deadband) -- this scenario's revision brings the small-breach/cold-start case into alignment with that one, rather than leaving a day-type-specific exception.",
+  "source": "Issue #843 (recency-gated deadband) -- revises Issue #827 Design #1's mid-review correction after the project owner confirmed the recency rule should apply uniformly across all day types, including hot/cold-day dawn dips previously exempted for energy-savings reasons.",
+  "issue": 843,
+  "superseded_issue": 827,
   "notes": [
     "Three-exercise protocol (CLAUDE.md #10):",
-    "(a) Scenario effectiveness (revert-test, per Verification's own requirement): if comfort_deadband_hot_f's clamp/default were removed (e.g. deadband forced to 0 for a hot day, matching a naive 'any breach counts' design), the 3F breach here (68-65=3) would immediately arm a candidate and, given enough elapsed time, sustain-confirm and escalate to heat -- the final assertion (comfort_family='cooling', hvac_mode_never_commanded=['heat']) would FAIL. Because this scenario's breach is deliberately BELOW the 5F deadband, only the deadband gate itself (not sustain-confirm timing) is what's under test -- the 2-hour elapsed gap proves it's not merely 'not yet confirmed', it's genuinely never even armed as a candidate.",
-    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f documents the deadband table's 'Hot' row (5.0F default) and this scenario as its test reference for the tolerate-a-transient-dip case.",
-    "(c) Occupant experience: on a day forecast to turn hot, a brief, modest early-morning chill (e.g. 3F below the floor right at dawn) is exactly the kind of condition that self-corrects within the hour as the day warms -- escalating to heat here would run the furnace for a few minutes right before the AC would otherwise need to run a few hours later, pure wasted energy and an unnecessary mode flip. With the fix, this kind of dip is correctly tolerated indefinitely (not just 'not yet confirmed') as long as it stays within the 5F deadband."
+    "(a) Scenario effectiveness (revert-test): if Issue #843's recency gate were reverted (deadband applied unconditionally regardless of recency, the pre-#843/#827-only design), this 3F breach (68-65=3, within the 5F hot-day deadband) would stay WITHIN_DEADBAND forever and the final assertions (comfort_family='heating', last_hvac_mode='heat') would FAIL -- proving this scenario genuinely depends on the recency gate treating a never-recorded cooling history as 'not recent', not on the breach magnitude alone.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md #6f's deadband table and const.py's CONF_COMFORT_DEADBAND_* block comment both now document the against-grain deadband as CONDITIONAL on comfort_family_recency_window_min -- this scenario is the hot-day test reference for the 'nothing ever recorded' cold-start case, replacing its own prior no-escalate reference.",
+    "(c) Occupant experience: with nothing cooling-side having run in this scenario at all, there is nothing for the deadband to protect against -- a 3F sub-floor dip at dawn now corrects itself via the furnace within a couple of minutes rather than the occupant coasting below comfort for up to two hours on the hope the day warms up in time. The energy cost is a few minutes of furnace runtime; the alternative the old design accepted was multiple hours of a house colder than its own comfort floor promises, the same category of occupant-facing problem the reported overnight-drift bug (Issue #843's original trigger) was about."
   ],
   "config": {
     "comfort_heat": 68,
@@ -21,7 +22,7 @@
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": true,
-      "note": "Hot-day classification at dawn. base_family='cooling' (native)."
+      "note": "Hot-day classification at dawn. base_family='cooling' (native). Cold start -- nothing cooling-side has ever run, so minutes_since_cooling_ended is None (not recent)."
     },
     {
       "time": "2026-09-01T06:00:00",
@@ -35,7 +36,7 @@
       "type": "temp_update",
       "indoor_f": 65.0,
       "outdoor_f": 50.0,
-      "note": "Dawn dip: indoor drops to 65F, 3F below comfort_heat(68) -- WITHIN comfort_deadband_hot_f (5.0F default). Not even a candidate for escalation."
+      "note": "Dawn dip: indoor drops to 65F, 3F below comfort_heat(68). Pre-#843 this was within comfort_deadband_hot_f (5.0F) and held indefinitely; under #843, with nothing cooling-side recorded, the effective deadband is 0 -- this breach immediately arms a heat candidate."
     },
     {
       "time": "2026-09-01T06:15:00",
@@ -43,22 +44,15 @@
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": true,
-      "note": "Re-evaluation: heat_breach_delta = 68-65 = 3F <= comfort_deadband_hot_f(5.0F) -> WITHIN_DEADBAND. Family stays 'cooling'."
+      "note": "Re-evaluation: heat_breach_delta = 68-65 = 3F > 0 (recency-gated deadband) -- candidate arms, not yet sustain-confirmed (elapsed 0s < 90s). Stays 'cooling' this tick."
     },
     {
-      "time": "2026-09-01T08:00:00",
-      "type": "temp_update",
-      "indoor_f": 65.0,
-      "outdoor_f": 52.0,
-      "note": "Nearly 2 hours later, indoor is STILL 65F (the same 3F sub-deadband breach) -- deliberately NOT a sustain-confirm timing test, but proof the deadband gate itself blocks this breach permanently, not just 'not yet confirmed'."
-    },
-    {
-      "time": "2026-09-01T08:00:00",
+      "time": "2026-09-01T06:17:00",
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": true,
-      "note": "Same 3F breach, ~2 hours later. Still within deadband -- still no candidate armed, still no escalation, regardless of elapsed time."
+      "note": "120s later (>90s sustain window). First-ever transition for this engine (cold start, no dwell gate). Sustain-confirmed: comfort family escalates to heating, commands heat at comfort_heat(68)."
     }
   ],
   "assertions": [
@@ -70,26 +64,26 @@
       "reason": "Baseline: hot day, indoor within band -- comfort band arms normally at the ceiling."
     },
     {
-      "at": "2026-09-01T08:00:00",
+      "at": "2026-09-01T06:17:00",
       "expect": "comfort_family",
-      "family": "cooling",
+      "family": "heating",
       "track": "logic",
       "simulator_support": false,
-      "reason": "A 3F breach never clears comfort_deadband_hot_f(5.0F), so the family never escalates -- not even after nearly 2 hours of the same sub-deadband breach persisting."
+      "reason": "Issue #843: with nothing cooling-side ever recorded, the against-grain deadband is 0 regardless of the 3F breach being 'small' -- once sustain-confirmed, the family escalates to heating."
     },
     {
-      "at": "2026-09-01T08:00:00",
-      "expect": "hvac_mode_never_commanded",
-      "forbidden_modes": ["heat"],
+      "at": "2026-09-01T06:17:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
       "track": "logic",
       "simulator_support": false,
-      "reason": "Across the whole scenario, heat mode must never be commanded -- proves the transient dawn dip is genuinely tolerated at the command level, not merely at the internal family-flag level."
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_heat, not merely an internal flag."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "A transient, sub-deadband dawn dip below comfort_heat on a hot-classified day is tolerated indefinitely -- it never escalates to heat, matching the design intent that a hot day self-corrects and shouldn't have its comfort family fought over a small, expected morning chill.",
-    "observed_behavior": "Indoor drops to 65F (3F below the 68F floor, within the 5F hot-day deadband) at dawn and stays there for nearly 2 hours -- comfort family remains 'cooling' throughout, no heat command ever issued.",
-    "expected_behavior": "Day type scales HOW MUCH tolerance the system gives before correcting an against-grain breach -- a hot day's wide deadband (5.0F default) means a modest, non-severe dip is correctly left alone rather than fought."
+    "summary": "REVISED under Issue #843: a dawn dip below comfort_heat on a hot-classified day now escalates to heat once sustain-confirmed, even though the breach itself is small, because nothing cooling-side has run recently -- there is nothing for the against-grain deadband to protect against. Supersedes this scenario's original #827 verdict (indefinite tolerance based on forecast self-correction alone), per explicit project-owner confirmation that the recency rule applies uniformly across day types.",
+    "observed_behavior": "Indoor drops to 65F (3F below the 68F floor) at dawn with no prior cooling-side activity recorded -- comfort family escalates to heating at 06:17:00 once sustain-confirmed, and heat is commanded at comfort_heat.",
+    "expected_behavior": "The against-grain deadband is a short-cycling guard conditioned on recent opposite-family activity (Issue #843), not a day-type-scaled forecast-based tolerance (the retired #827 framing) -- a cold start with nothing recorded behaves like the native direction (near-zero deadband, still sustain-confirmed) for every day type, hot/cold included."
   }
 }

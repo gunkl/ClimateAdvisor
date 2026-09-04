@@ -354,7 +354,8 @@
           "comfort_deadband_warm_f": "Comfort Deadband \u2014 Warm Days (\u00b0F)",
           "comfort_deadband_mild_f": "Comfort Deadband \u2014 Mild/Off Days (\u00b0F)",
           "comfort_deadband_cool_f": "Comfort Deadband \u2014 Cool Days (\u00b0F)",
-          "comfort_deadband_cold_f": "Comfort Deadband \u2014 Cold Days (\u00b0F)"
+          "comfort_deadband_cold_f": "Comfort Deadband \u2014 Cold Days (\u00b0F)",
+          "comfort_family_recency_window_min": "Recent Activity Window for Deadband (min)"
         },
         "data_description": {
           "learning_enabled": "When enabled, Climate Advisor learns from your manual adjustments and suggests improvements over time.",
@@ -373,7 +374,8 @@
           "comfort_deadband_warm_f": "On a warm day, how far indoor temp must drop below the comfort floor before the comfort-family FSM escalates to heat.",
           "comfort_deadband_mild_f": "On a mild or off-classified day, how far indoor temp must move past a comfort edge before the comfort-family FSM escalates against the day's native direction.",
           "comfort_deadband_cool_f": "On a cool day, how far indoor temp must rise above the comfort ceiling before the comfort-family FSM escalates to cooling.",
-          "comfort_deadband_cold_f": "On a cold day, how far indoor temp must rise above the comfort ceiling before the comfort-family FSM escalates to cooling (the against-grain direction on a cold day)."
+          "comfort_deadband_cold_f": "On a cold day, how far indoor temp must rise above the comfort ceiling before the comfort-family FSM escalates to cooling (the against-grain direction on a cold day).",
+          "comfort_family_recency_window_min": "How long HVAC-cool, WHF, HVAC-fan, or nat-vent activity is remembered as \"recent\" for the comfort-family deadband above. An against-grain switch (e.g. to heat on a warm day) only waits for the full deadband when the opposite family ran within this window; otherwise it switches immediately at the comfort boundary, since there's nothing recent to short-cycle away from."
         }
       },
       "classification_thresholds": {

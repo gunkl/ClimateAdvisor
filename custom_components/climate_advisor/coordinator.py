@@ -2705,6 +2705,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine._last_hvac_heating_active = dt_util.now().isoformat()
             elif _hvac_action_lower == "cooling":
                 self.automation_engine._last_hvac_cooling_active = dt_util.now().isoformat()
+            # Issue #843: same piggyback pattern, extended to fan/nat-vent activity
+            # for the comfort-family FSM's recency-gated deadband.
+            if self.automation_engine._fan_active:
+                self.automation_engine._last_fan_active = dt_util.now().isoformat()
+            if self.automation_engine._natural_vent_active:
+                self.automation_engine._last_natvent_active = dt_util.now().isoformat()
         # Issue #466: setpoint fields, so consumers that don't need live sub-cycle
         # freshness (ai_skills_activity.py/ai_skills_context.py) can read from
         # coordinator.data instead of independently re-fetching hass.states.get().

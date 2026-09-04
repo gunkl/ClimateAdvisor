@@ -71,6 +71,7 @@ EXPECTED_KEYS = {
     "comfort_deadband_mild_f",
     "comfort_deadband_cool_f",
     "comfort_deadband_cold_f",
+    "comfort_family_recency_window_min",
     "ai_enabled",
     "ai_api_key",
     "ai_model",

@@ -45,6 +45,7 @@ from .const import (
     CONF_COMFORT_DEADBAND_HOT_F,
     CONF_COMFORT_DEADBAND_MILD_F,
     CONF_COMFORT_DEADBAND_WARM_F,
+    CONF_COMFORT_FAMILY_RECENCY_WINDOW_MIN,
     CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
@@ -74,6 +75,7 @@ from .const import (
     DEFAULT_COMFORT_DEADBAND_HOT_F,
     DEFAULT_COMFORT_DEADBAND_MILD_F,
     DEFAULT_COMFORT_DEADBAND_WARM_F,
+    DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN,
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_HVAC_FAN_RESTRICT_MODE,
@@ -780,6 +782,16 @@ class AutomationEngine:
         # forgetting a recent cycle on restart would defeat the guard's purpose.
         self._last_hvac_heating_active: str | None = None  # ISO timestamp
         self._last_hvac_cooling_active: str | None = None  # ISO timestamp
+        # Issue #843: same continuously-refreshed-while-active / frozen-once-inactive
+        # pattern as the two fields above (Issue #835), extended to fan/nat-vent
+        # activity — used by the comfort-family FSM's recency-gated deadband
+        # (_minutes_since_cooling_ended()/_minutes_since_heating_ended()) to tell
+        # "opposite family ran recently" from "nothing to protect against". WHF and
+        # HVAC-fan-only both set self._fan_active, so a single field covers both per
+        # Issue #843's design (only actual HVAC heating counts toward the heating
+        # side — no fan equivalent, asymmetric by design).
+        self._last_fan_active: str | None = None  # ISO timestamp
+        self._last_natvent_active: str | None = None  # ISO timestamp
         self._fan_override_active: bool = False
         self._fan_override_time: str | None = None
         # RF remote timer selection in hours, for observability only (Issue #486).
@@ -8385,6 +8397,46 @@ class AutomationEngine:
         raw = float(self.config.get(conf_key, default))
         return max(lo, min(hi, raw))
 
+    @staticmethod
+    def _minutes_since_iso(ts_iso: str | None, *, now: datetime) -> float | None:
+        """Issue #843: minutes elapsed since an ISO-formatted timestamp, or
+        ``None`` if never recorded / unparseable. Shared conversion for the
+        comfort-family FSM's recency-gated deadband — mirrors the tz-normalization
+        already used by ``_hvac_fan_restriction_block_reason()``'s local
+        ``_recent()`` closure (Issue #835)."""
+        if not ts_iso:
+            return None
+        try:
+            ts = datetime.fromisoformat(ts_iso)
+        except (ValueError, TypeError):
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        return (now - ts).total_seconds() / 60.0
+
+    def _minutes_since_cooling_ended(self, *, now: datetime) -> float | None:
+        """Issue #843: minutes since HVAC-cool, WHF, HVAC-fan, or nat-vent
+        activity was last seen active — the most recent of the three tracked
+        timestamps, or None if none were ever recorded. Currently-active
+        activity naturally yields ~0 minutes (the tracking timestamp is
+        refreshed every coordinator cycle while active — see coordinator.py's
+        piggyback on the per-cycle hvac_action ground-truth read)."""
+        candidates = [
+            self._minutes_since_iso(getattr(self, "_last_hvac_cooling_active", None), now=now),
+            self._minutes_since_iso(getattr(self, "_last_fan_active", None), now=now),
+            self._minutes_since_iso(getattr(self, "_last_natvent_active", None), now=now),
+        ]
+        recorded = [m for m in candidates if m is not None]
+        return min(recorded) if recorded else None
+
+    def _minutes_since_heating_ended(self, *, now: datetime) -> float | None:
+        """Issue #843: minutes since HVAC-heat activity was last seen active.
+        No fan/nat-vent equivalent counts toward heating — asymmetric by
+        design (see comfort_family_decision.py's field docs)."""
+        return self._minutes_since_iso(getattr(self, "_last_hvac_heating_active", None), now=now)
+
     def _resolve_comfort_family_via_fsm(
         self,
         day_mode: str,
@@ -8491,6 +8543,11 @@ class AutomationEngine:
             ode_floor_outcome=ode_floor_decision.outcome,
             min_dwell_seconds=min_dwell_s,
             sustain_seconds=COMFORT_FALLBACK_CONFIRM_S,
+            minutes_since_cooling_ended=self._minutes_since_cooling_ended(now=now),
+            minutes_since_heating_ended=self._minutes_since_heating_ended(now=now),
+            recency_window_min=float(
+                self.config.get(CONF_COMFORT_FAMILY_RECENCY_WINDOW_MIN, DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN)
+            ),
             now=now,
         )
         event = ComfortFamilyEvent(kind=ComfortFamilyEventKind.TICK, inputs=fsm_inputs)
@@ -8708,6 +8765,28 @@ class AutomationEngine:
             )
             return
 
+        # Issue #843: this guard is a predictive, hard-bypass escalation to cool —
+        # it never went through the comfort-family FSM's deadband/recency gate at
+        # all. Symmetric with the ODE floor guard's own new recency gate (see
+        # comfort_family_decision.py's ode_floor_escalate_gated): a predicted
+        # breach minutes after heat just ran is exactly the flip-flop the
+        # recency-gated deadband exists to prevent — predictive vs. reactive
+        # shouldn't matter. Defer to the reactive comfort-family FSM (which now
+        # carries this same recency logic) instead of preemptively switching.
+        _minutes_since_heat = self._minutes_since_heating_ended(now=dt_util.now())
+        _recency_window = float(
+            self.config.get(CONF_COMFORT_FAMILY_RECENCY_WINDOW_MIN, DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN)
+        )
+        if _minutes_since_heat is not None and _minutes_since_heat < _recency_window:
+            _LOGGER.info(
+                "ODE ceiling guard: deferred — heating activity %.0fmin ago is within the"
+                " %.0fmin recency window; waiting for a live breach instead of preemptively"
+                " switching to cool",
+                _minutes_since_heat,
+                _recency_window,
+            )
+            return
+
         # ESCALATE
         _LOGGER.info(
             "ODE ceiling guard: active — setting HVAC cool, target=%.1f (breach %.1fh, lead=%.0fmin, k_cool=%s)",
@@ -8751,6 +8830,12 @@ class AutomationEngine:
             reason="ODE ceiling guard — target comfort_cool",
             mode="cool",
         )
+        # Issue #843: this guard writes mode directly rather than going through
+        # _resolve_comfort_family_via_fsm(), so it must arm the family state
+        # itself — otherwise the FSM's own dwell/recency bookkeeping goes stale
+        # relative to what the thermostat is actually doing (the same gap the ODE
+        # floor guard's equivalent call sites already avoid).
+        self._arm_comfort_family("cooling", dt_util.now())
         if self._emit_event_callback:
             self._emit_event_callback(
                 "ceiling_guard_fired",
@@ -9350,8 +9435,10 @@ class AutomationEngine:
         FAN_MODE_HVAC + aggressive_savings=False: re-arm the full comfort band so the
             thermostat self-arbitrates and the compressor can assist if the breeze alone
             cannot hold the comfort ceiling.
-        FAN_MODE_HVAC + aggressive_savings=True: arm the floor only (heat @ comfort_heat)
-            so the compressor cannot run for cooling through open windows.
+        FAN_MODE_HVAC + aggressive_savings=True: no-op (Issue #843 — previously armed
+            heat at comfort_heat directly; removed as a redundant, windows-open-violating
+            duplicate of decide_nat_vent_exit()'s COMFORT_FLOOR exit, which already
+            provides floor protection for every fan_mode/aggressive_savings combination).
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode in (FAN_MODE_DISABLED, FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -9420,16 +9507,23 @@ class AutomationEngine:
                     },
                 )
         else:
-            # Savings mode — floor guard only; ceiling disarmed so compressor cannot run
-            # for cooling through open windows.
+            # Issue #843: savings mode is now a no-op here — no longer arms heat at
+            # the comfort floor. It used to, but that force-commanded heat while
+            # nat-vent (windows open) was still the active session, contradicting
+            # this project's "no HVAC while windows are open, absent a manual
+            # override" principle, and it was redundant with a mechanism that
+            # already exists and is fan_mode/aggressive_savings-agnostic:
+            # decide_nat_vent_exit()'s COMFORT_FLOOR exit reason already ends the
+            # nat-vent session and restores heat (through the properly FSM-routed
+            # _set_temperature_for_mode(), which now also carries the recency-gated
+            # deadband from Issue #843) the moment indoor actually crosses the
+            # floor. Nat-vent's own thermostatic exit evaluation is the sole floor
+            # protection while windows are open — this branch no longer needs a
+            # separate, contradictory floor guard.
             _LOGGER.info(
-                "_apply_nat_vent_hvac_state: savings mode — floor-only at comfort_heat=%.1f"
-                " (aggressive_savings=on — ceiling disarmed)",
-                comfort_heat,
-            )
-            await self._set_hvac_mode("heat", reason="nat-vent savings mode — floor guard only, ceiling disarmed")
-            await self._set_temperature(
-                comfort_heat, reason="nat-vent savings mode — protecting comfort floor", mode="heat"
+                "_apply_nat_vent_hvac_state: savings mode — no HVAC arm (aggressive_savings=on);"
+                " floor protection comes from decide_nat_vent_exit()'s COMFORT_FLOOR exit,"
+                " not this function"
             )
 
     async def _command_whf_control_entity(self, desired_on: bool, *, reason: str) -> bool:
@@ -10868,6 +10962,12 @@ class AutomationEngine:
         # coil, recreating exactly the humidity issue the feature exists to prevent.
         self._last_hvac_heating_active = state.get("last_hvac_heating_active")
         self._last_hvac_cooling_active = state.get("last_hvac_cooling_active")
+        # Issue #843: same restore rationale as the two fields above — forgetting
+        # recent fan/nat-vent activity on restart would let the comfort-family FSM's
+        # recency gate immediately treat a genuinely-recent cooling session as if it
+        # never happened.
+        self._last_fan_active = state.get("last_fan_active")
+        self._last_natvent_active = state.get("last_natvent_active")
         self._fan_min_runtime_active = state.get("fan_min_runtime_active", False)
         self._pre_fan_hvac_mode = state.get("pre_fan_hvac_mode")
         # _fan_min_cycle_cancel / _fan_thermo_cancel are not serializable; timers restart
@@ -10966,6 +11066,9 @@ class AutomationEngine:
             # Issue #835: NOT clean-slate — restored on restart (see restore_state()).
             "last_hvac_heating_active": self._last_hvac_heating_active,
             "last_hvac_cooling_active": self._last_hvac_cooling_active,
+            # Issue #843: NOT clean-slate — restored on restart (see restore_state()).
+            "last_fan_active": self._last_fan_active,
+            "last_natvent_active": self._last_natvent_active,
             "fan_override_active": self._fan_override_active,
             "fan_override_time": self._fan_override_time,
             # Issue #486: RF remote timer hours, for observability only — like the two

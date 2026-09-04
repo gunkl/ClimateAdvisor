@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.17"
+VERSION = "0.7.18"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -343,6 +343,18 @@ COMFORT_MODE_SWITCH_MIN_INTERVAL_S = 600.0
 # Measured from the already-resolved band.floor/band.ceiling (post aggressive_savings
 # margin), not raw comfort_heat/comfort_cool, so the two tolerance mechanisms compose
 # from one anchor point instead of silently disagreeing.
+#
+# Issue #843: the against-grain gate itself is now CONDITIONAL, not unconditional.
+# It only applies when the opposite family (HVAC run, WHF, HVAC-fan, or nat-vent)
+# has actually run within CONF_COMFORT_FAMILY_RECENCY_WINDOW_MIN — see
+# comfort_family_decision.py's _against_grain_deadband(). Nothing recorded, or
+# nothing within the window, means the against-grain direction behaves like the
+# native direction (near-zero deadband): the deadband exists to prevent
+# short-cycling, and there's nothing to short-cycle away from if the opposite
+# family hasn't run in hours. Fixes the overnight-drift bug where the house sat
+# several degrees below the comfort floor for hours after nat-vent ended, because
+# the static deadband made no distinction between "just finished cooling" and
+# "nothing has run in 3 hours".
 CONF_COMFORT_DEADBAND_HOT_F = "comfort_deadband_hot_f"
 CONF_COMFORT_DEADBAND_WARM_F = "comfort_deadband_warm_f"
 CONF_COMFORT_DEADBAND_MILD_F = "comfort_deadband_mild_f"
@@ -367,6 +379,16 @@ COMFORT_DEADBAND_COOL_MIN_F = 1.0
 COMFORT_DEADBAND_COOL_MAX_F = 5.0
 COMFORT_DEADBAND_COLD_MIN_F = 2.0
 COMFORT_DEADBAND_COLD_MAX_F = 8.0
+
+# Issue #843: how long a "recent opposite-family activity" memory lasts before the
+# against-grain deadband above stops applying and the FSM behaves like the native
+# direction. Default 2 hours — long enough to cover a normal short-cycling risk
+# window, short enough that a genuinely idle house isn't held below/above comfort
+# indefinitely waiting for a large breach that was never coming.
+CONF_COMFORT_FAMILY_RECENCY_WINDOW_MIN = "comfort_family_recency_window_min"
+DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN = 120.0
+COMFORT_FAMILY_RECENCY_WINDOW_MIN_MIN = 15.0
+COMFORT_FAMILY_RECENCY_WINDOW_MIN_MAX = 360.0
 
 # State persistence
 STATE_FILE = "climate_advisor_state.json"
@@ -897,6 +919,17 @@ CONFIG_METADATA = {
         "description": (
             "On a cold day, how far indoor temp must rise above the comfort ceiling before the"
             " comfort-family FSM escalates to cooling (the against-grain direction on a cold day)."
+        ),
+        "category": "advanced",
+    },
+    "comfort_family_recency_window_min": {
+        "label": "Recent Activity Window for Deadband (min)",
+        "description": (
+            'How long HVAC-cool, WHF, HVAC-fan, or nat-vent activity is remembered as "recent" for'
+            " the comfort-family deadband above. An against-grain switch (e.g. to heat on a warm day)"
+            " only waits for the full deadband when the opposite family ran within this window;"
+            " otherwise it switches immediately at the comfort boundary, since there's nothing recent"
+            " to short-cycle away from."
         ),
         "category": "advanced",
     },

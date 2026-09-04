@@ -836,6 +836,17 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
         )
 
 
+def _oldest_event_time(event_log: list[dict]) -> str | None:
+    """Return the earliest "time" value in event_log, or None if empty/unset.
+
+    Uses min() rather than event_log[0] — the log is chronological in normal
+    production operation, but restore/merge paths don't guarantee that, and this
+    is a correctness-facing truncation signal, not a performance-critical path.
+    """
+    times = [e.get("time") for e in event_log if isinstance(e, dict) and e.get("time")]
+    return min(times) if times else None
+
+
 class ClimateAdvisorActivityRecordView(HomeAssistantView):
     """Deterministic activity record endpoint — no AI required."""
 
@@ -857,18 +868,26 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
 
         from homeassistant.util import dt as dt_util
 
+        event_log = list(getattr(coordinator, "_event_log", []) or [])
         table = build_event_timeline_table(
-            list(getattr(coordinator, "_event_log", []) or []),
+            event_log,
             coordinator.config or {},
             hours,
             dt_util.now(),
             newest_first=True,
         )
+
+        cutoff_iso = (dt_util.now() - timedelta(hours=hours)).isoformat()
+        oldest_stored = _oldest_event_time(event_log)
+        is_truncated = bool(oldest_stored) and oldest_stored > cutoff_iso
+
         return self.json(
             {
                 "table": table,
                 "hours": hours,
                 "generated_at": dt_util.now().isoformat(),
+                "is_truncated": is_truncated,
+                "oldest_available": oldest_stored,
             }
         )
 
@@ -1054,7 +1073,18 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
         cutoff = (dt_util.now() - timedelta(hours=hours)).isoformat()
         events = [e for e in coordinator._event_log if e.get("time", "") >= cutoff]
 
-        return self.json({"events": events, "total": len(events), "hours": hours})
+        oldest_stored = _oldest_event_time(coordinator._event_log)
+        is_truncated = bool(oldest_stored) and oldest_stored > cutoff
+
+        return self.json(
+            {
+                "events": events,
+                "total": len(events),
+                "hours": hours,
+                "is_truncated": is_truncated,
+                "oldest_available": oldest_stored,
+            }
+        )
 
 
 class ClimateAdvisorEnginesView(HomeAssistantView):

@@ -1502,3 +1502,127 @@ class TestLifecycleScopedNarration:
         )
         assert "mode: off->heat" in st
         assert "fan: on->auto" in st
+
+
+# ---------------------------------------------------------------------------
+# TestFilterEventsByWindow — Issue #432 shared helper unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestFilterEventsByWindow:
+    """Direct unit tests for filter_events_by_window() (Issue #432).
+
+    The helper must filter by time window BEFORE applying any `limit`, so a
+    caller-supplied display/render budget never causes older-but-still-in-window
+    entries to be dropped ahead of entries that fall outside the window entirely.
+    """
+
+    def test_filter_only_no_limit_keeps_all_in_window_entries(self):
+        events = [_make_event("fan_activated", hours_ago=h) for h in (1, 5, 10, 23.9)]
+        # One event well outside the 24h window
+        events.append(_make_event("fan_activated", hours_ago=48))
+
+        filtered, limited = _act_mod.filter_events_by_window(events, 24.0, _REAL_NOW)
+
+        assert len(filtered) == 4
+        assert limited is False
+
+    def test_limit_trims_and_sets_limited_true(self):
+        # 250 events, all inside the window — exceeds a limit of 200. Built in
+        # ascending chronological order (oldest first, index 0 = 12.51h ago,
+        # index 249 = 0.01h ago) to match how the real coordinator event log is
+        # actually appended (see coordinator.py's `self._event_log.append(entry)`).
+        events = [_make_event("fan_activated", hours_ago=float(249 - i) * 0.05 + 0.01) for i in range(250)]
+
+        filtered, limited = _act_mod.filter_events_by_window(events, 24.0, _REAL_NOW, limit=200)
+
+        assert len(filtered) == 200
+        assert limited is True
+        # The kept entries must be the 200 MOST RECENT ones (the tail of the
+        # ascending input), still in ascending time order (oldest of the kept
+        # entries first, newest last).
+        times = [e["time"] for e in filtered]
+        assert times == sorted(times)
+        # The 50 oldest events (indices 0-49) must have been dropped by the limit.
+        assert events[0] not in filtered
+        assert events[-1] in filtered
+
+    def test_limit_does_not_trim_when_under_threshold(self):
+        events = [_make_event("fan_activated", hours_ago=float(i)) for i in range(5)]
+
+        filtered, limited = _act_mod.filter_events_by_window(events, 24.0, _REAL_NOW, limit=200)
+
+        assert len(filtered) == 5
+        assert limited is False
+
+    def test_non_dict_entries_are_skipped(self):
+        events = ["not-a-dict", 42, None, _make_event("fan_activated", hours_ago=1)]
+
+        filtered, limited = _act_mod.filter_events_by_window(events, 24.0, _REAL_NOW)
+
+        assert len(filtered) == 1
+        assert limited is False
+
+
+# ---------------------------------------------------------------------------
+# TestFilterThenLimitOrdering — Issue #432 regression: filter-before-limit
+# ---------------------------------------------------------------------------
+
+
+class TestFilterThenLimitOrdering:
+    """Regression lock for Issue #432: build_event_timeline_table must filter by
+    time window BEFORE applying the 200-row render budget.
+
+    Before the fix, `raw_event_log[-200:]` sliced the raw log to its last 200
+    RAW ARRAY POSITIONS first, then filtered by time. For a strictly
+    chronologically-ordered log this happens to give the same result as
+    filter-then-limit (both reduce to "the most recent N in-window entries").
+    The bug bites when the log is NOT strictly ordered by position — e.g. an
+    event lands at an earlier array position than a block of later-appended
+    entries that are themselves outside the requested window (a plausible
+    shape for a merged/backfilled event source). In that shape, the old code's
+    blind positional slice can throw away an in-window event before the time
+    filter ever runs, even though the total in-window count is well under 200
+    and the corrected filter-then-limit order would have kept it untrimmed.
+    """
+
+    def test_events_spread_across_window_all_survive_filtering(self):
+        # Position 0: sentinel, 11h ago (inside the 12h window).
+        # Positions 1-250: "noise" events, 20h ago (OUTSIDE the 12h window) —
+        #   a large block that pushes the sentinel out of the raw last-200 slice.
+        # Positions 251-300: "filler" events, 1h ago (inside the 12h window).
+        # Total in-window count = 1 (sentinel) + 50 (filler) = 51, well under
+        # the 200 render budget — the corrected code should keep ALL of them,
+        # including the sentinel.
+        sentinel_event = _make_event(
+            "comfort_band_applied",
+            hours_ago=11.0,
+            mode="home",
+            floor=64,
+            ceiling=76,
+            active="ceiling",
+        )
+        noise_events = [_make_event("fan_activated", hours_ago=20.0, indoor_temp=70) for _ in range(250)]
+        filler_events = [_make_event("fan_activated", hours_ago=1.0, indoor_temp=72) for _ in range(50)]
+        events = [sentinel_event] + noise_events + filler_events
+
+        table = _build_table(events, hours=12.0)
+
+        assert "no events in window" not in table
+        assert "76" in table, f"sentinel comfort_band_applied event (11h ago, inside 12h window) missing:\n{table}"
+
+    def test_limited_note_present_when_window_exceeds_200(self):
+        # 220 events spread evenly across a 12h window — all inside the window,
+        # so the render budget (not the time filter) is what trims them.
+        events = [_make_event("fan_activated", hours_ago=(i / 220.0) * 11.9 + 0.01) for i in range(220)]
+
+        table = _build_table(events, hours=12.0)
+
+        assert "more than 200 events" in table
+
+    def test_no_limited_note_when_under_200(self):
+        events = [_make_event("fan_activated", hours_ago=(i / 50.0) * 11.9 + 0.01) for i in range(50)]
+
+        table = _build_table(events, hours=12.0)
+
+        assert "more than 200 events" not in table

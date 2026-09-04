@@ -132,6 +132,7 @@ from .const import (
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_TEMP_DELTA,
     EVENT_LOG_CAP,
+    EVENT_LOG_MAX_AGE_HOURS,
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
@@ -352,6 +353,20 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
     today = dt_util.now().date().isoformat()
     index = int(hashlib.sha256(f"{today}:{salt}".encode()).hexdigest(), 16) % len(pool)
     return pool[index]
+
+
+def _prune_event_log(event_log: list[dict], now: datetime) -> list[dict]:
+    """Evict entries older than EVENT_LOG_MAX_AGE_HOURS, then enforce EVENT_LOG_CAP
+    as a memory-safety backstop (Issue #432).
+
+    Single source of truth for both live emit (_emit_event) and restore-from-disk
+    (async_restore_state) so the two paths can never disagree on retention.
+    """
+    cutoff = (now - timedelta(hours=EVENT_LOG_MAX_AGE_HOURS)).isoformat()
+    pruned = [e for e in event_log if e.get("time", "") >= cutoff]
+    if len(pruned) > EVENT_LOG_CAP:
+        pruned = pruned[-EVENT_LOG_CAP:]
+    return pruned
 
 
 # Issue #757 Phase 6 Step 4: _DOOR_WINDOW_FSM_EVENT_KINDS/
@@ -1437,7 +1452,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Restore event log ring buffer and emit restart boundary marker
         saved_log = state.get("event_log")
         if isinstance(saved_log, list):
-            self._event_log = saved_log[-EVENT_LOG_CAP:]
+            self._event_log = _prune_event_log(saved_log, dt_util.now())
 
         # Restart-cause classification (Issue #403): compare the persisted last-shutdown
         # version against VERSION, and check whether the prior shutdown was clean.
@@ -7822,7 +7837,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
-        entry: dict[str, Any] = {"time": dt_util.now().isoformat(), "type": event_type, **data}
+        _now = dt_util.now()
+        entry: dict[str, Any] = {"time": _now.isoformat(), "type": event_type, **data}
         # Normalize alternate temp field names used by automation events
         for _src in ("indoor_temp", "indoor"):
             if _src in entry:
@@ -7836,8 +7852,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             entry.setdefault("indoor_f", self._get_indoor_temp())
             entry.setdefault("outdoor_f", getattr(self, "_last_outdoor_temp", None))
         self._event_log.append(entry)
-        if len(self._event_log) > EVENT_LOG_CAP:
-            self._event_log.pop(0)
+        self._event_log = _prune_event_log(self._event_log, _now)
 
         # #437 follow-up: detect a genuine nat-vent True->False exit transition (any of
         # the 6 real exit paths — comfort-floor, away-ceiling, predicted-floor,

@@ -861,3 +861,140 @@ class TestResumeFromPauseViewFeedsOverrideGraceFsm:
         self._post(coordinator)
 
         coordinator._feed_override_grace_fsm_on_detect.assert_not_called()
+
+
+class TestEventLogAndActivityRecordTruncationSignal:
+    """Issue #432: ClimateAdvisorEventLogView and ClimateAdvisorActivityRecordView
+    must honestly signal when a time-window response might be incomplete — either
+    because the event log's retention doesn't reach back as far as requested, or
+    (fixed separately, see filter_events_by_window()) because of the old slicing
+    bug. `is_truncated` is True whenever the oldest stored event is newer than the
+    requested cutoff — that means the log simply doesn't hold data that far back,
+    regardless of the reason (fresh install, recent restart, retention backstop).
+    An empty log is not "truncated" — there's just nothing there yet.
+    """
+
+    def _make_request(self, coordinator, hours: str | None = None) -> MagicMock:
+        hass = MagicMock()
+        hass.data = {DOMAIN: {"entry1": coordinator}}
+        req = MagicMock()
+        req.app = {"hass": hass}
+        query = {"hours": hours} if hours is not None else {}
+        req.query = query
+        req.rel_url = MagicMock()
+        req.rel_url.query = query
+        return req
+
+    def _get(self, view_cls, coordinator, now, hours: str | None = None):
+        import asyncio
+        from unittest.mock import patch
+
+        from homeassistant.util import dt as dt_util
+
+        request = self._make_request(coordinator, hours)
+        view = view_cls()
+        with patch.object(dt_util, "now", return_value=now):
+            resp = asyncio.run(view.get(request))
+        return resp.json_data
+
+    def _make_coordinator(self, event_log):
+        coordinator = MagicMock()
+        coordinator.config = {}
+        coordinator._event_log = event_log
+        return coordinator
+
+    # ---- ClimateAdvisorEventLogView ----
+
+    def test_event_log_not_truncated_when_oldest_event_predates_cutoff(self):
+        from datetime import datetime
+
+        from custom_components.climate_advisor.api import ClimateAdvisorEventLogView
+
+        now = datetime(2026, 7, 21, 14, 0, 0)  # cutoff for hours=12 -> 2026-07-21T02:00:00
+        oldest_time = "2026-07-20T00:00:00"
+        coordinator = self._make_coordinator(
+            [
+                {"time": oldest_time, "type": "setpoint_applied"},
+                {"time": "2026-07-21T10:00:00", "type": "setpoint_applied"},
+            ]
+        )
+
+        body = self._get(ClimateAdvisorEventLogView, coordinator, now, hours="12")
+
+        assert body["is_truncated"] is False
+        assert body["oldest_available"] == oldest_time
+
+    def test_event_log_truncated_when_oldest_event_is_newer_than_cutoff(self):
+        from datetime import datetime
+
+        from custom_components.climate_advisor.api import ClimateAdvisorEventLogView
+
+        now = datetime(2026, 7, 21, 14, 0, 0)  # cutoff for hours=12 -> 2026-07-21T02:00:00
+        oldest_time = "2026-07-21T10:00:00"  # newer than cutoff — log doesn't reach back far enough
+        coordinator = self._make_coordinator([{"time": oldest_time, "type": "setpoint_applied"}])
+
+        body = self._get(ClimateAdvisorEventLogView, coordinator, now, hours="12")
+
+        assert body["is_truncated"] is True
+        assert body["oldest_available"] == oldest_time
+
+    def test_event_log_empty_is_not_truncated(self):
+        from datetime import datetime
+
+        from custom_components.climate_advisor.api import ClimateAdvisorEventLogView
+
+        now = datetime(2026, 7, 21, 14, 0, 0)
+        coordinator = self._make_coordinator([])
+
+        body = self._get(ClimateAdvisorEventLogView, coordinator, now, hours="12")
+
+        assert body["is_truncated"] is False
+        assert body["oldest_available"] is None
+
+    # ---- ClimateAdvisorActivityRecordView ----
+
+    def test_activity_record_not_truncated_when_oldest_event_predates_cutoff(self):
+        from datetime import datetime
+
+        from custom_components.climate_advisor.api import ClimateAdvisorActivityRecordView
+
+        now = datetime(2026, 7, 21, 14, 0, 0)  # cutoff for hours=12 -> 2026-07-21T02:00:00
+        oldest_time = "2026-07-20T00:00:00"
+        coordinator = self._make_coordinator(
+            [
+                {"time": oldest_time, "type": "setpoint_applied"},
+                {"time": "2026-07-21T10:00:00", "type": "setpoint_applied"},
+            ]
+        )
+
+        body = self._get(ClimateAdvisorActivityRecordView, coordinator, now, hours="12")
+
+        assert body["is_truncated"] is False
+        assert body["oldest_available"] == oldest_time
+
+    def test_activity_record_truncated_when_oldest_event_is_newer_than_cutoff(self):
+        from datetime import datetime
+
+        from custom_components.climate_advisor.api import ClimateAdvisorActivityRecordView
+
+        now = datetime(2026, 7, 21, 14, 0, 0)  # cutoff for hours=12 -> 2026-07-21T02:00:00
+        oldest_time = "2026-07-21T10:00:00"  # newer than cutoff — log doesn't reach back far enough
+        coordinator = self._make_coordinator([{"time": oldest_time, "type": "setpoint_applied"}])
+
+        body = self._get(ClimateAdvisorActivityRecordView, coordinator, now, hours="12")
+
+        assert body["is_truncated"] is True
+        assert body["oldest_available"] == oldest_time
+
+    def test_activity_record_empty_is_not_truncated(self):
+        from datetime import datetime
+
+        from custom_components.climate_advisor.api import ClimateAdvisorActivityRecordView
+
+        now = datetime(2026, 7, 21, 14, 0, 0)
+        coordinator = self._make_coordinator([])
+
+        body = self._get(ClimateAdvisorActivityRecordView, coordinator, now, hours="12")
+
+        assert body["is_truncated"] is False
+        assert body["oldest_available"] is None

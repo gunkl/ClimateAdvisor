@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.17] — 2026-09-04
+
+- Fix #842: the five comfort deadband settings (Hot/Warm/Mild/Cool/Cold Days) in Advanced options now show proper names and descriptions instead of raw field names with no explanation — same class of gap as #837.
+
 ## [0.7.16] — 2026-09-03
 
 - Fix #432: the Activity dashboard's time-window views (e.g. "last 12 hours") now return complete data instead of silently truncating during busy automation periods. Two compounding causes: the retained event history was capped by a fixed entry count with no regard for how much time those entries actually spanned (a busy day could shrink it to just a few hours), and several internal consumers sliced to the most recent 200 raw entries before applying the requested time window, which could drop in-window events on a non-chronological log. Retention is now time-based (7 days). API responses also report when the data available doesn't reach back as far as requested, instead of returning a confidently-rendered partial answer with no indication anything was missing.

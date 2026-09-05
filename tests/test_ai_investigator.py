@@ -1539,7 +1539,7 @@ class TestTimingCorrelations:
         now = datetime.datetime.now(datetime.UTC)
         auto_event = self._make_event("grace_expired", "automation", now)
         manual_event = self._make_event("override_detected", "manual", now + datetime.timedelta(minutes=30))
-        result = _build_timing_correlations([auto_event, manual_event])
+        result = _build_timing_correlations([auto_event, manual_event], 24, now)
         assert "[TIMING-COINCIDENT]" in result, (
             "Fix G: override_detected at exactly T+30min after grace_expired should be "
             "flagged as [TIMING-COINCIDENT].\n"
@@ -1557,7 +1557,7 @@ class TestTimingCorrelations:
         now = datetime.datetime.now(datetime.UTC)
         auto_event = self._make_event("classification_applied", "automation", now)
         manual_event = self._make_event("override_detected", "manual", now + datetime.timedelta(minutes=31))
-        result = _build_timing_correlations([auto_event, manual_event])
+        result = _build_timing_correlations([auto_event, manual_event], 24, now)
         assert "[TIMING-COINCIDENT]" in result, (
             f"Fix G: T+31min is within ±2 min of 30min interval — must be flagged.\nGot output:\n{result}"
         )
@@ -1573,7 +1573,7 @@ class TestTimingCorrelations:
         now = datetime.datetime.now(datetime.UTC)
         auto_event = self._make_event("classification_applied", "automation", now)
         manual_event = self._make_event("override_detected", "manual", now + datetime.timedelta(minutes=45))
-        result = _build_timing_correlations([auto_event, manual_event])
+        result = _build_timing_correlations([auto_event, manual_event], 24, now)
         assert "[TIMING-COINCIDENT]" not in result, (
             f"Fix G: T+45min is NOT within ±2 min of any known interval — must NOT flag.\nGot output:\n{result}"
         )
@@ -1590,7 +1590,7 @@ class TestTimingCorrelations:
         now = datetime.datetime.now(datetime.UTC)
         auto_event = self._make_event("grace_started", "automation", now)
         manual_event = self._make_event("manual_override_cleared", "manual", now + datetime.timedelta(minutes=90))
-        result = _build_timing_correlations([auto_event, manual_event])
+        result = _build_timing_correlations([auto_event, manual_event], 24, now)
         assert "[TIMING-COINCIDENT]" in result, (
             f"Fix G: T+90min matches the manual grace interval — must be flagged.\nGot output:\n{result}"
         )
@@ -1602,10 +1602,113 @@ class TestTimingCorrelations:
         """
         from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
 
-        result = _build_timing_correlations([])
+        now = datetime.datetime.now(datetime.UTC)
+        result = _build_timing_correlations([], 24, now)
         assert "TIMING CORRELATIONS" in result, (
             f"Fix G: output must contain 'TIMING CORRELATIONS' header.\nGot:\n{result}"
         )
+
+    def test_event_outside_window_is_excluded(self):
+        """Issue #840: an automation/manual pair outside the `hours`/`now` window
+        must not be correlated, even though the delta would otherwise match.
+        """
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        now = datetime.datetime.now(datetime.UTC)
+        old_base = now - datetime.timedelta(hours=10)
+        auto_event = self._make_event("grace_expired", "automation", old_base)
+        manual_event = self._make_event("override_detected", "manual", old_base + datetime.timedelta(minutes=30))
+        result = _build_timing_correlations([auto_event, manual_event], 1, now)
+        assert "[TIMING-COINCIDENT]" not in result, (
+            f"Fix #840: events outside the 1h window must not be correlated.\nGot:\n{result}"
+        )
+
+    def test_bisect_matches_brute_force_oracle(self):
+        """Issue #840: the sort+bisect nearest-prior lookup must match a naive
+        list-comprehension + max() oracle across a randomized batch of events.
+        """
+        import random
+
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        rng = random.Random(840)
+        base = datetime.datetime.now(datetime.UTC)
+        now = base + datetime.timedelta(hours=48)
+        auto_types = ["grace_expired", "classification_applied", "ceiling_guard_fired"]
+        manual_types = ["override_detected", "manual_override_cleared"]
+
+        events = []
+        for _ in range(120):
+            offset = rng.uniform(0, 47 * 3600)
+            events.append(
+                self._make_event(rng.choice(auto_types), "automation", base + datetime.timedelta(seconds=offset))
+            )
+        for _ in range(120):
+            offset = rng.uniform(0, 47 * 3600)
+            events.append(
+                self._make_event(rng.choice(manual_types), "manual", base + datetime.timedelta(seconds=offset))
+            )
+        rng.shuffle(events)
+
+        def _oracle_coincident_count(events, hours, now):
+            cutoff = now - datetime.timedelta(hours=hours)
+            resolved = [(e["time"], e) for e in events if e["time"] >= cutoff]
+            auto_events = [(dt, e) for dt, e in resolved if e.get("source") == "automation"]
+            count = 0
+            for evt_dt, evt in resolved:
+                if evt.get("source") != "manual":
+                    continue
+                prior_auto = [(adt, ae) for adt, ae in auto_events if adt < evt_dt]
+                if not prior_auto:
+                    continue
+                nearest_adt, _nearest_ae = max(prior_auto, key=lambda x: x[0])
+                delta_s = (evt_dt - nearest_adt).total_seconds()
+                from custom_components.climate_advisor.ai_skills_context import (
+                    _AUTOMATION_INTERVALS_SECONDS,
+                )
+
+                for interval_s in _AUTOMATION_INTERVALS_SECONDS.values():
+                    if abs(delta_s - interval_s) <= 120:
+                        count += 1
+                        break
+            return count
+
+        expected = _oracle_coincident_count(events, 168, now)
+        result = _build_timing_correlations(events, 168, now)
+        actual = result.count("[TIMING-COINCIDENT]")
+        assert actual == expected, f"expected {expected} coincident matches, got {actual}\n{result}"
+
+    def test_volume_completes_quickly(self):
+        """Issue #840: ~2000 events per category must complete well under 1s."""
+        import random
+        import time as _time
+
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        rng = random.Random(841)
+        base = datetime.datetime.now(datetime.UTC)
+        now = base + datetime.timedelta(hours=48)
+        auto_types = ["grace_expired", "classification_applied", "ceiling_guard_fired"]
+        manual_types = ["override_detected", "manual_override_cleared"]
+
+        events = []
+        for _ in range(1800):
+            offset = rng.uniform(0, 47 * 3600)
+            events.append(
+                self._make_event(rng.choice(auto_types), "automation", base + datetime.timedelta(seconds=offset))
+            )
+        for _ in range(1800):
+            offset = rng.uniform(0, 47 * 3600)
+            events.append(
+                self._make_event(rng.choice(manual_types), "manual", base + datetime.timedelta(seconds=offset))
+            )
+        rng.shuffle(events)
+
+        start = _time.perf_counter()
+        result = _build_timing_correlations(events, 168, now)
+        elapsed = _time.perf_counter() - start
+        assert elapsed < 0.3, f"scan took {elapsed:.3f}s — expected well under 0.3s (bisect-based, not O(n*m))"
+        assert "TIMING CORRELATIONS" in result
 
     def test_automation_intervals_constants_defined(self):
         """_AUTOMATION_INTERVALS_SECONDS must be defined as a module-level constant.

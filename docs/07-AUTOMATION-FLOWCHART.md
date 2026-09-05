@@ -233,7 +233,7 @@ When occupancy switches to `away` or `vacation` while `_paused_by_door=True` (a 
 - `_occupancy_mode` **is** updated immediately — the new occupancy state is recorded.
 - No setback band service call is made — the thermostat is left at HVAC off (the existing paused state).
 - Event `occupancy_setback_suppressed_paused` is emitted with payload `{occupancy: "away"|"vacation", reason: "paused_by_door"}`.
-- The coordinator status string reflects both states: `"paused — away (setback deferred: windows open)"` or `"paused — vacation (setback deferred: windows open)"`.
+- The coordinator status string reflects both states: `"paused — away (resumes after windows close)"` or `"paused — vacation (resumes after windows close)"` (reworded Issue #860; was `"setback deferred: windows open"`).
 - When sensors eventually close, the resume path calls `_set_temperature_for_mode()`, whose §6a safety net redirects to `handle_occupancy_away()` or `handle_occupancy_vacation()` as appropriate — the deferred setback is applied at that point.
 
 **Why:** Applying a setback band while HVAC is paused for open sensors would re-arm the thermostat in a mode that conflicts with the pause reason. The occupancy state is captured so the correct setback is applied the moment the sensors close and the system resumes.

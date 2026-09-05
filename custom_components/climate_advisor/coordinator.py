@@ -8356,9 +8356,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return "nat-vent"
         if self.automation_engine.is_paused_by_door:
             if self._occupancy_mode == OCCUPANCY_AWAY:
-                return "paused — away (setback deferred: windows open)"
+                return "paused — away (resumes after windows close)"
             if self._occupancy_mode == OCCUPANCY_VACATION:
-                return "paused — vacation (setback deferred: windows open)"
+                return "paused — vacation (resumes after windows close)"
             return "paused — door/window open"
         if self.automation_engine._override_confirm_pending:
             return "override pending (confirming...)"
@@ -8367,7 +8367,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if _ae2._manual_override_active and not _ae2._grace_active and _ae2._grace_end_time is not None:
             _se = dt_util.parse_datetime(_ae2._grace_end_time)
             if _se is not None and dt_util.now() > _se:
-                return "override (grace stuck — check logs)"
+                return "override (stuck — see Debug tab)"
         if self.automation_engine._grace_active:
             if self.automation_engine._resumed_from_pause:
                 return "resumed — door/window override"
@@ -8382,6 +8382,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (_last_action_reason), unaffected by this change.
             _trigger_label = _GRACE_TRIGGER_LABELS.get(self.automation_engine._last_grace_trigger or "", "")
             _cause_suffix = f" — {_trigger_label}" if _trigger_label else ""
+            # Issue #860: when a Fan (WHF)/(HVAC) remote timer is active
+            # (_fan_remote_timer_hours is not None), that card already displays this
+            # grace's original duration + expiry ("remote timer: Xh (ends HH:MM)") —
+            # sourced from the original RF-remote token. Status's own duration clause is
+            # derived from a DIFFERENT field (_grace_duration_seconds, the
+            # remaining-from-arm value), which legitimately diverges from the remote-timer
+            # token after an HA-restart re-arm (Issue #677: the restart reconcile sets
+            # remaining-time into _grace_duration_seconds for real timer scheduling but
+            # leaves _fan_remote_timer_hours as the original token for session-identity
+            # matching, per Issue #530) — showing both produced two different numbers for
+            # what the occupant understands as one timer. Omit Status's clause entirely
+            # whenever the Fan card already owns this information; the Fan card becomes
+            # the sole source for original setting + expiry in that case. This is a
+            # data-driven condition (not a hardcoded trigger-name allowlist) so any future
+            # grace-trigger cause that happens to co-occur with an active remote timer is
+            # automatically handled correctly with no further maintenance.
+            if self.automation_engine._fan_remote_timer_hours is not None:
+                return f"grace period ({source}){_cause_suffix}"
             return f"grace period ({source}){_cause_suffix}{self._format_grace_remaining(self.automation_engine)}"
         # Issue #786: TOU scheduler pre-conditioning — a mechanism reason, per the Status
         # Card Ontology this is the one card it belongs on. Same compact "short label —
@@ -8749,6 +8767,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Returns "" if the timestamp/duration is missing, unparseable, or already in the
         past — never raises (Issue #498: dashboard showed grace was active but never said
         when it would end, the single most useful piece of information during an override).
+
+        Issue #860: as of the caller's fan-remote-timer check in `_compute_automation_status()`,
+        this is only invoked when `ae._fan_remote_timer_hours is None` — whenever a Fan
+        (WHF)/(HVAC) remote timer is active, that card already owns and displays the
+        duration + expiry (from the original RF-remote token), and Status's own duration
+        source (`_grace_duration_seconds`, a remaining-from-arm value) can legitimately
+        diverge from it after an HA-restart re-arm (Issue #677/#530), producing two
+        different numbers for what the occupant understands as one timer.
         """
         end_iso = getattr(ae, "_grace_end_time", None)
         duration_s = getattr(ae, "_grace_duration_seconds", None)

@@ -12,6 +12,7 @@ with mocked HA dependencies.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
@@ -928,10 +929,27 @@ class TestGracePeriodDuration:
     """Tests for configurable grace period durations."""
 
     def test_manual_grace_uses_config_value(self):
+        # Issue #860 test-isolation fix: _start_grace_period_action() computes
+        # `duration = int((grace.at - dt_util.now()).total_seconds())` — without an
+        # explicit real `now`, dt_util.now() resolves to the shared unconfigured
+        # MagicMock module stub (homeassistant.util.dt), whose arithmetic dunders
+        # silently collapse to int(MagicMock()) == 1 instead of raising. This test
+        # previously only passed because some other, alphabetically-earlier test file
+        # (tests/test_chart_log.py) leaks a permanent, unrestored module-level
+        # `dt_util.now = ...` patch onto the same shared mock singleton — invisible
+        # in a full-suite run, but this test fails on its own under any selection
+        # that excludes that file. Patch `now` explicitly so this test is correct in
+        # isolation, matching this file's engines never asserting real wall-clock time.
         engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 600})
         engine._paused_by_door = True
 
-        with patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later:
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later,
+            patch(
+                "custom_components.climate_advisor.automation.dt_util.now",
+                return_value=datetime(2026, 1, 1, 12, 0, 0),
+            ),
+        ):
             mock_call_later.return_value = MagicMock()
             asyncio.run(engine.handle_manual_override_during_pause())
 
@@ -941,11 +959,19 @@ class TestGracePeriodDuration:
         assert call_args[0][1] == 600  # duration
 
     def test_automation_grace_uses_config_value(self):
+        # Issue #860 test-isolation fix: see test_manual_grace_uses_config_value's
+        # comment above — same dt_util.now() dependency.
         engine = _make_automation_engine({CONF_AUTOMATION_GRACE_PERIOD: 1200})
         engine._paused_by_door = True
         engine._pre_pause_mode = "heat"
 
-        with patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later:
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later,
+            patch(
+                "custom_components.climate_advisor.automation.dt_util.now",
+                return_value=datetime(2026, 1, 1, 12, 0, 0),
+            ),
+        ):
             mock_call_later.return_value = MagicMock()
             asyncio.run(engine.handle_all_doors_windows_closed())
 
@@ -1389,8 +1415,22 @@ class TestGracePeriodExpiry:
     ]
 
     def _run_close_and_capture_callback(self, engine):
-        """Run handle_all_doors_windows_closed and return the grace expiry callback."""
-        with patch(self._PATCHES[0]) as mock_call_later, patch(self._PATCHES[1], side_effect=lambda f: f):
+        """Run handle_all_doors_windows_closed and return the grace expiry callback.
+
+        Issue #860 test-isolation fix: explicitly patch dt_util.now() to a real
+        datetime for the duration computation in _start_grace_period_action() —
+        see TestGracePeriodDuration.test_manual_grace_uses_config_value's comment
+        for the full explanation of why this can't be left to the shared MagicMock
+        module stub.
+        """
+        with (
+            patch(self._PATCHES[0]) as mock_call_later,
+            patch(self._PATCHES[1], side_effect=lambda f: f),
+            patch(
+                "custom_components.climate_advisor.automation.dt_util.now",
+                return_value=datetime(2026, 1, 1, 12, 0, 0),
+            ),
+        ):
             mock_call_later.return_value = MagicMock()
             asyncio.run(engine.handle_all_doors_windows_closed())
             assert mock_call_later.call_count == 1
@@ -1824,9 +1864,9 @@ class TestAutomationStatusPausedWithOccupancy:
             return "nat-vent"
         if is_paused_by_door:
             if occupancy_mode == OCCUPANCY_AWAY:
-                return "paused — away (setback deferred: windows open)"
+                return "paused — away (resumes after windows close)"
             if occupancy_mode == OCCUPANCY_VACATION:
-                return "paused — vacation (setback deferred: windows open)"
+                return "paused — vacation (resumes after windows close)"
             return "paused — door/window open"
         if override_confirm_pending:
             return "override pending (confirming...)"
@@ -1849,7 +1889,7 @@ class TestAutomationStatusPausedWithOccupancy:
             is_paused_by_door=True,
             occupancy_mode=OCCUPANCY_AWAY,
         )
-        assert status == "paused — away (setback deferred: windows open)"
+        assert status == "paused — away (resumes after windows close)"
 
     def test_status_paused_vacation(self):
         """When paused and occupancy=vacation, status shows deferred setback message."""
@@ -1857,7 +1897,7 @@ class TestAutomationStatusPausedWithOccupancy:
             is_paused_by_door=True,
             occupancy_mode=OCCUPANCY_VACATION,
         )
-        assert status == "paused — vacation (setback deferred: windows open)"
+        assert status == "paused — vacation (resumes after windows close)"
 
     def test_status_paused_home_still_shows_generic(self):
         """When paused and occupancy=home, status is the original generic string."""

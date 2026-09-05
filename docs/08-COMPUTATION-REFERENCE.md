@@ -2224,6 +2224,22 @@ was also reworked: instead of a "N min left" countdown, it now shows the **appli
 case that previously showed nothing. The full free-text reason remains available on the Debug tab
 (`_last_action_reason`), unaffected.
 
+**Issue #860 follow-up (restart re-arm divergence):** the #625 duration line above assumes
+`_grace_duration_seconds` and `AutomationEngine._fan_remote_timer_hours` always describe the same
+number. They usually do — on a fresh remote press both derive from `burst.timer_hours` — but
+Issue #677's `_reconcile_fan_on_startup_locked()` (HA-restart timer re-arm) deliberately sets them
+apart: `_grace_duration_seconds` is set to the *remaining* time (needed to schedule the real
+timer correctly), while `_fan_remote_timer_hours` keeps the *original* token (needed by Issue
+#530's `_timer_boundary_settle_until` session-identity matching). Post-restart, Status's
+`"Xh (ends HH:MM)"` (from `_grace_duration_seconds`) and the Fan (WHF) card's
+`"remote timer: Xh (ends HH:MM)"` (from `_fan_remote_timer_hours`) therefore showed the same end
+time but two different durations for what the occupant understands as one timer. Fix:
+`_compute_automation_status()`'s grace branch now omits its duration/end-time clause entirely
+when `ae._fan_remote_timer_hours is not None`, leaving the Fan (WHF)/(HVAC) card as sole owner of
+that number in this case. `tools/simulations/golden/issue_677_rf_timer_restart_resume.json` is the
+scenario that establishes the backend re-arm behavior this display fix builds on; it asserts
+backend event shape only, never dashboard text, and is unaffected by this fix.
+
 **Test coverage:** `tests/test_coordinator.py::TestComputeNextAction` (paused/grace/override tests
 renamed `test_next_action_*_does_not_preempt_schedule`, asserting the real guidance now surfaces
 and the mechanism word does NOT appear), `tests/test_status_sensors.py::TestComputeNextAutomationAction`
@@ -2231,7 +2247,10 @@ and the mechanism word does NOT appear), `tests/test_status_sensors.py::TestComp
 `tests/test_status_sensors.py::TestGraceStatusNoLongerLeaksLastActionReason` and
 `::TestFormatGraceRemaining` (Issue #625 — cause-label lookup, duration+end-time formatting,
 confirms `_last_action_reason` never leaks onto Status),
-`tests/test_grace_period_desired_state_integration.py::test_start_grace_period_stores_trigger_for_status_card`.
+`tests/test_grace_period_desired_state_integration.py::test_start_grace_period_stores_trigger_for_status_card`,
+`tests/test_status_sensors.py::TestGraceStatusOmitsDurationWhenFanTimerActive` (Issue #860 —
+reproduces the reported 10.0h/12h divergence and confirms the duration clause is omitted, plus
+control tests proving `fan_off`/`physical_drift_correction`/no-remote-timer cases are unaffected).
 
 ### 9f. Timestamp-Correct Forecast-Curve Crossing Scan, and Predictive Next Automation Candidates (Issue #528)
 

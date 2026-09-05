@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.24] — 2026-09-05
+
+- Fix #860: The Status card no longer shows a different countdown than the Fan (WHF) card for the same whole-house-fan timer — Status now names the cause only, and the Fan card is the one place to see how long and when it ends. Also clearer wording for away/vacation pauses and a stuck-override state, and the Debug tab's override countdown is now accurate for multi-hour remote timers.
+
 ## [0.7.23] — 2026-09-05
 
 - Fix #858: a comfort-family (heat/cool) switch at the floor or ceiling now happens within seconds of the temperature reading, instead of waiting up to 30 minutes for the next scheduled check. A confirmed live incident showed indoor temperature falling 6°F below the comfort floor before the automation caught up.

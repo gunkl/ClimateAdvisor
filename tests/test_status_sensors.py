@@ -24,6 +24,8 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
+    OCCUPANCY_AWAY,
+    OCCUPANCY_VACATION,
 )
 
 # ---------------------------------------------------------------------------
@@ -67,6 +69,7 @@ def _make_automation_engine(
     grace_end_time: str | None = None,
     grace_duration_seconds: float | None = None,
     last_action_reason: str | None = None,
+    fan_remote_timer_hours: float | None = None,
 ) -> MagicMock:
     """Create a mock AutomationEngine with given state flags.
 
@@ -91,6 +94,12 @@ def _make_automation_engine(
     ae._last_action_reason = last_action_reason or "REGRESSION: _last_action_reason leaked onto Status"
     ae._resumed_from_pause = False
     ae._is_within_planned_window_period = MagicMock(return_value=False)
+    # Issue #860: an unset MagicMock attribute is truthy (never None), which would make
+    # _compute_automation_status()'s `_fan_remote_timer_hours is not None` check always
+    # True and silently suppress every grace-duration clause. Explicit default of None
+    # preserves byte-for-byte existing behavior; callers testing the Issue #860 fix pass
+    # a real float.
+    ae._fan_remote_timer_hours = fan_remote_timer_hours
     return ae
 
 
@@ -148,6 +157,7 @@ def _compute_automation_status(
     tou_phase_resolution=None,
     tou_active_cost_resolution=None,
     current_classification=None,
+    occupancy_mode: str = "home",
 ) -> str:
     """Call the real ClimateAdvisorCoordinator._compute_automation_status().
 
@@ -160,6 +170,7 @@ def _compute_automation_status(
     coord = _make_real_coordinator(
         automation_enabled,
         automation_engine,
+        occupancy_mode=occupancy_mode,
         tou_phase_resolution=tou_phase_resolution,
         tou_active_cost_resolution=tou_active_cost_resolution,
         current_classification=current_classification,
@@ -282,6 +293,35 @@ class TestComputeAutomationStatus:
         ae = _make_automation_engine(is_paused_by_door=True)
         result = _compute_automation_status(False, ae)
         assert result == "disabled"
+
+    def test_automation_status_paused_away_wording(self):
+        """paused_by_door=True + occupancy=away -> reworded 'resumes after windows
+        close' text (Issue #860 — the prior 'setback deferred: windows open' jargon
+        is gone). Calls the real _compute_automation_status(), unlike the mirrored
+        literal in test_door_window.py's TestAutomationStatusPausedWithOccupancy."""
+        ae = _make_automation_engine(is_paused_by_door=True)
+        result = _compute_automation_status(True, ae, occupancy_mode=OCCUPANCY_AWAY)
+        assert result == "paused — away (resumes after windows close)"
+        assert "setback deferred" not in result
+
+    def test_automation_status_paused_vacation_wording(self):
+        """paused_by_door=True + occupancy=vacation -> reworded 'resumes after
+        windows close' text (Issue #860). Calls the real method — see note above."""
+        ae = _make_automation_engine(is_paused_by_door=True)
+        result = _compute_automation_status(True, ae, occupancy_mode=OCCUPANCY_VACATION)
+        assert result == "paused — vacation (resumes after windows close)"
+        assert "setback deferred" not in result
+
+    def test_automation_status_grace_stuck_wording(self):
+        """Stuck-grace detection (_manual_override_active=True, _grace_active=False,
+        _grace_end_time in the past) -> reworded 'stuck — see Debug tab' text (Issue
+        #860 — previously told the occupant to 'check logs', which most homeowners
+        can't do; the Debug tab is inside the same dashboard)."""
+        ae = _make_automation_engine(grace_active=False, grace_end_time="2020-01-01T00:00:00")
+        ae._manual_override_active = True
+        result = _compute_automation_status(True, ae, now_dt=datetime(2026, 1, 1))
+        assert result == "override (stuck — see Debug tab)"
+        assert "check logs" not in result
 
     def test_tou_preconditioning_cool_mode(self):
         """TOUPhase.PRECONDITIONING with mode='cool' -> 'pre-cooling — ...' (Issue #786)."""
@@ -544,6 +584,97 @@ class TestGraceStatusNoLongerLeaksLastActionReason:
         ae._resumed_from_pause = True
         result = _compute_automation_status(True, ae)
         assert result == "resumed — door/window override"
+
+
+class TestGraceStatusOmitsDurationWhenFanTimerActive:
+    """_compute_automation_status()'s grace branch omits its own duration/end-time
+    clause whenever the Fan (WHF)/(HVAC) card already owns that information via an
+    active RF remote timer (Issue #860).
+
+    Reported bug: after an HA-restart mid-timer re-arm (Issue #677), the automation
+    engine's `_grace_duration_seconds` (remaining-from-arm) and `_fan_remote_timer_hours`
+    (original RF-remote token) legitimately diverge — Status showed "10.0h" from the
+    former while the Fan (WHF) card showed "12h" from the latter, both claiming the same
+    end time. The occupant sees two different numbers for what they understand as one
+    timer. The fix is data-driven (`ae._fan_remote_timer_hours is not None`), not a
+    hardcoded trigger-name allowlist.
+    """
+
+    NOW = datetime(2026, 9, 4, 18, 47)  # 6:47 PM
+
+    def test_diverged_duration_and_active_remote_timer_omits_status_duration(self):
+        """The exact reported shape: grace_duration_seconds=10h, fan_remote_timer_hours=12h,
+        same grace_end_time. Status must show neither number — the Fan card owns this."""
+        end = (self.NOW + timedelta(hours=10)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="manual",
+            last_grace_trigger="fan_manual_override",
+            grace_end_time=end,
+            grace_duration_seconds=36000,  # 10.0h — the diverged, "remaining-from-arm" value
+            fan_remote_timer_hours=12.0,  # the original RF-remote token — Fan card's source
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (manual) — WHF override"
+        assert "h (ends" not in result
+        assert "min (ends" not in result
+        assert "10" not in result
+        assert "12" not in result
+
+    def test_no_active_remote_timer_still_shows_duration(self):
+        """Proves the fix does not over-apply: identical setup but
+        fan_remote_timer_hours=None (no RF timer — e.g. a plain manual WHF toggle) must
+        keep showing Status's own duration clause exactly as before Issue #860."""
+        end = (self.NOW + timedelta(hours=10)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="manual",
+            last_grace_trigger="fan_manual_override",
+            grace_end_time=end,
+            grace_duration_seconds=36000,
+            fan_remote_timer_hours=None,
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (manual) — WHF override — 10h (ends 4:47 AM)"
+
+    def test_fan_off_trigger_with_no_remote_timer_shows_duration_unchanged(self):
+        """trigger='fan_off' always clears _fan_remote_timer_hours to None before starting
+        its grace period (automation.py's on_fan_turned_off()/_clear_fan_flags_and_start_grace()
+        stale-override-clear branch) — production behavior for this trigger is unaffected by
+        the Issue #860 fix."""
+        end = (self.NOW + timedelta(minutes=15)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="automation",
+            last_grace_trigger="fan_off",
+            grace_end_time=end,
+            grace_duration_seconds=900,
+            fan_remote_timer_hours=None,
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (automation) — WHF turned off — 15 min (ends 7:02 PM)"
+
+    def test_physical_drift_correction_trigger_with_no_remote_timer_shows_duration_unchanged(self):
+        """trigger='physical_drift_correction' in its typical/expected shape
+        (_fan_remote_timer_hours=None) is unaffected by the Issue #860 fix. NOTE (caveat
+        surfaced to the Coordinator): _reconcile_fan_physical_drift() does not itself read
+        or clear _fan_override_active/_fan_remote_timer_hours before calling
+        _clear_fan_flags_and_start_grace() — unlike on_fan_turned_off(), so a fan that
+        physically fails mid-RF-timer (override still active, timer not yet expired) could
+        in principle reach this trigger with _fan_remote_timer_hours still non-None. The
+        Issue #860 fix handles that case correctly by design (duration would be omitted,
+        deferring to the Fan card) — this test only documents the common case."""
+        end = (self.NOW + timedelta(minutes=15)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="automation",
+            last_grace_trigger="physical_drift_correction",
+            grace_end_time=end,
+            grace_duration_seconds=900,
+            fan_remote_timer_hours=None,
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (automation) — fan drift correction — 15 min (ends 7:02 PM)"
 
 
 class TestFormatGraceRemaining:

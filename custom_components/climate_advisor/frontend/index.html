@@ -2451,9 +2451,8 @@
             <tr><td>Last Action Time</td><td>${data.last_action_time ? new Date(data.last_action_time).toLocaleString() : 'N/A'}</td></tr>
             <tr><td>Last Action Reason</td><td>${data.last_action_reason || 'N/A'}</td></tr>
             <tr><td>Manual Override</td><td>${data.manual_override_active ? (() => {
-              const startMs = new Date(data.manual_override_time).getTime();
-              const durationMs = (data.manual_grace_duration || 1800) * 1000;
-              const remainMs = (startMs + durationMs) - Date.now();
+              if (!data.grace_end_time) { return data.manual_override_mode + ' (active)'; }
+              const remainMs = new Date(data.grace_end_time).getTime() - Date.now();
               const remainMin = Math.max(0, Math.ceil(remainMs / 60000));
               return data.manual_override_mode + ' (active, ' + remainMin + ' min remaining)';
             })() : 'No'}</td></tr>

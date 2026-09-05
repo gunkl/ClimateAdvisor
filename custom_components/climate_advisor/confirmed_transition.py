@@ -19,8 +19,10 @@ Two independent consumers, ONE implementation (DRY, per the project owner's expl
 instruction): nat-vent's own 5 non-manual-override exit reasons in
 ``decide_nat_vent_exit()`` (wired into the shell in ``automation.py``, since the pure
 decision module itself is stateless per-call and cannot own the "since when has this
-been true" clock), and the new comfort-family switch lockout (``automation.py``'s
-``_resolve_comfort_family_mode()``/family-switch state).
+been true" clock), and the comfort-family switch lockout (``automation.py``'s
+``_resolve_comfort_family_via_fsm()``/family-switch state — this module's original
+``_resolve_comfort_family_mode()`` reference was retired by the #827 FSM
+consolidation).
 
 Pure, stateless per call, like every other leaf module in this codebase. The caller
 owns the actual state — the candidate value currently being timed, and the wall-clock

@@ -30,8 +30,12 @@ the cached crossing time at all — ``MODEL_INELIGIBLE`` otherwise, matching
 ``ode_ceiling_guard.py``'s own precedent exactly. This is deliberately NOT what fixes
 the reported live incident (Zone "Simulated 2", confidence_k_passive == "none" during
 the entire incident window) — see the fallback path in ``automation.py``'s
-``_resolve_comfort_family_mode()`` for the conservative, non-ODE guard that actually
-covers that case.
+``_resolve_comfort_family_via_fsm()``/``comfort_family_decision.py``'s
+``_check_direction()`` sustain-confirm branch for the conservative, non-ODE guard
+that actually covers that case. (Issue #858: this incident recurred even with that
+fallback in place — root cause was the ~30-minute ``apply_classification()`` cadence,
+not this guard or the fallback's own decision logic, which a deterministic
+reproduction confirmed defect-free; see ``comfort_family_temperature_check()``.)
 
 Scoped to ``hvac_mode != "off"`` (the logical complement of
 ``ode_ceiling_guard.py``'s own ``hvac_mode == "off"`` gate) — a shoulder day's diurnal

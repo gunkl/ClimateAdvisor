@@ -1,0 +1,99 @@
+{
+  "name": "issue_858_comfort_family_reactive_ceiling_breach",
+  "description": "Symmetric companion to issue_858_comfort_family_reactive_floor_breach.json: a cool day (native heating), recency window cleared, indoor rises above comfort_cool -- the switch to cool must land within one sustain-confirm window of the reactive temperature tick, without a second explicit classification cycle.",
+  "source": "issue-report",
+  "issue": 858,
+  "notes": [
+    "The user explicitly asked for this to be symmetric: the same reactive-tick guarantee that",
+    "closes the heat-side incident must also apply to a ceiling breach on a cool-classified day.",
+    "comfort_family_temperature_check()'s gate is direction-agnostic (checks current_temp against",
+    "both band.floor and band.ceiling), and comfort_family_decision.py's",
+    "_against_grain_deadband() is already symmetric by construction -- this scenario proves the",
+    "reactive wiring inherits that symmetry rather than only having been exercised heat-side.",
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness: reverting comfort_family_temperature_check()'s ceiling-side",
+    "    check (`current_temp > band.ceiling`) makes this scenario fail identically to how",
+    "    reverting the floor-side check fails the companion scenario.",
+    "(b) Docs<->production alignment: same automation logic table row as the floor-side scenario,",
+    "    documented as covering both directions.",
+    "(c) Occupant experience: a home drifting above the comfort ceiling on a cool day (e.g. an",
+    "    unseasonably warm afternoon) gets cooling engaged within about a minute and a half of the",
+    "    drift being detected, not up to 30 minutes later."
+  ],
+  "config": {
+    "comfort_heat": 66,
+    "comfort_cool": 72,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-11-01T06:00:00",
+      "type": "classification",
+      "day_type": "cool",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "Cool-day classification (native heating). Only classification event in this scenario."
+    },
+    {
+      "time": "2026-11-01T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 60.0,
+      "note": "Indoor 69F, within band [66F, 72F]."
+    },
+    {
+      "time": "2026-11-01T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 78.0,
+      "note": "First breach tick: 1F above comfort_cool(72), unseasonably warm afternoon. Cold-start engine -- nothing recorded as recently heating, so the recency-gated deadband is already 0F. comfort_family_temperature_check() fires reactively (indoor > band.ceiling); sustain-confirm candidate starts here."
+    },
+    {
+      "time": "2026-11-01T14:02:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 79.0,
+      "note": "120s after the first breach tick (>90s sustain window). Reactive check fires again, sustain-confirms, escalates to cooling -- with no second classification event ever having run."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-01T06:00:00",
+      "expect": "comfort_band_armed",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: cool day, indoor within band -- comfort band arms normally at the floor."
+    },
+    {
+      "at": "2026-11-01T14:02:00",
+      "expect": "comfort_family_switch_by",
+      "family": "cooling",
+      "by": "2026-11-01T14:02:00",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Issue #858: the switch to cooling lands by 14:02 -- 2 minutes after the first breach tick -- driven entirely by the reactive temperature-tick path, symmetric with the heat-side companion scenario."
+    },
+    {
+      "at": "2026-11-01T14:02:00",
+      "expect": "comfort_family",
+      "family": "cooling",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Final engine state confirms the family actually escalated, not just an emitted event."
+    },
+    {
+      "at": "2026-11-01T14:02:00",
+      "expect": "last_hvac_mode",
+      "mode": "cool",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_cool, not merely an internal flag."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A ceiling breach resolves to cool within one sustain-confirm window of the reactive temperature tick, symmetric with the heat-side fix (Issue #858).",
+    "observed_behavior": "Single classification event at 06:00 (cool/heat), indoor rises above the ceiling via temp_update alone at 14:00 and 14:02 -- comfort family escalates to cooling by 14:02, driven entirely by the reactive tick.",
+    "expected_behavior": "The reactive comfort-family re-evaluation must be direction-agnostic -- a ceiling breach on a cool day gets the same fast-detection guarantee as a floor breach on a warm day."
+  }
+}

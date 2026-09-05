@@ -20,7 +20,9 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                             + inject indoor temp via climate entity attribute
                             + IF indoor changed: run_coro(engine.nat_vent_temperature_check())
                               (if nat-vent active) + run_coro(engine.fan_thermostat_check())
-                              (if any CA fan active) — mirrors _async_thermostat_changed's
+                              (if any CA fan active) + run_coro(engine.comfort_family_temperature_check())
+                              (Issue #858, unconditional — the method's own internal gating
+                              matches production) — mirrors _async_thermostat_changed's
                               state-listener dispatch (coordinator.py:2837-2862)
                             + run_coro(engine.check_natural_vent_conditions())
   sensor_open             → (use_coordinator=True) states.async_set(entity_id, "on") — fires
@@ -970,6 +972,11 @@ def _handle_temp_update(
                     trigger="tick",
                 )
             )
+        # Issue #858: third sibling call, same "direct, unconditional call guarded
+        # by the same flags production reads" fidelity as the two above —
+        # coordinator._async_thermostat_changed's real dispatch to
+        # comfort_family_temperature_check() on every current_temperature change.
+        run_coro(engine.comfort_family_temperature_check(new_indoor, predicted_indoor=event.get("predicted_indoor")))
 
     # Production: coordinator calls check_natural_vent_conditions() on each update.
     # This is the correct re-evaluation entry point for temperature changes.

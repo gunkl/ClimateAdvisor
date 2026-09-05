@@ -4527,6 +4527,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 trigger="tick",
             )
 
+        # Issue #858: comfort-family FSM re-evaluation on every indoor temp tick.
+        # Previously only re-evaluated on the ~30-minute apply_classification()
+        # cycle (nat-vent and fan control above already had this reactivity;
+        # the comfort-family defense did not) — a confirmed live incident
+        # showed indoor falling 6°F below the comfort floor before the
+        # scheduled cycle caught up. The engine method itself gates on whether
+        # a breach is plausible against the last-applied band, so this call is
+        # cheap on every other tick.
+        if _new_temp_attr is not None and _new_temp_attr != _old_temp_attr:
+            await self.automation_engine.comfort_family_temperature_check(
+                float(_new_temp_attr), predicted_indoor=self._last_predicted_indoor
+            )
+
         # Expected-state confirmation suppression: if thermostat is confirming an automation
         # command (same mode, within 2 minutes), this is not a user override.
         # Covers cloud-thermostat lag where _hvac_command_pending is already cleared by the time

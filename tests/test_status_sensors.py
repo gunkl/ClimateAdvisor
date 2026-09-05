@@ -903,10 +903,15 @@ class TestNextActionNeverShowsTou:
         assert "pre-cool" not in result.lower()
 
 
-class TestHotDayWindowOpportunityCandidates:
-    """HOT-day window-cooling opportunity candidates (Issue #528)."""
+class TestHotDayWindowOpportunityCandidatesRemoved:
+    """HOT-day window-cooling opportunity candidates (Issue #528) were removed in
+    Issue #849 — they told the occupant to open/close windows, an action CA cannot
+    execute (no window actuator), duplicating the "Next User Action" card. These
+    tests prove the candidate strings never surface on "Next Automation" even under
+    the exact classifier conditions that used to produce them — the regression-
+    proofing value that remains once the candidates themselves are gone."""
 
-    def test_morning_opportunity_present_before_start(self):
+    def test_morning_opportunity_absent_before_start(self):
         ae = _make_automation_engine()
         c = _make_classification(
             day_type="hot",
@@ -914,10 +919,11 @@ class TestHotDayWindowOpportunityCandidates:
             window_opportunity_morning_start=time(6, 0),
         )
         # briefing_time defaults to 06:00:00 too — push it out of the way so this test
-        # isolates the window-opportunity candidate instead of a same-time tiebreak.
-        action, t = _compute_next_automation_action(c, ae, {"briefing_time": "23:00:00"}, time(5, 0))
-        assert action == "Morning window cooling opportunity"
-        assert t == "6:00 AM"
+        # isolates the (now-removed) window-opportunity candidate instead of a
+        # same-time tiebreak with the briefing candidate.
+        action, _t = _compute_next_automation_action(c, ae, {"briefing_time": "23:00:00"}, time(5, 0))
+        assert action != "Morning window cooling opportunity"
+        assert "window" not in action.lower()
 
     def test_morning_opportunity_absent_once_past(self):
         ae = _make_automation_engine()
@@ -935,16 +941,16 @@ class TestHotDayWindowOpportunityCandidates:
         action, _t = _compute_next_automation_action(c, ae, {}, time(5, 0))
         assert action != "Morning window cooling opportunity"
 
-    def test_evening_opportunity_present_before_start(self):
+    def test_evening_opportunity_absent_before_start(self):
         ae = _make_automation_engine()
         c = _make_classification(
             day_type="hot",
             window_opportunity_evening=True,
             window_opportunity_evening_start=time(17, 0),
         )
-        action, t = _compute_next_automation_action(c, ae, {}, time(16, 0))
-        assert action == "Evening window cooling opportunity"
-        assert t == "5:00 PM"
+        action, _t = _compute_next_automation_action(c, ae, {}, time(16, 0))
+        assert action != "Evening window cooling opportunity"
+        assert "window" not in action.lower()
 
 
 class TestNatVentStartCandidate:
@@ -1027,7 +1033,18 @@ class TestWarmDayForecastEventCandidates:
         assert action == "AC turns on to hold the ceiling"
         assert t == "3:00 PM"  # hour 15: indoor 76 > comfort_cool 75
 
-    def test_close_windows_candidate_present(self):
+    def test_close_windows_candidate_absent_falls_through_to_next_real_candidate(self):
+        """Issue #849: the nat_vent_cutoff-driven "Close windows around..." candidate
+        was removed — it told the occupant to close windows, an action CA cannot
+        execute (no window actuator), duplicating the "Next User Action" card. With
+        comfort_cool=100.0 keeping the ceiling-breach candidate out of the way (per
+        the original fixture's own comment) and no other Issue #528 candidate wired
+        up in this fixture (fan_mode unset -> disabled, no TOU resolution, no
+        pre-cool), the only remaining schedule candidate is the default sleep-time
+        fallback ("Bedtime check" at the config default sleep_time=22:30:00, since
+        c.hvac_mode="off" here) — confirmed by running this exact fixture against
+        current production and reading back the actual resolved action rather than
+        assuming one."""
         ae = _make_automation_engine()
         ae._natural_vent_active = False
         c = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
@@ -1035,12 +1052,48 @@ class TestWarmDayForecastEventCandidates:
         indoor = _curve([70.0, 71.0, 72.0, 73.0], start_hour=13)
         outdoor = _curve([60.0, 62.0, 71.5, 74.0], start_hour=13, ts_key="datetime", temp_key="temperature")
         action, t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
-        # Issue #847: phrasing now comes from the shared describe_nat_vent_cutoff_reason()
-        # helper (nat_vent_plan.py) rather than this card's own reason-agnostic string, so
-        # the Next Automation card and the briefing can no longer disagree about *why*
-        # windows close. outdoor_rise here -> "before outdoor air warms past indoor".
-        assert action == "Close windows around 3:00 PM before outdoor air warms past indoor"
-        assert t == "3:00 PM"  # hour 15: outdoor 71.5 >= indoor 72 - 1
+        assert "Close windows" not in action
+        assert "window" not in action.lower()
+        assert action == "Bedtime check"
+        assert t == "10:30 PM"
+
+    def test_recovery_time_candidate_absent_reopen_windows(self):
+        """Issue #849: the recovery_time-driven "Reopen windows — outdoor helping
+        again" candidate was removed for the same reason as the close-windows
+        candidate above — CA cannot reopen windows itself. self._nat_vent_plan is
+        set directly with a future recovery_time (the field compute_nat_vent_plan()
+        populates per nat_vent_plan.py's docstring: "first timestamp after cutoff
+        where outdoor < indoor again") rather than routed through
+        _compute_and_cache_nat_vent_plan(), which would recompute a fresh plan from
+        forecast curves and could obscure whether the candidate is gone or just
+        never triggered — this proves the candidate is gone even when recovery_time
+        is unambiguously present and in the future."""
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
+        coord = _make_real_coordinator(True, ae)
+        coord.config = {"comfort_cool": 100.0}
+        coord._current_classification = c
+        coord._nat_vent_plan = {
+            "nat_vent_cutoff": None,
+            "nat_vent_cutoff_reason": None,
+            "comfort_floor_crossing_time": None,
+            "ceiling_breach_time": None,
+            "precool_start_time": None,
+            "any_nat_vent_window": True,
+            "nat_vent_recovers": True,
+            "recovery_time": datetime(2026, 7, 10, 15, 0),
+        }
+        from custom_components.climate_advisor import coordinator as _coord_mod
+
+        now_dt = datetime(2026, 7, 10, 12, 0)
+        with (
+            patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+            patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        ):
+            action, _t = coord._compute_next_automation_action(c)
+        assert "Reopen windows" not in action
+        assert "window" not in action.lower()
 
     def test_absent_when_windows_not_recommended(self):
         ae = _make_automation_engine()

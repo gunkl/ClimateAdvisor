@@ -248,7 +248,7 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
-from .nat_vent_plan import compute_nat_vent_plan, describe_nat_vent_cutoff_reason
+from .nat_vent_plan import compute_nat_vent_plan
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
@@ -296,22 +296,19 @@ _GRACE_TRIGGER_LABELS: Final[dict[str, str]] = {
 }
 
 # Registered exceptions to the Status Card Ontology's "Next Automation must not
-# contain time-of-day phrasing" rule (CLAUDE.md, Issue #527). Issue #534 deliberately
-# folded a clock time into the nat-vent-cutoff candidate's own action string in
-# _compute_next_automation_action() because omitting it read as a present-tense claim
-# ("windows should close now") rather than a future one, when the Automation Time card
-# showing the same time sits at a different point on the page. #527 postdated and never
-# re-audited #534's wording against the new no-duplication rule (five-whys in the
-# #847-followup plan) — rather than leaving that gap as silent prose drift, each
-# exception must be registered here AND tagged in-line with a matching
-# `# ontology-exception: <slug>` comment directly above the candidate. Both the
-# registration and the comment are required — see tests/test_status_card_ontology.py,
-# which structurally enforces that every clock-time-bearing candidate in
+# contain time-of-day phrasing" rule (CLAUDE.md, Issue #527). The nat_vent_cutoff
+# grant (Issue #534/#847-followup) is retired as of Issue #849: that candidate told
+# the occupant to close/reopen windows, an action CA cannot execute (no window
+# actuator) — the candidate itself was removed rather than reworded, so the
+# exception it needed no longer applies. The mechanism stays available here for a
+# future candidate that is a genuinely automation-executed action and needs a
+# time-disambiguation exception — see tests/test_status_card_ontology.py, which
+# structurally enforces that every clock-time-bearing candidate in
 # _compute_next_automation_action() is either exception-tagged and listed here, or
-# doesn't exist. Do not add an entry here without also adding the matching comment,
-# and do not add the comment without registering the slug here — the test checks both
-# directions.
-_ONTOLOGY_TIME_EXCEPTIONS: Final[set[str]] = {"nat_vent_cutoff"}
+# doesn't exist. Do not add an entry here without also adding the matching
+# `# ontology-exception: <slug>` comment directly above the candidate, and vice versa
+# — the test checks both directions.
+_ONTOLOGY_TIME_EXCEPTIONS: Final[set[str]] = set()
 
 
 @dataclass
@@ -8765,20 +8762,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             pc_desc = f"Pre-cool ceiling ({format_temp(self._pre_cool_target, unit)})"
             candidates.append((self._pre_cool_trigger_dt, pc_desc))
 
-        # HOT-day window-cooling opportunities (Issue #528) — static, classifier-computed
-        # hours, no forecast-scan needed. Wording deliberately avoids implying the
-        # automation opens the window itself — these are forecasted conditions the
-        # occupant can act on, not an automation-executed setpoint change.
-        if c.window_opportunity_morning and c.window_opportunity_morning_start:
-            mo_dt = _to_dt(c.window_opportunity_morning_start)
-            if mo_dt > now:
-                candidates.append((mo_dt, "Morning window cooling opportunity"))
-
-        if c.window_opportunity_evening and c.window_opportunity_evening_start:
-            ev_dt = _to_dt(c.window_opportunity_evening_start)
-            if ev_dt > now:
-                candidates.append((ev_dt, "Evening window cooling opportunity"))
-
         # Issue #528: self._last_predicted_indoor is always set in __init__() in
         # production, but several test files build a coordinator via object.__new__()
         # without running __init__() — getattr() keeps those minimal stubs working
@@ -8798,40 +8781,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
 
-        # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_cutoff/
-        # ceiling_breach_time/precool_start_time/recovery_time already computed for the
-        # briefing. Issue #817: this used to independently re-derive its own copy via a
-        # second compute_nat_vent_plan() call with its own locally-rebuilt inputs — now
-        # reads the coordinator's single per-cycle self._nat_vent_plan
-        # (_compute_and_cache_nat_vent_plan()) instead, so this card can never disagree
-        # with the briefing or TLDR table about the same numbers.
+        # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_plan
+        # already computed for the briefing. Issue #817: this used to independently
+        # re-derive its own copy via a second compute_nat_vent_plan() call with its own
+        # locally-rebuilt inputs — now reads the coordinator's single per-cycle
+        # self._nat_vent_plan (_compute_and_cache_nat_vent_plan()) instead, so this card
+        # can never disagree with the briefing or TLDR table about the same numbers.
+        # Issue #849: nat_vent_cutoff and recovery_time candidates were removed — both
+        # told the occupant to close/reopen windows, an action CA cannot execute (no
+        # window actuator). ceiling_breach_time is the only automation-executed action
+        # in this plan (the AC actually turns on) and is kept.
         _warm_events = getattr(self, "_nat_vent_plan", None)
-        if c.windows_recommended and _warm_events:
-            if _warm_events["nat_vent_cutoff"] and _warm_events["nat_vent_cutoff"] > now:
-                # Issue #534: this is a forecast for a future time, not a claim about current
-                # conditions — the qualifying time otherwise lives only in the separate
-                # "Automation Time" card, and a user comparing this text to *current* conditions
-                # (which can look nothing like it, hours ahead of the actual crossing) reads it as
-                # a present-tense contradiction. Folding the time into the action text itself
-                # removes the ambiguity without changing when this candidate fires.
-                # ontology-exception: nat_vent_cutoff — see CLAUDE.md Status Card Ontology (#534/#847-followup)
-                _cutoff_t = _warm_events["nat_vent_cutoff"].strftime("%I:%M %p").lstrip("0")
-                # Issue #847: phrasing now flows through describe_nat_vent_cutoff_reason()
-                # — the same shared helper briefing.py's _warm_day_plan()/_mild_day_plan()
-                # call — so this card and the briefing text can never phrase the same
-                # nat_vent_cutoff_reason differently again. Comfort-impact language only,
-                # per Status Card Ontology (CLAUDE.md): no mechanism words.
-                _cutoff_reason_fragment = describe_nat_vent_cutoff_reason(_warm_events.get("nat_vent_cutoff_reason"))
-                candidates.append(
-                    (
-                        _warm_events["nat_vent_cutoff"],
-                        f"Close windows around {_cutoff_t} {_cutoff_reason_fragment}",
-                    )
-                )
-            if _warm_events["ceiling_breach_time"] and _warm_events["ceiling_breach_time"] > now:
-                candidates.append((_warm_events["ceiling_breach_time"], "AC turns on to hold the ceiling"))
-            if _warm_events["recovery_time"] and _warm_events["recovery_time"] > now:
-                candidates.append((_warm_events["recovery_time"], "Reopen windows — outdoor helping again"))
+        if (
+            c.windows_recommended
+            and _warm_events
+            and _warm_events["ceiling_breach_time"]
+            and _warm_events["ceiling_breach_time"] > now
+        ):
+            candidates.append((_warm_events["ceiling_breach_time"], "AC turns on to hold the ceiling"))
 
         # Nat-vent/WHF start prediction (Issue #528). Uses the real activation gate
         # (decide_nat_vent_gate(), the same pure function automation.py's

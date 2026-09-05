@@ -166,7 +166,17 @@ Choose where indoor and outdoor temperature readings come from:
 - Polarity inversion for each toggle
 
 ### Step 7: Schedule
-Set your wake time, bedtime, and when you want the daily briefing.
+Set your wake time, bedtime, and when you want the daily briefing. This step also collects the **zone name** (pre-filled with a suggestion derived from your thermostat's friendly name, fully editable) — see [Adding a Second Zone](#adding-a-second-zone) below for what this name is used for.
+
+### Adding a Second Zone
+
+A **zone** is one Climate Advisor config entry: one thermostat, with its own independent learning history, thermal model, dashboard data, and settings. Nothing is shared between zones — this is standard multi-instance Home Assistant integration behavior, the same way you'd run two independent instances of any other integration against two different devices.
+
+**To add a second zone**, repeat the same setup flow you used for the first: **Settings → Devices & Services → Add Integration → Climate Advisor**, this time pointing the Climate Entity field at your second thermostat. There is no separate "add zone" flow — it's the ordinary Add Integration flow, run again.
+
+- **Naming**: Step 7 (Schedule) collects a **zone name**, pre-filled with a suggestion derived from the selected thermostat's HA friendly name (e.g. `climate.bedroom_thermostat` → "Bedroom"), fully editable, up to 50 characters. This becomes the zone's config entry title — how you'll tell zones apart in Settings → Devices & Services, in the dashboard's zone selector, and when picking a zone for a service call. Names aren't required to be unique.
+- **Dashboard**: once 2 or more zones are configured, the dashboard shows a zone selector (a row of tabs/pills, one per zone) above the existing tab layout. Switching zones re-fetches all data for the newly selected zone — Status, Briefing, Learning, Analysis, everything — independently per zone.
+- **Services**: with more than one zone configured, every one of the 5 Climate Advisor services (see [Services](#services) below) **requires** you to pick which zone the call applies to, via a Zone field in HA's service-call UI. This isn't optional — Home Assistant's service registry has no other way to know which zone's `reset_learning_data` call you meant, for example, so specifying the zone became mandatory the moment multi-zone support shipped (Issue #796).
 
 ### Thermostat Setup Requirements
 
@@ -219,6 +229,8 @@ All settings are editable after setup, plus advanced options:
 
 ## Services
 
+Every service below requires an `entry_id` field (labeled **Zone** in HA's service-call UI, backed by a `config_entry` selector) identifying which Climate Advisor zone the call applies to — pick it from the dropdown in Developer Tools → Services, or the visual service-call editor. It's shown below as a raw YAML value for reference; you don't need to type it by hand.
+
 ### `climate_advisor.respond_to_suggestion`
 
 Accept or dismiss a learning suggestion.
@@ -226,6 +238,7 @@ Accept or dismiss a learning suggestion.
 ```yaml
 service: climate_advisor.respond_to_suggestion
 data:
+  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
   action: accept  # or "dismiss"
   suggestion_key: low_window_compliance
 ```
@@ -236,6 +249,8 @@ Force re-fetch of forecast data and reclassify the day. Useful for debugging.
 
 ```yaml
 service: climate_advisor.force_reclassify
+data:
+  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
 ```
 
 ### `climate_advisor.resend_briefing`
@@ -244,6 +259,8 @@ Re-generate and resend the daily briefing notification.
 
 ```yaml
 service: climate_advisor.resend_briefing
+data:
+  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
 ```
 
 ### `climate_advisor.dump_diagnostics`
@@ -252,15 +269,18 @@ Log a comprehensive diagnostic snapshot to HA logs at INFO level for troubleshoo
 
 ```yaml
 service: climate_advisor.dump_diagnostics
+data:
+  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
 ```
 
 ### `climate_advisor.reset_learning_data`
 
-Reset some or all learned data — useful after changing HVAC equipment or moving to a new location.
+Reset some or all learned data — useful after changing HVAC equipment or moving to a new location. **Destructive** — double-check you've selected the right zone before calling.
 
 ```yaml
 service: climate_advisor.reset_learning_data
 data:
+  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
   scope: all  # or "thermal_model", "weather_bias", "suggestions"
 ```
 
@@ -370,7 +390,7 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] DailyRecord accumulated counters survive HA restart (#176)
 - [x] Predicted indoor evening drop fixed: ODE mode uses classification for today (#172)
 
-### Phase 3: Thermostat-as-Controller & Compatibility (v0.4.x–v0.5.x) — Current
+### Phase 3: Thermostat-as-Controller & Compatibility (v0.4.x–v0.5.x) — Complete
 - [x] Comfort band model — CA programs `[comfort_heat / comfort_cool]` and the thermostat holds it; HVAC is no longer micromanaged every 30 min (#249)
 - [x] Single-setpoint commands — every thermostat write is `climate.set_temperature` with mode + setpoint; `heat_cool` dual-setpoint mode dropped for compatibility (#301)
 - [x] Whole-house fan suppresses HVAC while active (#277)
@@ -440,18 +460,25 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Next Automation's "outdoor no longer helping" message now states when that's expected to happen instead of reading like a claim about right now; mild-day briefings use the same forecast-based window-close time warm days already got instead of a fixed 5:00 PM (#534)
 - [x] Whole-house fan can now soft-start for air movement and attic/thermal-mass purge as soon as outdoor reaches parity with indoor in the evening, once the day is confirmed past its peak — instead of waiting for outdoor to be measurably cooler; on by default, disable in settings for the old strict-delta behavior (#540)
 
-### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
+### Phase 3.5: FSM Migration, Multi-Zone & Reliability (v0.6.x–v0.7.x) — Shipped
+- [x] Strangler-fig FSM completion program — economizer, classification, occupancy, fan/WHF, door/window, override/grace, and nat-vent decision surfaces each extracted into a differentially-validated lifecycle FSM, run shadow-diagnostic against the legacy path for weeks with zero corpus divergence, then graduated to sole authoritative implementation and the legacy path deleted (Phase 6 graduation, Issue #757; see [FSM Decision Layer](docs/02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer))
+- [x] **Multi-zone HVAC support** — Climate Advisor can run 2+ independent zones (thermostats) at once, each with its own learning history, thermal model, dashboard data, and settings, plus a dashboard zone selector once more than one zone is configured (Issue #796, shipped v0.7.0, 2026-09-01; see [Multi-Zone Spec](docs/multi-zone-spec.md) and [Adding a Second Zone](#adding-a-second-zone) above) — this was originally scoped under Phase 5 below; moved here to reflect when and where it actually shipped
+- [x] Time-of-use (TOU) scheduler — up to 5 cost-period schedules pre-condition toward the home's existing comfort-band edge ahead of a scheduled high-cost period, using the learned thermal rate (Issue #786)
+- [x] Entity health monitoring — missing/unresponsive thermostat, weather source, sensor, or configured entity now triggers a notification instead of Climate Advisor silently running on stale data (Issue #805)
+- [x] Comfort-family (heat/cool) floor/ceiling switches now react within seconds of a temperature reading instead of waiting up to 30 minutes for the next scheduled check (Issue #858)
+
+### Phase 4: Seasonal & Cost Intelligence (v0.7+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)
 - [ ] Anomaly detection (e.g., "heating 30% higher than last November")
 - [ ] Energy cost integration (utility rates → estimated cost)
 - [ ] Savings tracking vs. "no automation" baseline
 
-### Phase 5: Multi-Zone & Advanced (v0.6+) — Future
-- [ ] Multi-zone HVAC support (multiple thermostats)
+### Phase 5: Advanced Zone & Comfort Intelligence (v0.7+) — Future
+- [x] ~~Multi-zone HVAC support (multiple thermostats)~~ — shipped v0.7.0; see Phase 3.5 above
 - [ ] Room-level occupancy detection
 - [ ] Humidity-based decisions
 - [ ] Energy source cost optimization
-- [ ] Advanced thermal model with per-zone coefficients
+- [ ] Advanced thermal model with per-zone coefficients (e.g. zones influencing each other thermally — sketched, deliberately deferred, see [Multi-Zone Spec: Future — Zone Influence](docs/multi-zone-spec.md#future-zone-influence-deferred-not-in-scope-for-implementation))
 
 ## Contributing
 
@@ -482,6 +509,9 @@ custom_components/climate_advisor/
 ├── api.py               # 21 REST API endpoints for dashboard panel
 ├── state.py             # State persistence across restarts
 ├── repairs.py           # HA repairs flow for config issues
+├── zone_registry.py     # Multi-zone coordinator lookup/listing (Issue #796)
+├── storage_paths.py     # Entry-scoped persistence file paths for multi-zone (Issue #796)
+├── diagnostics.py       # Native HA diagnostics download hook
 ├── claude_api.py        # Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking
 ├── ai_skills.py         # Lightweight skill registry framework for pluggable AI capabilities
 ├── ai_skills_investigator.py  # The sole registered AI skill ("investigator"): deep cross-source analysis on demand, plus silent/scheduled activity narration — merged from two separate skills, Issue #563

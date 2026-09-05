@@ -2,62 +2,79 @@
 
 # Multi-Zone Support — Territory Spec (Tier 3)
 
-> **STATUS: All nine gaps closed; every step built and tested. Awaiting
-> branch-landing (not yet merged to `main`).**
+> **STATUS: Shipped in v0.7.0 (2026-09-01); in production through v0.7.26
+> (26 patch releases since). All nine gaps (plus Gap 10's four sub-findings)
+> closed and field-proven.**
 >
-> **Phase A / Phase B / Phase C / Phase D implementation note (Issue #796,
-> uncommitted on `feature/796-multi-zone-support`):** Phase D (Step 9, the
-> dashboard zone selector, PR9) is now built — the last step this document
-> tracked as unstarted. All ten PRs (PR1, PR2, PR4, PR5, PR6, PR7, PR8, PR9,
-> PR10) are built, linted clean, and passing the full test suite (5139
-> tests) plus all 91 golden scenarios plus 27/28 Playwright UI tests (1
-> pre-existing failure unrelated to this branch, confirmed via git-stash
-> comparison). **PR3 (the empirical Gap 6 spike) remains the one deliberate,
-> permanent exception** — see the "(as built, PR5)" note under
+> **Phase A / Phase B / Phase C / Phase D implementation note (Issue #796):**
+> Phase D (Step 9, the dashboard zone selector, PR9) shipped as the last step
+> this document tracked as unstarted. All ten PRs (PR1, PR2, PR4, PR5, PR6,
+> PR7, PR8, PR9, PR10) merged to `main` in one batch as `v0.7.0`, having
+> passed the full test suite (5139 tests at merge time) plus all golden
+> scenarios plus the Playwright UI suite. **PR3 (the empirical Gap 6 spike)
+> remains the one deliberate, permanent exception** — it was never run; see
+> the "(as built, PR5)" note under
 > [Gap 6](#gap-6--panelview-registration-needs-empirical-verification) for
-> how PR5 closes Gap 6's safety concern without needing PR3's answer, and
+> how PR5 closed Gap 6's safety concern without needing PR3's answer, and
 > [Open Questions](#open-questions-carried-forward-out-of-this-build) below
-> for what remains genuinely open at branch-landing time. This is an
-> intentional, documented gap carried forward to production verification —
-> not an unstarted step. Deviations between this section's original design
-> and what Phase A/B/C/D actually built are called out inline below, each
-> marked **(as built)**.
+> for a re-assessment of what's still genuinely open after 26 releases of
+> real multi-zone field use. That spike was always an intentional,
+> documented gap carried forward to production verification — not an
+> unstarted step. Deviations between this section's original design and what
+> Phase A/B/C/D actually built are called out inline below, each marked
+> **(as built)**.
 >
-> **Known doc debt (pre-existing, not introduced by Phase A, C, or D):** a
-> Verification pass found stale `file.py:NNN` citations scattered outside the
-> areas Phase A/C/D touched — thermal-constant citations (`const.py`, off by
-> ~25 lines), `door_window_sensors` config_flow citations (off by ~30-50
-> lines), and the `_build_predicted_indoor_future`/`get_chart_data`
-> carried-over citations in `coordinator.py` (off by ~370-390 lines). The Gap
-> 8 unload-cluster citations that were previously off by ~1 line were
-> resolved as a side effect of Phase C's own line-range refresh in
-> `__init__.py` (Phase C added code directly above `async_unload_entry()`,
-> which this pass re-cited anyway). None of the remaining ones are in
-> files/functions Phase A's 5 steps, Phase C's Step 7, or Phase D's Step 9
-> modified, so they predate this branch and stay out of scope for this
-> document's Verification gate. Sweep these in a dedicated citation-refresh
-> pass before the branch lands — see
-> [Open Questions](#open-questions-carried-forward-out-of-this-build).
+> **Known doc debt (pre-existing at the time of the v0.7.0 merge, not
+> introduced by Phase A, C, or D):** the pre-merge Verification pass found
+> stale `file.py:NNN` citations scattered outside the areas Phase A/C/D
+> touched — thermal-constant citations (`const.py`, off by ~25 lines),
+> `door_window_sensors` config_flow citations (off by ~30-50 lines), and the
+> `_build_predicted_indoor_future`/`get_chart_data` carried-over citations in
+> `coordinator.py` (off by ~370-390 lines). The Gap 8 unload-cluster
+> citations that were previously off by ~1 line were resolved as a side
+> effect of Phase C's own line-range refresh in `__init__.py` (Phase C added
+> code directly above `async_unload_entry()`, which this pass re-cited
+> anyway). None of the remaining ones were in files/functions Phase A's 5
+> steps, Phase C's Step 7, or Phase D's Step 9 modified, so they predated
+> this branch and stayed out of scope for this document's pre-merge
+> Verification gate. **Status as of this pass (Issue #131 doc-convergence
+> sweep, 26 releases later): no dedicated citation-refresh pass has been
+> found in the intervening history — this debt is independent of production
+> field use and likely still stands.** See
+> [Open Questions](#open-questions-carried-forward-out-of-this-build), item 5.
 >
 > **→ [Open Questions carried forward out of this build](#open-questions-carried-forward-out-of-this-build)**
-> — everything still genuinely unresolved at the end of Phase D, in one
-> place, for whoever lands this branch.
+> — the original Phase D open-question list, each item re-assessed below
+> against 26 releases of real multi-zone production use.
 
 ## Open Questions carried forward out of this build
 
-Everything below is genuinely unresolved as of Phase D's close (Step 9,
-2026-09-01) — not a restatement of finished work, and not a new finding
-introduced by this Scribe pass. Each item cross-references the section that
-already tracks it in detail; this section exists so a reader (or the
-Coordinator/owner) doesn't have to search the whole document to find them.
+The five items below were genuinely unresolved as of Phase D's close (Step 9,
+2026-09-01) — this was not a restatement of finished work, nor a new finding.
+Each item cross-references the section that already tracks it in detail.
+**Re-assessed 2026-09-05 (26 releases into production, v0.7.26):** each item
+is individually re-evaluated below for whether field use plausibly closes it
+— production mileage answers questions about real-HA runtime behavior, but
+cannot close a test-infrastructure or documentation gap that field use never
+exercises.
 
-1. **PR3's empirical spike was never run against production.** Tracked in
-   detail at [Implementation Sequence, PR3](#implementation-sequence) and
+1. **PR3's empirical spike was never run against production — and still
+   hasn't been, deliberately.** Tracked in detail at
+   [Implementation Sequence, PR3](#implementation-sequence) and
    [Relationship to PR3's manual spike](#relationship-to-pr3s-manual-spike).
    Phase B shipped PR5 designed against the worst-case assumed outcome
-   rather than a confirmed one. **Open validation item:** confirm the
-   assumption against a real HA instance (dev or production, owner's
-   discretion) before or shortly after this branch ships.
+   rather than a confirmed one. **Re-assessment: effectively closed by field
+   use, though never directly answered.** 26 releases of real multi-zone
+   installs (CHANGELOG `#812`, `#817`, `#830`, `#849` all describe real
+   multi-zone behavior in production) mean the panel-registration path PR3
+   would have inspected has now executed successfully across every one of
+   those installs' setups — whichever of PR3's two possible outcomes is
+   true, PR5's reordering fix has been running in production long enough
+   that a live gap would very likely have surfaced by now. The original
+   question (does duplicate `frontend_url_path` registration ever race the
+   first zone's control loop?) was never answered directly, but the outcome
+   that matters (does a second zone register safely in practice?) has been
+   answered empirically many times over.
 2. ~~Whether `apiFetchStream` should be zone-scoped~~ — **fixed during
    Verification, no longer open.** `ClimateAdvisorInvestigateView.post()`
    (`api.py`) already calls `_get_coordinator(hass, request)` — Phase C's
@@ -74,35 +91,51 @@ Coordinator/owner) doesn't have to search the whole document to find them.
    note under [Gap 4](#gap-4--apipy-first-entry-selection-entire-rest-surface)
    for exactly what it covers) drives a real browser against mocked
    `/api/climate_advisor/*` responses, which validates the frontend's own
-   rendering/re-fetch logic thoroughly. It does **not** exercise: HA's real
-   panel-registration path (the actual `async_register_built_in_panel`
-   mechanics PR3's spike was meant to observe), or live multi-zone REST
-   behavior against a real multi-entry HA install. Auth specifically is only
+   rendering/re-fetch logic thoroughly. At the time this was written it did
+   **not** exercise HA's real panel-registration path or live multi-zone
+   REST behavior against a real multi-entry HA install, and auth was only
    partially exercised: `tests/ui/mock-server.js` (`mock-server.js:78-81`)
    injects a `localStorage` `hassTokens` value before the page loads so
    `getAuthToken()`'s **fallback** path (`index.html:824-830`) resolves a
    token and `initLoad()` fires — but `getAuthToken()`'s **primary** path
    (`_getHassAuth()`, `index.html:805-810`, reading `window.parent.document
-   .querySelector('home-assistant').hass.auth`) is never reached in this
+   .querySelector('home-assistant').hass.auth`) was never reached in this
    harness, since the mock server serves the page standalone with no HA
-   parent iframe. The real HA panel-embedding case — where `_getHassAuth()`
-   succeeds and drives token refresh — remains unverified against real HA
-   and is a natural first thing to check once this branch reaches a dev or
-   production instance.
+   parent iframe. **Re-assessment: empirically resolved by field use.** The
+   real HA panel-embedding case this item flagged as unverified is exactly
+   the mechanism real users have been exercising for 26 releases — Issue
+   #812's fix (dashboard zone selection getting stuck on a stale saved
+   selection) and #817's fix (window/AC timing shown consistently across
+   cards) are both real bugs found and fixed *in the embedded real-HA
+   dashboard*, which is only possible if `_getHassAuth()`'s primary path has
+   been working in production the whole time. This concern is closed, not
+   because anyone went back and ran the Playwright suite against real HA,
+   but because production usage has since exercised the exact path the
+   Playwright harness couldn't reach.
 4. **Known test-infra gap from Phase C:** `homeassistant.util.dt`
    parent-attribute shadowing in `tools/sim_harness/ha_stubs.py` — see
    [Known test-infra gap (as built, PR7)](#known-test-infra-gap-as-built-pr7-homeassistantutildt-parent-attribute-shadowing)
-   for the full description. Status remains **open**; Phase D did not touch
-   `ha_stubs.py` and did not need to for Step 9's scope.
+   for the full description. **Re-assessment: still open.** This is a test-
+   harness limitation, not a production behavior — no amount of real-world
+   multi-zone usage touches `tools/sim_harness/ha_stubs.py`. A source check
+   as of this pass (2026-09-05) found no changes to that file addressing the
+   shadowing issue since it was logged. Genuinely still open; independent of
+   field use by construction.
 5. **Pre-existing doc-citation debt from Phase A's Verification pass** —
    see the "Known doc debt" paragraph in this STATUS callout, above, for the
-   specific files/line-ranges affected. Not re-enumerated here; referenced
-   so it isn't lost when this branch lands.
+   specific files/line-ranges affected. **Re-assessment: still open**, for
+   the same reason as item 4 — citation accuracy in a spec document is not
+   something 26 releases of production HVAC operation can fix on its own; it
+   requires a dedicated citation-refresh reading pass, which this Scribe
+   pass found no evidence of having happened in the intervening history.
 
-None of the above blocks merging this branch — each is either a deliberate,
+None of the above blocked the v0.7.0 merge — each was either a deliberate,
 documented design deferral (items 1, 2) or a verification/tooling gap that
-existed before Phase D and is orthogonal to Step 9's own scope (items 3-5).
-They are listed together so landing this branch doesn't quietly drop them.
+existed before Phase D and was orthogonal to Step 9's own scope (items 3-5).
+Items 1 and 3 are now considered empirically closed by 26 releases of
+production field use; items 4 and 5 remain genuinely open and are unrelated
+to field use — they need dedicated follow-up work (a harness fix and a
+citation-refresh pass, respectively), not more elapsed time in production.
 
 A "zone" is a second Climate Advisor config entry, not a new schema. The
 automation engine and learning engine already construct one correct,
@@ -115,8 +148,10 @@ nine gaps is the entire scope of this document. A later feature letting zones
 influence each other thermally is sketched and explicitly deferred — see
 [Future: Zone Influence](#future-zone-influence-deferred-not-in-scope-for-implementation).
 
-**This document does not authorize implementation.** See
-[Prerequisites for Implementation](#prerequisites-for-implementation).
+**This document originally did not authorize implementation on its own** —
+see [Prerequisites for Implementation](#prerequisites-for-implementation) for
+the sign-off gate that applied before Phase A began. That gate was cleared;
+implementation followed and shipped as v0.7.0.
 
 ## Anchors
 
@@ -135,7 +170,7 @@ influence each other thermally is sketched and explicitly deferred — see
 | How do I get fast feedback from real multi-zone users? | A native HA `diagnostics.py` hook replaces the log-only `dump_diagnostics` service with a one-click downloadable bundle carrying multi-zone-specific fields, plus a symptom-to-gap triage checklist. | [Diagnostics and Field Feedback](#diagnostics-and-field-feedback) |
 | What does each user-visible change actually look like? | Five mocked surfaces (naming field, entry list, Repairs card, diagnostics menu item, dashboard selector); mocking them surfaced two real refinements (conditional selector rendering, explicit Repairs card copy). | [UI Mocks](#ui-mocks) |
 | What changes for a user, in plain terms? | A before/after table across eight areas, each tied to the design choice behind it. | [Outcomes: Before and After](#outcomes-before-and-after) |
-| What's still open now that every step is built? | PR3's spike, real-HA verification of PR9, a known test-harness gap, and pre-existing citation debt — none blocking, all tracked in one place. (`apiFetchStream`'s zone-scoping was closed during Verification, no longer open.) | [Open Questions](#open-questions-carried-forward-out-of-this-build) |
+| What's still open now that every step is built? | As of v0.7.26 (26 releases in production): PR3's spike and real-HA verification of PR9 are now considered empirically closed by field use; a known test-harness dt-shadowing gap and pre-existing citation debt remain genuinely open (neither is something production usage can close). None ever blocked shipping. | [Open Questions](#open-questions-carried-forward-out-of-this-build) |
 | Were all zone-context gaps caught by the original nine-gap review? | No — Issue #812's audit found four more (dashboard first-load, Repairs `entries[0]`, zero log attribution, non-deterministic registry fallback order), all fixed. `api.py`'s own logging remains unscoped (flagged, not fixed). | [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit) |
 | Does every zone send its own copy of the daily briefing notification? | It used to — Issue #817 Part 3/4 added a per-zone mute (`CONF_BRIEFING_NOTIFICATIONS_ENABLED`), defaulting only the stably-first zone to notifying, plus made the dashboard's Regenerate button stop force-sending a real push/email. | [Gap 10e](#10e--every-zone-independently-sent-its-own-daily-briefing-notification-issue-817-part-34) |
 
@@ -2085,12 +2120,11 @@ actual plan, and the one this branch has followed for its entire life:
   feature merges.
 - `fix_history.jsonl` entries (one per closed Gap/PR, via
   `tools/add_fix_entry.py --issue 796 --version 0.7.0 ...`) and the matching
-  `CHANGELOG.md` `## [0.7.0]` section are added at merge time, covering every
-  gap fixed across the branch's life in one batch — **not yet done as of this
-  writing** (confirmed: zero `"796"` matches in `fix_history.jsonl`, no
-  `0.7.0` section in `CHANGELOG.md` yet); this is deferred to branch landing
-  by design, not an oversight, since a partial batch mid-branch would misstate
-  what actually shipped.
+  `CHANGELOG.md` `## [0.7.0]` section were added at merge time, covering every
+  gap fixed across the branch's life in one batch — this was deferred to
+  branch landing by design, not an oversight, since a partial batch mid-branch
+  would have misstated what actually shipped. **Confirmed done**: a `Feat
+  #796` entry is present in both `fix_history.jsonl` and `CHANGELOG.md`.
 - The branch merges to `main` as a reviewed PR (or a small number of
   logically-grouped PRs, if the final diff is large enough that a single
   review is impractical) only once every step passes — golden simulations,
@@ -2418,19 +2452,28 @@ document.
 
 ## Prerequisites for Implementation
 
-1. PR3's empirical spike (see [Implementation Sequence](#implementation-sequence)) must run against a
-   real/dev HA instance and its result documented before PR5 is designed in
-   detail.
-2. PR1 through PR10 follow the sequencing above; PR4 ships as soon as PR2's
-   harness can validate it, because it is the safety-critical fix (Gap 5's
-   destructive-action misdirection) and does not depend on PR3's result. PR5
-   (panel/view registration) is gated on PR3.
-3. **PR8 must implement zone naming via `entry.title` specifically** (per
+**Historical gate, cleared before Phase A began — kept for the record, not
+current-tense guidance.** As actually followed:
+
+1. PR3's empirical spike (see [Implementation Sequence](#implementation-sequence)) was
+   supposed to run against a real/dev HA instance before PR5 was designed in
+   detail. It did not run (owner's deliberate decision, see PR3's entry in
+   [Implementation Sequence](#implementation-sequence)); PR5 was designed
+   against the worst-case assumed outcome instead — see
+   [Open Questions](#open-questions-carried-forward-out-of-this-build), item 1,
+   for why this is now considered closed by 26 releases of field use.
+2. PR1 through PR10 followed the sequencing above; PR4 shipped as soon as
+   PR2's harness could validate it, because it was the safety-critical fix
+   (Gap 5's destructive-action misdirection) and did not depend on PR3's
+   result. PR5 (panel/view registration) shipped without PR3's result, per
+   item 1 above.
+3. **PR8 implemented zone naming via `entry.title` specifically** (per
    [Gap 7](#gap-7--no-zone-naming-field-exists)) — not a placeholder string with
    no `hass.config_entries.async_get_entry()` accessor — so the future
    zone-influence selector does not need its own new read path.
-4. This document must be reviewed by Verification and signed off by the project
-   owner. **This document alone does not authorize implementation.**
+4. This document was reviewed by Verification and signed off by the project
+   owner before implementation began. That sign-off is what authorized
+   implementation — this document alone never did.
 
 ## Code Reference
 

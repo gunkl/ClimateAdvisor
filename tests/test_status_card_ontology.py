@@ -94,6 +94,17 @@ case, #534 never justified an exception for these words, so this test does not
 invent a matching allow-list "for words nothing asked for" (the #847-followup plan's
 own phrasing). Any hit is an unconditional failure.
 
+**"window" joined the ban list in Issue #849.** A shipped regression had Next
+Automation instruct the occupant to close/reopen windows ("Close windows around
+6:12 PM ...", "Reopen windows — outdoor helping again") — CA has no window
+actuator, so neither candidate was ever something the *automation* was going to
+do; it was Next User Action's question, answered a second time, wrong card. This
+is a second, broader invariant alongside the time-of-day rule: a Next Automation
+candidate must describe something CA can actually execute — no actuator, no
+candidate. Like the other three banned words, "window" has no exception
+mechanism and never will without a much larger feature (an actual window
+actuator) changing that premise.
+
 **Symmetric check.** Every slug in `_ONTOLOGY_TIME_EXCEPTIONS` must have at least one
 matching `# ontology-exception: <slug>` comment somewhere inside
 `_compute_next_automation_action()`'s source — the same both-directions discipline
@@ -115,7 +126,7 @@ _REGISTRY_NAME = "_ONTOLOGY_TIME_EXCEPTIONS"
 
 _TIME_FORMAT_CODES = ("%I", "%H", "%p")
 _LITERAL_TIME_RE = re.compile(r"\b(AM|PM)\b|%I:%M")
-_BANNED_WORDS = ("waiting", "paused", "grace")
+_BANNED_WORDS = ("waiting", "paused", "grace", "window")
 _BANNED_WORD_RE = re.compile(r"\b(" + "|".join(_BANNED_WORDS) + r")\b", re.IGNORECASE)
 _EXCEPTION_COMMENT_RE = re.compile(r"#\s*ontology-exception:\s*([A-Za-z0-9_]+)")
 _COMMENT_SEARCH_WINDOW = 5  # lines to look upward from a time-source node for the tag

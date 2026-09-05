@@ -1038,10 +1038,15 @@ The fix, landed in #847:
   None) -> str` (next to `compute_nat_vent_plan()`), is now the single source of truth for
   reason→sentence wording. It returns a phrase *fragment*, not a full sentence — each caller
   interpolates it into its own sentence shape: `"comfort_floor"` → `"to hold the heat in"`;
-  `"outdoor_rise"` or `None` → `"before outdoor air warms past indoor"`. `_warm_day_plan()`,
+  `"outdoor_rise"` or `None` → `"before outdoor air warms past indoor"`. `_warm_day_plan()` and
   `_mild_day_plan()` (which previously had no reason branch at all — always said "to trap the
-  warmth" regardless of the underlying cutoff reason), and `_compute_next_automation_action()`
-  all interpolate this same fragment instead of maintaining independent branches or wording.
+  warmth" regardless of the underlying cutoff reason) interpolate this same fragment instead of
+  maintaining independent branches or wording. **`_compute_next_automation_action()` was a third
+  call site until Issue #849 removed it**: the candidate it fed (`nat_vent_cutoff` → "Close
+  windows...") told the occupant to physically operate windows, an action CA has no actuator for
+  — a distinct ontology violation from the phrasing-drift bug this section fixes, not a reason to
+  reintroduce the branch. The shared helper's two remaining call sites (`_warm_day_plan()`,
+  `_mild_day_plan()`) are unaffected.
 - **A live sanity check** on the `comfort_floor` reason reuses the **existing**
   `free_cooling_direction_ok(outdoor_temp, indoor_temp)` in `temperature.py` — the same #428
   guard already used by the `next_human_action` sensor and the economizer gate — no new
@@ -1077,17 +1082,22 @@ see project memory `feedback_verify_before_confirmed_bug` — it closes a latent
 recurring nat-vent duplication-drift pattern (`project_natvent_duplicate_threshold_logic`)
 predicted would eventually reappear in a forecast-curve consumer.
 
-> **DOC RULE (Issue #847):** any new `nat_vent_plan` field that is rendered as user-facing text
-> in more than one place (briefing body, Next Automation card, or any future consumer) MUST go
-> through `describe_nat_vent_cutoff_reason()` (or its successor, if the mapping's scope grows
-> beyond cutoff reasons) — do not add a second inline `if nat_vent_cutoff_reason == "..."`
-> branch anywhere else. This is the guardrail the #847 five-whys found missing after three prior
-> rounds of fixes on this exact briefing/Next-Automation pair (#428/#430, #518/#528,
+> **DOC RULE (Issue #847; scope corrected by #849):** any new `nat_vent_plan` field that is
+> rendered as user-facing text in more than one place MUST go through
+> `describe_nat_vent_cutoff_reason()` (or its successor, if the mapping's scope grows beyond
+> cutoff reasons) — do not add a second inline `if nat_vent_cutoff_reason == "..."` branch
+> anywhere else. This is the guardrail the #847 five-whys found missing after three prior rounds
+> of fixes on this exact pair of briefing call sites (#428/#430, #518/#528,
 > #535/#788/#814/#817/#818) — each prior fix solved its own reported symptom without leaving
 > behind an enforcement mechanism for the next field. If you are adding a new field to
 > `nat_vent_plan` and it needs user-facing phrasing in two places, extend the shared helper;
 > if you are tempted to write a second branch "just for this one case," that temptation is
-> exactly how this bug recurred four times.
+> exactly how this bug recurred four times. **The "Next Automation card" was originally listed
+> as a consumer alongside the briefing body; Issue #849 removed the card's cutoff-reason
+> candidate entirely** (an occupant-action ontology violation, not a phrasing bug this rule
+> would have caught), so the phrasing-symmetry guarantee this rule provides now applies only
+> within briefing.py's own two call sites (`_warm_day_plan()`, `_mild_day_plan()`) — a future
+> third consumer would still need to route through this same helper, but the card is not one.
 
 When a predicted indoor/outdoor forecast curve is available (thermal model calibrated):
 - MILD day window close time = `nat_vent_cutoff` (earlier of: outdoor temp ≥ indoor − 1°F, or
@@ -1297,12 +1307,16 @@ Window advice is set by the classifier at classification time, based on `day_typ
 
 **MILD-day window times (v0.3.46+):** Open time is always `MILD_WINDOW_OPEN_HOUR = 10` (10:00 AM). Close time uses `nat_vent_cutoff` when the ODE is calibrated, otherwise falls back to `MILD_WINDOW_CLOSE_HOUR = 17` (5:00 PM). See [§6d. MILD Day Dynamic Window Close Time](#6d-mild-day-dynamic-window-close-time-fix-c-issue-147).
 
-**Reason wording for the close time (Issue #847):** both WARM and MILD close-time sentences —
-and the Next Automation status card's phrasing for the same event — now derive from the shared
-`describe_nat_vent_cutoff_reason()` helper (see §6d's Issue #847 update above), not independent
-per-consumer branches. This is what keeps the briefing body, the TL;DR header, and the Next
-Automation card from drifting into contradictory framing of the same `nat_vent_cutoff_reason`
-value. See the DOC RULE in §6d before adding user-facing text for any new `nat_vent_plan` field.
+**Reason wording for the close time (Issue #847; card consumer removed by #849):** both WARM and
+MILD close-time sentences derive from the shared `describe_nat_vent_cutoff_reason()` helper (see
+§6d's Issue #847 update above), not independent per-consumer branches — this is what keeps the
+briefing body and the TL;DR header from drifting into contradictory framing of the same
+`nat_vent_cutoff_reason` value. **The Next Automation status card was originally a third consumer
+of this same helper; Issue #849 removed its cutoff-reason candidate entirely** (it instructed the
+occupant to close/reopen windows, an action CA cannot execute — a distinct ontology violation, not
+a phrasing bug this helper would have fixed), so the symmetry guarantee described here now applies
+only within briefing.py's own two call sites. See the DOC RULE in §6d before adding user-facing
+text for any new `nat_vent_plan` field.
 
 ---
 
@@ -2236,17 +2250,23 @@ candidate types, none of which existed before this issue:
   own precondition — nat-vent cannot start with everything closed, so the candidate never promises a
   time contingent on the occupant opening a window first.
 - **WARM/MILD warm-day-event candidates** — the same `nat_vent_cutoff`/`ceiling_breach_time`/
-  `recovery_time` computed above (now timestamp-correct) are surfaced as "Close windows — outdoor no
-  longer helping" / "AC turns on to hold the ceiling" / "Reopen windows — outdoor helping again," gated
-  on `c.windows_recommended` and a forecast curve being available. Previously computed only for the
-  briefing; now also visible on the dashboard ahead of the next briefing send.
-- **HOT-day window-cooling opportunities** — `classifier.py`'s existing static
-  `window_opportunity_morning`/`_evening` fields (already computed, previously only used for the
-  Next User Action card) surfaced as "Morning/Evening window cooling opportunity" candidates —
-  fixed-hour, no forecast scan needed, same pattern as the pre-existing briefing/wake/bedtime
-  candidates. Deliberately worded to avoid implying the automation opens the window itself — these
-  are forecasted conditions the occupant can act on, not an automation-executed setpoint change,
-  unlike every other candidate in this function.
+  `recovery_time` computed above (now timestamp-correct) were originally surfaced as three
+  candidates: "Close windows — outdoor no longer helping" / "AC turns on to hold the ceiling" /
+  "Reopen windows — outdoor helping again," gated on `c.windows_recommended` and a forecast curve
+  being available. **The `nat_vent_cutoff` ("Close windows...") and `recovery_time` ("Reopen
+  windows...") candidates were removed by Issue #849**: both instructed the occupant to physically
+  operate windows — an action CA has no actuator for — duplicating what Next User Action already
+  says, in violation of the Status Card Ontology (CLAUDE.md, "Status Card Ontology" section). The
+  `ceiling_breach_time` candidate ("AC turns on to hold the ceiling") is unaffected — it describes
+  an automation-executed setpoint change and remains a valid Next Automation candidate.
+- **HOT-day window-cooling opportunities** — **removed by Issue #849.** `classifier.py`'s static
+  `window_opportunity_morning`/`_evening` fields had been surfaced here as "Morning/Evening window
+  cooling opportunity" candidates in addition to their pre-existing use on the Next User Action
+  card; despite being "[d]eliberately worded to avoid implying the automation opens the window
+  itself," the candidates still instructed an occupant action on a card whose contract is
+  automation-executed actions only, duplicating Next User Action. See CLAUDE.md's Status Card
+  Ontology section for the corrected invariant: every Next Automation candidate must be an action
+  CA itself performs, independent of wording or time treatment.
 
 **Test coverage:** `tests/test_temperature.py::TestFindTemperatureCrossing` (alignment, `after`
 boundary, comparator receiving `ts`); `tests/test_briefing.py::TestDeriveWarmDayEvents`

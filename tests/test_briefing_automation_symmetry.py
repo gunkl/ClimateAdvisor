@@ -1,6 +1,6 @@
-"""Cross-consumer regression tests for Issue #847 — the briefing text and the
-"Next Automation" status card must never disagree in wording OR timing about the
-same nat_vent_cutoff_reason fact.
+"""Regression tests for Issue #847's nat_vent_cutoff_reason phrasing, narrowed by
+Issue #849 (see TestBriefingAutomationSymmetry's class docstring for the full
+history of that narrowing).
 
 This is the 4th round of fixes on this exact bug class (#428/#430, #518, #528,
 #535/#788/#814/#817/#818 all touched briefing/Next-Automation nat-vent wording or
@@ -8,11 +8,15 @@ timing without leaving behind an enforcement test). Per the approved plan
 (use-the-mob-look-joyful-elephant.md, "Tests" + "Observability & Regression-
 Proofing" #2/#3), this file is that enforcement mechanism:
 
-1. TestBriefingAutomationSymmetry — one shared nat_vent_plan-shaped dict is fed to
-   both _warm_day_plan()/_mild_day_plan() (briefing.py) and
-   _compute_next_automation_action() (coordinator.py) and the two outputs must
-   agree in REASON FRAMING (comfort_floor vs outdoor_rise), for both WARM and MILD
-   day types.
+1. TestBriefingAutomationSymmetry — originally fed one shared nat_vent_plan-shaped
+   dict to both _warm_day_plan()/_mild_day_plan() (briefing.py) and
+   _compute_next_automation_action() (coordinator.py) and required the two outputs
+   to agree in REASON FRAMING (comfort_floor vs outdoor_rise). Issue #849 removed
+   the Next Automation card as a consumer of this phrase entirely (occupant-action
+   ontology violation — the card told the occupant to close/reopen windows, which
+   CA cannot do), so this class now verifies briefing-internal consistency only:
+   _warm_day_plan() and _mild_day_plan() must still agree with each other and with
+   the shared helper, for both WARM and MILD day types.
 2. TestBriefingStalenessOnCutoffDrift — reproduces the exact reported scenario: a
    frozen "sent" briefing baked in a comfort_floor/8AM cutoff; the live
    self._nat_vent_plan has since moved to outdoor_rise/11AM with no day_type or
@@ -26,19 +30,18 @@ helper as `describe_nat_vent_cutoff_reason(reason)` in `nat_vent_plan.py`, exact
 as the plan's Approach §1 proposed:
   "comfort_floor"      -> "to hold the heat in"
   "outdoor_rise"/None  -> "before outdoor air warms past indoor"
-Both `_warm_day_plan()`/`_mild_day_plan()` (briefing.py, conversational sentence)
-and `_compute_next_automation_action()` (coordinator.py, compact status-card
-phrase) call this same function and embed its return value verbatim into their
-own sentence shape — so this test imports the real helper and asserts its actual
-output string appears in both outputs, rather than guessing a marker. This is
-stronger than a loose semantic check: it fails if either consumer ever stops
+`_warm_day_plan()`/`_mild_day_plan()` (briefing.py, conversational sentence) both
+call this same function and embed its return value verbatim into their own
+sentence shape — so this test imports the real helper and asserts its actual
+output string appears in the briefing text, rather than guessing a marker. This
+is stronger than a loose semantic check: it fails if either call site ever stops
 routing through the shared helper, not just if the wording happens to diverge.
 """
 
 from __future__ import annotations
 
 import types
-from datetime import UTC, date, datetime, time
+from datetime import UTC, datetime, time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,87 +91,39 @@ def _shared_nat_vent_plan(reason: str, cutoff: datetime) -> dict:
     }
 
 
-def _make_automation_engine() -> MagicMock:
-    ae = MagicMock()
-    ae.is_paused_by_door = False
-    ae._grace_active = False
-    ae._natural_vent_active = False
-    ae._manual_override_active = False
-    return ae
-
-
-def _make_real_coordinator(nat_vent_plan: dict) -> ClimateAdvisorCoordinator:
-    """Bare ClimateAdvisorCoordinator bound to the real
-    _compute_next_automation_action(), via the established object.__new__() +
-    types.MethodType() partial-instantiation pattern (see
-    tests/test_status_sensors.py::_make_real_coordinator /
-    tests/test_daily_record_accuracy.py). Adds self._nat_vent_plan, which the
-    existing test_status_sensors.py helper doesn't set (getattr(..., None) default
-    there is fine for its own tests, but this file specifically needs the
-    WARM/MILD-day events branch to fire)."""
-    coord = object.__new__(ClimateAdvisorCoordinator)
-    coord._automation_enabled = True
-    coord._startup_coalesce_active = False
-    coord._startup_coalesce_expiry = None
-    coord._startup_timer_fired = False
-    coord._current_classification = None
-    coord._occupancy_mode = "home"
-    coord.automation_engine = _make_automation_engine()
-    coord._any_sensor_open = MagicMock(return_value=False)
-    coord._door_open_timers = {}
-    coord._door_open_timer_expiry = {}
-    coord._pre_cool_trigger_dt = None
-    coord._pre_cool_target = None
-    coord._tou_phase_resolution = None
-    coord._tou_active_cost_resolution = None
-    coord.config = {}
-    coord._nat_vent_plan = nat_vent_plan
-    coord._last_predicted_indoor = []
-    coord._compute_next_automation_action = types.MethodType(
-        ClimateAdvisorCoordinator._compute_next_automation_action, coord
-    )
-    return coord
-
-
-def _compute_next_automation_action(c: DayClassification, nat_vent_plan: dict, now_time: time) -> str:
-    """Call the real ClimateAdvisorCoordinator._compute_next_automation_action()
-    and return just the action-description string."""
-    from custom_components.climate_advisor import coordinator as _coord_mod
-
-    coord = _make_real_coordinator(nat_vent_plan)
-    now_dt = datetime.combine(date(2026, 5, 11), now_time, tzinfo=UTC)
-    with (
-        patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
-        patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
-    ):
-        action, _time_str = coord._compute_next_automation_action(c)
-    return action
-
-
 # ---------------------------------------------------------------------------
-# Item 3: cross-consumer symmetry
+# Item 3: briefing-internal symmetry (narrowed by Issue #849 — see class docstring)
 # ---------------------------------------------------------------------------
 
 
 class TestBriefingAutomationSymmetry:
-    """Issue #847: the briefing's close-sentence phrase and the Next Automation
-    card's phrase must agree in REASON FRAMING for the same nat_vent_plan fact,
-    across both WARM and MILD day types.
+    """Issue #847 originally required TWO consumers of nat_vent_cutoff_reason —
+    the briefing text (_warm_day_plan()/_mild_day_plan(), briefing.py) and the
+    "Next Automation" status card (_compute_next_automation_action(),
+    coordinator.py) — to agree in REASON FRAMING (comfort_floor vs
+    outdoor_rise), because both consumers used to say something about the
+    cutoff and had drifted into contradicting each other (the reported
+    screenshot: briefing said "hold the heat in" while the card unconditionally
+    said "Outdoor will stop helping").
 
-    Pre-fix, ALL FOUR comfort_floor cases below fail: _warm_day_plan() says
-    "hold the heat in" while _compute_next_automation_action() unconditionally
-    says "Outdoor will stop helping" (coordinator.py:8721-8724, reason-agnostic)
-    — the exact contradiction from the reported screenshot. _mild_day_plan() has
-    no reason branch at all yet (see TestMildDayPlanFloorWording in
-    test_briefing.py), so its comfort_floor cases fail for the same underlying
-    reason. The outdoor_rise cases may already coincidentally pass pre-fix
-    (Next Automation's unconditional wording already happens to fit
-    outdoor_rise) — that's expected; the bug is specifically that comfort_floor
-    is never distinguished on the card side.
+    Issue #849 removed the Next Automation card as a consumer of this phrase
+    entirely: the nat-vent-cutoff candidate told the occupant to close/reopen
+    windows, an action CA cannot execute (no window actuator) — an occupant-
+    action ontology violation, not a wording bug #847's phrasing fix could ever
+    have made correct. The card no longer says anything about the cutoff, full
+    stop, so the card-side half of this test's original contract is now
+    permanently unsatisfiable by design and was removed here.
+
+    The symmetry guarantee now needs to hold only for the one remaining
+    consumer — the briefing itself, which still has two call sites (WARM day's
+    _warm_day_plan() and MILD day's _mild_day_plan()) that must agree with each
+    other and with the shared describe_nat_vent_cutoff_reason() helper
+    (nat_vent_plan.py) for the same nat_vent_plan fact. That is what these
+    tests assert.
     """
 
     @pytest.mark.parametrize("day_type", [DAY_TYPE_WARM, DAY_TYPE_MILD])
-    def test_comfort_floor_reason_agrees_between_briefing_and_next_automation(self, day_type):
+    def test_comfort_floor_reason_consistent_in_briefing(self, day_type):
         c = _make_classification(day_type, today_high=80 if day_type == DAY_TYPE_WARM else 68)
         cutoff = datetime(2026, 5, 11, 14, 0, 0, tzinfo=UTC)
         plan = _shared_nat_vent_plan("comfort_floor", cutoff)
@@ -180,19 +135,13 @@ class TestBriefingAutomationSymmetry:
             lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=plan)
         briefing_text = "\n".join(lines)
 
-        next_action = _compute_next_automation_action(c, plan, now_time=time(12, 30))
-
         assert expected_phrase in briefing_text, (
             f"briefing ({day_type}) should use the shared comfort_floor phrase"
             f" {expected_phrase!r} — got: {briefing_text!r}"
         )
-        assert expected_phrase in next_action, (
-            f"Next Automation card ({day_type}) should use the SAME shared phrase"
-            f" {expected_phrase!r} the briefing used — got action string: {next_action!r}"
-        )
 
     @pytest.mark.parametrize("day_type", [DAY_TYPE_WARM, DAY_TYPE_MILD])
-    def test_outdoor_rise_reason_agrees_between_briefing_and_next_automation(self, day_type):
+    def test_outdoor_rise_reason_consistent_in_briefing(self, day_type):
         c = _make_classification(day_type, today_high=80 if day_type == DAY_TYPE_WARM else 68)
         cutoff = datetime(2026, 5, 11, 14, 0, 0, tzinfo=UTC)
         plan = _shared_nat_vent_plan("outdoor_rise", cutoff)
@@ -205,21 +154,11 @@ class TestBriefingAutomationSymmetry:
             lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=plan)
         briefing_text = "\n".join(lines)
 
-        next_action = _compute_next_automation_action(c, plan, now_time=time(12, 30))
-
         assert expected_phrase in briefing_text, (
             f"briefing ({day_type}) should use the shared outdoor_rise phrase"
             f" {expected_phrase!r} — got: {briefing_text!r}"
         )
         assert comfort_floor_phrase not in briefing_text
-        assert expected_phrase in next_action, (
-            f"Next Automation card ({day_type}) should use the SAME shared phrase"
-            f" {expected_phrase!r} the briefing used — got: {next_action!r}"
-        )
-        assert comfort_floor_phrase not in next_action, (
-            f"Next Automation card ({day_type}) must NOT use comfort_floor framing"
-            f" for an outdoor_rise reason — got: {next_action!r}"
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.20] — 2026-09-04
+
+- Fix #849: The Next Automation card no longer tells you to close or reopen windows — that instruction now lives only in Next User Action, where it belongs.
+
 ## [0.7.19] — 2026-09-04
 
 - Fix #847: The daily briefing and the Next Automation status card now always agree on window-close time and reason on warm/mild days.

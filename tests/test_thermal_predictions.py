@@ -1126,4 +1126,71 @@ class TestVentilatedSolarPrediction:
 
         # Hour 17→18: solar_factor(18)=0 → increment must be near zero
         inc_17_18 = temps_by_h[18] - temps_by_h[17]
-        assert abs(inc_17_18) < 0.05, f"Hour 17→18: solar_factor=0 → no increment; got Δ={inc_17_18:.3f}°F"
+        assert abs(inc_17_18) < 0.05, f"Solar contribution should vanish by hour 18; got Δ={inc_17_18:.3f}°F"
+
+
+# ---------------------------------------------------------------------------
+# Regression: Issue #587 Defect A (endpoint estimator fix) does not ripple into
+# forecast output (plan Part 3.5, test 14).
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointEstimatorForecastRegressionPinned:
+    """Pinned golden regression: a realistic pre-upgrade thermal_model dict (only
+    k_vent_window populated, k_passive absent — the gate-bridge case) must produce a
+    byte-identical (tolerance-matched) predicted-temperature sequence before and after
+    the Issue #587 Defect A endpoint-estimator change.
+
+    Defect A only touches how k is *derived* when a NEW chart_log window is fit
+    (_passive_endpoint_estimate / _vent_endpoint_estimate in coordinator.py, via
+    compute_k_passive_endpoint() in learning.py) — it does not touch
+    _build_predicted_indoor_future() or the ODE it drives. This test pins the forecast
+    output for an already-populated thermal_model dict to prove that claim rather than
+    merely assert it: if a future change to the endpoint estimator (or anything it
+    touches) ever leaks into forecast math, this test catches it.
+
+    The pinned values below were captured by running this exact scenario against the
+    post-Defect-A code and are not independently re-derived — this is a golden/pin test,
+    not a physics-correctness test (physics correctness for this ODE path is covered by
+    TestGateBridge/TestPerHourVentilationWiring elsewhere in this file).
+    """
+
+    def test_gate_bridge_forecast_output_unchanged_by_endpoint_estimator_fix(self):
+        now = _NOW
+        indoor_f = 70.0
+        # Off-day range: THRESHOLD_MILD(60) <= outdoor < THRESHOLD_WARM(75)
+        outdoor_f = 65.0
+        entries = [_entry(now + timedelta(hours=i), outdoor_f) for i in range(1, 7)]
+        model = {
+            "confidence": "low",
+            "k_passive": None,
+            "k_vent_window": -0.05,
+            "k_active_heat": None,
+            "k_active_cool": None,
+        }
+
+        result = _call(entries, now=now, indoor=indoor_f, model=model)
+
+        assert len(result) == 11
+
+        pinned_temps = [
+            69.8,
+            69.7,
+            69.5,
+            69.4,
+            69.3,
+            69.2,
+            69.1,
+            69.0,
+            68.9,
+            68.8,
+            68.7,
+        ]
+
+        actual_temps = [r["temp"] for r in result]
+        for i, (actual, expected) in enumerate(zip(actual_temps, pinned_temps, strict=True)):
+            assert actual == pytest.approx(expected, abs=1e-6), (
+                f"Forecast point {i} diverged from pinned pre/post-#587 value: "
+                f"got {actual!r}, expected {expected!r}. If this is an intentional ODE "
+                f"change, re-pin deliberately — do not silently widen the tolerance."
+            )

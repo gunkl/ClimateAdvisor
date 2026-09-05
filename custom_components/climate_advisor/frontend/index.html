@@ -2071,11 +2071,15 @@
     abandoned: 'Measurement interrupted',
   };
   const TYPE_LABELS = {
-    passive_decay: 'Passive windows', fan_only_decay: 'Fan-only windows',
-    ventilated_decay: 'Ventilated windows', solar_gain: 'Solar readings',
+    passive_decay: 'Passive windows',
+    vent_window_decay: 'Window ventilation', vent_fan_decay: 'Fan/WHF ventilation',
+    solar_gain: 'Solar readings',
     hvac_heat: 'Heating cycles', hvac_cool: 'Cooling cycles',
+    // Issue #587 legacy entries — retired obs types, kept so old persisted history
+    // (committed before the upgrade) still renders with a label instead of a raw key.
+    fan_only_decay: 'Fan-only windows (legacy)', ventilated_decay: 'Ventilated windows (legacy)',
   };
-  const ENVELOPE_TYPES = ['passive_decay', 'fan_only_decay', 'ventilated_decay', 'solar_gain'];
+  const ENVELOPE_TYPES = ['passive_decay', 'vent_window_decay', 'vent_fan_decay', 'solar_gain'];
   const HVAC_TYPES = ['hvac_heat', 'hvac_cool'];
 
   const envConf = tm.confidence_k_passive || 'none';
@@ -2121,7 +2125,7 @@
   function makeStatusLine(eConf, hConf) {
     const eHas = eConf !== 'none';
     const hHas = hConf !== 'none';
-    const bridgeActive = !eHas && (tm.k_vent_window != null || tm.k_solar != null);
+    const bridgeActive = !eHas && (tm.k_vent_window != null || tm.k_vent_fan != null || tm.k_solar != null);
     if (bridgeActive && !hHas) return 'Active via ventilation learning — house envelope calibration in progress.';
     if (bridgeActive && hHas) return 'Active — using HVAC response and ventilation learning; envelope calibration in progress.';
     if (!eHas && !hHas) return 'Falling back to schedule until first measurements land.';
@@ -2151,12 +2155,12 @@
   }
 
   // --- Envelope rail ---
-  const envCount = (tm.observation_count_passive || 0) + (tm.observation_count_fan_only || 0)
-    + (tm.observation_count_vent || 0) + (tm.observation_count_solar || 0);
+  const envCount = (tm.observation_count_passive || 0) + (tm.observation_count_vent_window || 0)
+    + (tm.observation_count_vent_fan || 0) + (tm.observation_count_solar || 0);
   const envParamRows = [];
   if (tm.k_passive != null) envParamRows.push({ label: 'Heat loss rate', value: `${Math.abs(tm.k_passive).toFixed(2)} /hr` });
-  if (tm.k_vent != null) envParamRows.push({ label: 'Air exchange', value: `${Math.abs(tm.k_vent).toFixed(2)} /hr` });
-  if (tm.k_vent_window != null) envParamRows.push({ label: 'Ventilated loss rate', value: `${Math.abs(tm.k_vent_window).toFixed(2)} /hr (windows open)` });
+  if (tm.k_vent_window != null) envParamRows.push({ label: 'Window ventilation loss rate', value: `${Math.abs(tm.k_vent_window).toFixed(2)} /hr (windows open, fan off)` });
+  if (tm.k_vent_fan != null) envParamRows.push({ label: 'Fan ventilation loss rate', value: `${Math.abs(tm.k_vent_fan).toFixed(2)} /hr (windows open, fan/WHF on)` });
   if (tm.k_solar != null) envParamRows.push({ label: 'Solar gain', value: `${tm.k_solar.toFixed(2)} ${unitLabel}/hr·sun` });
   if (tm.solar_phase_offset_h != null) envParamRows.push({ label: 'Solar peak lag', value: `${tm.solar_phase_offset_h.toFixed(1)}h (peak at ${13 + Math.round(tm.solar_phase_offset_h)}:00)` });
   if (tm.avg_r_squared_passive != null && envConf !== 'none') {
@@ -2164,7 +2168,7 @@
   }
   const hintDelta = tm.unit === 'celsius' ? 1.7 : 3;
   const envHint = envConf === 'none'
-    ? (tm.k_vent_window != null || tm.k_solar != null)
+    ? (tm.k_vent_window != null || tm.k_vent_fan != null || tm.k_solar != null)
       ? `<p class="tm-hint">Ventilation data is being used for predictions. House envelope calibration improves with closed-window HVAC-off measurements.</p>`
       : `<p class="tm-hint">Needs a few hours of HVAC-off time with a ${hintDelta}${unitLabel}+ indoor-outdoor temperature difference.</p>`
     : '';
@@ -2554,6 +2558,7 @@
           ${engineRow('k_solar', 'k_solar', ` ${unitSym}/hr`)}
           ${engineRow('solar_phase_offset_h', 'solar_phase_offset', 'h')}
           ${engineRow('k_vent_window', 'k_vent_window', ' hr⁻¹')}
+          ${engineRow('k_vent_fan', 'k_vent_fan', ' hr⁻¹')}
           ${hvacRow()}
           <tr><td>Physics ODE</td><td>${odeVer}, eligible: ${eligible}${eligibleReason}</td></tr>
         </table>

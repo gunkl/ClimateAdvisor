@@ -27,6 +27,7 @@ from .const import (
     MIN_THERMAL_OBSERVATIONS,
     MIN_WEATHER_BIAS_OBSERVATIONS,
     OBS_TYPE_HVAC_HEAT,
+    REJECT_NO_K_PASSIVE,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
     REJECT_OLS_WRONG_SIGN,
@@ -136,20 +137,30 @@ def _grade_passive_confidence(cache: dict) -> str:
     """Compute confidence tier for k_passive based on combined observation count.
 
     Only observation types that write to k_passive are counted:
-      - passive_decay, fan_only_decay, hvac_heat, hvac_cool
+      - passive_decay, hvac_heat, hvac_cool
 
     Excluded types (they write to different cache fields):
-      - observation_count_vent  → writes to k_vent_window only
-        (guarded by _envelope_modes check in learning.py commit path)
+      - observation_count_vent_window / observation_count_vent_fan → write to
+        k_vent_window / k_vent_fan only (guarded by _envelope_modes check in
+        learning.py commit path)
       - observation_count_solar → writes to k_solar only
 
-    fan_only observations are an approximation: fan_only_decay does not write to
-    k_passive directly, but fan-only decay is a close proxy for envelope decay.
-    A dedicated confidence_k_vent field is deferred to a future follow-up.
+    Issue #587: fan_only_decay's observation_count_fan_only was previously folded in
+    here as an approximation — fan-only-no-windows genuinely resembles passive decay
+    with a small forced-convection perturbation, so it was treated as a close proxy
+    for envelope decay. That type is retired outright, and its count is DROPPED here
+    rather than replaced with observation_count_vent_window/observation_count_vent_fan:
+    window-open decay (and especially fan-driven ventilation) are NOT close proxies for
+    envelope-only decay — they measure a materially larger, different rate (the same
+    premise behind the existing gate-bridge guard's own over-prediction concern).
+    Folding either into *envelope* confidence would be scientifically wrong in a way
+    the original fan_only inclusion was not. This is a real, intentional behavior
+    change: houses previously getting confidence credit from fan_only_decay will show
+    slightly lower confidence_k_passive after upgrade — called out explicitly in the
+    CHANGELOG as deliberate, not a silent regression.
     """
     count = (
         cache.get("observation_count_passive", 0)
-        + cache.get("observation_count_fan_only", 0)
         + cache.get("observation_count_heat", 0)
         + cache.get("observation_count_cool", 0)
     )
@@ -160,6 +171,34 @@ def _grade_passive_confidence(cache: dict) -> str:
     if count < THERMAL_PASSIVE_CONF_HIGH:
         return "medium"
     return "high"
+
+
+def _ewma_update_field(cache: dict, field_name: str, value: float, alpha: float) -> None:
+    """Blend value into cache[field_name] via EWMA, initializing on first observation.
+
+    Factors out the `if cache.get(field) is None: cache[field] = value; else: cache[field]
+    = (1-alpha)*cache[field] + alpha*value` pattern that would otherwise be repeated per
+    field (Issue #587) — small, but the same class of duplication the vent-split trigger/
+    abort logic avoids. Immediately reusable by k_passive/k_active_heat/k_active_cool's
+    own EWMA blocks too if touched later (not required for this change).
+    """
+    if cache.get(field_name) is None:
+        cache[field_name] = value
+    else:
+        cache[field_name] = (1.0 - alpha) * cache[field_name] + alpha * value
+
+
+def _apply_two_param_solar_update(cache: dict, obs: dict, grade: str) -> None:
+    """Blend a 2-param vent-split commit's separated k_solar term into the cache.
+
+    Shared by both vent_window_decay and vent_fan_decay commits (Issue #587) — factored
+    out of what was previously written once for the single "ventilated" branch, now
+    shared across both split branches rather than copy-pasted.
+    """
+    k_sol = obs.get("k_solar")
+    if k_sol is not None and obs.get("two_param"):
+        alpha_sol = {"high": 0.3, "medium": 0.15, "low": 0.05}.get(grade, 0.05)
+        _ewma_update_field(cache, "k_solar", k_sol, alpha_sol)
 
 
 def _grade_swing_confidence(count: int) -> str:
@@ -417,6 +456,156 @@ def compute_k_passive_blocks(
     return compute_k_passive(synthetic_samples, min_samples=min_blocks - 1)
 
 
+def _interp_outdoor(times_hours: list[float], outdoors: list[float], t: float) -> float:
+    """Piecewise-linear interpolation of outdoor temp at time t (hours since window start).
+
+    Clamps to the first/last sample when t falls outside the window's time range.
+    Windows are short (at most a few dozen samples), so a linear scan is simple and
+    fast enough — no need for binary search.
+    """
+    if t <= times_hours[0]:
+        return outdoors[0]
+    if t >= times_hours[-1]:
+        return outdoors[-1]
+    for i in range(len(times_hours) - 1):
+        t0, t1 = times_hours[i], times_hours[i + 1]
+        if t0 <= t <= t1:
+            if t1 == t0:
+                return outdoors[i]
+            frac = (t - t0) / (t1 - t0)
+            return outdoors[i] + frac * (outdoors[i + 1] - outdoors[i])
+    return outdoors[-1]
+
+
+def _integrate_indoor_rk4(
+    t_start_indoor: float,
+    times_hours: list[float],
+    outdoors: list[float],
+    k: float,
+    dt_hours: float,
+    n_steps: int,
+) -> float:
+    """RK4 forward-integrate dT/dt = k*(T - T_out(t)) from t=0 to t=dt_hours.
+
+    T_out(t) is the piecewise-linear interpolation of the window's real per-sample
+    outdoor trace (_interp_outdoor) rather than a constant window-average — this is
+    the mechanism behind Defect A's time-varying-outdoor bias fix (Issue #587).
+    """
+    if n_steps < 1:
+        n_steps = 1
+    h = dt_hours / n_steps
+    t = 0.0
+    temp = t_start_indoor
+    for _ in range(n_steps):
+
+        def _deriv(tt: float, tt_indoor: float) -> float:
+            return k * (tt_indoor - _interp_outdoor(times_hours, outdoors, tt))
+
+        k1 = _deriv(t, temp)
+        k2 = _deriv(t + h / 2.0, temp + h / 2.0 * k1)
+        k3 = _deriv(t + h / 2.0, temp + h / 2.0 * k2)
+        k4 = _deriv(t + h, temp + h * k3)
+        temp += (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        t += h
+    return temp
+
+
+def compute_k_passive_endpoint(
+    window: list[dict],
+    k_min: float,
+    k_max: float,
+) -> float | None:
+    """Bisection root-find k using the window's real per-sample outdoor trace (Issue #587).
+
+    Fixes Defect A: the prior closed-form endpoint formula
+    (``ratio = (T_end - T_out_avg) / (T_start - T_out_avg); k = ln(ratio) / dt``) collapsed
+    the window's outdoor readings into a single scalar average, assuming outdoor
+    temperature held constant across the whole window. It doesn't — outdoor swings
+    through the day — and this produced k values 1.3x-1.9x higher in magnitude than the
+    ODE-consistent true rate on real overnight windows (confirmed via independent RK4
+    numerical integration against the same raw samples).
+
+    Root-finds (bisection) the k value whose RK4 forward-integration of
+    dT/dt = k*(T - T_out(t)) — using the window's real per-sample outdoor trace,
+    piecewise-linearly interpolated between samples (_interp_outdoor) — reproduces the
+    observed T_end starting from T_start.
+
+    Stays bookend-only on the *indoor* side (#141's blip-immunity design constraint,
+    reaffirmed for this fix): only T_start/T_end (window[0]["indoor"]/window[-1]["indoor"])
+    ever feed the root-find target — no interior indoor samples are read, so a mid-window
+    indoor sensor blip cannot skew the result. Only the *outdoor* series gains full
+    per-sample resolution. On a 2-sample window, piecewise-linear interpolation over the
+    2 outdoor points *is* the whole trace, so the result naturally matches the old
+    closed-form answer in that degenerate case.
+
+    Args:
+        window: chart_log window entries — dicts with "ts" (ISO string), "indoor" (°F),
+            "outdoor" (°F), ordered by time, at least 2 entries.
+        k_min: Lower bracket bound for bisection (e.g. THERMAL_K_PASSIVE_MIN).
+        k_max: Upper bracket bound for bisection (e.g. THERMAL_K_PASSIVE_MAX).
+
+    Returns:
+        The root-found k (hr⁻¹), or None if no root exists in [k_min, k_max] — the same
+        regime-filter role the old ratio<=0/ratio>=1.0 reject played: an unreachable
+        T_end given the real outdoor path means this window doesn't fit a single-k decay
+        model within the physically valid range, so the caller should fall back to
+        block-OLS (Estimator B) instead.
+    """
+    if len(window) < 2:
+        return None
+
+    try:
+        ts_list = [datetime.fromisoformat(s["ts"]) for s in window]
+    except (ValueError, KeyError, TypeError):
+        return None
+    ts_list = [ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts for ts in ts_list]
+    t0_epoch = ts_list[0].timestamp()
+    times_hours = [(ts.timestamp() - t0_epoch) / 3600.0 for ts in ts_list]
+    try:
+        outdoors = [float(s["outdoor"]) for s in window]
+        t_start = float(window[0]["indoor"])
+        t_end = float(window[-1]["indoor"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    dt_hours = times_hours[-1]
+    if dt_hours <= 0:
+        return None
+
+    # At least 4 RK4 sub-steps per sample interval, floor of 40 total steps so even a
+    # 2-sample window integrates accurately.
+    n_steps = max(40, (len(window) - 1) * 4)
+
+    def _residual(k: float) -> float:
+        return _integrate_indoor_rk4(t_start, times_hours, outdoors, k, dt_hours, n_steps) - t_end
+
+    f_lo = _residual(k_min)
+    f_hi = _residual(k_max)
+
+    if f_lo == 0.0:
+        return k_min
+    if f_hi == 0.0:
+        return k_max
+    if (f_lo > 0) == (f_hi > 0):
+        # No sign change across the bracket — no single-k decay model in the valid range
+        # reproduces this window's observed T_end given its real outdoor path.
+        return None
+
+    lo, hi = k_min, k_max
+    flo = f_lo
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        fmid = _residual(mid)
+        if fmid == 0.0:
+            return mid
+        if (flo > 0) == (fmid > 0):
+            lo = mid
+            flo = fmid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
 def compute_k_env_solar(
     samples: list[dict],
     min_samples: int = 4,
@@ -550,6 +739,68 @@ def compute_k_active(
     r_squared = max(0.0, r_squared)
 
     return k_active, r_squared
+
+
+def compute_k_solar(
+    samples: list[dict],
+    k_passive: float,
+) -> tuple[float | None, float]:
+    """Estimate solar-gain rate (k_solar, °F/hr) from solar_gain window samples.
+
+    Mirrors compute_k_active's per-interval subtraction pattern: the raw observed
+    warming rate over each interval already includes ordinary conduction toward
+    (or away from) outdoor temperature — that contribution, `k_passive * delta`,
+    must be subtracted before what remains can be credited to solar gain (Issue
+    #587, Defect B). Without this subtraction, a purely-conductive warming window
+    (e.g. a warm outdoor with zero solar physics) is misreported as solar gain.
+
+    For each interval:
+        k_solar_i = rate_i - k_passive * delta_i
+
+    Args:
+        samples: Solar-gain window samples (indoor_temp_f, outdoor_temp_f,
+            elapsed_minutes), at least 2.
+        k_passive: Cached k_passive (envelope decay rate, hr⁻¹, always negative)
+            from the current best thermal model — the subtrahend, never itself
+            committed as part of this observation.
+
+    Returns:
+        Tuple of (k_solar, r_squared). k_solar is None when fewer than 2 samples
+        are available or all intervals have non-positive dt. Bounded to
+        [0.0, THERMAL_K_SOLAR_MAX_F_PER_HR] — a negative result (i.e. subtraction
+        would credit "negative solar gain") is clamped to 0.0.
+    """
+    if len(samples) < 2:
+        return None, 0.0
+
+    indoor = [s["indoor_temp_f"] for s in samples]
+    outdoor = [s["outdoor_temp_f"] for s in samples]
+    elapsed = [s["elapsed_minutes"] for s in samples]
+
+    k_solars: list[float] = []
+    rates: list[float] = []
+    for i in range(len(indoor) - 1):
+        dt_hours = (elapsed[i + 1] - elapsed[i]) / 60.0
+        if dt_hours <= 0:
+            continue
+        rate = (indoor[i + 1] - indoor[i]) / dt_hours
+        delta = ((indoor[i] + indoor[i + 1]) / 2.0) - ((outdoor[i] + outdoor[i + 1]) / 2.0)
+        k_solar_i = rate - k_passive * delta
+        k_solars.append(k_solar_i)
+        rates.append(rate)
+
+    if not k_solars:
+        return None, 0.0
+
+    k_solar = sum(k_solars) / len(k_solars)
+    k_solar = max(0.0, min(THERMAL_K_SOLAR_MAX_F_PER_HR, k_solar))
+
+    var_residual = sum((k_s - k_solar) ** 2 for k_s in k_solars)
+    var_total = sum((r - sum(rates) / len(rates)) ** 2 for r in rates)
+    r_squared = 1.0 - (var_residual / var_total) if var_total > 0 else 0.0
+    r_squared = max(0.0, r_squared)
+
+    return k_solar, r_squared
 
 
 def compute_k_active_single_point(
@@ -856,8 +1107,8 @@ class LearningEngine:
                 "k_passive": None,
                 "k_active_heat": None,
                 "k_active_cool": None,
-                "k_vent": None,
                 "k_vent_window": None,
+                "k_vent_fan": None,
                 "k_solar": None,
                 "solar_phase_offset_h": None,
                 "solar_phase_offset_last_obs_date": None,
@@ -867,8 +1118,8 @@ class LearningEngine:
                 "observation_count_heat": 0,
                 "observation_count_cool": 0,
                 "observation_count_passive": 0,
-                "observation_count_fan_only": 0,
-                "observation_count_vent": 0,
+                "observation_count_vent_window": 0,
+                "observation_count_vent_fan": 0,
                 "observation_count_solar": 0,
                 "swing_heat_f": None,
                 "swing_cool_f": None,
@@ -879,67 +1130,65 @@ class LearningEngine:
                 "confidence_k_passive": "none",
                 "confidence_k_hvac": "none",
             }
+        elif ("k_vent" in cache or "observation_count_fan_only" in cache) and not getattr(
+            self, "_logged_legacy_k_vent_present", False
+        ):
+            # Issue #587: old-format persisted cache (pre-retirement) — present but
+            # ignored going forward (k_vent's sole ODE consumer was always called with
+            # ventilation_active=False, so it never affected a live prediction). Logged
+            # once per process so the upgrade is visible in logs rather than silently
+            # invisible via tolerant .get() calls elsewhere.
+            _LOGGER.info(
+                "Thermal model cache: legacy k_vent/observation_count_fan_only key(s) "
+                "found on state load — present but ignored (Issue #587)"
+            )
+            self._logged_legacy_k_vent_present = True
 
         k_p = obs.get("k_passive")
         mode = obs.get("hvac_mode")
 
-        # k_passive tracks envelope-only decay — fan_only and ventilated observations
-        # must NOT write here.  fan_only k_p reflects fan-modified heat transfer (→ k_vent);
-        # ventilated k_p reflects window-open heat transfer (→ k_vent_window).  Mixing either
-        # into k_passive would bias the envelope rate used for bedtime-setback predictions.
-        _envelope_modes = mode not in ("fan_only", "ventilated")
+        # k_passive tracks envelope-only decay — vent_window/vent_fan observations must
+        # NOT write here. vent_window k_p reflects window-open heat transfer (→
+        # k_vent_window); vent_fan k_p reflects window-open+fan-driven heat transfer (→
+        # k_vent_fan). Mixing either into k_passive would bias the envelope rate used for
+        # bedtime-setback predictions. (Issue #587: fan_only_decay/"fan_only" retired —
+        # it used to write k_vent, a separate now-removed cache field.)
+        _envelope_modes = mode not in ("vent_window", "vent_fan")
         if k_p is not None and _envelope_modes:
-            if cache["k_passive"] is None:
-                cache["k_passive"] = k_p
-            else:
-                cache["k_passive"] = (1.0 - alpha) * cache["k_passive"] + alpha * k_p
+            _ewma_update_field(cache, "k_passive", k_p, alpha)
 
         # Update avg_r_squared_passive (simple EWMA) — same guard as k_passive.
-        # Ventilated/fan R² reflects fit quality of a different physical regime and
-        # must not contaminate the envelope-fit confidence metric.
+        # Vent-split R² reflects fit quality of a different physical regime and must
+        # not contaminate the envelope-fit confidence metric.
         r2_p = obs.get("r_squared_passive")
         if r2_p is not None and _envelope_modes:
-            if cache["avg_r_squared_passive"] is None:
-                cache["avg_r_squared_passive"] = r2_p
-            else:
-                cache["avg_r_squared_passive"] = (1.0 - alpha) * cache["avg_r_squared_passive"] + alpha * r2_p
+            _ewma_update_field(cache, "avg_r_squared_passive", r2_p, alpha)
         k_a = obs.get("k_active")
         if mode == "heat" and k_a is not None:
-            if cache["k_active_heat"] is None:
-                cache["k_active_heat"] = k_a
-            else:
-                cache["k_active_heat"] = (1.0 - alpha) * cache["k_active_heat"] + alpha * k_a
+            _ewma_update_field(cache, "k_active_heat", k_a, alpha)
             cache["observation_count_heat"] = cache.get("observation_count_heat", 0) + 1
         elif mode == "cool" and k_a is not None:
-            if cache["k_active_cool"] is None:
-                cache["k_active_cool"] = k_a
-            else:
-                cache["k_active_cool"] = (1.0 - alpha) * cache["k_active_cool"] + alpha * k_a
+            _ewma_update_field(cache, "k_active_cool", k_a, alpha)
             cache["observation_count_cool"] = cache.get("observation_count_cool", 0) + 1
         elif mode == "passive":
             cache["observation_count_passive"] = cache.get("observation_count_passive", 0) + 1
-        elif mode == "fan_only":
+        elif mode in ("vent_window", "vent_fan"):
+            # Issue #587: one DRY'd branch resolving the target field/count names once,
+            # rather than two near-duplicate branches (the same drift risk 2.2/2.3's
+            # trigger/abort split avoids) — see _VENT_SPLIT_TYPES' rationale.
+            _field = "k_vent_window" if mode == "vent_window" else "k_vent_fan"
+            _count_field = "observation_count_vent_window" if mode == "vent_window" else "observation_count_vent_fan"
+            _was_unset = cache.get(_field) is None
             if k_p is not None:
-                if cache.get("k_vent") is None:
-                    cache["k_vent"] = k_p
-                else:
-                    cache["k_vent"] = (1.0 - alpha) * cache["k_vent"] + alpha * k_p
-            cache["observation_count_fan_only"] = cache.get("observation_count_fan_only", 0) + 1
-        elif mode == "ventilated":
-            if k_p is not None:
-                if cache.get("k_vent_window") is None:
-                    cache["k_vent_window"] = k_p
-                else:
-                    cache["k_vent_window"] = (1.0 - alpha) * cache["k_vent_window"] + alpha * k_p
-            # If this was a 2-param commit, also update k_solar from the separated solar term.
-            k_sol = obs.get("k_solar")
-            if k_sol is not None and obs.get("two_param"):
-                alpha_sol = {"high": 0.3, "medium": 0.15, "low": 0.05}.get(grade, 0.05)
-                if cache["k_solar"] is None:
-                    cache["k_solar"] = k_sol
-                else:
-                    cache["k_solar"] = (1.0 - alpha_sol) * cache["k_solar"] + alpha_sol * k_sol
-            cache["observation_count_vent"] = cache.get("observation_count_vent", 0) + 1
+                _ewma_update_field(cache, _field, k_p, alpha)
+                if _was_unset:
+                    _LOGGER.info(
+                        "%s: first observation committed (Issue #587) k=%.4f",
+                        _field,
+                        k_p,
+                    )
+            _apply_two_param_solar_update(cache, obs, grade)
+            cache[_count_field] = cache.get(_count_field, 0) + 1
         elif mode == "solar":
             k_solar = obs.get("k_solar")
             if k_solar is not None:
@@ -989,8 +1238,8 @@ class LearningEngine:
                 "k_passive": None,
                 "k_active_heat": None,
                 "k_active_cool": None,
-                "k_vent": None,
                 "k_vent_window": None,
+                "k_vent_fan": None,
                 "k_solar": None,
                 "solar_phase_offset_h": None,
                 "solar_phase_offset_last_obs_date": None,
@@ -1000,8 +1249,8 @@ class LearningEngine:
                 "observation_count_heat": 0,
                 "observation_count_cool": 0,
                 "observation_count_passive": 0,
-                "observation_count_fan_only": 0,
-                "observation_count_vent": 0,
+                "observation_count_vent_window": 0,
+                "observation_count_vent_fan": 0,
                 "observation_count_solar": 0,
                 "swing_heat_f": None,
                 "swing_cool_f": None,
@@ -1188,8 +1437,8 @@ class LearningEngine:
             "k_active_heat": k_active_heat,
             "k_active_cool": k_active_cool,
             "k_passive": k_passive,
-            "k_vent": cache.get("k_vent"),
             "k_vent_window": cache.get("k_vent_window"),
+            "k_vent_fan": cache.get("k_vent_fan"),
             "k_solar": k_solar,
             "solar_phase_offset_h": _resolve_solar_phase_offset(cache),
             "solar_phase_offset_ac_h": cache.get("solar_phase_offset_ac_h"),
@@ -1202,8 +1451,8 @@ class LearningEngine:
             "observation_count_cool": count_cool,
             "observation_count_total": total,
             "observation_count_passive": cache.get("observation_count_passive", 0),
-            "observation_count_fan_only": cache.get("observation_count_fan_only", 0),
-            "observation_count_vent": cache.get("observation_count_vent", 0),
+            "observation_count_vent_window": cache.get("observation_count_vent_window", 0),
+            "observation_count_vent_fan": cache.get("observation_count_vent_fan", 0),
             "observation_count_solar": _solar_obs,
             "confidence": confidence,
             "confidence_k_passive": _grade_passive_confidence(cache),
@@ -1238,19 +1487,32 @@ class LearningEngine:
           None when OLS never ran (pre-OLS rejection path).
 
         force_grade overrides the computed confidence grade when set.
-        obs_type selects the commit path: passive_decay/fan_only_decay/ventilated_decay
-        use k_passive only; solar_gain computes mean rate; hvac_heat/hvac_cool use
-        the existing two-parameter path.
+        obs_type selects the commit path: passive_decay/vent_window_decay/vent_fan_decay
+        use k_passive only; solar_gain subtracts cached k_passive's conductive
+        contribution before attributing the remainder to k_solar (Issue #587,
+        Defect B — see compute_k_solar); hvac_heat/hvac_cool use
+        the existing two-parameter path. (Issue #587: fan_only_decay retired; the
+        vent-split's shared solar-separation logic is regime-agnostic physics —
+        separating conduction/ventilation from solar gain works identically whether
+        the channel is window-only or window+fan — so it applies to both new types
+        unchanged, just widening this guard.)
         """
-        if obs_type in ("passive_decay", "fan_only_decay", "ventilated_decay"):
+        _decay_tag_map = {
+            "passive_decay": "passive",
+            "vent_window_decay": "vent_window",
+            "vent_fan_decay": "vent_fan",
+        }
+        if obs_type in ("passive_decay", "vent_window_decay", "vent_fan_decay"):
             samples = event.get("samples", event.get("active_samples", []))
+            hvac_mode_tag_2p = _decay_tag_map[obs_type]
 
-            # For ventilated_decay: attempt 2-param OLS as PRIMARY path when solar_factor
-            # variation is sufficient.  This handles the warm-sunny-day case where solar
-            # gain drives a positive net dT/dt (indoor rising) even though outdoor is cooler
-            # than indoor.  1-param OLS sees a positive k and raises ols_wrong_sign — so
-            # 2-param must be tried FIRST to separate k_env (ventilation) from k_solar.
-            if obs_type == "ventilated_decay":
+            # For vent_window_decay/vent_fan_decay: attempt 2-param OLS as PRIMARY path
+            # when solar_factor variation is sufficient.  This handles the warm-sunny-day
+            # case where solar gain drives a positive net dT/dt (indoor rising) even
+            # though outdoor is cooler than indoor.  1-param OLS sees a positive k and
+            # raises ols_wrong_sign — so 2-param must be tried FIRST to separate k_env
+            # (ventilation) from k_solar.
+            if obs_type in ("vent_window_decay", "vent_fan_decay"):
                 _sf_vals = [s.get("solar_factor", 0.0) for s in samples]
                 _sf_range = max(_sf_vals) - min(_sf_vals) if len(_sf_vals) >= 2 else 0.0
                 if _sf_range >= THERMAL_SOLAR_FACTOR_MIN_RANGE:
@@ -1270,7 +1532,7 @@ class LearningEngine:
                             "event_id": event.get("obs_id", event.get("event_id", str(uuid.uuid4()))),
                             "timestamp": now_str,
                             "date": date_str,
-                            "hvac_mode": "ventilated",
+                            "hvac_mode": hvac_mode_tag_2p,
                             "k_passive": round(_k_env_2p, 5),
                             "k_solar": round(_k_solar_2p, 3),
                             "k_active": None,
@@ -1282,8 +1544,9 @@ class LearningEngine:
                             "two_param": True,
                         }
                         _LOGGER.info(
-                            "Thermal obs 2-param PRIMARY commit: mode=ventilated "
+                            "Thermal obs 2-param PRIMARY commit: mode=%s "
                             "k_env=%.4f k_solar=%.3f R²=%.3f sf_range=%.2f n=%d",
+                            hvac_mode_tag_2p,
                             _k_env_2p,
                             _k_solar_2p,
                             _r2_2p,
@@ -1321,11 +1584,6 @@ class LearningEngine:
                 return None, _reject_code, r2_p
             now_str = dt_util.now().isoformat()
             date_str = dt_util.now().date().isoformat()
-            _decay_tag_map = {
-                "passive_decay": "passive",
-                "fan_only_decay": "fan_only",
-                "ventilated_decay": "ventilated",
-            }
             hvac_mode_tag = _decay_tag_map[obs_type]
             obs = {
                 "event_id": event.get("obs_id", event.get("event_id", str(uuid.uuid4()))),
@@ -1340,10 +1598,10 @@ class LearningEngine:
                 "confidence_grade": force_grade or "low",
                 "schema_version": 2,
             }
-            # For ventilated_decay: attempt adaptive 2-param OLS upgrade when sf_range
-            # is below the primary-path threshold (< 0.30) but 1-param succeeded.
-            # Falls back silently to 1-param result if bounds checks fail.
-            if obs_type == "ventilated_decay":
+            # For vent_window_decay/vent_fan_decay: attempt adaptive 2-param OLS upgrade
+            # when sf_range is below the primary-path threshold (< 0.30) but 1-param
+            # succeeded. Falls back silently to 1-param result if bounds checks fail.
+            if obs_type in ("vent_window_decay", "vent_fan_decay"):
                 _k_env_2p, _k_solar_2p, _r2_2p = compute_k_env_solar(samples)
                 if _k_env_2p is not None and _k_solar_2p is not None and _r2_2p is not None:
                     _k_env_in_bounds = THERMAL_K_PASSIVE_MIN <= _k_env_2p <= 0.001
@@ -1354,7 +1612,8 @@ class LearningEngine:
                         obs["r_squared_passive"] = round(_r2_2p, 3)
                         obs["two_param"] = True
                         _LOGGER.info(
-                            "Thermal observation 2-param upgrade: mode=ventilated k_env=%.4f k_solar=%.3f R²=%.3f",
+                            "Thermal observation 2-param upgrade: mode=%s k_env=%.4f k_solar=%.3f R²=%.3f",
+                            hvac_mode_tag,
                             _k_env_2p,
                             _k_solar_2p,
                             _r2_2p,
@@ -1379,9 +1638,24 @@ class LearningEngine:
             total_dt_hours = (elapsed[-1] - elapsed[0]) / 60.0
             if total_dt_hours <= 0:
                 return None, REJECT_SMALL_DELTA, None
-            mean_rate = (indoor_temps[-1] - indoor_temps[0]) / total_dt_hours
-            if mean_rate < 0:
-                return None, REJECT_OLS_WRONG_SIGN, None
+            # Diagnostic/shadow-log only — the OLD (pre-#587-Defect-B) formula credited
+            # this entire raw rate to solar gain with no subtraction of the ordinary
+            # conductive contribution. Never committed; kept only to log how much the
+            # fixed subtraction below diverges from it (Part 2.10 observability).
+            mean_rate_old_style = (indoor_temps[-1] - indoor_temps[0]) / total_dt_hours
+
+            cache = self._state.thermal_model_cache or {}
+            k_passive = cache.get("k_passive")
+            if k_passive is None:
+                # Fresh install / no envelope model yet — nothing to subtract, and
+                # committing the raw rate as k_solar would silently reintroduce the
+                # conduction-attribution bug this reject exists to prevent.
+                return None, REJECT_NO_K_PASSIVE, None
+
+            k_solar, r2_solar = compute_k_solar(samples, k_passive)
+            if k_solar is None:
+                return None, REJECT_TOO_FEW_SAMPLES, None
+
             now_str = dt_util.now().isoformat()
             date_str = dt_util.now().date().isoformat()
             obs = {
@@ -1391,7 +1665,7 @@ class LearningEngine:
                 "hvac_mode": "solar",
                 "k_passive": None,
                 "k_active": None,
-                "k_solar": round(mean_rate, 3),
+                "k_solar": round(k_solar, 3),
                 "r_squared_passive": None,
                 "r_squared_active": None,
                 "sample_count_post": len(samples),
@@ -1399,9 +1673,22 @@ class LearningEngine:
                 "schema_version": 2,
             }
             _LOGGER.info(
-                "Thermal observation committed: mode=solar grade=%s k_solar=%.3f",
+                "Thermal observation committed: mode=solar grade=%s k_solar=%.3f R²=%.3f",
                 obs["confidence_grade"],
-                mean_rate,
+                k_solar,
+                r2_solar,
+            )
+            _subtraction_pct = (
+                100 * (mean_rate_old_style - k_solar) / mean_rate_old_style if mean_rate_old_style else 0.0
+            )
+            _LOGGER.info(
+                "solar_gain commit [Issue #587]: k_solar=%.3f raw_mean_rate=%.3f k_passive_used=%.4f "
+                "subtraction_pct=%.1f%% n=%d",
+                k_solar,
+                mean_rate_old_style,
+                k_passive,
+                _subtraction_pct,
+                len(samples),
             )
             self.record_thermal_observation(obs)
             return obs, None, None

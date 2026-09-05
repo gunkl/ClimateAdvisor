@@ -42,12 +42,12 @@ from .const import (
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
     MAX_WEATHER_BIAS_APPLY_F,
-    OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
     OBS_TYPE_PASSIVE_DECAY,
     OBS_TYPE_SOLAR_GAIN,
-    OBS_TYPE_VENTILATED_DECAY,
+    OBS_TYPE_VENT_FAN_DECAY,
+    OBS_TYPE_VENT_WINDOW_DECAY,
     THERMAL_OBS_CAP,
     THERMAL_SWING_DEFAULT_F,
 )
@@ -462,6 +462,7 @@ def format_engine_status_for_ai(engine_status: dict) -> str:
     lines.append(_engine_line("k_solar", "k_solar", " F/hr"))
     lines.append(_engine_line("solar_phase_offset_h", "solar_phase_offset_h", "h"))
     lines.append(_engine_line("k_vent_window", "k_vent_window", " hr^-1"))
+    lines.append(_engine_line("k_vent_fan", "k_vent_fan", " hr^-1"))
 
     # k_active_hvac has a different shape -- values nested under "value": {"heat": ..., "cool": ...}
     hvac_info = engine_status.get("k_active_hvac", {})
@@ -813,8 +814,8 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         OBS_TYPE_HVAC_HEAT,
         OBS_TYPE_HVAC_COOL,
         OBS_TYPE_PASSIVE_DECAY,
-        OBS_TYPE_FAN_ONLY_DECAY,
-        OBS_TYPE_VENTILATED_DECAY,
+        OBS_TYPE_VENT_WINDOW_DECAY,
+        OBS_TYPE_VENT_FAN_DECAY,
         OBS_TYPE_SOLAR_GAIN,
     ]
 

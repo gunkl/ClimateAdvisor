@@ -169,9 +169,11 @@ def _make_build_state_stub(mod, fit_date):
     coord.claude_client = None
     coord._pred_archive = {}
     coord._passive_k_backfilled = True
-    coord._vent_k_backfilled = True
+    coord._vent_window_k_backfilled = True
+    coord._vent_fan_k_backfilled = True
     coord._passive_k_backfill_v2 = True
-    coord._vent_k_backfill_v2 = True
+    coord._vent_window_k_backfill_v2 = True
+    coord._vent_fan_k_backfill_v2 = True
     coord._event_log = []
     coord._outdoor_temp_history = []
     coord._indoor_temp_history = []
@@ -219,9 +221,11 @@ def _make_restore_coord_stub():
     coord.claude_client = None
     coord._event_log = []
     coord._passive_k_backfilled = False
-    coord._vent_k_backfilled = False
+    coord._vent_window_k_backfilled = False
+    coord._vent_fan_k_backfilled = False
     coord._passive_k_backfill_v2 = False
-    coord._vent_k_backfill_v2 = False
+    coord._vent_window_k_backfill_v2 = False
+    coord._vent_fan_k_backfill_v2 = False
     coord._solar_phase_backfill = False
     coord._last_solar_phase_fit_date = None
 

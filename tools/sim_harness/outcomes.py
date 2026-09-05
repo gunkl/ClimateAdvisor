@@ -113,6 +113,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from tools.sim_harness.multi_zone_assertions import _FIELD_NOT_FOUND, resolve_dotted_field
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1087,6 +1089,30 @@ def check_assertion(
             if _naive_iso(ev_ts) >= since:
                 return False
         return expect
+
+    # --- field_equals (Issue #587, Part 3.6 groundwork) ---
+    # Single-zone dotted-path field check — reuses the multi-zone
+    # resolve_dotted_field() mechanism (tools/sim_harness/multi_zone_assertions.py)
+    # scoped down to one zone's ProductionRunResult, so a new golden scenario can
+    # assert against any field reachable off `result` (most usefully
+    # `engine_state.<attr>` for a flag the engine snapshot already carries, e.g.
+    # `engine_state._fan_active`) without needing a bespoke assertion type written
+    # for it first. Smaller and more broadly reusable than a one-off type.
+    # Payload: {"field": "<dotted.path>", "value": <expected>}.
+    # `_FIELD_NOT_FOUND` (not None) distinguishes "field genuinely is None" from
+    # "field path is wrong and this assertion is vacuously passing for the wrong
+    # reason" — a typo'd path fails loudly instead of silently matching value=None.
+    if expect == "field_equals":
+        field_path = assertion.get("field")
+        expected_value = assertion.get("value")
+        if not field_path:
+            return False
+        actual = resolve_dotted_field(result, field_path)
+        if actual is _FIELD_NOT_FOUND:
+            return False
+        if actual == expected_value:
+            return expect
+        return False
 
     return False
 

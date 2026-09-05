@@ -631,6 +631,25 @@ def check_assertion(
             return "comfort_family"
         return False
 
+    # --- comfort_family_switch_by (Issue #858) ---
+    # New assertion type — the existing `comfort_family` check above only reads
+    # FINAL engine state, so it cannot express "switched by time T, not several
+    # cycles later", which is exactly what this issue's regression protection
+    # needs to prove (a floor/ceiling breach must resolve within one reactive
+    # tick, not wait out the ~30-minute apply_classification() cycle). Scans
+    # the raw event_log directly for the #843 `comfort_family_switch` event
+    # (payload: resolved_family/reason/deadband_applied_f/minutes_since_*)
+    # timestamped at or before `by`. Payload: {"family": str, "by": ISO str}.
+    if expect == "comfort_family_switch_by":
+        expected_family = assertion.get("family")
+        by = assertion.get("by", "")
+        for event_type, payload, ts in result.event_log:
+            if event_type != "comfort_family_switch" or ts is None:
+                continue
+            if payload.get("resolved_family") == expected_family and _naive_iso(ts) <= by:
+                return "comfort_family_switch_by"
+        return False
+
     # --- fan_not_active (Issue #620) ---
     # Purely additive, same pattern as nat_vent_not_active immediately above — reads the
     # production engine's final _fan_active flag. Needed because a fan-off-grace

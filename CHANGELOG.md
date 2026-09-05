@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.23] — 2026-09-05
+
+- Fix #858: a comfort-family (heat/cool) switch at the floor or ceiling now happens within seconds of the temperature reading, instead of waiting up to 30 minutes for the next scheduled check. A confirmed live incident showed indoor temperature falling 6°F below the comfort floor before the automation caught up.
+
 ## [0.7.22] — 2026-09-05
 
 - Fix #788: the briefing no longer tells you to reopen windows shortly after telling you to close them — that recommendation was never valid for a comfort-floor close. The earlier fix under this issue only corrected the reopen sentence's wording; the underlying `recovery_time` computation was still populated for a comfort-floor cutoff even though the "outdoor cools back below indoor" signal it reports on is already true at the moment of that cutoff.

@@ -1,0 +1,121 @@
+{
+  "name": "issue_858_comfort_family_reactive_floor_breach",
+  "description": "The comfort-family FSM must resolve a floor breach reactively, on the thermostatic temperature tick, without waiting for a second explicit classification cycle (Issue #858). Reproduces the live incident's shape: a warm day (native cooling), recency window cleared (cold-start engine, nothing recorded as recently cooling), indoor falls below comfort_heat -- the switch to heat must land within one sustain-confirm window of the first breach reading, driven purely by temp_update events.",
+  "source": "issue-report",
+  "issue": 858,
+  "notes": [
+    "Occupant impact: on a live 2-zone install (Zone \"Simulated 2\"), indoor fell from 67F to",
+    "62F -- 6F below the 68F comfort floor -- over 2h40m overnight before heat engaged, because",
+    "the comfort-family FSM (Issue #827) only re-evaluated on apply_classification()'s ~30-minute",
+    "scheduled cycle. Unlike nat-vent (nat_vent_temperature_check()) and fan control",
+    "(fan_thermostat_check()), which already react to every current_temperature tick via",
+    "coordinator._async_thermostat_changed, the comfort-family defense had no equivalent.",
+    "",
+    "Root cause investigation: a deterministic reproduction driving comfort_family_decision.py/",
+    "comfort_family_fsm.py directly with this incident's exact recorded values (67->66->65->64->",
+    "63->62F, floor=68, day_type=warm, 30-minute ticks, recency window already cleared) found NO",
+    "defect in that pure decision logic -- given a genuinely-cleared recency window, it already",
+    "resolves within one cycle. The fix is therefore to remove the up-to-30-minute ceiling on",
+    "when a cycle happens (comfort_family_temperature_check(), wired into",
+    "coordinator._async_thermostat_changed), not to change the decision math -- see",
+    "comfort_family_temperature_check()'s own docstring in automation.py.",
+    "",
+    "This scenario proves the fix directly: only ONE classification event exists (at 06:00), and",
+    "the switch still lands by 06:17 -- driven entirely by temp_update events, which is only",
+    "possible because comfort_family_temperature_check() now re-enters apply_classification()",
+    "reactively. Before this fix, this exact event sequence would never switch at all within the",
+    "scenario's timeline (no second classification event ever fires to give the FSM another look).",
+    "",
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness (revert-test): removing the coordinator._async_thermostat_changed",
+    "    wiring (or the comfort_family_temperature_check() call it makes) makes this scenario",
+    "    fail -- comfort_family_switch_by would never fire, since no classification event ever",
+    "    re-runs apply_classification() in this event list.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's automation logic table",
+    "    gets a new row for this reactive-tick path, cross-referenced from the existing #827",
+    "    deadband entries.",
+    "(c) Occupant experience: a person sleeping in a home whose indoor temperature drifts below",
+    "    the comfort floor now gets heat within about a minute and a half of the drift being",
+    "    detected, not up to 30 minutes (or, as in the live incident, several missed cycles and",
+    "    hours) later.",
+    "Deliberately mirrors issue_827_hot_day_deadband_cleared_escalates.json's config/day-type",
+    "shape (comfort_heat=68, fan_mode disabled) so the only material difference is HOW the",
+    "sustain-confirm ticks are delivered -- classification events there, temp_update events here."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-09-01T06:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification (native cooling). Only classification event in this scenario -- everything after this is driven by temp_update alone."
+    },
+    {
+      "time": "2026-09-01T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 55.0,
+      "note": "Indoor 70F, within band [68F, 74F]."
+    },
+    {
+      "time": "2026-09-01T06:15:00",
+      "type": "temp_update",
+      "indoor_f": 67.0,
+      "outdoor_f": 52.0,
+      "note": "First breach tick: 1F below comfort_heat(68). Cold-start engine -- nothing recorded as recently cooling, so the recency-gated deadband (Issue #843) is already 0F. comfort_family_temperature_check() fires reactively (indoor < band.floor), re-enters apply_classification() -- sustain-confirm candidate starts here, not yet confirmed (elapsed 0s < 90s)."
+    },
+    {
+      "time": "2026-09-01T06:17:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 51.0,
+      "note": "120s after the first breach tick (>90s sustain window). Reactive check fires again, sustain-confirms, escalates to heating -- with no second classification event ever having run."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-01T06:00:00",
+      "expect": "comfort_band_armed",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: warm day, indoor within band -- comfort band arms normally at the ceiling."
+    },
+    {
+      "at": "2026-09-01T06:17:00",
+      "expect": "comfort_family_switch_by",
+      "family": "heating",
+      "by": "2026-09-01T06:17:00",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Issue #858: the switch to heating lands by 06:17 -- 17 minutes after the scenario's only classification event, and 2 minutes after the first breach tick -- driven entirely by the reactive temperature-tick path, not a second scheduled classification cycle."
+    },
+    {
+      "at": "2026-09-01T06:17:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Final engine state confirms the family actually escalated, not just an emitted event."
+    },
+    {
+      "at": "2026-09-01T06:17:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_heat, not merely an internal flag."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A floor breach resolves to heat within one sustain-confirm window of the reactive temperature tick, without waiting for a second scheduled classification cycle (Issue #858).",
+    "observed_behavior": "Single classification event at 06:00 (warm/cool), indoor drifts below the floor via temp_update alone at 06:15 and 06:17 -- comfort family escalates to heating by 06:17, driven entirely by the reactive tick.",
+    "expected_behavior": "The comfort-family FSM must not depend on the ~30-minute apply_classification() cycle to notice a floor/ceiling breach -- every current_temperature tick must give it a chance to re-evaluate, matching nat-vent and fan control's existing reactivity."
+  }
+}

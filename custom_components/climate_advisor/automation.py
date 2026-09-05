@@ -746,6 +746,12 @@ class AutomationEngine:
         # re-application) don't each re-announce an identical band as a fresh event.
         self._last_comfort_band_signature: tuple[str, str, float] | None = None
         self._last_comfort_band_event_at: datetime | None = None
+        # Issue #858: the most recently applied band's floor/ceiling, cached so
+        # comfort_family_temperature_check() can cheaply tell whether a live
+        # temperature tick is a plausible breach worth re-evaluating, without
+        # re-deriving the band itself (which stays this call's job, via a full
+        # apply_classification() re-entry — see that method's own docstring).
+        self._last_comfort_band: ComfortBand | None = None
 
         # Economizer state (two-phase window cooling per Issue #27)
         # Phase "cool-down": AC runs to cool to set temp (outdoor air assists)
@@ -2885,6 +2891,14 @@ class AutomationEngine:
     async def _apply_comfort_band(self, band: ComfortBand, *, reason: str) -> None:
         """Arm the thermostat with the comfort band (always single-setpoint).
 
+        Issue #858: caches ``band`` on entry (before any early return below) so
+        ``comfort_family_temperature_check()`` always has the most recently
+        *intended* floor/ceiling to compare a live temperature tick against,
+        even on a cycle where the band ultimately isn't armed (e.g. a
+        door/window pause) — the reactive check only needs "is this tick a
+        plausible breach worth re-evaluating", not proof the band was actually
+        armed last cycle.
+
         Reads live thermostat capabilities and emits ONE ``set_temperature`` call with
         ``hvac_mode`` included so the thermostat is in the right mode and HA deduplication
         is bypassed:
@@ -2916,6 +2930,7 @@ class AutomationEngine:
         independent of this choke-point. This guard exists for the case nat-vent/WHF does
         *not* own HVAC yet the window is still open.
         """
+        self._last_comfort_band = band
         if (
             not self._natural_vent_active
             and not self._whf_owns_hvac()
@@ -5573,6 +5588,87 @@ class AutomationEngine:
             set_outdoor_exit_time=True,
             event_type=_event_type,
             event_payload=_event_payload,
+        )
+
+    async def comfort_family_temperature_check(
+        self, current_temp: float, *, predicted_indoor: list[dict] | None
+    ) -> None:
+        """Issue #858: reactive comfort-family re-evaluation on every thermostatic
+        tick, mirroring ``nat_vent_temperature_check()``/``fan_thermostat_check()``'s
+        existing shape and calling convention exactly.
+
+        Root cause this closes: the comfort-family FSM (Issue #827) previously
+        only re-evaluated on ``apply_classification()``'s ~30-minute scheduled
+        cycle — unlike nat-vent and fan control, which already react to every
+        ``current_temperature`` tick via ``coordinator._async_thermostat_changed``.
+        A confirmed live incident (Zone "Simulated 2", 2026-09-05) showed indoor
+        falling 6°F below the comfort floor before the scheduled cycle caught up.
+        A deterministic reproduction against this module's own decision/FSM
+        functions (``comfort_family_decision.py``/``comfort_family_fsm.py``)
+        found no defect in that pure decision logic — given a genuinely-cleared
+        recency window, it already resolves within one cycle. The fix is
+        therefore to remove the up-to-30-minute ceiling on when a cycle happens,
+        not to change the decision itself.
+
+        Deliberately reuses ``apply_classification()`` in full — the single
+        existing authority for this decision, per the #827 FSM consolidation —
+        rather than reconstructing a shortcut path. This is what inherits, with
+        no duplication, the two safety-critical guards a shortcut could
+        otherwise miss:
+          - the door/window pause choke-point inside ``_apply_comfort_band()``
+            (Issue #629) — never bypassable, since this call goes through the
+            exact same function;
+          - occupancy-aware away/vacation setback (Issue #85) — ``apply_classification()``
+            re-checks ``decide_scheduled_band_gate()`` fresh on every call, so a
+            reactive tick during an away/vacation period redirects to the
+            setback handlers exactly as the scheduled cycle already does, never
+            arming the home-mode comfort band.
+
+        Gated on a plausible breach against ``self._last_comfort_band`` (cached
+        by ``_apply_comfort_band()``) so this does real work only when the tick
+        could actually matter — mirrors the ``_fan_active or _natural_vent_active``
+        gating style the two sibling checks already use, rather than re-running
+        the full classification pipeline on every insignificant fluctuation.
+
+        Args:
+            current_temp: Current indoor temperature in °F.
+            predicted_indoor: Caller-sourced (mirrors ``outdoor`` in
+                ``nat_vent_temperature_check()``) — the coordinator's own
+                ``self._last_predicted_indoor``, which this engine has no
+                access to directly. Passed straight through to
+                ``apply_classification()``.
+        """
+        classification = self._current_classification
+        if classification is None or classification.hvac_mode not in ("heat", "cool"):
+            return
+        if self._manual_override_active or self._override_confirm_pending:
+            return
+        if self._natural_vent_active or self._whf_owns_hvac():
+            # Nat-vent/WHF owns HVAC — same territory nat_vent_temperature_check()/
+            # fan_thermostat_check() already cover reactively; the comfort-family
+            # FSM itself also defers here (comfort_family_decision.py's
+            # NOT_APPLICABLE branch), so there is nothing for this check to do.
+            return
+        band = self._last_comfort_band
+        if band is None:
+            return
+        if not (current_temp < band.floor or current_temp > band.ceiling):
+            return
+
+        _LOGGER.debug(
+            "Comfort family reactive tick: zone=%s indoor=%.1f floor=%.1f ceiling=%.1f — plausible breach,"
+            " re-evaluating now instead of waiting for the next scheduled cycle",
+            self.climate_entity,
+            current_temp,
+            band.floor,
+            band.ceiling,
+        )
+        await self.apply_classification(
+            classification,
+            predicted_indoor=predicted_indoor,
+            indoor_temp=current_temp,
+            nat_vent_cutoff=self._nat_vent_cutoff,
+            comfort_floor_crossing_time=self._comfort_floor_crossing_time,
         )
 
     async def reconcile_fan_on_startup(
@@ -8552,6 +8648,30 @@ class AutomationEngine:
         )
         event = ComfortFamilyEvent(kind=ComfortFamilyEventKind.TICK, inputs=fsm_inputs)
         result = _comfort_family_fsm_transition(current_state, event, dwell_state=dwell_state)
+
+        # Issue #858: per-tick DEBUG trace, unconditional (not gated on
+        # result.changed/locked_out like the INFO/WARNING logs below). Before
+        # this, every HOLD/WITHIN_DEADBAND/SUSTAINING/NOT_APPLICABLE tick was
+        # invisible — the only way to see them was indirect reconstruction
+        # from surrounding logs (the investigation that motivated this issue).
+        # Deliberately verbose; DEBUG level keeps it out of normal operation.
+        _LOGGER.debug(
+            "Comfort family tick: zone=%s outcome=%s target=%s heat_breach=%s cool_breach=%s"
+            " deadband_applied=%s heat_candidate_since=%s cool_candidate_since=%s"
+            " ode_floor_outcome=%s nat_vent=%s whf=%s override=%s",
+            self.climate_entity,
+            result.decision.outcome.value,
+            result.decision.target_family,
+            result.decision.heat_breach_delta_f,
+            result.decision.cool_breach_delta_f,
+            result.decision.deadband_applied_f,
+            result.dwell_state.heat_candidate_since,
+            result.dwell_state.cool_candidate_since,
+            fsm_inputs.ode_floor_outcome.value,
+            fsm_inputs.natural_vent_active,
+            fsm_inputs.whf_owns_hvac,
+            fsm_inputs.manual_override_active,
+        )
 
         # Pure leaf/FSM — the shell persists the updated dwell/sustain-confirm
         # bookkeeping it hands back (comfort_family_fsm.py's own documented

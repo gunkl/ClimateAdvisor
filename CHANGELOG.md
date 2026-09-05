@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.26] — 2026-09-05
+
+- Internal: hardened two AI Investigator context builders (`_build_timing_correlations`, `_build_known_override_false_positives` in `ai_skills_context.py`) that previously scanned the entire unbounded event log with no time window on every context build. Both now apply the same `hours`/`now` time-window filtering as their sibling functions (Issue #432) and use a sort-once + `bisect` lookup instead of a nested comparison loop. No occupant-facing behavior change.
+
 ## [0.7.25] — 2026-09-05
 
 - Fix #862: The dashboard's Target line now shows for past heat and cool cycles (it was silently blank the whole time due to a wrong attribute name), and it's now colored red while heating and blue while cooling.

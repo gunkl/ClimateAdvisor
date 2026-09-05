@@ -14,9 +14,11 @@ Phase 2: providers are focus-filtered by semantic tags; KNOWN_FIXES is version-s
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import datetime
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -218,7 +220,7 @@ def _is_issue_205_automation_event(entry: dict) -> bool:
     return False
 
 
-def _build_known_override_false_positives(events: list) -> str:
+def _build_known_override_false_positives(events: list, hours: float, now: datetime.datetime) -> str:
     """Detect the Issue #205 false-override pattern deterministically.
 
     An `override_detected` event within 60 seconds of an automation-initiated
@@ -230,15 +232,26 @@ def _build_known_override_false_positives(events: list) -> str:
     model only has to cite the result instead of re-doing the arithmetic (and
     risking getting the 60-second window wrong).
 
+    Issue #840: `events` is first filtered to `hours` of `now` via
+    `filter_events_by_window()` (no size `limit` — only the time window is
+    applied, so no in-window match can be silently dropped), then the nested
+    O(n*m) scan is replaced with a sort-once + `bisect` lookup per override
+    event, since this previously scanned the full unbounded event log against
+    every automation event on every investigator context build.
+
     Returns a formatted string starting with '=== KNOWN OVERRIDE FALSE POSITIVES
     (Issue #205) ==='.
     """
     import datetime as _dt
 
+    start = time.perf_counter()
+
     lines: list[str] = ["=== KNOWN OVERRIDE FALSE POSITIVES (Issue #205) ==="]
 
+    filtered_events, _limited = filter_events_by_window(events, hours, now)
+
     resolved: list[tuple[_dt.datetime | None, dict]] = []
-    for entry in events:
+    for entry in filtered_events:
         if not isinstance(entry, dict):
             continue
         raw_time = entry.get("time")
@@ -261,9 +274,15 @@ def _build_known_override_false_positives(events: list) -> str:
         (dt, e) for dt, e in resolved if dt is not None and str(e.get("type", "")) == "override_detected"
     ]
 
+    automation_events_sorted = sorted(automation_events, key=lambda pair: pair[0])
+    automation_times_sorted = [dt for dt, _e in automation_events_sorted]
+    window_delta = _dt.timedelta(seconds=_OVERRIDE_FALSE_POSITIVE_WINDOW_S)
+
     matches: list[str] = []
     for evt_dt, _evt in override_events:
-        for auto_dt, auto_evt in automation_events:
+        lo = bisect.bisect_left(automation_times_sorted, evt_dt - window_delta)
+        hi = bisect.bisect_right(automation_times_sorted, evt_dt + window_delta)
+        for auto_dt, auto_evt in automation_events_sorted[lo:hi]:
             delta_s = abs((evt_dt - auto_dt).total_seconds())
             if delta_s <= _OVERRIDE_FALSE_POSITIVE_WINDOW_S:
                 matches.append(
@@ -274,6 +293,17 @@ def _build_known_override_false_positives(events: list) -> str:
                 break
 
     lines.extend(matches if matches else ["  None detected in this window."])
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    _LOGGER.debug(
+        "Override false-positive scan complete override_count=%d automation_count=%d matches=%d hours=%s"
+        " duration_ms=%.2f",
+        len(override_events),
+        len(automation_events),
+        len(matches),
+        hours,
+        duration_ms,
+    )
     return "\n".join(lines)
 
 
@@ -322,25 +352,45 @@ def _build_restart_summary(events: list) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_timing_correlations(events: list) -> str:
+def _build_timing_correlations(events: list, hours: float, now: datetime.datetime) -> str:
     """Build a TIMING CORRELATIONS section for the investigator context.
 
     Scans the event log for manual events that occur within ±2 minutes of a
     known automation interval after an automation event. These coincidences
     suggest the "manual" event may actually be automation-caused.
 
+    Issue #840: `events` is first filtered to `hours` of `now` via
+    `filter_events_by_window()` (no size `limit` — only the time window is
+    applied, so no in-window candidate can be silently dropped), then the
+    per-manual-event `prior_auto = [...]` list-comprehension + `max()` scan
+    (O(n*m) against the full unbounded log) is replaced with a sort-once +
+    `bisect` lookup for the nearest prior automation event.
+
     Returns a formatted string starting with '=== TIMING CORRELATIONS ==='.
     """
     import datetime as _dt
 
+    start = time.perf_counter()
+
     lines: list[str] = ["=== TIMING CORRELATIONS ==="]
     if not events:
         lines.append("  (no events to correlate)")
+        duration_ms = (time.perf_counter() - start) * 1000
+        _LOGGER.debug(
+            "Timing correlation scan complete manual_count=%d automation_count=%d matches=%d hours=%s duration_ms=%.2f",
+            0,
+            0,
+            0,
+            hours,
+            duration_ms,
+        )
         return "\n".join(lines)
+
+    filtered_events, _limited = filter_events_by_window(events, hours, now)
 
     # Resolve timestamps to UTC datetime objects
     resolved: list[tuple] = []  # (dt | None, event_dict)
-    for entry in events:
+    for entry in filtered_events:
         if not isinstance(entry, dict):
             continue
         raw_time = entry.get("time")
@@ -358,30 +408,41 @@ def _build_timing_correlations(events: list) -> str:
                 pass
         resolved.append((event_dt, entry))
 
-    # Collect automation events (with parseable timestamps)
-    auto_events = [
-        (dt, e)
-        for dt, e in resolved
-        if dt is not None and (e.get("source") in ("automation",) or str(e.get("type", "")) in _TIMING_AUTO_EVENT_TYPES)
-    ]
+    # Collect automation events (with parseable timestamps), sorted once so the
+    # nearest-prior lookup below can bisect instead of rescanning per manual event.
+    auto_events_sorted = sorted(
+        (
+            (dt, e)
+            for dt, e in resolved
+            if dt is not None
+            and (e.get("source") in ("automation",) or str(e.get("type", "")) in _TIMING_AUTO_EVENT_TYPES)
+        ),
+        key=lambda pair: pair[0],
+    )
+    auto_times_sorted = [dt for dt, _e in auto_events_sorted]
 
-    # Check each manual event against all prior automation events
+    # Check each manual event against the nearest prior automation event
     found_any = False
+    manual_count = 0
+    match_count = 0
     for evt_dt, evt in resolved:
         etype = str(evt.get("type", ""))
         is_manual = evt.get("source") == "manual" or etype in _TIMING_MANUAL_EVENT_TYPES
         if not is_manual or evt_dt is None:
             continue
+        manual_count += 1
 
-        # Find the nearest prior automation event
-        prior_auto = [(adt, ae) for adt, ae in auto_events if adt < evt_dt]
-        if not prior_auto:
+        # bisect_left(evt_dt) gives the index of the first automation event
+        # that is NOT strictly before evt_dt — everything before that index
+        # satisfies adt < evt_dt, and the entry immediately before it is the
+        # nearest prior automation event (mirrors the old max(prior_auto)).
+        idx = bisect.bisect_left(auto_times_sorted, evt_dt)
+        if idx == 0:
             lines.append(f"  [OK] {evt_dt.strftime('%H:%M')} — {etype}: no prior automation event in window")
             found_any = True
             continue
 
-        # Most recent prior automation event
-        nearest_adt, nearest_ae = max(prior_auto, key=lambda x: x[0])
+        nearest_adt, nearest_ae = auto_events_sorted[idx - 1]
         delta_s = (evt_dt - nearest_adt).total_seconds()
         time_str = evt_dt.strftime("%H:%M")
         prior_type = str(nearest_ae.get("type", "?"))
@@ -401,6 +462,7 @@ def _build_timing_correlations(events: list) -> str:
                 f"{delta_min:.0f}m after {prior_type} at {prior_time_str} "
                 f"(≈{matched_interval.replace('_', '-')}) — may be automation-caused"
             )
+            match_count += 1
         else:
             lines.append(
                 f"  [OK] {time_str} — {etype}: no matching automation interval (delta={delta_s:.0f}s from {prior_type})"
@@ -410,6 +472,15 @@ def _build_timing_correlations(events: list) -> str:
     if not found_any:
         lines.append("  (no manual events in window)")
 
+    duration_ms = (time.perf_counter() - start) * 1000
+    _LOGGER.debug(
+        "Timing correlation scan complete manual_count=%d automation_count=%d matches=%d hours=%s duration_ms=%.2f",
+        manual_count,
+        len(auto_events_sorted),
+        match_count,
+        hours,
+        duration_ms,
+    )
     return "\n".join(lines)
 
 
@@ -995,6 +1066,7 @@ def filter_events_by_window(
 async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
     """Build EVENT LOG, TIMING CORRELATIONS, and KNOWN OVERRIDE FALSE POSITIVES sections."""
     hours: int = min(max(int(kwargs.get("hours", 168)), 1), 720)
+    now_utc = datetime.datetime.now(datetime.UTC)
 
     event_section_lines: list[str] = []
     timing_section: str = ""
@@ -1003,7 +1075,6 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
 
     # --- Event log ---
     try:
-        now_utc = datetime.datetime.now(datetime.UTC)
         event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
         recent_events, limited = filter_events_by_window(event_log, hours, now_utc, limit=200)
 
@@ -1072,7 +1143,7 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
     # --- Timing correlations ---
     try:
         raw_log: list[Any] = getattr(coordinator, "_event_log", []) or []
-        timing_section = _build_timing_correlations(raw_log)
+        timing_section = _build_timing_correlations(raw_log, hours, now_utc)
     except Exception:
         _LOGGER.warning("investigator: failed to build timing correlations -- skipping")
         timing_section = "=== TIMING CORRELATIONS ===\n  unavailable"
@@ -1080,7 +1151,7 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
     # --- Known override false positives (Issue #205) ---
     try:
         raw_log_fp: list[Any] = getattr(coordinator, "_event_log", []) or []
-        false_positives_section = _build_known_override_false_positives(raw_log_fp)
+        false_positives_section = _build_known_override_false_positives(raw_log_fp, hours, now_utc)
     except Exception:
         _LOGGER.warning("investigator: failed to build override false-positive check -- skipping")
         false_positives_section = "=== KNOWN OVERRIDE FALSE POSITIVES (Issue #205) ===\n  unavailable"

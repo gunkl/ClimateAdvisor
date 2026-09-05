@@ -12,7 +12,7 @@ You are helping David build, iterate on, and improve **Climate Advisor**, a cust
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What problem does Climate Advisor solve? | The user frequently forgets the heater is on. CA automates HVAC management using weather forecasts, occupancy, and door/window sensors, and sends a daily briefing with any required human actions. | [§Context](00-PROJECT-INSTRUCTIONS.md#context) |
-| What are all the modules and how does data flow end-to-end? | 59 source files; weather entity → coordinator → classifier → automation engine → HVAC service calls. | [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) |
+| What are all the modules and how does data flow end-to-end? | 71 source files as of v0.7.26 (module count drifts as features ship — see Architecture Reference for the current count); weather entity → coordinator → classifier → automation engine → HVAC service calls. | [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) |
 | How does the thermal learning model work — observation types, OLS, EWMA, gate bridge? | Six concurrent observation types (`hvac_heat`, `hvac_cool`, `passive_decay`, `fan_only`, `ventilated`, `solar_gain`) feed separate OLS regression and EWMA update paths. | [Thermal Model v3 Spec](thermal-model-v3-spec.md) |
 | How does the automation engine handle occupancy — priority, setback, state transitions? | GUEST > VACATION > HOME/AWAY priority. `_compute_occupancy_mode()` dispatches to per-mode handlers; VACATION fires setback immediately, AWAY after 15-min grace. | [Occupancy Dispatch Spec](occupancy-dispatch-spec.md) |
 | How do grace periods work — manual vs automation, timer lifecycle, pre-pause storage? | Two grace types (manual: user override, automation: window recommendation). Cannot be simultaneously active. Timer lifecycle: start → extend → expire → cancel. | [Grace Periods Spec](grace-periods-spec.md) |
@@ -47,6 +47,7 @@ You are helping David build, iterate on, and improve **Climate Advisor**, a cust
 | How does CA hear a QuietCool RF wall remote timer/speed selection, and what does it do? | Optional `fan_remote_entity` integrates RF timer presses and speed changes as fan override events. See [Fan Remote Spec](fan-remote-spec.md) for details (Issue #486). | [Fan Remote Spec](fan-remote-spec.md) |
 | How does the TOU (time-of-use) scheduler pre-cool/pre-heat before a scheduled high-cost period, and why are there no temperature settings for it? | Up to 5 `cost_period` schedules (day-of-week, start/end, `high`/`low` cost tag — no temperature field). Pre-conditioning banks toward the home's own existing comfort-band edge (or sleep-window edge) automatically, using the learned thermal rate; "coast" afterward needs zero new code since `_apply_comfort_band()` is already a threshold command. Issue #786. | [TOU Scheduler Spec](scheduler-spec.md) |
 | What happens when the thermostat, weather source, a sensor, or another configured entity is removed or stops responding? | A generic per-cycle sweep (`entity_health.py`) detects it, notifies once (plus a daily reminder while still missing), and surfaces it on the Status card — no HA Repairs flow, notification only. The two HVAC write choke points also now catch and log a failed command instead of crashing the update cycle. Issue #805. | [Entity Health Brief](entity-health-brief.md) |
+| How does multi-zone support work — what is a "zone", what breaks with two config entries, and how was it fixed? | A zone is a second Climate Advisor config entry (one thermostat, fully independent learning/dashboard/settings). Nine singleton assumptions across persistence, REST API, service handlers, and panel/view registration had to be fixed; all closed and in production since v0.7.0 (2026-09-01, Issue #796). | [Multi-Zone Spec](multi-zone-spec.md) |
 
 ## Context
 
@@ -60,7 +61,7 @@ The user frequently forgets the heater is on, leading to expensive heating bills
 
 ## Project State
 
-The integration is at **v0.6.x** — 59 source modules in `custom_components/climate_advisor/` (verified via `ls custom_components/climate_advisor/*.py`, 2026-08-21). For the full module list with responsibilities and data-flow diagram, see the [Architecture Reference](02-ARCHITECTURE-REFERENCE.md). For design rationale and guiding principles, see [Strategy and Design](01-STRATEGY-AND-DESIGN.md).
+The integration is at **v0.7.x** (currently v0.7.26) — 71 source modules in `custom_components/climate_advisor/` (verified via `ls custom_components/climate_advisor/*.py`, 2026-09-05; re-verify with that command rather than trusting this number long-term, since it drifts every time a module is added). Multi-zone support (Issue #796) shipped in v0.7.0 (2026-09-01) and has had 26 patch releases since. For the full module list with responsibilities and data-flow diagram, see the [Architecture Reference](02-ARCHITECTURE-REFERENCE.md). For design rationale and guiding principles, see [Strategy and Design](01-STRATEGY-AND-DESIGN.md).
 
 ## How to Help
 
@@ -83,7 +84,7 @@ When David asks for changes, follow these principles:
 - Compliance scoring refinement
 
 ### v0.3 — Advanced Intelligence
-- Multi-zone support
+- ~~Multi-zone support~~ — shipped in v0.7.0 (2026-09-01, Issue #796), not v0.3; see [Multi-Zone Spec](multi-zone-spec.md)
 - Energy cost tracking
 - Weekly summary email
 - Humidity-aware recommendations

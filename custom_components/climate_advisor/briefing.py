@@ -706,15 +706,13 @@ def _warm_day_plan(
         _recovery_ts = _events["recovery_time"]
         if _recovery_ts is not None:
             rec_t = _recovery_ts.strftime(_FMT_HOUR)
-            # Issue #788: the "evening air cools back down" phrasing only holds when
-            # the cutoff that preceded it was the midday outdoor_rise crossing. When
-            # the cutoff was a comfort_floor close (an early/cold-morning close held
-            # for comfort, not outdoor heat), recovery can happen the same morning \u2014
-            # "evening" would contradict the close sentence a paragraph earlier.
-            if _nat_vent_cutoff_reason == "comfort_floor":
-                recovery_reason = "once outdoor air cools back below indoor"
-            else:
-                recovery_reason = "when the evening air cools back down"
+            # Issue #788: nat_vent_plan.py's compute_nat_vent_plan() only ever populates
+            # recovery_time/nat_vent_recovers for an "outdoor_rise" cutoff \u2014 for a
+            # "comfort_floor" cutoff (an early/cold-morning close held for comfort, not
+            # outdoor heat) reopening was never a genuine, actionable later event, so
+            # _nat_vent_recovers is always False there and this block is never reached
+            # for that reason. Only the outdoor_rise phrasing applies here.
+            recovery_reason = "when the evening air cools back down"
             # Issue #518: only claim "I'll turn off the AC" when the AC could
             # plausibly have engaged first (breach predicted before recovery) \u2014
             # otherwise this contradicted itself by canceling an action that was

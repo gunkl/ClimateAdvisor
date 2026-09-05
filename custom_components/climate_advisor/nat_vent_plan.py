@@ -123,8 +123,18 @@ def compute_nat_vent_plan(
       ceiling_breach_time: datetime | None — first hour indoor > comfort_cool
       precool_start_time: datetime | None — ceiling_breach_time minus computed lead
       any_nat_vent_window: bool — True if outdoor < indoor at any point
-      nat_vent_recovers: bool — True if outdoor drops back below indoor after cutoff
-      recovery_time: datetime | None — first timestamp after cutoff where outdoor < indoor again
+      nat_vent_recovers: bool — True if outdoor drops back below indoor after cutoff.
+          Issue #788: only ever computed for the "outdoor_rise" cutoff reason — always
+          False for "comfort_floor" cutoffs (left at its initial-dict default, never
+          overwritten). A "comfort_floor" cutoff fires specifically in the branch where
+          outdoor_crossing did NOT win the race (see the `elif floor_crossing is not
+          None` below), which means outdoor is already below indoor at cutoff time — the
+          "recovery" test this field reports on was never actually unmet, so treating it
+          as a genuine later event is a false positive that told occupants to reopen
+          windows minutes after being told to close them.
+      recovery_time: datetime | None — first timestamp after cutoff where outdoor < indoor
+          again. Same "outdoor_rise"-only restriction as nat_vent_recovers above; always
+          None for "comfort_floor" cutoffs.
     """
     result: dict = {
         "nat_vent_cutoff": None,
@@ -223,8 +233,17 @@ def compute_nat_vent_plan(
         )
         result["precool_start_time"] = result["ceiling_breach_time"] - timedelta(minutes=lead_min)
 
-    # nat_vent_recovers / recovery_time: outdoor drops back below indoor AFTER the cutoff
-    if result["nat_vent_cutoff"] is not None:
+    # nat_vent_recovers / recovery_time: outdoor drops back below indoor AFTER the cutoff.
+    # Issue #788: only meaningful for an "outdoor_rise" cutoff (windows closed BECAUSE
+    # outdoor rose above indoor, so outdoor dropping back below indoor is a genuine,
+    # later, actionable event). For "comfort_floor" cutoffs, this branch only wins the
+    # race when outdoor_crossing did NOT fire first (see the `elif floor_crossing is not
+    # None` above) — which means outdoor is already below indoor at cutoff time. Running
+    # this scan there would find a "recovery" that was never really unmet, producing a
+    # reopen recommendation minutes after telling the occupant to close windows. Leave
+    # recovery_time=None / nat_vent_recovers=False (their initial-dict defaults) for
+    # "comfort_floor" cutoffs.
+    if result["nat_vent_cutoff"] is not None and result["nat_vent_cutoff_reason"] == "outdoor_rise":
         result["recovery_time"] = find_temperature_crossing(
             predicted_indoor, predicted_outdoor, lambda _ts, o, i: o < i, after=result["nat_vent_cutoff"]
         )

@@ -1065,14 +1065,38 @@ The fix, landed in #847:
   forecast-hour step size, well below the 3-hour drift the reported incident showed) or when
   `nat_vent_cutoff_reason` flips, so a frozen briefing can no longer silently fall behind the
   live card the way it did in the reported incident.
-- **Known remaining gap, deliberately out of scope for #847:** one inline
-  `nat_vent_cutoff_reason ==` check still exists outside the shared helper —
-  `briefing.py`'s Issue #788 reopen/recovery sentence branch (~line 714, "evening air cools back
-  down" vs. "once outdoor air cools back below indoor"). That branch renders a different
-  field-usage (recovery framing after a reopen event, not the prospective close-cutoff phrase
-  this issue scoped) and was left alone intentionally, not missed. See the #847 issue comments
-  for the deferred-follow-up note before assuming this is an unfixed instance of the DOC RULE
-  below.
+- **Issue #788 (reopened) — reopen/recovery sentence was a computation bug, not a wording
+  gap:** an earlier round on this issue (see history below) treated the contradiction as a
+  phrasing mismatch and patched `briefing.py`'s reopen sentence to say "once outdoor air cools
+  back below indoor" for a `comfort_floor` cutoff instead of "this evening." That shipped a
+  self-contradictory briefing anyway ("Close up at 8:00 AM to hold the heat in" ... "Reopen
+  windows around 9:00 AM once outdoor air cools back below indoor") because the deeper bug was
+  never in the wording — it was in `compute_nat_vent_plan()` (`nat_vent_plan.py`) computing
+  `recovery_time`/`nat_vent_recovers` the same way for both cutoff reasons. A `comfort_floor`
+  cutoff fires only in the branch where the `outdoor_rise` crossing did **not** win the race
+  (`elif floor_crossing is not None`) — meaning outdoor is *already* below indoor at cutoff
+  time. Scanning forward for "outdoor drops back below indoor" from that starting point finds a
+  false "recovery" minutes to ~1 hour later, not because anything changed, but because the
+  condition was never really unmet. No wording fix can repair this: reopening windows shortly
+  after closing them specifically to protect indoor temperature from dropping further would
+  undo the very reason they were closed.
+
+  **Fix (this round):** `compute_nat_vent_plan()` now gates the `recovery_time` scan on
+  `result["nat_vent_cutoff_reason"] == "outdoor_rise"` — `recovery_time`/`nat_vent_recovers`
+  stay at their `None`/`False` defaults for `comfort_floor` cutoffs. `briefing.py`'s
+  `_warm_day_plan()` needed no branch of its own once this landed: `_nat_vent_recovers` is
+  simply `False` for `comfort_floor` cutoffs, so the reopen sentence is omitted entirely rather
+  than reworded. The dead `_nat_vent_cutoff_reason == "comfort_floor"` phrasing branch this
+  section previously described was removed as part of the same fix — see `nat_vent_plan.py`'s
+  `compute_nat_vent_plan()` docstring and the comment above its `recovery_time` block for the
+  authoritative statement of this restriction.
+
+  **Known gap, intentionally not addressed here:** there is no `comfort_floor`-specific reopen
+  signal in the codebase today (e.g., "reopen once indoor rises N° above the comfort floor") —
+  reopening was never a modeled part of that gate's off-ramp. Suppressing the invalid
+  `outdoor_rise`-shaped signal is the correct scope for this bug fix; designing a new,
+  indoor-floor-based reopen signal for `comfort_floor` days is a separate feature/design
+  decision, not attempted here.
 
 *(Superseded text retained below for historical context — do not treat "no confirmed production
 incident" as current status; see the Issue #847 update above.)*

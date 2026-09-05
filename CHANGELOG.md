@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.22] — 2026-09-05
+
+- Fix #788: the briefing no longer tells you to reopen windows shortly after telling you to close them — that recommendation was never valid for a comfort-floor close. The earlier fix under this issue only corrected the reopen sentence's wording; the underlying `recovery_time` computation was still populated for a comfort-floor cutoff even though the "outdoor cools back below indoor" signal it reports on is already true at the moment of that cutoff.
+
 ## [0.7.21] — 2026-09-04
 
 - Fix #587 (plus two related thermal-model calculation fixes, #851/#852): house-response and ventilation-loss estimates used in your predictions are now measurably more accurate — especially overnight ventilated-window and whole-house-fan measurements, which previously blended together and could overstate cooling by up to ~2x on some homes. The unused "fan-only" ventilation measurement (which required the fan running with windows closed — something whole-house-fan homes never actually do) has been retired. Known follow-up gaps tracked separately, not addressed in this round: #853 (a door/window sensor unrelated to a given zone can still trigger a ventilation measurement for that zone) and #854 (post-deploy monitoring of this change's convergence).

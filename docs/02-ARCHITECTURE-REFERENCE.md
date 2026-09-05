@@ -227,7 +227,7 @@ Pure module-level functions called by `get_chart_data()` to build the dashboard 
 
 | Response key | Content |
 |---|---|
-| `historical_setpoint` | `[{ts, temp}]` — actual thermostat `target_temperature` captured at each 30-min poll; `null` entries when HVAC mode is off |
+| `historical_setpoint` | `[{ts, temp}]` — actual thermostat `temperature` attribute captured at each 30-min poll; `null` entries when HVAC mode is off |
 | `predicted_setpoint` | `[{ts, temp}]` — future setpoint derived from target band (lower bound in heat mode, upper bound in cool mode, null in off mode) |
 
 Both are rendered in the dashboard as a stepped purple/magenta line: solid past, dashed future, faint-dotted forward-fill during off-mode periods. Toggle via the "Thermostat Setpoint" overlay checkbox (hidden by default).

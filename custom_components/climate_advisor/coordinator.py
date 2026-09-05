@@ -3127,14 +3127,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif self._last_predicted_indoor:
                 _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
             _chart_hvac_poll = self._read_chart_hvac_action()
-            # Read thermostat setpoint and convert to °F for chart_log storage.
-            _setpoint_f: float | None = None
-            _chart_unit = self.config.get("temp_unit", "fahrenheit")
-            _climate_state = self.hass.states.get(self.config["climate_entity"])
-            if _climate_state and _climate_state.state in ("heat", "cool"):
-                _raw_sp = _climate_state.attributes.get("target_temperature")
-                if _raw_sp is not None:
-                    _setpoint_f = to_fahrenheit(float(_raw_sp), _chart_unit)
+            _setpoint_f = self._read_chart_setpoint()
             _LOGGER.debug(
                 "chart_log append: event=30min_poll hvac=%r fan=%s",
                 _chart_hvac_poll,
@@ -8472,8 +8465,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return hvac_action
 
     def _read_chart_setpoint(self) -> float | None:
-        """Return the live thermostat's ``target_temperature`` in °F, for chart_log's
-        ``setpoint`` field (Phase 3a).
+        """Return the live thermostat's ``temperature`` (single-setpoint target) in °F,
+        for chart_log's ``setpoint`` field (Phase 3a).
 
         Mirrors the read the 30-min poll ``chart_log.append()`` site has always done
         (only heat/cool modes carry a real commanded setpoint) — extracted here so the
@@ -8481,14 +8474,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ``override``/``hvac_action_change``) can share it instead of writing ``None`` for
         ``setpoint`` (the gap Investigation B found: those 3 sites never populated it,
         leaving the historical "effective target" series with holes at exactly the moments
-        an event fired between 30-min polls).
+        an event fired between 30-min polls). The 30-min poll site itself was later found
+        to hold its own independent (and independently broken — see below) copy of this
+        same read rather than calling this helper; it now calls this helper too.
+
+        Reads HA's standard single-setpoint climate attribute, ``temperature`` (the same
+        key read correctly at every other setpoint call site in this integration, e.g.
+        ``coordinator.py``'s override-detection code and ``automation.py``). This method
+        and the 30-min poll's former inline copy both read the nonexistent
+        ``target_temperature`` key instead until fixed — confirmed via a live chart_log
+        pull (SSH) showing 0 non-null ``setpoint`` values across the entire production
+        history (15k+ entries, both heat and cool) for the real zone.
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         climate_id = self.config.get("climate_entity", "")
         cs = self.hass.states.get(climate_id) if climate_id else None
         if cs is None or cs.state not in ("heat", "cool"):
             return None
-        raw_sp = cs.attributes.get("target_temperature")
+        raw_sp = cs.attributes.get("temperature")
         if raw_sp is None:
             return None
         return to_fahrenheit(float(raw_sp), unit)
@@ -11290,7 +11293,7 @@ def _extract_historical_effective_target(log_entries: list[dict]) -> list[dict]:
 
     Per cycle: ``chart_log``'s real ``setpoint`` when present (compressor-commanded,
     genuinely source-agnostic — comfort-band and TOU banking both land here identically
-    since it only reads what the thermostat's ``target_temperature`` attribute reads),
+    since it only reads what the thermostat's ``temperature`` attribute reads),
     else ``nat_vent_target`` when ``nat_vent_active`` was true that cycle (the real
     thermostatic value the fan was cycling around — not a band-edge approximation),
     else ``None`` only when genuinely undefined (thermostat off, no nat-vent, no

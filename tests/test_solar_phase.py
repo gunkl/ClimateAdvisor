@@ -417,7 +417,6 @@ class TestODEPeakShift:
                 comfort_cool=self.COMFORT_COOL,
                 k_solar=self.K_SOLAR,
                 solar_factor=sf,
-                ventilation_active=False,
             )
             result[h + 1] = t_next  # temperature arriving at h+1
             t_current = t_next

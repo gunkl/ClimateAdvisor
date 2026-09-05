@@ -11,8 +11,11 @@
 | What are the three rolling-window thresholds and what happens at each? | `THERMAL_ROLLING_MIN_WINDOW_MINUTES` (30 min): earliest commit attempt; `THERMAL_ROLLING_MAX_WINDOW_MINUTES` (240 min): hard cap — commit or abandon regardless of signal; signal check (`THERMAL_ROLLING_MIN_DELTA_T_F = 0.2°F`): required indoor ΔT to commit between the two limits. | [§Rolling Window Constraints](#rolling-window-constraints) |
 | How does `compute_k_passive` reject an observation and what codes does it emit? | Five rejection codes: `REJECT_TOO_FEW_SAMPLES`, `REJECT_SMALL_DELTA` (Σδ² = 0), `REJECT_OLS_WRONG_SIGN` (k > 0), `REJECT_OLS_BOUNDS` (k outside [-0.5, -0.001]), `REJECT_OLS_BAD_FIT` (R² < 0.20). Exactly one of `k_passive` or `rejection_code` is non-None in the return tuple. | [§OLS Functions — compute\_k\_passive](#compute_k_passive) |
 | What invariant must hold for every committed observation's `k_passive`? | `k_passive < 0` for all non-bridge envelope modes; `k_solar ≥ 0` for all committed solar observations. The bridge proxy (`k_vent_window`) may equal 0.0 exactly (perfectly inert home) but never > 0. | [§Invariants](#invariants) |
-| How does `ventilated_decay` commit path choose between 1-param and 2-param OLS? | When solar factor range across samples ≥ 0.30, the 2-param path fires first and — if bounds pass — commits both `k_env` and `k_solar`, bypassing 1-param entirely. If 2-param fails bounds/R², the 1-param path runs as fallback. | [§OLS Functions — compute\_k\_env\_solar](#compute_k_env_solar) |
-| What is the EWMA alpha for each confidence grade and which observation types write `k_passive`? | Alpha: high = 0.30, medium = 0.15, low = 0.05. Only `passive`, `heat`, and `cool` modes write `k_passive`; `fan_only` writes `k_vent`; `ventilated` writes `k_vent_window`; `solar` writes `k_solar`. | [§EWMA Update](#ewma-update-_update_thermal_model_cache) |
+| How does `vent_window_decay`/`vent_fan_decay` commit path choose between 1-param and 2-param OLS? | When solar factor range across samples ≥ 0.30, the 2-param path fires first and — if bounds pass — commits both `k_env` and `k_solar`, bypassing 1-param entirely. If 2-param fails bounds/R², the 1-param path runs as fallback. Identical logic for both vent-split types (shared, regime-agnostic). | [§OLS Functions — compute\_k\_env\_solar](#compute_k_env_solar) |
+| What is the EWMA alpha for each confidence grade and which observation types write `k_passive`? | Alpha: high = 0.30, medium = 0.15, low = 0.05. Only `passive`, `heat`, and `cool` modes write `k_passive`; `vent_window` writes `k_vent_window`; `vent_fan` writes `k_vent_fan`; `solar` writes `k_solar` (subtracting `k_passive`'s conductive contribution first — Issue #587 Defect B). `fan_only`/`k_vent` retired (Issue #587). | [§EWMA Update](#ewma-update-_update_thermal_model_cache) |
+| How does `compute_k_passive_endpoint()` fix the old endpoint formula's bias? | The old formula collapsed the window's outdoor readings into one scalar average, assuming outdoor temp was constant — biasing k by 1.3x–1.9x. The new one RK4-forward-integrates against the real per-sample outdoor trace and bisection-root-finds the k that reproduces the observed `T_end`. | [§OLS Functions — compute\_k\_passive\_endpoint](#compute_k_passive_endpoint) |
+| How does `compute_k_solar()` avoid crediting conduction as solar gain? | It subtracts `k_passive * delta` (the ordinary conductive contribution) from the observed rate per interval before averaging — mirrors `compute_k_active`'s pattern exactly. Bounded to `[0.0, THERMAL_K_SOLAR_MAX_F_PER_HR]`; rejects with `REJECT_NO_K_PASSIVE` if no `k_passive` is cached yet. | [§OLS Functions — compute\_k\_solar](#compute_k_solar) |
+| What changed with Issue #587 (k_vent/fan_only_decay retirement + vent split)? | `k_vent`/`fan_only_decay` retired outright (confirmed dead — never affected a live forecast). `ventilated_decay` split into `vent_window_decay` (windows open, fan/WHF off) and `vent_fan_decay` (windows open, fan/WHF on) via one shared trigger table and one shared commit-evaluation method. | [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587) |
 | How does the dual-estimator framework select between endpoint and block-averaged OLS per overnight window? | Both estimators always run; an 8-row decision table selects based on R²_B and 30% relative agreement. On disagreement, Estimator A (endpoint) wins. On R²_B ≥ 0.50 and agreement, B wins with medium grade (α=0.15). | [§Dual Estimator Framework](#dual-estimator-framework) |
 | Where is the solar factor formula defined and what does `phase_offset_h` do? | `_solar_factor(local_hour, phase_offset_h)` shifts the sinusoidal solar input peak by `phase_offset_h` hours. With the default offset=2 the peak falls at local hour 15 (3pm) instead of 13 (1pm). | [§Solar Factor](#solar-factor) |
 | How is `solar_phase_offset_h` learned from chart_log? | Daytime passive windows (HVAC off, fan off, windows closed) are scanned for the indoor temperature peak hour. `phase_obs = peak_hour − 13` is accumulated via EWMA (α=0.10), clamped to [0, 4]. | [§Solar Phase Offset Learning](#solar-phase-offset-learning) |
@@ -25,35 +28,58 @@
 ## Scope
 
 **Files:**
-- `learning.py` — OLS functions (`compute_k_passive`, `compute_k_passive_blocks`, `compute_k_env_solar`, `compute_k_active`, `compute_k_active_single_point`), commit routing (`_commit_event_from_dict`), EWMA update (`_update_thermal_model_cache`), model output (`get_thermal_model`, `record_thermal_observation`), solar phase learning (`update_solar_phase_offset`), engine visibility (`get_engine_status`)
-- `coordinator.py` — observation orchestration (`_sample_all_observations`, `_start_hvac_observation`, `_start_decay_observation`, `_end_hvac_active_phase`, `_check_hvac_stabilization`, `_evaluate_rolling_window`, `_commit_rolling_window_obs`, `_commit_observation_if_sufficient`, `_abandon_observation`, `_commit_observation`), ODE prediction (`_build_predicted_indoor_future`, `_simulate_indoor_physics`, `_simulate_indoor_physics_v3`), dual-estimator chart_log fit (`_is_solar_hour`, `_select_estimator`, `_extract_passive_windows`, `_passive_endpoint_estimate`, `_run_passive_chart_log_fit`, `_extract_ventilated_windows`, `_ventilated_endpoint_estimate`, `_run_ventilated_chart_log_fit`), solar factor (`_solar_factor`), solar phase offset learning (`_estimate_solar_phase_offset`, `_run_solar_phase_chart_log_fit`)
+- `learning.py` — OLS functions (`compute_k_passive`, `compute_k_passive_blocks`, `compute_k_passive_endpoint`, `compute_k_env_solar`, `compute_k_active`, `compute_k_active_single_point`, `compute_k_solar`), RK4 helpers (`_interp_outdoor`, `_integrate_indoor_rk4`), commit routing (`_commit_event_from_dict`), EWMA update (`_update_thermal_model_cache`), confidence grading (`_grade_passive_confidence`), model output (`get_thermal_model`, `record_thermal_observation`), solar phase learning (`update_solar_phase_offset`), engine visibility (`get_engine_status`)
+- `coordinator.py` — observation orchestration (`_sample_all_observations`, `_start_hvac_observation`, `_start_decay_observation`, `_end_hvac_active_phase`, `_check_hvac_stabilization`, `_evaluate_rolling_window`, `_commit_rolling_window_obs`, `_commit_observation_if_sufficient`, `_abandon_observation`, `_commit_observation`, `_evaluate_vent_split_observation`), ODE prediction (`_build_predicted_indoor_future`, `_simulate_indoor_physics`, `_simulate_indoor_physics_v3`), dual-estimator chart_log fit (`_is_solar_hour`, `_select_estimator`, `_extract_passive_windows`, `_passive_endpoint_estimate`, `_run_passive_chart_log_fit`, `_extract_ventilated_windows` (now takes `fan_state` kwarg), `_vent_endpoint_estimate` (renamed from `_ventilated_endpoint_estimate`), `_run_vent_window_chart_log_fit`, `_run_vent_fan_chart_log_fit`, `_run_vent_chart_log_fit_impl`), solar factor (`_solar_factor`), solar phase offset learning (`_estimate_solar_phase_offset`, `_run_solar_phase_chart_log_fit`)
 
-**Line ranges (verified against source):**
+**Issue #587 (k_vent/fan_only_decay retirement + vent split), and the two accompanying calculation-defect fixes, landed together** — see [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587) for the combined summary. Tracking issues: [#587](https://github.com/gunkl/ClimateAdvisor/issues/587) (structural split), [#851](https://github.com/gunkl/ClimateAdvisor/issues/851) (endpoint estimator time-varying-outdoor bias), [#852](https://github.com/gunkl/ClimateAdvisor/issues/852) (solar_gain conduction attribution). Known-gap follow-ups filed alongside, not fixed in this round: [#853](https://github.com/gunkl/ClimateAdvisor/issues/853) (vent-observation sensor-causality gap), [#854](https://github.com/gunkl/ClimateAdvisor/issues/854) (post-deploy monitoring).
+
+**Line ranges (re-verified against source, 2026-09-04, post-Issue-#587):**
 
 | Function | File | Start line |
 |---|---|---|
-| `compute_k_passive` | learning.py | 236 |
-| `compute_k_passive_blocks` | learning.py | 334 |
-| `compute_k_env_solar` | learning.py | 419 |
-| `compute_k_active` | learning.py | 495 |
-| `compute_k_active_single_point` | learning.py | 554 |
-| `record_thermal_observation` (method) | learning.py | 820 |
-| `_update_thermal_model_cache` | learning.py | 754 |
-| `get_thermal_model` | learning.py | 1028 |
-| `_commit_event_from_dict` | learning.py | 1127 |
-| `update_solar_phase_offset` | learning.py | 902 |
-| `get_engine_status` | learning.py | 959 |
-| `_start_hvac_observation` | coordinator.py | 2429 |
-| `_sample_all_observations` | coordinator.py | 2527 |
-| `_check_hvac_stabilization` | coordinator.py | 3468 |
-| `_evaluate_rolling_window` | coordinator.py | 3777 |
-| `_commit_rolling_window_obs` | coordinator.py | 3848 |
-| `_run_solar_phase_chart_log_fit` | coordinator.py | 3311 |
-| `_simulate_indoor_physics` | coordinator.py | 4595 |
-| `_simulate_indoor_physics_v3` | coordinator.py | 4723 |
-| `_build_predicted_indoor_future` | coordinator.py | 4905 |
-| `_solar_factor` | coordinator.py | 4640 |
-| `_estimate_solar_phase_offset` | coordinator.py | 4661 |
+| `compute_k_passive` | learning.py | 276 |
+| `compute_k_passive_blocks` | learning.py | 374 |
+| `_interp_outdoor` | learning.py | 459 |
+| `_integrate_indoor_rk4` | learning.py | 480 |
+| `compute_k_passive_endpoint` | learning.py | 513 |
+| `compute_k_env_solar` | learning.py | 609 |
+| `compute_k_active` | learning.py | 685 |
+| `compute_k_solar` | learning.py | 744 |
+| `compute_k_active_single_point` | learning.py | 806 |
+| `record_thermal_observation` (method) | learning.py | 1078 |
+| `update_solar_phase_offset` | learning.py | 1219 |
+| `get_engine_status` | learning.py | 1296 |
+| `get_thermal_model` | learning.py | 1372 |
+| `_commit_event_from_dict` | learning.py | 1478 |
+| `_start_hvac_observation` | coordinator.py | 6115 |
+| `_sample_all_observations` | coordinator.py | 6219 |
+| `_evaluate_vent_split_observation` | coordinator.py | 6467 |
+| `_is_solar_hour` | coordinator.py | 6542 |
+| `_select_estimator` | coordinator.py | 6553 |
+| `_extract_passive_windows` | coordinator.py | 6630 |
+| `_extract_ventilated_windows` (`fan_state` kwarg) | coordinator.py | 6842 |
+| `_passive_endpoint_estimate` | coordinator.py | 6701 |
+| `_vent_endpoint_estimate` (renamed from `_ventilated_endpoint_estimate`) | coordinator.py | 6916 |
+| `_run_passive_chart_log_fit` | coordinator.py | 6734 |
+| `_run_vent_window_chart_log_fit` | coordinator.py | 6954 |
+| `_run_vent_fan_chart_log_fit` | coordinator.py | 6958 |
+| `_run_vent_chart_log_fit_impl` | coordinator.py | 6962 |
+| `_run_solar_phase_chart_log_fit` | coordinator.py | 7095 |
+| `_start_decay_observation` | coordinator.py | 7339 |
+| `_end_hvac_active_phase` | coordinator.py | 7361 |
+| `_check_hvac_stabilization` | coordinator.py | 7407 |
+| `_commit_observation` | coordinator.py | 7495 |
+| `_abandon_observation` | coordinator.py | 7531 |
+| `_commit_observation_if_sufficient` | coordinator.py | 7700 |
+| `_evaluate_rolling_window` | coordinator.py | 7733 |
+| `_commit_rolling_window_obs` | coordinator.py | 7804 |
+| `_simulate_indoor_physics` | coordinator.py | 9722 |
+| `_estimate_solar_phase_offset` | coordinator.py | 9796 |
+| `_simulate_indoor_physics_v3` | coordinator.py | 9962 |
+| `_build_predicted_indoor_future` | coordinator.py | 10335 |
+| `_solar_factor` | coordinator.py | 9775 |
+
+Line numbers shifted substantially from the pre-#587 table (coordinator.py grew ~2000 lines across this and other intervening changes) — re-verify with grep rather than trusting a cached line number if this table goes stale again.
 
 **Out of scope for this spec:** suggestion generation, weather bias, daily record lifecycle, automation engine, briefing text.
 
@@ -67,12 +93,16 @@ All six types run concurrently in `_pending_observations: dict[str, PendingObser
 |---|---|---|---|---|
 | `hvac_heat` | `hvac_action = "heating"` transitions to active | `k_active_heat`, `k_passive` (via pre-heat buffer) | 4 post-heat samples (`THERMAL_MIN_POST_HEAT_SAMPLES`) | Nothing HVAC; all passive types commit/abandon on HVAC start |
 | `hvac_cool` | `hvac_action = "cooling"` transitions to active | `k_active_cool`, `k_passive` | 4 post-heat samples | Same as hvac_heat |
-| `passive_decay` | HVAC off, fan off, windows closed, `\|T_indoor − T_outdoor\| ≥ THERMAL_PASSIVE_MIN_DELTA_F (3.0°F)` | `k_passive` | 30 (`THERMAL_PASSIVE_MIN_SAMPLES`) | `fan_only_decay`, `ventilated_decay`, `solar_gain` — but mutual exclusion via trigger conditions prevents concurrent passive + fan or passive + vent |
-| `fan_only_decay` | Fan active (`_fan_active` or thermostat `fan_only` state), HVAC off, no open sensors | `k_vent` | 15 (`THERMAL_FAN_MIN_SAMPLES`) | `solar_gain` is not started while fan is active |
-| `ventilated_decay` | Any door/window sensor open, HVAC off, `\|T_indoor − T_outdoor\| ≥ THERMAL_VENTILATED_MIN_DELTA_F (1.0°F)` | `k_vent_window` (and optionally `k_solar` via 2-param path) | 20 (`THERMAL_VENT_MIN_SAMPLES`) | Can coexist with anything not HVAC; but fan trigger and sensor-open trigger are mutually exclusive |
-| `solar_gain` | HVAC off, fan off, windows closed, `T_indoor > T_outdoor`, daytime (local 08:00–18:00, `THERMAL_SOLAR_DAYTIME_START_H` / `END_H`) | `k_solar` | 20 (`THERMAL_SOLAR_MIN_SAMPLES`) | `passive_decay` may also be running (different parameter) |
+| `passive_decay` | HVAC off, fan off, windows closed, `\|T_indoor − T_outdoor\| ≥ THERMAL_PASSIVE_MIN_DELTA_F (3.0°F)` | `k_passive` | 30 (`THERMAL_PASSIVE_MIN_SAMPLES`) | `vent_window_decay`, `vent_fan_decay`, `solar_gain` — but mutual exclusion via trigger conditions (windows-closed vs. windows-open) prevents concurrent passive + either vent type |
+| `vent_window_decay` | Any door/window sensor open, fan/WHF **off** (`_fan_active == False`), HVAC off, `\|T_indoor − T_outdoor\| ≥ THERMAL_VENTILATED_MIN_DELTA_F (1.0°F)` | `k_vent_window` (and optionally `k_solar` via 2-param path) | 20 (`THERMAL_VENT_MIN_SAMPLES`) | Can coexist with `passive_decay`/`solar_gain`'s parameters conceptually, but its own trigger and `vent_fan_decay`'s are mutually exclusive by fan state |
+| `vent_fan_decay` | Any door/window sensor open, fan/WHF **on** (`_fan_active == True`), HVAC off, same delta threshold | `k_vent_fan` (and optionally `k_solar` via the same 2-param path) | 20 (`THERMAL_VENT_MIN_SAMPLES`) | Mutually exclusive with `vent_window_decay` by fan state; a mid-window fan toggle commits the in-progress observation and lets the sibling's trigger pick up the continuation (no discard) |
+| `solar_gain` | HVAC off, fan off, windows closed, `T_indoor > T_outdoor`, daytime (local 08:00–18:00, `THERMAL_SOLAR_DAYTIME_START_H` / `END_H`) | `k_solar` (subtracting `k_passive`'s conductive contribution — Issue #587 Defect B) | 20 (`THERMAL_SOLAR_MIN_SAMPLES`) | `passive_decay` may also be running (different parameter) |
 
-**HVAC contamination rule:** When HVAC starts (`_start_hvac_observation()`), all four non-HVAC types in `_pending_observations` are committed via `_commit_observation_if_sufficient()` (which commits if `len(samples) >= min_samples`, else abandons). The contamination check fires before the new HVAC observation is started.
+**Retired (Issue #587):** `fan_only_decay`/`k_vent` — confirmed dead code (the only live-forecast consumer was called with `ventilation_active=False` hardcoded, so `k_vent` never affected a real prediction). See [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587).
+
+**Mutual exclusion correction (Issue #587):** Prior to #587, `ventilated_decay` was never actually exclusive of fan influence — "any door/window sensor open" fired regardless of whether the fan/WHF was also running, so windows-open-with-fan-running was silently included in the same `k_vent_window` estimate as windows-open-with-fan-off. The three-way split above (`passive_decay` / `vent_window_decay` / `vent_fan_decay`, keyed on `_sensor_open` × `_fan_active`) is what makes the types *actually* mutually exclusive by trigger condition — each poll cycle, at most one of the three decay types can newly trigger for a given sensor/fan state combination.
+
+**HVAC contamination rule:** When HVAC starts (`_start_hvac_observation()`), all non-HVAC types in `_pending_observations` are committed via `_commit_observation_if_sufficient()` (which commits if `len(samples) >= min_samples`, else abandons). The contamination check fires before the new HVAC observation is started.
 
 ---
 
@@ -96,7 +126,7 @@ All six types run concurrently in `_pending_observations: dict[str, PendingObser
 
 Terminal states: committed (observation recorded in `thermal_observations`) or abandoned (rejection event logged in `rejection_log`). No re-entry once a type is removed from `_pending_observations`.
 
-### Rolling Decay Types (passive_decay, fan_only_decay, ventilated_decay, solar_gain)
+### Rolling Decay Types (passive_decay, vent_window_decay, vent_fan_decay, solar_gain)
 
 **Start:** `_start_decay_observation(obs_type)` fires from Section B of `_sample_all_observations()` when trigger conditions are first met. Creates the observation dict with `status="monitoring"`, empty `samples`, and `flags_at_start`.
 
@@ -105,11 +135,13 @@ Terminal states: committed (observation recorded in `thermal_observations`) or a
 | Type | Gate constant | Interval |
 |---|---|---|
 | `passive_decay` | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` | 5 min |
-| `fan_only_decay` | `THERMAL_FAN_SAMPLE_INTERVAL_S` | 2 min |
-| `ventilated_decay` | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` | 5 min |
+| `vent_window_decay` | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` | 5 min |
+| `vent_fan_decay` | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` | 5 min |
 | `solar_gain` | `THERMAL_SOLAR_SAMPLE_INTERVAL_S` | 5 min |
 
-A sample is appended only when `elapsed_since_last_sample >= interval_s`. Each sample is a dict with `timestamp`, `indoor_temp_f`, `outdoor_temp_f`, `elapsed_minutes`. For `ventilated_decay`, `solar_factor` (from `_solar_factor(now.hour)`) is also recorded at collection time. The hard cap per observation is `THERMAL_MAX_OBS_SAMPLES = 200`.
+`fan_only_decay`'s `THERMAL_FAN_SAMPLE_INTERVAL_S` (2 min) gate is retired along with the type (Issue #587); both vent-split types use the same 5-min gate `ventilated_decay` used.
+
+A sample is appended only when `elapsed_since_last_sample >= interval_s`. Each sample is a dict with `timestamp`, `indoor_temp_f`, `outdoor_temp_f`, `elapsed_minutes`. For `vent_window_decay`/`vent_fan_decay`, `solar_factor` (from `_solar_factor(now.hour)`) is also recorded at collection time. The hard cap per observation is `THERMAL_MAX_OBS_SAMPLES = 200`.
 
 **Commit decision (`_evaluate_rolling_window`):** Called from Section C for each rolling type. Two-threshold logic:
 
@@ -118,7 +150,7 @@ A sample is appended only when `elapsed_since_last_sample >= interval_s`. Each s
 3. `elapsed >= THERMAL_ROLLING_MAX_WINDOW_MINUTES (240)` → commit if `len(samples) >= THERMAL_MIN_DECAY_SAMPLES + 1 (= 5)`, else abandon with reason `"max_window_exceeded"`
 4. Between min and max, signal not sufficient → log and keep alive (samples trimmed to last 96 if > 96)
 
-**Solar keep-alive guard (ventilated_decay only):** During daytime hours (08:00–18:00), if `sf_range < THERMAL_SOLAR_FACTOR_MIN_RANGE (0.30)`, `_vent_signal_sufficient` is forced to `False`, suppressing early commit even after the 30-min minimum. This prevents a 1-param commit before the 2-param OLS can distinguish `k_env` from `k_solar`. The 240-min hard cap overrides the guard.
+**Solar keep-alive guard (vent_window_decay / vent_fan_decay only):** During daytime hours (08:00–18:00), if `sf_range < THERMAL_SOLAR_FACTOR_MIN_RANGE (0.30)`, `_vent_signal_sufficient` is forced to `False`, suppressing early commit even after the 30-min minimum. This prevents a 1-param commit before the 2-param OLS can distinguish `k_env` from `k_solar`. The 240-min hard cap overrides the guard. Identical logic for both vent-split types — implemented once in the shared `_evaluate_vent_split_observation()` method (Issue #587), not duplicated per type.
 
 **Hard cap behavior:** When `elapsed >= THERMAL_ROLLING_MAX_WINDOW_MINUTES`, `_evaluate_rolling_window` commits unconditionally (with `skip_delta_guard=True`) if `len(samples) >= 5`, otherwise abandons with `reason_code="max_window_exceeded"`.
 
@@ -219,6 +251,29 @@ R² is clamped to [0.0, ∞).
 
 ---
 
+### compute_k_passive_endpoint()
+
+*Added Issue #587 (Defect A fix). Replaces the old closed-form endpoint formula in both `_passive_endpoint_estimate` and the shared `_vent_endpoint_estimate`.*
+
+**Signature:** `compute_k_passive_endpoint(window: list[dict], k_min: float, k_max: float) -> float | None`
+
+**Input:** `window` — chart_log window entries (dicts with `ts` ISO-8601 string, `indoor` °F, `outdoor` °F), ordered by time, at least 2 entries. `k_min`/`k_max` — bisection bracket, typically `THERMAL_K_PASSIVE_MIN`/`THERMAL_K_PASSIVE_MAX`.
+
+**Root cause fixed:** The prior closed-form formula (`ratio = (T_end − T_out_avg) / (T_start − T_out_avg); k = ln(ratio) / dt`) collapsed the window's outdoor readings into a single scalar average, assuming outdoor temperature held constant across the whole window. It doesn't — outdoor swings through the day — producing k values 1.3x–1.9x higher in magnitude than the ODE-consistent true rate on real overnight windows (confirmed via independent RK4 numerical integration against the same raw samples).
+
+**Algorithm:**
+1. Build a piecewise-linear interpolation of the window's real per-sample outdoor trace (`_interp_outdoor`).
+2. Bisection root-find (60 iterations) the k value whose RK4 forward-integration (`_integrate_indoor_rk4`, ≥40 sub-steps, at least 4 per sample interval) of `dT/dt = k*(T − T_out(t))` — starting from `T_start = window[0]["indoor"]` — reproduces `T_end = window[-1]["indoor"]` at `t = dt_hours`.
+3. If the residual doesn't change sign across `[k_min, k_max]`, no single-k decay model in the valid range reproduces the observed outcome — returns `None`.
+
+**Key semantics — stays bookend-only on the indoor side:** only `T_start`/`T_end` ever feed the root-find target — no interior indoor samples are read. This preserves #141's original blip-immunity design constraint (a mid-window indoor sensor blip cannot skew the result). Only the *outdoor* series gains full per-sample resolution. On a 2-sample window, piecewise-linear interpolation over 2 points *is* the whole trace, so the result naturally matches the old closed-form answer in that degenerate case — a built-in regression guarantee, not a coincidence.
+
+**Post-condition:** Returns the root-found k (hr⁻¹), or `None` if no root exists in `[k_min, k_max]` — plays the same regime-filter role the old `ratio<=0`/`ratio>=1.0` reject played. Callers (`_passive_endpoint_estimate`, `_vent_endpoint_estimate`) fall back to block-OLS (Estimator B) on `None`, exactly as before.
+
+**Verified accuracy:** 0.02% error (new estimator) vs. 20.7% error (old formula) on a test window with known true k.
+
+---
+
 ### compute_k_env_solar()
 
 **Signature:** `compute_k_env_solar(samples, min_samples=4) -> tuple[float | None, float | None, float | None]`
@@ -264,6 +319,37 @@ R² = 1 − Σ(rate_i − k_env×delta_i − k_solar×sf_i)² / Σ(rate_i − me
 
 ---
 
+### compute_k_solar()
+
+*Added Issue #587 (Defect B fix). Used by the `solar_gain` commit branch only — distinct from `compute_k_env_solar()`, which is the 2-param path shared by `vent_window_decay`/`vent_fan_decay`.*
+
+**Signature:** `compute_k_solar(samples: list[dict], k_passive: float) -> tuple[float | None, float]`
+
+**Input:** `samples` — `solar_gain` window samples (`indoor_temp_f`, `outdoor_temp_f`, `elapsed_minutes`), at least 2. `k_passive` — the cached envelope decay rate (from `thermal_model_cache["k_passive"]`) used as the subtrahend; never itself committed as part of this observation.
+
+**Root cause fixed:** The `solar_gain` commit path previously attributed the *entire* observed daytime warming rate to solar gain, with no subtraction of the ordinary conductive contribution already explained by `k_passive * (T_in − T_out)`. The trigger condition never checked flow direction or distinguished radiative gain from ordinary conduction toward a warm outdoor.
+
+**Computation — per-interval subtraction, mirroring `compute_k_active` exactly:**
+```
+k_solar_i = rate_i - k_passive * delta_i
+```
+averaged across all intervals, where `rate_i = (T_in[i+1] − T_in[i]) / dt_hours` and `delta_i = midpoint(T_in − T_out)` over the interval — the same pairing convention used throughout this spec's other OLS-adjacent functions.
+
+**Bounds:** Result is clamped to `[0.0, THERMAL_K_SOLAR_MAX_F_PER_HR]`. A negative result (subtraction implying "negative solar gain," i.e. the window was entirely or more-than-entirely explained by conduction) is clamped to `0.0` rather than rejected — this is the mechanism that makes a pure-conduction window correctly report near-zero solar contribution instead of the old formula's full raw rate.
+
+**Post-condition:** Returns `(k_solar, r_squared)`. `k_solar` is `None` when fewer than 2 samples are available or all intervals have non-zero/negative `dt`.
+
+**Caller contract (`_commit_event_from_dict`, `solar_gain` branch):**
+1. Reads `self._state.thermal_model_cache.get("k_passive")` — the current best envelope model.
+2. If `k_passive is None` (fresh install, no envelope model learned yet), rejects with **`REJECT_NO_K_PASSIVE`** rather than silently falling back to the old raw-rate behavior — committing the raw rate would silently reintroduce the conduction-attribution bug this function exists to prevent.
+3. Otherwise calls `compute_k_solar(samples, k_passive)` and commits its result. `obs["k_passive"]` stays `None` in the committed dict (unchanged contract — the subtrahend never leaks into the envelope EWMA, same invariant class as the bridge-proxy D21 rule).
+
+**Verified accuracy:** a pure-conduction synthetic case that used to report 1.92°F/hr of fake "solar gain" now reports 0.0°F/hr.
+
+**Observability:** an `[Issue #587]`-tagged INFO log line at commit time reports both `k_solar` (new, subtracted) and `raw_mean_rate` (what the old formula would have produced) side by side, for post-deploy monitoring (see [issue #854](https://github.com/gunkl/ClimateAdvisor/issues/854)).
+
+---
+
 ## Commit Routing (_commit_event_from_dict)
 
 `_commit_event_from_dict(event, force_grade, obs_type)` selects the commit path based on `obs_type`. Returns `(obs_dict | None, reject_code | None, r_squared | None)`.
@@ -271,11 +357,15 @@ R² = 1 − Σ(rate_i − k_env×delta_i − k_solar×sf_i)² / Σ(rate_i − me
 | obs_type | Commit path | Cache keys written by `_update_thermal_model_cache` | `hvac_mode` tag in committed obs dict |
 |---|---|---|---|
 | `passive_decay` | 1-param OLS (`compute_k_passive`) on `event["samples"]`; min `THERMAL_MIN_DECAY_SAMPLES (4)` | `k_passive`, `avg_r_squared_passive`, `observation_count_passive` | `"passive"` |
-| `fan_only_decay` | 1-param OLS on `event["samples"]` | `k_vent`, `observation_count_fan_only` | `"fan_only"` |
-| `ventilated_decay` | 2-param OLS attempted first (when `sf_range >= 0.30`); if fails, 1-param fallback | `k_vent_window`, `observation_count_vent`; `k_solar` additionally when `two_param=True` | `"ventilated"` |
-| `solar_gain` | Mean rate: `(T_last − T_first) / total_hours`; reject if rate < 0 | `k_solar`, `observation_count_solar` | `"solar"` |
+| `vent_window_decay` | 2-param OLS (`compute_k_env_solar`) attempted first (when `sf_range >= 0.30`); if fails, 1-param (`compute_k_passive`) fallback | `k_vent_window`, `observation_count_vent_window`; `k_solar` additionally when `two_param=True` | `"vent_window"` |
+| `vent_fan_decay` | Same commit path as `vent_window_decay` — identical logic, shared via the `_decay_tag_map`/2-param guard widening (Issue #587); the two types differ only in which fan state triggered the observation, not in how the samples are processed once collected | `k_vent_fan`, `observation_count_vent_fan`; `k_solar` additionally when `two_param=True` | `"vent_fan"` |
+| `solar_gain` | `compute_k_solar(samples, k_passive)` — subtracts `k_passive`'s conductive contribution per interval before attributing the remainder to solar (Issue #587 Defect B); rejects with `REJECT_NO_K_PASSIVE` if no `k_passive` is cached | `k_solar`, `observation_count_solar` | `"solar"` |
 | `hvac_heat` | 2-param path: `compute_k_passive(post_samples, pre_samples)` → `compute_k_active(active_samples, k_p)`; bridge proxy and single-point fallback applied when OLS returns None | `k_active_heat`, `k_passive` (when not from proxy), `observation_count_heat`, `swing_heat_f` | `"heat"` |
 | `hvac_cool` | Same as hvac_heat; `session_mode = "cool"` | `k_active_cool`, `k_passive` (when not from proxy), `observation_count_cool`, `swing_cool_f` | `"cool"` |
+
+**Retired (Issue #587):** `fan_only_decay` — 1-param OLS on `event["samples"]`, wrote `k_vent`/`observation_count_fan_only`, tagged `"fan_only"`. Confirmed dead code (its sole live-forecast consumer, `_simulate_indoor_physics_v3`, was always called with `ventilation_active=False` hardcoded) — removed outright, not deprecated. Old persisted `thermal_observations` entries with `hvac_mode == "fan_only"` are inert historical data; the frontend keeps a legacy label entry so old history still renders.
+
+**Bridge proxy note:** the HVAC-commit bridge proxy (`learning.py`, D17/D26) stays keyed on `k_vent_window` only, never `k_vent_fan` — `k_vent_fan` mixes in forced air exchange, a worse proxy for envelope-only decay than window-only ventilation already is (Issue #587 Part 0 decision).
 
 **Bridge proxy (hvac_heat/hvac_cool only, D17):** If `compute_k_passive()` returns `None` and `k_vent_window < 0` exists in `thermal_model_cache`, `k_vent_window` is used as proxy `k_passive` with `force_grade = "low"`. The committed obs dict writes `k_passive = None` (D21) so the proxy value never contaminates the envelope EWMA.
 
@@ -296,7 +386,7 @@ Called by `record_thermal_observation()` on every successful commit. Applies one
 | `"low"` | 0.05 |
 | (unknown) | 0.05 |
 
-**Confidence grade thresholds — `confidence_k_passive`** (counts from `observation_count_passive` + `observation_count_heat` + `observation_count_cool`):
+**Confidence grade thresholds — `confidence_k_passive`** (counts from `observation_count_passive` + `observation_count_heat` + `observation_count_cool`; `observation_count_vent_window`/`observation_count_vent_fan`/`observation_count_solar` are explicitly excluded — see [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587) for why the old `observation_count_fan_only` inclusion was dropped rather than replaced):
 
 | Observation count | Grade |
 |---|---|
@@ -327,9 +417,11 @@ First observation initialises the cache field directly (no EWMA).
 | `"heat"` | `k_passive` (EWMA if `k_p` not None), `avg_r_squared_passive`, `k_active_heat` (EWMA if `k_a` not None), `observation_count_heat`, `swing_heat_f` (if `swing_f` present) | `_envelope_modes = True` — k_passive EWMA runs |
 | `"cool"` | `k_passive`, `avg_r_squared_passive`, `k_active_cool`, `observation_count_cool`, `swing_cool_f` | `_envelope_modes = True` |
 | `"passive"` | `k_passive`, `avg_r_squared_passive`, `observation_count_passive` | `_envelope_modes = True` |
-| `"fan_only"` | `k_vent` (EWMA of `obs["k_passive"]`), `observation_count_fan_only` | `_envelope_modes = False` — k_passive EWMA does NOT run |
-| `"ventilated"` | `k_vent_window` (EWMA of `obs["k_passive"]`), `k_solar` (EWMA of `obs["k_solar"]` when `two_param=True`), `observation_count_vent` | `_envelope_modes = False` |
+| `"vent_window"` | `k_vent_window` (EWMA of `obs["k_passive"]`), `k_solar` (EWMA of `obs["k_solar"]` when `two_param=True`), `observation_count_vent_window` | `_envelope_modes = False` — k_passive EWMA does NOT run |
+| `"vent_fan"` | `k_vent_fan` (EWMA of `obs["k_passive"]`), `k_solar` (EWMA of `obs["k_solar"]` when `two_param=True`), `observation_count_vent_fan` | `_envelope_modes = False` |
 | `"solar"` | `k_solar` (EWMA of `obs["k_solar"]`), `observation_count_solar` | `_envelope_modes = False` |
+
+**Retired (Issue #587):** `"fan_only"` mode — previously updated `k_vent` (EWMA of `obs["k_passive"]`) and `observation_count_fan_only`. The `elif mode in ("vent_window", "vent_fan"):` branch resolves the target field name (`k_vent_window`/`k_vent_fan`) and count field once via a shared `_ewma_update_field()` helper, rather than two copy-pasted branches — see [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587).
 
 **Swing update:** Applied for `"heat"` and `"cool"` modes only. Both `swing_heat_f` / `swing_cool_f` and their counters (`observation_count_swing_heat` / `observation_count_swing_cool`) are updated with the same alpha as the primary parameters.
 
@@ -341,16 +433,17 @@ First observation initialises the cache field directly (no EWMA).
 |---|---|---|
 | `THERMAL_ROLLING_MIN_WINDOW_MINUTES` | 30 min | No commit attempt before this elapsed time; observation keeps accumulating regardless of signal |
 | `THERMAL_ROLLING_MAX_WINDOW_MINUTES` | 240 min (4h) | Hard cap: forces commit if `len(samples) >= 5`, else abandons unconditionally; `skip_delta_guard=True` |
-| `THERMAL_ROLLING_MIN_DELTA_T_F` | 0.2°F | Minimum indoor temperature range required to commit at min-window point (passive_decay, solar_gain); skipped for fan_only_decay and ventilated_decay (`skip_delta_guard=True`) |
+| `THERMAL_ROLLING_MIN_DELTA_T_F` | 0.2°F | Minimum indoor temperature range required to commit at min-window point (passive_decay, solar_gain); skipped for vent_window_decay and vent_fan_decay (`skip_delta_guard=True`) |
 | `THERMAL_MIN_DECAY_SAMPLES` | 4 | OLS pair floor for rolling-window commits; `_commit_rolling_window_obs` requires `len(samples) >= 5` (= 4 + 1) to guarantee 4 pairs |
 
 **Early commit condition:** `elapsed >= THERMAL_ROLLING_MIN_WINDOW_MINUTES` AND `signal_sufficient=True`. Signal is type-specific:
 - `passive_decay`: `max(indoor_temps) − min(indoor_temps) >= THERMAL_ROLLING_MIN_DELTA_T_F`
-- `fan_only_decay`: same range check, but `skip_delta_guard=True` so this check is bypassed in `_commit_rolling_window_obs`
-- `ventilated_decay`: indoor range check, additionally suppressed when solar keep-alive guard applies (daytime AND `sf_range < 0.30`)
+- `vent_window_decay` / `vent_fan_decay`: indoor range check, additionally suppressed when solar keep-alive guard applies (daytime AND `sf_range < 0.30`); `skip_delta_guard=True` for both (identical to the old `ventilated_decay` behavior, now shared via `_evaluate_vent_split_observation()` rather than duplicated)
 - `solar_gain`: indoor range check
 
-**Solar keep-alive guard:** Active during hours 08:00–17:59 when `sf_range < THERMAL_SOLAR_FACTOR_MIN_RANGE (0.30)`. Forces `_vent_signal_sufficient = False` for `ventilated_decay`, deferring early commit until `sf_range` meets threshold or the 240-min hard cap fires.
+**Solar keep-alive guard:** Active during hours 08:00–17:59 when `sf_range < THERMAL_SOLAR_FACTOR_MIN_RANGE (0.30)`. Forces `_vent_signal_sufficient = False` for both `vent_window_decay` and `vent_fan_decay`, deferring early commit until `sf_range` meets threshold or the 240-min hard cap fires.
+
+**Retired (Issue #587):** `fan_only_decay` previously used the same range check with `skip_delta_guard=True`.
 
 ---
 
@@ -396,6 +489,40 @@ When the guard applies, ramp interpolation is used for that hour. When windows a
 
 ---
 
+## k_vent / fan_only_decay retirement (Issue #587)
+
+*Retired in Issue #587, alongside the [Defect A](#compute_k_passive_endpoint) and [Defect B](#compute_k_solar) calculation fixes and the `vent_window_decay`/`vent_fan_decay` split described throughout this spec. Tracking: [#587](https://github.com/gunkl/ClimateAdvisor/issues/587), [#851](https://github.com/gunkl/ClimateAdvisor/issues/851), [#852](https://github.com/gunkl/ClimateAdvisor/issues/852).*
+
+### Dead-code confirmation
+
+`k_vent` (from the retired `fan_only_decay` observation type) is confirmed genuinely dead: `_simulate_indoor_physics_v3`'s `ventilation_active` parameter was hardcoded `False` at its sole call site, so `k_vent` never affected a live forecast prediction — regardless of how many `fan_only_decay` observations had committed on a given install. On a real, live install, this manifested as a stale "Air exchange: 0.15/hr" value on the dashboard under a "Calibration: Strong" badge, while the same panel's rejection expander showed 0 kept / 32 skipped fan-only observations for the current 90-day window — the displayed number was carried over from early in the install's life and had nothing left feeding it.
+
+The deeper reason `fan_only_decay` never worked in practice: it requires the fan running with windows **closed**, but a whole-house fan (WHF)'s entire purpose is pulling outside air through **open** windows. Homes that actually run a WHF essentially never produce a `fan_only_decay`-eligible window.
+
+### Removal scope
+
+Removed outright (not deprecated — per this codebase's #133 broken-state-trap discipline of never leaving old/parallel code paths behind): the `fan_only_decay` trigger and abort/commit blocks in `_sample_all_observations`; the `"fan_only"` branch in `_update_thermal_model_cache`; `k_vent`/`ventilation_active` from `_simulate_indoor_physics_v3`'s signature and its `k_eff` computation; `k_vent` from `get_thermal_model()`'s return dict and the coordinator's API-facing dict-builder; `OBS_TYPE_FAN_ONLY_DECAY` from all remaining maps/lists (`_build_learning_health`, `_commit_observation_if_sufficient`'s min-samples map, the sampling interval map, the restart-recovery map, the HVAC contamination tuple); the now-dead `THERMAL_FAN_MIN_SAMPLES`/`THERMAL_FAN_MIN_SIGNAL_F` constants. Old persisted `thermal_observations` entries with `hvac_mode == "fan_only"` are inert historical data — the frontend's `TYPE_LABELS` map keeps a legacy entry so old history still renders correctly, without any code path being able to write that string again.
+
+The ODE's branch-selection condition (which observation-derived parameters are non-`None` enough to attempt physics prediction) uses the conservative form `if _k_solar is not None or _k_vent_window is not None or _k_vent_fan is not None:` rather than assuming `k_solar`/old-`k_vent` were never independently populated on any install.
+
+### EWMA-no-reset decision
+
+`k_vent_window`'s existing accumulated EWMA value is **not** hard-reset on upgrade, even though its *definition* narrowed from "windows open, any fan state" to "windows open, fan/WHF off specifically." Rationale: no reset-on-redefinition precedent exists anywhere in this codebase; unlike a genuinely wrong formula (Defect A), the pre-upgrade `k_vent_window` EWMA isn't "wrong" for its old wider definition — it's a blend of two now-distinct regimes that naturally re-weights toward the true fan-off rate as new, correctly-scoped observations arrive via EWMA's own recency-weighting. A hard reset would zero out months of accumulated signal for houses with sparse fan-off ventilation windows, regressing the gate bridge's physics eligibility for exactly the houses most reliant on it. The backfill-flag rename (see [§Symmetric Application](#symmetric-application)) already accelerates correction for the dominant (chart_log) contributor by forcing one fresh 30-day fan-off-only backfill pass on upgrade.
+
+### Confidence-exclusion decision
+
+`_grade_passive_confidence()` drops `observation_count_fan_only` from the envelope (`k_passive`) confidence count outright — it does **not** replace it with `observation_count_vent_window`/`observation_count_vent_fan`. The original `fan_only_decay` inclusion was justified because fan-only-no-windows genuinely resembles passive decay with a small forced-convection perturbation — a defensible approximation. Window-open decay (and especially fan-driven ventilation) are **not** close proxies for envelope-only decay: they measure a materially larger, different rate (the same premise behind the gate-bridge guard's own over-prediction concern, and behind the D17 bridge-proxy's forced `"low"` confidence grade). Folding either vent count into *envelope* confidence would be scientifically wrong in a way the original fan_only inclusion was not.
+
+This is a real, intentional behavior change: houses that previously got confidence credit from `fan_only_decay` observations will show a slightly lower `confidence_k_passive` after upgrade. This is expected, not a regression — flagged explicitly in the CHANGELOG.
+
+### Forecast-ODE scope boundary — k_vent_fan is learned/displayed but not wired into per-hour forecast selection
+
+`k_vent_fan` is learned (via `vent_fan_decay` observations) and displayed (dashboard, `get_thermal_model()`, engine diagnostics) exactly like `k_vent_window`. However, `_build_predicted_indoor_future()`'s per-hour selection logic is **unchanged** from before Issue #587: window-open forecast hours still substitute `k_vent_window` only (`_k_passive_for_hour = _k_vent_window if (_hour_windows_open and not _k_passive_via_bridge) else _k_passive`, `coordinator.py` ~L10647-10650). `k_vent_fan` has no equivalent per-hour substitution slot.
+
+**This is a deliberate scope boundary, not an oversight.** There is genuinely no forecast-time fan/WHF schedule to key a per-hour fan-active computation off — `classification`'s window fields are `window_open_time`/`window_close_time`/`windows_recommended` only; no fan/WHF-schedule field exists anywhere in the classification or config model. Retrofitting a forecast fan-schedule concept (predicting *when* the WHF will run, not just *that* it has run historically) is its own future "dedicated design pass," out of scope for #587. A regression test confirms `k_vent_fan`'s mere presence in the thermal model dict doesn't change any current forecast output — its only live consumers today are display surfaces, not the ODE.
+
+---
+
 ## Swing Detection
 
 **Formula:** `swing_f = abs(T_end − T_start) / 2`
@@ -427,7 +554,7 @@ When the guard applies, ramp interpolation is used for that hour. When windows a
 
 ## Dual Estimator Framework
 
-*Added in v0.3.45 (Issue #146). Applies to both `_run_passive_chart_log_fit` and `_run_ventilated_chart_log_fit`.*
+*Added in v0.3.45 (Issue #146). Applies to `_run_passive_chart_log_fit`, `_run_vent_window_chart_log_fit`, and `_run_vent_fan_chart_log_fit` (the latter two are thin wrappers around a shared `_run_vent_chart_log_fit_impl`, since Issue #587's split of `_run_ventilated_chart_log_fit`).*
 
 ### Motivation
 
@@ -445,10 +572,13 @@ The dual-estimator framework runs both methods on every overnight window and sel
 
 ### Estimator A — Endpoint
 
-`k = ln((T_end − T_out_avg) / (T_start − T_out_avg)) / Δt_hours`
+*Updated Issue #587 (Defect A fix) — see [§OLS Functions — compute_k_passive_endpoint](#compute_k_passive_endpoint) for the full spec.*
 
-- Uses only the bookend readings of the window; immune to mid-window sensor blips that corrupt interior samples
-- Natural regime filter: ratio in (0, 1) rejects solar and HVAC contamination before OLS runs
+`compute_k_passive_endpoint()`: bisection root-find of the k whose RK4 forward-integration of `dT/dt = k*(T − T_out(t))` — against the window's real per-sample outdoor trace, piecewise-linearly interpolated — reproduces the observed `T_end` from `T_start`.
+
+- **No longer** the old closed-form `k = ln((T_end − T_out_avg) / (T_start − T_out_avg)) / Δt_hours`, which assumed outdoor temperature was constant across the window and was measurably biased (1.3x–1.9x) on real overnight windows — see the linked spec section for the full before/after.
+- Uses only the bookend indoor readings of the window (`T_start`/`T_end`); immune to mid-window indoor sensor blips that corrupt interior samples — this part of #141's original design is unchanged
+- Natural regime filter: no root in `[k_min, k_max]` ⇒ `None`, playing the same role the old `ratio<=0`/`ratio>=1.0` reject played
 - No R² (returns `r_squared=None`); grade always `"low"`
 - Source label: `"endpoint"`
 
@@ -504,7 +634,9 @@ On startup, if `_passive_k_backfill_v2` is `False`, `_run_passive_chart_log_fit(
 
 ### Symmetric Application
 
-`_run_ventilated_chart_log_fit` follows the same structure: extract windows with solar guard → per-window run A + B + `_select_estimator` → `record_thermal_observation`. The ventilated path writes to `k_vent_window` rather than `k_passive`, but the estimator machinery (`compute_k_passive_blocks`, `_passive_endpoint_estimate`, `_select_estimator`) is reused unchanged.
+`_run_vent_window_chart_log_fit`/`_run_vent_fan_chart_log_fit` (both thin wrappers around `_run_vent_chart_log_fit_impl(fan_state=..., hvac_mode_tag=..., backfill=...)`, Issue #587) follow the same structure: extract windows filtered by `fan_state` with solar guard → per-window run A + B + `_select_estimator` → `record_thermal_observation`. The vent-split paths write to `k_vent_window`/`k_vent_fan` respectively rather than `k_passive`, but the estimator machinery (`compute_k_passive_blocks`, `_vent_endpoint_estimate` — renamed from `_ventilated_endpoint_estimate`, same shared body as `_passive_endpoint_estimate` uses, now fixed by `compute_k_passive_endpoint()` — `_select_estimator`) is reused unchanged and identically by both fan-state variants.
+
+Backfill flags renamed on upgrade (deliberate, not just additive — see [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587)): `_vent_k_backfilled`/`_vent_k_backfill_v2` → `_vent_window_k_backfilled`/`_vent_window_k_backfill_v2`, plus new `_vent_fan_k_backfilled`/`_vent_fan_k_backfill_v2`. The rename forces a fresh one-time 30-day backfill under the new fan-off-only filter on upgrade — idempotent, and desirable since the old flag's backfill ran under the wider (fan-state-agnostic) definition.
 
 ---
 
@@ -693,11 +825,16 @@ A chart_log window is eligible for a phase observation only when all six conditi
         "active": bool,
         "value": float | None,
     },
+    # "k_vent_fan" is not yet exposed via get_engine_status() — it is available on
+    # get_thermal_model()'s output dict but this dashboard-facing engine list has not
+    # been extended for it (display-only field, no forecast-eligibility implication;
+    # see the forecast-ODE scope boundary note under k_vent/fan_only_decay retirement).
     "k_active_hvac": {
         "active": bool,  # True when k_active_heat or k_active_cool is not None
         "value": {"heat": float | None, "cool": float | None},  # k_active_heat and k_active_cool
     },
-    "ode_version": str,  # "v3" when k_solar or k_vent present; "basic" otherwise
+    "ode_version": str,  # "v3" when k_solar or k_vent_window/k_vent_fan present; "basic" otherwise. The
+    # old bare "k_vent" (fan_only_decay) key is retired (Issue #587) and never appears.
     "physics_eligible": bool,  # True when the ODE prediction path is currently active
     "physics_eligible_reason": str,  # human-readable explanation of eligibility state
 }
@@ -750,7 +887,7 @@ This section documents failure modes in the HVAC observation pipeline that have 
 - `_phase == "active"` (default): reads `active_samples`, requires `min_s = 1` — any sample is worth recovering so the post-heat window can continue after restart
 - Backward-compat fallback: if `active_samples` is empty (pre-fix persisted obs), falls back to `obs.get("samples", [])`
 
-Non-HVAC types (passive_decay, fan_only_decay, etc.) use the generic `obs.get("samples", obs.get("active_samples", []))` path.
+Non-HVAC types (passive_decay, vent_window_decay, vent_fan_decay, solar_gain) use the generic `obs.get("samples", obs.get("active_samples", []))` path.
 
 ### Fixed: `_abandon_observation` Reporting n=0 (Issue #156)
 
@@ -777,7 +914,7 @@ These rejection patterns in `--rejections` output are expected and do not indica
 | `new_session_started` (repeated for hvac_cool/hvac_heat) | HVAC started a new session before the previous post-heat window finished. Most common on short-cycling thermostats or systems with rapid cycling. | Expected on short-cycling systems. If count is high relative to committed obs, the home may never reach `THERMAL_MIN_POST_HEAT_SAMPLES` before the next cycle. |
 | `n=0, delta_t=0.00°F` on HVAC types (coordinator ≥ v0.3.50) | Sensor quantization — the thermostat's 1°F resolution cannot resolve 0.3–0.8°F temperature change in short cycles. Both active_samples and post_heat_samples have real data, but consecutive pairs produce rate ≈ 0. | Normal on short-cycle homes. Event-driven sampling (v0.3.50) and the single-point fallback mitigate this. |
 | `plateau_guard: insufficient post-heat decay` | The post-heat phase ended without the indoor temperature dropping `THERMAL_HVAC_MIN_DECAY_F (0.3°F)` below the peak. Common on efficient systems or when HVAC duty cycle is very short. | Threshold was reduced from 1.0°F to 0.3°F in v0.3.22. If still firing, the system may have a very tight thermostat deadband. |
-| `max_window_exceeded` on rolling types | Passive/fan/vent observation ran for 4 hours without meeting signal threshold. | Not a bug — the 240-min hard cap forces a commit or abandon when signal is never sufficient. |
+| `max_window_exceeded` on rolling types | Passive/vent observation ran for 4 hours without meeting signal threshold. | Not a bug — the 240-min hard cap forces a commit or abandon when signal is never sufficient. |
 | `REJECT_OLS_BAD_FIT` (R² < 0.20) on passive_decay | Consecutive 5-min pair OLS on 1°F thermostat data structurally fails; see §Dual Estimator Framework. | The chart_log dual-estimator (Estimator B) handles this. Active passive_decay observations supplement with real-time data. |
 
 ---
@@ -788,11 +925,11 @@ The following conditions must always hold after a successful commit and EWMA upd
 
 1. **k_passive sign:** Every value written to `cache["k_passive"]` via `_update_thermal_model_cache` is negative (`k_p < 0`). The `REJECT_OLS_WRONG_SIGN` check in `compute_k_passive` enforces this before any value reaches the cache. The only exception is the bridge proxy path in `_commit_event_from_dict` — but in that path `k_passive=None` is written to the obs dict (D21), so the cache is never updated with the proxy value.
 
-2. **k_vent_window sign:** `k_vent_window` in cache is always ≤ 0 when valid. The bridge activation check (`_k_vent_window <= 0`) enforces this. A value of exactly 0.0 is physically valid (perfectly inert home with zero ventilation effect) and produces a flat ODE prediction.
+2. **k_vent_window / k_vent_fan sign:** Both are always ≤ 0 in cache when valid — same 1-param/2-param OLS bounds apply to `vent_fan_decay` as to `vent_window_decay` (Issue #587). The bridge activation check (`_k_vent_window <= 0`) reads `k_vent_window` only. A value of exactly 0.0 is physically valid (perfectly inert home with zero ventilation effect) and produces a flat ODE prediction.
 
 3. **k_solar sign:** `k_solar` is always non-negative. The bounds check `0.0 <= k_solar <= THERMAL_K_SOLAR_MAX_F_PER_HR` in `_commit_event_from_dict` and the mean-rate sign check (`if mean_rate < 0: reject`) for solar_gain observations enforce this.
 
-4. **Separation of envelope and ventilation:** The guard `_envelope_modes = mode not in ("fan_only", "ventilated")` in `_update_thermal_model_cache` ensures that `fan_only` and `ventilated` observations never write to `cache["k_passive"]`. Only `"heat"`, `"cool"`, and `"passive"` modes update the envelope decay estimate.
+4. **Separation of envelope and ventilation:** The guard `_envelope_modes = mode not in ("vent_window", "vent_fan")` in `_update_thermal_model_cache` ensures that `vent_window` and `vent_fan` observations never write to `cache["k_passive"]`. Only `"heat"`, `"cool"`, and `"passive"` modes update the envelope decay estimate. (Retired Issue #587: the old guard was `mode not in ("fan_only", "ventilated")`.)
 
 5. **Rejection code exclusivity:** `compute_k_passive` returns exactly one of `(k_passive, rejection_code)` as non-None. The function never returns both `k_passive` and a `rejection_code` as non-None simultaneously.
 

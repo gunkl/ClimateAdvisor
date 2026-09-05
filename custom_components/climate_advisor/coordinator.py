@@ -51,6 +51,7 @@ from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
 from .const import (
+    _VENT_SPLIT_TYPES,
     ATTR_AI_STATUS,
     ATTR_AUTOMATION_STATUS,
     ATTR_BRIEFING,
@@ -145,12 +146,12 @@ from .const import (
     MAX_WEATHER_BIAS_APPLY_F,
     MIN_WEATHER_BIAS_APPLY_F,
     NAT_VENT_HYSTERESIS_F,
-    OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
     OBS_TYPE_PASSIVE_DECAY,
     OBS_TYPE_SOLAR_GAIN,
-    OBS_TYPE_VENTILATED_DECAY,
+    OBS_TYPE_VENT_FAN_DECAY,
+    OBS_TYPE_VENT_WINDOW_DECAY,
     OCCUPANCY_AWAY,
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
@@ -186,9 +187,6 @@ from .const import (
     THERMAL_DUAL_AGREE_REL,
     THERMAL_DUAL_OLS_GOOD,
     THERMAL_DUAL_OLS_OK,
-    THERMAL_FAN_MIN_SAMPLES,
-    THERMAL_FAN_MIN_SIGNAL_F,
-    THERMAL_FAN_SAMPLE_INTERVAL_S,
     THERMAL_HVAC_MIN_DECAY_F,
     THERMAL_K_PASSIVE_MAX,
     THERMAL_K_PASSIVE_MIN,
@@ -244,7 +242,7 @@ from .fan_status import (
 )
 from .indoor_temp import resolve_indoor_temp_f
 from .invariant_watchdog import run_invariant_checks
-from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
+from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, compute_k_passive_endpoint
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
@@ -701,10 +699,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
-        self._vent_k_backfilled: bool = False  # True after chart_log overnight ventilated windows processed
+        # Issue #587: renamed from _vent_k_backfilled/_vent_k_backfill_v2 — deliberate,
+        # not just additive. Reusing the old flag name would make an in-place upgrade
+        # silently skip re-backfilling under the new narrower (fan-off-only) definition.
+        # The rename forces a fresh one-time 30-day backfill under the new filter on
+        # upgrade, which is desirable and costs nothing (backfill is idempotent).
+        self._vent_window_k_backfilled: bool = False  # True after vent_window_decay backfill processed
+        self._vent_fan_k_backfilled: bool = False  # True after vent_fan_decay backfill processed
         # Dual-estimator backfill flags (v2): runs block-OLS alongside endpoint estimator
         self._passive_k_backfill_v2: bool = False
-        self._vent_k_backfill_v2: bool = False
+        self._vent_window_k_backfill_v2: bool = False
+        self._vent_fan_k_backfill_v2: bool = False
         # Solar phase offset (Issue #147)
         self._solar_phase_offset: float = THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
         self._solar_phase_backfill: bool = False
@@ -1455,10 +1460,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled = bool(state.get("passive_k_backfilled", False))
-        self._vent_k_backfilled = bool(state.get("vent_k_backfilled", False))
+        # Issue #587: new flag names (not vent_k_backfilled) — see __init__ comment.
+        self._vent_window_k_backfilled = bool(state.get("vent_window_k_backfilled", False))
+        self._vent_fan_k_backfilled = bool(state.get("vent_fan_k_backfilled", False))
         # Dual-estimator backfill flags (v2)
         self._passive_k_backfill_v2 = bool(state.get("passive_k_backfill_v2", False))
-        self._vent_k_backfill_v2 = bool(state.get("vent_k_backfill_v2", False))
+        self._vent_window_k_backfill_v2 = bool(state.get("vent_window_k_backfill_v2", False))
+        self._vent_fan_k_backfill_v2 = bool(state.get("vent_fan_k_backfill_v2", False))
         # Solar phase offset backfill flag (Issue #147)
         self._solar_phase_backfill = bool(state.get("solar_phase_backfill", False))
         self._solar_phase_ac_backfill = bool(state.get("solar_phase_ac_backfill", False))  # Issue #312
@@ -1585,9 +1593,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "ai_stats": self.claude_client.get_persistent_stats() if self.claude_client else {},
             "pred_archive": {str(k): v for k, v in self._pred_archive.items()},
             "passive_k_backfilled": self._passive_k_backfilled,
-            "vent_k_backfilled": self._vent_k_backfilled,
+            "vent_window_k_backfilled": self._vent_window_k_backfilled,
+            "vent_fan_k_backfilled": self._vent_fan_k_backfilled,
             "passive_k_backfill_v2": self._passive_k_backfill_v2,
-            "vent_k_backfill_v2": self._vent_k_backfill_v2,
+            "vent_window_k_backfill_v2": self._vent_window_k_backfill_v2,
+            "vent_fan_k_backfill_v2": self._vent_fan_k_backfill_v2,
             "solar_phase_backfill": self._solar_phase_backfill,
             "solar_phase_ac_backfill": self._solar_phase_ac_backfill,  # Issue #312
             "last_solar_phase_fit_date": (
@@ -2459,8 +2469,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                                 samples = _obs.get("samples", _obs.get("active_samples", []))
                                 min_s = {
                                     OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
-                                    OBS_TYPE_FAN_ONLY_DECAY: THERMAL_FAN_MIN_SAMPLES,
-                                    OBS_TYPE_VENTILATED_DECAY: THERMAL_VENT_MIN_SAMPLES,
+                                    OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
+                                    OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
                                     OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
                                 }.get(_obs_type, 10)
                             if len(samples) >= min_s:
@@ -2481,18 +2491,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._run_passive_chart_log_fit(backfill=True)
                         self._passive_k_backfilled = True
                         _LOGGER.info("chart_log_endpoint: passive k_passive backfill complete")
-                    if not self._vent_k_backfilled:
-                        self._run_ventilated_chart_log_fit(backfill=True)
-                        self._vent_k_backfilled = True
-                        _LOGGER.info("chart_log_endpoint: ventilated k_vent_window backfill complete")
+                    if not self._vent_window_k_backfilled:
+                        self._run_vent_window_chart_log_fit(backfill=True)
+                        self._vent_window_k_backfilled = True
+                        _LOGGER.info("chart_log_endpoint: vent_window k_vent_window backfill complete")
+                    if not self._vent_fan_k_backfilled:
+                        self._run_vent_fan_chart_log_fit(backfill=True)
+                        self._vent_fan_k_backfilled = True
+                        _LOGGER.info("chart_log_endpoint: vent_fan k_vent_fan backfill complete (Issue #587)")
                     if not self._passive_k_backfill_v2:
                         self._run_passive_chart_log_fit(backfill=True)
                         self._passive_k_backfill_v2 = True
                         _LOGGER.info("chart_log_endpoint v2: passive k_passive dual-estimator backfill complete")
-                    if not self._vent_k_backfill_v2:
-                        self._run_ventilated_chart_log_fit(backfill=True)
-                        self._vent_k_backfill_v2 = True
-                        _LOGGER.info("chart_log_endpoint v2: ventilated k_vent_window dual-estimator backfill complete")
+                    if not self._vent_window_k_backfill_v2:
+                        self._run_vent_window_chart_log_fit(backfill=True)
+                        self._vent_window_k_backfill_v2 = True
+                        _LOGGER.info(
+                            "chart_log_endpoint v2: vent_window k_vent_window dual-estimator backfill complete"
+                        )
+                    if not self._vent_fan_k_backfill_v2:
+                        self._run_vent_fan_chart_log_fit(backfill=True)
+                        self._vent_fan_k_backfill_v2 = True
+                        _LOGGER.info(
+                            "chart_log_endpoint v2: vent_fan k_vent_fan dual-estimator backfill complete (Issue #587)"
+                        )
                     if not self._solar_phase_backfill:
                         self._run_solar_phase_chart_log_fit(backfill=True)
                         self._solar_phase_backfill = True
@@ -6099,11 +6121,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         obs_type = OBS_TYPE_HVAC_HEAT if session_mode == "heat" else OBS_TYPE_HVAC_COOL
 
-        # Abandon any active non-HVAC observations — HVAC start contaminates them
+        # Abandon any active non-HVAC observations — HVAC start contaminates them.
+        # Reads the vent-split pair from _VENT_SPLIT_TYPES rather than hardcoding it a
+        # third time (Issue #587).
         for _contaminated in (
             OBS_TYPE_PASSIVE_DECAY,
-            OBS_TYPE_FAN_ONLY_DECAY,
-            OBS_TYPE_VENTILATED_DECAY,
+            *(t for t, _ in _VENT_SPLIT_TYPES),
             OBS_TYPE_SOLAR_GAIN,
         ):
             if _contaminated in self._pending_observations:
@@ -6272,8 +6295,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     # H1: per-type decimation gate — slow phenomena at full poll rate yield noise
                     _interval_map = {
                         OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
-                        OBS_TYPE_FAN_ONLY_DECAY: THERMAL_FAN_SAMPLE_INTERVAL_S,
-                        OBS_TYPE_VENTILATED_DECAY: THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
+                        OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
+                        OBS_TYPE_VENT_FAN_DECAY: THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
                         OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_SAMPLE_INTERVAL_S,
                     }
                     _interval_s = _interval_map.get(obs_type, 0)
@@ -6282,7 +6305,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         (now - dt_util.parse_datetime(_last_s)).total_seconds() if _last_s else _interval_s + 1
                     )
                     if _elapsed_since_last >= _interval_s:
-                        if obs_type == OBS_TYPE_VENTILATED_DECAY:
+                        if obs_type in (OBS_TYPE_VENT_WINDOW_DECAY, OBS_TYPE_VENT_FAN_DECAY):
                             _sf_offset = getattr(self, "_solar_phase_offset", THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT)
                             sample["solar_factor"] = _solar_factor(now.hour, _sf_offset)
                         samples_list.append(sample)
@@ -6330,22 +6353,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ):
                 self._start_decay_observation(OBS_TYPE_PASSIVE_DECAY)
 
-            _fan_only_mode = _cs.state == "fan_only" if _cs else False
-            if (
-                OBS_TYPE_FAN_ONLY_DECAY not in self._pending_observations
-                and (_fan_only_mode or ae._fan_active)
-                and not _is_heating_cooling
-                and not _sensor_open
-            ):
-                self._start_decay_observation(OBS_TYPE_FAN_ONLY_DECAY)
-
-            if (
-                OBS_TYPE_VENTILATED_DECAY not in self._pending_observations
-                and _sensor_open
-                and not _is_heating_cooling
-                and _delta >= THERMAL_VENTILATED_MIN_DELTA_F
-            ):
-                self._start_decay_observation(OBS_TYPE_VENTILATED_DECAY)
+            # Issue #587: fan_only_decay (fan on, windows closed) is retired outright —
+            # it is NOT folded into vent_fan_decay (which requires windows open AND fan
+            # on). ventilated_decay is split into vent_window_decay (fan off) and
+            # vent_fan_decay (fan on) via one shared table-driven loop rather than two
+            # near-identical `if` blocks — see _VENT_SPLIT_TYPES' module docstring for
+            # why (this codebase has a documented history of exactly that drift, in
+            # nat-vent's parallel-function precedent).
+            for _vt_type, _vt_fan_state in _VENT_SPLIT_TYPES:
+                if (
+                    _vt_type not in self._pending_observations
+                    and _sensor_open
+                    and _fan_active == _vt_fan_state
+                    and not _is_heating_cooling
+                    and _delta >= THERMAL_VENTILATED_MIN_DELTA_F
+                ):
+                    self._start_decay_observation(_vt_type)
 
             _hour = now.hour
             if (
@@ -6394,67 +6417,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._run_passive_chart_log_fit(backfill=False)
                         self._abandon_observation(obs_type, "max_window_reached")
 
-            elif obs_type == OBS_TYPE_FAN_ONLY_DECAY:
-                # Two-threshold accumulation: signal = indoor sample range (max-min).
-                # Uses indoor movement, not snapshot differential, so keep-alive fires when
-                # the integer thermostat is flat even with a large indoor-outdoor gap.
-                _fan_temps = [s["indoor_temp_f"] for s in samples_list if "indoor_temp_f" in s]
-                _fan_signal_sufficient = (
-                    (max(_fan_temps) - min(_fan_temps)) >= THERMAL_ROLLING_MIN_DELTA_T_F if _fan_temps else False
+            elif obs_type in (OBS_TYPE_VENT_WINDOW_DECAY, OBS_TYPE_VENT_FAN_DECAY):
+                self._evaluate_vent_split_observation(
+                    obs_type,
+                    obs,
+                    samples_list,
+                    now,
+                    indoor,
+                    outdoor,
+                    _fan_active,
+                    _sensor_open,
+                    _is_heating_cooling,
+                    _hvac_active,
                 )
-                if self._evaluate_rolling_window(obs_type, obs, _fan_signal_sufficient, skip_delta_guard=True):
-                    continue
-                _fan_only_mode = _cs.state == "fan_only" if _cs else False
-                _fan_still_on = _fan_only_mode or ae._fan_active
-                if not _fan_still_on and not (_cs and _cs.state == "fan_only"):
-                    self._commit_observation_if_sufficient(obs_type, "fan_stopped")
-                elif _sensor_open:
-                    self._abandon_observation(obs_type, "sensor_opened")
-                elif _is_heating_cooling or _hvac_active:
-                    self._abandon_observation(obs_type, "hvac_started")
-                elif (
-                    len(samples_list) >= THERMAL_FAN_MIN_SAMPLES
-                    and indoor is not None
-                    and outdoor is not None
-                    and abs(indoor - outdoor) >= THERMAL_FAN_MIN_SIGNAL_F
-                ):
-                    self._commit_observation_if_sufficient(obs_type, "insufficient_signal")
-
-            elif obs_type == OBS_TYPE_VENTILATED_DECAY:
-                # Two-threshold accumulation: signal = indoor sample range (max-min).
-                # Uses indoor movement, not snapshot differential, so keep-alive fires when
-                # the integer thermostat is flat even with a large indoor-outdoor gap.
-                _vent_temps = [s["indoor_temp_f"] for s in samples_list if "indoor_temp_f" in s]
-                _vent_signal_sufficient = (
-                    (max(_vent_temps) - min(_vent_temps)) >= THERMAL_ROLLING_MIN_DELTA_T_F if _vent_temps else False
-                )
-                # Solar accumulation guard: during daytime, suppress early commit if
-                # sf_range has not yet reached the 2-param OLS threshold.  Without this,
-                # obs commits at 30 min (sf_range ≈ 0.05–0.15) before 2-param can fire,
-                # producing ols_wrong_sign rejections on solar-gain mornings.
-                # The 240-min hard cap in _evaluate_rolling_window fires normally.
-                _sf_vals_vent = [s.get("solar_factor", 0.0) for s in samples_list if "solar_factor" in s]
-                _sf_range_vent = max(_sf_vals_vent) - min(_sf_vals_vent) if len(_sf_vals_vent) >= 2 else 0.0
-                if 8 <= now.hour < 18 and _sf_range_vent < THERMAL_SOLAR_FACTOR_MIN_RANGE:
-                    _vent_signal_sufficient = False
-                if self._evaluate_rolling_window(obs_type, obs, _vent_signal_sufficient, skip_delta_guard=True):
-                    continue
-                if not _sensor_open:
-                    # Sensors closed: run OLS commit (morning windows) AND chart_log endpoint
-                    # fit (overnight windows). Natural filter in the endpoint fit auto-rejects
-                    # morning windows where T_out crossed T_in.
-                    self._commit_observation_if_sufficient(obs_type, "sensors_closed")
-                    self._run_ventilated_chart_log_fit(backfill=False)
-                elif _is_heating_cooling or _hvac_active:
-                    self._run_ventilated_chart_log_fit(backfill=False)
-                    self._abandon_observation(obs_type, "hvac_started")
-                elif (
-                    len(samples_list) >= THERMAL_VENT_MIN_SAMPLES
-                    and indoor is not None
-                    and outdoor is not None
-                    and abs(indoor - outdoor) >= THERMAL_VENT_MIN_SIGNAL_F
-                ):
-                    self._commit_observation_if_sufficient(obs_type, "insufficient_signal")
 
             elif obs_type == OBS_TYPE_SOLAR_GAIN:
                 # Two-threshold accumulation (Issue #126): signal = indoor ΔT sufficient
@@ -6488,6 +6463,76 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             ) / elapsed_h
                             if mean_rate >= THERMAL_SOLAR_MIN_RATE_F_PER_HR:
                                 self._commit_observation_if_sufficient(obs_type, "insufficient_rate")
+
+    def _evaluate_vent_split_observation(
+        self,
+        obs_type: str,
+        obs: dict,
+        samples_list: list[dict],
+        now: datetime,
+        indoor: float | None,
+        outdoor: float | None,
+        _fan_active: bool,
+        _sensor_open: bool,
+        _is_heating_cooling: bool,
+        _hvac_active: bool,
+    ) -> None:
+        """Shared commit/abandon evaluation for both vent_window_decay and vent_fan_decay.
+
+        Single source of truth for the split's commit/abandon logic (Issue #587) — do
+        not reimplement this per-type; see the nat-vent parallel-function drift this
+        pattern avoids (this codebase's own documented history of exactly that failure
+        mode when two near-identical trigger/commit blocks are written separately).
+        """
+        my_fan_state = dict(_VENT_SPLIT_TYPES)[obs_type]
+        run_chart_log_fit = (
+            self._run_vent_window_chart_log_fit if not my_fan_state else self._run_vent_fan_chart_log_fit
+        )
+
+        # Two-threshold accumulation: signal = indoor sample range (max-min).
+        # Uses indoor movement, not snapshot differential, so keep-alive fires when
+        # the integer thermostat is flat even with a large indoor-outdoor gap.
+        _temps = [s["indoor_temp_f"] for s in samples_list if "indoor_temp_f" in s]
+        _signal_sufficient = (max(_temps) - min(_temps)) >= THERMAL_ROLLING_MIN_DELTA_T_F if _temps else False
+        # Solar accumulation guard: during daytime, suppress early commit if sf_range
+        # has not yet reached the 2-param OLS threshold.  Without this, obs commits at
+        # 30 min (sf_range ≈ 0.05–0.15) before 2-param can fire, producing
+        # ols_wrong_sign rejections on solar-gain mornings.  The 240-min hard cap in
+        # _evaluate_rolling_window fires normally.
+        _sf_vals = [s.get("solar_factor", 0.0) for s in samples_list if "solar_factor" in s]
+        _sf_range = max(_sf_vals) - min(_sf_vals) if len(_sf_vals) >= 2 else 0.0
+        if 8 <= now.hour < 18 and _sf_range < THERMAL_SOLAR_FACTOR_MIN_RANGE:
+            _signal_sufficient = False
+        if self._evaluate_rolling_window(obs_type, obs, _signal_sufficient, skip_delta_guard=True):
+            return
+
+        if _fan_active != my_fan_state:
+            # Regime flipped to the sibling's — commit what's accumulated (valid data
+            # for the regime it was collected under), let the sibling's trigger (same
+            # poll cycle) pick up the continuation. Not a discard: samples collected
+            # before the toggle are genuinely valid data for the regime they were
+            # collected under — discarding would starve whichever type has the
+            # shorter typical dwell time. Symmetric with the retired fan_only_decay's
+            # own "fan_stopped → commit" convention. _commit_observation_if_sufficient
+            # already falls back to _abandon_observation internally when the
+            # accumulated count is below minimum, so short toggles are naturally
+            # discarded via the existing mechanism.
+            toggle_reason = "fan_activated" if not my_fan_state else "fan_stopped"
+            self._commit_observation_if_sufficient(obs_type, toggle_reason)
+            run_chart_log_fit(backfill=False)
+        elif not _sensor_open:
+            self._commit_observation_if_sufficient(obs_type, "sensors_closed")
+            run_chart_log_fit(backfill=False)
+        elif _is_heating_cooling or _hvac_active:
+            run_chart_log_fit(backfill=False)
+            self._abandon_observation(obs_type, "hvac_started")
+        elif (
+            len(samples_list) >= THERMAL_VENT_MIN_SAMPLES
+            and indoor is not None
+            and outdoor is not None
+            and abs(indoor - outdoor) >= THERMAL_VENT_MIN_SIGNAL_F
+        ):
+            self._commit_observation_if_sufficient(obs_type, "insufficient_signal")
 
     # ------------------------------------------------------------------
     # Chart-log dual-estimator helpers
@@ -6658,11 +6703,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         Returns {"k": float, "r_squared": None, "source": "endpoint", "grade": "low"} or None.
         """
-        import math as _math
-
         t_start = window[0]["indoor"]
         t_end = window[-1]["indoor"]
-        t_out_avg = sum(s["outdoor"] for s in window) / len(window)
 
         try:
             ts0 = datetime.fromisoformat(window[0]["ts"])
@@ -6680,15 +6722,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if dt_hours < THERMAL_CHART_LOG_PASSIVE_MIN_MINUTES / 60.0:
             return None
 
-        denom = t_start - t_out_avg
-        if abs(denom) < 0.01:
-            return None
-        ratio = (t_end - t_out_avg) / denom
-        if ratio <= 0 or ratio >= 1.0:
-            return None
-
-        k = _math.log(ratio) / dt_hours
-        if not (THERMAL_K_PASSIVE_MIN <= k <= THERMAL_K_PASSIVE_MAX):
+        # Issue #587 Defect A: root-finds k against the window's real per-sample
+        # outdoor trace (RK4 forward-integration) instead of assuming a constant
+        # window-average outdoor temperature — see compute_k_passive_endpoint().
+        k = compute_k_passive_endpoint(window, THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX)
+        if k is None:
             return None
 
         return {"k": k, "r_squared": None, "source": "endpoint", "grade": "low"}
@@ -6749,6 +6787,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             t_end = window[-1]["indoor"]
             t_out_avg = sum(s["outdoor"] for s in window) / len(window)
             denom = t_start - t_out_avg
+            # Diagnostic-only (approximate): the committed k itself comes from
+            # _passive_endpoint_estimate() above (compute_k_passive_endpoint, Issue #587
+            # Defect A), which uses the real per-sample outdoor trace rather than this
+            # window-average. `ratio` here is retained purely as a diagnostic field on
+            # the observation record, not as the actual k derivation.
             ratio = (t_end - t_out_avg) / denom if abs(denom) >= 0.01 else None
 
             obs = {
@@ -6772,6 +6815,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 dt_hours,
                 t_end - t_start,
             )
+            if chosen["source"] == "endpoint":
+                # Shadow-log (Issue #587 Part 2.10 / Defect A observability): what the
+                # old constant-outdoor closed-form formula would have produced for the
+                # same window, alongside the new RK4/bisection k. Grep-able proof the new
+                # estimator ran and by how much it diverged — a check that greps for
+                # "new_k" and finds none is itself evidence the new code path never ran.
+                k_old = math.log(ratio) / dt_hours if ratio is not None and ratio > 0 else None
+                _LOGGER.info(
+                    "thermal endpoint estimator [Issue #587]: obs_type=passive new_k=%.4f "
+                    "old_formula_k=%s delta_pct=%s n=%d dt_hours=%.2f",
+                    k,
+                    f"{k_old:.4f}" if k_old is not None else "n/a",
+                    f"{100 * (k - k_old) / k_old:.1f}%" if k_old else "n/a",
+                    len(window),
+                    dt_hours,
+                )
 
         if committed > 0:
             _LOGGER.info(
@@ -6780,10 +6839,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 " (backfill)" if backfill else "",
             )
 
-    def _extract_ventilated_windows(self, entries: list[dict], days: int) -> list[list[dict]]:
+    def _extract_ventilated_windows(self, entries: list[dict], days: int, *, fan_state: bool) -> list[list[dict]]:
         """Extract ventilated decay windows from chart_log entries.
 
-        Regime: HVAC=off/idle, windows=open, T_out < T_in throughout.
+        Regime: HVAC=off/idle, windows=open, T_out < T_in throughout, fan/WHF state ==
+        fan_state (Issue #587 — one parameterized function serving both vent_window_decay
+        (fan_state=False) and vent_fan_decay (fan_state=True) call sites, rather than two
+        near-duplicate bodies).
         Solar guard: rejects any window whose start OR end timestamp falls in local hours 08–19.
         """
         cutoff = dt_util.now() - timedelta(days=days)
@@ -6831,6 +6893,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             outdoor = entry.get("outdoor")
             hvac = entry.get("hvac", "")
             windows_open = entry.get("windows_open")
+            fan_on = bool(entry.get("fan"))
 
             if indoor is None or outdoor is None:
                 _flush()
@@ -6841,7 +6904,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             win_open = bool(windows_open)
 
-            if not hvac_idle or not win_open:
+            if not hvac_idle or not win_open or fan_on != fan_state:
                 _flush()
                 continue
 
@@ -6850,16 +6913,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _flush()
         return windows
 
-    def _ventilated_endpoint_estimate(self, window: list[dict]) -> dict | None:
-        """Compute endpoint k_vent_window estimate for a ventilated decay window.
+    def _vent_endpoint_estimate(self, window: list[dict]) -> dict | None:
+        """Compute endpoint k estimate for a ventilated decay window (vent_window or vent_fan).
 
         Returns {"k": float, "r_squared": None, "source": "endpoint", "grade": "low"} or None.
-        """
-        import math as _math
 
+        Shared by both vent_window_decay and vent_fan_decay call sites (Issue #587) — the
+        endpoint math doesn't care why the window is a decay window. This is the one
+        function Defect A's RK4/bisection fix modifies exactly once, covering both
+        call sites.
+        """
         t_start = window[0]["indoor"]
         t_end = window[-1]["indoor"]
-        t_out_avg = sum(s["outdoor"] for s in window) / len(window)
 
         try:
             ts0 = datetime.fromisoformat(window[0]["ts"])
@@ -6877,31 +6942,41 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if dt_hours < THERMAL_CHART_LOG_VENT_MIN_MINUTES / 60.0:
             return None
 
-        denom = t_start - t_out_avg
-        if abs(denom) < 0.01:
-            return None
-        ratio = (t_end - t_out_avg) / denom
-        if ratio <= 0 or ratio >= 1.0:
-            return None
-
-        k = _math.log(ratio) / dt_hours
-        if not (THERMAL_K_PASSIVE_MIN <= k <= THERMAL_K_PASSIVE_MAX):
+        # Issue #587 Defect A: root-finds k against the window's real per-sample
+        # outdoor trace (RK4 forward-integration) instead of assuming a constant
+        # window-average outdoor temperature — see compute_k_passive_endpoint().
+        k = compute_k_passive_endpoint(window, THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX)
+        if k is None:
             return None
 
         return {"k": k, "r_squared": None, "source": "endpoint", "grade": "low"}
 
-    def _run_ventilated_chart_log_fit(self, *, backfill: bool = False) -> None:
-        """Estimate k_vent_window from overnight ventilated chart_log windows using dual-estimator.
+    def _run_vent_window_chart_log_fit(self, *, backfill: bool = False) -> None:
+        """Thin wrapper: vent_window_decay (fan off) chart_log dual-estimator fit."""
+        self._run_vent_chart_log_fit_impl(fan_state=False, hvac_mode_tag="vent_window", backfill=backfill)
+
+    def _run_vent_fan_chart_log_fit(self, *, backfill: bool = False) -> None:
+        """Thin wrapper: vent_fan_decay (fan/WHF on) chart_log dual-estimator fit."""
+        self._run_vent_chart_log_fit_impl(fan_state=True, hvac_mode_tag="vent_fan", backfill=backfill)
+
+    def _run_vent_chart_log_fit_impl(self, *, fan_state: bool, hvac_mode_tag: str, backfill: bool) -> None:
+        """Estimate k_vent_window/k_vent_fan from ventilated chart_log windows (dual-estimator).
 
         Endpoint estimator (A) and block-OLS estimator (B) are both computed for each
         window. _select_estimator() picks the best result.
 
         Natural regime filter: only windows where T_out < T_in throughout are used
-        (overnight conditions).
+        (overnight conditions), further filtered by fan_state.
         Solar guard: windows starting or ending in local hours 08–19 are rejected.
 
         If backfill=True, processes up to 30 days of history (once on startup).
         If backfill=False, processes only the most recent ventilated window.
+
+        Shared body for both vent_window_decay (fan_state=False) and vent_fan_decay
+        (fan_state=True) — kept as two thin wrappers (_run_vent_window_chart_log_fit /
+        _run_vent_fan_chart_log_fit) around this impl, not one parameterized method with
+        branching log lines, so _LOGGER messages and the committed obs["hvac_mode"] stay
+        unambiguous per call site (Issue #587).
         """
         chart_log = getattr(self, "_chart_log", None)
         if chart_log is None:
@@ -6911,7 +6986,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
 
         days = 30 if backfill else 2
-        windows = self._extract_ventilated_windows(entries, days)
+        windows = self._extract_ventilated_windows(entries, days, fan_state=fan_state)
         if not windows:
             return
 
@@ -6920,7 +6995,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         today_str = dt_util.now().strftime("%Y-%m-%d")
 
         for window in target_windows:
-            result_a = self._ventilated_endpoint_estimate(window)
+            result_a = self._vent_endpoint_estimate(window)
             b_raw = compute_k_passive_blocks(window)
             result_b = (
                 {"k": b_raw[0], "r_squared": b_raw[1], "source": "block_ols", "grade": "low"}
@@ -6947,10 +7022,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             t_end = window[-1]["indoor"]
             t_out_avg = sum(s["outdoor"] for s in window) / len(window)
             denom = t_start - t_out_avg
+            # Diagnostic-only (approximate): the committed k itself comes from
+            # _vent_endpoint_estimate() above (compute_k_passive_endpoint, Issue #587
+            # Defect A), which uses the real per-sample outdoor trace rather than this
+            # window-average. `ratio` here is retained purely as a diagnostic field on
+            # the observation record, not as the actual k derivation.
             ratio = (t_end - t_out_avg) / denom if abs(denom) >= 0.01 else None
 
             obs = {
-                "hvac_mode": "ventilated",
+                "hvac_mode": hvac_mode_tag,
                 "k_passive": k,
                 "confidence_grade": chosen["grade"],
                 "date": today_str,
@@ -6963,17 +7043,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.learning.record_thermal_observation(obs)
             committed += 1
             _LOGGER.debug(
-                "chart_log vent: k=%.4f source=%s conf=%s dt=%.1fh dT=%.1fF",
+                "chart_log %s: k=%.4f source=%s conf=%s dt=%.1fh dT=%.1fF",
+                hvac_mode_tag,
                 k,
                 chosen["source"],
                 chosen["grade"],
                 dt_hours,
                 t_end - t_start,
             )
+            if chosen["source"] == "endpoint":
+                # Shadow-log (Issue #587 Part 2.10 / Defect A observability): what the
+                # old constant-outdoor closed-form formula would have produced for the
+                # same window, alongside the new RK4/bisection k. Grep-able proof the new
+                # estimator ran and by how much it diverged — a check that greps for
+                # "new_k" and finds none is itself evidence the new code path never ran.
+                k_old = math.log(ratio) / dt_hours if ratio is not None and ratio > 0 else None
+                _LOGGER.info(
+                    "thermal endpoint estimator [Issue #587]: obs_type=%s new_k=%.4f "
+                    "old_formula_k=%s delta_pct=%s n=%d dt_hours=%.2f",
+                    hvac_mode_tag,
+                    k,
+                    f"{k_old:.4f}" if k_old is not None else "n/a",
+                    f"{100 * (k - k_old) / k_old:.1f}%" if k_old else "n/a",
+                    len(window),
+                    dt_hours,
+                )
 
         if committed > 0:
             _LOGGER.info(
-                "chart_log vent: committed %d observations%s",
+                "chart_log %s: committed %d observations%s",
+                hvac_mode_tag,
                 committed,
                 " (backfill)" if backfill else "",
             )
@@ -7532,8 +7631,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         all_obs_types = [
             OBS_TYPE_PASSIVE_DECAY,
-            OBS_TYPE_FAN_ONLY_DECAY,
-            OBS_TYPE_VENTILATED_DECAY,
+            OBS_TYPE_VENT_WINDOW_DECAY,
+            OBS_TYPE_VENT_FAN_DECAY,
             OBS_TYPE_SOLAR_GAIN,
             OBS_TYPE_HVAC_HEAT,
             OBS_TYPE_HVAC_COOL,
@@ -7551,8 +7650,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ]
         _hvac_mode_to_obs_type = {
             "passive": OBS_TYPE_PASSIVE_DECAY,
-            "fan_only": OBS_TYPE_FAN_ONLY_DECAY,
-            "ventilated": OBS_TYPE_VENTILATED_DECAY,
+            "vent_window": OBS_TYPE_VENT_WINDOW_DECAY,
+            "vent_fan": OBS_TYPE_VENT_FAN_DECAY,
             "solar": OBS_TYPE_SOLAR_GAIN,
             "heat": OBS_TYPE_HVAC_HEAT,
             "cool": OBS_TYPE_HVAC_COOL,
@@ -7607,8 +7706,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         samples = obs.get("samples", obs.get("active_samples", []))
         min_samples = {
             OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
-            OBS_TYPE_FAN_ONLY_DECAY: THERMAL_FAN_MIN_SAMPLES,
-            OBS_TYPE_VENTILATED_DECAY: THERMAL_VENT_MIN_SAMPLES,
+            OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
+            OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
             OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
             OBS_TYPE_HVAC_HEAT: THERMAL_MIN_POST_HEAT_SAMPLES,
             OBS_TYPE_HVAC_COOL: THERMAL_MIN_POST_HEAT_SAMPLES,
@@ -9183,16 +9282,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "learning_health": thermal_model.get("learning_health", {}),
                 "confidence_k_passive": thermal_model.get("confidence_k_passive", "none"),
                 "k_passive": thermal_model.get("k_passive"),
-                "k_vent": thermal_model.get("k_vent"),
                 "k_vent_window": thermal_model.get("k_vent_window"),
+                "k_vent_fan": thermal_model.get("k_vent_fan"),
                 "k_solar": (
                     convert_delta(thermal_model["k_solar"], unit) if thermal_model.get("k_solar") is not None else None
                 ),
                 "avg_r_squared_passive": thermal_model.get("avg_r_squared_passive"),
                 "last_observation_date": thermal_model.get("last_observation_date"),
                 "observation_count_passive": thermal_model.get("observation_count_passive", 0),
-                "observation_count_fan_only": thermal_model.get("observation_count_fan_only", 0),
-                "observation_count_vent": thermal_model.get("observation_count_vent", 0),
+                "observation_count_vent_window": thermal_model.get("observation_count_vent_window", 0),
+                "observation_count_vent_fan": thermal_model.get("observation_count_vent_fan", 0),
                 "observation_count_solar": thermal_model.get("observation_count_solar", 0),
                 "swing_heat": round(convert_delta(thermal_model.get("swing_heat_f_display", 1.5), unit), 2),
                 "swing_cool": round(convert_delta(thermal_model.get("swing_cool_f_display", 1.5), unit), 2),
@@ -9870,14 +9969,18 @@ def _simulate_indoor_physics_v3(
     *,
     comfort_heat: float,
     comfort_cool: float,
-    k_vent: float | None = None,
     k_solar: float | None = None,
     solar_factor: float = 0.0,
-    ventilation_active: bool = False,
     hvac_mode: str | None = None,
 ) -> float:
-    """Advance indoor temperature using the v3 ODE with ventilation and solar terms."""
-    k_eff = k_passive + (k_vent if (ventilation_active and k_vent is not None) else 0.0)
+    """Advance indoor temperature using the v3 ODE with a solar term.
+
+    Issue #587: k_vent/ventilation_active removed — k_vent was confirmed dead (the
+    sole caller always passed ventilation_active=False, so it never affected a live
+    prediction). Ventilation is represented instead via k_passive_for_hour substitution
+    at the call site (k_vent_window swapped in for window-open hours).
+    """
+    k_eff = k_passive
 
     q_hvac = 0.0
     if setpoint is not None and k_active is not None:
@@ -10326,9 +10429,16 @@ def _build_predicted_indoor_future(
     _k_passive: float | None = None
     _k_active_heat: float | None = None
     _k_active_cool: float | None = None
-    _k_vent: float | None = None
     _k_solar: float | None = None
     _k_vent_window: float | None = None
+    # Issue #587 (2.8 scope boundary): k_vent_fan is learned/displayed but NOT wired
+    # into per-hour forecast selection below — there is no forecast-time fan/WHF
+    # schedule to key a per-hour fan-active computation off (classification's window
+    # fields are window_open_time/window_close_time/windows_recommended only, no
+    # fan/WHF-schedule field exists). Retrofitting a forecast fan-schedule concept is
+    # its own future dedicated design pass. Its only live use here is the conservative
+    # "does *any* solar/vent signal exist" branch condition below.
+    _k_vent_fan: float | None = None
     _k_passive_via_bridge: bool = False
     # _phase_offset: when model has a learned value use it; otherwise 0.0 preserves
     # pre-feature behavior for callers that do not supply solar_phase_offset_h.
@@ -10341,9 +10451,9 @@ def _build_predicted_indoor_future(
         _k_passive = thermal_model.get("k_passive")
         _k_active_heat = thermal_model.get("k_active_heat")
         _k_active_cool = thermal_model.get("k_active_cool")
-        _k_vent = thermal_model.get("k_vent")
         _k_solar = thermal_model.get("k_solar")
         _k_vent_window = thermal_model.get("k_vent_window")
+        _k_vent_fan = thermal_model.get("k_vent_fan")
         _raw_phase = thermal_model.get("solar_phase_offset_h")
         _phase_offset = float(_raw_phase) if _raw_phase is not None else 0.0
         # Gate bridge: when k_passive is absent but k_vent_window is learned, use it as
@@ -10547,7 +10657,12 @@ def _build_predicted_indoor_future(
                     _window_close_time,
                 )
 
-            if _k_solar is not None or _k_vent is not None:
+            # Issue #587: conservative branch-selection form — includes k_vent_fan
+            # alongside k_solar/k_vent_window rather than assuming it's never
+            # independently populated (verified: it can be, once vent_fan_decay
+            # observations commit; see 2.8 for why it's not used in _k_passive_for_hour
+            # selection above even when this branch is taken for its sake).
+            if _k_solar is not None or _k_vent_window is not None or _k_vent_fan is not None:
                 _t_current = _simulate_indoor_physics_v3(
                     _t_current,
                     float(outdoor),
@@ -10557,10 +10672,8 @@ def _build_predicted_indoor_future(
                     setpoint,
                     comfort_heat=comfort_heat,
                     comfort_cool=comfort_cool,
-                    k_vent=_k_vent,
                     k_solar=_k_solar,
                     solar_factor=_solar_factor(local_ts.hour, _phase_offset),
-                    ventilation_active=False,
                     hvac_mode=mode,
                 )
             else:

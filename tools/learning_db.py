@@ -34,12 +34,17 @@ LEARNING_DB_PATH = "/config/climate_advisor_learning.json"
 
 OBS_TYPES = [
     "passive_decay",
-    "fan_only_decay",
-    "ventilated_decay",
+    "vent_window_decay",
+    "vent_fan_decay",
     "solar_gain",
     "hvac_heat",
     "hvac_cool",
 ]
+
+# Issue #587: old-format obs_type strings, retired but still possibly present in
+# pre-upgrade persisted history — --check-587 flags any post-upgrade-dated entry
+# still carrying these as a FAIL (see the #133 broken-state-trap check).
+LEGACY_OBS_TYPES = ["fan_only_decay", "ventilated_decay"]
 
 DEBUG_STATE_URL_PATH = "/api/climate_advisor/automation_state"
 
@@ -200,9 +205,11 @@ def _print_model_summary(db: dict) -> None:
     print(f"k_passive:     {_model_field('k_passive', 'hr^-1', 'n_passive')}")
     print(f"k_active_heat: {_model_field('k_active_heat', 'F/hr', 'n_hvac_heat')}")
     print(f"k_active_cool: {_model_field('k_active_cool', 'F/hr', 'n_hvac_cool')}")
-    print(f"k_vent:        {_model_field('k_vent', 'hr^-1', 'n_vent')}")
-    print(f"k_vent_window: {_model_field('k_vent_window', 'hr^-1', 'n_vent_window')}")
+    print(f"k_vent_window: {_model_field('k_vent_window', 'hr^-1', 'observation_count_vent_window')}")
+    print(f"k_vent_fan:    {_model_field('k_vent_fan', 'hr^-1', 'observation_count_vent_fan')}")
     print(f"k_solar:       {_model_field('k_solar', 'F/hr', 'n_solar')}")
+    if "k_vent" in cache or "observation_count_fan_only" in cache:
+        print("WARNING: legacy k_vent/observation_count_fan_only key(s) present in cache (Issue #587)")
 
     def _swing_field(key: str, cnt_key: str) -> str:
         val = cache.get(key)
@@ -440,6 +447,122 @@ def _print_committed(db: dict) -> None:
         )
         print(row)
 
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Section C2: Issue #587 post-deploy validation check
+# ---------------------------------------------------------------------------
+
+
+def _print_check_587(db: dict) -> None:
+    """PASS/WARN/FAIL summary for the Issue #587 k_vent/fan_only_decay retirement.
+
+    Checks (per docs/08-COMPUTATION-REFERENCE.md's post-deploy monitoring table):
+      1. "k_vent" key absent from thermal_model_cache (PASS) / present (FAIL)
+      2. "observation_count_fan_only" key absent (PASS) / present (FAIL)
+      3. k_vent_window / k_vent_fan values + bounds sanity + observation counts
+      4. No post-upgrade thermal_observations entry still carries hvac_mode
+         "ventilated" or "fan_only" (the old strings) — FAIL if so (#133 broken-
+         state-trap check, runnable in production, not just at code review)
+      5. REJECT_NO_K_PASSIVE count from the rejection log (Defect B, #852 — live).
+         A single snapshot can't detect a "climbing" trend on its own — that's
+         the daily-check procedure's job (#854): compare today's count against
+         yesterday's. This check flags the one thing a single snapshot CAN say
+         for certain: if k_passive is already populated in the cache, a fresh
+         no_k_passive rejection should not still be happening going forward.
+    """
+    print("Issue #587 Post-Deploy Check")
+    print("=============================")
+
+    cache = db.get("thermal_model_cache")
+    overall = "PASS"
+    lines: list[str] = []
+
+    if not isinstance(cache, dict):
+        print("WARN: no thermal_model_cache found in learning DB (fresh install — nothing to check yet)")
+        print()
+        return
+
+    # Check 1/2: legacy keys must be absent
+    if "k_vent" in cache:
+        overall = "FAIL"
+        lines.append("FAIL: 'k_vent' key still present in thermal_model_cache — old code/cache never cleared")
+    else:
+        lines.append("PASS: 'k_vent' key absent from thermal_model_cache")
+
+    if "observation_count_fan_only" in cache:
+        overall = "FAIL"
+        lines.append("FAIL: 'observation_count_fan_only' key still present in thermal_model_cache")
+    else:
+        lines.append("PASS: 'observation_count_fan_only' key absent from thermal_model_cache")
+
+    # Check 3: k_vent_window / k_vent_fan values + counts
+    k_vw = cache.get("k_vent_window")
+    k_vf = cache.get("k_vent_fan")
+    n_vw = cache.get("observation_count_vent_window", 0)
+    n_vf = cache.get("observation_count_vent_fan", 0)
+    lines.append(f"INFO: k_vent_window={k_vw} (observation_count_vent_window={n_vw})")
+    if k_vw is not None and k_vw >= 0:
+        overall = "FAIL" if overall != "FAIL" else overall
+        lines.append(f"FAIL: k_vent_window={k_vw} has wrong sign (expected < 0)")
+    lines.append(
+        f"INFO: k_vent_fan={k_vf} (observation_count_vent_fan={n_vf})"
+        + (" — not yet exercised (WHF hasn't run with windows open); not itself a failure" if k_vf is None else "")
+    )
+    if k_vf is not None and k_vf >= 0:
+        overall = "FAIL" if overall != "FAIL" else overall
+        lines.append(f"FAIL: k_vent_fan={k_vf} has wrong sign (expected < 0)")
+
+    # Check 4: no post-upgrade entry with the old hvac_mode strings
+    observations = db.get("thermal_observations")
+    legacy_hits = 0
+    if isinstance(observations, list):
+        legacy_hits = sum(
+            1 for o in observations if isinstance(o, dict) and o.get("hvac_mode") in ("ventilated", "fan_only")
+        )
+    if legacy_hits:
+        overall = "FAIL"
+        lines.append(
+            f"FAIL: {legacy_hits} thermal_observations entr{'y' if legacy_hits == 1 else 'ies'} still "
+            f"carr{'ies' if legacy_hits == 1 else 'y'} the old hvac_mode 'ventilated'/'fan_only' — the old "
+            "commit path may still be live somewhere (a #133-class parallel-path bug)"
+        )
+    else:
+        lines.append("PASS: no thermal_observations entries carry the old 'ventilated'/'fan_only' hvac_mode")
+
+    # Check 5: REJECT_NO_K_PASSIVE (Defect B, #852)
+    rejection_log = db.get("rejection_log") or {}
+    solar_rejections = rejection_log.get("solar_gain") or []
+    no_k_passive_events = [
+        e for e in solar_rejections if isinstance(e, dict) and e.get("reason_code") == "no_k_passive"
+    ]
+    no_k_passive_count = len(no_k_passive_events)
+    k_passive_now = cache.get("k_passive")
+    if no_k_passive_count and k_passive_now is not None:
+        # k_passive is populated right now, yet the rejection log still carries
+        # no_k_passive events — expected only if they all predate k_passive's
+        # first commit (fresh-install ramp-up); can't disambiguate from a single
+        # snapshot, so WARN (not FAIL) and point at the daily-check comparison.
+        overall = "FAIL" if overall == "FAIL" else "WARN"
+        lines.append(
+            f"WARN: REJECT_NO_K_PASSIVE count={no_k_passive_count} while k_passive={k_passive_now:.4f} is "
+            "already populated — expected to be zero going forward once k_passive exists; if this count "
+            "is still increasing day over day (compare against yesterday's #854 check), that's a FAIL, "
+            "not a WARN — the cache read in the solar_gain commit path may be broken"
+        )
+    else:
+        lines.append(
+            f"INFO: REJECT_NO_K_PASSIVE count={no_k_passive_count} "
+            f"(k_passive currently {'populated' if k_passive_now is not None else 'not yet populated'} — "
+            "expect this count flat/zero within a day of install once k_passive exists; a single run here "
+            "can't detect a climbing trend, compare against yesterday's #854 check for that)"
+        )
+
+    for line in lines:
+        print(line)
+    print()
+    print(f"Overall: {overall}")
     print()
 
 
@@ -753,6 +876,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", action="store_true", help="Show model summary only")
     parser.add_argument("--thermal", action="store_true", help="Show chart_log endpoint observations only")
     parser.add_argument("--pending", action="store_true", help="Show persisted pending observations")
+    parser.add_argument(
+        "--check-587",
+        action="store_true",
+        dest="check_587",
+        help=(
+            "PASS/WARN/FAIL summary for the Issue #587 k_vent/fan_only_decay retirement + "
+            "vent_window_decay/vent_fan_decay split (post-deploy validation)"
+        ),
+    )
     parser.add_argument("--last", type=int, default=5, metavar="N", help="Last N rejections per type (default 5)")
     parser.add_argument(
         "--type",
@@ -790,8 +922,11 @@ def main() -> None:
     show_daily = args.daily is not None
     daily_n = args.daily if args.daily is not None else 30
     show_pending = getattr(args, "pending", False)
+    show_check_587 = getattr(args, "check_587", False)
     filter_type = getattr(args, "obs_type", None)
-    section_flag = args.rejections or args.committed or args.model or args.thermal or show_daily or show_pending
+    section_flag = (
+        args.rejections or args.committed or args.model or args.thermal or show_daily or show_pending or show_check_587
+    )
     show_model = args.model or args.thermal or not section_flag
     show_rejections = args.rejections or not section_flag
     show_committed = args.committed or not section_flag
@@ -802,6 +937,9 @@ def main() -> None:
     print(f"Reading {LEARNING_DB_FILE} from {config['HA_HOST']} ...")
     db = fetch_learning_db(config, entry_id=getattr(args, "entry_id", None))
     print()
+
+    if show_check_587:
+        _print_check_587(db)
 
     if show_model:
         _print_model_summary(db)

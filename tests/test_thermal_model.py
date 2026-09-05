@@ -355,3 +355,127 @@ class TestThermalModelBackwardCompat:
         )
         model = engine.get_thermal_model()
         assert model["confidence"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# TestVentSplitCacheRegression (Issue #587, Part 3.4 items 11-13)
+# ---------------------------------------------------------------------------
+
+
+class TestVentSplitCacheRegression:
+    """Cache/confidence/removal regression tests for the k_vent/fan_only_decay retirement."""
+
+    def test_k_vent_fully_removed_from_cache_and_status(self, tmp_path: Path):
+        """ "k_vent" must be genuinely ABSENT from get_thermal_model()'s dict, not lingering None.
+
+        Distinguishes "removed" from "present but null" — a caller doing
+        ``"k_vent" in model`` must see False, not True-with-None-value.
+        """
+        engine = _make_engine(tmp_path)
+        model = engine.get_thermal_model()
+        assert "k_vent" not in model, "k_vent key must be fully removed from get_thermal_model()"
+        assert "observation_count_fan_only" not in model, "observation_count_fan_only key must be fully removed"
+        assert "observation_count_vent" not in model, (
+            "observation_count_vent (pre-#587 name) must be fully removed — replaced by "
+            "observation_count_vent_window/observation_count_vent_fan"
+        )
+        # The replacement fields must be present (even if None/0 on a fresh install).
+        assert "k_vent_fan" in model
+        assert "observation_count_vent_window" in model
+        assert "observation_count_vent_fan" in model
+        assert model["k_vent_fan"] is None
+        assert model["observation_count_vent_window"] == 0
+        assert model["observation_count_vent_fan"] == 0
+
+        # Same check against the raw cache dict (not just the get_thermal_model() view) —
+        # force cache creation via a real commit first (cache is None before any obs).
+        _inject_obs(
+            engine,
+            {"date": _TODAY, "hvac_mode": "passive", "k_passive": -0.05, "confidence_grade": "high"},
+        )
+        cache = engine._state.thermal_model_cache
+        assert cache is not None
+        assert "k_vent" not in cache
+        assert "observation_count_fan_only" not in cache
+
+    def test_grade_passive_confidence_excludes_vent_observations(self, tmp_path: Path):
+        """_grade_passive_confidence must NOT count vent_window/vent_fan observations.
+
+        Issue #587 deliberately drops the old fan_only_decay confidence-credit
+        approximation rather than replacing it with vent_window/vent_fan counts —
+        those regimes are NOT close proxies for envelope-only decay (they measure a
+        materially larger, different rate). Confirms confidence stays "none" even
+        after many vent-only commits, with no passive/heat/cool observations at all.
+        """
+        from custom_components.climate_advisor.const import THERMAL_PASSIVE_CONF_LOW
+        from custom_components.climate_advisor.learning import _grade_passive_confidence
+
+        engine = _make_engine(tmp_path)
+        for _i in range(THERMAL_PASSIVE_CONF_LOW + 10):
+            _inject_obs(
+                engine,
+                {
+                    "date": _TODAY,
+                    "hvac_mode": "vent_window",
+                    "k_passive": -0.1,
+                    "confidence_grade": "high",
+                },
+            )
+            _inject_obs(
+                engine,
+                {
+                    "date": _TODAY,
+                    "hvac_mode": "vent_fan",
+                    "k_passive": -0.2,
+                    "confidence_grade": "high",
+                },
+            )
+
+        cache = engine._state.thermal_model_cache
+        assert cache["observation_count_vent_window"] >= THERMAL_PASSIVE_CONF_LOW + 10
+        assert cache["observation_count_vent_fan"] >= THERMAL_PASSIVE_CONF_LOW + 10
+        # k_passive itself must remain untouched (envelope guard) ...
+        assert cache["k_passive"] is None
+        # ... and confidence must still read "none" — vent commits alone never count.
+        assert _grade_passive_confidence(cache) == "none"
+
+    def test_k_vent_window_ewma_not_reset_on_upgrade(self, tmp_path: Path):
+        """A pre-existing k_vent_window value survives seeding — no hard reset on upgrade.
+
+        Issue #587's design explicitly rejects zeroing k_vent_window's accumulated EWMA
+        value on redefinition (no reset-on-redefinition precedent exists anywhere in this
+        codebase) — new, correctly-scoped vent_window_decay observations blend in via the
+        normal EWMA recency-weighting instead.
+        """
+        engine = _make_engine(tmp_path)
+        # Seed a pre-upgrade-style k_vent_window value directly (simulates a value that
+        # accumulated under the old, wider "ventilated" definition before this upgrade).
+        _inject_obs(
+            engine,
+            {
+                "date": _TODAY,
+                "hvac_mode": "vent_window",
+                "k_passive": -0.30,
+                "confidence_grade": "low",
+            },
+        )
+        pre_upgrade_value = engine._state.thermal_model_cache["k_vent_window"]
+        assert pre_upgrade_value == pytest.approx(-0.30, abs=1e-9)
+
+        # A new, correctly-scoped commit blends in via EWMA — it must NOT reset to None
+        # or jump straight to the new value; it must be strictly between the old value
+        # and the new one (a proper EWMA blend), proving no hard reset occurred.
+        _inject_obs(
+            engine,
+            {
+                "date": _TODAY,
+                "hvac_mode": "vent_window",
+                "k_passive": -0.10,
+                "confidence_grade": "low",
+            },
+        )
+        post_value = engine._state.thermal_model_cache["k_vent_window"]
+        assert post_value is not None, "k_vent_window must not be reset to None on a new commit"
+        assert -0.30 < post_value < -0.10, (
+            f"expected an EWMA blend strictly between -0.30 and -0.10 (no hard reset); got {post_value}"
+        )

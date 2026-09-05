@@ -48,8 +48,8 @@ def _load_dotenv() -> None:
 SENSOR_ENTITY_ID = "sensor.climate_advisor_comfort_score"
 OBS_TYPES = [
     "passive_decay",
-    "fan_only_decay",
-    "ventilated_decay",
+    "vent_window_decay",
+    "vent_fan_decay",
     "solar_gain",
     "hvac_heat",
     "hvac_cool",

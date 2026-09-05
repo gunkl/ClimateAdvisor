@@ -13,6 +13,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import pytest
+
 # ── HA module stubs ──────────────────────────────────────────────────────────
 if "homeassistant" not in sys.modules:
     from conftest import _install_ha_stubs
@@ -34,7 +36,7 @@ from custom_components.climate_advisor.const import (
     THERMAL_K_PASSIVE_MAX,
     THERMAL_K_PASSIVE_MIN,
 )
-from custom_components.climate_advisor.learning import compute_k_passive_blocks
+from custom_components.climate_advisor.learning import compute_k_passive_blocks, compute_k_passive_endpoint
 
 ClimateAdvisorCoordinator = _coord_mod.ClimateAdvisorCoordinator
 
@@ -83,6 +85,90 @@ def _make_chart_log_entries(
             }
         )
     return entries
+
+
+def _make_sinusoidal_chart_log_entries(
+    *,
+    n_hours: float,
+    t_indoor_start: float,
+    t_outdoor_mean: float,
+    t_outdoor_amplitude: float,
+    outdoor_period_hours: float,
+    k_true: float,
+    interval_minutes: int = 30,
+    fine_step_minutes: float = 1.0,
+    phase_hours: float = 0.0,
+    t0: datetime | None = None,
+) -> tuple[list[dict], float]:
+    """Generate a synthetic chart_log window with a time-varying (sinusoidal) outdoor temp.
+
+    Ground truth is produced by an independent fine-step (1-minute) RK4 forward
+    integration of dT/dt = k_true*(T - T_out(t)) against the TRUE continuous sinusoid —
+    much finer-grained than the ~30-min sample spacing the estimator under test actually
+    sees (which only gets the coarse piecewise-linear-interpolated trace). This makes the
+    coarse-sample recovery a genuine test, not a tautology against the estimator's own math.
+
+    Returns (entries, t_end_true) where entries are the coarse interval_minutes-spaced
+    chart_log samples (what compute_k_passive_endpoint()/the old formula both see) and
+    t_end_true is the fine-grained ground-truth indoor temp at n_hours.
+    """
+    if t0 is None:
+        t0 = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+    def _t_out(t_hours: float) -> float:
+        return t_outdoor_mean + t_outdoor_amplitude * math.sin(
+            2 * math.pi * (t_hours + phase_hours) / outdoor_period_hours
+        )
+
+    total_minutes = n_hours * 60.0
+    n_fine_steps = int(round(total_minutes / fine_step_minutes))
+    h = fine_step_minutes / 60.0
+    temp = t_indoor_start
+    t = 0.0
+    fine_temps = [temp]
+    for _ in range(n_fine_steps):
+
+        def _deriv(tt: float, tt_indoor: float) -> float:
+            return k_true * (tt_indoor - _t_out(tt))
+
+        k1 = _deriv(t, temp)
+        k2 = _deriv(t + h / 2.0, temp + h / 2.0 * k1)
+        k3 = _deriv(t + h / 2.0, temp + h / 2.0 * k2)
+        k4 = _deriv(t + h, temp + h * k3)
+        temp += (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        t += h
+        fine_temps.append(temp)
+
+    n_per_coarse = int(round(interval_minutes / fine_step_minutes))
+    n_coarse_steps = int(round(total_minutes / interval_minutes)) + 1
+    entries = []
+    for i in range(n_coarse_steps):
+        idx = i * n_per_coarse
+        elapsed_h = i * interval_minutes / 60.0
+        entries.append(
+            {
+                "ts": (t0 + timedelta(minutes=i * interval_minutes)).isoformat(),
+                "indoor": fine_temps[idx],
+                "outdoor": _t_out(elapsed_h),
+            }
+        )
+    return entries, fine_temps[-1]
+
+
+def _call_passive_endpoint_estimate(window):
+    """Call ClimateAdvisorCoordinator._passive_endpoint_estimate via a MagicMock-bound instance.
+
+    The method reads only its `window` argument (no `self` state), so binding to a
+    MagicMock is safe for unit testing — same pattern as _call_select_estimator below.
+    """
+    fake_self = MagicMock()
+    return ClimateAdvisorCoordinator._passive_endpoint_estimate(fake_self, window)
+
+
+def _call_vent_endpoint_estimate(window):
+    """Call ClimateAdvisorCoordinator._vent_endpoint_estimate via a MagicMock-bound instance."""
+    fake_self = MagicMock()
+    return ClimateAdvisorCoordinator._vent_endpoint_estimate(fake_self, window)
 
 
 def _call_select_estimator(result_a, result_b):
@@ -316,3 +402,145 @@ class TestSelectEstimator:
         assert result is not None
         assert result["source"] == "endpoint"
         assert result["grade"] == "low"
+
+
+# ── TestComputeKPassiveEndpoint (Issue #587 Defect A) ──────────────────────────
+#
+# Defect A: the endpoint k estimator assumed outdoor temperature was constant across
+# the whole window (t_out_avg), when real outdoor readings swing through the day. On
+# two live windows (5.3h and 8.6h) this produced k values 1.3x-1.9x higher in magnitude
+# than the ODE-consistent true rate. compute_k_passive_endpoint() replaces the closed-form
+# formula with a bisection root-find against the window's real per-sample outdoor trace
+# (RK4 forward-integration), while staying bookend-only on the indoor side (#141).
+
+
+class TestComputeKPassiveEndpoint:
+    def test_endpoint_matches_old_formula_when_outdoor_constant(self):
+        """Constant-outdoor window: new helper matches the old closed-form formula.
+
+        No behavior change for the common stable case — piecewise-linear interpolation
+        over a constant trace reduces to the same constant, so RK4 integration should
+        reproduce the same exponential-decay answer the old ratio/log formula gave.
+        """
+        k_true = -0.02
+        entries = _make_chart_log_entries(
+            n_hours=8,
+            t_indoor_start=72.0,
+            t_outdoor=45.0,
+            k_passive=k_true,
+            interval_minutes=30,
+        )
+        t_start = entries[0]["indoor"]
+        t_end = entries[-1]["indoor"]
+        t_out_avg = sum(e["outdoor"] for e in entries) / len(entries)
+        ratio = (t_end - t_out_avg) / (t_start - t_out_avg)
+        k_old = math.log(ratio) / 8.0
+
+        k_new = compute_k_passive_endpoint(entries, THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX)
+
+        assert k_new is not None
+        assert k_new == pytest.approx(k_old, abs=1e-4)
+        assert k_new == pytest.approx(k_true, rel=0.02)
+
+    def test_endpoint_recovers_true_k_under_sinusoidal_outdoor(self):
+        """Sinusoidal-outdoor window: new estimator recovers true k within ~2%;
+        the old closed-form formula is measurably biased (>15%) on the same data.
+
+        This is the direct proof the fix closes the reported 1.3x-1.9x gap from the
+        original investigation: an 8.6-hour overnight window with outdoor swinging
+        through a diurnal sinusoid (mean 50°F, amplitude 10°F, 24h period), true
+        k=-0.15 hr⁻¹.
+        """
+        k_true = -0.15
+        entries, _t_end_ground_truth = _make_sinusoidal_chart_log_entries(
+            n_hours=8.6,
+            t_indoor_start=72.0,
+            t_outdoor_mean=50.0,
+            t_outdoor_amplitude=10.0,
+            outdoor_period_hours=24.0,
+            k_true=k_true,
+            interval_minutes=30,
+            phase_hours=6.0,
+        )
+        t_start = entries[0]["indoor"]
+        t_end = entries[-1]["indoor"]
+        t_out_avg = sum(e["outdoor"] for e in entries) / len(entries)
+        ratio = (t_end - t_out_avg) / (t_start - t_out_avg)
+        k_old = math.log(ratio) / 8.6
+
+        k_new = compute_k_passive_endpoint(entries, THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX)
+
+        assert k_new is not None
+        new_err_pct = abs((k_new - k_true) / k_true) * 100.0
+        old_err_pct = abs((k_old - k_true) / k_true) * 100.0
+
+        assert new_err_pct < 2.0, f"new estimator error {new_err_pct:.2f}% exceeds 2%"
+        assert old_err_pct > 15.0, f"old formula error {old_err_pct:.2f}% does not exceed 15%"
+
+    def test_endpoint_degrades_gracefully_with_only_two_samples(self):
+        """A 2-sample window still returns a valid, bounded k — no exception.
+
+        Piecewise-linear interpolation over exactly 2 outdoor points *is* the whole
+        trace, so this is the degenerate case where the new estimator's answer should
+        match the old closed-form formula (both reduce to the same math).
+        """
+        t0 = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+        entries = [
+            {"ts": t0.isoformat(), "indoor": 72.0, "outdoor": 45.0},
+            {"ts": (t0 + timedelta(hours=8)).isoformat(), "indoor": 65.0, "outdoor": 45.0},
+        ]
+
+        k_new = compute_k_passive_endpoint(entries, THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX)
+
+        assert k_new is not None
+        assert THERMAL_K_PASSIVE_MIN <= k_new <= THERMAL_K_PASSIVE_MAX
+        ratio = (65.0 - 45.0) / (72.0 - 45.0)
+        k_old = math.log(ratio) / 8.0
+        assert k_new == pytest.approx(k_old, abs=1e-3)
+
+    def test_endpoint_returns_none_when_no_root_in_bounds(self):
+        """An unreachable T_end (given the real outdoor path) ⇒ None.
+
+        Preserves the same regime-filter/reject-and-fallback-to-block-OLS contract as
+        the old ratio<=0/ratio>=1.0 check: indoor barely moves while outdoor sits far
+        away, so no k in [THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX] can explain a
+        near-zero observed change over an 8-hour window with a huge indoor-outdoor gap.
+        """
+        entries = _make_chart_log_entries(
+            n_hours=8,
+            t_indoor_start=72.0,
+            t_outdoor=71.9,  # tiny indoor-outdoor gap
+            k_passive=THERMAL_K_PASSIVE_MIN,  # even the fastest allowed decay barely moves T
+            interval_minutes=30,
+        )
+        # Force an artificial T_end far outside what any k in-bounds could produce:
+        # indoor rising away from outdoor while outdoor stays put — no decay-toward-outdoor
+        # k reproduces this.
+        entries[-1]["indoor"] = 90.0
+
+        k_new = compute_k_passive_endpoint(entries, THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX)
+
+        assert k_new is None
+
+    def test_vent_endpoint_shares_passive_helper(self):
+        """_vent_endpoint_estimate and _passive_endpoint_estimate produce identical
+        output for the same synthetic window — proves the Issue #587 Phase 1
+        shared-helper refactor didn't fork behavior, and this phase's Defect A fix
+        landed identically in both (both call the same compute_k_passive_endpoint()).
+        """
+        entries = _make_chart_log_entries(
+            n_hours=8,
+            t_indoor_start=72.0,
+            t_outdoor=45.0,
+            k_passive=-0.03,
+            interval_minutes=30,
+        )
+
+        result_passive = _call_passive_endpoint_estimate(entries)
+        result_vent = _call_vent_endpoint_estimate(entries)
+
+        assert result_passive is not None
+        assert result_vent is not None
+        assert result_passive["k"] == result_vent["k"]
+        assert result_passive["source"] == result_vent["source"] == "endpoint"
+        assert result_passive["grade"] == result_vent["grade"] == "low"

@@ -16,6 +16,7 @@ from custom_components.climate_advisor.learning import (
     _smooth_temps,
     compute_k_active,
     compute_k_passive,
+    compute_k_solar,
 )
 
 _FAKE_NOW = datetime(2026, 4, 19, 12, 0, 0, tzinfo=UTC)
@@ -245,6 +246,59 @@ def test_k_active_too_few_active_samples():
 
 
 # ---------------------------------------------------------------------------
+# Tests: compute_k_solar (Issue #587, Defect B)
+# ---------------------------------------------------------------------------
+
+
+def test_k_solar_subtracts_passive_contribution():
+    """100%-conduction window (no solar physics at all) → compute_k_solar ≈ 0.
+
+    Direct regression test for the reported bug: the original investigation
+    found 21 solar_gain observations on a simulator with zero solar physics,
+    all reporting 1.09-4.00°F/hr of pure-conduction warming as "solar gain"
+    because the old formula (mean_rate = ΔT_indoor / Δt) attributed the entire
+    observed warming rate to solar with no subtraction. These samples are
+    generated from the pure decay-toward-outdoor ODE (dT/dt = k_passive*(T-T_out)),
+    i.e. warming purely because outdoor is warmer than indoor — exactly the
+    "warm simulated outdoor with zero solar physics" scenario from the
+    investigation. The old raw mean_rate on this window is large and positive;
+    the fixed compute_k_solar must report ≈0 once k_passive's conductive
+    contribution is subtracted.
+    """
+    true_k_p = -0.08
+    samples = _make_decay_samples(t_start=68.0, t_outdoor=95.0, k_passive=true_k_p, n=13, dt_minutes=15.0)
+
+    # Old-style raw rate (what the pre-fix code committed as k_solar) — for
+    # the report's numeric-proof comparison, not itself asserted here.
+    indoor_temps = [s["indoor_temp_f"] for s in samples]
+    elapsed = [s["elapsed_minutes"] for s in samples]
+    total_dt_hours = (elapsed[-1] - elapsed[0]) / 60.0
+    old_style_mean_rate = (indoor_temps[-1] - indoor_temps[0]) / total_dt_hours
+    assert old_style_mean_rate > 1.0, "sanity check: old formula should report a large positive rate here"
+
+    k_solar, r2 = compute_k_solar(samples, k_passive=true_k_p)
+    assert k_solar is not None
+    assert k_solar < 0.1, f"Expected compute_k_solar≈0 for pure-conduction window, got {k_solar}"
+
+
+def test_k_solar_recovers_known_solar_component():
+    """Conductive term + a known added constant solar term → recovers just the solar term.
+
+    Samples are generated from dT/dt = k_passive*(T-T_out) + k_solar_true (the same
+    general linear-ODE shape _make_active_samples already uses for k_active) — i.e.
+    ordinary conduction plus a genuine additional constant warming contribution.
+    compute_k_solar must recover close to k_solar_true, not the raw combined rate.
+    """
+    true_k_p = -0.06
+    true_k_solar = 1.5
+    samples = _make_active_samples(t_start=72.0, t_outdoor=78.0, k_passive=true_k_p, k_active=true_k_solar, n=13)
+
+    k_solar, r2 = compute_k_solar(samples, k_passive=true_k_p)
+    assert k_solar is not None
+    assert abs(k_solar - true_k_solar) < 0.2, f"Expected compute_k_solar≈{true_k_solar}, got {k_solar}"
+
+
+# ---------------------------------------------------------------------------
 # Tests: LearningEngine EWMA accumulation
 # ---------------------------------------------------------------------------
 
@@ -354,20 +408,25 @@ def test_ewma_heat_and_cool_independent(tmp_path):
     assert model["observation_count_cool"] == 3
 
 
-def test_fan_only_k_vent_only(tmp_path):
-    """fan_only observation sets k_vent but must NOT write k_passive or k_active_heat/cool.
+def test_vent_fan_obs_sets_k_vent_fan_only(tmp_path):
+    """vent_fan observation sets k_vent_fan but must NOT write k_passive or k_active_heat/cool.
 
-    fan_only k_p reflects the effective decay rate with the fan running — a different
-    coefficient from the bare envelope rate.  Writing it into k_passive would bias the
-    envelope model and corrupt bedtime-setback physics predictions.
+    Issue #587: fan_only_decay/k_vent are retired outright (the old fan-on/windows-
+    closed regime this test used to exercise no longer exists — see
+    tests/test_thermal_vent_split.py::test_fan_only_decay_no_longer_triggers for that
+    retirement's regression coverage). This test now exercises vent_fan's replacement
+    cache field: vent_fan k_p reflects the effective decay rate with windows open AND
+    fan/WHF running — a different coefficient from the bare envelope rate. Writing it
+    into k_passive would bias the envelope model and corrupt bedtime-setback physics
+    predictions.
     """
     engine = _make_engine(tmp_path)
 
-    fan_obs = {
+    vent_fan_obs = {
         "event_id": "f1",
         "timestamp": "2026-04-01T20:00:00",
         "date": "2026-04-01",
-        "hvac_mode": "fan_only",
+        "hvac_mode": "vent_fan",
         "session_minutes": 15.0,
         "start_indoor_f": 72.0,
         "end_indoor_f": 71.0,
@@ -387,13 +446,13 @@ def test_fan_only_k_vent_only(tmp_path):
         "schema_version": 2,
     }
 
-    _record_obs(engine, fan_obs)
+    _record_obs(engine, vent_fan_obs)
     model = engine.get_thermal_model()
-    # k_passive must stay None — fan_only must not contaminate the envelope model
-    assert model["k_passive"] is None, f"k_passive must be None after fan_only obs; got {model['k_passive']}"
-    # k_vent must be set to the observed decay rate
-    assert model["k_vent"] is not None and abs(model["k_vent"] - (-0.04)) < 1e-9, (
-        f"k_vent should be -0.04 from fan_only obs; got {model['k_vent']}"
+    # k_passive must stay None — vent_fan must not contaminate the envelope model
+    assert model["k_passive"] is None, f"k_passive must be None after vent_fan obs; got {model['k_passive']}"
+    # k_vent_fan must be set to the observed decay rate
+    assert model["k_vent_fan"] is not None and abs(model["k_vent_fan"] - (-0.04)) < 1e-9, (
+        f"k_vent_fan should be -0.04 from vent_fan obs; got {model['k_vent_fan']}"
     )
     assert model["k_active_heat"] is None
     assert model["k_active_cool"] is None

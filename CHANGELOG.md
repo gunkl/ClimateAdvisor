@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.21] — 2026-09-04
+
+- Fix #587 (plus two related thermal-model calculation fixes, #851/#852): house-response and ventilation-loss estimates used in your predictions are now measurably more accurate — especially overnight ventilated-window and whole-house-fan measurements, which previously blended together and could overstate cooling by up to ~2x on some homes. The unused "fan-only" ventilation measurement (which required the fan running with windows closed — something whole-house-fan homes never actually do) has been retired. Known follow-up gaps tracked separately, not addressed in this round: #853 (a door/window sensor unrelated to a given zone can still trigger a ventilation measurement for that zone) and #854 (post-deploy monitoring of this change's convergence).
+
 ## [0.7.20] — 2026-09-04
 
 - Fix #849: The Next Automation card no longer tells you to close or reopen windows — that instruction now lives only in Next User Action, where it belongs.

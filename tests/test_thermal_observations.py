@@ -38,14 +38,13 @@ if _ha_util is not None:
 
 from custom_components.climate_advisor.const import (  # noqa: E402
     MIN_THERMAL_OBSERVATIONS,
-    OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
     OBS_TYPE_PASSIVE_DECAY,
     OBS_TYPE_SOLAR_GAIN,
-    OBS_TYPE_VENTILATED_DECAY,
-    THERMAL_FAN_MIN_SAMPLES,
-    THERMAL_FAN_SAMPLE_INTERVAL_S,
+    OBS_TYPE_VENT_FAN_DECAY,
+    OBS_TYPE_VENT_WINDOW_DECAY,
+    REJECT_NO_K_PASSIVE,
     THERMAL_HVAC_MIN_DECAY_F,
     THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S,
     THERMAL_PASSIVE_CONF_HIGH,
@@ -344,81 +343,14 @@ class TestPassiveDecayObservation:
 # ---------------------------------------------------------------------------
 
 
-class TestFanOnlyObservation:
-    """Fan-only decay observation lifecycle via _sample_all_observations()."""
-
-    def test_starts_when_fan_active_no_hvac(self):
-        coord = _make_obs_coord(
-            hvac_action="idle",
-            indoor_temp=72.0,
-            outdoor_temp=65.0,
-            fan_active=True,
-            any_sensor_open=False,
-        )
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-        assert OBS_TYPE_FAN_ONLY_DECAY in coord._pending_observations
-        assert coord._pending_observations[OBS_TYPE_FAN_ONLY_DECAY]["status"] == "monitoring"
-
-    def test_does_not_start_when_hvac_active(self):
-        coord = _make_obs_coord(
-            hvac_action="heating",
-            indoor_temp=72.0,
-            outdoor_temp=65.0,
-            fan_active=True,
-        )
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-        assert OBS_TYPE_FAN_ONLY_DECAY not in coord._pending_observations
-
-    def test_does_not_start_when_sensor_open(self):
-        coord = _make_obs_coord(
-            hvac_action="idle",
-            indoor_temp=72.0,
-            outdoor_temp=65.0,
-            fan_active=True,
-            any_sensor_open=True,
-        )
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-        assert OBS_TYPE_FAN_ONLY_DECAY not in coord._pending_observations
-
-    def test_abandons_when_fan_stops(self):
-        """fan_only_decay with < THERMAL_FAN_MIN_SAMPLES is abandoned when fan stops."""
-
-        coord = _make_obs_coord(hvac_action="idle", indoor_temp=72.0, outdoor_temp=65.0, fan_active=False)
-        # Pre-seed observation with 5 samples (< 15 min threshold)
-        coord._pending_observations[OBS_TYPE_FAN_ONLY_DECAY] = {
-            "obs_type": OBS_TYPE_FAN_ONLY_DECAY,
-            "obs_id": "test-fan-1",
-            "start_time": _FAKE_NOW.isoformat(),
-            "status": "monitoring",
-            "samples": [
-                {
-                    "timestamp": _FAKE_NOW.isoformat(),
-                    "indoor_temp_f": 72.0,
-                    "outdoor_temp_f": 65.0,
-                    "elapsed_minutes": float(i),
-                }
-                for i in range(5)
-            ],
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-        # ae._fan_active is already False; climate state is idle
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-        # 5 < THERMAL_FAN_MIN_SAMPLES → should be abandoned
-        assert OBS_TYPE_FAN_ONLY_DECAY not in coord._pending_observations
-
-
 # ---------------------------------------------------------------------------
 # TestConcurrentObservations
 # ---------------------------------------------------------------------------
+# NOTE (Issue #587): TestFanOnlyObservation was removed here — fan_only_decay
+# (fan on, windows closed) is a retired regime with no replacement trigger (it is
+# NOT folded into vent_fan_decay, which requires windows open AND fan on). See
+# tests/test_thermal_vent_split.py::test_fan_only_decay_no_longer_triggers for the
+# regression coverage confirming clean retirement.
 
 
 class TestConcurrentObservations:
@@ -454,8 +386,13 @@ class TestConcurrentObservations:
         # hvac_heat observation must be started
         assert OBS_TYPE_HVAC_HEAT in coord._pending_observations
 
-    def test_passive_and_fan_only_cannot_coexist(self):
-        """When fan activates while passive_decay is monitoring, passive_decay is abandoned."""
+    def test_passive_abandoned_on_fan_activation_no_new_obs_without_open_sensor(self):
+        """When fan activates while passive_decay is monitoring, passive_decay is abandoned.
+
+        Issue #587: fan_only_decay (the old fan-on/windows-closed regime) is retired
+        outright — it is NOT folded into vent_fan_decay, which requires windows open
+        AND fan on. With sensors closed, no replacement observation should start.
+        """
         coord = _make_obs_coord(
             hvac_action="idle",
             indoor_temp=75.0,
@@ -489,8 +426,10 @@ class TestConcurrentObservations:
 
         # passive_decay should be abandoned (fan_activated condition)
         assert OBS_TYPE_PASSIVE_DECAY not in coord._pending_observations
-        # fan_only_decay should be started
-        assert OBS_TYPE_FAN_ONLY_DECAY in coord._pending_observations
+        # No vent-split type should start: vent_window requires fan OFF, vent_fan
+        # requires sensors open (they're closed here) — and fan_only no longer exists.
+        assert OBS_TYPE_VENT_WINDOW_DECAY not in coord._pending_observations
+        assert OBS_TYPE_VENT_FAN_DECAY not in coord._pending_observations
 
 
 # ---------------------------------------------------------------------------
@@ -846,11 +785,15 @@ class TestMigrationLoadState:
 
 
 class TestE6CacheBugFix:
-    """E6: passive_decay observations must NOT write k_vent; only fan_only_decay may.
+    """E6: passive_decay observations must NOT write k_vent_window/k_vent_fan.
 
-    Before the fix, _update_thermal_model_cache() wrote k_p (envelope decay rate)
-    into cache["k_vent"] inside the `elif mode == "passive"` branch, silently
-    contaminating fan-ventilation data with envelope-only measurements.
+    Before the original fix, _update_thermal_model_cache() wrote k_p (envelope decay
+    rate) into the ventilation cache field inside the `elif mode == "passive"` branch,
+    silently contaminating ventilation data with envelope-only measurements.
+
+    Issue #587: fan_only_decay/k_vent retired outright (dead — the sole ODE consumer
+    was always called with ventilation_active=False). Coverage for that removal lives
+    in tests/test_thermal_model.py::test_k_vent_fully_removed_from_cache_and_status.
     """
 
     def _make_engine(self, tmp_path: Path) -> LearningEngine:
@@ -867,20 +810,11 @@ class TestE6CacheBugFix:
             "confidence_grade": "high",
         }
 
-    def _fan_only_obs(self, k_passive: float) -> dict:
-        """Minimal fan_only_decay observation dict."""
-        return {
-            "date": "2026-04-28",
-            "hvac_mode": "fan_only",
-            "k_passive": k_passive,
-            "confidence_grade": "high",
-        }
-
     def _ventilated_obs(self, k_passive: float, r_squared_passive: float | None = None) -> dict:
-        """Minimal ventilated_decay observation dict."""
+        """Minimal vent_window_decay observation dict."""
         obs = {
             "date": "2026-04-28",
-            "hvac_mode": "ventilated",
+            "hvac_mode": "vent_window",
             "k_passive": k_passive,
             "confidence_grade": "high",
         }
@@ -888,8 +822,8 @@ class TestE6CacheBugFix:
             obs["r_squared_passive"] = r_squared_passive
         return obs
 
-    def test_passive_decay_does_not_update_k_vent(self, tmp_path: Path):
-        """A passive_decay commit must update k_passive but leave k_vent untouched."""
+    def test_passive_decay_does_not_update_k_vent_window(self, tmp_path: Path):
+        """A passive_decay commit must update k_passive but leave k_vent_window untouched."""
         engine = self._make_engine(tmp_path)
         engine._update_thermal_model_cache(self._passive_obs(-0.08))
 
@@ -897,51 +831,8 @@ class TestE6CacheBugFix:
         assert pytest.approx(-0.08, abs=1e-9) == model["k_passive"], (
             f"k_passive should be -0.08, got {model['k_passive']}"
         )
-        assert model["k_vent"] is None, f"k_vent must be None after passive_decay commit; got {model['k_vent']}"
-
-    def test_fan_only_decay_updates_k_vent(self, tmp_path: Path):
-        """A fan_only_decay commit must set k_vent but must NOT write k_passive.
-
-        fan_only k_p reflects the effective decay rate with a running fan, which
-        is not the same as the envelope-only decay rate.  Writing it into k_passive
-        would bias the envelope model and corrupt bedtime-setback predictions.
-        """
-        engine = self._make_engine(tmp_path)
-        engine._update_thermal_model_cache(self._fan_only_obs(-0.15))
-
-        model = engine.get_thermal_model()
-        assert pytest.approx(-0.15, abs=1e-9) == model["k_vent"], f"k_vent should be -0.15, got {model['k_vent']}"
-        # k_passive must remain None — fan_only observations do not contribute to envelope model
-        assert model["k_passive"] is None, (
-            "k_passive must be None after fan_only commit "
-            f"(fan_only must not write k_passive); got {model['k_passive']}"
-        )
-
-    def test_passive_and_fan_only_do_not_cross_contaminate(self, tmp_path: Path):
-        """passive then fan_only: k_vent reflects only fan_only; k_passive reflects only passive.
-
-        After the fix, fan_only observations do not write to k_passive.  k_passive must
-        equal the value set by the passive_decay commit only — no EMA blending with fan_only.
-        """
-        engine = self._make_engine(tmp_path)
-
-        # First: passive_decay — should touch k_passive only
-        engine._update_thermal_model_cache(self._passive_obs(-0.08))
-
-        # Second: fan_only_decay — should set k_vent but must NOT update k_passive
-        engine._update_thermal_model_cache(self._fan_only_obs(-0.12))
-
-        model = engine.get_thermal_model()
-
-        # k_vent must reflect the fan_only value only (first commit; cache was None → set directly)
-        assert pytest.approx(-0.12, abs=1e-9) == model["k_vent"], (
-            f"k_vent should be -0.12 (fan_only only); got {model['k_vent']} — passive_decay must not contaminate k_vent"
-        )
-
-        # k_passive must reflect ONLY the passive_decay commit (-0.08).
-        # The fan_only commit must not touch k_passive — no EMA blending.
-        assert pytest.approx(-0.08, abs=1e-9) == model["k_passive"], (
-            f"k_passive should be -0.08 (passive only, no fan_only contamination); got {model['k_passive']}"
+        assert model["k_vent_window"] is None, (
+            f"k_vent_window must be None after passive_decay commit; got {model['k_vent_window']}"
         )
 
     def test_ventilated_decay_does_not_update_k_passive(self, tmp_path: Path):
@@ -1084,7 +975,7 @@ def _make_stale_obs_rising_temps(
 
 
 class TestWallClockTimeout:
-    """Wall-clock abandon guard for ventilated_decay and fan_only_decay (Issue #122 H4 / Issue #126)."""
+    """Wall-clock abandon guard for vent_window_decay (Issue #122 H4 / Issue #126)."""
 
     def test_ventilated_decay_kept_alive_at_61min_low_signal(self, caplog):
         """ventilated_decay started 61 min ago, low |ΔT| → kept alive (between min=30 and max=240 window).
@@ -1101,8 +992,8 @@ class TestWallClockTimeout:
             outdoor_temp=outdoor,
             any_sensor_open=True,  # sensor open keeps ventilated_decay alive under normal logic
         )
-        coord._pending_observations[OBS_TYPE_VENTILATED_DECAY] = _make_stale_obs(
-            OBS_TYPE_VENTILATED_DECAY,
+        coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = _make_stale_obs(
+            OBS_TYPE_VENT_WINDOW_DECAY,
             n_samples=THERMAL_VENT_MIN_SAMPLES + 5,  # enough samples, but low signal
             indoor_temp=indoor,
             outdoor_temp=outdoor,
@@ -1118,7 +1009,7 @@ class TestWallClockTimeout:
             coord._sample_all_observations()
 
         # At 61 min with low signal the obs should be kept alive, not abandoned
-        assert OBS_TYPE_VENTILATED_DECAY in coord._pending_observations, (
+        assert OBS_TYPE_VENT_WINDOW_DECAY in coord._pending_observations, (
             "ventilated_decay observation should be kept alive at 61 min with low signal "
             f"(between THERMAL_ROLLING_MIN_WINDOW_MINUTES={THERMAL_ROLLING_MIN_WINDOW_MINUTES} "
             f"and THERMAL_ROLLING_MAX_WINDOW_MINUTES={THERMAL_ROLLING_MAX_WINDOW_MINUTES})"
@@ -1138,8 +1029,8 @@ class TestWallClockTimeout:
             outdoor_temp=outdoor,
             any_sensor_open=True,  # sensor open keeps ventilated_decay alive under normal logic
         )
-        coord._pending_observations[OBS_TYPE_VENTILATED_DECAY] = _make_very_stale_obs(
-            OBS_TYPE_VENTILATED_DECAY,
+        coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = _make_very_stale_obs(
+            OBS_TYPE_VENT_WINDOW_DECAY,
             n_samples=3,  # below THERMAL_MIN_DECAY_SAMPLES+1 threshold → abandon not commit
             indoor_temp=indoor,
             outdoor_temp=outdoor,
@@ -1154,7 +1045,7 @@ class TestWallClockTimeout:
         ):
             coord._sample_all_observations()
 
-        assert OBS_TYPE_VENTILATED_DECAY not in coord._pending_observations, (
+        assert OBS_TYPE_VENT_WINDOW_DECAY not in coord._pending_observations, (
             "ventilated_decay observation should be abandoned after THERMAL_ROLLING_MAX_WINDOW_MINUTES "
             f"({THERMAL_ROLLING_MAX_WINDOW_MINUTES} min) with low signal"
         )
@@ -1175,8 +1066,8 @@ class TestWallClockTimeout:
             outdoor_temp=outdoor,
             any_sensor_open=True,
         )
-        coord._pending_observations[OBS_TYPE_VENTILATED_DECAY] = _make_stale_obs_rising_temps(
-            OBS_TYPE_VENTILATED_DECAY,
+        coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = _make_stale_obs_rising_temps(
+            OBS_TYPE_VENT_WINDOW_DECAY,
             n_samples=THERMAL_VENT_MIN_SAMPLES + 5,
             indoor_start=indoor_start,
             indoor_end=indoor_end,
@@ -1187,7 +1078,7 @@ class TestWallClockTimeout:
         def _fake_async_create_task(coro):
             coro_name = getattr(coro, "__name__", getattr(coro, "__qualname__", ""))
             if "_commit_observation" in coro_name:
-                committed_obs_types.append(OBS_TYPE_VENTILATED_DECAY)
+                committed_obs_types.append(OBS_TYPE_VENT_WINDOW_DECAY)
             coro.close()
 
         coord.hass.async_create_task = _fake_async_create_task
@@ -1196,7 +1087,7 @@ class TestWallClockTimeout:
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
 
-        obs_still_present = coord._pending_observations.get(OBS_TYPE_VENTILATED_DECAY)
+        obs_still_present = coord._pending_observations.get(OBS_TYPE_VENT_WINDOW_DECAY)
         was_committed_status = obs_still_present is not None and obs_still_present.get("status") == "committing"
         was_queued = len(committed_obs_types) > 0
 
@@ -1220,8 +1111,8 @@ class TestWallClockTimeout:
             outdoor_temp=outdoor,
             any_sensor_open=True,
         )
-        coord._pending_observations[OBS_TYPE_VENTILATED_DECAY] = _make_stale_obs(
-            OBS_TYPE_VENTILATED_DECAY,
+        coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = _make_stale_obs(
+            OBS_TYPE_VENT_WINDOW_DECAY,
             n_samples=THERMAL_VENT_MIN_SAMPLES + 5,
             indoor_temp=indoor,  # flat — range=0
             outdoor_temp=outdoor,
@@ -1236,7 +1127,7 @@ class TestWallClockTimeout:
         ):
             coord._sample_all_observations()
 
-        assert OBS_TYPE_VENTILATED_DECAY in coord._pending_observations, (
+        assert OBS_TYPE_VENT_WINDOW_DECAY in coord._pending_observations, (
             "ventilated_decay with flat indoor temps should be kept alive at 61 min "
             "even when indoor-outdoor snapshot diff is large (12°F). "
             "Signal check must use indoor sample range, not snapshot differential."
@@ -1245,81 +1136,9 @@ class TestWallClockTimeout:
             "Expected 'keeping alive' log — flat indoor means signal_sufficient=False"
         )
 
-    def test_fan_only_decay_kept_alive_at_61min_low_signal(self, caplog):
-        """fan_only_decay started 61 min ago, fan still on, low |ΔT| → kept alive (between min=30 and max=240 window).
 
-        Issue #126 changed the rolling window so that observations between THERMAL_ROLLING_MIN_WINDOW_MINUTES
-        (30 min) and THERMAL_ROLLING_MAX_WINDOW_MINUTES (240 min) with insufficient signal are kept alive
-        rather than abandoned. The old 60-min hard-abandon is replaced by the 240-min hard cap.
-        """
-        # |indoor - outdoor| = 70.1 - 70.0 = 0.1 < THERMAL_FAN_MIN_SIGNAL_F (0.2)
-        indoor, outdoor = 70.1, 70.0
-        coord = _make_obs_coord(
-            hvac_action="idle",
-            indoor_temp=indoor,
-            outdoor_temp=outdoor,
-            fan_active=True,  # fan on keeps fan_only_decay alive under normal logic
-        )
-        coord._pending_observations[OBS_TYPE_FAN_ONLY_DECAY] = _make_stale_obs(
-            OBS_TYPE_FAN_ONLY_DECAY,
-            n_samples=THERMAL_FAN_MIN_SAMPLES + 5,  # enough samples, but low signal
-            indoor_temp=indoor,
-            outdoor_temp=outdoor,
-        )
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-
-        import logging
-
-        with (
-            patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock),
-            caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.coordinator"),
-        ):
-            coord._sample_all_observations()
-
-        # At 61 min with low signal the obs should be kept alive, not abandoned
-        assert OBS_TYPE_FAN_ONLY_DECAY in coord._pending_observations, (
-            "fan_only_decay observation should be kept alive at 61 min with low signal "
-            f"(between THERMAL_ROLLING_MIN_WINDOW_MINUTES={THERMAL_ROLLING_MIN_WINDOW_MINUTES} "
-            f"and THERMAL_ROLLING_MAX_WINDOW_MINUTES={THERMAL_ROLLING_MAX_WINDOW_MINUTES})"
-        )
-        # The coordinator should log a "keeping alive" message
-        assert any("keeping alive" in r.message for r in caplog.records), (
-            "Expected INFO log indicating observation is being kept alive"
-        )
-
-    def test_fan_only_decay_abandons_at_max_window(self, caplog):
-        """fan_only_decay started 241 min ago (past 240-min cap), low |ΔT| → abandoned with max_window_exceeded."""
-        # |indoor - outdoor| = 70.1 - 70.0 = 0.1 < THERMAL_FAN_MIN_SIGNAL_F (0.2)
-        indoor, outdoor = 70.1, 70.0
-        coord = _make_obs_coord(
-            hvac_action="idle",
-            indoor_temp=indoor,
-            outdoor_temp=outdoor,
-            fan_active=True,  # fan on keeps fan_only_decay alive under normal logic
-        )
-        coord._pending_observations[OBS_TYPE_FAN_ONLY_DECAY] = _make_very_stale_obs(
-            OBS_TYPE_FAN_ONLY_DECAY,
-            n_samples=3,  # below THERMAL_MIN_DECAY_SAMPLES+1 threshold → abandon not commit
-            indoor_temp=indoor,
-            outdoor_temp=outdoor,
-        )
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-
-        import logging
-
-        with (
-            patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock),
-            caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.coordinator"),
-        ):
-            coord._sample_all_observations()
-
-        assert OBS_TYPE_FAN_ONLY_DECAY not in coord._pending_observations, (
-            "fan_only_decay observation should be abandoned after THERMAL_ROLLING_MAX_WINDOW_MINUTES "
-            f"({THERMAL_ROLLING_MAX_WINDOW_MINUTES} min) with low signal"
-        )
-        assert any("max_window_exceeded" in r.message for r in caplog.records), (
-            "Expected log with reason 'max_window_exceeded'"
-        )
+# Issue #587: the two fan_only_decay wall-clock tests formerly here were removed —
+# fan_only_decay is retired outright (see TestE6CacheBugFix docstring above).
 
 
 # ---------------------------------------------------------------------------
@@ -1391,43 +1210,47 @@ class TestSampleDecimation:
             "passive_decay should append a sample after 310s (interval=300s)"
         )
 
-    def test_fan_only_decimated_at_2min(self):
-        """fan_only_decay: sample is NOT appended if < 120s since last sample."""
+    def test_vent_window_decimated_at_5min(self):
+        """vent_window_decay: sample is NOT appended if < 300s since last sample.
+
+        Issue #587: vent_window_decay/vent_fan_decay share THERMAL_PASSIVE_SAMPLE_INTERVAL_S
+        (formerly this covered fan_only_decay's own 120s interval — retired outright).
+        """
         coord = _make_obs_coord(
             hvac_action="idle",
             indoor_temp=72.0,
             outdoor_temp=65.0,
-            fan_active=True,
+            any_sensor_open=True,
         )
-        # last_sample_time was only 60s ago — below the 120s interval
-        obs = self._make_obs_with_last_sample(OBS_TYPE_FAN_ONLY_DECAY, last_sample_offset_s=60)
-        coord._pending_observations[OBS_TYPE_FAN_ONLY_DECAY] = obs
+        # last_sample_time was only 60s ago — below the 300s interval
+        obs = self._make_obs_with_last_sample(OBS_TYPE_VENT_WINDOW_DECAY, last_sample_offset_s=60)
+        coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = obs
 
         dt_mock = _make_dt_mock(_FAKE_NOW)
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
 
-        assert len(coord._pending_observations.get(OBS_TYPE_FAN_ONLY_DECAY, {}).get("samples", [])) == 0, (
-            "fan_only_decay should not append a sample when only 60s has elapsed (interval=120s)"
+        assert len(coord._pending_observations.get(OBS_TYPE_VENT_WINDOW_DECAY, {}).get("samples", [])) == 0, (
+            "vent_window_decay should not append a sample when only 60s has elapsed (interval=300s)"
         )
 
-    def test_fan_only_appended_after_2min(self):
-        """fan_only_decay: sample IS appended after >= 120s since last sample."""
+    def test_vent_window_appended_after_5min(self):
+        """vent_window_decay: sample IS appended after >= 300s since last sample."""
         coord = _make_obs_coord(
             hvac_action="idle",
             indoor_temp=72.0,
             outdoor_temp=65.0,
-            fan_active=True,
+            any_sensor_open=True,
         )
-        obs = self._make_obs_with_last_sample(OBS_TYPE_FAN_ONLY_DECAY, last_sample_offset_s=130)
-        coord._pending_observations[OBS_TYPE_FAN_ONLY_DECAY] = obs
+        obs = self._make_obs_with_last_sample(OBS_TYPE_VENT_WINDOW_DECAY, last_sample_offset_s=310)
+        coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = obs
 
         dt_mock = _make_dt_mock(_FAKE_NOW)
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
 
-        assert len(coord._pending_observations.get(OBS_TYPE_FAN_ONLY_DECAY, {}).get("samples", [])) == 1, (
-            "fan_only_decay should append a sample after 130s (interval=120s)"
+        assert len(coord._pending_observations.get(OBS_TYPE_VENT_WINDOW_DECAY, {}).get("samples", [])) == 1, (
+            "vent_window_decay should append a sample after 310s (interval=300s)"
         )
 
     def test_hvac_active_not_decimated(self):
@@ -1465,9 +1288,6 @@ class TestSampleDecimation:
         """Confirm constant values match the plan spec."""
         assert THERMAL_PASSIVE_SAMPLE_INTERVAL_S == 300, (
             f"Expected THERMAL_PASSIVE_SAMPLE_INTERVAL_S=300, got {THERMAL_PASSIVE_SAMPLE_INTERVAL_S}"
-        )
-        assert THERMAL_FAN_SAMPLE_INTERVAL_S == 120, (
-            f"Expected THERMAL_FAN_SAMPLE_INTERVAL_S=120, got {THERMAL_FAN_SAMPLE_INTERVAL_S}"
         )
         assert THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S == 300, (
             f"Expected THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S=300, got {THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S}"
@@ -1652,7 +1472,7 @@ class TestNatVentAndVentilatedDecay:
         dt_mock = _make_dt_mock()
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
-        assert OBS_TYPE_VENTILATED_DECAY in coord._pending_observations, (
+        assert OBS_TYPE_VENT_WINDOW_DECAY in coord._pending_observations, (
             "ventilated_decay should start when delta=1.5 >= THERMAL_VENTILATED_MIN_DELTA_F=1.0"
         )
 
@@ -1670,16 +1490,19 @@ class TestNatVentAndVentilatedDecay:
         dt_mock = _make_dt_mock()
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
-        assert OBS_TYPE_VENTILATED_DECAY not in coord._pending_observations, (
+        assert OBS_TYPE_VENT_WINDOW_DECAY not in coord._pending_observations, (
             "ventilated_decay must not start when delta=0.7 < THERMAL_VENTILATED_MIN_DELTA_F=1.0"
         )
 
-    def test_warm_day_nat_vent_only_ventilated_decay_viable(self):
-        """On a warm day with nat_vent active and a window open, only ventilated_decay is viable.
+    def test_warm_day_nat_vent_only_vent_fan_decay_viable(self):
+        """On a warm day with nat_vent active and a window open, only vent_fan_decay is viable.
 
-        passive_decay is blocked (nat_vent_active), fan_only is blocked (fan not active),
-        solar_gain is blocked (indoor < outdoor not required here, but HVAC idle + nat_vent
-        means solar_gain guard also blocks it).  Only ventilated_decay should start.
+        Issue #587: the local `_fan_active` gating variable is `ae._fan_active OR
+        ae._natural_vent_active` — so nat_vent_active=True makes the vent-split trigger
+        see fan_active=True, routing to vent_fan_decay (not vent_window_decay, which
+        requires fan_active=False). passive_decay is blocked (nat_vent_active), and
+        solar_gain is blocked (HVAC idle + nat_vent means the solar_gain guard also
+        blocks it, since it requires not _fan_active).
         """
         coord = _make_obs_coord(
             indoor_temp=72.0,
@@ -1695,14 +1518,14 @@ class TestNatVentAndVentilatedDecay:
         assert OBS_TYPE_PASSIVE_DECAY not in coord._pending_observations, (
             "passive_decay must be blocked when nat_vent_active=True"
         )
-        assert OBS_TYPE_FAN_ONLY_DECAY not in coord._pending_observations, (
-            "fan_only_decay must not start when fan_active=False"
+        assert OBS_TYPE_VENT_WINDOW_DECAY not in coord._pending_observations, (
+            "vent_window_decay must not start when fan_active (via nat_vent)=True"
         )
         assert OBS_TYPE_SOLAR_GAIN not in coord._pending_observations, (
             "solar_gain must not start when nat_vent_active=True"
         )
-        assert OBS_TYPE_VENTILATED_DECAY in coord._pending_observations, (
-            "ventilated_decay must start: sensor open, delta=4.0 >= 1.0, HVAC idle"
+        assert OBS_TYPE_VENT_FAN_DECAY in coord._pending_observations, (
+            "vent_fan_decay must start: sensor open, delta=4.0 >= 1.0, HVAC idle, fan_active=True"
         )
 
     def test_ventilated_min_delta_constant_is_1_0f(self):
@@ -1740,7 +1563,7 @@ class TestConfidenceGrading:
         """
         return {
             "date": "2026-04-28",
-            "hvac_mode": "ventilated",
+            "hvac_mode": "vent_window",
             "k_passive": k_passive,
             "confidence_grade": "high",
         }
@@ -1979,7 +1802,9 @@ class TestAdaptiveVentilatedOLS:
             patch(self._DT_PATCH, dt_mock),
             patch("custom_components.climate_advisor.learning.compute_k_env_solar", side_effect=_bad_k_solar),
         ):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         # Commit should still succeed (1-param fallback) but k_solar must NOT be stored.
         assert obs is not None, "1-param fallback should still produce a valid obs"
@@ -2010,7 +1835,9 @@ class TestAdaptiveVentilatedOLS:
             patch(self._DT_PATCH, dt_mock),
             patch("custom_components.climate_advisor.learning.compute_k_env_solar", side_effect=_good_2param),
         ):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         assert obs is not None, f"ventilated_decay commit should succeed; reject_code={reject_code}"
         assert obs.get("two_param") is True, "two_param flag must be set when 2-param path succeeds"
@@ -2040,7 +1867,9 @@ class TestAdaptiveVentilatedOLS:
             patch(self._DT_PATCH, dt_mock),
             patch("custom_components.climate_advisor.learning.compute_k_env_solar", side_effect=_good_2param),
         ):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         assert obs is not None, f"commit should succeed; reject_code={reject_code}"
         assert obs.get("two_param") is True, "two_param flag must be set"
@@ -2072,7 +1901,9 @@ class TestAdaptiveVentilatedOLS:
         event = self._make_event(samples)
         dt_mock = _make_dt_mock(self._FAKE_DT)
         with patch(self._DT_PATCH, dt_mock):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         assert obs is not None, f"1-param ventilated commit should succeed; reject_code={reject_code}"
         model = engine.get_thermal_model()
@@ -2093,6 +1924,109 @@ class TestAdaptiveVentilatedOLS:
         k_env, k_solar, r2 = compute_k_env_solar(samples)
         assert k_env is None, "k_env should be None when all samples missing solar_factor (treated as 0.0, range=0)"
         assert k_solar is None, "k_solar should be None for old-format samples without solar_factor"
+
+
+# ---------------------------------------------------------------------------
+# TestSolarGainCommit  (Issue #587, Defect B)
+# ---------------------------------------------------------------------------
+
+
+class TestSolarGainCommit:
+    """solar_gain commit path subtracts cached k_passive's conductive contribution.
+
+    Before this fix, _commit_event_from_dict's solar_gain branch attributed the
+    *entire* observed warming rate to solar gain with no subtraction of ordinary
+    conduction toward a warm outdoor. These tests verify the fixed path: it reads
+    cached k_passive, rejects with REJECT_NO_K_PASSIVE when none is cached yet,
+    and otherwise commits compute_k_solar's subtracted result (not the old raw
+    mean_rate), while never leaking k_passive itself into the committed obs dict.
+    """
+
+    _DT_PATCH = "custom_components.climate_advisor.learning.dt_util"
+    _FAKE_DT = datetime(2026, 5, 10, 13, 0, 0, tzinfo=UTC)
+
+    def _make_engine(self, tmp_path: Path) -> LearningEngine:
+        engine = LearningEngine(tmp_path)
+        engine.load_state()
+        return engine
+
+    @staticmethod
+    def _make_conduction_samples(k_passive: float = -0.08) -> list[dict]:
+        """Pure-conduction warming window (no solar physics at all).
+
+        Same synthetic shape as test_k_solar_subtracts_passive_contribution in
+        tests/test_thermal_physics.py — warming purely because outdoor is warmer
+        than indoor, generated from the pure decay-toward-outdoor ODE.
+        """
+        import math
+
+        t_start = 68.0
+        t_outdoor = 95.0
+        n = 13
+        dt_minutes = 15.0
+        samples = []
+        for i in range(n):
+            t_hr = i * dt_minutes / 60.0
+            indoor = t_outdoor + (t_start - t_outdoor) * math.exp(k_passive * t_hr)
+            samples.append(
+                {
+                    "indoor_temp_f": indoor,
+                    "outdoor_temp_f": t_outdoor,
+                    "elapsed_minutes": float(i * dt_minutes),
+                }
+            )
+        return samples
+
+    def _make_event(self, samples: list[dict]) -> dict:
+        return {"obs_id": "test-solar-gain", "samples": samples}
+
+    def test_solar_gain_commit_rejects_when_no_k_passive_cached(self, tmp_path: Path):
+        """Empty/no-k_passive thermal_model_cache → (None, REJECT_NO_K_PASSIVE, None)."""
+        engine = self._make_engine(tmp_path)
+        assert (engine._state.thermal_model_cache or {}).get("k_passive") is None
+
+        samples = self._make_conduction_samples()
+        event = self._make_event(samples)
+        dt_mock = _make_dt_mock(self._FAKE_DT)
+        with patch(self._DT_PATCH, dt_mock):
+            obs, reject_code, r2 = engine._commit_event_from_dict(event, force_grade="high", obs_type="solar_gain")
+
+        assert obs is None
+        assert reject_code == REJECT_NO_K_PASSIVE
+        assert r2 is None
+
+    def test_solar_gain_commit_uses_cached_k_passive(self, tmp_path: Path):
+        """Seeded cache with known k_passive → committed k_solar matches the
+        per-interval-subtracted value (not the old raw mean_rate), and
+        obs["k_passive"] in the committed dict stays None.
+        """
+        from custom_components.climate_advisor.learning import compute_k_solar
+
+        engine = self._make_engine(tmp_path)
+        true_k_p = -0.08
+        engine._state.thermal_model_cache = {"k_passive": true_k_p}
+
+        samples = self._make_conduction_samples(k_passive=true_k_p)
+        expected_k_solar, _ = compute_k_solar(samples, true_k_p)
+
+        # Old-style raw rate, for contrast — must NOT be what gets committed.
+        indoor_temps = [s["indoor_temp_f"] for s in samples]
+        elapsed = [s["elapsed_minutes"] for s in samples]
+        total_dt_hours = (elapsed[-1] - elapsed[0]) / 60.0
+        old_style_mean_rate = (indoor_temps[-1] - indoor_temps[0]) / total_dt_hours
+        assert old_style_mean_rate > 1.0, "sanity check: old formula would report a large positive rate here"
+
+        event = self._make_event(samples)
+        dt_mock = _make_dt_mock(self._FAKE_DT)
+        with patch(self._DT_PATCH, dt_mock):
+            obs, reject_code, r2 = engine._commit_event_from_dict(event, force_grade="high", obs_type="solar_gain")
+
+        assert obs is not None, f"solar_gain commit should succeed; reject_code={reject_code}"
+        assert obs["k_passive"] is None, "k_passive must stay None in the committed obs dict"
+        assert obs["k_solar"] == round(expected_k_solar, 3)
+        assert obs["k_solar"] != round(old_style_mean_rate, 3), (
+            "committed k_solar must be the subtracted value, not the old raw mean_rate"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2201,7 +2135,9 @@ class TestTwoParamPrimaryPath:
         event = self._make_event(samples)
         dt_mock = _make_dt_mock(self._FAKE_DT)
         with patch(self._DT_PATCH, dt_mock):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         assert obs is not None, f"2-param PRIMARY should have committed; got reject_code={reject_code}"
         assert obs.get("two_param") is True, "two_param flag must be True for 2-param PRIMARY commit"
@@ -2222,7 +2158,9 @@ class TestTwoParamPrimaryPath:
         event = self._make_event(samples)
         dt_mock = _make_dt_mock(self._FAKE_DT)
         with patch(self._DT_PATCH, dt_mock):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         # 1-param should commit (indoor cooling, outdoor cooler → k_passive < 0)
         assert obs is not None, f"1-param fallback should commit nighttime cooling; reject_code={reject_code}"
@@ -2264,7 +2202,9 @@ class TestTwoParamPrimaryPath:
                 return_value=(None, None, None),
             ),
         ):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         assert obs is not None, f"1-param fallback should commit when 2-param returns None; reject_code={reject_code}"
         assert obs.get("two_param") is not True, "two_param must not be set when 2-param returned None"
@@ -2299,7 +2239,9 @@ class TestTwoParamPrimaryPath:
                 side_effect=_low_r2_2param,
             ),
         ):
-            obs, reject_code, _ = engine._commit_event_from_dict(event, force_grade="high", obs_type="ventilated_decay")
+            obs, reject_code, _ = engine._commit_event_from_dict(
+                event, force_grade="high", obs_type="vent_window_decay"
+            )
 
         assert obs is not None, (
             f"1-param fallback should commit when 2-param R² below threshold; reject_code={reject_code}"

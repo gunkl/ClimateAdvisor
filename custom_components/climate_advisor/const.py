@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.20"
+VERSION = "0.7.21"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1205,11 +1205,26 @@ THERMAL_MIN_DECAY_F = 1.0  # min total post-heat decay required to commit (°F)
 
 # --- v3 Observation Type string constants ---
 OBS_TYPE_PASSIVE_DECAY = "passive_decay"
-OBS_TYPE_FAN_ONLY_DECAY = "fan_only_decay"
-OBS_TYPE_VENTILATED_DECAY = "ventilated_decay"
+# Issue #587: OBS_TYPE_VENTILATED_DECAY ("ventilated_decay") renamed to
+# OBS_TYPE_VENT_WINDOW_DECAY ("vent_window_decay") — the semantics narrowed from
+# fan-state-agnostic to fan-off specifically, so the string is renamed rather than
+# reused (a silent redefinition under the same string would be undetectable by grep).
+OBS_TYPE_VENT_WINDOW_DECAY = "vent_window_decay"
+OBS_TYPE_VENT_FAN_DECAY = "vent_fan_decay"  # NEW - windows open AND fan/WHF running
 OBS_TYPE_SOLAR_GAIN = "solar_gain"
 OBS_TYPE_HVAC_HEAT = "hvac_heat"
 OBS_TYPE_HVAC_COOL = "hvac_cool"
+# OBS_TYPE_FAN_ONLY_DECAY retired entirely (Issue #587) — k_vent was confirmed dead
+# (the sole ODE consumer is always called with ventilation_active=False).
+
+# (obs_type, required fan state) pairing shared by the trigger loop (coordinator.py
+# _sample_all_observations), the abort/commit dispatch (_evaluate_vent_split_observation),
+# and the HVAC contamination-abandon list — single source of truth so the two vent types
+# cannot silently drift apart the way nat-vent's parallel-function history did.
+_VENT_SPLIT_TYPES = (
+    (OBS_TYPE_VENT_WINDOW_DECAY, False),  # (obs_type, required fan state)
+    (OBS_TYPE_VENT_FAN_DECAY, True),
+)
 
 # Thermal rejection reason codes (emitted in ThermalRejectionEvent)
 REJECT_TOO_FEW_SAMPLES = "too_few_samples"
@@ -1221,6 +1236,7 @@ REJECT_ABANDONED = "abandoned"
 REJECT_TOO_FEW_BLOCKS = "too_few_blocks"
 REJECT_WINDOW_TOO_SHORT = "window_too_short"
 REJECT_NO_INTERIOR_PEAK = "no_interior_peak"
+REJECT_NO_K_PASSIVE = "no_k_passive"  # solar_gain commit: no cached k_passive yet to subtract (Issue #587, Defect B)
 
 # Reduced plateau guard (was THERMAL_MIN_DECAY_F = 1.0)
 THERMAL_HVAC_MIN_DECAY_F = 0.3
@@ -1253,14 +1269,13 @@ THERMAL_CHART_LOG_PASSIVE_MIN_MINUTES: int = 120  # 2h minimum window
 THERMAL_CHART_LOG_PASSIVE_MIN_DT_F: float = 1.0  # at least 1°F sensor change
 THERMAL_CHART_LOG_VENT_MIN_MINUTES: int = 120  # 2h minimum for overnight ventilated windows
 
-# Fan-only decay observation thresholds
-THERMAL_FAN_MIN_SAMPLES = 15
-THERMAL_FAN_MIN_SIGNAL_F = 0.2
+# THERMAL_FAN_MIN_SAMPLES / THERMAL_FAN_MIN_SIGNAL_F retired (Issue #587) along with
+# fan_only_decay — no remaining reference.
 
-# Ventilated decay observation thresholds
+# Ventilated decay observation thresholds (shared by vent_window_decay and vent_fan_decay)
 THERMAL_VENT_MIN_SAMPLES = 20
 THERMAL_VENT_MIN_SIGNAL_F = 0.3
-# Lower trigger delta for ventilated_decay: k_vent_window is measurable at 1°F differential.
+# Lower trigger delta for the vent split: k_vent_window/k_vent_fan are measurable at 1°F differential.
 # passive_decay needs 3°F for sufficient envelope-decay SNR; vent obs measures a different
 # phenomenon (air exchange rate) where smaller differentials still carry useful signal.
 THERMAL_VENTILATED_MIN_DELTA_F: float = 1.0
@@ -1317,7 +1332,8 @@ THERMAL_MIN_DECAY_SAMPLES: int = 4  # min OLS pairs for rolling-window decay typ
 THERMAL_SOLAR_FACTOR_MIN_RANGE: float = 0.30  # min solar_factor variance across samples for 2-param OLS
 THERMAL_K_SOLAR_MAX_F_PER_HR: float = 8.0  # upper bound for k_solar (°F/hr); physical max ~6°F/hr on clear day
 THERMAL_PASSIVE_SAMPLE_INTERVAL_S: int = 300  # 5 min — passive/vent slow decay
-THERMAL_FAN_SAMPLE_INTERVAL_S: int = 120  # 2 min — fan-only (faster signal)
+# THERMAL_FAN_SAMPLE_INTERVAL_S retired (Issue #587) with fan_only_decay — vent_window_decay
+# and vent_fan_decay both use THERMAL_PASSIVE_SAMPLE_INTERVAL_S.
 THERMAL_SOLAR_SAMPLE_INTERVAL_S: int = 300  # 5 min — solar gain slow trend
 THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S: int = 300  # 5 min — post-heat is passive dynamics
 

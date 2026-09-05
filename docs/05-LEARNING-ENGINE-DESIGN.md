@@ -495,13 +495,13 @@ Returns the current accumulated thermal model from `thermal_model_cache`.
     "k_active_cool": float | None,  # HVAC cooling contribution (°F/hr, negative)
     "k_vent_window": float | None,  # window-open, fan/WHF-off ventilation decay rate (hr⁻¹, negative)
     "k_vent_fan": float | None,  # window-open, fan/WHF-on ventilation decay rate (hr⁻¹, negative);
-                                 # learned/displayed only — not wired into forecast per-hour selection
-                                 # (Issue #587 scope boundary)
+    # learned/displayed only — not wired into forecast per-hour selection
+    # (Issue #587 scope boundary)
     "k_solar": float | None,  # solar gain coefficient (°F/hr per unit solar factor)
     # Confidence
     "confidence": str,  # HVAC confidence: "none"|"low"|"medium"|"high" (heat+cool obs count)
     "confidence_k_passive": str,  # passive confidence: "none"|"low"|"medium"|"high" (passive+heat+cool
-                                  # obs count only — vent/solar counts excluded, Issue #587)
+    # obs count only — vent/solar counts excluded, Issue #587)
     "confidence_k_hvac": str,  # same as "confidence" — explicit alias
     # Observation counts
     "observation_count_heat": int,

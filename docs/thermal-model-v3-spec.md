@@ -834,7 +834,7 @@ A chart_log window is eligible for a phase observation only when all six conditi
         "value": {"heat": float | None, "cool": float | None},  # k_active_heat and k_active_cool
     },
     "ode_version": str,  # "v3" when k_solar or k_vent_window/k_vent_fan present; "basic" otherwise. The
-                         # old bare "k_vent" (fan_only_decay) key is retired (Issue #587) and never appears.
+    # old bare "k_vent" (fan_only_decay) key is retired (Issue #587) and never appears.
     "physics_eligible": bool,  # True when the ODE prediction path is currently active
     "physics_eligible_reason": str,  # human-readable explanation of eligibility state
 }

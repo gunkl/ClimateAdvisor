@@ -163,7 +163,7 @@ resolution logic anywhere in this chain.
 Per persisted `chart_log` cycle, in priority order:
 
 1. The real `setpoint` field (compressor-commanded — read from the live thermostat's
-   `target_temperature` attribute at write time, genuinely source-agnostic since it doesn't
+   `temperature` attribute at write time, genuinely source-agnostic since it doesn't
    care *why* the thermostat is set there).
 2. Else `nat_vent_target` (Phase 3a) when `nat_vent_active` was true that cycle — the real
    thermostatic value the WHF fan was cycling around

@@ -1306,6 +1306,26 @@
     return 'transparent';
   }
 
+  // Target line mode coloring: collapses both the historical vocabulary
+  // (state_log[].hvac: "heating"/"cooling"/"fan"/...) and the forecast
+  // vocabulary (predicted_activity[].hvac_mode: "heat"/"cool"/"off") to one
+  // shared {heat, cool, null} value, and maps that to the SAME
+  // hvac_heating/hvac_cooling colours already used for the HVAC action bar
+  // (_hvacColor above) — one palette, one normalizer, reused everywhere a
+  // heat/cool distinction is drawn on this chart.
+  function _normalizeTargetMode(raw) {
+    const s = (raw || '').toLowerCase();
+    if (s === 'heating' || s === 'heat') return 'heat';
+    if (s === 'cooling' || s === 'cool') return 'cool';
+    return null;
+  }
+
+  function _targetModeColor(mode) {
+    if (mode === 'heat') return CHART_COLORS.hvac_heating;
+    if (mode === 'cool') return CHART_COLORS.hvac_cooling;
+    return CHART_COLORS.target;
+  }
+
   // Parse ISO timestamp → milliseconds (numeric, no date adapter needed)
   function _parseTs(ts) { return new Date(ts).getTime(); }
 
@@ -1666,6 +1686,27 @@
     const mergedEffTarget = [...histEffTargetPts, ...effTargetFuturePts].sort((a, b) => a.x - b.x);
     const setpointHasData = mergedEffTarget.some(p => p.y != null);
 
+    // Effective HVAC mode timeline for Target-line coloring only (heat=red, cool=blue,
+    // symmetric — the Target Band's own fill/border are intentionally unchanged).
+    // Historical mode from state_log[].hvac, forecast mode from
+    // predicted_activity[].hvac_mode — same historical/future merge pattern as
+    // mergedEffTarget above, normalized once via _normalizeTargetMode().
+    const targetModeTimeline = [
+      ...(chartData.state_log || []).map(e => ({ x: _parseTs(e.ts), mode: _normalizeTargetMode(e.hvac) })),
+      ...(chartData.predicted_activity || []).map(e => ({ x: _parseTs(e.ts), mode: _normalizeTargetMode(e.hvac_mode) })),
+    ].sort((a, b) => a.x - b.x);
+
+    // Step-function lookup: the most recent timeline entry at or before xMs — mirrors
+    // how HVAC mode holds until the next observed/forecast change.
+    function _targetModeAt(xMs) {
+      let mode = null;
+      for (const entry of targetModeTimeline) {
+        if (entry.x > xMs) break;
+        mode = entry.mode;
+      }
+      return mode;
+    }
+
     const datasets = [
       {
         label: 'Predicted Outdoor',
@@ -1778,7 +1819,13 @@
       label: 'Target',
       type: 'line',
       data: mergedEffTarget,
-      borderColor: CHART_COLORS.target,
+      borderColor: CHART_COLORS.target, // legend swatch color; per-segment color below
+      // Heat/cool symmetric coloring (line only — Target Band unchanged): each segment
+      // takes the color of the mode active at its later endpoint, via the shared
+      // _targetModeColor()/_targetModeAt() lookup built above.
+      segment: {
+        borderColor: (segCtx) => _targetModeColor(_targetModeAt(segCtx.p1.parsed.x)),
+      },
       borderWidth: 4,
       pointRadius: 0,
       tension: 0,

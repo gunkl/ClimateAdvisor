@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.25] — 2026-09-05
+
+- Fix #862: The dashboard's Target line now shows for past heat and cool cycles (it was silently blank the whole time due to a wrong attribute name), and it's now colored red while heating and blue while cooling.
+
 ## [0.7.24] — 2026-09-05
 
 - Fix #860: The Status card no longer shows a different countdown than the Fan (WHF) card for the same whole-house-fan timer — Status now names the cause only, and the Fan card is the one place to see how long and when it ends. Also clearer wording for away/vacation pauses and a stuck-override state, and the Debug tab's override countdown is now accurate for multi-hour remote timers.

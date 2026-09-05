@@ -1928,26 +1928,48 @@ class TestMildDayPlanFloorWording:
 
 
 class TestWarmDayPlanReopenWording:
-    """Issue #788: the reopen/recovery sentence must also pick its wording based
-    on nat_vent_cutoff_reason, not always claim it's evening. A comfort_floor
-    close can recover the same morning, which previously produced self-
-    contradictory text (e.g. "hold the heat in" at 7am, then "evening air" at 8am)."""
+    """Issue #788 (reopened — the original fix here only rebranded the reopen
+    sentence's WORDING by nat_vent_cutoff_reason; it never questioned whether
+    recovery_time is a meaningful value to report at all for a comfort_floor
+    cutoff. It isn't: a comfort_floor close happens specifically because indoor
+    hit the comfort floor, and that cutoff reason only wins the race in
+    compute_nat_vent_plan() when the outdoor crossing did NOT fire first — which
+    means outdoor is already below indoor at cutoff time. Any "recovery" found
+    after that is not a genuine later event, so nat_vent_plan.py's
+    compute_nat_vent_plan() now gates recovery_time/nat_vent_recovers on
+    nat_vent_cutoff_reason == "outdoor_rise" and never populates them for a
+    comfort_floor cutoff (see nat_vent_plan.py's docstring and the
+    `if result["nat_vent_cutoff_reason"] == "outdoor_rise":` gate near the end
+    of compute_nat_vent_plan()). _warm_day_plan() needs no cutoff_reason branch
+    of its own any more: since recovery_time is always None for comfort_floor,
+    the reopen sentence simply never renders for that reason. The old
+    "comfort_floor reopen uses non-evening wording" test asserted the very
+    contradiction this fix removes (a same-morning reopen sentence one hour
+    after a comfort-preserving close) — that assertion is retired in favor of
+    the two cases below: no reopen sentence at all for comfort_floor, and the
+    outdoor_rise reopen sentence unaffected."""
 
-    def test_comfort_floor_reason_reopen_avoids_evening_wording(self):
+    def test_comfort_floor_reason_never_produces_reopen_sentence(self):
         c = _make_classification("warm", today_high=80, today_low=60)
         cutoff = datetime(2026, 5, 11, 7, 0, 0, tzinfo=UTC)
-        recovery = datetime(2026, 5, 11, 8, 0, 0, tzinfo=UTC)
+        # Matches what compute_nat_vent_plan() actually returns for a comfort_floor
+        # cutoff post-fix: nat_vent_recovers=False, recovery_time=None (never
+        # overwritten — see nat_vent_plan.py's outdoor_rise-only gate).
         warm_events = {
             "nat_vent_cutoff": cutoff,
             "nat_vent_cutoff_reason": "comfort_floor",
             "ceiling_breach_time": None,
-            "nat_vent_recovers": True,
-            "recovery_time": recovery,
+            "nat_vent_recovers": False,
+            "recovery_time": None,
         }
         lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
         text = "\n".join(lines)
+        # The close sentence still fires (comfort_floor cutoff was reported)...
+        assert "hold the heat in" in text
+        # ...but no reopen/recovery sentence — reopening minutes after a
+        # comfort-floor close would undo the very thing the close protected.
+        assert "Reopen windows" not in text
         assert "evening" not in text
-        assert "Reopen windows around 8:00 AM" in text
 
     def test_outdoor_rise_reason_reopen_keeps_evening_wording(self):
         c = _make_classification("warm", today_high=80, today_low=60)
@@ -1962,6 +1984,97 @@ class TestWarmDayPlanReopenWording:
         }
         lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
         text = "\n".join(lines)
+        assert "evening air cools back down" in text
+
+
+class TestIssue788ReportedScenario:
+    """Reproduces the exact contradictory briefing reported 2026-09-05 (Issue #788
+    reopened): "Close up at 8:00 AM to hold the heat in." followed one paragraph
+    later by "Reopen windows around 9:00 AM once outdoor air cools back below
+    indoor." — an hour-apart contradiction. Conditions at the time: outdoor 59.7°F,
+    indoor 67.0°F at the moment nat-vent cut off (outdoor already well below
+    indoor, so it was a comfort_floor cutoff, not outdoor_rise).
+
+    This class exercises the real pipeline end-to-end: compute_nat_vent_plan()
+    first (confirming the cutoff really is classified comfort_floor and that
+    recovery_time/nat_vent_recovers come back None/False), then feeds that exact
+    dict into _warm_day_plan() (confirming the close sentence renders but the
+    reopen sentence does not). A sibling test confirms outdoor_rise cutoffs are
+    unaffected by this gate — recovery_time must still populate there, guarding
+    against a future regression that disables recovery reporting entirely rather
+    than scoping it correctly.
+    """
+
+    def _reported_curves(self) -> tuple[list[dict], list[dict]]:
+        # Indoor declines through the comfort floor (67.0) at hour 8 local, matching
+        # the reported "Close up at 8:00 AM" timing. Outdoor stays well below indoor
+        # (59.7 vs 67.0 at hour 8, per the report) for the entire curve — never once
+        # crossing the outdoor_rise predicate (o >= i - 1.0) — so the comfort-floor
+        # scan is the only crossing available and must win the cutoff race.
+        indoor = _make_indoor_curve([70.0, 68.5, 67.0, 65.5, 64.0], start_hour_utc=6)
+        outdoor = _make_outdoor_curve([58.0, 58.8, 59.7, 60.0, 60.5], start_hour_utc=6)
+        return indoor, outdoor
+
+    def test_compute_nat_vent_plan_comfort_floor_recovery_fields_are_empty(self):
+        indoor, outdoor = self._reported_curves()
+        events = compute_nat_vent_plan(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=COMFORT_COOL,
+            comfort_heat_raw=67.0,
+            sleep_heat=62.0,
+            in_sleep_window_fn=lambda _ts: False,
+            window_open_time=time(6, 0),
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 8
+        assert events["nat_vent_cutoff_reason"] == "comfort_floor"
+        # The core regression this fix closes: no fabricated "recovery" for a
+        # cutoff where outdoor was already below indoor at close time.
+        assert events["recovery_time"] is None
+        assert events["nat_vent_recovers"] is False
+
+    def test_briefing_has_close_sentence_but_no_reopen_sentence(self):
+        indoor, outdoor = self._reported_curves()
+        events = compute_nat_vent_plan(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=COMFORT_COOL,
+            comfort_heat_raw=67.0,
+            sleep_heat=62.0,
+            in_sleep_window_fn=lambda _ts: False,
+            window_open_time=time(6, 0),
+        )
+        c = _make_classification("warm", today_high=80, today_low=60)
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=events)
+        text = "\n".join(lines)
+        assert "hold the heat in" in text
+        assert "Reopen windows" not in text
+        assert "evening" not in text
+        assert "outdoor air cools back below indoor" not in text
+
+    def test_outdoor_rise_cutoff_still_populates_recovery_time(self):
+        """Guard against a future regression that disables recovery_time reporting
+        entirely rather than scoping it to outdoor_rise only. Outdoor rises above
+        indoor at hour 8, then drops back below indoor at hour 11 — a genuine,
+        later, actionable recovery event that must still be reported."""
+        indoor = _make_indoor_curve([70.0, 71.0, 72.0, 73.0, 71.0, 68.0], start_hour_utc=6)
+        outdoor = _make_outdoor_curve([60.0, 65.0, 73.0, 74.0, 69.0, 62.0], start_hour_utc=6)
+        events = compute_nat_vent_plan(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=COMFORT_COOL,
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff_reason"] == "outdoor_rise"
+        assert events["nat_vent_recovers"] is True
+        assert events["recovery_time"] is not None
+        assert events["recovery_time"] > events["nat_vent_cutoff"]
+
+        c = _make_classification("warm", today_high=80, today_low=60)
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=events)
+        text = "\n".join(lines)
+        assert "Reopen windows" in text
         assert "evening air cools back down" in text
 
 

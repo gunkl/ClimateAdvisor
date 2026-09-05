@@ -14,6 +14,12 @@ Usage:
 
 `--user-summary` is optional — a meaningful fraction of historical entries are
 internal/process changes with no occupant-facing outcome (do not invent one).
+
+`--allow-reopened` permits a second entry for one already-recorded --issue value,
+for the case where an issue was reopened and received a materially different,
+deeper fix (not a re-filing of the same fix). It only lifts the duplicate check
+for the exact issue number passed alongside it in that invocation — every other
+issue number is still subject to the normal duplicate rejection.
 """
 
 from __future__ import annotations
@@ -35,6 +41,15 @@ def main() -> int:
     parser.add_argument("--title", required=True, help="short dev-facing description")
     parser.add_argument("--scope", required=True, dest="scope_covered", help="code paths touched")
     parser.add_argument("--user-summary", default=None, help="occupant-facing outcome bullet, if any")
+    parser.add_argument(
+        "--allow-reopened",
+        action="store_true",
+        help=(
+            "Allow a second entry for the exact --issue value given, when that issue was "
+            "reopened and received a materially different, deeper fix. Does not disable "
+            "the duplicate check for any other issue number."
+        ),
+    )
     args = parser.parse_args()
 
     if not _FIX_HISTORY_FILE.exists():
@@ -55,7 +70,7 @@ def main() -> int:
             existing_issues.add(rec.get("issue"))
             existing_issues.update(rec.get("merged_from", []))
 
-    if args.issue in existing_issues:
+    if args.issue in existing_issues and not args.allow_reopened:
         print(f"error: issue #{args.issue} already has a fix_history entry", file=sys.stderr)
         return 1
 

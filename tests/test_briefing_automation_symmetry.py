@@ -28,7 +28,8 @@ Proofing" #2/#3), this file is that enforcement mechanism:
 Marker note (TestBriefingAutomationSymmetry): Craftsman-Impl landed the shared
 helper as `describe_nat_vent_cutoff_reason(reason)` in `nat_vent_plan.py`, exactly
 as the plan's Approach §1 proposed:
-  "comfort_floor"      -> "to hold the heat in"
+  "comfort_floor"      -> "since indoor's already down to your comfort floor" (Issue #869;
+                           was "to hold the heat in" when this test was written)
   "outdoor_rise"/None  -> "before outdoor air warms past indoor"
 `_warm_day_plan()`/`_mild_day_plan()` (briefing.py, conversational sentence) both
 call this same function and embed its return value verbatim into their own

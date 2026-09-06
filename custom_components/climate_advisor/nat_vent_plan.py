@@ -46,7 +46,8 @@ def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
     Before this existed, ``briefing.py``'s ``_warm_day_plan()`` and ``coordinator.py``'s
     ``_compute_next_automation_action()`` each independently decided how to phrase the
     same ``nat_vent_cutoff_reason`` value from the shared ``nat_vent_plan`` dict —
-    ``_warm_day_plan()`` said "hold the heat in" for ``comfort_floor``, while the Next
+    ``_warm_day_plan()`` said "hold the heat in" for ``comfort_floor`` (reworded in
+    Issue #869 — see below), while the Next
     Automation card said "outdoor will stop helping" unconditionally, regardless of
     which reason actually won. ``_mild_day_plan()`` had no branch at all. That let the
     two dashboard surfaces show contradictory framing for one underlying fact even
@@ -69,11 +70,21 @@ def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
         CLAUDE.md §Status Card Ontology), so it's safe to embed in both a full
         conversational sentence (briefing.py) and a compact status-card phrase
         (coordinator.py):
-          "comfort_floor"      -> "to hold the heat in"
+          "comfort_floor"      -> "since indoor's already down to your comfort floor"
           "outdoor_rise"/None  -> "before outdoor air warms past indoor"
+
+        Issue #869: "comfort_floor" previously read "to hold the heat in", which reads
+        backwards on the WARM/MILD day types where this function is actually used —
+        both day types' overall framing is banking coolness for later, and "hold the
+        heat in" sounds like a winter/heating framing that contradicts that narrative.
+        A "comfort_floor" cutoff is a distinct, legitimate reason (indoor has already
+        fallen to the overnight comfort floor, protecting against an overnight low —
+        not part of the day's cool-banking strategy), so the new phrasing names that
+        directly instead of borrowing heating-season language. Still a single shared
+        fragment — no new parameter, no second inline branch in a consumer.
     """
     if reason == "comfort_floor":
-        return "to hold the heat in"
+        return "since indoor's already down to your comfort floor"
     return "before outdoor air warms past indoor"
 
 

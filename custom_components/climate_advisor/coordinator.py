@@ -50,6 +50,7 @@ from .automation import (
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
+from .confirmed_transition import is_confirmed, resolve_candidate_since
 from .const import (
     _VENT_SPLIT_TYPES,
     ATTR_AI_STATUS,
@@ -145,6 +146,7 @@ from .const import (
     INVESTIGATION_REPORTS_FILE,
     MAX_WEATHER_BIAS_APPLY_F,
     MIN_WEATHER_BIAS_APPLY_F,
+    NAT_VENT_CUTOFF_REASON_SUSTAIN_S,
     NAT_VENT_HYSTERESIS_F,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
@@ -653,6 +655,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # text, the TLDR table, and the Next Automation/Next User Action cards all read
         # this instead of independently recomputing it, so they can never disagree.
         self._nat_vent_plan: dict | None = None
+        # Issue #869: sustain-confirmation state for nat_vent_cutoff_reason flapping
+        # (see _stabilize_nat_vent_cutoff_reason()). Not persisted across restart —
+        # matches confirmed_transition.py's own documented precedent for this exact
+        # kind of state.
+        self._nat_vent_cutoff_reason_candidate: str | None = None
+        self._nat_vent_cutoff_reason_candidate_since: datetime | None = None
         self._pred_archive: dict[int, float] = {}
         self._thermal_factors: dict | None = None
 
@@ -4109,7 +4117,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
-        self._nat_vent_plan = compute_nat_vent_plan(
+        raw_plan = compute_nat_vent_plan(
             predicted_indoor=self._last_predicted_indoor,
             predicted_outdoor=_outdoor_curve,
             comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
@@ -4118,6 +4126,120 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
             window_open_time=c.window_open_time,
         )
+        self._nat_vent_plan = self._stabilize_nat_vent_cutoff_reason(raw_plan)
+
+    def _stabilize_nat_vent_cutoff_reason(self, raw_plan: dict) -> dict:
+        """Sustain-confirm ``nat_vent_cutoff``/``nat_vent_cutoff_reason`` flips before
+        accepting them (Issue #869).
+
+        Five-whys root cause: ``compute_nat_vent_plan()`` races two independent crossing
+        scans against each other — ``outdoor_crossing`` (outdoor temp rises above indoor)
+        vs. ``floor_crossing`` (indoor temp drops to the comfort floor) — and reports
+        whichever comes first as ``nat_vent_cutoff``/``nat_vent_cutoff_reason``. On a
+        knife-edge day where both crossings land within minutes of each other, this is a
+        genuine race: small sensor-reading shifts between recomputes flip which crossing
+        wins. And this coordinator recomputes far more often than the 30-min timer cycle
+        — indoor/outdoor temp sensor state-change events call
+        ``_compute_and_cache_nat_vent_plan()`` via ``async_request_refresh()`` too (see
+        the two call sites above, lines ~2605 and ~3788) — so the reported reason (and
+        the wording/time shown to the occupant, see
+        ``nat_vent_plan.describe_nat_vent_cutoff_reason()``) flaps unpredictably even
+        though the underlying physical conditions haven't meaningfully changed.
+
+        Only ``nat_vent_cutoff``/``nat_vent_cutoff_reason`` are held back while a new
+        reason is unconfirmed — every other key in ``raw_plan`` passes through fresh,
+        every cycle, unconditionally. This is deliberate, not an oversight:
+        ``comfort_floor_crossing_time`` (one of those other keys) is read by
+        ``ode_floor_guard.py`` for a real safety-relevant heating-escalation decision,
+        and it must never lag behind the live computation. Freezing the whole
+        ``self._nat_vent_plan`` dict while a reason flip settles would silently stall
+        that safety-relevant input — only the display-facing cutoff/reason pair is
+        protected here.
+
+        DRY: reuses ``confirmed_transition.py``'s ``resolve_candidate_since()``/
+        ``is_confirmed()`` — the same shared sustain-confirmation primitive
+        ``nat_vent_exit.py``'s exit reasons and the comfort-family switch lockout
+        already use — rather than a new hand-rolled debounce tracker. That module's own
+        docstring documents an explicit project-owner mandate ("Two independent
+        consumers, ONE implementation (DRY)"); this is the third consumer.
+
+        Also note (not handled here, but downstream of this cache):
+        ``automation.py`` (~line 1303-1316) reads ``self._nat_vent_cutoff``
+        (propagated from ``self._nat_vent_plan["nat_vent_cutoff"]`` via
+        ``apply_classification()``) as a real control boundary — the door/window
+        pause-exemption window end time. Stabilizing the cached value here
+        automatically stabilizes that boundary too, since both flow through this one
+        cached dict.
+
+        Known internal-coherence quirk while a flip is held: ``recovery_time``/
+        ``nat_vent_recovers`` are derived from *this cycle's raw* cutoff/reason
+        (``compute_nat_vent_plan()``'s own ``outdoor_rise``-only gating), so for up to
+        the sustain window they can momentarily pair with the held (not-yet-accepted)
+        ``nat_vent_cutoff_reason`` in a way that doesn't quite match — e.g. a held
+        ``outdoor_rise`` reason displayed alongside a ``nat_vent_recovers=False`` that
+        raw only computed because it currently sees ``comfort_floor``. This only affects
+        the display-side "reopens at X" sentence for at most ``NAT_VENT_CUTOFF_REASON_
+        SUSTAIN_S`` seconds, never a safety path, so it's accepted rather than fixed.
+
+        Acceptance latency is bounded by recompute cadence, not strictly by the sustain
+        duration: ``is_confirmed()`` is only evaluated when a recompute actually
+        happens, so on an install with sparse sensor events (only the 30-min timer
+        firing) a genuine reason change is accepted at the first recompute at-or-after
+        the sustain window elapses, which can be later than
+        ``NAT_VENT_CUTOFF_REASON_SUSTAIN_S`` itself.
+        """
+        previous_plan = self._nat_vent_plan
+        if previous_plan is None:
+            # Bootstrap: first-ever call, nothing to hold onto yet.
+            return raw_plan
+
+        raw_reason = raw_plan.get("nat_vent_cutoff_reason")
+        previous_reason = previous_plan.get("nat_vent_cutoff_reason")
+
+        if raw_reason == previous_reason:
+            # No transition — nothing to confirm. Clear any stale candidate state.
+            self._nat_vent_cutoff_reason_candidate = None
+            self._nat_vent_cutoff_reason_candidate_since = None
+            return raw_plan
+
+        if raw_reason is None or previous_reason is None:
+            # The nat-vent window appeared or disappeared entirely (one side has a
+            # cutoff, the other doesn't) — mirrors
+            # _maybe_regenerate_briefing_for_drift()'s own "one side has a cutoff and
+            # the other doesn't -> always regenerate" precedent. Not a knife-edge race
+            # between the two reasons, so no sustain-confirm needed.
+            self._nat_vent_cutoff_reason_candidate = None
+            self._nat_vent_cutoff_reason_candidate_since = None
+            return raw_plan
+
+        # Both sides are non-None and differ — the knife-edge race case. Sustain-confirm
+        # via the shared primitive before accepting the flip.
+        now = dt_util.now()
+        candidate_since = resolve_candidate_since(
+            candidate=raw_reason,
+            previous_candidate=self._nat_vent_cutoff_reason_candidate,
+            previous_since=self._nat_vent_cutoff_reason_candidate_since,
+            now=now,
+        )
+        self._nat_vent_cutoff_reason_candidate = raw_reason
+        self._nat_vent_cutoff_reason_candidate_since = candidate_since
+
+        if is_confirmed(
+            candidate=raw_reason,
+            candidate_since=candidate_since,
+            now=now,
+            sustain_seconds=NAT_VENT_CUTOFF_REASON_SUSTAIN_S,
+        ):
+            self._nat_vent_cutoff_reason_candidate = None
+            self._nat_vent_cutoff_reason_candidate_since = None
+            return raw_plan
+
+        # Not yet confirmed — hold the previously-confirmed cutoff/reason, but let
+        # every other field through fresh (see safety-relevant rationale above).
+        held_plan = dict(raw_plan)
+        held_plan["nat_vent_cutoff"] = previous_plan.get("nat_vent_cutoff")
+        held_plan["nat_vent_cutoff_reason"] = previous_reason
+        return held_plan
 
     def _target_band_lower_upper_now(self) -> tuple[float | None, float | None]:
         """Return this cycle's cached target-band lower/upper for the current instant

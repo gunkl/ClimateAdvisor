@@ -398,6 +398,14 @@ Golden scenarios in `tools/simulations/golden/` are **LOCKED**. The AI MUST NOT 
 - Are the assertions grounded in documented automation logic (`docs/08-COMPUTATION-REFERENCE.md`)?
 - Could a reasonable HVAC technician confirm this outcome as correct?
 - Are all assertion `reason` fields specific enough to explain the HVAC logic, not just restate the outcome?
+- Does a hand-set field on a `classification` event (`hvac_mode`, `windows_recommended`, etc.)
+  match what `classifier.py` would actually derive for the given `day_type`? Never override a
+  field just to make an assertion pass — `run_production.py` lets a scenario force `hvac_mode`
+  directly onto the classification object, bypassing the real day-type-driven derivation, and a
+  divergence there validates a state production can never produce. This exact gap let a real
+  defect in `comfort_family_temperature_check()`'s guard ship undetected (Issue #858's own test
+  scenario hand-set `hvac_mode="cool"` on a `day_type="warm"` event; real `classifier.py` derives
+  `"off"` for that day type — see Issue #867).
 
 **Never promote a scenario from `pending/` to `golden/` without running it first and having the user review the scenario card output.**
 

@@ -1,0 +1,114 @@
+{
+  "name": "issue_867_comfort_family_reactive_mild_day_floor_breach",
+  "description": "Same defect population as issue_858_comfort_family_reactive_floor_breach.json (day_type whose real classifier.py-derived hvac_mode is \"off\"), but DAY_TYPE_MILD instead of DAY_TYPE_WARM -- proves the Issue #867 fix covers both day types that share this classification.hvac_mode=\"off\" characteristic, not just the one the live incident happened to be classified as.",
+  "source": "issue-report",
+  "issue": 867,
+  "notes": [
+    "Issue #867 root cause: comfort_family_temperature_check()'s guard used to check",
+    "`classification.hvac_mode not in (\"heat\", \"cool\")` and return early whenever it was \"off\" --",
+    "which classifier.py sets for BOTH DAY_TYPE_WARM and DAY_TYPE_MILD. The existing #858 scenario",
+    "(now corrected to hvac_mode=\"off\") only exercises DAY_TYPE_WARM; this scenario exercises",
+    "DAY_TYPE_MILD so both members of the affected population are proven, not just one.",
+    "",
+    "A companion ceiling-breach scenario for the \"off\" population was considered and dropped:",
+    "warm/mild days are cooling-native (base_family=\"cooling\", since _apply_comfort_band()'s",
+    "active edge falls back to \"ceiling\" whenever hvac_mode != \"heat\") -- a ceiling breach on",
+    "such a day is never a family SWITCH (there is nothing to escalate to; the FSM is already",
+    "sitting in \"cooling\"), so decide_comfort_family() correctly returns a non-transition outcome",
+    "(confirmed via a debug-trace run: `outcome=hold` with `cool_candidate_since` correctly",
+    "sustain-confirmed at 120s -- the FSM works exactly as intended, there is just no target family",
+    "left to switch to). The only direction that is ever a genuine family switch for the",
+    "hvac_mode=\"off\" population is the floor breach into heating -- which this scenario and its",
+    "warm-day sibling both cover. The symmetric heating-native population (DAY_TYPE_COOL/COLD)",
+    "always derives hvac_mode=\"heat\" from real classifier.py, never \"off\", so no equivalent",
+    "\"off\"-population ceiling-breach case exists to test.",
+    "",
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Scenario effectiveness (revert-test): reintroducing the old",
+    "    `classification.hvac_mode not in (\"heat\", \"cool\")` guard makes this scenario fail --",
+    "    comfort_family_temperature_check() would return early on every tick (hvac_mode=\"off\"),",
+    "    and comfort_family_switch_by would never fire since no second classification event runs.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's #858/#867 note documents",
+    "    that the reactive check's applicability is band-based, covering both warm and mild.",
+    "(c) Occupant experience: a home drifting below the comfort floor on a mild day (native",
+    "    hvac_mode=off, same population as the live incident) now gets heat engaged within about a",
+    "    minute and a half of the drift being detected, instead of the up-to-30-minute wait that",
+    "    silently returned after Issue #858 first shipped."
+  ],
+  "config": {
+    "comfort_heat": 66,
+    "comfort_cool": 72,
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-05-01T06:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild-day classification. hvac_mode=off matches what classifier.py actually derives for DAY_TYPE_MILD -- _apply_comfort_band() still arms a real floor/ceiling-active comfort band regardless. Only classification event in this scenario -- everything after this is driven by temp_update alone."
+    },
+    {
+      "time": "2026-05-01T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 55.0,
+      "note": "Indoor 69F, within band [66F, 72F]."
+    },
+    {
+      "time": "2026-05-01T06:15:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 50.0,
+      "note": "First breach tick: 1F below comfort_heat(66). Cold-start engine -- nothing recorded as recently cooling, so the recency-gated deadband is already 0F. comfort_family_temperature_check() fires reactively (indoor < band.floor), re-enters apply_classification() -- sustain-confirm candidate starts here, not yet confirmed (elapsed 0s < 90s)."
+    },
+    {
+      "time": "2026-05-01T06:17:00",
+      "type": "temp_update",
+      "indoor_f": 63.0,
+      "outdoor_f": 49.0,
+      "note": "120s after the first breach tick (>90s sustain window). Reactive check fires again, sustain-confirms, escalates to heating -- with no second classification event ever having run."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-01T06:00:00",
+      "expect": "comfort_band_armed",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Baseline: mild day, indoor within band -- comfort band arms normally, even though the day's native recommendation is hvac_mode=off."
+    },
+    {
+      "at": "2026-05-01T06:17:00",
+      "expect": "comfort_family_switch_by",
+      "family": "heating",
+      "by": "2026-05-01T06:17:00",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Issue #867: the switch to heating lands by 06:17, driven entirely by the reactive temperature-tick path, on a day type whose classification.hvac_mode is \"off\" -- proving the guard fix covers DAY_TYPE_MILD as well as DAY_TYPE_WARM."
+    },
+    {
+      "at": "2026-05-01T06:17:00",
+      "expect": "comfort_family",
+      "family": "heating",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "Final engine state confirms the family actually escalated, not just an emitted event."
+    },
+    {
+      "at": "2026-05-01T06:17:00",
+      "expect": "last_hvac_mode",
+      "mode": "heat",
+      "track": "logic",
+      "simulator_support": false,
+      "reason": "The escalated mode is a real climate.set_temperature/set_hvac_mode call at comfort_heat, not merely an internal flag."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A floor breach on a mild (hvac_mode=off) day resolves to heat within one sustain-confirm window of the reactive temperature tick (Issue #867).",
+    "observed_behavior": "Single classification event at 06:00 (mild/off), indoor falls below the floor via temp_update alone at 06:15 and 06:17 -- comfort family escalates to heating by 06:17, driven entirely by the reactive tick.",
+    "expected_behavior": "The reactive comfort-family check's applicability must be decided by whether a comfort band is armed, not by the classifier's native hvac_mode recommendation -- mild days get the same fast-detection guarantee as warm days for the one direction (floor breach) that is ever a genuine family switch for this population."
+  }
+}

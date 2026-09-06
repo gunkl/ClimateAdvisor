@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.27] — 2026-09-06
+
+- Fix #867: version bump only — the comfort-family reactive tick (#858) is now actually active on every day type it was supposed to cover from the start.
+
 ## [0.7.26] — 2026-09-05
 
 - Internal: hardened two AI Investigator context builders (`_build_timing_correlations`, `_build_known_override_false_positives` in `ai_skills_context.py`) that previously scanned the entire unbounded event log with no time window on every context build. Both now apply the same `hours`/`now` time-window filtering as their sibling functions (Issue #432) and use a sort-once + `bisect` lookup instead of a nested comparison loop. No occupant-facing behavior change.

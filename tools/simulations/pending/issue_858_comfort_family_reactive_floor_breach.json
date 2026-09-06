@@ -40,7 +40,19 @@
     "    hours) later.",
     "Deliberately mirrors issue_827_hot_day_deadband_cleared_escalates.json's config/day-type",
     "shape (comfort_heat=68, fan_mode disabled) so the only material difference is HOW the",
-    "sustain-confirm ticks are delivered -- classification events there, temp_update events here."
+    "sustain-confirm ticks are delivered -- classification events there, temp_update events here.",
+    "",
+    "Issue #867 correction: the classification event's hvac_mode was originally hand-set to",
+    "\"cool\" for this day_type=warm event. Real classifier.py derives hvac_mode=\"off\" for",
+    "DAY_TYPE_WARM (and DAY_TYPE_MILD) -- only hot/cool/cold days derive cool/heat/heat. That",
+    "divergence let this scenario pass despite comfort_family_temperature_check()'s guard at the",
+    "time checking `classification.hvac_mode not in (\"heat\", \"cool\")` and returning early on",
+    "every reactive tick for a real warm-day classification -- silently disabling the entire #858",
+    "fix for exactly the day types (warm/mild) the comfort-family floor/ceiling fallback exists to",
+    "protect, and letting the reported incident recur the very next night on the same zone. Fixed",
+    "here to hvac_mode=\"off\" (what production actually derives), which is what makes this",
+    "scenario fail against the old guard and pass against the Issue #867 fix -- see",
+    "comfort_family_temperature_check()'s docstring in automation.py for the corrected guard."
   ],
   "config": {
     "comfort_heat": 68,
@@ -52,9 +64,9 @@
       "time": "2026-09-01T06:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
+      "hvac_mode": "off",
       "windows_recommended": false,
-      "note": "Warm-day classification (native cooling). Only classification event in this scenario -- everything after this is driven by temp_update alone."
+      "note": "Warm-day classification. Issue #867: hvac_mode=off matches what classifier.py actually derives for DAY_TYPE_WARM -- _apply_comfort_band() still arms a real ceiling-active comfort band regardless of this label (Issue #249/P3). Only classification event in this scenario -- everything after this is driven by temp_update alone."
     },
     {
       "time": "2026-09-01T06:00:00",

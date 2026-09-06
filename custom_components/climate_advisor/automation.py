@@ -5630,6 +5630,22 @@ class AutomationEngine:
         gating style the two sibling checks already use, rather than re-running
         the full classification pipeline on every insignificant fluctuation.
 
+        Issue #867: applicability is decided ENTIRELY by ``self._last_comfort_band``
+        below (has a band actually been armed for this cycle?), never by
+        ``classification.hvac_mode``. That field is the classifier's *native
+        recommendation* label, not "is a comfort band active" — ``classifier.py``
+        sets it to ``"off"`` for both ``DAY_TYPE_WARM`` and ``DAY_TYPE_MILD``, yet
+        ``_apply_comfort_band()`` unconditionally arms a real floor/ceiling band
+        for those same two day types (Issue #249/P3 — see CLAUDE.md's "Warm-Day
+        Classification Behavior"). An earlier version of this guard checked
+        ``classification.hvac_mode not in ("heat", "cool")`` first and returned
+        early whenever it was ``"off"`` — which silently disabled this entire
+        reactive check on every warm/mild-classified night, the exact population
+        the comfort-family floor/ceiling fallback exists to protect, and let the
+        reported incident recur the night after this method first shipped. Do not
+        reintroduce an ``hvac_mode``-based gate here — the band check below is
+        the correct and complete applicability test.
+
         Args:
             current_temp: Current indoor temperature in °F.
             predicted_indoor: Caller-sourced (mirrors ``outdoor`` in
@@ -5639,7 +5655,7 @@ class AutomationEngine:
                 ``apply_classification()``.
         """
         classification = self._current_classification
-        if classification is None or classification.hvac_mode not in ("heat", "cool"):
+        if classification is None:
             return
         if self._manual_override_active or self._override_confirm_pending:
             return

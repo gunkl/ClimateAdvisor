@@ -142,6 +142,14 @@ def _make_real_coordinator(
     coord._pre_cool_target = None
     coord._tou_phase_resolution = tou_phase_resolution
     coord._tou_active_cost_resolution = tou_active_cost_resolution
+    # Issue #869: _compute_and_cache_nat_vent_plan() now routes through
+    # _stabilize_nat_vent_cutoff_reason(), which reads self._nat_vent_plan (and the
+    # two candidate-tracking attrs) unconditionally — this bare instance bypasses
+    # ClimateAdvisorCoordinator.__init__(), so these must be seeded here the same
+    # way __init__ seeds them, or the very first call blows up with AttributeError.
+    coord._nat_vent_plan = None
+    coord._nat_vent_cutoff_reason_candidate = None
+    coord._nat_vent_cutoff_reason_candidate_since = None
     coord.config = {}
     coord._compute_automation_status = types.MethodType(ClimateAdvisorCoordinator._compute_automation_status, coord)
     coord._compute_next_automation_action = types.MethodType(

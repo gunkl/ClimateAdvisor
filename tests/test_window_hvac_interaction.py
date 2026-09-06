@@ -498,3 +498,42 @@ class TestIsWithinPlannedWindowPeriodOdeCutoff:
         with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 7, 10, 9, 30, 0)
             assert ae._is_within_planned_window_period() is True
+
+    def test_consumes_stabilized_cutoff_unchanged_by_reason_wording(self):
+        """Issue #869: the coordinator's _stabilize_nat_vent_cutoff_reason() may hold
+        back a reason-flip and propagate an older confirmed nat_vent_cutoff time
+        instead of a raced/flapping one, but _is_within_planned_window_period() has
+        no knowledge of *why* self._nat_vent_cutoff carries the value it does — it
+        simply reads self._nat_vent_cutoff as-is. This test plugs in a specific
+        stabilized (i.e. "held-back", would-be-earlier-if-unstabilized) cutoff
+        value directly and confirms the boundary check still behaves exactly as
+        documented: exempt strictly before the cutoff, not exempt at/after it.
+        Doesn't duplicate the coordinator-level stabilization tests
+        (tests/test_nat_vent_cutoff_stability.py) — only confirms this consumer
+        side still works correctly with a stabilized value plugged in.
+        """
+        ae = _make_ae_stub()
+        ae._is_within_planned_window_period = types.MethodType(
+            _ae_mod.AutomationEngine._is_within_planned_window_period, ae
+        )
+        ae._current_classification = _make_warm_classification(window_close_time=time(11, 0))
+        # Simulates a stabilized value: the coordinator's raw scan may have
+        # already raced ahead to a later "outdoor_rise" cutoff, but the
+        # sustain-confirm gate held the propagated value back at this earlier
+        # "comfort_floor" cutoff since the flip hadn't yet sustained for 90s.
+        stabilized_cutoff = datetime(2026, 7, 10, 9, 15, 0)
+        ae._nat_vent_cutoff = stabilized_cutoff
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            # Just before the stabilized cutoff -> still exempt.
+            mock_dt.now.return_value = datetime(2026, 7, 10, 9, 14, 59)
+            assert ae._is_within_planned_window_period() is True
+
+            # Exactly at the stabilized cutoff -> boundary is inclusive (`<=`).
+            mock_dt.now.return_value = datetime(2026, 7, 10, 9, 15, 0)
+            assert ae._is_within_planned_window_period() is True
+
+            # Just after the stabilized cutoff -> no longer exempt, even though
+            # the static classifier close time (11:00) hasn't arrived yet.
+            mock_dt.now.return_value = datetime(2026, 7, 10, 9, 15, 1)
+            assert ae._is_within_planned_window_period() is False

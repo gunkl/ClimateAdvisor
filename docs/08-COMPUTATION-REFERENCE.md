@@ -1037,8 +1037,10 @@ The fix, landed in #847:
 - **One shared phrase helper**, `nat_vent_plan.describe_nat_vent_cutoff_reason(reason: str |
   None) -> str` (next to `compute_nat_vent_plan()`), is now the single source of truth for
   reason→sentence wording. It returns a phrase *fragment*, not a full sentence — each caller
-  interpolates it into its own sentence shape: `"comfort_floor"` → `"to hold the heat in"`;
-  `"outdoor_rise"` or `None` → `"before outdoor air warms past indoor"`. `_warm_day_plan()` and
+  interpolates it into its own sentence shape: `"comfort_floor"` → `"since indoor's already down
+  to your comfort floor"` (reworded by Issue #869 — see the UPDATE below; was `"to hold the heat
+  in"` at the time #847 landed); `"outdoor_rise"` or `None` → `"before outdoor air warms past
+  indoor"`. `_warm_day_plan()` and
   `_mild_day_plan()` (which previously had no reason branch at all — always said "to trap the
   warmth" regardless of the underlying cutoff reason) interpolate this same fragment instead of
   maintaining independent branches or wording. **`_compute_next_automation_action()` was a third
@@ -1097,6 +1099,65 @@ The fix, landed in #847:
   `outdoor_rise`-shaped signal is the correct scope for this bug fix; designing a new,
   indoor-floor-based reopen signal for `comfort_floor` days is a separate feature/design
   decision, not attempted here.
+
+**UPDATE — Issue #869 (2026-09-06):** on a WARM day the `nat_vent_cutoff_reason` flipped between
+`comfort_floor`/`outdoor_rise` within the same morning, jumping the displayed close time (7:00 AM
+→ 9:00 AM) and producing contradictory briefing framing ("hold the heat in" vs. "before outdoor
+air warms past indoor" for the same underlying fact) minutes apart.
+
+Five-whys root cause: `self._nat_vent_plan` — meant to be a stable, single-per-cycle cache
+(#817) — was actually being recomputed dozens of times between 6:00–8:21 AM, confirmed against
+live logs (`tools/ha_logs.py`). The 30-min `update_interval` is not the only rebuild trigger:
+`coordinator.py`'s indoor/outdoor temperature state-change listeners (predates #817, traces to
+Fix #327) call `async_request_refresh()` on every sensor update, and those sensors report far
+more often than every 30 minutes. `compute_nat_vent_plan()` races two independent crossing scans
+(`nat_vent_plan.py`) — `outdoor_crossing` (outdoor rises above indoor) vs. `floor_crossing`
+(indoor drops to the comfort floor) — and on a knife-edge day these two crossings land within
+minutes of each other, so small shifts in the live sensor reading between recomputes flip which
+one wins. Nothing sustained a reason transition before accepting it, unlike the time-drift check
+next to it in `_maybe_regenerate_briefing_for_drift()`.
+
+**Fix:** a new `_stabilize_nat_vent_cutoff_reason()` method in `coordinator.py` wraps every
+`compute_nat_vent_plan()` call in `_compute_and_cache_nat_vent_plan()`. It sustain-confirms a
+`nat_vent_cutoff_reason` transition — via `confirmed_transition.py`'s existing
+`resolve_candidate_since()`/`is_confirmed()` primitive, the same shared sustain-confirmation
+mechanism `nat_vent_exit.py`'s exit reasons and the comfort-family switch lockout already use
+(project-owner DRY mandate: one implementation, not a new hand-rolled debounce tracker for a
+third consumer) — requiring the new reason to be the standing candidate for
+`NAT_VENT_CUTOFF_REASON_SUSTAIN_S = 90.0` seconds (`const.py`) before accepting it.
+Acceptance is checked only when a recompute actually happens, so on an install with
+sparse sensor-triggered recomputes (only the 30-min timer firing), a genuine change can
+be accepted later than 90 seconds after it first appeared — the guarantee is "at least
+90 seconds of standing candidacy," not "within 90 seconds." Until confirmed, the
+previously-accepted `nat_vent_cutoff`/
+`nat_vent_cutoff_reason` pair is held. A transition where either side is `None` (the nat-vent
+window appearing/disappearing entirely, not a race between two live reasons) bypasses the sustain
+window and applies immediately, mirroring the "one side has a cutoff and the other doesn't →
+always regenerate" precedent already established in `_maybe_regenerate_briefing_for_drift()`.
+
+**Scope — deliberately narrow:** only the `nat_vent_cutoff`/`nat_vent_cutoff_reason` pair is
+stabilized. Every other key in `self._nat_vent_plan` (`comfort_floor_crossing_time`,
+`ceiling_breach_time`, `precool_start_time`, `any_nat_vent_window`, `nat_vent_recovers`,
+`recovery_time`) continues to update fresh every cycle, unstabilized. This is intentional, not an
+oversight: `comfort_floor_crossing_time` is read by `ode_floor_guard.py` (§6f) for a real
+safety-relevant heating-escalation decision (Issue #821) and must never lag behind the live
+computation — freezing the whole cached dict while a reason flip settles would silently stall
+that safety-relevant input. Only the display-facing (and, see below, control-boundary) cutoff/
+reason pair is protected.
+
+**Blast radius beyond display text:** `automation.py` (~lines 1303–1316,
+`_is_within_planned_window_period()`, see §16) reads `self._nat_vent_cutoff` — propagated from
+`self._nat_vent_plan["nat_vent_cutoff"]` via `apply_classification()` (Issue #817) — as a real
+control boundary: the door/window pause-exemption window's end time, not just briefing text. The
+pre-fix flapping therefore also caused an unnoticed automation-boundary flicker on knife-edge
+mornings. Because both the display value and the control-boundary value flow through the same
+cached `self._nat_vent_plan` dict, stabilizing it here fixes both without a second change.
+
+**Wording (separate from the stabilization fix, same issue):**
+`describe_nat_vent_cutoff_reason()`'s `comfort_floor` phrase was reworded away from
+`"to hold the heat in"` — see the mapping update above — since it read backwards on the WARM/MILD
+day framing (both day types are banking coolness for later; "hold the heat in" sounds like a
+winter/heating framing).
 
 *(Superseded text retained below for historical context — do not treat "no confirmed production
 incident" as current status; see the Issue #847 update above.)*
@@ -2579,8 +2640,19 @@ All three must be true simultaneously for the check to return `True`:
 | # | Condition | Details |
 |---|---|---|
 | 1 | `windows_recommended == True` | Classification set this flag at classification time — `warm` day (when `today_low` is low enough) or `mild` day (always) |
-| 2 | Current local time is within the recommended open window | `warm`: 6:00 AM – 10:00 AM; `mild`: 10:00 AM – 5:00 PM (constants: `WARM_WINDOW_OPEN_HOUR`, `WARM_WINDOW_CLOSE_HOUR`, `MILD_WINDOW_OPEN_HOUR`, `MILD_WINDOW_CLOSE_HOUR`) |
+| 2 | Current local time is within the recommended open window | `warm`: 6:00 AM – 10:00 AM; `mild`: 10:00 AM – 5:00 PM (constants: `WARM_WINDOW_OPEN_HOUR`, `WARM_WINDOW_CLOSE_HOUR`, `MILD_WINDOW_OPEN_HOUR`, `MILD_WINDOW_CLOSE_HOUR`) — but see the ODE-cutoff override note below; these static hours are only the fallback bound |
 | 3 | HVAC mode is `off` | The classification itself set HVAC to `off` for warm/mild days — if HVAC is running (e.g. classification changed to cool/heat), normal pause rules apply |
+
+**Condition #2's real close bound (Issue #817, stabilized by #869):** the static
+`WARM_WINDOW_CLOSE_HOUR`/`MILD_WINDOW_CLOSE_HOUR` in the table above is a fallback only.
+`_is_within_planned_window_period()` (automation.py ~lines 1303–1316) prefers
+`self._nat_vent_cutoff` — propagated from the coordinator's cached `self._nat_vent_plan
+["nat_vent_cutoff"]` via `apply_classification()` — whenever it is set, so the pause-exemption
+window actually ends at the same ODE-derived moment the briefing/status cards show this cycle,
+same as §7's WARM/MILD close-time caveat. As of Issue #869, that cached value is sustain-confirmed
+before it changes (see §6d's Issue #869 update above), so this control boundary no longer flickers
+in step with the knife-edge `nat_vent_cutoff_reason` race that motivated that fix — a genuine
+change in the ODE curve still updates the boundary, just not a same-cycle sensor-noise flip.
 
 ### What It Suppresses
 

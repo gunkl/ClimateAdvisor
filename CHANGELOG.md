@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.28] — 2026-09-06
+
+- Fix #869: the briefing/dashboard no longer flip-flops between contradictory window-close guidance (e.g. jumping between a 7:00 AM and 9:00 AM close time, or between "hold the heat in" and "before outdoor air warms past indoor") on a day where those two conditions are nearly tied — a new recommendation is now only shown once it holds steady for a bit, not on every noisy recompute. Also reworded the comfort-floor close reason, which previously read backwards on a warm day's cool-banking framing.
+
 ## [0.7.27] — 2026-09-06
 
 - Fix #867: version bump only — the comfort-family reactive tick (#858) is now actually active on every day type it was supposed to cover from the start.

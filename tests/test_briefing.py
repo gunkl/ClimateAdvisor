@@ -1851,7 +1851,7 @@ class TestWarmDayPlanFloorWording:
         # "the outdoor air will be warmer than inside" to "before outdoor air warms past
         # indoor" — same framing, now shared verbatim with the Next Automation card.
         assert "before outdoor air warms past indoor" in text
-        assert "hold the heat in" not in text
+        assert "since indoor's already down to your comfort floor" not in text
 
     def test_comfort_floor_reason_uses_generic_wording(self):
         c = _make_classification("warm", today_high=80, today_low=60)
@@ -1865,7 +1865,7 @@ class TestWarmDayPlanFloorWording:
         }
         lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
         text = "\n".join(lines)
-        assert "hold the heat in" in text
+        assert "since indoor's already down to your comfort floor" in text
         assert "outdoor air will be warmer than inside" not in text
 
 
@@ -1881,7 +1881,8 @@ class TestMildDayPlanFloorWording:
     of the WARM-day one (missing branch vs. wrong branch), and left uncorrected it's
     exactly the kind of asymmetry that lets MILD and WARM drift apart from each
     other next. These two tests currently FAIL against pre-fix code — the phrase
-    "hold the heat in" is never emitted by _mild_day_plan() and "trap the warmth"
+    "since indoor's already down to your comfort floor" is never emitted by
+    _mild_day_plan() and "trap the warmth"
     is emitted unconditionally regardless of the reason passed in.
     """
 
@@ -1900,7 +1901,7 @@ class TestMildDayPlanFloorWording:
         # Issue #847: shared describe_nat_vent_cutoff_reason() phrase, same as
         # _warm_day_plan()'s counterpart above.
         assert "before outdoor air warms past indoor" in text
-        assert "hold the heat in" not in text
+        assert "since indoor's already down to your comfort floor" not in text
 
     def test_comfort_floor_reason_uses_generic_wording(self):
         c = _make_classification("mild", today_high=68, today_low=50)
@@ -1914,7 +1915,7 @@ class TestMildDayPlanFloorWording:
         }
         lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
         text = "\n".join(lines)
-        assert "hold the heat in" in text
+        assert "since indoor's already down to your comfort floor" in text
         assert "outdoor air will be warmer than inside" not in text
 
     def test_no_events_falls_back_to_classifier_close_time(self):
@@ -1965,7 +1966,7 @@ class TestWarmDayPlanReopenWording:
         lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
         text = "\n".join(lines)
         # The close sentence still fires (comfort_floor cutoff was reported)...
-        assert "hold the heat in" in text
+        assert "since indoor's already down to your comfort floor" in text
         # ...but no reopen/recovery sentence — reopening minutes after a
         # comfort-floor close would undo the very thing the close protected.
         assert "Reopen windows" not in text
@@ -2048,7 +2049,7 @@ class TestIssue788ReportedScenario:
         c = _make_classification("warm", today_high=80, today_low=60)
         lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=events)
         text = "\n".join(lines)
-        assert "hold the heat in" in text
+        assert "since indoor's already down to your comfort floor" in text
         assert "Reopen windows" not in text
         assert "evening" not in text
         assert "outdoor air cools back below indoor" not in text

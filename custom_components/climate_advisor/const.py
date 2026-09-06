@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.27"
+VERSION = "0.7.28"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -336,6 +336,16 @@ NAT_VENT_EXIT_SUSTAIN_S = 90.0
 # occurred under). Same duration and same rationale as NAT_VENT_EXIT_SUSTAIN_S above —
 # avoids reacting to a single noisy indoor reading before committing a family switch.
 COMFORT_FALLBACK_CONFIRM_S = 90.0
+
+# Issue #869: nat-vent cutoff *reason* sustain window. compute_nat_vent_plan() races two
+# independent crossing scans (outdoor rising above indoor vs. indoor falling to the
+# comfort floor) — on a knife-edge day where both crossings land minutes apart, small
+# sensor-reading shifts between the coordinator's frequent recomputes (event-driven, not
+# just the 30-min timer) flip which scan wins, flapping the reported reason/wording shown
+# to the occupant. Same duration and rationale as NAT_VENT_EXIT_SUSTAIN_S/
+# COMFORT_FALLBACK_CONFIRM_S above — this is the third confirmed_transition.py consumer,
+# not a new hand-rolled debounce.
+NAT_VENT_CUTOFF_REASON_SUSTAIN_S = 90.0
 
 # Minimum dwell before the comfort-family switch (heating <-> cooling) may commit,
 # per the project owner's explicit request (Issue #821 Design §4). User-configurable —

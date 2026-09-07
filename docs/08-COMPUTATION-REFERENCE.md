@@ -1382,30 +1382,71 @@ Named `deadband`, not `hysteresis` — deliberately distinct vocabulary from `NA
 ## 7. Window Recommendations
 
 Window advice is set by the classifier at classification time, based on `day_type` and forecast lows.
+As of Issue #876, the morning **open** time is computed but no longer shown to the user in any of
+the three surfaces below (briefing text, TLDR table, "Next User Action" status card) — it carries
+no actionable information once display starts. The **close** time and (new, Issue #876) an
+**evening reopen** time are computed dynamically for all three day types via the same shared
+crossing-search mechanism, `nat_vent_plan.compute_nat_vent_plan()`, falling back to a static hour
+when ODE forecast curves aren't calibrated yet.
 
-| Day Type | Windows Recommended? | Open Time | Close Time | Condition |
+| Day Type | Windows Recommended? | Displayed Close Time | Displayed Evening-Open Time | Condition |
 |---|---|---|---|---|
-| `hot` | Not a traditional recommendation — window *opportunities* only | 6:00 AM | 9:00 AM | Morning opportunity: `today_low <= 80` |
-| `hot` | Evening opportunity | 5:00 PM | Midnight (00:00) | Evening opportunity: `tomorrow_low <= 80` |
-| `warm` | Yes (if condition met) | 6:00 AM | 10:00 AM (`WARM_WINDOW_CLOSE_HOUR`) or `nat_vent_cutoff` when ODE available | `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` = `today_low <= 72°F` (defaults) |
-| `mild` | Always yes | 10:00 AM (`MILD_WINDOW_OPEN_HOUR`) | 5:00 PM (`MILD_WINDOW_CLOSE_HOUR`) or `nat_vent_cutoff` when ODE available | No condition — always recommended |
+| `hot` | Not a traditional recommendation — window *opportunities* only | `nat_vent_cutoff` when ODE available, else `ECONOMIZER_MORNING_END_HOUR` (9:00 AM fallback) | `evening_open_time` when ODE available (only for an `outdoor_rise` cutoff — see below), else `ECONOMIZER_EVENING_START_HOUR` (5:00 PM fallback) | Morning opportunity: `today_low <= 80`; evening opportunity: `tomorrow_low <= 80` |
+| `warm` | Yes (if condition met) | `nat_vent_cutoff` when ODE available, else `WARM_WINDOW_CLOSE_HOUR` (10:00 AM fallback) | `evening_open_time` when ODE available and cutoff reason is `outdoor_rise`; **no fallback shown** if unavailable (sentence is simply omitted, same as before #876) | `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` = `today_low <= 72°F` (defaults) |
+| `mild` | Always yes | `nat_vent_cutoff` when ODE available, else `MILD_WINDOW_CLOSE_HOUR` (5:00 PM fallback) | Same as WARM — new sentence added by #876, MILD never had one before | No condition — always recommended |
 | `cool` | No | — | — | — |
 | `cold` | No | — | — | — |
 
-**Warm-day window condition formula:** `today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA` = `75 - 3 = 72°F` at defaults. Constant: `WARM_WINDOW_OPEN_HOUR = 6`, `WARM_WINDOW_CLOSE_HOUR = 10`. **Like MILD (below), the static `WARM_WINDOW_CLOSE_HOUR` is only a fallback** — `briefing.py`'s `_derive_warm_day_events()` (§9e, Issue #528) overrides it with the ODE-derived `nat_vent_cutoff` whenever a forecast curve is available, exactly the same cascade §6d documents for MILD days. This table previously omitted that caveat for WARM specifically, which read as a contradiction between a correct-but-dynamic production briefing and this static reference.
+**Warm-day window condition formula:** `today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA` = `75 - 3 = 72°F` at defaults. Constant: `WARM_WINDOW_OPEN_HOUR = 6` (computed, no longer displayed), `WARM_WINDOW_CLOSE_HOUR = 10`. The static `WARM_WINDOW_CLOSE_HOUR` is only a fallback — `generate_briefing()`'s single per-day-type call into `nat_vent_plan.compute_nat_vent_plan()` (correcting this doc's earlier reference to a `_derive_warm_day_events()` function, which does not exist in current code — see the module docstring in `nat_vent_plan.py`, Issue #817) overrides it with the ODE-derived `nat_vent_cutoff` whenever a forecast curve is available, the same cascade §6d documents for MILD days.
 
-**MILD-day window times (v0.3.46+):** Open time is always `MILD_WINDOW_OPEN_HOUR = 10` (10:00 AM). Close time uses `nat_vent_cutoff` when the ODE is calibrated, otherwise falls back to `MILD_WINDOW_CLOSE_HOUR = 17` (5:00 PM). See [§6d. MILD Day Dynamic Window Close Time](#6d-mild-day-dynamic-window-close-time-fix-c-issue-147).
+**MILD-day window times (v0.3.46+):** Open time is always `MILD_WINDOW_OPEN_HOUR = 10` (computed, no longer displayed as of #876). Close time uses `nat_vent_cutoff` when the ODE is calibrated, otherwise falls back to `MILD_WINDOW_CLOSE_HOUR = 17` (5:00 PM). See [§6d. MILD Day Dynamic Window Close Time](#6d-mild-day-dynamic-window-close-time-fix-c-issue-147).
 
-**Reason wording for the close time (Issue #847; card consumer removed by #849):** both WARM and
-MILD close-time sentences derive from the shared `describe_nat_vent_cutoff_reason()` helper (see
-§6d's Issue #847 update above), not independent per-consumer branches — this is what keeps the
-briefing body and the TL;DR header from drifting into contradictory framing of the same
-`nat_vent_cutoff_reason` value. **The Next Automation status card was originally a third consumer
-of this same helper; Issue #849 removed its cutoff-reason candidate entirely** (it instructed the
-occupant to close/reopen windows, an action CA cannot execute — a distinct ontology violation, not
-a phrasing bug this helper would have fixed), so the symmetry guarantee described here now applies
-only within briefing.py's own two call sites. See the DOC RULE in §6d before adding user-facing
-text for any new `nat_vent_plan` field.
+**HOT-day window times (Issue #876):** Before this fix, HOT's morning-opportunity close (9:00 AM)
+and evening-opportunity open (5:00 PM) were the only remaining fully-hardcoded times in this table
+— `ECONOMIZER_MORNING_END_HOUR`/`ECONOMIZER_EVENING_START_HOUR` displayed unconditionally, with zero
+connection to the actual forecast, unlike WARM/MILD's close time which had been ODE-dynamic since
+#518/#534. HOT's own classifier fields (`window_opportunity_morning_start/end`,
+`window_opportunity_evening_start/end`) are structurally distinct from WARM/MILD's
+`window_open_time`/`window_close_time` — see `classifier.py`'s `_compute_recommendations()` — and
+stay that way; they were not unified, since HOT never sets `windows_recommended=True` and unifying
+would have newly routed HOT through `automation.py`'s door/window pause-exemption gate, an
+unrelated live-control behavior change outside this fix's scope. **HOT's live economizer control
+(`automation.py`'s `_build_economizer_fsm_inputs()`, the function that actually turns HVAC off for
+natural ventilation) still runs on the original static `ECONOMIZER_*_HOUR` schedule, deliberately
+untouched by #876** — only the *displayed* text in the briefing/TLDR/status-card surfaces above
+became dynamic. This is a known, intentional divergence between what's shown and when live control
+actually acts, not a defect this fix was scoped to close.
+
+**Evening-open time asymmetry (Issue #876, extends Issue #788's reasoning):** the evening-open
+crossing search (`_nat_vent_reopen_reached()` in `nat_vent_plan.py`, the symmetric opposite of the
+morning-close predicate) is **only meaningful when the morning close was `outdoor_rise`-driven**.
+When the close was `comfort_floor`-driven (indoor fell too low, independent of outdoor temperature),
+outdoor cooling further is the same bad direction that caused the close in the first place — not a
+signal that reopening helps. `compute_nat_vent_plan()` therefore only populates `evening_open_time`
+for an `outdoor_rise` cutoff, exactly mirroring the restriction Issue #788 already established for
+this field under its previous name (`recovery_time`/`nat_vent_recovers`, retired by #876). Generalizing
+this to `comfort_floor` cutoffs was evaluated and rejected during #876's implementation — it
+reproduces the exact "Close at 8am, reopen at 9am" contradiction #788 was filed to fix (verified
+against that issue's reported scenario numbers).
+
+**Reason wording for the close time (Issue #847; extended to HOT by #876; card consumer removed by
+#849 for windows-recommended-only cards):** all three day types' close-time sentences derive from
+the shared `describe_nat_vent_cutoff_reason()` helper (see §6d's Issue #847 update above), not
+independent per-consumer branches — this is what keeps the briefing body and the TL;DR header from
+drifting into contradictory framing of the same `nat_vent_cutoff_reason` value. **The "Next
+Automation" status card was originally a third consumer of this helper for WARM/MILD; Issue #849
+removed its cutoff-reason candidate entirely for the `windows_recommended` branch** (it instructed
+the occupant to close/reopen windows, an action CA cannot execute — a distinct ontology violation,
+not a phrasing bug this helper would have fixed). HOT's separate branch on that same card (never
+part of #849's `windows_recommended` cleanup, since HOT never sets that flag) does **not** phrase a
+cutoff reason at all — it only shows the threshold/time, so this helper's phrasing symmetry
+guarantee applies only within `briefing.py`'s own three call sites (one per day type). See the DOC
+RULE in §6d before adding user-facing text for any new `nat_vent_plan` field. A previously
+independent third computation of `threshold = comfort_cool + ECONOMIZER_TEMP_DELTA` on that same
+HOT status-card branch, and a fourth hand-rolled "dynamic value or static fallback" check pattern
+across `briefing.py`/`coordinator.py`, were consolidated by #876 onto one shared
+`resolve_with_fallback()` helper in `nat_vent_plan.py` — see that module's docstring for the
+single-source-of-truth rationale this pattern follows (Issues #518/#528/#817).
 
 ---
 

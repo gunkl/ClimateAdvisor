@@ -134,7 +134,6 @@ from .const import (
     DEFAULT_THRESHOLD_WARM,
     DOMAIN,
     ECONOMIZER_EVENING_START_HOUR,
-    ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_TEMP_DELTA,
     EVENT_LOG_CAP,
     EVENT_LOG_MAX_AGE_HOURS,
@@ -248,7 +247,7 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, com
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
-from .nat_vent_plan import compute_nat_vent_plan
+from .nat_vent_plan import compute_nat_vent_plan, resolve_with_fallback
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
@@ -612,12 +611,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # alongside _briefing_day_type so the mid-day regen gate can also
         # fire on a meaningful value drift, not just a category change.
         self._briefing_today_high: float | None = None
-        # nat_vent_cutoff/reason baked into the last-generated briefing text (Issue #847)
-        # — tracked alongside _briefing_day_type/_briefing_today_high so the mid-day
-        # regen gate can also fire when the WARM/MILD-day window-close time or its
-        # reason has drifted, even when day_type/today_high haven't moved.
+        # nat_vent_cutoff/reason baked into the last-generated briefing text (Issue #847,
+        # extended to HOT days and evening_open_time by Issue #876) — tracked alongside
+        # _briefing_day_type/_briefing_today_high so the mid-day regen gate can also fire
+        # when the HOT/WARM/MILD-day window-close or evening-open time (or the close
+        # reason) has drifted, even when day_type/today_high haven't moved.
         self._briefing_nat_vent_cutoff: datetime | None = None
         self._briefing_nat_vent_cutoff_reason: str | None = None
+        self._briefing_evening_open_time: datetime | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
         # Issue #645: last_changed timestamps known to be a reconnect/availability blip
@@ -1448,6 +1449,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except (TypeError, ValueError):
             self._briefing_nat_vent_cutoff = None
         self._briefing_nat_vent_cutoff_reason = briefing.get("briefing_nat_vent_cutoff_reason")
+        _restored_evening_open_time = briefing.get("briefing_evening_open_time")
+        try:
+            self._briefing_evening_open_time = (
+                datetime.fromisoformat(_restored_evening_open_time) if _restored_evening_open_time else None
+            )
+        except (TypeError, ValueError):
+            self._briefing_evening_open_time = None
 
         # Automation state
         auto_state = state.get("automation_state", {})
@@ -1604,6 +1612,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     else None
                 ),
                 "briefing_nat_vent_cutoff_reason": getattr(self, "_briefing_nat_vent_cutoff_reason", None),
+                "briefing_evening_open_time": (
+                    getattr(self, "_briefing_evening_open_time", None).isoformat()
+                    if getattr(self, "_briefing_evening_open_time", None)
+                    else None
+                ),
             },
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
@@ -3545,20 +3558,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         day_type_changed = self._briefing_day_type is not None and classification.day_type != self._briefing_day_type
         high_drifted = today_high_drift >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F
 
-        # nat_vent_cutoff/reason drift — only meaningful on WARM/MILD days, the only
-        # day types whose briefing text (_warm_day_plan()/_mild_day_plan()) actually
-        # renders these fields. Gating avoids regeneration thrash on other day types,
-        # where self._nat_vent_plan's cutoff (computed regardless of day type) is
-        # never shown in text anyway.
+        # nat_vent_cutoff/reason/evening_open_time drift — only meaningful on
+        # HOT/WARM/MILD days, the only day types whose briefing text
+        # (_hot_day_plan()/_warm_day_plan()/_mild_day_plan(), extended to HOT by Issue
+        # #876) actually renders these fields. Gating avoids regeneration thrash on
+        # other day types, where self._nat_vent_plan's cutoff (computed regardless of
+        # day type) is never shown in text anyway.
         briefing_cutoff = getattr(self, "_briefing_nat_vent_cutoff", None)
         briefing_cutoff_reason = getattr(self, "_briefing_nat_vent_cutoff_reason", None)
+        briefing_evening_open = getattr(self, "_briefing_evening_open_time", None)
         live_plan = getattr(self, "_nat_vent_plan", None) or {}
         live_cutoff = live_plan.get("nat_vent_cutoff")
         live_cutoff_reason = live_plan.get("nat_vent_cutoff_reason")
+        live_evening_open = live_plan.get("evening_open_time")
         cutoff_drift_minutes = 0.0
         cutoff_drifted = False
         reason_flipped = False
-        if classification.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD):
+        evening_open_drifted = False
+        if classification.day_type in (DAY_TYPE_HOT, DAY_TYPE_WARM, DAY_TYPE_MILD):
             if briefing_cutoff is not None and live_cutoff is not None:
                 cutoff_drift_minutes = abs((live_cutoff - briefing_cutoff).total_seconds()) / 60.0
                 cutoff_drifted = cutoff_drift_minutes >= BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES
@@ -3569,13 +3586,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # time shift, so always regenerate.
                 cutoff_drifted = True
             reason_flipped = briefing_cutoff_reason != live_cutoff_reason
+            # Same "one side has it, the other doesn't, or drifted by the same
+            # threshold" treatment as nat_vent_cutoff above — evening_open_time is
+            # rendered by the same conversational-body functions.
+            if briefing_evening_open is not None and live_evening_open is not None:
+                evening_open_drift_minutes = abs((live_evening_open - briefing_evening_open).total_seconds()) / 60.0
+                evening_open_drifted = evening_open_drift_minutes >= BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES
+            elif briefing_evening_open != live_evening_open:
+                evening_open_drifted = True
 
-        if not (day_type_changed or high_drifted or cutoff_drifted or reason_flipped):
+        if not (day_type_changed or high_drifted or cutoff_drifted or reason_flipped or evening_open_drifted):
             return False
 
         _LOGGER.info(
             "Regenerating briefing text — day_type %s → %s, today_high drift %.1f°F (%s → %s),"
-            " nat_vent_cutoff %s → %s (drift %.1fmin), nat_vent_cutoff_reason %s → %s",
+            " nat_vent_cutoff %s → %s (drift %.1fmin), nat_vent_cutoff_reason %s → %s,"
+            " evening_open_time %s → %s",
             self._briefing_day_type,
             classification.day_type,
             today_high_drift,
@@ -3586,12 +3612,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             cutoff_drift_minutes,
             briefing_cutoff_reason,
             live_cutoff_reason,
+            briefing_evening_open,
+            live_evening_open,
         )
         self._last_briefing, self._last_briefing_short = self._build_briefing_text(classification)
         self._briefing_day_type = classification.day_type
         self._briefing_today_high = classification.today_high
         self._briefing_nat_vent_cutoff = live_cutoff
         self._briefing_nat_vent_cutoff_reason = live_cutoff_reason
+        self._briefing_evening_open_time = live_evening_open
         return True
 
     def _build_briefing_text(
@@ -3859,12 +3888,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self._briefing_day_type = classification.day_type
             self._briefing_today_high = classification.today_high
-            # Issue #847: bake in this cycle's nat_vent_cutoff/reason alongside
-            # day_type/today_high so _maybe_regenerate_briefing_for_drift()'s new
-            # third trigger has a correct starting point to compare against.
+            # Issue #847 (extended to evening_open_time by #876): bake in this cycle's
+            # nat_vent_cutoff/reason/evening_open_time alongside day_type/today_high so
+            # _maybe_regenerate_briefing_for_drift()'s drift triggers have a correct
+            # starting point to compare against.
             _plan_at_generation = getattr(self, "_nat_vent_plan", None) or {}
             self._briefing_nat_vent_cutoff = _plan_at_generation.get("nat_vent_cutoff")
             self._briefing_nat_vent_cutoff_reason = _plan_at_generation.get("nat_vent_cutoff_reason")
+            self._briefing_evening_open_time = _plan_at_generation.get("evening_open_time")
 
             # In observe-only mode, skip sending the notification
             if not self._automation_enabled:
@@ -4133,8 +4164,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
     def _compute_and_cache_nat_vent_plan(self) -> None:
-        """Issue #817: single per-cycle computation of warm/mild-day nat-vent window
-        and cutoff timing, cached on ``self._nat_vent_plan``.
+        """Issue #817: single per-cycle computation of hot/warm/mild-day nat-vent
+        window and cutoff timing, cached on ``self._nat_vent_plan`` (extended to HOT
+        days by Issue #876).
 
         Before this existed, briefing text, the TLDR table, and the "Next Automation"
         status card each independently called what is now
@@ -4153,18 +4185,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if c is None or not self._last_predicted_indoor:
             self._nat_vent_plan = None
             return
-        _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-        _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
-        raw_plan = compute_nat_vent_plan(
-            predicted_indoor=self._last_predicted_indoor,
-            predicted_outdoor=_outdoor_curve,
-            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
-            comfort_heat_raw=_comfort_heat_raw,
-            sleep_heat=_sleep_heat,
-            in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
-            window_open_time=c.window_open_time,
-        )
+        if c.day_type == DAY_TYPE_HOT:
+            # Issue #876: HOT's own open-time field is window_opportunity_morning_start
+            # (window_open_time is always None for HOT — see classifier.py) and the
+            # comfort-floor scan doesn't apply to a cooling-mode day — mirrors exactly
+            # what briefing.py's generate_briefing() computes standalone for HOT so this
+            # cached value can be reused there without disagreeing.
+            raw_plan = compute_nat_vent_plan(
+                predicted_indoor=self._last_predicted_indoor,
+                predicted_outdoor=_outdoor_curve,
+                comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                window_open_time=c.window_opportunity_morning_start,
+            )
+        else:
+            _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+            _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
+            raw_plan = compute_nat_vent_plan(
+                predicted_indoor=self._last_predicted_indoor,
+                predicted_outdoor=_outdoor_curve,
+                comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                comfort_heat_raw=_comfort_heat_raw,
+                sleep_heat=_sleep_heat,
+                in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
+                window_open_time=c.window_open_time,
+            )
         self._nat_vent_plan = self._stabilize_nat_vent_cutoff_reason(raw_plan)
 
     def _stabilize_nat_vent_cutoff_reason(self, raw_plan: dict) -> dict:
@@ -4465,6 +4510,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_today_high = None
         self._briefing_nat_vent_cutoff = None
         self._briefing_nat_vent_cutoff_reason = None
+        self._briefing_evening_open_time = None
         self._hvac_on_since = None
         self._last_violation_check = None
         self._outdoor_temp_history.clear()
@@ -8093,8 +8139,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Falls back to c.window_close_time when no plan is cached (e.g. before the
         # first cycle) or it has no cutoff for today.
         _plan = getattr(self, "_nat_vent_plan", None)
-        _close_time_dt = _plan.get("nat_vent_cutoff") if _plan else None
-        _effective_close_time = _close_time_dt.time() if _close_time_dt else c.window_close_time
+        _effective_close_time = resolve_with_fallback(
+            _plan.get("nat_vent_cutoff") if _plan else None, c.window_close_time
+        )
 
         if c.windows_recommended:
             if c.window_open_time and now < c.window_open_time:
@@ -8127,12 +8174,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return _decide("Open windows — outdoor air may be cooler now.")
 
         if c.day_type == DAY_TYPE_HOT:
+            # Issue #876: threshold formula and morning-close/evening-open times now
+            # share the same nat_vent_plan-derived values the briefing renders
+            # (self._nat_vent_plan, the single per-cycle computation — see
+            # _compute_and_cache_nat_vent_plan()), routed through the same
+            # resolve_with_fallback() helper, instead of this card independently
+            # recomputing `comfort_cool + ECONOMIZER_TEMP_DELTA` and hardcoding the
+            # static ECONOMIZER_MORNING_END_HOUR/ECONOMIZER_EVENING_START_HOUR hours a
+            # third and fourth time.
             threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
-            if c.window_opportunity_morning and now < time(ECONOMIZER_MORNING_END_HOUR, 0):
-                end_t = time(ECONOMIZER_MORNING_END_HOUR, 0).strftime("%I:%M %p").lstrip("0")
+            _hot_plan = getattr(self, "_nat_vent_plan", None)
+            _close_time = resolve_with_fallback(
+                _hot_plan.get("nat_vent_cutoff") if _hot_plan else None, c.window_opportunity_morning_end
+            )
+            _evening_open_time = resolve_with_fallback(
+                _hot_plan.get("evening_open_time") if _hot_plan else None, c.window_opportunity_evening_start
+            )
+            if c.window_opportunity_morning and _close_time is not None and now < _close_time:
+                end_t = _close_time.strftime("%I:%M %p").lstrip("0")
                 return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})")
-            elif c.window_opportunity_evening and now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
-                return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)}")
+            elif c.window_opportunity_evening and _evening_open_time is not None and now >= _evening_open_time:
+                start_t = _evening_open_time.strftime("%I:%M %p").lstrip("0")
+                return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (from {start_t})")
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
                 return _decide("-")
             return _decide("Keep windows and blinds closed.")

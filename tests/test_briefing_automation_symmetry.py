@@ -87,8 +87,7 @@ def _shared_nat_vent_plan(reason: str, cutoff: datetime) -> dict:
         "ceiling_breach_time": None,
         "precool_start_time": None,
         "any_nat_vent_window": True,
-        "nat_vent_recovers": False,
-        "recovery_time": None,
+        "evening_open_time": None,
     }
 
 

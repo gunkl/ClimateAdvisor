@@ -1,4 +1,5 @@
-"""Single source of truth for warm/mild-day natural-ventilation timing (Issue #817).
+"""Single source of truth for hot/warm/mild-day natural-ventilation timing
+(Issue #817, extended to Hot's displayed briefing/status text by Issue #876).
 
 Before this module existed, "when should windows close" was computed independently
 in briefing.py (called from generate_briefing() for the TLDR table and conversational
@@ -38,6 +39,30 @@ def _nat_vent_cutoff_reached(outdoor_temp: float, indoor_temp: float) -> bool:
     now a single shared definition. This is only half of the real activation gate's
     predicate — see the comfort-floor scan in compute_nat_vent_plan() (Issue #535)."""
     return outdoor_temp >= indoor_temp - _NAT_VENT_CUTOFF_MARGIN_F
+
+
+def _nat_vent_reopen_reached(outdoor_temp: float, indoor_temp: float) -> bool:
+    """Symmetric opposite of ``_nat_vent_cutoff_reached()`` (Issue #876): outdoor has
+    cooled back down far enough below indoor that reopening windows helps again.
+    Reuses the same ``_NAT_VENT_CUTOFF_MARGIN_F`` so the morning-close and
+    evening-open crossings are symmetric by construction, rather than the evening
+    side being defined against an unrelated absolute threshold."""
+    return outdoor_temp <= indoor_temp - _NAT_VENT_CUTOFF_MARGIN_F
+
+
+def resolve_with_fallback(dynamic: datetime | None, static: time | None) -> time | None:
+    """Single source of truth for "use the ODE-dynamic time if available, else fall
+    back to the static configured hour" (Issue #876).
+
+    Before this existed, this exact ``x.time() if x is not None else y`` check was
+    hand-rolled independently in ``briefing.py`` (twice), ``coordinator.py``'s Next
+    Automation card, and ``automation.py``'s planned-window-period gate — the same
+    class of duplication this module's own docstring already identifies as the root
+    cause of Issue #528 (a duplicate silently reintroduced after #518 supposedly
+    fixed it). Every caller that needs "dynamic value, else static fallback" should
+    call this rather than writing its own inline conditional.
+    """
+    return dynamic.time() if dynamic is not None else static
 
 
 def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
@@ -134,18 +159,24 @@ def compute_nat_vent_plan(
       ceiling_breach_time: datetime | None — first hour indoor > comfort_cool
       precool_start_time: datetime | None — ceiling_breach_time minus computed lead
       any_nat_vent_window: bool — True if outdoor < indoor at any point
-      nat_vent_recovers: bool — True if outdoor drops back below indoor after cutoff.
-          Issue #788: only ever computed for the "outdoor_rise" cutoff reason — always
-          False for "comfort_floor" cutoffs (left at its initial-dict default, never
-          overwritten). A "comfort_floor" cutoff fires specifically in the branch where
-          outdoor_crossing did NOT win the race (see the `elif floor_crossing is not
-          None` below), which means outdoor is already below indoor at cutoff time — the
-          "recovery" test this field reports on was never actually unmet, so treating it
-          as a genuine later event is a false positive that told occupants to reopen
-          windows minutes after being told to close them.
-      recovery_time: datetime | None — first timestamp after cutoff where outdoor < indoor
-          again. Same "outdoor_rise"-only restriction as nat_vent_recovers above; always
-          None for "comfort_floor" cutoffs.
+      evening_open_time: datetime | None — renamed from ``recovery_time`` (Issue #876;
+          ``nat_vent_recovers`` is retired in favor of a plain
+          ``evening_open_time is not None`` check at call sites) but the underlying
+          Issue #788 semantics are UNCHANGED, not generalized: this field is still
+          only computed for an "outdoor_rise" cutoff — first timestamp after
+          ``nat_vent_cutoff`` where outdoor has cooled back below indoor again (the
+          symmetric opposite of the morning-close crossing, via
+          ``_nat_vent_reopen_reached()``). For a "comfort_floor" cutoff this stays
+          ``None`` by design: that cutoff fires because indoor fell too low, and
+          outdoor cooling further from there is the same bad direction that caused
+          the close, not a signal that reopening helps — using the same predicate
+          there would reproduce the exact "Close at 8am, reopen at 9am" contradiction
+          Issue #788 was filed to fix (verified against that issue's reported
+          scenario during Issue #876's implementation: the generalized version
+          fabricates an evening_open_time one hour after a comfort_floor cutoff in
+          that exact case). A future comfort_floor-specific "safe to reopen" event
+          would need its own predicate (outdoor warming back toward indoor, the
+          opposite direction) — out of scope here.
     """
     result: dict = {
         "nat_vent_cutoff": None,
@@ -154,8 +185,7 @@ def compute_nat_vent_plan(
         "ceiling_breach_time": None,
         "precool_start_time": None,
         "any_nat_vent_window": False,
-        "nat_vent_recovers": False,
-        "recovery_time": None,
+        "evening_open_time": None,
     }
 
     if not predicted_indoor or not predicted_outdoor:
@@ -244,30 +274,27 @@ def compute_nat_vent_plan(
         )
         result["precool_start_time"] = result["ceiling_breach_time"] - timedelta(minutes=lead_min)
 
-    # nat_vent_recovers / recovery_time: outdoor drops back below indoor AFTER the cutoff.
-    # Issue #788: only meaningful for an "outdoor_rise" cutoff (windows closed BECAUSE
-    # outdoor rose above indoor, so outdoor dropping back below indoor is a genuine,
-    # later, actionable event). For "comfort_floor" cutoffs, this branch only wins the
-    # race when outdoor_crossing did NOT fire first (see the `elif floor_crossing is not
-    # None` above) — which means outdoor is already below indoor at cutoff time. Running
-    # this scan there would find a "recovery" that was never really unmet, producing a
-    # reopen recommendation minutes after telling the occupant to close windows. Leave
-    # recovery_time=None / nat_vent_recovers=False (their initial-dict defaults) for
-    # "comfort_floor" cutoffs.
+    # evening_open_time (Issue #876 rename of recovery_time/nat_vent_recovers): first
+    # timestamp after cutoff where outdoor has cooled back down far enough below indoor
+    # to make reopening worthwhile again — the symmetric opposite of the morning-close
+    # crossing above. Issue #788's outdoor_rise-only restriction is preserved unchanged
+    # (see the field's docstring above for why generalizing this to comfort_floor
+    # cutoffs would reproduce the exact bug #788 fixed).
     if result["nat_vent_cutoff"] is not None and result["nat_vent_cutoff_reason"] == "outdoor_rise":
-        result["recovery_time"] = find_temperature_crossing(
-            predicted_indoor, predicted_outdoor, lambda _ts, o, i: o < i, after=result["nat_vent_cutoff"]
+        result["evening_open_time"] = find_temperature_crossing(
+            predicted_indoor,
+            predicted_outdoor,
+            lambda _ts, o, i: _nat_vent_reopen_reached(o, i),
+            after=result["nat_vent_cutoff"],
         )
-        result["nat_vent_recovers"] = result["recovery_time"] is not None
 
     _LOGGER.debug(
-        "NatVentPlan: nat_vent_cutoff=%s (%s), ceiling_breach=%s, precool_start=%s, recovers=%s, recovery_time=%s",
+        "NatVentPlan: nat_vent_cutoff=%s (%s), ceiling_breach=%s, precool_start=%s, evening_open_time=%s",
         result["nat_vent_cutoff"],
         result["nat_vent_cutoff_reason"],
         result["ceiling_breach_time"],
         result["precool_start_time"],
-        result["nat_vent_recovers"],
-        result["recovery_time"],
+        result["evening_open_time"],
     )
 
     return result

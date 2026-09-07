@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.30] — 2026-09-07
+
+- Fix #876: the daily briefing's window close/reopen times for Hot, Warm, and Mild days are now computed from the actual forecast (matching what Warm/Mild's close time already did) instead of Hot's close/reopen times being fixed clock hours unrelated to outdoor conditions. The morning open time is no longer shown since it carried no useful information.
+
 ## [0.7.29] — 2026-09-07
 
 - Fix #874: quieted several routine HA log lines that were incorrectly logged as WARNING (whole-house-fan mode handoffs, door/window pause, next-action window advice, transient forecast hiccups), and fixed a bug where a manual whole-house-fan override's grace period could linger for a few minutes after bedtime or wake-up instead of clearing immediately.

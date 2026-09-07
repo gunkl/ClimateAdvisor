@@ -80,8 +80,7 @@ def _plan(
     ceiling_breach_time: datetime | None = None,
     precool_start_time: datetime | None = None,
     any_nat_vent_window: bool = True,
-    nat_vent_recovers: bool = False,
-    recovery_time: datetime | None = None,
+    evening_open_time: datetime | None = None,
 ) -> dict:
     """Build a nat_vent_plan-shaped dict with distinguishable values for every
     key, so tests can prove non-cutoff fields pass through fresh/unfrozen."""
@@ -92,8 +91,7 @@ def _plan(
         "ceiling_breach_time": ceiling_breach_time,
         "precool_start_time": precool_start_time,
         "any_nat_vent_window": any_nat_vent_window,
-        "nat_vent_recovers": nat_vent_recovers,
-        "recovery_time": recovery_time,
+        "evening_open_time": evening_open_time,
     }
 
 
@@ -178,8 +176,7 @@ class TestKnifeEdgeFlipNotYetConfirmed:
             ceiling_breach_time=new_ceiling_breach,
             precool_start_time=new_precool_start,
             any_nat_vent_window=False,
-            nat_vent_recovers=True,
-            recovery_time=_T0 + timedelta(minutes=300),
+            evening_open_time=_T0 + timedelta(minutes=300),
         )
 
         # Called moments later — well under the 90s sustain window.
@@ -196,8 +193,7 @@ class TestKnifeEdgeFlipNotYetConfirmed:
         assert result["ceiling_breach_time"] == new_ceiling_breach
         assert result["precool_start_time"] == new_precool_start
         assert result["any_nat_vent_window"] is False
-        assert result["nat_vent_recovers"] is True
-        assert result["recovery_time"] == _T0 + timedelta(minutes=300)
+        assert result["evening_open_time"] == _T0 + timedelta(minutes=300)
 
         # Candidate state now tracks the not-yet-confirmed new reason.
         assert coord._nat_vent_cutoff_reason_candidate == "outdoor_rise"

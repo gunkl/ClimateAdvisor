@@ -36,7 +36,7 @@ from .const import (
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
 )
-from .nat_vent_plan import compute_nat_vent_plan, describe_nat_vent_cutoff_reason
+from .nat_vent_plan import compute_nat_vent_plan, describe_nat_vent_cutoff_reason, resolve_with_fallback
 from .temperature import FAHRENHEIT, format_temp, format_temp_delta, free_cooling_direction_ok
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,6 +162,7 @@ def generate_briefing(
     if nat_vent_plan is not None:
         warm_events = nat_vent_plan if c.day_type == DAY_TYPE_WARM else None
         mild_events = nat_vent_plan if c.day_type == DAY_TYPE_MILD else None
+        hot_events = nat_vent_plan if c.day_type == DAY_TYPE_HOT else None
     else:
         warm_events = (
             compute_nat_vent_plan(
@@ -196,6 +197,26 @@ def generate_briefing(
             if c.day_type == DAY_TYPE_MILD and predicted_indoor_future and predicted_outdoor_future
             else None
         )
+        # Issue #876: HOT day's morning-opportunity close/evening-reopen times had no
+        # dynamic path at all (unlike WARM/MILD above) — always the raw
+        # window_opportunity_morning_end/evening_start hour constants, with no
+        # connection to the actual forecast. Bounded by window_opportunity_morning_start
+        # (HOT's own open-time field, distinct from WARM/MILD's window_open_time —
+        # see nat_vent_plan.py's compute_nat_vent_plan() window_open_time param, which
+        # is a generic "don't scan before this hour" bound regardless of which field
+        # supplies it). comfort_heat_raw/sleep_heat/in_sleep_window_fn are intentionally
+        # omitted — HOT's hvac_mode is "cool", so the comfort-floor scan (a heating-mode
+        # concept) doesn't apply.
+        hot_events = (
+            compute_nat_vent_plan(
+                predicted_indoor=predicted_indoor_future,
+                predicted_outdoor=predicted_outdoor_future,
+                comfort_cool=comfort_cool,
+                window_open_time=c.window_opportunity_morning_start,
+            )
+            if c.day_type == DAY_TYPE_HOT and predicted_indoor_future and predicted_outdoor_future
+            else None
+        )
 
     tldr_lines = _generate_tldr_table(
         c,
@@ -206,6 +227,7 @@ def generate_briefing(
         occupancy_mode=occupancy_mode,
         warm_events=warm_events,
         mild_events=mild_events,
+        hot_events=hot_events,
     )
 
     if verbosity == "tldr_only":
@@ -237,6 +259,7 @@ def generate_briefing(
                 fan_mode=fan_mode,
                 temp_unit=temp_unit,
                 runtime_config=runtime_config,
+                hot_events=hot_events,
             )
         )
     elif c.day_type == DAY_TYPE_WARM:
@@ -357,6 +380,7 @@ def _generate_tldr_table(
     occupancy_mode: str = "home",
     warm_events: dict | None = None,
     mild_events: dict | None = None,
+    hot_events: dict | None = None,
 ) -> list[str]:
     """Generate a plain-text aligned TLDR summary table.
 
@@ -403,33 +427,37 @@ def _generate_tldr_table(
     # --- Windows row ---
     threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
     if c.windows_recommended and c.window_open_time and c.window_close_time:
-        open_t = c.window_open_time.strftime(_FMT_HOUR)
         # Prefer the same ODE-derived cutoff the conversational body uses (Issue #518, extended
         # to MILD days in #534) \u2014 falls back to the classifier's static hour only when no
         # forecast curve exists. warm_events/mild_events are mutually exclusive (populated only
-        # for their matching day_type).
+        # for their matching day_type). Issue #876: morning OPEN time is intentionally dropped
+        # from this row too \u2014 it carries no useful information \u2014 so the row now shows only the
+        # close time, matching the conversational body.
         _events = warm_events or mild_events
         _cutoff = _events.get("nat_vent_cutoff") if _events else None
         # Defensive second guard (belt-and-suspenders alongside compute_nat_vent_plan()'s
         # own window_open_time bound): never let the ODE cutoff produce a close time at or
         # before the open time \u2014 fall back to the classifier's static close hour instead of
-        # displaying a zero-or-negative-width "Open 6:00 AM \u2013 6:00 AM".
+        # displaying a nonsensical (or negative-width, pre-#876) close.
         if _cutoff is not None and _cutoff.time() <= c.window_open_time:
             _cutoff = None
-        close_t = _cutoff.strftime(_FMT_HOUR) if _cutoff is not None else c.window_close_time.strftime(_FMT_HOUR)
-        windows_val = f"Open {open_t} \u2013 {close_t}"
+        close_time = resolve_with_fallback(_cutoff, c.window_close_time)
+        close_t = close_time.strftime(_FMT_HOUR)
+        windows_val = f"Close by {close_t}"
     elif c.window_opportunity_morning and c.window_opportunity_evening:
-        m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR).lstrip("0")
-        m_end = c.window_opportunity_morning_end.strftime(_FMT_HOUR).lstrip("0")
-        e_start = c.window_opportunity_evening_start.strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"{m_start}\u2013{m_end} / {e_start}+ (<{format_temp(threshold, temp_unit)})"
+        _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
+        m_end = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end).strftime(_FMT_HOUR).lstrip("0")
+        _evening_dt = hot_events.get("evening_open_time") if hot_events else None
+        e_start = resolve_with_fallback(_evening_dt, c.window_opportunity_evening_start).strftime(_FMT_HOUR).lstrip("0")
+        windows_val = f"Close by {m_end} / Open {e_start}+ (<{format_temp(threshold, temp_unit)})"
     elif c.window_opportunity_morning:
-        m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR).lstrip("0")
-        m_end = c.window_opportunity_morning_end.strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"{m_start}\u2013{m_end} (<{format_temp(threshold, temp_unit)})"
+        _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
+        m_end = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end).strftime(_FMT_HOUR).lstrip("0")
+        windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)})"
     elif c.window_opportunity_evening:
-        e_start = c.window_opportunity_evening_start.strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"{e_start} onward (<{format_temp(threshold, temp_unit)})"
+        _evening_dt = hot_events.get("evening_open_time") if hot_events else None
+        e_start = resolve_with_fallback(_evening_dt, c.window_opportunity_evening_start).strftime(_FMT_HOUR).lstrip("0")
+        windows_val = f"Open {e_start} onward (<{format_temp(threshold, temp_unit)})"
     else:
         windows_val = "Closed all day"
 
@@ -496,9 +524,20 @@ def _hot_day_plan(
     fan_mode: str = FAN_MODE_DISABLED,
     temp_unit: str = FAHRENHEIT,
     runtime_config: dict | None = None,
+    hot_events: dict | None = None,
 ) -> list[str]:
     """Conversational plan for hot days (85\u00b0F+)."""
     threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
+
+    # Issue #876: morning-close and evening-open times are now derived from the same
+    # ODE-crossing mechanism WARM/MILD already use (nat_vent_plan.compute_nat_vent_plan()),
+    # falling back to the static classifier hour when no forecast curve is available yet
+    # \u2014 the morning OPEN time is intentionally dropped from the displayed text
+    # entirely (it carries no useful information; see Issue #876's plan).
+    _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
+    _close_time = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end)
+    _evening_open_dt = hot_events.get("evening_open_time") if hot_events else None
+    _evening_open_time = resolve_with_fallback(_evening_open_dt, c.window_opportunity_evening_start)
 
     # Issue #558: only claim overnight pre-cool banking when it's actually expected to run
     # tonight (resolve_pre_cool_modifier() \u2014 the same gate handle_pre_cool() uses), and phrase
@@ -523,44 +562,40 @@ def _hot_day_plan(
     has_evening = c.window_opportunity_evening
 
     if has_morning and has_evening:
-        m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR)
-        m_end = c.window_opportunity_morning_end.strftime(_FMT_HOUR)
-        e_start = c.window_opportunity_evening_start.strftime(_FMT_HOUR)
+        m_end = _close_time.strftime(_FMT_HOUR)
+        e_start = _evening_open_time.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(
-            f"This morning between {m_start} and {m_end}, if outdoor temps are"
-            f" at or below {format_temp(threshold, temp_unit)}, open up for a cross-breeze \u2014"
-            f" I'll handle the AC transition."
+            f"This morning, if outdoor temps are at or below {format_temp(threshold, temp_unit)},"
+            f" open up for a cross-breeze until about {m_end} \u2014 I'll handle the AC transition."
         )
         lines.append("")
         lines.append(
-            f"After {m_end}, close up and keep blinds drawn on sun-facing windows"
+            f"After that, close up and keep blinds drawn on sun-facing windows"
             f" (especially west-facing after noon). I'll hold things at"
             f" {format_temp(comfort_cool, temp_unit)}."
         )
         lines.append("")
         lines.append(
-            f"From {e_start} onward, if outdoor temps drop back below"
+            f"From about {e_start} onward, if outdoor temps drop back below"
             f" {format_temp(threshold, temp_unit)}, open up again and I'll cut the AC to let"
             f" natural ventilation take over."
         )
     elif has_morning:
-        m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR)
-        m_end = c.window_opportunity_morning_end.strftime(_FMT_HOUR)
+        m_end = _close_time.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(
-            f"This morning between {m_start} and {m_end}, if outdoor temps are"
-            f" at or below {format_temp(threshold, temp_unit)}, open up for a cross-breeze \u2014"
-            f" I'll handle the AC transition."
+            f"This morning, if outdoor temps are at or below {format_temp(threshold, temp_unit)},"
+            f" open up for a cross-breeze until about {m_end} \u2014 I'll handle the AC transition."
         )
         lines.append("")
         lines.append(
-            f"After {m_end}, close up and keep blinds drawn on sun-facing windows"
+            f"After that, close up and keep blinds drawn on sun-facing windows"
             f" (especially west-facing after noon). I'll hold things at"
             f" {format_temp(comfort_cool, temp_unit)} for the rest of the day."
         )
     elif has_evening:
-        e_start = c.window_opportunity_evening_start.strftime(_FMT_HOUR)
+        e_start = _evening_open_time.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(
             f"Today's a keep-it-sealed kind of day. Close the blinds on sun-facing"
@@ -569,7 +604,7 @@ def _hot_day_plan(
         )
         lines.append("")
         lines.append(
-            f"From {e_start} onward, if outdoor temps drop below {format_temp(threshold, temp_unit)},"
+            f"From about {e_start} onward, if outdoor temps drop below {format_temp(threshold, temp_unit)},"
             f" open up and I'll cut the AC to let natural ventilation take over."
         )
     else:
@@ -624,10 +659,12 @@ def _warm_day_plan(
     _nat_vent_cutoff = _events["nat_vent_cutoff"] if _events else None
     _nat_vent_cutoff_reason = _events.get("nat_vent_cutoff_reason") if _events else None
     _ceiling_breach = _events["ceiling_breach_time"] if _events else None
-    _nat_vent_recovers = _events["nat_vent_recovers"] if _events else False
+    _evening_open_time = _events.get("evening_open_time") if _events else None
 
+    # Issue #876: the morning OPEN time is intentionally dropped from this sentence \u2014
+    # it carries no useful information (windows day starts, full stop). Only the
+    # dynamically-computed close time matters here.
     if c.windows_recommended and c.window_open_time:
-        open_t = c.window_open_time.strftime(_FMT_HOUR)
         if _nat_vent_cutoff is not None:
             close_t = _nat_vent_cutoff.strftime(_FMT_HOUR)
             # Issue #535: two distinct reasons the cutoff can fire \u2014 outdoor air rising
@@ -651,12 +688,11 @@ def _warm_day_plan(
                     _nat_vent_cutoff_reason,
                 )
                 _effective_reason = "outdoor_rise"
-            close_sentence = f"Close up at {close_t} {describe_nat_vent_cutoff_reason(_effective_reason)}."
-            lines.append(f"Open windows around {open_t} to catch the cool morning air. {close_sentence}")
+            lines.append(f"Close up at {close_t} {describe_nat_vent_cutoff_reason(_effective_reason)}.")
         else:
             lines.append(
-                f"Open windows around {open_t} to catch the cool morning air"
-                f" \u2014 cross-ventilation keeps things comfortable without the AC."
+                "Windows are open to catch the cool morning air \u2014"
+                " cross-ventilation keeps things comfortable without the AC."
             )
     else:
         lines.append("HVAC is off this morning.")
@@ -702,25 +738,24 @@ def _warm_day_plan(
             f" coasts longer before the AC needs to kick in."
         )
 
-    if _nat_vent_recovers and _events is not None:
-        _recovery_ts = _events["recovery_time"]
-        if _recovery_ts is not None:
-            rec_t = _recovery_ts.strftime(_FMT_HOUR)
-            # Issue #788: nat_vent_plan.py's compute_nat_vent_plan() only ever populates
-            # recovery_time/nat_vent_recovers for an "outdoor_rise" cutoff \u2014 for a
-            # "comfort_floor" cutoff (an early/cold-morning close held for comfort, not
-            # outdoor heat) reopening was never a genuine, actionable later event, so
-            # _nat_vent_recovers is always False there and this block is never reached
-            # for that reason. Only the outdoor_rise phrasing applies here.
-            recovery_reason = "when the evening air cools back down"
-            # Issue #518: only claim "I'll turn off the AC" when the AC could
-            # plausibly have engaged first (breach predicted before recovery) \u2014
-            # otherwise this contradicted itself by canceling an action that was
-            # never actually started.
-            if _ceiling_breach is not None and _ceiling_breach < _recovery_ts:
-                lines.append(f"Reopen windows around {rec_t} {recovery_reason} \u2014 I'll turn off the AC.")
-            else:
-                lines.append(f"Reopen windows around {rec_t} {recovery_reason}.")
+    if _evening_open_time is not None:
+        rec_t = _evening_open_time.strftime(_FMT_HOUR)
+        # Issue #876 (renamed from recovery_time/nat_vent_recovers): nat_vent_plan.py's
+        # compute_nat_vent_plan() only ever populates evening_open_time for an
+        # "outdoor_rise" cutoff \u2014 for a "comfort_floor" cutoff (an early/cold-morning
+        # close held for comfort, not outdoor heat) reopening was never a genuine,
+        # actionable later event, so evening_open_time is always None there and this
+        # block is never reached for that reason. Only the outdoor_rise phrasing
+        # applies here.
+        recovery_reason = "when the evening air cools back down"
+        # Issue #518: only claim "I'll turn off the AC" when the AC could
+        # plausibly have engaged first (breach predicted before recovery) \u2014
+        # otherwise this contradicted itself by canceling an action that was
+        # never actually started.
+        if _ceiling_breach is not None and _ceiling_breach < _evening_open_time:
+            lines.append(f"Reopen windows around {rec_t} {recovery_reason} \u2014 I'll turn off the AC.")
+        else:
+            lines.append(f"Reopen windows around {rec_t} {recovery_reason}.")
 
     return lines
 
@@ -752,11 +787,11 @@ def _mild_day_plan(
     ]
 
     if c.windows_recommended and c.window_open_time:
-        open_t = c.window_open_time.strftime(_FMT_HOUR)
+        # Issue #876: the morning OPEN time is intentionally dropped from this
+        # sentence — it carries no useful information.
         lines.append("")
         lines.append(
-            f"Open south and east windows around {open_t} for a natural"
-            f" cross-breeze that freshens the air and warms the house for free."
+            "Open south and east windows for a natural cross-breeze that freshens the air and warms the house for free."
         )
 
     # Issue #534: prefer the ODE-derived cutoff when available (same forecast already validated
@@ -765,7 +800,7 @@ def _mild_day_plan(
     # model), same fallback pattern _generate_tldr_table() already uses for warm days.
     _mild_cutoff = mild_events.get("nat_vent_cutoff") if mild_events else None
     _mild_cutoff_reason = mild_events.get("nat_vent_cutoff_reason") if mild_events else None
-    _close_time = _mild_cutoff if _mild_cutoff is not None else c.window_close_time
+    _close_time = resolve_with_fallback(_mild_cutoff, c.window_close_time)
     if _close_time:
         close_t = _close_time.strftime(_FMT_HOUR)
         # Issue #847: same reason branch + #430 live sanity check as _warm_day_plan()
@@ -793,6 +828,16 @@ def _mild_day_plan(
             f" {format_temp(comfort_heat - 2, temp_unit)} tonight, I'll bring the heater back on"
             f" automatically."
         )
+
+    # Issue #876: MILD days had no evening-reopen sentence at all — new, mirroring
+    # _warm_day_plan()'s equivalent (same outdoor_rise-only gate; see
+    # nat_vent_plan.py's compute_nat_vent_plan() docstring for why comfort_floor
+    # cutoffs never populate this).
+    _evening_open_time = mild_events.get("evening_open_time") if mild_events else None
+    if _evening_open_time is not None:
+        rec_t = _evening_open_time.strftime(_FMT_HOUR)
+        lines.append("")
+        lines.append(f"Reopen windows around {rec_t} when the evening air cools back down.")
 
     return lines
 

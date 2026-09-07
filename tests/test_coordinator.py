@@ -64,6 +64,16 @@ def _make_classification(**overrides):
         "setback_modifier": 0.0,
         "window_opportunity_morning": False,
         "window_opportunity_evening": False,
+        # Issue #876: production's classifier.py always sets these hour fields
+        # alongside the boolean flags above (see _compute_recommendations()) — the
+        # Next Automation card now reads them directly (via resolve_with_fallback())
+        # instead of independently hardcoding ECONOMIZER_MORNING_END_HOUR/
+        # ECONOMIZER_EVENING_START_HOUR a second time, so this fixture must supply
+        # matching defaults rather than leaving them unset.
+        "window_opportunity_morning_start": time(6, 0),
+        "window_opportunity_morning_end": time(9, 0),
+        "window_opportunity_evening_start": time(17, 0),
+        "window_opportunity_evening_end": time(0, 0),
     }
     defaults.update(overrides)
     c.__dict__.update(defaults)
@@ -1291,6 +1301,9 @@ class TestBriefingRegeneration:
         coord._nat_vent_plan = None
         coord._briefing_nat_vent_cutoff = None
         coord._briefing_nat_vent_cutoff_reason = None
+        # Issue #876: evening_open_time drift trigger, same MagicMock-autospec hazard
+        # as nat_vent_cutoff/nat_vent_cutoff_reason above — must be stubbed explicitly.
+        coord._briefing_evening_open_time = None
         coord._last_briefing = "Old warm briefing"
         coord._last_briefing_short = "Old warm TLDR"
         coord._automation_enabled = True

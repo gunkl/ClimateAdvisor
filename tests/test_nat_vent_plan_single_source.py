@@ -72,17 +72,26 @@ _TARGET_FN = "compute_nat_vent_plan"
 _ALLOWED_CALL_SITES: set[tuple[str, str, int]] = {
     # briefing.py: the documented fallback path in generate_briefing() — only
     # reached when a caller doesn't already have a precomputed nat_vent_plan
-    # (direct/standalone calls, tests passing raw prediction curves). Both call
-    # sites live directly inside generate_briefing() itself (not separate
-    # per-day-type helper functions) because the two day types need
+    # (direct/standalone calls, tests passing raw prediction curves). All three
+    # call sites live directly inside generate_briefing() itself (not separate
+    # per-day-type helper functions) because the three day types need
     # independently-gated results, not because the computation itself differs —
-    # ordinal 1 is the WARM-day plan, ordinal 2 is the MILD-day plan.
+    # ordinal 1 is the WARM-day plan, ordinal 2 is the MILD-day plan, ordinal 3
+    # is the HOT-day plan (Issue #876 — extended the shared dynamic-crossing
+    # mechanism to HOT's briefing text, which never used it before).
     ("briefing.py", "generate_briefing", 1),
     ("briefing.py", "generate_briefing", 2),
+    ("briefing.py", "generate_briefing", 3),
     # coordinator.py: the ONE per-cycle computation, cached on self._nat_vent_plan.
     # Every other production consumer reads that cache — see
-    # _compute_and_cache_nat_vent_plan()'s docstring.
+    # _compute_and_cache_nat_vent_plan()'s docstring. Two ordinals (Issue #876):
+    # HOT days need a differently-bounded/gated call (window_opportunity_morning_start,
+    # no comfort-floor scan) than WARM/MILD (window_open_time, comfort-floor scan) —
+    # an if/else choosing between them, not two calls in sequence, but the AST
+    # visitor still counts both branches as ordinals 1 and 2 within the same
+    # enclosing function.
     ("coordinator.py", "_compute_and_cache_nat_vent_plan", 1),
+    ("coordinator.py", "_compute_and_cache_nat_vent_plan", 2),
 }
 
 

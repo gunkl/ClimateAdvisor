@@ -1197,16 +1197,17 @@ class TestWarmDayForecastEventCandidates:
         assert t == "10:30 PM"
 
     def test_recovery_time_candidate_absent_reopen_windows(self):
-        """Issue #849: the recovery_time-driven "Reopen windows — outdoor helping
-        again" candidate was removed for the same reason as the close-windows
-        candidate above — CA cannot reopen windows itself. self._nat_vent_plan is
-        set directly with a future recovery_time (the field compute_nat_vent_plan()
-        populates per nat_vent_plan.py's docstring: "first timestamp after cutoff
-        where outdoor < indoor again") rather than routed through
-        _compute_and_cache_nat_vent_plan(), which would recompute a fresh plan from
-        forecast curves and could obscure whether the candidate is gone or just
-        never triggered — this proves the candidate is gone even when recovery_time
-        is unambiguously present and in the future."""
+        """Issue #849: the evening_open_time-driven (renamed from recovery_time by
+        Issue #876) "Reopen windows — outdoor helping again" candidate was removed
+        for the same reason as the close-windows candidate above — CA cannot reopen
+        windows itself. self._nat_vent_plan is set directly with a future
+        evening_open_time (the field compute_nat_vent_plan() populates per
+        nat_vent_plan.py's docstring: "first timestamp after cutoff where outdoor <
+        indoor again") rather than routed through _compute_and_cache_nat_vent_plan(),
+        which would recompute a fresh plan from forecast curves and could obscure
+        whether the candidate is gone or just never triggered — this proves the
+        candidate is gone even when evening_open_time is unambiguously present and
+        in the future."""
         ae = _make_automation_engine()
         ae._natural_vent_active = False
         c = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
@@ -1220,8 +1221,7 @@ class TestWarmDayForecastEventCandidates:
             "ceiling_breach_time": None,
             "precool_start_time": None,
             "any_nat_vent_window": True,
-            "nat_vent_recovers": True,
-            "recovery_time": datetime(2026, 7, 10, 15, 0),
+            "evening_open_time": datetime(2026, 7, 10, 15, 0),
         }
         from custom_components.climate_advisor import coordinator as _coord_mod
 

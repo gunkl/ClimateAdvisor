@@ -651,6 +651,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._indoor_temp_history: list[tuple[str, float]] = []
         self._hourly_forecast_temps: list[dict] = []
         self._last_predicted_indoor: list[dict] = []
+        # Issue #874: retry-style escalation for hourly-forecast-interpolation failures.
+        # Streak resets on success; not persisted, so it (and the confirmed-unsupported
+        # flag below) both naturally reset on coordinator restart.
+        self._hourly_interp_unavailable_streak: int = 0
+        self._hourly_forecast_confirmed_unsupported: bool = False
+        # Issue #874: dedup window for the "WHF _fan_active=True but physical state=off"
+        # stale-flag warning, shared by both _compute_whf_status() and _compute_fan_status()
+        # so the same real drift condition logs at most once per 60s regardless of which
+        # function (or how many times either function) is called per update cycle.
+        self._whf_stale_flag_warned_at: datetime | None = None
         # Issue #817: the single per-cycle nat-vent window/cutoff computation — briefing
         # text, the TLDR table, and the Next Automation/Next User Action cards all read
         # this instead of independently recomputing it, so they can never disagree.
@@ -3228,9 +3238,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "Outdoor temp: edge-clamped interpolation (%.1f°F) — now is outside the hourly forecast range",
                     interpolated_f,
                 )
+            self._hourly_interp_unavailable_streak = 0
             return interpolated_f
 
-        _LOGGER.warning(
+        # Issue #874: retry-style escalation, two independent pieces working together:
+        # 1. This branch (interpolation unusable this cycle — could be transient, e.g. a
+        #    brief hourly-forecast gap) escalates INFO -> WARNING only once the failure
+        #    persists past a short streak, instead of warning on every single occurrence.
+        # 2. The DEBUG call site in _get_hourly_forecast_data() (a stronger, more
+        #    definitive signal — the underlying service call itself failed/unsupported)
+        #    fires a one-time ERROR the first time it's confirmed, then stays DEBUG-only.
+        # Defensive default: several existing tests build the coordinator as a bare
+        # MagicMock() or via object.__new__() (bypassing __init__), where an unset
+        # attribute is either missing entirely or auto-vivifies as a truthy MagicMock
+        # (never the real getattr default) — isinstance guards against both.
+        _streak = getattr(self, "_hourly_interp_unavailable_streak", 0)
+        if not isinstance(_streak, int):
+            _streak = 0
+        self._hourly_interp_unavailable_streak = _streak + 1
+        _hourly_interp_log = _LOGGER.info if self._hourly_interp_unavailable_streak <= 3 else _LOGGER.warning
+        _hourly_interp_log(
             "Hourly forecast interpolation unavailable for outdoor temp — "
             "falling back to weather nowcast attribute (integration may not support hourly forecasts)"
         )
@@ -3303,6 +3330,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             return response.get(weather_entity, {}).get("forecast", []) if response else []
         except Exception:  # noqa: BLE001
+            # Issue #874: this is the stronger, more definitive signal (the underlying
+            # service call itself failed/is unsupported) vs. _get_outdoor_temp()'s
+            # interpolation-unavailable streak escalation above — log a one-time ERROR
+            # the first time this is confirmed for this session, then stay DEBUG-only
+            # for every subsequent occurrence (no need to re-alert every cycle once
+            # the cause is already known and confirmed unrecoverable this session).
+            if getattr(self, "_hourly_forecast_confirmed_unsupported", False) is not True:
+                self._hourly_forecast_confirmed_unsupported = True
+                _LOGGER.error(
+                    "Hourly forecast unavailable for %s — falling back to cosine model for the rest of this session",
+                    weather_entity,
+                )
             _LOGGER.debug(
                 "Hourly forecast not available for %s; using cosine model",
                 weather_entity,
@@ -8067,7 +8106,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     if outdoor_temp is not None and indoor_temp is not None and not direction_ok:
                         return _decide(
                             _close_windows_msg(outdoor_temp, indoor_temp),
-                            warn=True,
                             outdoor=outdoor_temp,
                             indoor=indoor_temp,
                         )
@@ -8083,7 +8121,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     return _decide(
                         f"Keep windows closed for now — outdoor ({format_temp(outdoor_temp, unit)}) isn't"
                         f" cooler than indoor ({format_temp(indoor_temp, unit)}) yet.",
-                        warn=True,
                         outdoor=outdoor_temp,
                         indoor=indoor_temp,
                     )
@@ -8116,7 +8153,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if outdoor_temp is not None and not direction_ok:
                     return _decide(
                         _close_windows_msg(outdoor_temp, indoor_temp),
-                        warn=True,
                         outdoor=outdoor_temp,
                         indoor=indoor_temp,
                     )
@@ -8139,7 +8175,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return _decide(
                 f"Outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler than indoor"
                 f" ({format_temp(indoor_temp, unit)}) yet — windows/fan won't help.",
-                warn=True,
                 outdoor=outdoor_temp,
                 indoor=indoor_temp,
             )
@@ -8709,7 +8744,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # stale flag once enough time has passed that ground truth should be trusted.
                 if self._is_recent_fan_command(threshold_seconds=30.0):
                     return "active (unconfirmed)"
-                _LOGGER.warning("WHF _fan_active=True but physical state=off — possible stale flag after manual stop")
+                _stale_now = dt_util.now()
+                _stale_last = getattr(self, "_whf_stale_flag_warned_at", None)
+                if _stale_last is None or (_stale_now - _stale_last).total_seconds() >= 60:
+                    _LOGGER.warning(
+                        "WHF _fan_active=True but physical state=off — possible stale flag after manual stop"
+                    )
+                    self._whf_stale_flag_warned_at = _stale_now
                 return "inactive"
             return "active"
         # Issue #510 0.1b: nat-vent session flag can go stale (still "active" between cycles,
@@ -8746,6 +8787,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         Issue #510: same ground-truth-first priority as _compute_fan_status() — see that
         method's docstring and 0.1b/0.1c below for the rationale.
+
+        Issue #874: the stale-flag WARNING below is deduped with a short windowed check
+        (same shape as the WINDOWED — not permanent — content-keyed dedup used elsewhere
+        in this codebase, e.g. AutomationEngine._recent_duplicate()/Issue #591) so that
+        repeated reads of this same real condition within one update cycle (multiple
+        consumers reading ATTR_WHF_STATUS, or this function being called more than once
+        for the same instant) log the warning once, not once per read.
         """
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -8759,9 +8807,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if self._is_recent_fan_command(threshold_seconds=30.0):
                     status = "active (unconfirmed)"
                 else:
-                    _LOGGER.warning(
-                        "WHF _fan_active=True but physical state=off — possible stale flag after manual stop"
-                    )
+                    _whf_stale_now = dt_util.now()
+                    _whf_stale_last = getattr(self, "_whf_stale_flag_warned_at", None)
+                    if _whf_stale_last is None or (_whf_stale_now - _whf_stale_last).total_seconds() >= 60:
+                        _LOGGER.warning(
+                            "WHF _fan_active=True but physical state=off — possible stale flag after manual stop"
+                        )
+                        self._whf_stale_flag_warned_at = _whf_stale_now
                     status = "inactive"
             else:
                 status = "active"

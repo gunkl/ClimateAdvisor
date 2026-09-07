@@ -121,6 +121,72 @@ def _check(label: str, actual: float, expected: float, tol: float = 1e-9) -> Non
         raise SystemExit(1)
 
 
+def _check_bool(label: str, actual: bool, expected: bool) -> None:
+    ok = actual is expected
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {label}: actual={actual!r} expected={expected!r}")
+    if not ok:
+        raise SystemExit(1)
+
+
+class _ReferenceCompressorFSM:
+    """Hand-transcribed copy of climate.py's SimulatedThermostat compressor on/off
+    state machine (deadband + min-run/min-off dwell), for verification only.
+
+    Mirrors the _async_tick() pseudocode exactly: mode/deadband selection, the
+    not-on -> wants_on/can_turn_on branch, and the on -> wants_off/can_turn_off
+    branch. `now` is a plain float of elapsed seconds (no datetime needed for this
+    hand-check — only deltas matter).
+    """
+
+    def __init__(
+        self,
+        *,
+        deadband_heat_f: float = 1.5,
+        deadband_cool_f: float = 1.5,
+        min_run_seconds: float = 300,
+        min_off_seconds: float = 300,
+    ) -> None:
+        self.deadband_heat_f = deadband_heat_f
+        self.deadband_cool_f = deadband_cool_f
+        self.min_run_seconds = min_run_seconds
+        self.min_off_seconds = min_off_seconds
+        self.compressor_on = False
+        self.last_on_ts: float | None = None
+        self.last_off_ts: float | None = None
+
+    def tick(self, *, now: float, hvac_mode: str | None, current_temp: float, target_temp: float | None) -> bool:
+        """Advance the FSM one tick and return the resulting compressor_on state."""
+        if hvac_mode == "heat":
+            mode, deadband = "heat", self.deadband_heat_f
+        elif hvac_mode == "cool":
+            mode, deadband = "cool", self.deadband_cool_f
+        else:
+            mode, deadband = None, None
+
+        if mode is None:
+            self.compressor_on = False
+        elif target_temp is not None:
+            if not self.compressor_on:
+                wants_on = (mode == "heat" and current_temp <= target_temp - deadband) or (
+                    mode == "cool" and current_temp >= target_temp + deadband
+                )
+                can_turn_on = self.last_off_ts is None or (now - self.last_off_ts) >= self.min_off_seconds
+                if wants_on and can_turn_on:
+                    self.compressor_on = True
+                    self.last_on_ts = now
+            else:
+                wants_off = (mode == "heat" and current_temp >= target_temp) or (
+                    mode == "cool" and current_temp <= target_temp
+                )
+                can_turn_off = self.last_on_ts is None or (now - self.last_on_ts) >= self.min_run_seconds
+                if wants_off and can_turn_off:
+                    self.compressor_on = False
+                    self.last_off_ts = now
+
+        return self.compressor_on
+
+
 def main() -> None:
     print(__doc__.splitlines()[0])
     print()
@@ -151,6 +217,59 @@ def main() -> None:
         ),
         76.0,
     )
+
+    # Case 4: heating compressor does NOT turn on before crossing the deadband edge.
+    # target=70, deadband_heat=1.5 -> turn-on threshold is 68.5. At 69.0 (above
+    # threshold), the compressor must stay off.
+    fsm = _ReferenceCompressorFSM(deadband_heat_f=1.5, min_off_seconds=0)
+    on = fsm.tick(now=0, hvac_mode="heat", current_temp=69.0, target_temp=70.0)
+    _check_bool("heat: stays off above deadband edge (69.0 > 68.5)", on, False)
+    on = fsm.tick(now=1, hvac_mode="heat", current_temp=68.5, target_temp=70.0)
+    _check_bool("heat: turns on exactly at deadband edge (68.5 <= 68.5)", on, True)
+
+    # Case 5: cooling compressor does NOT turn on before crossing the deadband edge.
+    # target=76, deadband_cool=1.5 -> turn-on threshold is 77.5.
+    fsm = _ReferenceCompressorFSM(deadband_cool_f=1.5, min_off_seconds=0)
+    on = fsm.tick(now=0, hvac_mode="cool", current_temp=77.0, target_temp=76.0)
+    _check_bool("cool: stays off below deadband edge (77.0 < 77.5)", on, False)
+    on = fsm.tick(now=1, hvac_mode="cool", current_temp=77.5, target_temp=76.0)
+    _check_bool("cool: turns on exactly at deadband edge (77.5 >= 77.5)", on, True)
+
+    # Case 6: once on, compressor does NOT turn off until reaching setpoint — even
+    # though it's already well inside the deadband. min_run_seconds=0 so dwell isn't
+    # the reason it stays on here; only "hasn't reached target yet" is.
+    fsm = _ReferenceCompressorFSM(deadband_heat_f=1.5, min_run_seconds=0, min_off_seconds=0)
+    fsm.tick(now=0, hvac_mode="heat", current_temp=68.0, target_temp=70.0)  # crosses on
+    _check_bool("heat: compressor is on after crossing threshold", fsm.compressor_on, True)
+    on = fsm.tick(now=60, hvac_mode="heat", current_temp=69.9, target_temp=70.0)
+    _check_bool("heat: stays on below setpoint (69.9 < 70.0)", on, True)
+    on = fsm.tick(now=61, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
+    _check_bool("heat: turns off exactly at setpoint (70.0 >= 70.0)", on, False)
+
+    # Case 7: min_run_seconds delays a turn-off that the deadband/setpoint condition
+    # alone would have triggered. Compressor turns on at t=0; setpoint is reached at
+    # t=60s, well before min_run_seconds=300 has elapsed — it must stay on until t=300.
+    fsm = _ReferenceCompressorFSM(deadband_heat_f=1.5, min_run_seconds=300, min_off_seconds=0)
+    fsm.tick(now=0, hvac_mode="heat", current_temp=68.0, target_temp=70.0)  # crosses on
+    on = fsm.tick(now=60, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
+    _check_bool("heat: min_run_seconds holds compressor on despite reaching setpoint", on, True)
+    on = fsm.tick(now=299, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
+    _check_bool("heat: still held on just before min_run_seconds elapses", on, True)
+    on = fsm.tick(now=300, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
+    _check_bool("heat: turns off once min_run_seconds has elapsed", on, False)
+
+    # Case 8: min_off_seconds delays a turn-on that the deadband condition alone would
+    # have triggered. Compressor turns off at t=0 (reaches setpoint); indoor drifts back
+    # below the deadband threshold at t=60s, well before min_off_seconds=300 has
+    # elapsed — it must stay off until t=300.
+    fsm = _ReferenceCompressorFSM(deadband_heat_f=1.5, min_run_seconds=0, min_off_seconds=300)
+    fsm.tick(now=0, hvac_mode="heat", current_temp=68.0, target_temp=70.0)  # crosses on
+    fsm.tick(now=1, hvac_mode="heat", current_temp=70.0, target_temp=70.0)  # crosses off
+    _check_bool("heat: compressor is off after reaching setpoint", fsm.compressor_on, False)
+    on = fsm.tick(now=61, hvac_mode="heat", current_temp=68.0, target_temp=70.0)
+    _check_bool("heat: min_off_seconds holds compressor off despite crossing deadband edge again", on, False)
+    on = fsm.tick(now=301, hvac_mode="heat", current_temp=68.0, target_temp=70.0)
+    _check_bool("heat: turns on once min_off_seconds has elapsed", on, True)
 
     print()
     print("All hand-verified cases pass. This confirms the formula transcribed")

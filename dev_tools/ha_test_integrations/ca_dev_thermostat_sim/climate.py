@@ -38,12 +38,20 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_COMFORT_COOL,
     CONF_COMFORT_HEAT,
+    CONF_DEADBAND_COOL_F,
+    CONF_DEADBAND_HEAT_F,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
     CONF_K_ACTIVE_HEAT,
     CONF_K_PASSIVE,
+    CONF_MIN_OFF_SECONDS,
+    CONF_MIN_RUN_SECONDS,
     CONF_OUTDOOR_SOURCE,
     CONF_TICK_SECONDS,
+    DEFAULT_DEADBAND_COOL_F,
+    DEFAULT_DEADBAND_HEAT_F,
+    DEFAULT_MIN_OFF_SECONDS,
+    DEFAULT_MIN_RUN_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -125,6 +133,14 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._comfort_cool: float = data[CONF_COMFORT_COOL]
         self._outdoor_source: str = data[CONF_OUTDOOR_SOURCE]
         self._tick_seconds: int = int(data[CONF_TICK_SECONDS])
+        # New keys (Issue: HVAC hysteresis + short-cycle protection) — read via .get()
+        # with DEFAULT_* fallback, not [...] , so existing entries created before these
+        # keys existed (including the live "Simulated"/"Simulated 2" zones) keep working
+        # unmodified until reconfigured.
+        self._deadband_heat_f: float = float(data.get(CONF_DEADBAND_HEAT_F, DEFAULT_DEADBAND_HEAT_F))
+        self._deadband_cool_f: float = float(data.get(CONF_DEADBAND_COOL_F, DEFAULT_DEADBAND_COOL_F))
+        self._min_run_seconds: float = float(data.get(CONF_MIN_RUN_SECONDS, DEFAULT_MIN_RUN_SECONDS))
+        self._min_off_seconds: float = float(data.get(CONF_MIN_OFF_SECONDS, DEFAULT_MIN_OFF_SECONDS))
 
         self._current_temp: float = float(data.get(CONF_INITIAL_TEMP_F, 70.0))
         self._target_temp: float | None = self._comfort_heat
@@ -140,6 +156,15 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # read via hvac_action.
         self._actively_driving: bool = False
         self._last_update_ts: datetime = dt_util.utcnow()
+
+        # Compressor on/off state machine (deadband + min-run/min-off dwell). See
+        # _async_tick() for the state transitions. Timestamps are reset (None) on
+        # restart — see async_added_to_hass() — since equipment-protection dwell timers
+        # tracking real wall-clock gaps across an HA restart isn't meaningful for a dev
+        # fixture.
+        self._compressor_on: bool = False
+        self._last_on_ts: datetime | None = None
+        self._last_off_ts: datetime | None = None
 
     async def async_added_to_hass(self) -> None:
         """Restore prior simulated state (if any) and start the tick timer."""
@@ -169,6 +194,9 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             restored_fan_mode = last_state.attributes.get("fan_mode")
             if restored_fan_mode in self._attr_fan_modes:
                 self._fan_mode = restored_fan_mode
+
+            restored_hvac_action = last_state.attributes.get("hvac_action")
+            self._compressor_on = restored_hvac_action in ("heating", "cooling")
         else:
             _LOGGER.debug(
                 "No prior state for %s — starting from configured initial_temp_f=%.1f",
@@ -222,6 +250,21 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
     def fan_mode(self) -> str:
         """Return the current fan mode."""
         return self._fan_mode
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the deadband/dwell state machine's internals for debugging.
+
+        Once dwell timers can hold the compressor in an unexpected on/off state, that
+        state is no longer inferable from hvac_action alone — this surfaces it directly.
+        """
+        return {
+            "compressor_on": self._compressor_on,
+            "deadband_heat_f": self._deadband_heat_f,
+            "deadband_cool_f": self._deadband_cool_f,
+            "min_run_seconds": self._min_run_seconds,
+            "min_off_seconds": self._min_off_seconds,
+        }
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set a new HVAC mode."""
@@ -311,24 +354,56 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             return
 
         if self._hvac_mode == HVACMode.HEAT:
-            k_active = self._k_active_heat
-            mode = "heat"
+            mode, deadband = "heat", self._deadband_heat_f
         elif self._hvac_mode == HVACMode.COOL:
-            k_active = self._k_active_cool
-            mode = "cool"
+            mode, deadband = "cool", self._deadband_cool_f
         else:
-            # OFF simulates as passive-only decay toward outdoor temp.
-            k_active = None
-            mode = None
+            mode, deadband = None, None
 
-        # Mirrors _simulate_indoor_physics's own q!=0 condition exactly (coordinator.py)
-        # so hvac_action can't drift out of sync with what the ODE step actually did
-        # this tick — computed from the temperature BEFORE this tick's step, same as
-        # the ODE function reads t_start.
-        self._actively_driving = self._target_temp is not None and (
-            (mode == "heat" and self._current_temp < self._target_temp)
-            or (mode == "cool" and self._current_temp > self._target_temp)
-        )
+        # Compressor on/off state machine: deadband thresholds decide when the
+        # compressor *wants* to change state; min_run/min_off dwell timers can delay
+        # that change (equipment short-cycle protection), same as real HVAC hardware.
+        # See docs/dev-thermostat-sim-hysteresis (plan) for the full design.
+        if mode is None:
+            self._compressor_on = False
+        elif self._target_temp is not None:
+            if not self._compressor_on:
+                wants_on = (mode == "heat" and self._current_temp <= self._target_temp - deadband) or (
+                    mode == "cool" and self._current_temp >= self._target_temp + deadband
+                )
+                can_turn_on = (
+                    self._last_off_ts is None or (now - self._last_off_ts).total_seconds() >= self._min_off_seconds
+                )
+                if wants_on and can_turn_on:
+                    self._compressor_on = True
+                    self._last_on_ts = now
+                    _LOGGER.info(
+                        "CA Dev Thermostat Sim %s: compressor ON (%s, indoor=%.1f target=%.1f)",
+                        self.entity_id,
+                        mode,
+                        self._current_temp,
+                        self._target_temp,
+                    )
+            else:
+                wants_off = (mode == "heat" and self._current_temp >= self._target_temp) or (
+                    mode == "cool" and self._current_temp <= self._target_temp
+                )
+                can_turn_off = (
+                    self._last_on_ts is None or (now - self._last_on_ts).total_seconds() >= self._min_run_seconds
+                )
+                if wants_off and can_turn_off:
+                    self._compressor_on = False
+                    self._last_off_ts = now
+                    _LOGGER.info(
+                        "CA Dev Thermostat Sim %s: compressor OFF (%s, indoor=%.1f target=%.1f)",
+                        self.entity_id,
+                        mode,
+                        self._current_temp,
+                        self._target_temp,
+                    )
+
+        self._actively_driving = self._compressor_on
+        k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if self._compressor_on else None
 
         self._current_temp = _simulate_indoor_physics(
             self._current_temp,

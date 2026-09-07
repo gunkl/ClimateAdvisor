@@ -23,18 +23,26 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_COMFORT_COOL,
     CONF_COMFORT_HEAT,
+    CONF_DEADBAND_COOL_F,
+    CONF_DEADBAND_HEAT_F,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
     CONF_K_ACTIVE_HEAT,
     CONF_K_PASSIVE,
+    CONF_MIN_OFF_SECONDS,
+    CONF_MIN_RUN_SECONDS,
     CONF_OUTDOOR_SOURCE,
     CONF_TICK_SECONDS,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
+    DEFAULT_DEADBAND_COOL_F,
+    DEFAULT_DEADBAND_HEAT_F,
     DEFAULT_INITIAL_TEMP_F,
     DEFAULT_K_ACTIVE_COOL,
     DEFAULT_K_ACTIVE_HEAT,
     DEFAULT_K_PASSIVE,
+    DEFAULT_MIN_OFF_SECONDS,
+    DEFAULT_MIN_RUN_SECONDS,
     DEFAULT_TICK_SECONDS,
     DOMAIN,
 )
@@ -84,6 +92,18 @@ def _build_schema(*, defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(CONF_TICK_SECONDS, default=defaults.get(CONF_TICK_SECONDS, DEFAULT_TICK_SECONDS)): _num(
                 min_=5, max_=3600, step=1, unit="s"
             ),
+            vol.Required(
+                CONF_DEADBAND_HEAT_F, default=defaults.get(CONF_DEADBAND_HEAT_F, DEFAULT_DEADBAND_HEAT_F)
+            ): _num(min_=0.1, max_=10.0, step=0.1, unit="°F"),
+            vol.Required(
+                CONF_DEADBAND_COOL_F, default=defaults.get(CONF_DEADBAND_COOL_F, DEFAULT_DEADBAND_COOL_F)
+            ): _num(min_=0.1, max_=10.0, step=0.1, unit="°F"),
+            vol.Required(
+                CONF_MIN_RUN_SECONDS, default=defaults.get(CONF_MIN_RUN_SECONDS, DEFAULT_MIN_RUN_SECONDS)
+            ): _num(min_=0, max_=1800, step=10, unit="s"),
+            vol.Required(
+                CONF_MIN_OFF_SECONDS, default=defaults.get(CONF_MIN_OFF_SECONDS, DEFAULT_MIN_OFF_SECONDS)
+            ): _num(min_=0, max_=1800, step=10, unit="s"),
         }
     )
 

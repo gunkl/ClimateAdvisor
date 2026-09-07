@@ -50,15 +50,41 @@ State survives HA restarts via `RestoreEntity` (current temperature, target
 temperature, HVAC mode, and fan mode are restored from the last known state).
 
 **`hvac_action`** reflects what the thermostat is actually doing each tick —
-`heating`/`cooling` while it's on the correct side of `target_temperature`
-(actively driving), `idle` once it reaches setpoint (still in heat/cool mode
-but not applying capacity, matching a real thermostat), `fan` when
-`hvac_mode` is off and `fan_mode` is `on`, `off` otherwise. This isn't
-cosmetic — 12 separate places in `coordinator.py`/`automation.py` key real
-decisions off a thermostat's `hvac_action` (thermal-observation gating,
-restart-cause classification, etc.); a fixture that never reported it was
-silently defeating all of them, independent of whether `hvac_mode` itself
-was being tracked correctly (Issue #830 fixed that; Issue #833 fixed this).
+`heating`/`cooling` while the compressor is actively running, `idle` while
+in heat/cool mode but not applying capacity, `fan` when `hvac_mode` is off
+and `fan_mode` is `on`, `off` otherwise. This isn't cosmetic — 12 separate
+places in `coordinator.py`/`automation.py` key real decisions off a
+thermostat's `hvac_action` (thermal-observation gating, restart-cause
+classification, etc.); a fixture that never reported it was silently
+defeating all of them, independent of whether `hvac_mode` itself was being
+tracked correctly (Issue #830 fixed that; Issue #833 fixed this).
+
+The compressor no longer switches on/off at the exact setpoint every tick.
+It now models the same two real-thermostat behaviors that made the earlier
+tick-frequency switching unrealistic:
+
+- **Hysteresis (deadband).** The compressor turns *on* only once indoor
+  temperature crosses `target_temperature ± deadband_{heat,cool}_f`, and
+  turns back *off* once indoor temperature returns to `target_temperature`
+  — a 1-2°F swing band, not an exact-setpoint trigger.
+- **Short-cycle protection (dwell timers).** Once the compressor starts, it
+  stays on for at least `min_run_seconds` even if it reaches setpoint
+  sooner; once it stops, it stays off for at least `min_off_seconds` even
+  if the deadband edge is crossed again sooner — equipment-protection dwell
+  timers, matching real compressor behavior.
+
+`hvac_action` correctly reports `idle` in **both** of these holding states —
+while indoor temperature is sitting inside the deadband, and while a
+deadband edge has been crossed but a dwell timer is still blocking the
+transition — not just "at setpoint." Because the ODE step is only ever
+given active capacity (`k_active_heat`/`k_active_cool`) while the compressor
+is actually on, a "commanded but waiting on a dwell timer" tick correctly
+falls back to pure passive decay, matching what a real thermostat's
+envelope does while the compressor is off. The entity's `compressor_on`
+debug attribute (see below) exposes this internal on/off state directly,
+since it's no longer always inferable from `hvac_action` alone once dwell
+timers can hold it in a state you might not expect from indoor temperature
+alone.
 
 **Fan mode** (`ClimateEntityFeature.FAN_MODE`, `auto`/`on`) is supported so
 Climate Advisor's HVAC-fan-only feature (`fan_mode: hvac_fan` or `both` in a
@@ -123,6 +149,20 @@ Reconfigure**. This reloads the entry with the new values immediately.
 | `comfort_cool` | number | 76 | Comfort ceiling (°F) — passed through to the ODE clamp logic |
 | `outdoor_source` | entity (weather or sensor) | — required | Where outdoor temperature is read from each tick |
 | `tick_seconds` | number | 30 | How often the simulation advances (real elapsed wall time drives the math, not this number) |
+| `deadband_heat_f` | number | 1.5 | Heat mode: compressor turns **on** once indoor temp falls to `target_temperature - deadband_heat_f`, and **off** once indoor temp rises back to `target_temperature` |
+| `deadband_cool_f` | number | 1.5 | Cool mode: compressor turns **on** once indoor temp rises to `target_temperature + deadband_cool_f`, and **off** once indoor temp falls back to `target_temperature` |
+| `min_run_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays on once started, even if it reaches setpoint sooner |
+| `min_off_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays off once stopped, even if a deadband edge is crossed again sooner |
+
+`deadband_heat_f`/`deadband_cool_f` default to 1.5°F to match production's
+`THERMAL_SWING_DEFAULT_F` — the same "real thermostat swing" value Climate
+Advisor itself assumes when it has no better live-measured estimate
+(`docs/08-COMPUTATION-REFERENCE.md` §5e-vii). `min_run_seconds`/
+`min_off_seconds` default to 300s (5 min), a typical compressor short-cycle
+protection interval. All four are new keys — existing config entries
+created before these fields existed load the defaults automatically until
+reconfigured. See "Matching a real home" below for tuning these to a
+specific zone's measured swing.
 
 ### `ca_dev_weather_proxy`
 
@@ -157,8 +197,12 @@ carefully by HA convention (targeting the `homeassistant: 2024.6.0` minimum
 pinned in `hacs.json`) and need to be installed and exercised on a real HA
 instance by a human before being trusted. The one exception:
 `ca_dev_thermostat_sim/test_sim_math.py` hand-verifies the ODE formula
-transcribed from `_simulate_indoor_physics` (three cases: passive decay,
-active heating, and a clamp-triggering long-dt cooling case) — run it with
+transcribed from `_simulate_indoor_physics` (passive decay, active heating,
+and a clamp-triggering long-dt cooling case), plus the deadband/dwell-timer
+switching logic described above (compressor doesn't turn on before crossing
+the deadband edge, doesn't turn off before reaching setpoint, and
+`min_off_seconds`/`min_run_seconds` correctly delay a transition the
+deadband alone would have triggered) — run it with
 `python dev_tools/ha_test_integrations/ca_dev_thermostat_sim/test_sim_math.py`.
 It is not a substitute for actually importing the real function once
 `homeassistant` is installed; see that script's docstring for why the import

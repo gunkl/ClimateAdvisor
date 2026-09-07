@@ -1521,15 +1521,26 @@ Both HVAC-writing functions check this at their very top, before any service cal
 ```python
 # inside _set_hvac_mode(mode, *, reason) and _set_temperature(temperature, *, reason, mode)
 if mode != "off" and self._whf_owns_hvac():
-    _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
+    self._log_whf_write_blocked(reason)
     if self._emit_event_callback:
         self._emit_event_callback("hvac_write_blocked_whf_active", {"attempted_mode": mode, "reason": reason})
     return
 ```
 
+`_log_whf_write_blocked()` (Issue #874) logs this at **INFO**, not `WARNING`:
+
+```python
+def _log_whf_write_blocked(self, reason: str) -> None:
+    _LOGGER.info(
+        "HVAC write blocked — whole-house fan owns thermostat (zone=%s, %s)",
+        self.climate_entity,
+        reason,
+    )
+```
+
 Key properties:
 - **`mode == "off"` is never blocked** — the guard only intercepts attempts to arm an *active* mode (`heat`, `cool`, `heat_cool`) while WHF owns the thermostat. Turning HVAC off is always allowed (it's what a WHF session wants anyway).
-- **Silent drops are made visible.** A blocked write logs a `WARNING` and emits `hvac_write_blocked_whf_active` (payload: `attempted_mode`, `reason`) so the Activity Log shows the interception rather than the write simply vanishing — per this project's Observability Requirements.
+- **Silent drops are made visible, at INFO.** This guard fires on every expected mode handoff to the whole-house fan — routine, not an anomaly — so it logs `INFO` (see `docs/06-LOGGING-GUIDELINES.md`'s narrowed guard-block rule), not `WARNING`. It still emits `hvac_write_blocked_whf_active` (payload: `attempted_mode`, `reason`) so the Activity Log shows the interception rather than the write simply vanishing — per this project's Observability Requirements.
 - **`apply_classification()` also short-circuits before reaching the guard.** For `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`, the nat-vent branch — as of Issue #495, `if self._natural_vent_active or self._whf_owns_hvac():` — returns immediately after `_apply_nat_vent_hvac_state()` — the same early-return pattern already used for `aggressive_savings=True` — so the classification cycle does not even attempt (and log) a band-arm the choke-point guard would silently drop, and does not waste a cycle computing `select_comfort_band()` or running the ODE ceiling guard while WHF owns the thermostat. The `_whf_owns_hvac()` disjunct is additive, not a replacement: it covers a manual/remote WHF session (which sets `_pre_fan_hvac_mode` via `_suppress_hvac_for_whf()` but is not a nat-vent decision, so `_natural_vent_active` stays `False`) without weakening coverage for the pre-existing `reconcile_fan_on_startup()` adopted-session case, which sets `_natural_vent_active` directly without touching `_pre_fan_hvac_mode`. `FAN_MODE_HVAC` keeps falling through to the comfort-band write exactly as before, because fan and compressor coexist for that archetype (see §6c).
 
 **This closes Root Cause #2 of Issue #392 directly.** Because both writer functions share this one choke point, no future caller — however it decides to call `_set_hvac_mode()` or `_set_temperature()` — can bypass WHF/AC mutual exclusion. The answer to "can WHF and AC ever both be on" is now enforced at exactly one place, not re-derived correctly (or incorrectly) at every call site.

@@ -2221,6 +2221,10 @@ class LearningEngine:
         # This is a placeholder — in a full implementation, each suggestion key
         # maps to a specific set of config changes.
         changes: dict[str, Any] = {}
+        # Issue #874: tracked separately from `changes` so informational-only keys
+        # (below) don't fall through to the "not recognized" WARNING — they ARE
+        # recognized, they just have no config change to apply.
+        recognized = True
 
         if suggestion_key == "low_window_compliance":
             changes["disable_window_recommendations"] = True
@@ -2233,12 +2237,21 @@ class LearningEngine:
             changes["morning_preheat_offset_minutes"] = 15  # Start earlier
         elif suggestion_key == "frequent_door_pauses":
             changes["door_pause_seconds"] = 300  # Extend to 5 minutes
+        elif suggestion_key in ("thermal_model_ready", "forecast_bias_significant", "high_runtime_mild_days"):
+            pass  # informational-only / no single deterministic config change
+        else:
+            recognized = False
 
         if changes:
             _LOGGER.info(
                 "Learning suggestion accepted — key=%s, changes=%s",
                 suggestion_key,
                 changes,
+            )
+        elif recognized:
+            _LOGGER.info(
+                "Learning suggestion accepted — key=%s, no automatic config change available",
+                suggestion_key,
             )
         else:
             _LOGGER.warning(

@@ -1,0 +1,78 @@
+{
+  "name": "wakeup_clears_orphaned_fan_override_grace",
+  "description": "Issue #874: handle_morning_wakeup() must cancel a grace period tied to a fan manual override it just cleared, immediately — not leave it orphaned for the _check_orphaned_grace() watchdog to force-cancel up to a coordinator cycle later.",
+  "source": "production",
+  "issue": 874,
+  "simulator_support": true,
+  "track": "integration",
+  "notes": [
+    "Root cause (confirmed via live production ha_logs.py pull, Issue #874): clear_manual_override() clears the override flags (_fan_override_active, _manual_override_active) but was never responsible for cancelling a grace period tied to that override — handle_bedtime() and handle_morning_wakeup() both call clear_manual_override() and stopped there, leaving _grace_active=True orphaned until coordinator.py's _check_orphaned_grace() watchdog force-cancelled it on its next cycle (observed up to ~4 minutes later in production logs, reported as an ERROR-level log line).",
+    "Fix: both handlers now additionally run the same minimal FSM-correctness subset cancel_override() uses internally (self._cancel_grace_timers_action() + self._resolve_override_grace_fsm_state(kind=OverrideGraceFsmEventKind.OVERRIDE_CANCELLED)), guarded on grace still being active and both override flags already clear — immediately after clear_manual_override(), not deferred to the watchdog.",
+    "Scenario setup mirrors the golden wakeup_preserves_whf_manual_override.json's external_fan_state_change pattern: fan_mode=whole_house_fan + fan_state_feedback=true so the coordinator's real _async_fan_entity_changed listener classifies the fan turning on as a genuine manual override, starting a real grace period (manual_grace_seconds=3600, deliberately long so this scenario's own passage of time could never account for the grace clearing on its own — only the fix's explicit cancel can).",
+    "(a) Scenario effectiveness: reverting the new guard block in handle_morning_wakeup() (or reverting to the pre-fix clear_manual_override()-only call) leaves _grace_active=True at 06:05 — this scenario's assertion would fail, since nothing else in this short window would clear it (the watchdog runs on the next coordinator cycle, not within this scenario's timeline). Confirmed by temporarily removing the new guard block: assertion failed (_grace_active stayed True), confirming this scenario genuinely discriminates the fix.",
+    "(b) Two-way alignment (single engine — Issue #236): docs/08-COMPUTATION-REFERENCE.md's grace-period section and docs/grace-periods-spec.md describe clear_manual_override() as clearing override flags only; this fix and scenario reflect a documented gap in a follow-up, not a change to a documented invariant — no existing doc claimed grace was cancelled by clear_manual_override() before this fix.",
+    "(c) User outcome: without this fix, a user who manually ran the whole-house fan overnight and let it settle into a grace-protected state sees that grace period visibly outlive the override that started it — for a few minutes after wake-up, the Status card and door/window-sensor re-pause logic still treat the (already-cleared) override as protected, which could mask a legitimate reason to re-evaluate HVAC during that gap. The fix makes the transition atomic with the override's own clearing."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:00",
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.attic",
+    "fan_state_feedback": true,
+    "manual_grace_seconds": 3600,
+    "initial_thermostat_mode": "off"
+  },
+  "events": [
+    {
+      "time": "2026-07-13T22:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "note": "Evening classification — warm day, comfort band armed at [68/74]. hvac_mode=off matches what classifier.py actually derives for day_type=warm (Issue #867 review checklist) — this scenario exercises a fan-manual-override grace during a bedtime/wakeup transition; the exact HVAC mode during that window is not what's under test."
+    },
+    {
+      "time": "2026-07-13T23:05:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.attic",
+      "state": "off",
+      "note": "Establishes a prior 'off' state for the fan entity so the 05:55 change below is a real observed transition."
+    },
+    {
+      "time": "2026-07-14T05:55:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.attic",
+      "state": "on",
+      "note": "User manually turns on the whole-house fan overnight via the real HA entity. The coordinator's real _async_fan_entity_changed listener classifies this as a manual override: sets _fan_override_active=True and starts a real 3600s grace period (_grace_active=True)."
+    },
+    {
+      "time": "2026-07-14T06:00:00",
+      "type": "wakeup",
+      "note": "Wake-up fires 5 minutes later — well within the 3600s grace window, so only an explicit cancel (not natural expiry) can clear it by this point."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-14T06:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._grace_active",
+      "value": false,
+      "track": "integration",
+      "reason": "Issue #874: handle_morning_wakeup() calls clear_manual_override() (clearing the override flags) and must now also cancel the grace period tied to that override in the same step — _grace_active must already be False immediately after wake-up, not still True awaiting the next coordinator cycle's _check_orphaned_grace() watchdog."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Morning wake-up clears an orphaned fan-override grace period immediately, not on the next watchdog cycle (Issue #874)",
+    "observed_behavior": "external_fan_state_change (05:55, WHF on, override detected, grace started) → wakeup (06:00, clear_manual_override() + explicit grace cancel, _grace_active=False by the same timestamp)",
+    "expected_behavior": "A grace period tied to an override that handle_morning_wakeup()/handle_bedtime() themselves just cleared must never outlive that clear, even briefly — the watchdog is a backstop for other paths, not a substitute for these two handlers doing their own cleanup."
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

@@ -2723,7 +2723,7 @@ class AutomationEngine:
 
             # Issue #337: while paused by open door/window, suppress the band and hold HVAC off.
             if _gate == ScheduledBandGate.DEFER_PAUSED:
-                _LOGGER.warning(
+                _LOGGER.info(
                     "apply_classification: door/window open (_paused_by_door=True) — "
                     "suppressing band, ensuring HVAC off; day_type=%s",
                     classification.day_type,
@@ -3026,14 +3026,26 @@ class AutomationEngine:
                 },
             )
 
+    def _log_whf_write_blocked(self, reason: str) -> None:
+        """Log the routine WHF/AC mode-ownership handoff at INFO (Issue #874).
+
+        This guard fires on every expected mode handoff to the whole-house fan — not
+        an anomaly — so it no longer warrants WARNING (see docs/06-LOGGING-GUIDELINES.md's
+        narrowed guard-block rule). Single helper consolidates the two identical inline
+        call sites in ``_set_hvac_mode()`` and ``_set_temperature()``.
+        """
+        _LOGGER.info(
+            "HVAC write blocked — whole-house fan owns thermostat (zone=%s, %s)",
+            self.climate_entity,
+            reason,
+        )
+
     async def _set_hvac_mode(self, mode: str, *, reason: str) -> None:
         """Set the thermostat HVAC mode."""
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every one of the ~13 call sites.
         if mode != "off" and self._whf_owns_hvac():
-            _LOGGER.warning(
-                "HVAC write blocked — whole-house fan owns thermostat (zone=%s, %s)", self.climate_entity, reason
-            )
+            self._log_whf_write_blocked(reason)
             # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
             # tried first and reverted — it silently swallowed the second, semantically
             # distinct guard firing at wake-up in golden/pending scenario
@@ -3142,9 +3154,7 @@ class AutomationEngine:
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every call site.
         if mode != "off" and self._whf_owns_hvac():
-            _LOGGER.warning(
-                "HVAC write blocked — whole-house fan owns thermostat (zone=%s, %s)", self.climate_entity, reason
-            )
+            self._log_whf_write_blocked(reason)
             # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
             # tried first and reverted — it silently swallowed the second, semantically
             # distinct guard firing at wake-up in golden/pending scenario
@@ -6889,6 +6899,29 @@ class AutomationEngine:
         _LOGGER.info("Bedtime setback: clearing any pending override state before applying sleep setback")
         self.clear_manual_override(reason="bedtime")
 
+        # Issue #874: clear_manual_override() clears the override flags but does not
+        # cancel a grace period tied to that override — left unattended, an
+        # override-protecting grace stays orphaned (_grace_active=True) for up to one
+        # coordinator cycle until coordinator.py's _check_orphaned_grace() watchdog
+        # force-cancels it (confirmed via live production logs). This only targets
+        # override-protecting grace — mirroring _check_orphaned_grace()'s own
+        # four-condition check (coordinator.py) — so non-override graces (fan-off
+        # cooldown, window-close-resume, nat-vent-exit-resume, physical-drift-correction)
+        # are left alone, exactly as the watchdog itself would leave them. Mirrors
+        # cancel_override()'s minimal FSM-correctness subset (timer cancellation + FSM
+        # dispatch) — not its dashboard-cancel-button side effects (event emission,
+        # forced refresh), which don't belong at this internal, scheduled transition point.
+        if (
+            self._grace_active
+            and self._grace_protects_override
+            and not self._manual_override_active
+            and not self._fan_override_active
+        ):
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            self._cancel_grace_timers_action()
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
+
         c = self._current_classification
         if not c:
             if self._today_record is not None:
@@ -7215,6 +7248,29 @@ class AutomationEngine:
         _LOGGER.info("Morning wakeup: clearing any pending override state before restoring comfort")
         self.clear_manual_override(reason="morning_wakeup")
 
+        # Issue #874: clear_manual_override() clears the override flags but does not
+        # cancel a grace period tied to that override — left unattended, an
+        # override-protecting grace stays orphaned (_grace_active=True) for up to one
+        # coordinator cycle until coordinator.py's _check_orphaned_grace() watchdog
+        # force-cancels it (confirmed via live production logs). This only targets
+        # override-protecting grace — mirroring _check_orphaned_grace()'s own
+        # four-condition check (coordinator.py) — so non-override graces (fan-off
+        # cooldown, window-close-resume, nat-vent-exit-resume, physical-drift-correction)
+        # are left alone, exactly as the watchdog itself would leave them. Mirrors
+        # cancel_override()'s minimal FSM-correctness subset (timer cancellation + FSM
+        # dispatch) — not its dashboard-cancel-button side effects (event emission,
+        # forced refresh), which don't belong at this internal, scheduled transition point.
+        if (
+            self._grace_active
+            and self._grace_protects_override
+            and not self._manual_override_active
+            and not self._fan_override_active
+        ):
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            self._cancel_grace_timers_action()
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
+
         # Deactivate fan if still running from overnight — unless the user is overriding it
         # or nat-vent/WHF currently owns HVAC (Issue #498 fix — see docstring note above).
         if _gate != ScheduledBandGate.DEFER_NAT_VENT and self._fan_active and not _fan_was_overridden:
@@ -7229,11 +7285,27 @@ class AutomationEngine:
         _comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         if _current_indoor is not None:
             if _current_indoor < _comfort_heat:
-                _LOGGER.warning(
-                    "Morning check: indoor %.1f°F below comfort_heat %.1f°F — pre-cool overshoot; heat may fire",
-                    _current_indoor,
-                    _comfort_heat,
-                )
+                # Issue #874: a setpoint command issued moments ago (e.g. this same
+                # morning-wakeup cycle applying the daytime band) can transiently read
+                # indoor below comfort_heat before the thermostat catches up — that's
+                # expected, not an anomaly. Only warn when there's no recent command to
+                # explain the gap.
+                if (
+                    self._temp_command_time is not None
+                    and (dt_util.now() - self._temp_command_time).total_seconds() < 30
+                ):
+                    _LOGGER.info(
+                        "Morning check: indoor %.1f°F below comfort_heat %.1f°F — "
+                        "pre-cool overshoot; heat may fire (recent setpoint command)",
+                        _current_indoor,
+                        _comfort_heat,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Morning check: indoor %.1f°F below comfort_heat %.1f°F — pre-cool overshoot; heat may fire",
+                        _current_indoor,
+                        _comfort_heat,
+                    )
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "pre_cool_overshoot",

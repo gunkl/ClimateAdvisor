@@ -8,7 +8,7 @@ Standards for log statements across all Climate Advisor modules.
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What formatting rules apply to all log messages? | Use %-style formatting (never f-strings), em dash `—` to separate event from detail context, past tense for completed actions, and always include units (°F, seconds, minutes). | [§Format Rules](06-LOGGING-GUIDELINES.md#format-rules) |
-| What log level should a thermostat mode/setpoint change use, and what must the message include? | `INFO` for a successful write (Issue #585 — routine operation, not a malfunction), via the `_set_hvac_mode` / `_set_temperature` primitives which emit a single consolidated line with a mandatory `reason` keyword argument and `role` field. No call site may omit the reason. The same primitives log at `WARNING` when a guard blocks/overrides the write instead (e.g. WHF owns the thermostat, or a door/window pause). | [§Thermostat Adjustment Logging](06-LOGGING-GUIDELINES.md#thermostat-adjustment-logging) |
+| What log level should a thermostat mode/setpoint change use, and what must the message include? | `INFO` for a successful write (Issue #585 — routine operation, not a malfunction), via the `_set_hvac_mode` / `_set_temperature` primitives which emit a single consolidated line with a mandatory `reason` keyword argument and `role` field. No call site may omit the reason. The same primitives log at `INFO` when a guard defers/redirects the write for a routine, expected, system-managed reason (e.g. WHF owns the thermostat), and at `WARNING` when a guard clamps/overrides a *value* the caller asked for, or leaves HVAC in a state the caller didn't intend (Issue #874 narrows the #585 rule — see below). | [§Thermostat Adjustment Logging](06-LOGGING-GUIDELINES.md#thermostat-adjustment-logging) |
 | What is the reason string convention for thermostat adjustment log messages? | `trigger — context` pattern using em dash: e.g., `"daily classification — hot day, trend warming 8°F"` or `"bedtime — heat setback (comfort 70 - 4 + modifier 2)"`. | [§Reason string convention](06-LOGGING-GUIDELINES.md#reason-string-convention) |
 | How are skipped actions logged when automation is disabled (observe-only mode)? | With a `[DRY RUN]` prefix at INFO level, e.g., `"[DRY RUN] Would set HVAC mode to cool — daily classification — hot day"`. Easily grep'd to distinguish from real actions. | [§Dry-run prefix convention](06-LOGGING-GUIDELINES.md#dry-run-prefix-convention) |
 | What distinguishes DEBUG from INFO level? | DEBUG: high-frequency or transient events (threshold calculations, debounce timers, per-classification details). INFO: lifecycle milestones and meaningful state transitions (HVAC mode changes, briefings sent, records saved). | [§Level Semantics](06-LOGGING-GUIDELINES.md#level-semantics) |
@@ -51,14 +51,17 @@ async def _set_temperature(self, temperature: float, *, reason: str) -> None:
 async def _set_temperature_for_mode(self, c: DayClassification, *, reason: str) -> None:
 ```
 
-The primitives emit a single consolidated log per adjustment — `INFO` for a normal, successful write; `WARNING` only when a guard blocks or overrides the write (Issue #585 — see `docs/08-COMPUTATION-REFERENCE.md` §13 for the full rationale and the complete list of what still warrants `WARNING` elsewhere in `automation.py`). The following are illustrative examples of log lines following this pattern:
+The primitives emit a single consolidated log per adjustment — `INFO` for a normal, successful write (Issue #585 — see `docs/08-COMPUTATION-REFERENCE.md` §13 for the full rationale and the complete list of what still warrants `WARNING` elsewhere in `automation.py`).
+
+**Issue #874 narrows the guard-block rule from #585**, which had lumped every guard-blocked write together as `WARNING`: a guard that *defers or redirects* a write for a routine, expected, system-managed reason — a mode-ownership handoff (e.g. WHF currently owns the thermostat), or an intentional pause (e.g. `apply_classification()` suppressing the band while paused by an open door/window) — logs at `INFO`; nothing is wrong, the system is doing exactly what it's supposed to. `WARNING` remains reserved for a guard that clamps or overrides a *value* the caller asked for, or that leaves HVAC in a state the caller didn't intend (see CLAUDE.md's Observability Requirements: "WARNING when a target value is clamped or overridden by a guard", "WARNING when a safety guard fires that would otherwise have left the HVAC in an unexpected state"). The following are illustrative examples of log lines following this pattern:
 
 ```
 INFO     Set HVAC mode to cool — daily classification — hot day, trend warming 8°F
 INFO     Set temperature to 72°F (mode=cool) — daily classification — hot day (pre-cool offset -3°F) role=automation
 INFO     Set temperature to 68°F (mode=heat) — bedtime — heat setback (comfort 70 - 4 + modifier 2) role=automation
 INFO     Set temperature to 70°F (mode=heat) — morning wake-up — restoring heat comfort role=automation
-WARNING  HVAC write blocked — whole-house fan owns thermostat (door/window open — binary_sensor.kitchen_window, was cool mode)
+INFO     HVAC write blocked — whole-house fan owns thermostat (zone=climate.thermostat, door/window open — binary_sensor.kitchen_window, was cool mode)
+WARNING  Pre-cool target 62.0°F below floor 64.0°F (sleep_heat=62.0 + hysteresis=2.0); clamped to 64.0°F
 ```
 
 ### Reason string convention

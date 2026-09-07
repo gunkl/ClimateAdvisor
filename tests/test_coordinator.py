@@ -371,14 +371,17 @@ class TestComputeNextAction:
         assert "open windows" not in result.lower()
         assert "turn on the fan" not in result.lower()
 
-    def test_next_action_indoor_above_comfort_outdoor_hotter_logs_warning(self, caplog):
-        """The direction guard suppressing the naive suggestion must log at WARNING (Issue #428)."""
+    def test_next_action_indoor_above_comfort_outdoor_hotter_logs_info(self, caplog):
+        """The direction guard suppressing the naive suggestion logs at INFO (Issue #428;
+        Issue #874 downgraded this and the other 3 _decide() next-action advisories from
+        WARNING to INFO — these are routine advisory text, not anomalies)."""
         import logging
 
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
-        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"):
+        with caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.coordinator"):
             _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=75.5, outdoor_temp=80.0)
-        assert any(r.levelno == logging.WARNING for r in caplog.records)
+        assert any(r.levelno == logging.INFO and "Next-action" in r.message for r in caplog.records)
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
 
     def test_next_action_indoor_above_comfort_outdoor_unavailable(self):
         """Outdoor reading unavailable → conservative message, never a guessed suggestion."""

@@ -19,7 +19,7 @@ from custom_components.climate_advisor.briefing import (
     generate_briefing,
 )
 from custom_components.climate_advisor.classifier import DayClassification
-from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan
+from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan, resolve_window_pair
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -323,6 +323,70 @@ class TestHotDayWindowOpportunities:
             fan_mode="whole_house_fan",
         )
         assert "fan" not in result.lower()
+
+    # --- Issue #878: real ODE curves through the actual rendering path ---
+    #
+    # Every test above calls _generate(c) with NO predicted_indoor_future/
+    # predicted_outdoor_future — hot_events is always None, so these only ever
+    # exercised the static-fallback tier. Confirmed via `grep -r hot_events tests/`
+    # before this fix: zero tests anywhere fed a real compute_nat_vent_plan() result
+    # through Hot's rendering. That untested seam is exactly where the live incident
+    # occurred (2026-09-08): a real ODE curve produced a close time of 6:00 PM (no
+    # upper bound on the scan — a legitimate forecast outcome), while no dynamic
+    # reopen crossing existed past that hour, so it silently fell back to the static
+    # 5:00 PM fallback — rendering "Close by 6:00 PM / Open 5:00 PM+".
+
+    def test_hot_day_late_close_does_not_pair_with_earlier_static_open_fallback(self):
+        """Reproduces the exact reported incident shape. Uses the same today_low/
+        tomorrow_low=63 as the live report (both eligible for morning+evening).
+        Outdoor stays below indoor-1 until hour 18 (6:00 PM) — no earlier crossing,
+        no crossing at all after it in this curve, so evening_open_time comes back
+        None from compute_nat_vent_plan() itself and briefing.py's fallback would
+        substitute the static 5:00 PM open time were it not for resolve_window_pair()
+        (Issue #878).
+        """
+        c = _make_classification("hot", today_high=93, today_low=63, tomorrow_low=63)
+        indoor = _make_indoor_curve([70.0] * 11, start_hour_utc=8)
+        outdoor = _make_outdoor_curve(
+            [60.0, 61.0, 62.0, 63.0, 64.0, 65.0, 66.0, 67.0, 68.0, 68.5, 69.2], start_hour_utc=8
+        )
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "6:00 PM" in result
+        assert "5:00 PM" not in result
+        assert "Open" not in result
+        # The wording rewrite (Issue #878) drops the hardcoded "this morning" claim —
+        # a 6:00 PM crossing must never be described as occurring "this morning".
+        assert "this morning" not in result.lower()
+
+    def test_hot_day_normal_curve_shows_both_close_and_reopen(self):
+        """Sibling positive case: a normally-shaped curve (close mid-morning, reopen
+        mid-evening) must still show both times and keep them correctly ordered —
+        confirms the fix doesn't over-suppress the common case."""
+        c = _make_classification("hot", today_high=93, today_low=63, tomorrow_low=63)
+        # Close (outdoor crosses indoor-1) at hour 10; reopens (outdoor drops back
+        # below indoor-1) at hour 19.
+        indoor = _make_indoor_curve([70.0] * 12, start_hour_utc=8)
+        outdoor = _make_outdoor_curve(
+            [60.0, 65.0, 69.2, 74.0, 78.0, 80.0, 79.0, 76.0, 72.0, 70.0, 68.9, 65.0], start_hour_utc=8
+        )
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "10:00 AM" in result
+        assert "6:00 PM" in result
+
+    def test_hot_day_dynamic_close_overrides_ineligible_low_heuristic(self):
+        """Issue #878 user-approved design decision: real ODE-computed crossing data
+        overrides the coarse today/tomorrow-low eligibility heuristic. today_low=85
+        and tomorrow_low=85 are both ABOVE WINDOW_OPPORTUNITY_MAX_LOW_F (80) — the old
+        eligibility-only logic would render 'Closed all day' regardless of forecast.
+        With a real computed crossing, window guidance must render anyway."""
+        c = _make_classification("hot", today_high=93, today_low=85, tomorrow_low=85)
+        indoor = _make_indoor_curve([70.0] * 11, start_hour_utc=8)
+        outdoor = _make_outdoor_curve(
+            [60.0, 65.0, 69.2, 74.0, 78.0, 80.0, 79.0, 76.0, 72.0, 70.0, 68.9], start_hour_utc=8
+        )
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "Closed all day" not in result
+        assert "10:00 AM" in result
 
 
 class TestWarmDayBriefing:
@@ -1833,6 +1897,125 @@ class TestDeriveWarmDayEvents:
         assert events["nat_vent_cutoff"] is not None
         assert events["nat_vent_cutoff"].hour == 12
         assert events["nat_vent_cutoff_reason"] == "comfort_floor"
+
+
+# ── Issue #878: resolve_window_pair() invariant matrix ──────────────────────
+#
+# Prior fixes in this lineage (#518/#528/#535/#788x2/#847/#869/#876) each added a
+# test reproducing one specific incident's exact numbers, never a general invariant
+# test — which is why a structurally identical bug (open resolving before close)
+# shipped in a new shape (Hot, not Warm/Mild) the day after #876. This matrix tests
+# the *shape* of the bug — "if an open time is returned, it is strictly after the
+# close time" — across every combination of dynamic/static/absent inputs, so a
+# future day type or field can't reintroduce this by skipping a guard someone forgot
+# to copy. Any new incident in this feature should add a row here, not a new
+# standalone test class reproducing only that incident's numbers.
+_SEP_8 = datetime(2026, 9, 8, tzinfo=UTC)
+
+
+class TestResolveWindowPairInvariant:
+    """Exhaustive matrix for resolve_window_pair() (Issue #878)."""
+
+    @pytest.mark.parametrize(
+        "dynamic_close,static_close,dynamic_open,static_open,expected_close,expect_open",
+        [
+            # Both dynamic, sane ordering — kept as-is.
+            pytest.param(
+                _SEP_8.replace(hour=9),
+                None,
+                _SEP_8.replace(hour=18),
+                None,
+                time(9, 0),
+                time(18, 0),
+                id="dynamic_pair_sane",
+            ),
+            # Both dynamic, open equal to close — dropped (strict > required).
+            pytest.param(
+                _SEP_8.replace(hour=9), None, _SEP_8.replace(hour=9), None, time(9, 0), None, id="dynamic_pair_equal"
+            ),
+            # Both dynamic, open before close — dropped.
+            pytest.param(
+                _SEP_8.replace(hour=18),
+                None,
+                _SEP_8.replace(hour=17),
+                None,
+                time(18, 0),
+                None,
+                id="dynamic_pair_reversed",
+            ),
+            # THE LIVE INCIDENT SHAPE: dynamic close resolves late (18:00); no dynamic
+            # open exists past it, so open falls back to the static fallback (17:00),
+            # which is before the dynamic close — must be dropped, not displayed.
+            pytest.param(
+                _SEP_8.replace(hour=18),
+                time(9, 0),
+                None,
+                time(17, 0),
+                time(18, 0),
+                None,
+                id="incident_dynamic_close_static_open_before",
+            ),
+            # Static close, dynamic open safely after it — kept.
+            pytest.param(
+                None,
+                time(9, 0),
+                _SEP_8.replace(hour=18),
+                time(17, 0),
+                time(9, 0),
+                time(18, 0),
+                id="static_close_dynamic_open_after",
+            ),
+            # Both static, sane fallback ordering (today's real constants) — kept.
+            pytest.param(None, time(9, 0), None, time(17, 0), time(9, 0), time(17, 0), id="both_static_sane"),
+            # Both static, but an (intentionally adversarial) insane fallback
+            # ordering — must still be caught even though no live consumer passes
+            # this combination today. A future const.py change could.
+            pytest.param(None, time(18, 0), None, time(17, 0), time(18, 0), None, id="both_static_insane_defensive"),
+            # No close known at all (close=None) — nothing to compare the open
+            # against, so the open passes through untouched. Documents the
+            # intentional lenient behavior at this edge rather than leaving it
+            # unspecified.
+            pytest.param(
+                None, None, _SEP_8.replace(hour=18), None, None, time(18, 0), id="close_none_open_passthrough"
+            ),
+            # Everything absent.
+            pytest.param(None, None, None, None, None, None, id="all_none"),
+        ],
+    )
+    def test_ordering_invariant_holds(
+        self, dynamic_close, static_close, dynamic_open, static_open, expected_close, expect_open
+    ):
+        close, open_ = resolve_window_pair(dynamic_close, static_close, dynamic_open, static_open)
+        assert close == expected_close
+        assert open_ == expect_open
+        # The invariant itself, asserted directly rather than just via the fixture's
+        # expected value — this is the line that must hold for every case above.
+        if open_ is not None and close is not None:
+            assert open_ > close
+
+    def test_dropped_pairing_logs_warning_naming_both_values(self, caplog):
+        """CLAUDE.md Observability Requirements: a guard that clamps/overrides a
+        value must log a WARNING. Verifies the incident shape specifically logs,
+        and that the message names both the dropped value and the value it
+        conflicted with (so a live log line is diagnosable without re-deriving it)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.nat_vent_plan"):
+            close, open_ = resolve_window_pair(_SEP_8.replace(hour=18), time(9, 0), None, time(17, 0))
+        assert open_ is None
+        assert close == time(18, 0)
+        assert any(record.levelname == "WARNING" for record in caplog.records)
+        warning_text = " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+        assert "17:00" in warning_text
+        assert "18:00" in warning_text
+
+    def test_sane_pairing_logs_no_warning(self, caplog):
+        """Negative case for the above — the common path must stay silent."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.nat_vent_plan"):
+            resolve_window_pair(_SEP_8.replace(hour=9), None, _SEP_8.replace(hour=18), None)
+        assert not any(record.levelname == "WARNING" for record in caplog.records)
 
 
 class TestWarmDayPlanFloorWording:

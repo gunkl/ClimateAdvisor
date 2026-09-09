@@ -65,6 +65,52 @@ def resolve_with_fallback(dynamic: datetime | None, static: time | None) -> time
     return dynamic.time() if dynamic is not None else static
 
 
+def resolve_window_pair(
+    dynamic_close: datetime | None,
+    static_close: time | None,
+    dynamic_open: datetime | None,
+    static_open: time | None,
+) -> tuple[time | None, time | None]:
+    """Single source of truth for resolving a close/open pair *together* (Issue #878).
+
+    Before this existed, every caller resolved its close time and its open time as
+    two independent ``resolve_with_fallback()`` calls, with nothing checking the pair
+    against each other. That let Hot's briefing render "Close by 6:00 PM / Open
+    5:00 PM+" the day after Issue #876 shipped: the ODE outdoor-crossing scan
+    genuinely resolved ``nat_vent_cutoff`` to 6:00 PM (no upper bound — a legitimate
+    forecast outcome), while ``evening_open_time`` had no crossing past that hour and
+    silently fell back to the static ``ECONOMIZER_EVENING_START_HOUR`` (5:00 PM) —
+    an open time before the close time it's paired with. Warm/Mild had a *partial*
+    guard (close vs. the static open hour, in ``briefing.py``) that was never
+    generalized to check a resolved pair against each other, and was never extended
+    to Hot at all.
+
+    This function is the one place that invariant is enforced, for every day type
+    and every current/future caller: if the resolved open time is not strictly after
+    the resolved close time, the open time is dropped (not the close time — the close
+    time is the more load-bearing half of the pair) and a WARNING is logged, per
+    CLAUDE.md's Observability Requirements ("WARNING when a target value is clamped
+    or overridden by a guard").
+
+    Returns:
+        (close_time, open_time_or_None)
+    """
+    close = resolve_with_fallback(dynamic_close, static_close)
+    open_ = resolve_with_fallback(dynamic_open, static_open)
+    if open_ is not None and close is not None and open_ <= close:
+        _LOGGER.warning(
+            "resolve_window_pair: dropping open time %s (%s) — not strictly after"
+            " resolved close time %s (%s); a close/open pair must never render with"
+            " open at or before close",
+            open_,
+            "dynamic" if dynamic_open is not None else "static fallback",
+            close,
+            "dynamic" if dynamic_close is not None else "static fallback",
+        )
+        open_ = None
+    return close, open_
+
+
 def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
     """Single source of truth for how ``nat_vent_cutoff_reason`` reads as text (Issue #847).
 

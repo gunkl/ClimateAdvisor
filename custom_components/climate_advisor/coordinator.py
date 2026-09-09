@@ -247,7 +247,7 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, com
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
-from .nat_vent_plan import compute_nat_vent_plan, resolve_with_fallback
+from .nat_vent_plan import compute_nat_vent_plan, resolve_window_pair, resolve_with_fallback
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
@@ -8182,13 +8182,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # recomputing `comfort_cool + ECONOMIZER_TEMP_DELTA` and hardcoding the
             # static ECONOMIZER_MORNING_END_HOUR/ECONOMIZER_EVENING_START_HOUR hours a
             # third and fourth time.
+            #
+            # Issue #878: close/open are now resolved TOGETHER via resolve_window_pair()
+            # rather than as two independent resolve_with_fallback() calls — this exact
+            # card had the identical unguarded-pairing shape as the briefing incident
+            # #878 fixed (a late dynamic close paired with an earlier static-fallback
+            # open), just not yet observed live here. resolve_window_pair() drops the
+            # open time rather than ever displaying one before the close it pairs with.
             threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
             _hot_plan = getattr(self, "_nat_vent_plan", None)
-            _close_time = resolve_with_fallback(
-                _hot_plan.get("nat_vent_cutoff") if _hot_plan else None, c.window_opportunity_morning_end
-            )
-            _evening_open_time = resolve_with_fallback(
-                _hot_plan.get("evening_open_time") if _hot_plan else None, c.window_opportunity_evening_start
+            _close_time, _evening_open_time = resolve_window_pair(
+                _hot_plan.get("nat_vent_cutoff") if _hot_plan else None,
+                c.window_opportunity_morning_end,
+                _hot_plan.get("evening_open_time") if _hot_plan else None,
+                c.window_opportunity_evening_start,
             )
             if c.window_opportunity_morning and _close_time is not None and now < _close_time:
                 end_t = _close_time.strftime("%I:%M %p").lstrip("0")

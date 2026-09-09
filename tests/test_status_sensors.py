@@ -1042,6 +1042,59 @@ class TestNextActionNeverShowsTou:
         assert "pre-cool" not in result.lower()
 
 
+class TestHotDayNextActionWindowPairOrdering:
+    """Issue #878: _compute_next_action()'s HOT branch (coordinator.py ~8176) had the
+    identical unguarded-pairing shape as the briefing incident #878 fixed — close and
+    open times were each resolved via an independent resolve_with_fallback() call,
+    with nothing checking the pair against each other. Not yet observed live in THIS
+    card (the reported incident was in the briefing), but the exact same inputs would
+    have produced the exact same class of wrong display here: a late dynamic close
+    (e.g. 6:00 PM) paired with an earlier static-fallback open (5:00 PM) would let the
+    'now >= evening_open_time' branch fire and claim windows have been openable since
+    5:00 PM — a time that never actually applied, since the real close held until
+    6:00 PM. Fixed by routing through the same resolve_window_pair() primitive.
+    """
+
+    def test_late_dynamic_close_does_not_fabricate_earlier_static_open_time(self):
+        import types
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor import coordinator as _coord_mod
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+        c = _make_classification(
+            day_type="hot",
+            hvac_mode="cool",
+            window_opportunity_morning=True,
+            window_opportunity_evening=True,
+        )
+        c.window_opportunity_morning_end = time(9, 0)
+        c.window_opportunity_evening_start = time(17, 0)
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        ae._economizer_active = False
+        coord = _make_real_coordinator(True, ae)
+        coord._compute_next_action = types.MethodType(ClimateAdvisorCoordinator._compute_next_action, coord)
+        coord.config = {"comfort_cool": 75.0, "temp_unit": "fahrenheit"}
+        # Same incident shape as the briefing fix: dynamic close resolves to 18:00,
+        # no dynamic reopen crossing exists past it.
+        coord._nat_vent_plan = {
+            "nat_vent_cutoff": datetime(2026, 7, 10, 18, 0),
+            "evening_open_time": None,
+        }
+        # 7:00 PM — after the dynamic close (6:00 PM). Pre-fix, the open branch would
+        # fire on the static 5:00 PM fallback here since 19:00 >= 17:00.
+        now_dt = datetime(2026, 7, 10, 19, 0)
+        with (
+            patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+            patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        ):
+            result = coord._compute_next_action(c, ae=ae)
+        assert "5:00 PM" not in result
+        assert "from 5" not in result.lower()
+        assert result == "Keep windows and blinds closed."
+
+
 class TestHotDayWindowOpportunityCandidatesRemoved:
     """HOT-day window-cooling opportunity candidates (Issue #528) were removed in
     Issue #849 — they told the occupant to open/close windows, an action CA cannot

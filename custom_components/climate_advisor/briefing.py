@@ -36,7 +36,12 @@ from .const import (
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
 )
-from .nat_vent_plan import compute_nat_vent_plan, describe_nat_vent_cutoff_reason, resolve_with_fallback
+from .nat_vent_plan import (
+    compute_nat_vent_plan,
+    describe_nat_vent_cutoff_reason,
+    resolve_window_pair,
+    resolve_with_fallback,
+)
 from .temperature import FAHRENHEIT, format_temp, format_temp_delta, free_cooling_direction_ok
 
 _LOGGER = logging.getLogger(__name__)
@@ -371,6 +376,20 @@ def generate_briefing(
     return briefing_text
 
 
+def _window_event_available(events: dict | None, key: str, opportunity_flag: bool) -> bool:
+    """Single shared check (Issue #878) for "is there a window event to show here" —
+    used identically by both Hot render call sites (_generate_tldr_table() and
+    _hot_day_plan()) so the eligibility-override rule can't be written twice and
+    drift apart, which is exactly the duplication class this feature keeps failing on.
+
+    A real ODE-computed crossing (``events[key] is not None``) always wins. The
+    coarse today/tomorrow-low ``opportunity_flag`` heuristic only matters as a
+    fallback signal when no forecast curve exists yet — it has no relationship to
+    when an actual computed crossing falls, so it must never override real data.
+    """
+    return (events is not None and events.get(key) is not None) or opportunity_flag
+
+
 def _generate_tldr_table(
     c: DayClassification,
     config: dict,
@@ -444,17 +463,31 @@ def _generate_tldr_table(
         close_time = resolve_with_fallback(_cutoff, c.window_close_time)
         close_t = close_time.strftime(_FMT_HOUR)
         windows_val = f"Close by {close_t}"
-    elif c.window_opportunity_morning and c.window_opportunity_evening:
+    elif _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning) and (
+        _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening)
+    ):
+        # Issue #878: close/open resolved TOGETHER — see resolve_window_pair()'s
+        # docstring for the exact incident (Close by 6:00 PM / Open 5:00 PM+) this
+        # prevents. Eligibility (has_morning/has_evening above) is real-data-first,
+        # matching _hot_day_plan()'s identical logic via the same shared helper.
         _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
-        m_end = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end).strftime(_FMT_HOUR).lstrip("0")
         _evening_dt = hot_events.get("evening_open_time") if hot_events else None
-        e_start = resolve_with_fallback(_evening_dt, c.window_opportunity_evening_start).strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"Close by {m_end} / Open {e_start}+ (<{format_temp(threshold, temp_unit)})"
-    elif c.window_opportunity_morning:
+        _close_time, _evening_open_time = resolve_window_pair(
+            _close_dt, c.window_opportunity_morning_end, _evening_dt, c.window_opportunity_evening_start
+        )
+        m_end = _close_time.strftime(_FMT_HOUR).lstrip("0")
+        if _evening_open_time is not None:
+            e_start = _evening_open_time.strftime(_FMT_HOUR).lstrip("0")
+            windows_val = f"Close by {m_end} / Open {e_start}+ (<{format_temp(threshold, temp_unit)})"
+        else:
+            # resolve_window_pair() dropped a nonsensical open time — render as
+            # morning-only rather than fabricate a pairing.
+            windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)})"
+    elif _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning):
         _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
         m_end = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end).strftime(_FMT_HOUR).lstrip("0")
         windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)})"
-    elif c.window_opportunity_evening:
+    elif _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening):
         _evening_dt = hot_events.get("evening_open_time") if hot_events else None
         e_start = resolve_with_fallback(_evening_dt, c.window_opportunity_evening_start).strftime(_FMT_HOUR).lstrip("0")
         windows_val = f"Open {e_start} onward (<{format_temp(threshold, temp_unit)})"
@@ -529,15 +562,37 @@ def _hot_day_plan(
     """Conversational plan for hot days (85\u00b0F+)."""
     threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
 
-    # Issue #876: morning-close and evening-open times are now derived from the same
+    # Issue #876: morning-close and evening-open times are derived from the same
     # ODE-crossing mechanism WARM/MILD already use (nat_vent_plan.compute_nat_vent_plan()),
     # falling back to the static classifier hour when no forecast curve is available yet
     # \u2014 the morning OPEN time is intentionally dropped from the displayed text
     # entirely (it carries no useful information; see Issue #876's plan).
+    #
+    # Issue #878: has_morning/has_evening now reflect whether a REAL crossing was
+    # computed, not just the coarse today/tomorrow-low eligibility heuristic (which
+    # has zero relationship to when an ODE-derived crossing actually falls) \u2014 dynamic
+    # forecast data wins when it exists. When both are available, close/open are
+    # resolved TOGETHER via resolve_window_pair(): the day after #876 shipped, this
+    # exact seam let a close time resolve to 6:00 PM (unbounded ODE scan \u2014 a
+    # legitimate forecast outcome) while open silently fell back to the static 5:00 PM
+    # fallback, rendering "Close by 6:00 PM / Open 5:00 PM+". resolve_window_pair()
+    # drops the open time instead of ever displaying it before the close time.
     _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
-    _close_time = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end)
     _evening_open_dt = hot_events.get("evening_open_time") if hot_events else None
-    _evening_open_time = resolve_with_fallback(_evening_open_dt, c.window_opportunity_evening_start)
+    has_morning = _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning)
+    has_evening = _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening)
+    _close_time: time | None = None
+    _evening_open_time: time | None = None
+    if has_morning and has_evening:
+        _close_time, _evening_open_time = resolve_window_pair(
+            _close_dt, c.window_opportunity_morning_end, _evening_open_dt, c.window_opportunity_evening_start
+        )
+        if _evening_open_time is None:
+            has_evening = False
+    elif has_morning:
+        _close_time = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end)
+    elif has_evening:
+        _evening_open_time = resolve_with_fallback(_evening_open_dt, c.window_opportunity_evening_start)
 
     # Issue #558: only claim overnight pre-cool banking when it's actually expected to run
     # tonight (resolve_pre_cool_modifier() \u2014 the same gate handle_pre_cool() uses), and phrase
@@ -558,39 +613,38 @@ def _hot_day_plan(
         )
     lines = [opener]
 
-    has_morning = c.window_opportunity_morning
-    has_evening = c.window_opportunity_evening
-
     if has_morning and has_evening:
         m_end = _close_time.strftime(_FMT_HOUR)
         e_start = _evening_open_time.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(
-            f"This morning, if outdoor temps are at or below {format_temp(threshold, temp_unit)},"
-            f" open up for a cross-breeze until about {m_end} \u2014 I'll handle the AC transition."
+            f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
+            f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
+            f" enjoy the cross-breeze."
         )
         lines.append("")
         lines.append(
-            f"After that, close up and keep blinds drawn on sun-facing windows"
+            f"Once closed, keep blinds drawn on sun-facing windows"
             f" (especially west-facing after noon). I'll hold things at"
             f" {format_temp(comfort_cool, temp_unit)}."
         )
         lines.append("")
         lines.append(
-            f"From about {e_start} onward, if outdoor temps drop back below"
-            f" {format_temp(threshold, temp_unit)}, open up again and I'll cut the AC to let"
-            f" natural ventilation take over."
+            f"Later, once outdoor temps drop back below"
+            f" {format_temp(threshold, temp_unit)} (around {e_start}), open up again and"
+            f" I'll cut the AC to let natural ventilation take over."
         )
     elif has_morning:
         m_end = _close_time.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(
-            f"This morning, if outdoor temps are at or below {format_temp(threshold, temp_unit)},"
-            f" open up for a cross-breeze until about {m_end} \u2014 I'll handle the AC transition."
+            f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
+            f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
+            f" enjoy the cross-breeze."
         )
         lines.append("")
         lines.append(
-            f"After that, close up and keep blinds drawn on sun-facing windows"
+            f"Once closed, keep blinds drawn on sun-facing windows"
             f" (especially west-facing after noon). I'll hold things at"
             f" {format_temp(comfort_cool, temp_unit)} for the rest of the day."
         )
@@ -604,8 +658,9 @@ def _hot_day_plan(
         )
         lines.append("")
         lines.append(
-            f"From about {e_start} onward, if outdoor temps drop below {format_temp(threshold, temp_unit)},"
-            f" open up and I'll cut the AC to let natural ventilation take over."
+            f"Later, once outdoor temps drop back below {format_temp(threshold, temp_unit)}"
+            f" (around {e_start}), open up and I'll cut the AC to let natural ventilation"
+            f" take over."
         )
     else:
         lines.append("")

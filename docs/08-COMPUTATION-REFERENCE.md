@@ -1391,7 +1391,7 @@ when ODE forecast curves aren't calibrated yet.
 
 | Day Type | Windows Recommended? | Displayed Close Time | Displayed Evening-Open Time | Condition |
 |---|---|---|---|---|
-| `hot` | Not a traditional recommendation — window *opportunities* only | `nat_vent_cutoff` when ODE available, else `ECONOMIZER_MORNING_END_HOUR` (9:00 AM fallback) | `evening_open_time` when ODE available (only for an `outdoor_rise` cutoff — see below), else `ECONOMIZER_EVENING_START_HOUR` (5:00 PM fallback) | Morning opportunity: `today_low <= 80`; evening opportunity: `tomorrow_low <= 80` |
+| `hot` | Not a traditional recommendation — window *opportunities* only | `nat_vent_cutoff` when ODE available, else `ECONOMIZER_MORNING_END_HOUR` (9:00 AM fallback) | `evening_open_time` when ODE available (only for an `outdoor_rise` cutoff — see below) **and it resolves strictly after the close time** (Issue #878 — see "Window timing invariants" below), else `ECONOMIZER_EVENING_START_HOUR` (5:00 PM fallback), unless that fallback would itself be at/before the close time, in which case no open time is shown at all | Morning opportunity: `today_low <= 80` **or** a real ODE-computed close crossing exists; evening opportunity: `tomorrow_low <= 80` **or** a real ODE-computed reopen crossing exists (Issue #878: real forecast data always overrides this coarse heuristic — see below) |
 | `warm` | Yes (if condition met) | `nat_vent_cutoff` when ODE available, else `WARM_WINDOW_CLOSE_HOUR` (10:00 AM fallback) | `evening_open_time` when ODE available and cutoff reason is `outdoor_rise`; **no fallback shown** if unavailable (sentence is simply omitted, same as before #876) | `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` = `today_low <= 72°F` (defaults) |
 | `mild` | Always yes | `nat_vent_cutoff` when ODE available, else `MILD_WINDOW_CLOSE_HOUR` (5:00 PM fallback) | Same as WARM — new sentence added by #876, MILD never had one before | No condition — always recommended |
 | `cool` | No | — | — | — |
@@ -1447,6 +1447,56 @@ HOT status-card branch, and a fourth hand-rolled "dynamic value or static fallba
 across `briefing.py`/`coordinator.py`, were consolidated by #876 onto one shared
 `resolve_with_fallback()` helper in `nat_vent_plan.py` — see that module's docstring for the
 single-source-of-truth rationale this pattern follows (Issues #518/#528/#817).
+
+### 7a. Window timing invariants — read before touching this feature (Issue #878)
+
+**The physical model, in plain terms:** windows stay open while outdoor air is
+favorable. Close them once outdoor temp rises above the comfort ceiling. Reopen them
+once outdoor temp falls back below that ceiling later. Two forecast facts, one shared
+calculation mechanism (`nat_vent_plan.compute_nat_vent_plan()`) — no day-type
+reinvents this.
+
+**The one hard invariant, and where it's enforced:** a rendered *open* time is never
+shown unless it is strictly after the rendered *close* time it's paired with. This is
+enforced in exactly one place — `resolve_window_pair()` in `nat_vent_plan.py` — which
+every caller that needs a close/open pair (not just a single fallback value) must call
+instead of resolving each side independently with two separate
+`resolve_with_fallback()` calls. If the resolved open would land at or before the
+resolved close, `resolve_window_pair()` drops the open value and logs a WARNING rather
+than ever displaying the pair. As of #878 this covers both `briefing.py` (TLDR row and
+`_hot_day_plan()`) and `coordinator.py`'s `_compute_next_action()` HOT branch — the
+latter had the identical unguarded-pairing shape but hadn't yet produced a live
+incident when it was found and fixed alongside the reported one.
+
+**Prior incidents in this feature** (why this section exists — recognize the shape,
+don't re-diagnose from zero):
+
+| Issue | Symptom | Root cause |
+|---|---|---|
+| #428 | Next Action suggested opening windows/fan even when outdoor was hotter than indoor | No outdoor-vs-indoor direction guard before window/fan advice |
+| #518 | Warm-day briefing self-contradictory across header/body/footer close times | Close time computed independently in multiple sentences |
+| #528 | "Reopen windows" shown before the actual heat peak | Forecast curves paired by list index, not timestamp |
+| #535 | `nat_vent_cutoff` only modeled outdoor-rise, ignoring the comfort-floor half of the real gate | Predictive scan didn't model the full live activation gate |
+| #788 (both) | Reopen sentence fired minutes after a comfort-floor close, self-contradicting it | Reopen time computed the same way regardless of *why* the close fired |
+| #814-818 | Various — including a zero-width "Open 6:00 AM – 6:00 AM" | Cutoff scan unbounded below `window_open_time` |
+| #817 | Same close/cutoff computed three independent ways across three surfaces | No single source of truth for the computation |
+| #847 | Briefing and Next Automation card disagreed on close time and reason wording | Two independent phrasing branches for one shared value |
+| #849 | Next Automation card told the occupant to close/open windows — CA has no window actuator | Category error: an occupant instruction on the automation-action card, not a wording bug |
+| #869 | Briefing flip-flopped between contradictory guidance on noisy recomputes | No hysteresis on a value recomputed every cycle |
+| #876 | Hot's close time was a hardcoded 9:00 AM, disconnected from the forecast | Hot never got the ODE-crossing treatment Warm/Mild had since #518 |
+| #878 | "Close by 6:00 PM / Open 5:00 PM+" — reopen time before close time; "this morning" applied to a 6:00 PM crossing | No primitive resolved a close/open pair *together* — each side resolved independently, so a late dynamic close could pair with an earlier static-fallback open with nothing checking the two against each other |
+
+**Structural fix, not another patch:** every fix before #878 added a test that
+reproduces *that* incident's exact reported numbers — proving the specific fix works,
+never establishing the general invariant, which is why a structurally identical bug
+shipped in a new shape (Hot, not Warm/Mild) the day after #876. **Any new incident in
+this feature must add a case to the existing invariant matrix
+(`TestResolveWindowPairInvariant` in `tests/test_briefing.py`) or a new curve shape to
+the existing per-day-type end-to-end tests — never a new standalone test file or class
+that only reproduces that one incident's numbers.** The matrix tests the *shape* of
+this bug (an ordering relationship) independent of which day type or which specific
+hour triggered it; a numbers-only regression test cannot catch a sibling occurrence in
+a different code path.
 
 ---
 

@@ -99,7 +99,7 @@ class DayClassification:
                 self.window_opportunity_evening_end = time(0, 0)  # midnight
             _LOGGER.debug(
                 "HOT day window opportunity — today_low=%.1f (morning=%s), "
-                "tomorrow_low=%.1f (evening=%s), threshold=%.0f°F",
+                "tomorrow_low=%.1f (evening=%s), eligibility_low_max=%.0f°F",
                 self.today_low,
                 self.window_opportunity_morning,
                 self.tomorrow_low,

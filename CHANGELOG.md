@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.35] — 2026-09-09
+
+- Fix #885: on a multi-zone install, an automated action (disable automation, force reclassify, cancel override, etc.) sent without picking a zone now gets a clear "select a zone" error instead of silently applying to the wrong zone; the underlying warning also now records which request caused it.
+
 ## [0.7.34] — 2026-09-09
 
 - Fix #882: a whole-house fan running under a manual RF-remote timer override now stops immediately when all monitored doors/windows close, instead of continuing to run against a sealed house until the timer happened to expire on its own.

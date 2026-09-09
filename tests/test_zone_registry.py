@@ -303,3 +303,171 @@ class TestGetDefaultCoordinatorWarningThrottle:
             ordered_entry_ids=["entry_pending", "entry_a", "entry_b"],
         )
         assert zone_registry.get_default_coordinator(hass) is coord_a
+
+
+class TestGetDefaultCoordinatorContext:
+    """Issue #885: optional `context` enriches the WARNING/throttle token so a
+    future occurrence can be attributed to its caller — without breaking the
+    message text any existing caller (context=None) already relies on."""
+
+    def test_context_appears_in_warning_message(self, caplog):
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
+            zone_registry.get_default_coordinator(hass, context="GET /api/climate_advisor/briefing from 1.2.3.4")
+
+        ambiguous_records = [rec for rec in caplog.records if "Multiple Climate Advisor zones" in rec.message]
+        assert len(ambiguous_records) == 1
+        assert "GET /api/climate_advisor/briefing from 1.2.3.4" in ambiguous_records[0].message
+
+    def test_omitted_context_keeps_original_message_text(self, caplog):
+        """No context passed (context=None, the default) — message text unchanged
+        from before Issue #885, so no existing substring assertion elsewhere breaks."""
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
+            zone_registry.get_default_coordinator(hass)
+
+        ambiguous_records = [rec for rec in caplog.records if "Multiple Climate Advisor zones" in rec.message]
+        assert len(ambiguous_records) == 1
+        assert "Multiple Climate Advisor zones are loaded and this request did not specify a zone" in (
+            ambiguous_records[0].message
+        )
+
+    def test_different_context_same_entry_logs_again(self, caplog):
+        """A different caller (context) hitting the SAME resolved fallback zone is new
+        information for observability purposes and must still log — this is the whole
+        point of Issue #885 (the live incident could not be attributed to a caller)."""
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
+            zone_registry.get_default_coordinator(hass, context="GET /a from 1.1.1.1")
+            zone_registry.get_default_coordinator(hass, context="GET /b from 2.2.2.2")
+
+        ambiguous_records = [rec for rec in caplog.records if "Multiple Climate Advisor zones" in rec.message]
+        assert len(ambiguous_records) == 2
+
+    def test_same_context_repeated_still_throttled_once(self, caplog):
+        """Same caller/context hitting the same outcome repeatedly is still throttled to
+        one log line — Issue #885 must not regress the original anti-flood fix."""
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
+            for _ in range(10):
+                zone_registry.get_default_coordinator(hass, context="GET /briefing from 1.1.1.1")
+
+        ambiguous_records = [rec for rec in caplog.records if "Multiple Climate Advisor zones" in rec.message]
+        assert len(ambiguous_records) == 1
+
+
+class TestResolveZone:
+    """Issue #885: resolve_zone() is the single decision point api.py's
+    _get_coordinator() now uses for all 21 REST views instead of each one
+    guessing independently."""
+
+    def test_explicit_entry_id_resolves_that_zone_not_refused(self):
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass({"entry_a": coord_a, "entry_b": coord_b})
+        coordinator, refused = zone_registry.resolve_zone(hass, "entry_b", context="GET /x from 1.1.1.1")
+        assert coordinator is coord_b
+        assert refused is False
+
+    def test_single_zone_no_entry_id_not_refused_even_with_allow_guess_false(self):
+        """The single-zone convenience path is safe regardless of allow_guess —
+        there's nothing ambiguous about it, so a POST on a single-zone install
+        must behave exactly as it always has."""
+        coord_a = MagicMock()
+        hass = _make_hass({"entry_a": coord_a})
+        coordinator, refused = zone_registry.resolve_zone(
+            hass, None, context="POST /toggle_automation from 1.1.1.1", allow_guess=False
+        )
+        assert coordinator is coord_a
+        assert refused is False
+
+    def test_ambiguous_no_entry_id_allow_guess_true_guesses(self):
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        coordinator, refused = zone_registry.resolve_zone(
+            hass, None, context="GET /briefing from 1.1.1.1", allow_guess=True
+        )
+        assert coordinator is coord_a
+        assert refused is False
+
+    def test_ambiguous_no_entry_id_allow_guess_false_refuses(self):
+        """The core safety property: a POST-style caller must get None + refused=True,
+        never a guessed coordinator — this is what stops a wrong-zone actuation."""
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        coordinator, refused = zone_registry.resolve_zone(
+            hass, None, context="POST /toggle_automation from 1.1.1.1", allow_guess=False
+        )
+        assert coordinator is None
+        assert refused is True
+
+    def test_refuse_path_logs_warning_with_context(self, caplog):
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
+            zone_registry.resolve_zone(hass, None, context="POST /toggle_automation from 9.9.9.9", allow_guess=False)
+        records = [rec for rec in caplog.records if "requires an explicit zone" in rec.message]
+        assert len(records) == 1
+        assert "POST /toggle_automation from 9.9.9.9" in records[0].message
+
+    def test_refuse_path_raises_ambiguous_repairs_issue(self):
+        from unittest.mock import patch
+
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        with patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create:
+            zone_registry.resolve_zone(hass, None, context="POST /toggle_automation from 1.1.1.1", allow_guess=False)
+        calls = [c for c in mock_create.call_args_list if "zone_resolution_ambiguous" in c.args]
+        assert len(calls) == 1
+
+    def test_refuse_path_repeated_same_context_throttled_once(self, caplog):
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass(
+            {"entry_a": coord_a, "entry_b": coord_b},
+            ordered_entry_ids=["entry_a", "entry_b"],
+        )
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
+            for _ in range(5):
+                zone_registry.resolve_zone(
+                    hass, None, context="POST /toggle_automation from 1.1.1.1", allow_guess=False
+                )
+        records = [rec for rec in caplog.records if "requires an explicit zone" in rec.message]
+        assert len(records) == 1
+
+    def test_unknown_entry_id_returns_none_not_refused(self):
+        """A bad/stale entry_id is a 'not found' case, not an ambiguity case — must not
+        silently fall back to guessing (or refusing) a DIFFERENT zone than the one named."""
+        coord_a = MagicMock()
+        hass = _make_hass({"entry_a": coord_a})
+        coordinator, refused = zone_registry.resolve_zone(
+            hass, "entry_does_not_exist", context="POST /x from 1.1.1.1", allow_guess=False
+        )
+        assert coordinator is None
+        assert refused is False

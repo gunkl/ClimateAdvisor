@@ -3741,8 +3741,19 @@
       _loadRetries++;
       setTimeout(initLoad, 250);
     } else {
-      // Give up waiting — try anyway (will show error messages in UI)
-      loadAll();
+      // Give up waiting on auth — try anyway, but still respect the same
+      // first-visit zone gating as the success branch above (Issue #813).
+      // This unconditionally called loadAll() before, which bypassed that
+      // gate on a genuine first-ever-visit whenever getAuthToken() took
+      // longer than 5s to resolve (e.g. the parent HA frontend's own auth
+      // object not yet initialized) — one of two identified ways a request
+      // could reach the backend with no zone selected on a multi-zone
+      // install (Issue #885).
+      if (_hadStoredZoneAtInit) {
+        loadAll();
+      } else {
+        loadStatus().then(_loadNonStatus);
+      }
     }
   }
   initLoad();

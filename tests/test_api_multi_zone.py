@@ -180,3 +180,84 @@ class TestEntryIdAbsentBackwardCompat:
         resp = _get(ClimateAdvisorAutomationStateView, {}, entry_id=None)
         assert resp.status == 503
         assert resp.json_data["error"] == "Climate Advisor not loaded"
+
+
+class TestAmbiguousZonePostRefusal:
+    """Issue #885: a POST view with 2+ zones loaded and no entry_id must refuse
+    to guess — not silently actuate whichever zone happens to be "first". This
+    is the actual safety property the centralized resolve_zone() adds; the
+    2-zone/no-entry_id/POST case had no coverage at all before this change
+    (confirmed by reading this file in full during design).
+
+    Uses its own request builder (not the shared _make_request() above) because
+    it needs hass.config_entries.async_entries() to actually list both zones —
+    _make_request()'s deliberate `return_value=[]` is correct for the other
+    tests in this file (none of which exercise the 2-zone/no-entry_id path) but
+    would make zone_registry.list_zones() (used to build the refusal payload's
+    zone_count) report 0 zones instead of 2 here.
+    """
+
+    def _make_ambiguous_request(self, coordinators: dict[str, MagicMock]) -> MagicMock:
+        hass = MagicMock()
+        hass.data = {DOMAIN: dict(coordinators)}
+        entries = []
+        for entry_id in coordinators:
+            entry = MagicMock()
+            entry.entry_id = entry_id
+            entry.title = entry_id
+            entries.append(entry)
+        hass.config_entries.async_entries = MagicMock(return_value=entries)
+        req = MagicMock()
+        req.app = {"hass": hass}
+        req.query = {}
+        req.method = "POST"
+        req.path = "/api/climate_advisor/x"
+        req.remote = "127.0.0.1"
+        return req
+
+    def test_toggle_automation_view_refuses_when_ambiguous(self):
+        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a.automation_enabled = False
+        zone_b.automation_enabled = False
+
+        view = ClimateAdvisorToggleAutomationView()
+        request = self._make_ambiguous_request({"entry_a": zone_a, "entry_b": zone_b})
+        resp = asyncio.run(view.post(request))
+
+        assert resp.status == 400
+        assert resp.json_data["zone_selection_required"] is True
+        assert resp.json_data["zone_count"] == 2
+        # The core safety property: no zone was actuated, not "the wrong one
+        # was picked but at least it was logged."
+        zone_a.set_automation_enabled.assert_not_called()
+        zone_b.set_automation_enabled.assert_not_called()
+
+    def test_force_reclassify_view_refuses_when_ambiguous(self):
+        from unittest.mock import AsyncMock
+
+        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a.async_request_refresh = AsyncMock()
+        zone_b.async_request_refresh = AsyncMock()
+
+        view = ClimateAdvisorForceReclassifyView()
+        request = self._make_ambiguous_request({"entry_a": zone_a, "entry_b": zone_b})
+        resp = asyncio.run(view.post(request))
+
+        assert resp.status == 400
+        zone_a.async_request_refresh.assert_not_called()
+        zone_b.async_request_refresh.assert_not_called()
+
+    def test_get_view_still_guesses_when_ambiguous_not_refused(self):
+        """A GET (display-only) view keeps the pre-existing degrade-with-warning
+        behavior — only POST/action views are made strict by this change."""
+        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a.get_debug_state.return_value = {"zone": "a"}
+        zone_b.get_debug_state.return_value = {"zone": "b"}
+
+        view = ClimateAdvisorAutomationStateView()
+        request = self._make_ambiguous_request({"entry_a": zone_a, "entry_b": zone_b})
+        request.method = "GET"
+        resp = asyncio.run(view.get(request))
+
+        assert resp.status == 200
+        assert "zone_selection_required" not in (resp.json_data or {})

@@ -159,7 +159,29 @@ def default_briefing_notifications_enabled(hass: HomeAssistant, entry_id: str | 
     return existing[0].entry_id == entry_id
 
 
-def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | None:
+def _raise_ambiguous_issue(hass: HomeAssistant) -> None:
+    """Raise the ``zone_resolution_ambiguous`` Repairs issue.
+
+    Shared by both the guess path in ``get_default_coordinator()`` below and
+    the refuse path in ``resolve_zone()`` — same underlying condition (an
+    unscoped caller hit a multi-zone install), same issue key. Factored out
+    so the five-argument ``ir.async_create_issue()`` call exists in exactly
+    one place rather than being duplicated between the two call sites.
+    is_fixable=False: nothing to configure, purely informational. Cleared by
+    __init__.py's async_unload_entry() once zone count drops to <= 1.
+    """
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        "zone_resolution_ambiguous",
+        is_fixable=False,
+        is_persistent=True,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="zone_resolution_ambiguous",
+    )
+
+
+def get_default_coordinator(hass: HomeAssistant, *, context: str | None = None) -> ClimateAdvisorCoordinator | None:
     """Single-zone convenience path.
 
     Returns the coordinator when exactly one zone is loaded — this is the
@@ -182,6 +204,14 @@ def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | 
     signals this condition is raised/cleared at the config-entry
     setup/unload lifecycle points in ``__init__.py``, not here — this
     function only performs the fallback selection and logs it.
+
+    Issue #885: ``context`` is an optional free-form description of the
+    caller (e.g. "GET /api/climate_advisor/briefing from 192.168.1.50") used
+    only to enrich the WARNING message and its throttle token — a prior
+    incident's warning carried no caller information at all, making it
+    impossible to determine after the fact which request produced it.
+    Defaults to None so any caller that doesn't pass it keeps today's exact
+    message text.
     """
     entries = hass.data.get(DOMAIN, {})
     if not entries:
@@ -213,29 +243,19 @@ def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | 
         if coordinator is not None:
             if _warn_once(
                 hass,
-                f"ambiguous:{entry.entry_id}",
-                "Multiple Climate Advisor zones are loaded and this request did not "
+                f"ambiguous:{entry.entry_id}:{context}",
+                "Multiple Climate Advisor zones are loaded and this request%s did not "
                 "specify a zone — defaulting to zone entry_id=%s. Pass an explicit "
                 "entry_id to target a specific zone. See Settings > Repairs for details.",
+                f" ({context})" if context else "",
                 entry.entry_id,
             ):
                 # Issue #813: raised here — at the moment an ambiguous
                 # fallback is actually taken — instead of unconditionally at
                 # zone setup (the old __init__.py behavior, which showed this
                 # card on every multi-zone install regardless of whether
-                # anything ever actually hit this fallback). is_fixable=False:
-                # nothing to configure, purely informational. Cleared by
-                # __init__.py's async_unload_entry() once zone count drops to
-                # <= 1, same as before.
-                ir.async_create_issue(
-                    hass,
-                    DOMAIN,
-                    "zone_resolution_ambiguous",
-                    is_fixable=False,
-                    is_persistent=True,
-                    severity=ir.IssueSeverity.WARNING,
-                    translation_key="zone_resolution_ambiguous",
-                )
+                # anything ever actually hit this fallback).
+                _raise_ambiguous_issue(hass)
             return coordinator
 
     # Every ordered entry is unloaded/missing from hass.data — fall back to a
@@ -251,3 +271,50 @@ def get_default_coordinator(hass: HomeAssistant) -> ClimateAdvisorCoordinator | 
         len(ordered_entries),
     )
     return sorted(entries.items(), key=lambda kv: kv[0])[0][1]
+
+
+def resolve_zone(
+    hass: HomeAssistant,
+    entry_id: str | None,
+    *,
+    context: str,
+    allow_guess: bool = True,
+) -> tuple[ClimateAdvisorCoordinator | None, bool]:
+    """Resolve a coordinator for a request, centralizing ambiguous-zone handling.
+
+    Issue #885: previously each of api.py's 21 REST views independently
+    guessed via ``get_default_coordinator()`` when no ``entry_id`` was given
+    — including 10 POST/action views, where guessing means silently
+    actuating whichever zone happens to be "stably first" instead of the one
+    the caller intended. This is the single decision point all of them now
+    go through instead.
+
+    Returns ``(coordinator, refused)``. ``refused`` is True only when the
+    request was genuinely ambiguous (2+ zones loaded, no entry_id) AND
+    ``allow_guess`` is False — callers MUST NOT execute any control action
+    against the returned (None) coordinator in that case.
+
+    ``context`` is a plain descriptive string (e.g. method + path + remote),
+    not the aiohttp ``Request`` type — this module stays REST-independent by
+    design (see module docstring: a future non-REST caller, e.g. the Zone
+    Influence FSM, must not need to import the REST layer to resolve a zone).
+    """
+    if entry_id:
+        return get_coordinator(hass, entry_id), False
+    entries = hass.data.get(DOMAIN, {})
+    if len(entries) <= 1:
+        return get_default_coordinator(hass), False
+    if not allow_guess:
+        if _warn_once(
+            hass,
+            f"explicit_required:{context}",
+            "Climate Advisor: %s requires an explicit zone but none was given "
+            "and %d zones are loaded — refusing to guess (no action taken). "
+            "Pass entry_id to target a specific zone. See Settings > Repairs "
+            "for details.",
+            context,
+            len(entries),
+        ):
+            _raise_ambiguous_issue(hass)
+        return None, True
+    return get_default_coordinator(hass, context=context), False

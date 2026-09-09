@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.33] — 2026-09-08
+
+- Fix #878 (followup): a Hot-day window reopen time could be delayed for hours because it was being measured against the overnight pre-cool banking target (which can be significantly colder than the normal comfort setting) instead of the actual comfort ceiling — reopen guidance now reflects when outdoor genuinely gets cool enough to skip the AC, not how deep the night's own thermal-banking target happens to be. The reopen time also no longer claims a specific outdoor temperature threshold that was never actually the value gating it. Separately, the dashboard chart's forward-looking "windows recommended" indicator never showed a nat-vent opportunity on Hot days at all (only on Warm/Mild days) — it now correctly reflects Hot-day morning/evening window opportunities the same way the briefing text already did.
+
 ## [0.7.32] — 2026-09-08
 
 - Fix #878 (followup): the previous fix for the Hot-day close/reopen contradiction introduced two further issues. A legitimate overnight window reopen (e.g. close at 7:00 PM, reopen at 2:00 AM the next morning) was being silently dropped from the briefing entirely, because the ordering check compared clock times without considering the date. Separately, when a briefing regenerates after the close condition is already true (e.g. an evening regeneration), the text could claim a stale future close time ("Close by 7:00 PM") hours after outdoor had actually crossed above indoor that morning — it now says the windows should be closed now instead. Both fixes apply to Hot, Warm, and Mild day briefings, and to the dashboard's "Next User Action" card.

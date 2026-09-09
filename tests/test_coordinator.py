@@ -223,7 +223,11 @@ class TestComputeNextAction:
         assert "9:00 AM" not in result
 
     def test_next_action_hot_evening_shows_threshold(self):
-        """HOT day, evening opportunity, at or after 5 PM → threshold shown without cutoff."""
+        """HOT day, evening opportunity, at or after 5 PM → mechanism wording shown
+        without cutoff. Issue #878-followup (Defect C): this branch used to reuse the
+        CLOSE-side comfort_cool+delta constant (78 = 75+3) even though it was never
+        the value actually gating reopening — now renders "cools back below indoor"
+        instead of a numeric claim."""
         c = _make_classification(
             day_type=DAY_TYPE_HOT,
             window_opportunity_morning=False,
@@ -232,11 +236,13 @@ class TestComputeNextAction:
         config = {"comfort_cool": 75}
         # Mock time: 5:00 PM — exactly ECONOMIZER_EVENING_START_HOUR (17:00)
         result = _compute_next_action(c, config, time(17, 0))
-        assert "78" in result  # threshold = 75 + 3
+        assert "78" not in result
+        assert "cools back below indoor" in result
         assert "9:00 AM" not in result  # no morning cutoff text
 
     def test_next_action_hot_evening_later_in_evening(self):
-        """HOT day, evening opportunity, well into the evening → threshold still shown."""
+        """HOT day, evening opportunity, well into the evening → mechanism wording
+        still shown (Issue #878-followup, Defect C)."""
         c = _make_classification(
             day_type=DAY_TYPE_HOT,
             window_opportunity_morning=False,
@@ -244,7 +250,8 @@ class TestComputeNextAction:
         )
         config = {"comfort_cool": 75}
         result = _compute_next_action(c, config, time(20, 0))
-        assert "78" in result
+        assert "78" not in result
+        assert "cools back below indoor" in result
 
     def test_next_action_hot_evening_before_start_hour_does_not_trigger(self):
         """HOT day, evening opportunity, before 5 PM → evening branch not taken."""

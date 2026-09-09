@@ -22,6 +22,7 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.nat_vent_plan import (
     compute_nat_vent_plan,
     describe_close_timing,
+    describe_reopen_clause,
     resolve_window_pair,
 )
 
@@ -246,6 +247,16 @@ class TestHotDayWindowOpportunities:
         assert "5:00 PM" in result
         assert "6:00 AM" not in result
 
+    def test_hot_day_evening_only_tldr_omits_numeric_threshold(self):
+        """Issue #878-followup (Defect C): the evening-open-only TLDR row ("Open X
+        onward") must not attach a numeric threshold — it was never the value
+        actually gating reopening. Matches Warm's/Mild's TLDR treatment, which never
+        shows a numeric claim for an open-only row."""
+        c = _make_classification("hot", today_high=95, today_low=82, tomorrow_low=70)
+        result = _generate(c)
+        assert "Open 5:00 PM onward" in result
+        assert "Open 5:00 PM onward (<" not in result
+
     # --- No opportunities ---
 
     def test_hot_day_no_opportunities_sealed(self):
@@ -370,12 +381,44 @@ class TestHotDayWindowOpportunities:
         # Close (outdoor crosses indoor-1) at hour 10; reopens (outdoor drops back
         # below indoor-1) at hour 19.
         indoor = _make_indoor_curve([70.0] * 12, start_hour_utc=8)
+        # Issue #878-followup: evening_open_time now compares outdoor against
+        # comfort_cool (75.0, _generate()'s default), not this flat 70.0 indoor
+        # curve (Fix D) — outdoor must stay above comfort_cool-1=74 for the whole
+        # afternoon heat build, not just above indoor-1=69, so the reopen doesn't
+        # fire on an earlier spurious dip.
         outdoor = _make_outdoor_curve(
-            [60.0, 65.0, 69.2, 74.0, 78.0, 80.0, 79.0, 76.0, 72.0, 70.0, 68.9, 65.0], start_hour_utc=8
+            [60.0, 65.0, 69.2, 76.0, 80.0, 82.0, 83.0, 81.0, 78.0, 76.0, 72.0, 65.0], start_hour_utc=8
         )
         result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
         assert "10:00 AM" in result
         assert "6:00 PM" in result
+
+    def test_hot_day_reopen_no_longer_claims_numeric_threshold(self):
+        """Issue #878-followup (Defect C): the reopen event's displayed number
+        (78°F, comfort_cool + ECONOMIZER_TEMP_DELTA) was never the value actually
+        gating reopening — it was the CLOSE threshold, reused verbatim in the
+        open-side text. Reuses the same close(10 AM)/reopen(6 PM) curve as
+        test_hot_day_normal_curve_shows_both_close_and_reopen above. The TLDR row
+        must still show the threshold next to Close, but never next to Open; the
+        conversational reopen sentence must use mechanism wording, matching
+        Warm's/Mild's already-correct "when the evening air cools back down"
+        convention, instead of a fixed numeric claim."""
+        c = _make_classification("hot", today_high=93, today_low=63, tomorrow_low=63)
+        indoor = _make_indoor_curve([70.0] * 12, start_hour_utc=8)
+        # Issue #878-followup: evening_open_time now compares outdoor against
+        # comfort_cool (75.0, _generate()'s default), not this flat 70.0 indoor
+        # curve (Fix D) — outdoor must stay above comfort_cool-1=74 for the whole
+        # afternoon heat build, not just above indoor-1=69, so the reopen doesn't
+        # fire on an earlier spurious dip.
+        outdoor = _make_outdoor_curve(
+            [60.0, 65.0, 69.2, 76.0, 80.0, 82.0, 83.0, 81.0, 78.0, 76.0, 72.0, 65.0], start_hour_utc=8
+        )
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "Close by 10:00 AM (<78" in result, result
+        assert "/ Open 6:00 PM+" in result
+        assert "Open 6:00 PM+ (<78" not in result
+        assert "drop back below" not in result.lower()
+        assert "cool back down below indoor" in result.lower()
 
     def test_hot_day_dynamic_close_overrides_ineligible_low_heuristic(self):
         """Issue #878 user-approved design decision: real ODE-computed crossing data
@@ -1778,6 +1821,49 @@ class TestDeriveWarmDayEvents:
         assert events["nat_vent_cutoff"].hour == 10
         assert events["nat_vent_cutoff_already_reached"] is False
 
+    def test_evening_open_time_decoupled_from_precool_banking(self):
+        """Issue #878-followup (Defect D): evening_open_time must compare outdoor
+        against comfort_cool, not the per-timestamp predicted_indoor value. This
+        curve reproduces the live incident: the close condition is already true at
+        hour 0 (outdoor=77 >= indoor(74)-1), then predicted_indoor collapses to ~70
+        within two hours (pre-cool banking ahead of a hotter following day) while
+        outdoor only cools gradually to 69 by hour 6. Before the fix, the reopen
+        predicate compared outdoor against the banked indoor curve and didn't fire
+        until hour 6 (outdoor <= indoor-1 = ~69.1); with the fix, it fires at hour 3
+        (outdoor <= comfort_cool-1 = 73), matching when outdoor actually got cool
+        enough relative to the real comfort ceiling."""
+        indoor = _make_indoor_curve([74.0, 73.8, 70.0, 70.2, 70.3, 70.3, 70.1], start_hour_utc=20)
+        outdoor = _make_outdoor_curve([77.0, 77.0, 74.0, 72.0, 71.0, 70.0, 69.0], start_hour_utc=20)
+        events = compute_nat_vent_plan(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=74.0,
+        )
+        assert events["nat_vent_cutoff_already_reached"] is True
+        assert events["evening_open_time"] is not None
+        # hour 20 + 3 = 23 (UTC)
+        assert events["evening_open_time"].hour == 23, (
+            f"evening_open_time={events['evening_open_time']} -- expected hour 23 (outdoor "
+            "first <= comfort_cool-1=73), not hour 2 the next day (outdoor <= banked "
+            "indoor-1=~69.1), which is what the pre-fix banked-indoor comparison produced"
+        )
+
+    def test_evening_open_time_unchanged_when_no_precool_banking_active(self):
+        """Companion to the test above: when predicted_indoor stays flat at
+        comfort_cool all night (no banking feature pulling it down), the fix is a
+        no-op -- comfort_cool and predicted_indoor are the same value, so the
+        comparison produces the identical result either way."""
+        indoor = _make_indoor_curve([74.0, 74.0, 74.0, 74.0, 74.0, 74.0, 74.0], start_hour_utc=20)
+        outdoor = _make_outdoor_curve([77.0, 77.0, 74.0, 72.0, 71.0, 70.0, 69.0], start_hour_utc=20)
+        events = compute_nat_vent_plan(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=74.0,
+        )
+        # Both comfort_cool-1=73 and indoor-1=73 first satisfied at hour 3 (outdoor=72<=73).
+        assert events["evening_open_time"] is not None
+        assert events["evening_open_time"].hour == 23
+
     def test_precool_start_uses_fallback_when_k_active_cool_none(self):
         """precool_start_time = ceiling_breach_time - 120 min when k_active_cool=None."""
         # breach at hour 14 UTC (start_hour=10, index 4 => temp 75.5 > 75)
@@ -1826,10 +1912,14 @@ class TestDeriveWarmDayEvents:
         timestamp-correct cutoff as its `after` boundary, not an index-drifted one."""
         indoor = _make_indoor_curve([72.0, 73.0, 74.0, 75.0, 74.0, 70.0], start_hour_utc=8)
         outdoor = _make_outdoor_curve([73.0, 76.0, 71.0, 68.0], start_hour_utc=10)
+        # Issue #878-followup: comfort_cool now also gates evening_open_time (Fix D),
+        # so it can no longer be an arbitrary high sentinel (100.0) meant only to keep
+        # ceiling_breach_time from firing -- 76.0 does the same job (above every indoor
+        # value here) while keeping the reopen comparison meaningful for this test.
         events = compute_nat_vent_plan(
             predicted_indoor=indoor,
             predicted_outdoor=outdoor,
-            comfort_cool=100.0,
+            comfort_cool=76.0,
         )
         assert events["nat_vent_cutoff"] is not None
         assert events["nat_vent_cutoff"].hour == 10
@@ -2146,6 +2236,30 @@ class TestDescribeCloseTiming:
 
     def test_not_already_reached_passes_time_string_through_unchanged(self):
         assert describe_close_timing("7:00 PM", False) == "7:00 PM"
+
+
+class TestDescribeReopenClause:
+    """Direct unit tests for describe_reopen_clause() (Issue #878-followup) — the
+    shared fragment consolidating _hot_day_plan()'s two previously-duplicated reopen
+    sentences (has_morning&&has_evening vs. has_evening-only)."""
+
+    def test_reopening_from_closed_all_day_omits_again(self):
+        result = describe_reopen_clause("11:00 PM", reopening_from_closed_all_day=True)
+        assert "open up and" in result
+        assert "open up again" not in result
+
+    def test_reopening_after_earlier_morning_window_says_again(self):
+        result = describe_reopen_clause("11:00 PM", reopening_from_closed_all_day=False)
+        assert "open up again and" in result
+
+    def test_never_contains_a_numeric_threshold(self):
+        """Issue #878-followup (Defect C): must never assert a specific outdoor
+        number for reopening — the real gating value (comfort_cool) isn't meant to
+        be recited in prose as if it were the exact live control threshold."""
+        for reopening_from_closed_all_day in (True, False):
+            result = describe_reopen_clause("11:00 PM", reopening_from_closed_all_day)
+            assert "°F" not in result
+            assert "cool back down below indoor" in result
 
 
 class TestWarmDayPlanFloorWording:

@@ -1487,6 +1487,9 @@ don't re-diagnose from zero):
 | #878 | "Close by 6:00 PM / Open 5:00 PM+" — reopen time before close time; "this morning" applied to a 6:00 PM crossing | No primitive resolved a close/open pair *together* — each side resolved independently, so a late dynamic close could pair with an earlier static-fallback open with nothing checking the two against each other |
 | #878-followup (A) | A legitimate overnight reopen (close 7:00 PM today, reopen 2:00 AM the next morning) was silently dropped | `resolve_window_pair()`'s ordering check compared date-stripped `.time()` values (`time(2,0) <= time(19,0)` reads "before" on a bare clock face) instead of the real dated datetimes — and the very invariant matrix built to catch this bug held the date constant across every test case, hiding the exact defect |
 | #878-followup (B) | "Close by 7:00 PM" shown hours after outdoor had already risen past indoor that morning — a stale future claim | The ODE crossing scan is forward-only from "now"; when the close condition is already true at compute time, the scan can only return the nearest future grid point, and every consumer rendered that identically to a genuine future prediction |
+| #878-followup (D) | "Open 2:00 AM+" shown when outdoor had already dropped well below the comfort ceiling by ~9-11 PM — the app's own stated reopen condition was satisfied hours before it acted | `evening_open_time`'s reopen predicate compared outdoor against the live `predicted_indoor` curve, which an unrelated feature (pre-cool banking ahead of a hotter following day) can pull well below `comfort_cool` overnight — reactivation eligibility was accidentally answering "has outdoor caught up with tonight's banking depth" instead of "is it cool enough to skip the AC" |
+| #878-followup (C) | "(<77°F)" shown next to the reopen time, implying that number gated reopening | The close-side `threshold` constant (`comfort_cool + ECONOMIZER_TEMP_DELTA`) was reused verbatim in the open-side text at five call sites because it was the nearest value in scope — no code path has ever actually gated reopening on that number |
+| #878-followup (E) | The chart's `predicted_activity`/"windows recommended" indicator never showed a nat-vent window on any Hot day, contradicting the briefing | `_walk_forward_regime()` (built for Issue #802) hard-coded `nat_vent_active=False` for every hour of any day whose mode wasn't `"off"` — it was scoped to Warm/Mild days only and never extended when Hot's own intraday close/reopen cycle (#876) was added elsewhere |
 
 **Structural fix, not another patch:** every fix before #878 added a test that
 reproduces *that* incident's exact reported numbers — proving the specific fix works,
@@ -1518,6 +1521,72 @@ fragment (mirrors `describe_nat_vent_cutoff_reason()`'s treatment of the *reason
 of the sentence) rather than always asserting the returned clock time as a scheduled
 future event. This only applies to the close/cutoff side — `evening_open_time` is
 scanned strictly `after` the cutoff, so it can never be "already true at curve start."
+
+**Reactivation eligibility vs. exit eligibility must reference different "indoor"
+values (Issue #878-followup D/E) — a named, permanent hazard, not a one-off fix:**
+any future feature that changes what the ODE-predicted indoor curve targets overnight
+(pre-cool banking is the first example; there will be others) can silently re-break
+this unless the following distinction is preserved everywhere nat-vent reactivation is
+evaluated:
+
+- **Reactivation/entry questions** ("should we override the day's comfort target and
+  use free air instead?") must compare outdoor against the **stable comfort target**
+  (`comfort_cool`) — never the live predicted-indoor curve, which can be pulled away
+  from that target by an unrelated feature (banking, TOU pre-conditioning, a future
+  feature not yet written). `compute_nat_vent_plan()`'s `evening_open_time` scan and
+  `_walk_forward_regime()`'s `decide_nat_vent_gate()` call (for `"cool"`-mode/Hot days
+  only — `"off"`-mode days have no committed target to substitute) both apply this
+  rule.
+- **Exit questions** ("should an already-running session stop?") correctly keep
+  comparing against the real/predicted indoor state — `decide_nat_vent_exit()`'s own
+  comfort-floor check already assumes this, and `compute_nat_vent_plan()`'s close-side
+  `outdoor_crossing` scan is the same category.
+
+`_walk_forward_regime()` (`coordinator.py`) and `compute_nat_vent_plan()`
+(`nat_vent_plan.py`) apply this same substitution independently (not through one
+shared function — see the "residual divergence" note below) specifically so the
+chart's forward simulation and the briefing's predictive text can't silently disagree
+on the reopen hour again. `tests/test_walk_forward_regime.py`'s
+`test_cross_check_walk_forward_agrees_with_compute_nat_vent_plan` is the regression
+guard for this cross-surface agreement — reuses the exact live-instance curve from the
+#878-followup incident and asserts both surfaces resolve the same reopen hour.
+
+**Residual, intentional divergence between the two surfaces:** `compute_nat_vent_plan()`'s
+`_nat_vent_reopen_reached()` uses a fixed `_NAT_VENT_CUTOFF_MARGIN_F = 1.0` margin,
+while `_walk_forward_regime()`'s `decide_nat_vent_gate()` uses the configurable
+`hysteresis`. This is pre-existing and deliberate (documented on
+`_NAT_VENT_CUTOFF_MARGIN_F` itself: "a PREDICTIVE identification... distinct from the
+live-control gates' own boundary choices") — the two surfaces may disagree by a few
+minutes when `hysteresis != 1.0`, which is a different, much smaller class of
+disagreement than the ~3-hour incident this section documents. Fully unifying them
+(having `compute_nat_vent_plan()` call `decide_nat_vent_gate()` directly) would require
+adding `hysteresis`/`nat_vent_delta`/`fan_mode`/`aggressive_savings` as new parameters
+and updating every caller — considered and deliberately deferred; revisit if the
+residual few-minutes divergence ever proves user-visible.
+
+**`_walk_forward_regime()`'s "off"-only ceiling-guard escalation (Issue #878-followup
+E):** `decide_ode_ceiling_guard()`/`ESCALATE`'s persistent `escalated_to_cool`
+(the rest of the calendar day becomes HVAC-cool regime) is scoped to `day_mode ==
+"off"` only, deliberately. A `"cool"`-mode (Hot) day never runs this step — it's
+semantically inapplicable (there's no "off → cool" transition to escalate for a day
+already at `"cool"`) and provably redundant: `decide_nat_vent_exit()`'s own
+`CEILING_THRESHOLD` exit already stops nat-vent the moment outdoor gets too warm. Do
+**not** extend the persistent-escalation concept to Hot days if this section is
+revisited — a Hot day's morning window and evening reopen are two independent
+opportunities in the same day, and applying `"off"` days' single escalate-once pattern
+would silently suppress a later same-day reopen.
+
+**Open question, not yet investigated (Issue #878-followup):** `chart_data`'s
+`predicted_activity` array is produced by `_walk_forward_regime()`/
+`_compute_predicted_activity()`. A separate, still-unconfirmed observation during this
+investigation: `predicted_activity[].windows_recommended` appeared to stay `False`
+across an entire forecast window even where `compute_nat_vent_plan()` reported a
+reopen, in at least one live pull taken *before* Fix E shipped — expected, since Fix E
+is exactly what corrects that. Whether any *other*, unrelated mismatch exists between
+`windows_recommended` (a `_walk_forward_regime()`-derived per-hour flag) and the
+classifier's own day-level `windows_recommended` field (`DayClassification`) has not
+been checked and is not established either way — flagged here for a future session
+rather than asserted as a bug.
 
 ---
 

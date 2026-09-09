@@ -40,6 +40,7 @@ from .nat_vent_plan import (
     compute_nat_vent_plan,
     describe_close_timing,
     describe_nat_vent_cutoff_reason,
+    describe_reopen_clause,
     resolve_window_pair,
     resolve_with_fallback,
 )
@@ -486,7 +487,7 @@ def _generate_tldr_table(
         m_end = describe_close_timing(_close_time.strftime(_FMT_HOUR).lstrip("0"), _already)
         if _evening_open_time is not None:
             e_start = _evening_open_time.strftime(_FMT_HOUR).lstrip("0")
-            windows_val = f"Close by {m_end} / Open {e_start}+ (<{format_temp(threshold, temp_unit)})"
+            windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)}) / Open {e_start}+"
         else:
             # resolve_window_pair() dropped a nonsensical open time — render as
             # morning-only rather than fabricate a pairing.
@@ -500,7 +501,7 @@ def _generate_tldr_table(
     elif _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening):
         _evening_dt = hot_events.get("evening_open_time") if hot_events else None
         e_start = resolve_with_fallback(_evening_dt, c.window_opportunity_evening_start).strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"Open {e_start} onward (<{format_temp(threshold, temp_unit)})"
+        windows_val = f"Open {e_start} onward"
     else:
         windows_val = "Closed all day"
 
@@ -650,11 +651,7 @@ def _hot_day_plan(
             f" {format_temp(comfort_cool, temp_unit)}."
         )
         lines.append("")
-        lines.append(
-            f"Later, once outdoor temps drop back below"
-            f" {format_temp(threshold, temp_unit)} (around {e_start}), open up again and"
-            f" I'll cut the AC to let natural ventilation take over."
-        )
+        lines.append(describe_reopen_clause(e_start, reopening_from_closed_all_day=False))
     elif has_morning:
         m_end = _close_time.strftime(_FMT_HOUR)
         lines.append("")
@@ -684,11 +681,7 @@ def _hot_day_plan(
             f" at {format_temp(comfort_cool, temp_unit)}."
         )
         lines.append("")
-        lines.append(
-            f"Later, once outdoor temps drop back below {format_temp(threshold, temp_unit)}"
-            f" (around {e_start}), open up and I'll cut the AC to let natural ventilation"
-            f" take over."
-        )
+        lines.append(describe_reopen_clause(e_start, reopening_from_closed_all_day=True))
     else:
         lines.append("")
         lines.append(

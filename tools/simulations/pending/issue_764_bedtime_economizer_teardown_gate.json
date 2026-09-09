@@ -11,7 +11,7 @@
     "No nat-vent activation is used here deliberately: economizer_fsm.py's own natural_vent_active short-circuit means economizer_check() would just defer/no-op (never reach cool-down) once nat-vent is already active, so a nat-vent-first scenario could never even get _economizer_active to True in the first place. The real production incident's simultaneous nat-vent+economizer state came from economizer engaging BEFORE nat-vent reactivated from a pause; this scenario isolates the actual bug condition instead: an active WHF-owning session (_whf_owns_hvac()==True, purely from the economizer's own suppression) at the moment bedtime fires — the same DEFER_NAT_VENT gate value production hit, without needing to reproduce nat-vent's own separate entry-gate timing.",
     "Two-way alignment: matches docs/08-COMPUTATION-REFERENCE.md's corrected anchor-table row (line 27) and the existing #9 table row 1442/1445 ('economizer also deactivated in that case' — i.e. only in the non-DEFER_NAT_VENT branch), both of which now match handle_bedtime()'s actual gated behavior post-fix.",
     "User outcome if this scenario is not caught: the occupant's AC audibly and unnecessarily cycles on at bedtime immediately after CA's own activity log states free cooling should continue — wasted energy plus a false comfort_violation incident, undermining trust in the automation's stated reasoning.",
-    "Config note: sleep_time/wake_time are required for bedtime's sleep-window logic. fan_mode=whole_house matches the reported incident's WHF hardware — _whf_owns_hvac() requires this archetype (WHOLE_HOUSE or BOTH) to ever return True. economizer_temp_delta=3.0 keeps outdoor(74) within the eligibility delta of comfort_cool+delta(74+3=77)."
+    "Config note: sleep_time/wake_time are required for bedtime's sleep-window logic. fan_mode=whole_house matches the reported incident's WHF hardware — _whf_owns_hvac() requires this archetype (WHOLE_HOUSE or BOTH) to ever return True. economizer_temp_delta=3.0 keeps outdoor(74) within the eligibility delta of comfort_cool+delta(74+3=77). door_window_sensors + the 20:00:00 sensor_open event (added for Issue #882) give the Issue #882 sealed-house guard a real monitored sensor to read as open, matching the economizer_check event's own windows_open=true eligibility parameter — before this, the scenario had no monitored sensor configured at all, so the guard's own read of live sensor state disagreed with the economizer's eligibility state."
   ],
   "config": {
     "comfort_heat": 68,
@@ -24,7 +24,8 @@
     "setback_cool": 79,
     "economizer_temp_delta": 3.0,
     "natural_vent_delta": 3.0,
-    "fan_mode": "whole_house_fan"
+    "fan_mode": "whole_house_fan",
+    "door_window_sensors": ["binary_sensor.window"]
   },
   "events": [
     {
@@ -34,6 +35,12 @@
       "hvac_mode": "cool",
       "windows_recommended": true,
       "note": "Hot day, hvac_mode=cool — matches the reported incident's classification."
+    },
+    {
+      "time": "2026-08-23T20:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "Issue #882: the economizer's own eligibility gate requires windows_physically_open (docs/economizer-lifecycle-spec.md) — this scenario's economizer_check event already passes windows_open=true as a direct eligibility parameter below, but had no monitored door_window_sensors configured at all, so the Issue #882 sealed-house guard's _any_monitored_sensor_open() (a real monitored sensor, not the economizer's own eligibility parameter) read 'nothing open' and tore the session down at the first 5-minute backstop tick. Added a real monitored sensor and opened it here so the scenario accurately represents the real install this incident happened on — a monitored window really was open for the economizer's fan to be running in the first place."
     },
     {
       "time": "2026-08-23T20:05:00",
@@ -59,8 +66,8 @@
     },
     {
       "at": "2026-08-23T22:30:00",
-      "expect": "hvac_write_blocked_whf_active",
-      "reason": "Bedtime fires with whf_owns_hvac()==True -> decide_scheduled_band_gate() returns DEFER_NAT_VENT -> nat_vent_bedtime_continue is emitted (informational payload only) and the sleep-band write is silently no-op'd by _apply_comfort_band()'s WHF choke-point guard (hvac_write_blocked_whf_active) instead of overriding the WHF session. This is the last decision at 22:30:00 and directly confirms bedtime never fought the active WHF session for control."
+      "expect": "bedtime_setback_skipped",
+      "reason": "Issue #882 update: with a real monitored door/window sensor now configured (required so the Issue #882 sealed-house guard can see the window is legitimately open), the same sensor-open event that makes the economizer eligible also sets _paused_by_door=True — and handle_bedtime()'s paused_by_door check (automation.py:6902-6903) fires before the WHF-choke-point DEFER_NAT_VENT path is ever reached, since windows_physically_opened cannot be True in real production without a monitored sensor open. The original hvac_write_blocked_whf_active assertion described a hand-set-parameter combination (economizer eligible via a direct event field, no monitored sensor at all) that cannot occur in a real install. bedtime_setback_skipped/paused_by_door is what a real install actually produces, and still confirms bedtime doesn't fight the active WHF session for control -- the two assertions below (economizer stays in cool-down, AC never commanded) are the ones that directly protect what Issue #764 is about."
     },
     {
       "at": "2026-08-23T22:30:00",

@@ -4204,15 +4204,16 @@ class AutomationEngine:
             # Fix D (Issue #277): whole-house fan running outside nat-vent must stop
             # when all sensors close — otherwise it draws outdoor air through a closed
             # envelope, counteracting HVAC and wasting energy for the occupant.
+            # Issue #882: routed through the shared sealed-house guard so this also covers
+            # a manually/RF-remote-overridden WHF session (_fan_override_active), not just
+            # a CA-owned one (_fan_active) — the prior _fan_active-only check left an
+            # override session invisible to this shutoff entirely.
             _fan_cfg_d = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-            if (
-                self._fan_active
-                and _fan_cfg_d in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
-                and not self._natural_vent_active
-            ):
-                _LOGGER.info("All sensors closed — stopping whole-house fan (was running outside nat-vent)")
+            if _fan_cfg_d in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not self._natural_vent_active:
                 # emit_event=False: this transition is reported via sensor_all_closed above.
-                await self._deactivate_fan(reason="all sensors closed — stopping whole-house fan", emit_event=False)
+                await self._enforce_sealed_house_whf_guard(
+                    reason="all sensors closed — stopping whole-house fan", emit_event=False
+                )
 
             if not self._paused_by_door:
                 return
@@ -5829,6 +5830,25 @@ class AutomationEngine:
         # with no live remote timer token), this branch is skipped entirely and the rest of
         # this method is byte-for-byte unchanged from before Issue #677.
         if remote_timer_provenance is not None and thermostat_fan_running:
+            # Issue #882: never re-arm a WHF override against a sealed house — the
+            # RF-remote timer surviving a restart doesn't change the sealed-house
+            # invariant. any_sensor_open is already supplied by the caller as a live
+            # read; check it before re-arming instead of only after (which would leave
+            # the fan running under a freshly re-armed override with nothing watching
+            # for a sensor that's already closed).
+            if not any_sensor_open:
+                _LOGGER.warning(
+                    "Fan reconcile: live RF remote timer still valid at restart but all"
+                    " monitored sensors are closed — deactivating instead of re-arming"
+                    " the sealed-house-unsafe override (archetype=%s)",
+                    archetype,
+                )
+                self._fan_active = True  # let _deactivate_fan see an owned fan
+                await self._deactivate_fan(
+                    reason="sealed-house on restart — not re-arming WHF override",
+                    bypass_absolute_override=True,
+                )
+                return
             _remaining_seconds, _token_hours = remote_timer_provenance
             _LOGGER.info(
                 "Fan reconcile: live RF remote timer still valid at restart (%sh token,"
@@ -7387,6 +7407,37 @@ class AutomationEngine:
         reactivation branch and ``_reconcile_fan_physical_drift()``'s preserve-session branch).
         """
         return bool(self._sensor_check_callback and self._sensor_check_callback())
+
+    async def _enforce_sealed_house_whf_guard(self, *, reason: str, emit_event: bool = True) -> FanCommandResult | None:
+        """Stop the whole-house fan — CA-owned OR manually/RF-remote overridden — the
+        instant no monitored sensor is open (Issue #882).
+
+        Single choke point for the sealed-house safety invariant: the WHF must never run
+        against a closed house. Prior to this, Fix D (Issue #277,
+        ``handle_all_doors_windows_closed()``) only checked ``_fan_active``, so a manual/
+        RF-remote override (which sets ``_fan_override_active`` instead) was invisible to
+        it — and even if it had fired, ``_deactivate_fan()``'s Issue #486 absolute-override
+        guard would have suppressed the shutoff anyway. This calls ``_deactivate_fan()``
+        with ``bypass_absolute_override=True``, the same escape hatch Issue #748 already
+        uses for the hard AC/WHF mutex — a sealed house is the same class of hard physical
+        invariant, not the "routine automation second-guessing" Issue #486 protects against.
+
+        ``_deactivate_fan()``'s own idempotency guard only reads ``_fan_active`` — an
+        override-only session (``_fan_override_active=True``, ``_fan_active=False``) would
+        otherwise hit that guard's early-return and never issue the real physical off
+        command. Mirrors the existing idiom at ``_reconcile_fan_on_startup_locked()``'s
+        turn-off branch ("let _deactivate_fan see an owned fan") for exactly this case.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return None
+        if self._any_monitored_sensor_open():
+            return None
+        if not (self._fan_active or self._fan_override_active):
+            return None
+        _LOGGER.warning("Sealed-house WHF guard: stopping fan — %s", reason)
+        self._fan_active = True  # let _deactivate_fan see an owned fan (override-only case)
+        return await self._deactivate_fan(reason=reason, bypass_absolute_override=True, emit_event=emit_event)
 
     async def _exit_nat_vent(
         self,
@@ -10263,10 +10314,16 @@ class AutomationEngine:
         """Execute a thermostatic check and reschedule the backstop (Issue #327)."""
         indoor = self._get_indoor_temp_f()
         outdoor = self._last_outdoor_temp
-        # Issue #423: self-healing physical-state check runs first — if _fan_active is stale
-        # (e.g. from a reconcile that "adopted" a fan that was never actually turned on), correct
-        # it here so fan_thermostat_check()/nat_vent_temperature_check() below see the corrected
-        # state instead of stale-True on this same tick.
+        # Issue #882: sealed-house backstop runs first — catches a WHF (including a
+        # manually/RF-remote-overridden one) still running against a closed house, in
+        # case the event-driven handle_all_doors_windows_closed() path was ever missed
+        # (a race, a dropped/coalesced sensor event). Worst-case latency is this timer's
+        # own 5-minute cadence; a no-op whenever any monitored sensor is open.
+        await self._enforce_sealed_house_whf_guard(reason="sealed-house backstop — 5-minute thermostatic check")
+        # Issue #423: self-healing physical-state check — if _fan_active is stale (e.g.
+        # from a reconcile that "adopted" a fan that was never actually turned on),
+        # correct it here so fan_thermostat_check()/nat_vent_temperature_check() below see
+        # the corrected state instead of stale-True on this same tick.
         self._reconcile_fan_physical_drift()
         await self.fan_thermostat_check(indoor=indoor, outdoor=outdoor, trigger="timer")
         # Issue #402 follow-up: nat_vent_temperature_check() (the function that owns the

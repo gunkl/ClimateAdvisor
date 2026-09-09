@@ -1,0 +1,90 @@
+{
+  "name": "issue_882_sealed_house_whf_override",
+  "description": "Issue #882: a manually/RF-remote-overridden whole-house fan must stop the instant all monitored doors/windows close, even though the override is otherwise absolute against routine automation second-guessing (Issue #486).",
+  "source": "synthetic",
+  "issue": 882,
+  "simulator_support": true,
+  "track": "unit",
+  "notes": [
+    "Occupant impact: reproduces the 2026-09-09 production incident. The user runs the whole-house fan overnight via the QuietCool RF remote's timer with a window open. When the window closes mid-session (e.g. a rain shower, or simply closing up before bed), the fan must stop immediately instead of continuing to pull outdoor air through a now-sealed house.",
+    "(a) Scenario effectiveness: before the Issue #882 fix, handle_all_doors_windows_closed()'s Fix D condition (automation.py:4204-4215) checked only _fan_active, which a manual/RF-remote override never sets -- the sensor-close event would reach the coordinator, call handle_all_doors_windows_closed(), and the WHF-stop branch would never evaluate for this session. Reverting the fix (checking only _fan_active instead of routing through _enforce_sealed_house_whf_guard()) makes this scenario's fan_not_active assertion fail -- directly proven by re-running this scenario against a temporarily reverted call site 1 during development.",
+    "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md §9e-H (Sealed-House Guard) documents this exact call site and its bypass_absolute_override=True precedent (Issue #748's hard AC/WHF mutex), added alongside this fix.",
+    "(c) User outcome if this scenario's assertion fails in the future: an override-active whole-house fan would again keep running after all monitored sensors close, pulling outdoor air through a sealed house with nothing watching for it -- the exact 2026-09-09 incident.",
+    "Scope note: this scenario exercises call site 1 (the event-driven handle_all_doors_windows_closed() path, ~1-3s real-world latency) via use_coordinator=True so the sensor_close event drives the real coordinator listener, not a hand-invoked engine method. Call site 2 (the 5-minute thermostatic backstop) and call site 3 (the restart RF-timer re-arm branch) are covered directly by tests/test_fan_control.py::TestSealedHouseWhfGuard's unit tests instead, which exercise them without needing an 8-hour/5-minute wall-clock scenario timeline."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "fan_remote_entity": "event.quietcool_remote"
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-09-09T05:00:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seeds a real prior state for fan.whf so _async_fan_entity_changed can evaluate a transition (same seeding technique as issue_677_rf_timer_restart_resume.json)."
+    },
+    {
+      "time": "2026-09-09T05:00:05",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot night, thermostat commanded to cool -- gives the WHF override a real prior HVAC mode to capture/suppress via _pre_fan_hvac_mode, matching the live incident."
+    },
+    {
+      "time": "2026-09-09T05:00:10",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "Window open before the fan is turned on -- realistic precondition for running a whole-house fan (it needs an intake path)."
+    },
+    {
+      "time": "2026-09-09T05:00:20",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "User turns the whole-house fan on via the QuietCool RF remote's 2-hour timer button."
+    },
+    {
+      "time": "2026-09-09T05:00:25",
+      "type": "external_entity_state_change",
+      "entity": "event.quietcool_remote",
+      "state": "2026-09-09T05:00:25+00:00",
+      "attributes": {"event_type": "timer_2h"},
+      "note": "The RF remote's decoded firmware event, matching the live incident's 2-hour timer selection. After the burst-combining window elapses, handle_fan_manual_override(duration_override=7200, remote_timer_hours=2.0, is_remote_event=True) fires -- setting _fan_override_active=True, _fan_remote_timer_hours=2.0, and _suppress_hvac_for_whf()."
+    },
+    {
+      "time": "2026-09-09T05:45:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.window",
+      "note": "The window closes 45 minutes into the still-active 2-hour RF-remote-timer override (grace expires ~07:00:26) -- mirrors the live incident's window-closes-mid-session timing. With the Issue #882 fix, the coordinator's real sensor-changed listener calls handle_all_doors_windows_closed() immediately, which now routes through _enforce_sealed_house_whf_guard() and stops the fan within this same event-handling cycle instead of leaving it running for the rest of the timer."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-09T05:45:01",
+      "expect": "fan_not_active",
+      "reason": "The whole-house fan must be off within the same event-driven cycle as the sensor-closed event, even though it was running under an absolute RF-remote-timer override -- this is the sealed-house invariant taking precedence over Issue #486's override-absolute rule, via the same bypass_absolute_override=True precedent Issue #748 established for the hard AC/WHF mutex. Note: _fan_active alone is not distinguishing here (an override session never sets it), so the last_hvac_mode assertion below is what actually proves the guard ran -- confirmed via a deliberate revert-test during authoring (see the scenario effectiveness note)."
+    },
+    {
+      "at": "2026-09-09T05:45:01",
+      "expect": "last_hvac_mode",
+      "mode": "cool",
+      "reason": "_deactivate_fan()'s default restore_hvac=True restores the pre-fan HVAC mode ('cool', captured from the classification) once the guard actually deactivates the fan. Pre-fix, nothing ever calls _deactivate_fan() for an override-only session, so the thermostat stays stranded at 'off' (the WHF-suppressed mode) indefinitely -- this is the assertion that actually distinguishes pre-fix from post-fix behavior, since _fan_active was never True for an override session in either case."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A manually/RF-remote-overridden whole-house fan stops the instant all monitored doors/windows close, closing the sealed-house safety gap the 2026-09-09 incident exposed (Issue #882 fix).",
+    "observed_behavior": "The RF-remote timer override activates the fan and suppresses HVAC as normal; when the monitored window sensor closes mid-override, handle_all_doors_windows_closed() fires immediately and the shared sealed-house guard stops the fan, bypassing the RF-timer-absolute protection the same way Issue #748's hard AC/WHF mutex already does.",
+    "expected_behavior": "No WHF-activation path -- CA-owned or manually/RF-remote overridden -- may leave the whole-house fan running once no monitored sensor is open."
+  }
+}

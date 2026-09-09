@@ -160,6 +160,43 @@ def describe_close_timing(close_time_str: str, already_reached: bool) -> str:
     return close_time_str
 
 
+def describe_reopen_clause(e_start: str, reopening_from_closed_all_day: bool) -> str:
+    """Shared Hot-day reopen sentence (Issue #878-followup).
+
+    ``_hot_day_plan()``'s two reopen-rendering branches (has_morning &&
+    has_evening, and has_evening-only) were independently hand-writing the same
+    sentence, differing only in whether "again" applies (windows were already
+    open earlier that day vs. closed all day) — the exact duplication class
+    this module exists to prevent, just for the reopen sentence instead of the
+    close-time/reason fragments ``describe_close_timing()``/
+    ``describe_nat_vent_cutoff_reason()`` already cover.
+
+    Deliberately mechanism-accurate, not numeric: earlier Hot-day text claimed
+    a specific outdoor threshold ("once outdoor temps drop back below 77°F")
+    that was never the value actually gating reopening (see
+    ``evening_open_time``'s docstring above — the real comparison is against
+    ``comfort_cool``, and even that isn't meant to be recited as if it were a
+    live control threshold in prose). Matches Warm's/Mild's already-correct
+    "when the evening air cools back down" convention.
+
+    Args:
+        e_start: the already-formatted clock time (e.g. "11:00 PM") for the
+            reopen event.
+        reopening_from_closed_all_day: True when windows were sealed all day
+            (no earlier morning opportunity) — renders "open up" instead of
+            "open up again".
+
+    Returns:
+        The complete reopen sentence for a Hot-day briefing.
+    """
+    verb = "open up" if reopening_from_closed_all_day else "open up again"
+    return (
+        f"Later, once outdoor temps cool back down below indoor"
+        f" (around {e_start}), {verb} and I'll cut the AC to let"
+        f" natural ventilation take over."
+    )
+
+
 def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
     """Single source of truth for how ``nat_vent_cutoff_reason`` reads as text (Issue #847).
 
@@ -259,9 +296,15 @@ def compute_nat_vent_plan(
           ``evening_open_time is not None`` check at call sites) but the underlying
           Issue #788 semantics are UNCHANGED, not generalized: this field is still
           only computed for an "outdoor_rise" cutoff — first timestamp after
-          ``nat_vent_cutoff`` where outdoor has cooled back below indoor again (the
-          symmetric opposite of the morning-close crossing, via
-          ``_nat_vent_reopen_reached()``). For a "comfort_floor" cutoff this stays
+          ``nat_vent_cutoff`` where outdoor has cooled back below ``comfort_cool``
+          again (the symmetric opposite of the morning-close crossing, via
+          ``_nat_vent_reopen_reached()``). Issue #878-followup: compared against
+          ``comfort_cool`` (the stable comfort ceiling), NOT the per-timestamp
+          ``predicted_indoor`` value — the ODE-predicted indoor curve can be pulled
+          well below ``comfort_cool`` overnight by unrelated features (e.g. pre-cool
+          banking ahead of a hotter following day), and comparing reactivation
+          eligibility against that banked value let the banking feature silently
+          delay or suppress a genuine nat-vent opportunity. For a "comfort_floor" cutoff this stays
           ``None`` by design: that cutoff fires because indoor fell too low, and
           outdoor cooling further from there is the same bad direction that caused
           the close, not a signal that reopening helps — using the same predicate
@@ -400,10 +443,21 @@ def compute_nat_vent_plan(
     # (see the field's docstring above for why generalizing this to comfort_floor
     # cutoffs would reproduce the exact bug #788 fixed).
     if result["nat_vent_cutoff"] is not None and result["nat_vent_cutoff_reason"] == "outdoor_rise":
+        # Issue #878-followup: compare outdoor against comfort_cool (the stable
+        # comfort ceiling), NOT the per-timestamp predicted_indoor value. Overnight,
+        # predicted_indoor tracks whatever the pre-cool banking feature currently
+        # wants the thermostat to target (e.g. ramping toward 70°F ahead of a hotter
+        # following day) — comparing reactivation eligibility against that banked
+        # value let an unrelated feature silently delay/suppress a genuine nat-vent
+        # opportunity (live incident: reopen computed as 2 AM against a banked ~69°F
+        # curve, when outdoor had already dropped below the real 74°F comfort ceiling
+        # by 23:00). predicted_indoor is still passed to find_temperature_crossing()
+        # to determine which timestamps have a matching pair in both curves — only
+        # the compared *value* changes.
         result["evening_open_time"] = find_temperature_crossing(
             predicted_indoor,
             predicted_outdoor,
-            lambda _ts, o, i: _nat_vent_reopen_reached(o, i),
+            lambda _ts, o, _i: _nat_vent_reopen_reached(o, comfort_cool),
             after=result["nat_vent_cutoff"],
         )
 

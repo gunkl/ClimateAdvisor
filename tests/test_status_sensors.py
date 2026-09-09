@@ -1139,6 +1139,45 @@ class TestHotDayNextActionWindowPairOrdering:
         assert "7:00 PM" not in result
         assert result == "Keep windows and blinds closed."
 
+    def test_evening_open_branch_omits_numeric_threshold(self):
+        """Issue #878-followup (Defect C): the evening-open branch's displayed
+        threshold was the CLOSE-side comfort_cool+delta constant, reused verbatim
+        even though it was never the value actually gating reopening. Must render
+        mechanism wording ("cools back below indoor") instead."""
+        import types
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor import coordinator as _coord_mod
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+        c = _make_classification(
+            day_type="hot",
+            hvac_mode="cool",
+            window_opportunity_morning=False,
+            window_opportunity_evening=True,
+        )
+        c.window_opportunity_morning_end = time(9, 0)
+        c.window_opportunity_evening_start = time(17, 0)
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        ae._economizer_active = False
+        coord = _make_real_coordinator(True, ae)
+        coord._compute_next_action = types.MethodType(ClimateAdvisorCoordinator._compute_next_action, coord)
+        coord.config = {"comfort_cool": 75.0, "temp_unit": "fahrenheit"}
+        coord._nat_vent_plan = {
+            "nat_vent_cutoff": None,
+            "evening_open_time": datetime(2026, 7, 10, 19, 0),
+        }
+        # At/after the evening_open_time -> the evening-open branch fires.
+        now_dt = datetime(2026, 7, 10, 19, 5)
+        with (
+            patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+            patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        ):
+            result = coord._compute_next_action(c, ae=ae)
+        assert "78" not in result
+        assert "cools back below indoor" in result
+
 
 class TestHotDayWindowOpportunityCandidatesRemoved:
     """HOT-day window-cooling opportunity candidates (Issue #528) were removed in

@@ -8211,7 +8211,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})")
             elif c.window_opportunity_evening and _evening_open_time is not None and now >= _evening_open_time:
                 start_t = _evening_open_time.strftime("%I:%M %p").lstrip("0")
-                return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (from {start_t})")
+                return _decide(f"Open windows once outdoor cools back below indoor (from {start_t})")
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
                 return _decide("-")
             return _decide("Keep windows and blinds closed.")
@@ -11363,26 +11363,44 @@ def _walk_forward_regime(
 
     Per calendar day (from ``day_modes``, itself derived once via
     ``_compute_day_hvac_modes()``):
-      - Day mode ``heat``/``cool`` -> HVAC regime for the whole day; nat-vent is not
-        evaluated at all.
-      - Day mode ``off`` -> nat-vent-eligible, subject to same-day escalation. Each hour,
+      - Day mode ``heat`` (Cold days) -> HVAC regime for the whole day; nat-vent is not
+        evaluated at all — ``classifier.py`` has no window-opportunity concept for Cold
+        days.
+      - Day mode ``off`` (Warm/Mild) or ``cool`` (Hot) -> nat-vent-eligible. Each hour,
         in order:
           1. Resolve nat-vent's session-active state FIRST (``decide_nat_vent_exit()`` if
              currently active, ``decide_nat_vent_gate()`` if not) — this hour's result, not
-             a stale one, since step 2 depends on it.
-          2. Check ``decide_ode_ceiling_guard()`` using THIS hour's session-active state as
-             its ``natural_vent_active`` input, scanning only the *remaining* predicted-indoor
-             curve from this hour forward (matching production's own "if evaluated right now"
-             semantics — never scanning past-already-walked entries, which would let an
-             already-resolved earlier breach masquerade as a future one).
-          3. On ``ESCALATE``: the rest of this calendar day becomes HVAC-cool regime; the
-             nat-vent walk stops for the remainder of the day. A new day gets a fresh
-             evaluation (escalation is a same-day event).
+             a stale one, since step 2 depends on it. Issue #878-followup: on a ``cool``
+             day, the gate call's ``indoor`` input is ``comfort_cool`` (the day's
+             committed AC target), not the live predicted-indoor curve — that curve can
+             be pulled well below ``comfort_cool`` overnight by unrelated features (e.g.
+             pre-cool banking ahead of a hotter following day), and comparing
+             REACTIVATION eligibility against that banked value let banking silently
+             suppress a genuine nat-vent opportunity. The exit call is unaffected (still
+             reads the real predicted-indoor curve) — exit questions ("should an already-
+             running session stop") are correctly answered against real/predicted state;
+             only entry/reactivation questions ("should we override the day's committed
+             target") are answered against the stable target. ``off`` days have no such
+             committed target, so their gate call is unchanged.
+          2. On an ``off`` day only: check ``decide_ode_ceiling_guard()`` using THIS
+             hour's session-active state as its ``natural_vent_active`` input, scanning
+             only the *remaining* predicted-indoor curve from this hour forward (matching
+             production's own "if evaluated right now" semantics). On ``ESCALATE``: the
+             rest of this calendar day becomes HVAC-cool regime; the nat-vent walk stops
+             for the remainder of the day. A ``cool`` day skips this step entirely — it's
+             semantically inapplicable (there's no "off -> cool" transition to escalate
+             for a day already at "cool") and provably redundant:
+             ``decide_nat_vent_exit()``'s own ``CEILING_THRESHOLD`` exit already stops
+             nat-vent the moment outdoor gets too warm. Applying the persistent
+             ``escalated_to_cool`` concept to Hot days would wrongly suppress a later
+             same-day evening reopen — a Hot day's morning window and evening reopen are
+             two independent opportunities, unlike an "off" day's single escalate-once
+             pattern. A new calendar day always gets a fresh evaluation either way.
 
     Returns ``{ts: {"nat_vent_active": bool, "hvac_mode": str}}`` — ``hvac_mode`` is the day's
-    classified mode, overridden to ``"cool"`` for hours at/after an escalation. No new
-    threshold math: composition of three pre-existing, differentially-validated pure
-    functions plus the day-mode lookup, per the approved plan.
+    classified mode, overridden to ``"cool"`` for hours at/after an ``off``-day escalation.
+    Composition of three pre-existing, differentially-validated pure functions plus the
+    day-mode lookup and the ``comfort_cool`` reactivation substitution above.
     """
     indoor_by_ts = {e["ts"]: e.get("temp") for e in predicted_indoor if e.get("ts")}
     outdoor_by_ts = {e["ts"]: e.get("temp") for e in forecast_outdoor if e.get("ts")}
@@ -11425,7 +11443,17 @@ def _walk_forward_regime(
 
         day_mode = day_modes.get(day, "off")
 
-        if day_mode != "off" or escalated_to_cool:
+        # Issue #878-followup: only "heat"-mode days (Cold — classifier.py has no
+        # window-opportunity concept for them) and already-escalated hours skip
+        # nat-vent evaluation entirely. "cool"-mode days (Hot) fall through to the
+        # same gate/exit resolution "off" days use below — Hot days have their own
+        # real, classifier-driven nat-vent eligibility (window_opportunity_morning/
+        # evening) and their own real production automation behavior (AC deferred
+        # while nat-vent runs), so hard-coding nat_vent_active=False for the whole
+        # day (as this used to do for any day_mode != "off") made this walk-forward
+        # chart simulation permanently disagree with compute_nat_vent_plan() (used
+        # by the briefing) on every single Hot day.
+        if day_mode == "heat" or escalated_to_cool:
             effective_mode = "cool" if escalated_to_cool else day_mode
             result[ts_str] = {"nat_vent_active": False, "hvac_mode": effective_mode}
             continue
@@ -11437,6 +11465,9 @@ def _walk_forward_regime(
         in_sleep_window = _in_sleep_window(local_dt, config)
 
         # Step 1: resolve nat-vent's session-active state for THIS hour first.
+        # Runs identically for "off" (Warm/Mild) and "cool" (Hot) days — the gate/
+        # exit functions are generic and already used this way in live production
+        # for both.
         if session_active:
             exit_decision = decide_nat_vent_exit(
                 NatVentExitInputs(
@@ -11458,10 +11489,21 @@ def _walk_forward_regime(
             if exit_decision.reason != NatVentExitReason.NONE:
                 session_active = False
         elif lower is not None and upper is not None:
+            # Issue #878-followup: for a "cool"-mode day (Hot), indoor is committed
+            # to comfort_cool as its base target. The ODE-predicted indoor curve can
+            # dip well below that overnight (pre-cool banking ahead of a hotter
+            # following day) — comparing REACTIVATION eligibility against that
+            # banked value lets an unrelated banking feature silently suppress a
+            # genuine nat-vent opportunity (the exact defect reported live; see
+            # compute_nat_vent_plan()'s evening_open_time fix for the briefing-side
+            # twin of this same rule). "off"-mode days have no such committed
+            # target — indoor is the only signal there, so they keep comparing
+            # against the real predicted curve, unchanged.
+            _gate_indoor = comfort_cool if day_mode == "cool" else indoor
             session_active = decide_nat_vent_gate(
                 NatVentGateInputs(
                     outdoor=outdoor,
-                    indoor=indoor,
+                    indoor=_gate_indoor,
                     comfort_heat_raw=comfort_heat_raw,
                     sleep_heat=sleep_heat,
                     in_sleep_window=in_sleep_window,
@@ -11473,30 +11515,38 @@ def _walk_forward_regime(
                 )
             )
 
-        # Step 2: ceiling-guard escalation check, using THIS hour's session_active — only
-        # scans the remaining predicted-indoor curve from this hour forward.
-        _idx = predicted_indoor_index.get(ts_str)
-        _remaining_predicted_indoor = predicted_indoor[_idx:] if _idx is not None else []
-        guard_decision = decide_ode_ceiling_guard(
-            OdeCeilingGuardInputs(
-                predicted_indoor=_remaining_predicted_indoor,
-                hvac_mode=day_mode,
-                k_passive=k_passive,
-                confidence_k_passive=confidence_k_passive,
-                k_passive_via_bridge=k_passive_via_bridge,
-                k_active_cool=k_active_cool,
-                comfort_cool=comfort_cool,
-                outdoor=outdoor,
-                indoor=indoor,
-                natural_vent_active=session_active,
-                ceiling_threshold=ceiling_threshold,
-                now=ts_dt,
+        # Step 2: ceiling-guard escalation check — only meaningful for an "off"-mode
+        # day that might need to proactively commit to AC for the rest of the day.
+        # A "cool"-mode day (Hot) is already at that base mode, and its own exit
+        # chain's CEILING_THRESHOLD check (above) already stops nat-vent the moment
+        # outdoor gets too warm — applying the persistent escalated_to_cool concept
+        # to Hot days would wrongly suppress a later same-day evening reopen (a
+        # Hot day's morning window and evening reopen are two separate, independent
+        # opportunities in the same day, unlike an "off" day's single escalate-once
+        # pattern).
+        if day_mode == "off":
+            _idx = predicted_indoor_index.get(ts_str)
+            _remaining_predicted_indoor = predicted_indoor[_idx:] if _idx is not None else []
+            guard_decision = decide_ode_ceiling_guard(
+                OdeCeilingGuardInputs(
+                    predicted_indoor=_remaining_predicted_indoor,
+                    hvac_mode=day_mode,
+                    k_passive=k_passive,
+                    confidence_k_passive=confidence_k_passive,
+                    k_passive_via_bridge=k_passive_via_bridge,
+                    k_active_cool=k_active_cool,
+                    comfort_cool=comfort_cool,
+                    outdoor=outdoor,
+                    indoor=indoor,
+                    natural_vent_active=session_active,
+                    ceiling_threshold=ceiling_threshold,
+                    now=ts_dt,
+                )
             )
-        )
-        if guard_decision.outcome == OdeCeilingGuardOutcome.ESCALATE:
-            escalated_to_cool = True
-            result[ts_str] = {"nat_vent_active": False, "hvac_mode": "cool"}
-            continue
+            if guard_decision.outcome == OdeCeilingGuardOutcome.ESCALATE:
+                escalated_to_cool = True
+                result[ts_str] = {"nat_vent_active": False, "hvac_mode": "cool"}
+                continue
 
         result[ts_str] = {"nat_vent_active": session_active, "hvac_mode": day_mode}
 

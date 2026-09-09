@@ -346,14 +346,17 @@ class TestWalkForwardRegimeReentry:
 
 
 class TestWalkForwardRegimeDayModeBoundary:
-    def test_heat_cool_day_never_walks_nat_vent(self) -> None:
-        """Assumption Audit #4: a day classified heat/cool is never fed to
-        decide_nat_vent_gate()/decide_nat_vent_exit() at all -- confirmed by conditions
-        that WOULD activate nat-vent (favorable outdoor/indoor gap) producing
-        nat_vent_active=False purely because the day's mode isn't 'off'."""
+    def test_heat_day_never_walks_nat_vent(self) -> None:
+        """Issue #878-followup (formerly Assumption Audit #4, which covered heat AND
+        cool): a day classified 'heat' (Cold — classifier.py has no window-opportunity
+        concept for Cold days) is never fed to decide_nat_vent_gate()/decide_nat_vent_exit()
+        at all -- confirmed by conditions that WOULD activate nat-vent (favorable
+        outdoor/indoor gap) producing nat_vent_active=False purely because the day's
+        mode is 'heat'. 'cool' (Hot) days are covered separately below -- they now DO
+        evaluate nat-vent (that was the whole point of this fix)."""
         mod = _mod()
         ts1 = _ts(12)
-        day_modes = {date(2026, 7, 13): "cool"}
+        day_modes = {date(2026, 7, 13): "heat"}
         band = _band([(ts1, 68.0, 76.0)])
         predicted_indoor = _series([(ts1, 74.0)])
         forecast_outdoor = _series([(ts1, 60.0)])  # would satisfy the gate on an off day
@@ -371,11 +374,15 @@ class TestWalkForwardRegimeDayModeBoundary:
             None,
             False,
         )
-        assert result[ts1] == {"nat_vent_active": False, "hvac_mode": "cool"}
+        assert result[ts1] == {"nat_vent_active": False, "hvac_mode": "heat"}
 
     def test_off_day_into_forecast_hot_day_switches_regime_at_boundary(self) -> None:
         """Multi-day range: an off/nat-vent-eligible day followed by a day the forecast
-        classifies 'cool' switches the regime exactly at the day boundary."""
+        classifies 'cool' switches the HVAC regime exactly at the day boundary. Issue
+        #878-followup: day2's nat-vent eligibility is now genuinely evaluated too (was
+        hardcoded False before this fix) -- outdoor here is cool enough to activate,
+        proving the day-boundary switch correctly carries into a 'cool' day's own gate
+        evaluation rather than silently disabling it."""
         mod = _mod()
         ts_day1 = _ts(20)  # 20:00 on day 1
         ts_day2 = _ts(6, day_offset=1)  # 06:00 on day 2
@@ -399,7 +406,151 @@ class TestWalkForwardRegimeDayModeBoundary:
         )
         assert result[ts_day1]["hvac_mode"] == "off"
         assert result[ts_day2]["hvac_mode"] == "cool"
-        assert result[ts_day2]["nat_vent_active"] is False
+        assert result[ts_day2]["nat_vent_active"] is True
+
+
+class TestWalkForwardRegimeHotDayNatVent:
+    """Issue #878-followup (Defect E): 'cool'-mode days (Hot) now evaluate nat-vent
+    gate/exit via the same real production functions 'off' days already used --
+    previously hard-coded to nat_vent_active=False for the entire day."""
+
+    def test_hot_day_activates_overnight_when_cool_enough(self) -> None:
+        mod = _mod()
+        ts1 = _ts(23)  # cool enough overnight
+        day_modes = {date(2026, 7, 13): "cool"}
+        band = _band([(ts1, 68.0, 76.0)])
+        predicted_indoor = _series([(ts1, 76.0)])
+        forecast_outdoor = _series([(ts1, 70.0)])  # < comfort_cool(76) - hysteresis(1)
+
+        result = mod._walk_forward_regime(
+            day_modes, predicted_indoor, forecast_outdoor, band, _BASE_CONFIG, "home", None, False, None, None, False
+        )
+        assert result[ts1]["nat_vent_active"] is True
+        assert result[ts1]["hvac_mode"] == "cool"
+
+    def test_hot_day_midday_stays_inactive(self) -> None:
+        mod = _mod()
+        ts1 = _ts(13)
+        day_modes = {date(2026, 7, 13): "cool"}
+        band = _band([(ts1, 68.0, 76.0)])
+        predicted_indoor = _series([(ts1, 76.0)])
+        forecast_outdoor = _series([(ts1, 90.0)])  # far above comfort_cool + nat_vent_delta
+
+        result = mod._walk_forward_regime(
+            day_modes, predicted_indoor, forecast_outdoor, band, _BASE_CONFIG, "home", None, False, None, None, False
+        )
+        assert result[ts1]["nat_vent_active"] is False
+        assert result[ts1]["hvac_mode"] == "cool"
+
+    def test_hot_day_two_separate_windows_both_activate(self) -> None:
+        """Regression guard for five-whys #5: a midday exit must NOT persistently
+        suppress a later same-day reactivation the way an 'off' day's escalated_to_cool
+        would -- a Hot day's morning window and evening reopen are two independent
+        opportunities."""
+        mod = _mod()
+        ts_morning, ts_midday, ts_evening = _ts(7), _ts(13), _ts(20)
+        day_modes = {date(2026, 7, 13): "cool"}
+        band = _band([(ts_morning, 68.0, 76.0), (ts_midday, 68.0, 76.0), (ts_evening, 68.0, 76.0)])
+        predicted_indoor = _series([(ts_morning, 74.0), (ts_midday, 74.0), (ts_evening, 74.0)])
+        forecast_outdoor = _series(
+            [
+                (ts_morning, 65.0),  # cool -> activates
+                (ts_midday, 85.0),  # hot -> exits (OUTDOOR_RISE and CEILING_THRESHOLD both fire)
+                (ts_evening, 65.0),  # cool again -> reactivates
+            ]
+        )
+
+        result = mod._walk_forward_regime(
+            day_modes, predicted_indoor, forecast_outdoor, band, _BASE_CONFIG, "home", None, False, None, None, False
+        )
+        assert result[ts_morning]["nat_vent_active"] is True
+        assert result[ts_midday]["nat_vent_active"] is False
+        assert result[ts_evening]["nat_vent_active"] is True
+        assert (
+            result[ts_morning]["hvac_mode"]
+            == result[ts_midday]["hvac_mode"]
+            == result[ts_evening]["hvac_mode"]
+            == "cool"
+        )
+
+    def test_hot_day_reactivation_gate_uses_comfort_cool_not_banked_indoor(self) -> None:
+        """Direct proof of the DRY-cross-check fix: the gate's indoor input on a 'cool'
+        day is comfort_cool, not the (possibly pre-cool-banked) predicted_indoor curve.
+        Outdoor here sits between the banked curve's implied threshold and comfort_cool's
+        -- only correct if comfort_cool is really what's being compared."""
+        mod = _mod()
+        ts1 = _ts(23)
+        day_modes = {date(2026, 7, 13): "cool"}
+        band = _band([(ts1, 64.0, 70.0)])
+        # predicted_indoor banked down to 70 (e.g. pre-cool banking) -- if the gate used
+        # this value, outdoor(72) would need to be < 70-1=69 to activate, which it isn't.
+        predicted_indoor = _series([(ts1, 70.0)])
+        # outdoor(72) IS < comfort_cool(76) - hysteresis(1) = 75 -> activates only if the
+        # gate compares against comfort_cool, not the banked 70.0 curve value.
+        forecast_outdoor = _series([(ts1, 72.0)])
+
+        result = mod._walk_forward_regime(
+            day_modes, predicted_indoor, forecast_outdoor, band, _BASE_CONFIG, "home", None, False, None, None, False
+        )
+        assert result[ts1]["nat_vent_active"] is True, (
+            "gate must compare outdoor against comfort_cool (76), not the banked "
+            "predicted_indoor value (70) -- if it used the banked curve, outdoor=72 would "
+            "not satisfy 72 < 70-1=69 and this would incorrectly stay inactive"
+        )
+
+    def test_cross_check_walk_forward_agrees_with_compute_nat_vent_plan(self) -> None:
+        """Issue #878-followup DRY cross-check: reusing the exact live production curve
+        from the plan's Context table, compute_nat_vent_plan() (Fix D) and
+        _walk_forward_regime() (Fix E) must agree on the reopen hour (23:00), not one at
+        23:00 and the other at 02:00. This is the regression guard for the gap the DRY
+        re-check found -- a future edit could silently reintroduce the divergence by
+        changing one call site's `indoor` substitution without the other."""
+        from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan
+
+        mod = _mod()
+        config = dict(_BASE_CONFIG)
+        config["comfort_cool"] = 74.0
+        config["natural_vent_delta"] = 3.0
+        config["nat_vent_hysteresis_f"] = 1.0
+
+        # Live production data (v0.7.32 incident), 2026-09-08 21:00 through 2026-09-09 02:00.
+        curve = [
+            ("2026-09-08T21:00:00", 77.0, 73.8),
+            ("2026-09-08T22:00:00", 74.0, 70.0),
+            ("2026-09-08T23:00:00", 72.0, 70.2),
+            ("2026-09-09T00:00:00", 71.0, 70.3),
+            ("2026-09-09T01:00:00", 70.0, 70.3),
+            ("2026-09-09T02:00:00", 69.0, 70.1),
+        ]
+        predicted_indoor = _series([(ts, indoor) for ts, _outdoor, indoor in curve])
+        predicted_outdoor = _series([(ts, outdoor) for ts, outdoor, _indoor in curve])
+        band = _band([(ts, 64.0, 72.0) for ts, _o, _i in curve])
+        day_modes = {date(2026, 9, 8): "cool", date(2026, 9, 9): "cool"}
+
+        walk_result = mod._walk_forward_regime(
+            day_modes, predicted_indoor, predicted_outdoor, band, config, "home", None, False, None, None, False
+        )
+        walk_reopen_ts = next((ts for ts, r in walk_result.items() if r["nat_vent_active"]), None)
+        assert walk_reopen_ts == "2026-09-08T23:00:00", (
+            f"_walk_forward_regime() reopened at {walk_reopen_ts}, expected 23:00"
+        )
+
+        plan_result = compute_nat_vent_plan(
+            predicted_indoor,
+            predicted_outdoor,
+            comfort_cool=74.0,
+            window_open_time=None,
+        )
+        # This curve's own first entry (21:00, outdoor=77 >= indoor(73.8)-1) already
+        # satisfies the close condition, so nat_vent_cutoff lands there (already_reached);
+        # what matters for this cross-check is where evening_open_time lands relative to
+        # that cutoff -- 23:00, matching the walk's own reopen hour above.
+        assert plan_result["nat_vent_cutoff"] is not None
+        assert plan_result["evening_open_time"] is not None
+        assert plan_result["evening_open_time"].isoformat().startswith("2026-09-08T23:00:00"), (
+            f"compute_nat_vent_plan() reopened at {plan_result['evening_open_time']}, expected 23:00 -- "
+            "must match _walk_forward_regime()'s own reopen hour asserted above"
+        )
 
 
 class TestWalkForwardRegimeCeilingGuardEscalation:

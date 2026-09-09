@@ -212,6 +212,28 @@ class TestComputeEffectiveTargetForward:
         # Sleep branch: sleep_heat (fed as band lower=64.0) + hysteresis(1.0) = 65.0
         assert result == [{"ts": ts, "target": 65.0}]
 
+    def test_nat_vent_target_applies_on_hot_day_cool_mode_too(self) -> None:
+        """Issue #878-followup (Fix E): before this fix, _walk_forward_regime() never
+        set fan_active=True on a 'cool'-mode (Hot) day, so this tier could never fire
+        for hvac_mode='cool' -- the chart's effective-target line always fell through
+        to the flat comfort_cool band edge during a Hot day's nat-vent window, even
+        though compute_nat_vent_plan() (the briefing) said windows should be open.
+        Tier 2 gates purely on predicted_activity[].fan_active, with no hvac_mode
+        check, so once Fix E lets that flag be True on a Hot day, this tier must fire
+        exactly as it already does for an 'off'-mode day."""
+        fn = self._fn()
+        ts = "2026-05-17T14:00:00+00:00"
+        predicted_activity = [{"ts": ts, "fan_active": True}]
+        result = fn(
+            self._band(ts, lower=68.0, upper=76.0),
+            predicted_activity,
+            self._mode(ts, "cool"),
+            1.0,
+            self._config(),
+        )
+        # Same nat-vent cycling target as the 'off'-mode case, not the flat cool edge (76.0).
+        assert result == [{"ts": ts, "target": 72.0}]
+
     def test_tou_wins_over_nat_vent_when_both_apply(self) -> None:
         """Tier ordering: TOU banking target (tier 1) takes priority over the nat-vent
         cycling target (tier 2) when both could apply to the same timestamp."""

@@ -57,23 +57,35 @@ class TestGetCoordinator:
     single-zone/no-zone behavior, updated only for the new request argument —
     the backward-compat guarantee is that absent entry_id, single-zone
     behavior is unchanged.
+
+    Issue #885: _get_coordinator() now returns (coordinator, ambiguous_refused)
+    instead of a bare coordinator, to centralize ambiguous-zone handling (see
+    test_api_multi_zone.py's TestAmbiguousZonePostRefusal for that behavior).
+    None of these three single-zone/zero-zone cases are ever ambiguous, so
+    ambiguous_refused is always False here — only the tuple shape changed.
     """
 
     def test_returns_coordinator_when_loaded(self):
         coord = MagicMock()
         hass = MagicMock()
         hass.data = {DOMAIN: {"entry_1": coord}}
-        assert _get_coordinator(hass, _make_request()) is coord
+        coordinator, ambiguous_refused = _get_coordinator(hass, _make_request())
+        assert coordinator is coord
+        assert ambiguous_refused is False
 
     def test_returns_none_when_not_loaded(self):
         hass = MagicMock()
         hass.data = {}
-        assert _get_coordinator(hass, _make_request()) is None
+        coordinator, ambiguous_refused = _get_coordinator(hass, _make_request())
+        assert coordinator is None
+        assert ambiguous_refused is False
 
     def test_returns_none_when_domain_empty(self):
         hass = MagicMock()
         hass.data = {DOMAIN: {}}
-        assert _get_coordinator(hass, _make_request()) is None
+        coordinator, ambiguous_refused = _get_coordinator(hass, _make_request())
+        assert coordinator is None
+        assert ambiguous_refused is False
 
 
 class TestAPIConstants:

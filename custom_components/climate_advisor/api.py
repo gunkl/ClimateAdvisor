@@ -92,18 +92,44 @@ def _get_coordinator(hass: HomeAssistant, request: web.Request):
     — an arbitrary "first" entry — regardless of how many zones were
     configured, meaning the entire REST/dashboard surface was blind to any
     zone beyond the first. Now reads an optional ``entry_id`` query parameter
-    and resolves it via ``zone_registry.get_coordinator()``; when absent
-    (every existing caller not yet updated to send it), falls back to
-    ``zone_registry.get_default_coordinator()`` — which preserves today's
-    single-zone behavior exactly when only one zone is loaded, and degrades
-    to a deterministic, logged, Repairs-flagged fallback selection when more
-    than one zone is loaded (see "Transitional Safety Window" in
-    docs/multi-zone-spec.md).
+    and resolves it via ``zone_registry.resolve_zone()``, which centralizes
+    ambiguous-zone handling (Issue #885) for every one of this module's 21
+    call sites: an explicit ``entry_id`` always resolves that zone; when
+    absent and only one zone is loaded, single-zone behavior is unchanged;
+    when absent and 2+ zones are loaded, a GET degrades to a deterministic,
+    logged, Repairs-flagged guess (see "Transitional Safety Window" in
+    docs/multi-zone-spec.md) but a POST refuses to guess entirely — silently
+    actuating the wrong zone's HVAC control is a safety issue a display
+    guess is not.
+
+    Returns ``(coordinator, ambiguous_refused)``. Every call site must check
+    ``ambiguous_refused`` and return ``_ambiguous_zone_payload(hass)`` before
+    treating a ``None`` coordinator as "not loaded" — the two ``None`` causes
+    require different responses.
     """
     entry_id = request.query.get("entry_id")
-    if entry_id:
-        return zone_registry.get_coordinator(hass, entry_id)
-    return zone_registry.get_default_coordinator(hass)
+    context = f"{request.method} {request.path} from {request.remote}"
+    return zone_registry.resolve_zone(hass, entry_id, context=context, allow_guess=(request.method != "POST"))
+
+
+def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
+    """Response body for a POST request refused for ambiguous zone selection.
+
+    Issue #885. Reuses the ``zone_selection_required``/``zones``/``zone_count``
+    shape the frontend's ``loadStatus()`` already parses for its own bootstrap
+    zone-discovery flow (see ``ClimateAdvisorStatusView.get()`` below), plus a
+    ``message`` key — ``apiFetch()``/``apiPost()`` in ``frontend/index.html``
+    already surface ``body.message`` as the thrown error's text for any
+    non-2xx response, so this renders correctly in the existing UI error paths
+    (e.g. ``doAction()``) with no frontend changes required.
+    """
+    zones = zone_registry.list_zones(hass)
+    return {
+        "message": "Multiple Climate Advisor zones are configured — pass entry_id to target a specific zone.",
+        "zone_selection_required": True,
+        "zones": zones,
+        "zone_count": len(zones),
+    }
 
 
 class ClimateAdvisorStatusView(HomeAssistantView):
@@ -151,7 +177,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                     }
                 )
 
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -373,7 +401,9 @@ class ClimateAdvisorBriefingView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -415,7 +445,9 @@ class ClimateAdvisorChartDataView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -449,7 +481,9 @@ class ClimateAdvisorAutomationStateView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -465,7 +499,9 @@ class ClimateAdvisorLearningView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -502,7 +538,9 @@ class ClimateAdvisorForceReclassifyView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -519,7 +557,9 @@ class ClimateAdvisorSendBriefingView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -553,7 +593,9 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -632,7 +674,9 @@ class ClimateAdvisorConfigView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -703,7 +747,9 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -732,7 +778,9 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -764,7 +812,9 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -788,7 +838,9 @@ class ClimateAdvisorToggleAutomationView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -813,7 +865,9 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -856,7 +910,9 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -901,7 +957,9 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -1042,7 +1100,9 @@ class ClimateAdvisorInvestigationReportsView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -1060,7 +1120,9 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
         from homeassistant.util import dt as dt_util
 
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -1096,7 +1158,9 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -1117,7 +1181,9 @@ class ClimateAdvisorDeleteReportView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
@@ -1152,7 +1218,9 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
         import aiohttp
 
         hass = request.app["hass"]
-        coordinator = _get_coordinator(hass, request)
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 

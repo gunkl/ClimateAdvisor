@@ -92,23 +92,72 @@ def resolve_window_pair(
     CLAUDE.md's Observability Requirements ("WARNING when a target value is clamped
     or overridden by a guard").
 
+    Issue #878-followup: when BOTH ``dynamic_close`` and ``dynamic_open`` are real
+    (dated) datetimes, the ordering check compares them directly rather than via
+    their date-stripped ``.time()`` values. A legitimate overnight reopen (close
+    7 PM today, reopen 2 AM tomorrow) is 7 hours *after* close on the real
+    timeline, but ``time(2, 0) <= time(19, 0)`` reads as "before" on a bare clock
+    face — the deployed v0.7.31 build compared exactly that and silently dropped
+    every dynamic-pair reopen that fell after midnight, which is the ordinary
+    shape of a hot day's evening reopen, not a rare edge case. When either side is
+    a static (dateless) fallback hour, "same evening" is the only meaning
+    available, so the original same-day clock-time comparison is kept — that
+    comparison is what correctly caught the *original* #878 incident (dynamic
+    close 6 PM vs. static-fallback open 5 PM, same evening) and must not change.
+
     Returns:
         (close_time, open_time_or_None)
     """
     close = resolve_with_fallback(dynamic_close, static_close)
     open_ = resolve_with_fallback(dynamic_open, static_open)
-    if open_ is not None and close is not None and open_ <= close:
-        _LOGGER.warning(
-            "resolve_window_pair: dropping open time %s (%s) — not strictly after"
-            " resolved close time %s (%s); a close/open pair must never render with"
-            " open at or before close",
-            open_,
-            "dynamic" if dynamic_open is not None else "static fallback",
-            close,
-            "dynamic" if dynamic_close is not None else "static fallback",
-        )
-        open_ = None
+    if open_ is not None and close is not None:
+        if dynamic_close is not None and dynamic_open is not None:
+            ordered = dynamic_open > dynamic_close
+        else:
+            ordered = open_ > close
+        if not ordered:
+            _LOGGER.warning(
+                "resolve_window_pair: dropping open time %s (%s) — not strictly after"
+                " resolved close time %s (%s); a close/open pair must never render with"
+                " open at or before close",
+                open_,
+                "dynamic" if dynamic_open is not None else "static fallback",
+                close,
+                "dynamic" if dynamic_close is not None else "static fallback",
+            )
+            open_ = None
     return close, open_
+
+
+def describe_close_timing(close_time_str: str, already_reached: bool) -> str:
+    """Shared fragment for the close-time half of a window-timing sentence
+    (Issue #878-followup) — the same treatment ``describe_nat_vent_cutoff_reason()``
+    already gives the *reason* half, applied here to the *time* half.
+
+    ``already_reached`` mirrors ``compute_nat_vent_plan()``'s
+    ``nat_vent_cutoff_already_reached``: the ODE crossing scan is forward-only from
+    "now", so when the close condition is already true at the moment the curve is
+    built, the scan can only return the first available future timestamp — not a
+    genuine future prediction, just "now" rounded to the next grid point. Rendering
+    that as "Close by 7:00 PM" hours after the real (morning) crossing already
+    passed asserts a false future-scheduled event. Every caller (Hot/Warm/Mild TLDR
+    rows and conversational sentences, ``coordinator.py``'s Next User Action card)
+    must call this rather than re-deriving the same branch six times over.
+
+    Args:
+        close_time_str: the already-formatted clock time (e.g. "7:00 PM") to use
+            when the close is a genuine future prediction.
+        already_reached: whether the close condition was already true when the
+            curve started.
+
+    Returns:
+        A short phrase fragment: either the passed-through formatted time, or an
+        "already true" phrase naming the present moment instead of a false future
+        clock time.
+    """
+    if already_reached:
+        return "now"
+    return close_time_str
 
 
 def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
@@ -223,6 +272,17 @@ def compute_nat_vent_plan(
           that exact case). A future comfort_floor-specific "safe to reopen" event
           would need its own predicate (outdoor warming back toward indoor, the
           opposite direction) — out of scope here.
+      nat_vent_cutoff_already_reached: bool — Issue #878-followup: True when
+          ``nat_vent_cutoff`` equals the *first* timestamp the scan could possibly
+          have examined (the first entry in ``predicted_indoor`` with a matching
+          ``predicted_outdoor`` entry, at-or-after ``window_open_time``). Both
+          ``predicted_indoor``/``predicted_outdoor`` are forward-only from "now"
+          (built fresh each cycle), so this means the close condition was already
+          true at the moment the curve was built — not a genuine future
+          prediction, just the nearest available future grid point. Callers must
+          not render this as a scheduled future clock time (see
+          ``describe_close_timing()``); doing so produced a live "Close by 7:00 PM"
+          hours after the real morning crossing had already passed.
     """
     result: dict = {
         "nat_vent_cutoff": None,
@@ -232,6 +292,7 @@ def compute_nat_vent_plan(
         "precool_start_time": None,
         "any_nat_vent_window": False,
         "evening_open_time": None,
+        "nat_vent_cutoff_already_reached": False,
     }
 
     if not predicted_indoor or not predicted_outdoor:
@@ -293,6 +354,18 @@ def compute_nat_vent_plan(
         result["nat_vent_cutoff"] = floor_crossing
         result["nat_vent_cutoff_reason"] = "comfort_floor"
 
+    # Issue #878-followup: was the winning cutoff the very first timestamp the scan
+    # could possibly have examined? If so, the close condition was already true when
+    # the (forward-only) curve was built — the scan found "now", not a real future
+    # prediction. Reuses find_temperature_crossing() with an always-true comparator
+    # to get "the first candidate timestamp," rather than re-deriving the _after_open()
+    # + curve-alignment logic a second time (DRY).
+    if result["nat_vent_cutoff"] is not None:
+        first_candidate_ts = find_temperature_crossing(
+            predicted_indoor, predicted_outdoor, lambda ts, _o, _i: _after_open(ts)
+        )
+        result["nat_vent_cutoff_already_reached"] = result["nat_vent_cutoff"] == first_candidate_ts
+
     # ceiling_breach_time only reads the indoor curve — no pairing needed.
     for entry in predicted_indoor:
         ts_str = entry.get("ts")
@@ -335,9 +408,11 @@ def compute_nat_vent_plan(
         )
 
     _LOGGER.debug(
-        "NatVentPlan: nat_vent_cutoff=%s (%s), ceiling_breach=%s, precool_start=%s, evening_open_time=%s",
+        "NatVentPlan: nat_vent_cutoff=%s (%s, already_reached=%s), ceiling_breach=%s, precool_start=%s,"
+        " evening_open_time=%s",
         result["nat_vent_cutoff"],
         result["nat_vent_cutoff_reason"],
+        result["nat_vent_cutoff_already_reached"],
         result["ceiling_breach_time"],
         result["precool_start_time"],
         result["evening_open_time"],

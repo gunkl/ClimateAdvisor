@@ -1094,6 +1094,51 @@ class TestHotDayNextActionWindowPairOrdering:
         assert "from 5" not in result.lower()
         assert result == "Keep windows and blinds closed."
 
+    def test_already_reached_cutoff_shows_closed_not_open_until(self):
+        """Issue #878-followup: the ODE crossing scan is forward-only from "now", so
+        when nat_vent_cutoff_already_reached is True, nat_vent_cutoff is just the
+        nearest future grid point — not a real deadline. `now < _close_time` would
+        still read True for the next ~30 minutes and tell the occupant windows are
+        fine to keep open until that time, when outdoor actually rose past indoor
+        hours earlier (the real, unrecoverable morning crossing). Must show "Keep
+        windows and blinds closed." instead of "Open windows... until HH:MM"."""
+        import types
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor import coordinator as _coord_mod
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+        c = _make_classification(
+            day_type="hot",
+            hvac_mode="cool",
+            window_opportunity_morning=True,
+            window_opportunity_evening=False,
+        )
+        c.window_opportunity_morning_end = time(9, 0)
+        c.window_opportunity_evening_start = time(17, 0)
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        ae._economizer_active = False
+        coord = _make_real_coordinator(True, ae)
+        coord._compute_next_action = types.MethodType(ClimateAdvisorCoordinator._compute_next_action, coord)
+        coord.config = {"comfort_cool": 75.0, "temp_unit": "fahrenheit"}
+        coord._nat_vent_plan = {
+            "nat_vent_cutoff": datetime(2026, 7, 10, 19, 0),
+            "nat_vent_cutoff_already_reached": True,
+            "evening_open_time": None,
+        }
+        # 25 minutes before the reported cutoff — the literal `now < _close_time`
+        # comparison alone would still fire the "Open windows... until 7:00 PM" branch.
+        now_dt = datetime(2026, 7, 10, 18, 35)
+        with (
+            patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+            patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        ):
+            result = coord._compute_next_action(c, ae=ae)
+        assert "until" not in result.lower()
+        assert "7:00 PM" not in result
+        assert result == "Keep windows and blinds closed."
+
 
 class TestHotDayWindowOpportunityCandidatesRemoved:
     """HOT-day window-cooling opportunity candidates (Issue #528) were removed in

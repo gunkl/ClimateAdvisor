@@ -8191,13 +8191,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # open time rather than ever displaying one before the close it pairs with.
             threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
             _hot_plan = getattr(self, "_nat_vent_plan", None)
+            _close_dt = _hot_plan.get("nat_vent_cutoff") if _hot_plan else None
             _close_time, _evening_open_time = resolve_window_pair(
-                _hot_plan.get("nat_vent_cutoff") if _hot_plan else None,
+                _close_dt,
                 c.window_opportunity_morning_end,
                 _hot_plan.get("evening_open_time") if _hot_plan else None,
                 c.window_opportunity_evening_start,
             )
-            if c.window_opportunity_morning and _close_time is not None and now < _close_time:
+            # Issue #878-followup: the ODE crossing scan is forward-only from "now", so
+            # when the close condition is already true at compute time, nat_vent_cutoff
+            # is just the nearest future grid point — not a real deadline. `now <
+            # _close_time` would still read True for the next ~30 min and tell the
+            # occupant windows are fine to keep open, when outdoor actually rose past
+            # indoor hours earlier (the real, unrecoverable morning crossing). Treat an
+            # already-reached cutoff as already past, regardless of the literal comparison.
+            _already = _close_dt is not None and bool(_hot_plan and _hot_plan.get("nat_vent_cutoff_already_reached"))
+            if c.window_opportunity_morning and _close_time is not None and now < _close_time and not _already:
                 end_t = _close_time.strftime("%I:%M %p").lstrip("0")
                 return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})")
             elif c.window_opportunity_evening and _evening_open_time is not None and now >= _evening_open_time:

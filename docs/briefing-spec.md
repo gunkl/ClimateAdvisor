@@ -93,6 +93,13 @@ wording now matches. The "reopen windows... I'll turn off the AC" sentence only 
 AC-off action when `ceiling_breach_time < recovery_time` (i.e. the AC could plausibly have
 engaged first) — otherwise it states the reopen without an AC claim.
 
+**Window close/reopen timing invariants (Issue #878):** for the specific rules
+governing how a close/open pair is resolved together, the cross-midnight comparison
+requirement, and the `nat_vent_cutoff_already_reached` "don't claim a stale future
+time" rule, see [§7a in 08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md#7a-window-timing-invariants--read-before-touching-this-feature-issue-878)
+— read that section, including its prior-incidents table, before changing any
+close/open time wording in `briefing.py`.
+
 ## Coherence Validation (Issue #518)
 
 `tools/briefing_review.py` renders `generate_briefing()` across a `day_type` x `hvac_mode` x

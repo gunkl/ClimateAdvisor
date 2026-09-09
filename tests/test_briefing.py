@@ -19,7 +19,11 @@ from custom_components.climate_advisor.briefing import (
     generate_briefing,
 )
 from custom_components.climate_advisor.classifier import DayClassification
-from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan, resolve_window_pair
+from custom_components.climate_advisor.nat_vent_plan import (
+    compute_nat_vent_plan,
+    describe_close_timing,
+    resolve_window_pair,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -388,6 +392,24 @@ class TestHotDayWindowOpportunities:
         assert "Closed all day" not in result
         assert "10:00 AM" in result
 
+    def test_hot_day_already_past_close_uses_now_wording_not_stale_future_time(self):
+        """Issue #878-followup: the ODE crossing scan is forward-only from "now" — when
+        outdoor is already above indoor-1 at the very first curve entry, the reported
+        cutoff is just the nearest future grid point, not a genuine future prediction.
+        Live incident: an evening regen reported "Close by 7:00 PM" hours after the
+        real (morning) crossing had already passed. Must render "already"/"now"
+        wording instead of a false future clock time, in both the TLDR row and the
+        conversational body."""
+        c = _make_classification("hot", today_high=99, today_low=80, tomorrow_low=80)
+        # Outdoor already above indoor-1 at the very first entry — no genuine future
+        # crossing, and no reopen crossing either (outdoor stays high throughout).
+        indoor = _make_indoor_curve([74.0] * 6, start_hour_utc=18)
+        outdoor = _make_outdoor_curve([90.0, 91.0, 92.0, 91.0, 90.0, 89.0], start_hour_utc=18)
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "close by 7:00" not in result.lower()
+        assert "close up for the day now" in result.lower()
+        assert "close by now" in result.lower()
+
 
 class TestWarmDayBriefing:
     """Warm day briefings should mention windows and optional AC safety net."""
@@ -414,6 +436,22 @@ class TestWarmDayBriefing:
         c = _make_classification("warm", today_high=80, today_low=60)
         result = _generate(c)
         assert "cross" in result.lower() or "opposite" in result.lower()
+
+    def test_already_past_close_uses_now_wording_not_stale_future_time(self):
+        """Issue #878-followup: same defect as Hot's equivalent test, for a WARM day —
+        the forward-only ODE scan is architecturally identical across all three day
+        types, and this exact wording bug was live in _warm_day_plan()'s "Close up at
+        {HH:MM}" sentence too, not just Hot's."""
+        c = _make_classification("warm", today_high=80, today_low=60)
+        # Indoor stays above comfort_heat (70) throughout — isolates the outdoor-rise
+        # crossing path from the comfort-floor scan. Outdoor already above indoor-1 at
+        # the very first entry.
+        indoor = _make_indoor_curve([72.0, 72.0, 72.0, 72.0], start_hour_utc=10)
+        outdoor = _make_outdoor_curve([80.0, 81.0, 82.0, 81.0], start_hour_utc=10)
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "close up at" not in result.lower()
+        assert "close up now" in result.lower()
+        assert "close by now" in result.lower()
 
 
 class TestMildDayBriefing:
@@ -470,6 +508,20 @@ class TestMildDayBriefing:
         c = _make_classification("mild", today_high=68, today_low=48)
         result = _generate(c)
         assert "5" in result or "17" in result
+
+    def test_already_past_close_uses_now_wording_not_stale_future_time(self):
+        """Issue #878-followup: same defect as Hot's/Warm's equivalent test, for a MILD
+        day's "Close up by {HH:MM}" sentence."""
+        c = _make_classification("mild", today_high=68, today_low=48)
+        # Indoor stays above comfort_heat (70) throughout — isolates the outdoor-rise
+        # crossing path from the comfort-floor scan. Outdoor already above indoor-1 at
+        # the very first entry.
+        indoor = _make_indoor_curve([72.0, 72.0, 72.0, 72.0], start_hour_utc=10)
+        outdoor = _make_outdoor_curve([80.0, 81.0, 82.0, 81.0], start_hour_utc=10)
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "close up by" not in result.lower()
+        assert "close up now" in result.lower()
+        assert "close by now" in result.lower()
 
 
 class TestCoolDayBriefing:
@@ -1694,6 +1746,38 @@ class TestDeriveWarmDayEvents:
         # outdoor drops below indoor in evening -> evening_open_time is set
         assert events["evening_open_time"] is not None
 
+    def test_nat_vent_cutoff_already_reached_when_first_entry_qualifies(self):
+        """Issue #878-followup: when the very first curve entry already satisfies the
+        close condition, the crossing is "now" (the nearest future grid point), not a
+        genuine future prediction — nat_vent_cutoff_already_reached must be True. This
+        is the live production shape: an evening regen where outdoor has been above
+        indoor since the (unrecoverable, already-past) morning crossing."""
+        indoor = _make_indoor_curve([74.0, 74.0, 74.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([90.0, 91.0, 92.0], start_hour_utc=8)
+        events = compute_nat_vent_plan(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=75.0,
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 8
+        assert events["nat_vent_cutoff_already_reached"] is True
+
+    def test_nat_vent_cutoff_already_reached_false_for_genuine_future_crossing(self):
+        """Regression guard: a crossing found several hours into the curve (not the
+        first entry) must NOT be flagged as already-reached — reuses the exact fixture
+        from test_nat_vent_cutoff_when_outdoor_crosses_indoor above, where the crossing
+        is at index 2, not index 0."""
+        indoor = _make_indoor_curve([72.0, 73.0, 74.0, 75.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([65.0, 68.0, 73.0, 76.0], start_hour_utc=8)
+        events = compute_nat_vent_plan(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=75.0,
+        )
+        assert events["nat_vent_cutoff"].hour == 10
+        assert events["nat_vent_cutoff_already_reached"] is False
+
     def test_precool_start_uses_fallback_when_k_active_cool_none(self):
         """precool_start_time = ceiling_breach_time - 120 min when k_active_cool=None."""
         # breach at hour 14 UTC (start_hour=10, index 4 => temp 75.5 > 75)
@@ -2016,6 +2100,52 @@ class TestResolveWindowPairInvariant:
         with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.nat_vent_plan"):
             resolve_window_pair(_SEP_8.replace(hour=9), None, _SEP_8.replace(hour=18), None)
         assert not any(record.levelname == "WARNING" for record in caplog.records)
+
+    # ── Issue #878-followup: cross-midnight dynamic pairs ───────────────────
+    #
+    # Live incident (2026-09-08): nat_vent_cutoff=2026-09-08 19:00 (outdoor_rise),
+    # evening_open_time=2026-09-09 02:00 — a legitimate 7-hour-later overnight
+    # reopen, dropped because resolve_window_pair() compared the date-stripped
+    # `time(2, 0) <= time(19, 0)`, which reads as "before" on a bare clock face.
+    # These two cases could NOT be folded into the parametrized matrix above
+    # because that matrix's shared assertion (`open_ > close` on the *returned*
+    # bare-time values) is only valid when both sides share a calendar date —
+    # resolve_window_pair() still returns bare `time` objects for display even
+    # when the ordering decision was made on full dated datetimes, so a kept
+    # cross-midnight pair legitimately returns a `close`/`open_` pair where the
+    # bare-time comparison reads "backwards" (e.g. close=19:00, open=02:00) despite
+    # being correctly ordered on the real timeline. Exactly the reason the matrix
+    # missed this bug in the first place (root cause step 3/4) — a generic
+    # bare-time invariant assertion cannot express "correct across midnight."
+    def test_dynamic_pair_spanning_midnight_is_kept(self):
+        """The exact production shape: must NOT be dropped."""
+        close_dt = _SEP_8.replace(hour=19)
+        open_dt = _SEP_8.replace(hour=2) + timedelta(days=1)
+        close, open_ = resolve_window_pair(close_dt, None, open_dt, None)
+        assert close == time(19, 0)
+        assert open_ == time(2, 0)
+
+    def test_dynamic_pair_spanning_midnight_wrong_order_is_dropped(self):
+        """Proves the fix compares real datetimes, not 'always trust cross-day
+        pairs': a close early the *next* morning paired with an open the
+        *previous* evening is genuinely out of order even once dates are
+        considered, and must still be dropped."""
+        close_dt = _SEP_8.replace(hour=6) + timedelta(days=1)
+        open_dt = _SEP_8.replace(hour=20)
+        close, open_ = resolve_window_pair(close_dt, None, open_dt, None)
+        assert close == time(6, 0)
+        assert open_ is None
+
+
+class TestDescribeCloseTiming:
+    """Direct unit tests for describe_close_timing() (Issue #878-followup)."""
+
+    def test_already_reached_returns_now_phrase_regardless_of_time_string(self):
+        assert describe_close_timing("7:00 PM", True) == "now"
+        assert describe_close_timing("anything", True) == "now"
+
+    def test_not_already_reached_passes_time_string_through_unchanged(self):
+        assert describe_close_timing("7:00 PM", False) == "7:00 PM"
 
 
 class TestWarmDayPlanFloorWording:

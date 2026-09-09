@@ -1485,6 +1485,8 @@ don't re-diagnose from zero):
 | #869 | Briefing flip-flopped between contradictory guidance on noisy recomputes | No hysteresis on a value recomputed every cycle |
 | #876 | Hot's close time was a hardcoded 9:00 AM, disconnected from the forecast | Hot never got the ODE-crossing treatment Warm/Mild had since #518 |
 | #878 | "Close by 6:00 PM / Open 5:00 PM+" — reopen time before close time; "this morning" applied to a 6:00 PM crossing | No primitive resolved a close/open pair *together* — each side resolved independently, so a late dynamic close could pair with an earlier static-fallback open with nothing checking the two against each other |
+| #878-followup (A) | A legitimate overnight reopen (close 7:00 PM today, reopen 2:00 AM the next morning) was silently dropped | `resolve_window_pair()`'s ordering check compared date-stripped `.time()` values (`time(2,0) <= time(19,0)` reads "before" on a bare clock face) instead of the real dated datetimes — and the very invariant matrix built to catch this bug held the date constant across every test case, hiding the exact defect |
+| #878-followup (B) | "Close by 7:00 PM" shown hours after outdoor had already risen past indoor that morning — a stale future claim | The ODE crossing scan is forward-only from "now"; when the close condition is already true at compute time, the scan can only return the nearest future grid point, and every consumer rendered that identically to a genuine future prediction |
 
 **Structural fix, not another patch:** every fix before #878 added a test that
 reproduces *that* incident's exact reported numbers — proving the specific fix works,
@@ -1497,6 +1499,25 @@ that only reproduces that one incident's numbers.** The matrix tests the *shape*
 this bug (an ordering relationship) independent of which day type or which specific
 hour triggered it; a numbers-only regression test cannot catch a sibling occurrence in
 a different code path.
+
+**Lesson from #878-followup (A) — vary the date axis, not just the hour axis:** the
+original matrix enumerated {present/absent} × {before/equal/after} combinations of
+*clock hour*, but every fixture derived from one fixed calendar date — itself a form
+of verification-by-example one level deeper than the pattern this section already
+warns about. A hot day's evening reopen is *definitionally* an overnight event,
+commonly landing after midnight; any new test fixture for `resolve_window_pair()`
+must include at least one case where the dynamic close and dynamic open fall on
+different calendar dates, not only different hours of the same date.
+
+**`nat_vent_cutoff_already_reached` (Issue #878-followup B):** `compute_nat_vent_plan()`
+exposes this bool — `True` when the winning cutoff equals the very first timestamp the
+scan could possibly have examined, meaning the close condition was already true when
+the (forward-only) curve was built, not a genuine future prediction. Every consumer
+that renders a close time must branch on it via the shared `describe_close_timing()`
+fragment (mirrors `describe_nat_vent_cutoff_reason()`'s treatment of the *reason* half
+of the sentence) rather than always asserting the returned clock time as a scheduled
+future event. This only applies to the close/cutoff side — `evening_open_time` is
+scanned strictly `after` the cutoff, so it can never be "already true at curve start."
 
 ---
 

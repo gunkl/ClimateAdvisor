@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.32] — 2026-09-08
+
+- Fix #878 (followup): the previous fix for the Hot-day close/reopen contradiction introduced two further issues. A legitimate overnight window reopen (e.g. close at 7:00 PM, reopen at 2:00 AM the next morning) was being silently dropped from the briefing entirely, because the ordering check compared clock times without considering the date. Separately, when a briefing regenerates after the close condition is already true (e.g. an evening regeneration), the text could claim a stale future close time ("Close by 7:00 PM") hours after outdoor had actually crossed above indoor that morning — it now says the windows should be closed now instead. Both fixes apply to Hot, Warm, and Mild day briefings, and to the dashboard's "Next User Action" card.
+
 ## [0.7.31] — 2026-09-08
 
 - Fix #878: Hot-day briefings no longer show a window reopen time before the close time (e.g. "Close by 6:00 PM / Open 5:00 PM+"), and no longer describe an afternoon/evening crossing as "this morning." Window guidance for all day types now resolves its close and reopen times together and checks them against each other before displaying either, and real forecast data now takes precedence over a coarse eligibility estimate when they'd otherwise disagree.

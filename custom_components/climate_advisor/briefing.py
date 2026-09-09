@@ -38,6 +38,7 @@ from .const import (
 )
 from .nat_vent_plan import (
     compute_nat_vent_plan,
+    describe_close_timing,
     describe_nat_vent_cutoff_reason,
     resolve_window_pair,
     resolve_with_fallback,
@@ -460,8 +461,13 @@ def _generate_tldr_table(
         # displaying a nonsensical (or negative-width, pre-#876) close.
         if _cutoff is not None and _cutoff.time() <= c.window_open_time:
             _cutoff = None
+        # Issue #878-followup: only trust the "already reached" flag when the dynamic
+        # cutoff actually survived to be used (not reset to None by the guard above,
+        # and not falling back to the static hour) — a static fallback is never a
+        # stale "now" artifact, it's a plain configured hour.
+        _already = _cutoff is not None and bool(_events and _events.get("nat_vent_cutoff_already_reached"))
         close_time = resolve_with_fallback(_cutoff, c.window_close_time)
-        close_t = close_time.strftime(_FMT_HOUR)
+        close_t = describe_close_timing(close_time.strftime(_FMT_HOUR), _already)
         windows_val = f"Close by {close_t}"
     elif _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning) and (
         _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening)
@@ -475,7 +481,9 @@ def _generate_tldr_table(
         _close_time, _evening_open_time = resolve_window_pair(
             _close_dt, c.window_opportunity_morning_end, _evening_dt, c.window_opportunity_evening_start
         )
-        m_end = _close_time.strftime(_FMT_HOUR).lstrip("0")
+        # Issue #878-followup: same already-reached guard as the Warm/Mild row above.
+        _already = _close_dt is not None and bool(hot_events and hot_events.get("nat_vent_cutoff_already_reached"))
+        m_end = describe_close_timing(_close_time.strftime(_FMT_HOUR).lstrip("0"), _already)
         if _evening_open_time is not None:
             e_start = _evening_open_time.strftime(_FMT_HOUR).lstrip("0")
             windows_val = f"Close by {m_end} / Open {e_start}+ (<{format_temp(threshold, temp_unit)})"
@@ -485,7 +493,9 @@ def _generate_tldr_table(
             windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)})"
     elif _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning):
         _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
-        m_end = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end).strftime(_FMT_HOUR).lstrip("0")
+        _already = _close_dt is not None and bool(hot_events and hot_events.get("nat_vent_cutoff_already_reached"))
+        m_end_raw = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end).strftime(_FMT_HOUR).lstrip("0")
+        m_end = describe_close_timing(m_end_raw, _already)
         windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)})"
     elif _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening):
         _evening_dt = hot_events.get("evening_open_time") if hot_events else None
@@ -594,6 +604,11 @@ def _hot_day_plan(
     elif has_evening:
         _evening_open_time = resolve_with_fallback(_evening_open_dt, c.window_opportunity_evening_start)
 
+    # Issue #878-followup: only trust "already reached" when the dynamic close time
+    # actually survived to be used — a static fallback is a plain configured hour,
+    # never a stale "now" artifact from the forward-only ODE scan.
+    _already_close = _close_dt is not None and bool(hot_events and hot_events.get("nat_vent_cutoff_already_reached"))
+
     # Issue #558: only claim overnight pre-cool banking when it's actually expected to run
     # tonight (resolve_pre_cool_modifier() \u2014 the same gate handle_pre_cool() uses), and phrase
     # it prospectively ("tonight") rather than asserting a past event that may not have happened
@@ -617,11 +632,17 @@ def _hot_day_plan(
         m_end = _close_time.strftime(_FMT_HOUR)
         e_start = _evening_open_time.strftime(_FMT_HOUR)
         lines.append("")
-        lines.append(
-            f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
-            f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
-            f" enjoy the cross-breeze."
-        )
+        if _already_close:
+            lines.append(
+                f"Outdoor's already above {format_temp(threshold, temp_unit)} \u2014 close up for the day"
+                f" now. I'll handle the AC transition."
+            )
+        else:
+            lines.append(
+                f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
+                f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
+                f" enjoy the cross-breeze."
+            )
         lines.append("")
         lines.append(
             f"Once closed, keep blinds drawn on sun-facing windows"
@@ -637,11 +658,17 @@ def _hot_day_plan(
     elif has_morning:
         m_end = _close_time.strftime(_FMT_HOUR)
         lines.append("")
-        lines.append(
-            f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
-            f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
-            f" enjoy the cross-breeze."
-        )
+        if _already_close:
+            lines.append(
+                f"Outdoor's already above {format_temp(threshold, temp_unit)} \u2014 close up for the day"
+                f" now. I'll handle the AC transition."
+            )
+        else:
+            lines.append(
+                f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
+                f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
+                f" enjoy the cross-breeze."
+            )
         lines.append("")
         lines.append(
             f"Once closed, keep blinds drawn on sun-facing windows"
@@ -722,6 +749,12 @@ def _warm_day_plan(
     if c.windows_recommended and c.window_open_time:
         if _nat_vent_cutoff is not None:
             close_t = _nat_vent_cutoff.strftime(_FMT_HOUR)
+            # Issue #878-followup: the ODE crossing scan is forward-only from "now", so
+            # when the close condition is already true at render time, the scan can only
+            # return the nearest future grid point \u2014 not a real future prediction. Asserting
+            # it as "Close up at {HH:MM}" hours after the real (earlier) crossing already
+            # passed is a false future-scheduled claim.
+            _already = bool(_events and _events.get("nat_vent_cutoff_already_reached"))
             # Issue #535: two distinct reasons the cutoff can fire \u2014 outdoor air rising
             # above indoor (the original predicate), or indoor forecast to reach the
             # comfort floor first. Same close time either way; different sentence why
@@ -743,7 +776,15 @@ def _warm_day_plan(
                     _nat_vent_cutoff_reason,
                 )
                 _effective_reason = "outdoor_rise"
-            lines.append(f"Close up at {close_t} {describe_nat_vent_cutoff_reason(_effective_reason)}.")
+            if _already and _effective_reason == "outdoor_rise":
+                # "before outdoor air warms past indoor" reads backwards once that's
+                # already happened \u2014 a self-contained present-tense sentence instead
+                # of composing the (now-wrong-tense) reason fragment.
+                lines.append("Close up now \u2014 outdoor's already warmed past indoor.")
+            else:
+                close_phrase = describe_close_timing(close_t, _already)
+                prep = "" if _already else "at "
+                lines.append(f"Close up {prep}{close_phrase} {describe_nat_vent_cutoff_reason(_effective_reason)}.")
         else:
             lines.append(
                 "Windows are open to catch the cool morning air \u2014"
@@ -858,6 +899,10 @@ def _mild_day_plan(
     _close_time = resolve_with_fallback(_mild_cutoff, c.window_close_time)
     if _close_time:
         close_t = _close_time.strftime(_FMT_HOUR)
+        # Issue #878-followup: same already-reached guard as _warm_day_plan() — only
+        # meaningful when the dynamic cutoff is actually in play (a static fallback
+        # hour is never a stale "now" artifact).
+        _already = _mild_cutoff is not None and bool(mild_events and mild_events.get("nat_vent_cutoff_already_reached"))
         # Issue #847: same reason branch + #430 live sanity check as _warm_day_plan()
         # — only meaningful when the ODE-derived cutoff (with its reason) is actually
         # in play; the static classifier-hour fallback has no reason to branch on.
@@ -874,15 +919,24 @@ def _mild_day_plan(
                 _mild_cutoff_reason,
             )
             _effective_reason = "outdoor_rise"
-        reason_fragment = (
-            "to trap the warmth" if _mild_cutoff is None else describe_nat_vent_cutoff_reason(_effective_reason)
-        )
         lines.append("")
-        lines.append(
-            f"Close up by {close_t} {reason_fragment}. If it dips below"
-            f" {format_temp(comfort_heat - 2, temp_unit)} tonight, I'll bring the heater back on"
-            f" automatically."
-        )
+        if _already and _effective_reason == "outdoor_rise":
+            lines.append(
+                f"Close up now — outdoor's already warmed past indoor. If it dips below"
+                f" {format_temp(comfort_heat - 2, temp_unit)} tonight, I'll bring the heater back on"
+                f" automatically."
+            )
+        else:
+            reason_fragment = (
+                "to trap the warmth" if _mild_cutoff is None else describe_nat_vent_cutoff_reason(_effective_reason)
+            )
+            close_phrase = describe_close_timing(close_t, _already)
+            prep = "" if _already else "by "
+            lines.append(
+                f"Close up {prep}{close_phrase} {reason_fragment}. If it dips below"
+                f" {format_temp(comfort_heat - 2, temp_unit)} tonight, I'll bring the heater back on"
+                f" automatically."
+            )
 
     # Issue #876: MILD days had no evening-reopen sentence at all — new, mirroring
     # _warm_day_plan()'s equivalent (same outdoor_rise-only gate; see

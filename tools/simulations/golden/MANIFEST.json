@@ -457,5 +457,15 @@
     "sha256": "3b37ff08a0e578265f122d9df9a2210e81c0237823b7f9f9d268811b2464bc98",
     "signed": "2026-08-22",
     "issue": 498
+  },
+  "issue_882_sealed_house_whf_override": {
+    "sha256": "06044ee94af8376230512f26c8259576d86044462adfb36d401c59d1845fd35a",
+    "signed": "2026-09-09",
+    "issue": 882
+  },
+  "issue_764_bedtime_economizer_teardown_gate": {
+    "sha256": "edc81ab52b904b3e0aa436c6e9c0b3107db86862799f84bb6812bf8cd4abe1bb",
+    "signed": "2026-09-09",
+    "issue": 764
   }
 }

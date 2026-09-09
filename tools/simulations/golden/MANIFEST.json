@@ -434,8 +434,8 @@
     "issue": 645
   },
   "issue_677_rf_timer_restart_resume": {
-    "sha256": "aa80d2ce1b9089551ce960ba7a8fe37c01339505ba22dbefb508758a1352aff1",
-    "signed": "2026-08-22",
+    "sha256": "a13c3ae66502b833868508983b0dd612e5f7aa1d5da2403e8950e5e1b80c52d6",
+    "signed": "2026-09-09",
     "issue": 677
   },
   "restart_whf_ac_mutex_backstop_race": {

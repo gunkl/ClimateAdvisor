@@ -69,7 +69,14 @@ def _build_coord_with_fan_running(remote_timer_provenance):
             attributes={"fan_mode": "on", "hvac_action": "fan", "hvac_modes": ["off", "heat", "cool"]},
         ),
     )
-    coordinator._resolved_sensors = []  # no windows open — isolate the fan-reconcile path
+    # Issue #882: a window must be open for the RF-timer-restart re-arm branch to
+    # re-arm at all (the sealed-house guard now checks any_sensor_open before
+    # re-arming an override) — this test's real subject is the shadow-FSM mirror
+    # gap (#707), which only reproduces when the inner handle_fan_manual_override()
+    # call actually fires, so a real open sensor is required to isolate that path
+    # the same way the prior "no sensors at all" setup intended to.
+    coordinator._resolved_sensors = ["binary_sensor.window"]
+    fake_hass.states.set("binary_sensor.window", FakeState(state="on", attributes={}))
     coordinator._read_live_remote_timer_provenance = lambda: remote_timer_provenance
     return coordinator, fake_hass, scheduler, event_log
 

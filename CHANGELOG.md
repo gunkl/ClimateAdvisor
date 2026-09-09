@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.34] — 2026-09-09
+
+- Fix #882: a whole-house fan running under a manual RF-remote timer override now stops immediately when all monitored doors/windows close, instead of continuing to run against a sealed house until the timer happened to expire on its own.
+
 ## [0.7.33] — 2026-09-08
 
 - Fix #878 (followup): a Hot-day window reopen time could be delayed for hours because it was being measured against the overnight pre-cool banking target (which can be significantly colder than the normal comfort setting) instead of the actual comfort ceiling — reopen guidance now reflects when outdoor genuinely gets cool enough to skip the AC, not how deep the night's own thermal-banking target happens to be. The reopen time also no longer claims a specific outdoor temperature threshold that was never actually the value gating it. Separately, the dashboard chart's forward-looking "windows recommended" indicator never showed a nat-vent opportunity on Hot days at all (only on Warm/Mild days) — it now correctly reflects Hot-day morning/evening window opportunities the same way the briefing text already did.

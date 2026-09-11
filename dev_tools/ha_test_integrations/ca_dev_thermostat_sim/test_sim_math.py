@@ -79,11 +79,17 @@ def _reference_simulate_indoor_physics(
     comfort_heat: float,
     comfort_cool: float,
     hvac_mode: str | None = None,
+    clamp_bound: float | None = None,
 ) -> float:
-    """Hand-transcribed copy of coordinator.py:9313-9363, for verification only.
+    """Hand-transcribed copy of coordinator.py's _simulate_indoor_physics, for
+    verification only.
 
     climate.py does NOT use this function — it imports the real one. See the
-    module docstring above for why this duplicate exists.
+    module docstring above for why this duplicate exists. `clamp_bound`
+    mirrors the Issue #887 parameter: when None, the clamp target defaults to
+    `setpoint` (original behavior); climate.py passes target±deadband instead
+    so the simulated compressor can actually reach its configured deadband
+    edge before the FSM shuts it off.
     """
     k_p = k_passive
     q = 0.0
@@ -105,11 +111,12 @@ def _reference_simulate_indoor_physics(
         t_outdoor + (t_start - t_outdoor) * exp_kp + (q / k_p) * (exp_kp - 1) if k_p != 0 else t_start + q * dt_hours
     )
 
-    if setpoint is not None:
+    bound = setpoint if clamp_bound is None else clamp_bound
+    if bound is not None:
         if q > 0:
-            t_next = min(t_next, setpoint)
+            t_next = min(t_next, bound)
         elif q < 0:
-            t_next = max(t_next, setpoint)
+            t_next = max(t_next, bound)
     return t_next
 
 
@@ -176,8 +183,8 @@ class _ReferenceCompressorFSM:
                     self.compressor_on = True
                     self.last_on_ts = now
             else:
-                wants_off = (mode == "heat" and current_temp >= target_temp) or (
-                    mode == "cool" and current_temp <= target_temp
+                wants_off = (mode == "heat" and current_temp >= target_temp + deadband) or (
+                    mode == "cool" and current_temp <= target_temp - deadband
                 )
                 can_turn_off = self.last_on_ts is None or (now - self.last_on_ts) >= self.min_run_seconds
                 if wants_off and can_turn_off:
@@ -235,49 +242,53 @@ def main() -> None:
     on = fsm.tick(now=1, hvac_mode="cool", current_temp=77.5, target_temp=76.0)
     _check_bool("cool: turns on exactly at deadband edge (77.5 >= 77.5)", on, True)
 
-    # Case 6: once on, compressor does NOT turn off until reaching setpoint — even
-    # though it's already well inside the deadband. min_run_seconds=0 so dwell isn't
-    # the reason it stays on here; only "hasn't reached target yet" is.
+    # Case 6 (Issue #887): once on, compressor does NOT turn off until reaching the
+    # deadband edge on the FAR side of setpoint — not the bare setpoint itself.
+    # target=70, deadband_heat=1.5 -> turn-off threshold is 71.5. min_run_seconds=0
+    # so dwell isn't the reason it stays on here; only "hasn't crossed 71.5 yet" is.
     fsm = _ReferenceCompressorFSM(deadband_heat_f=1.5, min_run_seconds=0, min_off_seconds=0)
     fsm.tick(now=0, hvac_mode="heat", current_temp=68.0, target_temp=70.0)  # crosses on
     _check_bool("heat: compressor is on after crossing threshold", fsm.compressor_on, True)
-    on = fsm.tick(now=60, hvac_mode="heat", current_temp=69.9, target_temp=70.0)
-    _check_bool("heat: stays on below setpoint (69.9 < 70.0)", on, True)
-    on = fsm.tick(now=61, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
-    _check_bool("heat: turns off exactly at setpoint (70.0 >= 70.0)", on, False)
+    on = fsm.tick(now=60, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
+    _check_bool("heat: stays on at setpoint, below turn-off edge (70.0 < 71.5)", on, True)
+    on = fsm.tick(now=61, hvac_mode="heat", current_temp=71.4, target_temp=70.0)
+    _check_bool("heat: stays on just below turn-off edge (71.4 < 71.5)", on, True)
+    on = fsm.tick(now=62, hvac_mode="heat", current_temp=71.5, target_temp=70.0)
+    _check_bool("heat: turns off exactly at turn-off edge (71.5 >= 71.5)", on, False)
 
-    # Case 7: min_run_seconds delays a turn-off that the deadband/setpoint condition
-    # alone would have triggered. Compressor turns on at t=0; setpoint is reached at
-    # t=60s, well before min_run_seconds=300 has elapsed — it must stay on until t=300.
+    # Case 7: min_run_seconds delays a turn-off that the deadband condition alone
+    # would have triggered. Compressor turns on at t=0; the turn-off edge (71.5) is
+    # reached at t=60s, well before min_run_seconds=300 has elapsed — it must stay
+    # on until t=300.
     fsm = _ReferenceCompressorFSM(deadband_heat_f=1.5, min_run_seconds=300, min_off_seconds=0)
     fsm.tick(now=0, hvac_mode="heat", current_temp=68.0, target_temp=70.0)  # crosses on
-    on = fsm.tick(now=60, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
-    _check_bool("heat: min_run_seconds holds compressor on despite reaching setpoint", on, True)
-    on = fsm.tick(now=299, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
+    on = fsm.tick(now=60, hvac_mode="heat", current_temp=71.5, target_temp=70.0)
+    _check_bool("heat: min_run_seconds holds compressor on despite reaching turn-off edge", on, True)
+    on = fsm.tick(now=299, hvac_mode="heat", current_temp=71.5, target_temp=70.0)
     _check_bool("heat: still held on just before min_run_seconds elapses", on, True)
-    on = fsm.tick(now=300, hvac_mode="heat", current_temp=70.0, target_temp=70.0)
+    on = fsm.tick(now=300, hvac_mode="heat", current_temp=71.5, target_temp=70.0)
     _check_bool("heat: turns off once min_run_seconds has elapsed", on, False)
 
-    # Case 8: min_off_seconds delays a turn-on that the deadband condition alone would
-    # have triggered. Compressor turns off at t=0 (reaches setpoint); indoor drifts back
-    # below the deadband threshold at t=60s, well before min_off_seconds=300 has
-    # elapsed — it must stay off until t=300.
+    # Case 8: min_off_seconds delays a turn-on that the deadband condition alone
+    # would have triggered. Compressor turns off at t=1 (reaches the 71.5 turn-off
+    # edge); indoor drifts back below the turn-on threshold (68.5) at t=61s, well
+    # before min_off_seconds=300 has elapsed — it must stay off until t=300.
     fsm = _ReferenceCompressorFSM(deadband_heat_f=1.5, min_run_seconds=0, min_off_seconds=300)
     fsm.tick(now=0, hvac_mode="heat", current_temp=68.0, target_temp=70.0)  # crosses on
-    fsm.tick(now=1, hvac_mode="heat", current_temp=70.0, target_temp=70.0)  # crosses off
-    _check_bool("heat: compressor is off after reaching setpoint", fsm.compressor_on, False)
-    on = fsm.tick(now=61, hvac_mode="heat", current_temp=68.0, target_temp=70.0)
+    fsm.tick(now=1, hvac_mode="heat", current_temp=71.5, target_temp=70.0)  # crosses off
+    _check_bool("heat: compressor is off after reaching turn-off edge", fsm.compressor_on, False)
+    on = fsm.tick(now=61, hvac_mode="heat", current_temp=68.5, target_temp=70.0)
     _check_bool("heat: min_off_seconds holds compressor off despite crossing deadband edge again", on, False)
-    on = fsm.tick(now=301, hvac_mode="heat", current_temp=68.0, target_temp=70.0)
+    on = fsm.tick(now=301, hvac_mode="heat", current_temp=68.5, target_temp=70.0)
     _check_bool("heat: turns on once min_off_seconds has elapsed", on, True)
 
     print()
     print("All hand-verified cases pass. This confirms the formula transcribed")
-    print("from coordinator.py:9313-9363 is internally consistent, but it does")
-    print("NOT confirm the transcription itself is byte-for-byte identical to")
-    print("the real function — that requires a real import, which needs a")
-    print("`homeassistant` package not present in this environment. Verify on")
-    print("a real HA instance, or re-run this check with the import swapped in")
+    print("from coordinator.py's _simulate_indoor_physics is internally consistent,")
+    print("but it does NOT confirm the transcription itself is byte-for-byte")
+    print("identical to the real function — that requires a real import, which")
+    print("needs a `homeassistant` package not present in this environment. Verify")
+    print("on a real HA instance, or re-run this check with the import swapped in")
     print("once `homeassistant` is installed locally.")
 
 

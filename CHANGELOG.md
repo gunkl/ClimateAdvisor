@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.36] — 2026-09-10
+
+- Fix #887: no user-visible change. The dev-only thermostat simulator used for multi-zone testing was applying its configured swing/deadband only on HVAC turn-on, shutting off the instant indoor temperature reached setpoint instead of overshooting/undershooting by the configured amount — producing an unrealistic flat-spike temperature trace instead of a real hysteresis swing. Fixed to apply the deadband symmetrically on both turn-on and turn-off, and added a backward-compatible optional parameter to the shared ODE step function (default unchanged, only the simulator opts in) so the simulated temperature can actually reach the deadband edge instead of being clamped to the bare setpoint. A companion investigation used live production chart_log data to confirm the real (production) swing measurement shown on the dashboard is accurate and needed no change — see Issue #887 for the data.
+
 ## [0.7.35] — 2026-09-09
 
 - Fix #885: on a multi-zone install, an automated action (disable automation, force reclassify, cancel override, etc.) sent without picking a zone now gets a clear "select a zone" error instead of silently applying to the wrong zone; the underlying warning also now records which request caused it.

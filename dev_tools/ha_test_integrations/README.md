@@ -65,8 +65,10 @@ tick-frequency switching unrealistic:
 
 - **Hysteresis (deadband).** The compressor turns *on* only once indoor
   temperature crosses `target_temperature ± deadband_{heat,cool}_f`, and
-  turns back *off* once indoor temperature returns to `target_temperature`
-  — a 1-2°F swing band, not an exact-setpoint trigger.
+  turns back *off* only once indoor temperature crosses that same deadband
+  edge on the far side of setpoint (`target_temperature ± deadband_{heat,cool}_f`
+  again, not the bare setpoint) — a symmetric round-trip swing band, not an
+  exact-setpoint trigger on either side (Issue #887).
 - **Short-cycle protection (dwell timers).** Once the compressor starts, it
   stays on for at least `min_run_seconds` even if it reaches setpoint
   sooner; once it stops, it stays off for at least `min_off_seconds` even
@@ -149,8 +151,8 @@ Reconfigure**. This reloads the entry with the new values immediately.
 | `comfort_cool` | number | 76 | Comfort ceiling (°F) — passed through to the ODE clamp logic |
 | `outdoor_source` | entity (weather or sensor) | — required | Where outdoor temperature is read from each tick |
 | `tick_seconds` | number | 30 | How often the simulation advances (real elapsed wall time drives the math, not this number) |
-| `deadband_heat_f` | number | 1.5 | Heat mode: compressor turns **on** once indoor temp falls to `target_temperature - deadband_heat_f`, and **off** once indoor temp rises back to `target_temperature` |
-| `deadband_cool_f` | number | 1.5 | Cool mode: compressor turns **on** once indoor temp rises to `target_temperature + deadband_cool_f`, and **off** once indoor temp falls back to `target_temperature` |
+| `deadband_heat_f` | number | 1.5 | Heat mode: compressor turns **on** once indoor temp falls to `target_temperature - deadband_heat_f`, and **off** once indoor temp rises to `target_temperature + deadband_heat_f` |
+| `deadband_cool_f` | number | 1.5 | Cool mode: compressor turns **on** once indoor temp rises to `target_temperature + deadband_cool_f`, and **off** once indoor temp falls to `target_temperature - deadband_cool_f` |
 | `min_run_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays on once started, even if it reaches setpoint sooner |
 | `min_off_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays off once stopped, even if a deadband edge is crossed again sooner |
 
@@ -200,9 +202,9 @@ instance by a human before being trusted. The one exception:
 transcribed from `_simulate_indoor_physics` (passive decay, active heating,
 and a clamp-triggering long-dt cooling case), plus the deadband/dwell-timer
 switching logic described above (compressor doesn't turn on before crossing
-the deadband edge, doesn't turn off before reaching setpoint, and
-`min_off_seconds`/`min_run_seconds` correctly delay a transition the
-deadband alone would have triggered) — run it with
+the near-side deadband edge, doesn't turn off before crossing the far-side
+deadband edge, and `min_off_seconds`/`min_run_seconds` correctly delay a
+transition the deadband alone would have triggered) — run it with
 `python dev_tools/ha_test_integrations/ca_dev_thermostat_sim/test_sim_math.py`.
 It is not a substitute for actually importing the real function once
 `homeassistant` is installed; see that script's docstring for why the import

@@ -10025,6 +10025,7 @@ def _simulate_indoor_physics(
     comfort_heat: float,
     comfort_cool: float,
     hvac_mode: str | None = None,
+    clamp_bound: float | None = None,
 ) -> float:
     """Advance indoor temperature by dt_hours using the two-parameter ODE.
 
@@ -10034,6 +10035,12 @@ def _simulate_indoor_physics(
     Pass hvac_mode="heat" or "cool" for correct behavior with sleep setback setpoints
     (sleep_heat < comfort_heat). When hvac_mode is None, falls back to threshold
     inference — only valid for comfort-range setpoints.
+
+    clamp_bound: overrides the overshoot/undershoot clamp target (normally `setpoint`).
+    Defaults to None, which preserves the original clamp-to-setpoint behavior used by
+    the production predicted-indoor forecast. Callers that need to model a real
+    hysteresis band (e.g. a simulated thermostat allowing overshoot to
+    setpoint+deadband before shutting off) pass the deadband-adjusted bound instead.
     """
     import math
 
@@ -10058,12 +10065,14 @@ def _simulate_indoor_physics(
         t_outdoor + (t_start - t_outdoor) * exp_kp + (q / k_p) * (exp_kp - 1) if k_p != 0 else t_start + q * dt_hours
     )
 
-    # Clamp: heating won't overshoot setpoint; cooling won't undershoot
-    if setpoint is not None:
+    # Clamp: heating won't overshoot the bound; cooling won't undershoot it.
+    # clamp_bound defaults to setpoint (original behavior) when not overridden.
+    _bound = setpoint if clamp_bound is None else clamp_bound
+    if _bound is not None:
         if q > 0:
-            t_next = min(t_next, setpoint)
+            t_next = min(t_next, _bound)
         elif q < 0:
-            t_next = max(t_next, setpoint)
+            t_next = max(t_next, _bound)
     return t_next
 
 

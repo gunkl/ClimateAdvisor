@@ -138,6 +138,52 @@ class TestSimulateIndoorPhysics:
         assert t_next < t_in  # passive decay pulls it down
 
 
+class TestSimulateIndoorPhysicsClampBound:
+    """Unit tests for the optional clamp_bound param (Issue #887).
+
+    clamp_bound overrides the overshoot/undershoot clamp target (normally
+    `setpoint`). Default None must be byte-identical to current behavior —
+    the dev thermostat simulator is the only caller that passes it, to let
+    a simulated compressor swing to a configured deadband edge instead of
+    being clamped to the bare setpoint.
+    """
+
+    def test_default_matches_setpoint_clamp(self):
+        """clamp_bound omitted == clamp_bound=None == clamp to setpoint (unchanged)."""
+        t_in, t_out, k_p, k_a = 75.5, 85.0, -0.05, -15.0
+        without_kwarg = _simulate_indoor_physics(t_in, t_out, k_p, k_a, 5.0, 75.0, comfort_heat=70, comfort_cool=75)
+        with_none = _simulate_indoor_physics(
+            t_in, t_out, k_p, k_a, 5.0, 75.0, comfort_heat=70, comfort_cool=75, clamp_bound=None
+        )
+        assert without_kwarg == with_none == pytest.approx(75.0)
+
+    def test_clamp_bound_overrides_setpoint_for_heating(self):
+        """Heating overshoots past setpoint up to the overridden clamp_bound."""
+        t_in, t_out, k_p, k_a = 68.0, 90.0, -0.05, 15.0  # aggressive heating
+        t_next = _simulate_indoor_physics(
+            t_in, t_out, k_p, k_a, 5.0, 70.0, comfort_heat=65, comfort_cool=75, hvac_mode="heat", clamp_bound=71.5
+        )
+        assert t_next == pytest.approx(71.5)
+
+    def test_clamp_bound_overrides_setpoint_for_cooling(self):
+        """Cooling undershoots past setpoint down to the overridden clamp_bound."""
+        t_in, t_out, k_p, k_a = 77.0, 60.0, -0.05, -15.0  # aggressive cooling
+        t_next = _simulate_indoor_physics(
+            t_in, t_out, k_p, k_a, 5.0, 76.0, comfort_heat=65, comfort_cool=80, hvac_mode="cool", clamp_bound=74.5
+        )
+        assert t_next == pytest.approx(74.5)
+
+    def test_clamp_bound_ignored_when_hvac_inactive(self):
+        """clamp_bound has no effect when q == 0 (no active HVAC contribution)."""
+        t_in, t_out, k_p = 72.0, 50.0, -0.1
+        t_next = _simulate_indoor_physics(
+            t_in, t_out, k_p, None, 1.0, None, comfort_heat=70, comfort_cool=75, clamp_bound=999.0
+        )
+        exp_kp = math.exp(k_p * 1.0)
+        expected = t_out + (t_in - t_out) * exp_kp
+        assert t_next == pytest.approx(expected, abs=0.001)
+
+
 # ---------------------------------------------------------------------------
 # TestBuildPredictedIndoorFuturePhysics
 # ---------------------------------------------------------------------------

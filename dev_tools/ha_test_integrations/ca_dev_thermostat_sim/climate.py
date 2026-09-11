@@ -5,9 +5,13 @@ Dev-only, never shipped — see dev_tools/ha_test_integrations/README.md.
 Reuses the real Climate Advisor ODE step function (_simulate_indoor_physics)
 so this simulator can never drift from production thermal-model behavior
 (DRY rule, CLAUDE.md). That function lives in
-custom_components/climate_advisor/coordinator.py:9519-9569 as a pure,
-module-level function with no instance-state dependency, so it can be
-imported directly.
+custom_components/climate_advisor/coordinator.py as a pure, module-level
+function with no instance-state dependency, so it can be imported directly.
+This simulator passes the optional `clamp_bound` kwarg (Issue #887) so
+overshoot/undershoot can swing to the configured deadband edge instead of
+being clamped to the bare setpoint — the production forecast caller
+(_build_predicted_indoor_future) omits it and keeps the original
+clamp-to-setpoint behavior.
 
 NOTE ON HA VERSION: ClimateEntity/RestoreEntity's API shape used here
 (hvac_modes, target_temperature, current_temperature, async_get_last_state,
@@ -385,8 +389,8 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
                         self._target_temp,
                     )
             else:
-                wants_off = (mode == "heat" and self._current_temp >= self._target_temp) or (
-                    mode == "cool" and self._current_temp <= self._target_temp
+                wants_off = (mode == "heat" and self._current_temp >= self._target_temp + deadband) or (
+                    mode == "cool" and self._current_temp <= self._target_temp - deadband
                 )
                 can_turn_off = (
                     self._last_on_ts is None or (now - self._last_on_ts).total_seconds() >= self._min_run_seconds
@@ -405,6 +409,13 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._actively_driving = self._compressor_on
         k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if self._compressor_on else None
 
+        # Allow indoor temp to actually swing to the deadband edge instead of
+        # clamping to the bare setpoint (which would make wants_off's deadband
+        # comparison above unreachable — see Issue #887).
+        clamp_bound = None
+        if mode is not None and self._target_temp is not None and deadband is not None:
+            clamp_bound = self._target_temp + deadband if mode == "heat" else self._target_temp - deadband
+
         self._current_temp = _simulate_indoor_physics(
             self._current_temp,
             outdoor_temp,
@@ -415,6 +426,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             comfort_heat=self._comfort_heat,
             comfort_cool=self._comfort_cool,
             hvac_mode=mode,
+            clamp_bound=clamp_bound,
         )
         self._last_update_ts = now
         self.async_write_ha_state()

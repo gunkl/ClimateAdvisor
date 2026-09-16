@@ -102,8 +102,9 @@ def resolve_occupancy_target(schedules: list[Schedule], now: datetime) -> str | 
 class ZoneOccupancyState:
     """Shared per-config-entry state connecting the scheduler evaluation (driven by
     the climate entity's own physics tick — see climate.py's _async_tick(), Issue
-    #898 decision: reuse the existing tick, no second timer) to the four occupancy
-    switch entities it updates.
+    #898 decision: reuse the existing tick, no second timer) to the three occupancy
+    switch entities it updates (home/vacation/guest — see switch.py's module
+    docstring for why there is no fourth "away" switch).
 
     Not a DataUpdateCoordinator — there's no polling/fetching involved, just a
     small shared object two platforms both reference via hass.data, the same
@@ -116,11 +117,23 @@ class ZoneOccupancyState:
 
     def evaluate(self, now: datetime) -> None:
         """Called once per physics tick. Determines the scheduled occupancy target
-        (if any) and updates every registered switch entity to match — exactly one
-        switch on at a time when a schedule is active, matching the "one target per
-        schedule entry" decision (Issue #898)."""
+        (if any) and updates every registered switch entity to match.
+
+        ``resolve_occupancy_target()`` can return "away" even though there is no
+        "Away" switch entity (see switch.py's module docstring — production has no
+        CONF_AWAY_TOGGLE, it derives Away from the Home switch being off). So this
+        maps the 4-valued schedule target onto the 3 real switches (home/vacation/
+        guest) the same way production's own decide_occupancy_priority() reads
+        them: "home" -> Home on; "away" -> Home off (and nothing else on); "vacation"/
+        "guest" -> that one switch on, Home off. Exactly one switch on at a time,
+        or none for "away" — matching the "one target per schedule entry" decision
+        (Issue #898), corrected to match production's real toggle model (bug found
+        live 2026-09-16).
+        """
         target = resolve_occupancy_target(self.schedules, now)
         if target is None:
             return
         for state, switch in self.switches.items():
+            # "away" has no switch of its own — it's represented by the Home
+            # switch being off, so it never matches any registered switch's state.
             switch.set_occupancy_active(state == target)

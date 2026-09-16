@@ -40,7 +40,7 @@ PLATFORMS = ["climate", "switch", "number"]
 
 # Occupancy scheduling (Issue #898). Reuses production's scheduler.Schedule dataclass
 # directly (see occupancy_schedule.py) — these are just the occupancy-state labels this
-# fixture's switches represent, matching climate_advisor's own OCCUPANCY_HOME/AWAY/
+# fixture's schedules can target, matching climate_advisor's own OCCUPANCY_HOME/AWAY/
 # VACATION/GUEST constants by value (not imported — those are plain strings in
 # climate_advisor's const.py, duplicating the four literal values here is not a DRY
 # violation the way reimplementing schedule-matching logic would be).
@@ -49,6 +49,21 @@ OCCUPANCY_AWAY = "away"
 OCCUPANCY_VACATION = "vacation"
 OCCUPANCY_GUEST = "guest"
 OCCUPANCY_STATES = (OCCUPANCY_HOME, OCCUPANCY_AWAY, OCCUPANCY_VACATION, OCCUPANCY_GUEST)
+
+# Bug fix (reported live 2026-09-16): the switch PLATFORM must NOT create one entity
+# per OCCUPANCY_STATES value. Production's real occupancy config
+# (climate_advisor/const.py) only has three toggle fields — CONF_HOME_TOGGLE,
+# CONF_VACATION_TOGGLE, CONF_GUEST_TOGGLE. There is no CONF_AWAY_TOGGLE: production
+# derives "away" from the home toggle being OFF (occupancy_priority.py's
+# guest > vacation > home/away priority chain), not from a fourth entity. The
+# original switch.py created a standalone "Away" switch that production can never
+# read (nothing to point CONF_AWAY_TOGGLE at, because it doesn't exist) and that
+# could disagree with the Home switch (e.g. both on at once) in a way production's
+# real model has no way to represent. SWITCH_OCCUPANCY_STATES is the three entities
+# that actually get created; OCCUPANCY_STATES above stays four-valued because a
+# *schedule* can still legitimately target "away" — it just resolves onto the Home
+# switch being turned off, not a fourth switch (see occupancy_schedule.py).
+SWITCH_OCCUPANCY_STATES = (OCCUPANCY_HOME, OCCUPANCY_VACATION, OCCUPANCY_GUEST)
 
 CONF_OCCUPANCY_SCHEDULES = "occupancy_schedules"  # list[dict] — see occupancy_schedule.py
 CONF_MAX_OCCUPANCY_SCHEDULES = 10  # generous vs. production's MAX_SCHEDULES=5 — dev tooling, not user config sprawl

@@ -101,23 +101,32 @@ either) — it only needs to accept and report the command correctly.
 Each zone (config entry) also gets a `switch` and a `number` platform, in
 addition to `climate`:
 
-- **Four occupancy switches** — `switch.<zone>_occupancy_home/away/vacation/guest`.
+- **Three occupancy switches** — `switch.<zone>_occupancy_home/vacation/guest`.
   Point `climate_advisor`'s own occupancy config
   (`CONF_HOME_TOGGLE`/`CONF_VACATION_TOGGLE`/`CONF_GUEST_TOGGLE`) at whichever
   of these your test scenario needs — this requires **zero** `climate_advisor`
   changes, confirmed directly from `_is_toggle_on()` (`coordinator.py:1802-1814`),
   which only ever checks `state.state == "on"` against whatever entity_id it's
-  configured with. These switches can always be toggled manually from a
-  dashboard in addition to being driven by the scheduler below.
+  configured with. There is **no separate "Away" switch** — production has no
+  `CONF_AWAY_TOGGLE` field; it derives Away from the Home switch being off
+  (`occupancy_priority.py`'s guest > vacation > home/away chain), so simulating
+  Away means turning the Home switch off, not pointing at a fourth entity. (An
+  earlier version of this fixture shipped a standalone Away switch that
+  production could never be configured to read — fixed live 2026-09-16.) These
+  switches can always be toggled manually from a dashboard in addition to being
+  driven by the scheduler below.
 - **Occupancy scheduler** — configured via this integration's own Options flow
   (gear icon on the zone → manage occupancy schedules), day-of-week + time
-  window + target occupancy state per entry, mirroring the real TOU calendar's
-  add/edit/remove UX. Reuses `custom_components/climate_advisor/scheduler.py`'s
-  `Schedule`/`is_schedule_active_at()` directly — same DRY precedent as the ODE
-  physics reuse above — rather than a second day-of-week/time matcher. Evaluated
-  on the same physics tick as `_async_tick()`, not a second timer. Exactly one
-  occupancy state is active at a time; a schedule only ever sets its own target
-  switch on and the others off when it's covering "now" — it never forces a
+  window + target occupancy state per entry (still 4 choices — home/away/
+  vacation/guest — "away" is a valid schedule target, it just resolves onto the
+  Home switch turning off rather than a switch of its own), mirroring the real
+  TOU calendar's add/edit/remove UX. Reuses
+  `custom_components/climate_advisor/scheduler.py`'s `Schedule`/
+  `is_schedule_active_at()` directly — same DRY precedent as the ODE physics
+  reuse above — rather than a second day-of-week/time matcher. Evaluated on the
+  same physics tick as `_async_tick()`, not a second timer. Exactly one switch
+  on at a time (none, for "away") — a schedule only ever sets its own target's
+  switch on and the others off when it's covering "now"; it never forces a
   default state when nothing is scheduled.
 - **Manual current-temperature override** — `number.<zone>_set_current_temperature`.
   A one-shot jump to a new simulated indoor temperature (e.g. to instantly test

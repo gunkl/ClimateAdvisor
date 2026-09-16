@@ -151,6 +151,49 @@ def main() -> None:
         _reference_resolve_occupancy_target([overlapping_a, overlapping_b], monday_1pm) == "away",
     )
 
+    # Case 7 (bug fix, found live 2026-09-16): ZoneOccupancyState.evaluate()'s switch
+    # mapping. There are only 3 real switches (home/vacation/guest) — "away" has no
+    # switch of its own, it's represented by Home being off. Reimplements the tiny
+    # mapping in evaluate() here (it's a 2-line loop, not worth a homeassistant-free
+    # import shim) so a regression to the old 4-switch behavior would be caught.
+    class _FakeSwitch:
+        def __init__(self) -> None:
+            self.active = False
+
+        def set_occupancy_active(self, active: bool) -> None:
+            self.active = active
+
+    def _apply_evaluate(target: str | None, switches: dict[str, _FakeSwitch]) -> None:
+        if target is None:
+            return
+        for state, switch in switches.items():
+            switch.set_occupancy_active(state == target)
+
+    switches = {"home": _FakeSwitch(), "vacation": _FakeSwitch(), "guest": _FakeSwitch()}
+    _apply_evaluate("home", switches)
+    _check(
+        "target=home -> Home on, Vacation/Guest off",
+        switches["home"].active and not switches["vacation"].active and not switches["guest"].active,
+    )
+
+    _apply_evaluate("away", switches)
+    _check(
+        "target=away -> all three switches off (no dedicated Away switch)",
+        not switches["home"].active and not switches["vacation"].active and not switches["guest"].active,
+    )
+
+    _apply_evaluate("vacation", switches)
+    _check(
+        "target=vacation -> Vacation on, Home/Guest off",
+        switches["vacation"].active and not switches["home"].active and not switches["guest"].active,
+    )
+
+    _apply_evaluate("guest", switches)
+    _check(
+        "target=guest -> Guest on, Home/Vacation off",
+        switches["guest"].active and not switches["home"].active and not switches["vacation"].active,
+    )
+
     print("\nAll occupancy_schedule.py reasoning checks passed against the hand-transcribed reference.")
 
 

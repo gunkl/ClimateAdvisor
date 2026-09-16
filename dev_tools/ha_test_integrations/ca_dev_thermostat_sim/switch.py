@@ -2,16 +2,24 @@
 
 Dev-only, never shipped — see dev_tools/ha_test_integrations/README.md.
 
-Four plain switch entities per zone (home/away/vacation/guest) — climate_advisor's
-own occupancy config (CONF_HOME_TOGGLE/CONF_VACATION_TOGGLE/CONF_GUEST_TOGGLE) reads
-whatever entity_id it's pointed at via _is_toggle_on() (coordinator.py), which only
-checks `state.state == "on"`. A standard HA switch entity satisfies that with zero
-climate_advisor changes — confirmed by reading _is_toggle_on() directly, not assumed.
+Three plain switch entities per zone (Home/Vacation/Guest) — one per production
+occupancy toggle field (CONF_HOME_TOGGLE/CONF_VACATION_TOGGLE/CONF_GUEST_TOGGLE,
+climate_advisor/const.py). There is deliberately no separate "Away" switch:
+production has no CONF_AWAY_TOGGLE — it derives Away from the Home switch being
+OFF (occupancy_priority.py's guest > vacation > home/away chain). An earlier
+version of this file created a fourth "Away" entity that production could never
+be pointed at and that could disagree with the Home switch's state; fixed to
+match production's real three-toggle model exactly (bug found live 2026-09-16).
+
+climate_advisor's own occupancy config reads whatever entity_id it's pointed at
+via _is_toggle_on() (coordinator.py), which only checks `state.state == "on"`. A
+standard HA switch entity satisfies that with zero climate_advisor changes —
+confirmed by reading _is_toggle_on() directly, not assumed.
 
 These switches can always be toggled manually (e.g. from a dashboard) in addition to
 being driven by the occupancy scheduler (see occupancy_schedule.py) — the scheduler
 only writes a new state when a schedule actually covers "now"; it never forces all
-four off when no schedule applies, so a manual toggle in between scheduled windows
+three off when no schedule applies, so a manual toggle in between scheduled windows
 sticks until the next schedule transition.
 """
 
@@ -26,7 +34,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN, OCCUPANCY_STATES
+from .const import DOMAIN, SWITCH_OCCUPANCY_STATES
 from .occupancy_schedule import ZoneOccupancyState
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,8 +45,9 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the four occupancy switch entities for this zone."""
-    switches = [OccupancySwitch(entry, state) for state in OCCUPANCY_STATES]
+    """Set up the three occupancy switch entities for this zone (Home/Vacation/Guest —
+    see module docstring for why there is no fourth "Away" entity)."""
+    switches = [OccupancySwitch(entry, state) for state in SWITCH_OCCUPANCY_STATES]
     async_add_entities(switches)
 
     zone_data = hass.data[DOMAIN][entry.entry_id]
@@ -48,7 +57,7 @@ async def async_setup_entry(
 
 
 class OccupancySwitch(RestoreEntity, SwitchEntity):
-    """One occupancy state's on/off switch (e.g. "Away") for a simulated zone."""
+    """One occupancy state's on/off switch (e.g. "Vacation") for a simulated zone."""
 
     _attr_has_entity_name = True
     _attr_should_poll = False

@@ -251,7 +251,14 @@ from .nat_vent_plan import compute_nat_vent_plan, resolve_window_pair, resolve_w
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
-from .scheduler import COST_TAG_HIGH, Schedule, TOUPhase, resolve_active_schedules, resolve_tou_phase
+from .scheduler import (
+    COST_TAG_HIGH,
+    Schedule,
+    TOUPhase,
+    resolve_active_schedules,
+    resolve_tou_away_vacation_phase,
+    resolve_tou_phase,
+)
 from .state import StatePersistence
 from .temperature import (
     convert_delta,
@@ -747,6 +754,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._occupancy_away_since: datetime | None = None
         self._unsub_occupancy_listeners: list[Any] = []
         self._occupancy_away_timer_cancel: Any | None = None
+
+        # Issue #899: precise T_start guard timer for away/vacation TOU pre-conditioning —
+        # stops precool/preheat exactly when the TOU window begins, rather than waiting up
+        # to 30 minutes for the next regular cycle. See _sync_tou_away_vacation_state().
+        self._tou_av_stop_timer_cancel: Any | None = None
+        self._tou_av_stop_timer_schedule_start: datetime | None = None
+        # Issue #899: cycle-summary observability (snapshot-and-diff of the existing
+        # hvac_runtime_minutes/fan-runtime counters across one TOU window's active span).
+        self._tou_av_window_was_active: bool = False
+        self._tou_av_cycle_start_hvac_runtime: float | None = None
+        self._tou_av_cycle_start_fan_runtime: float | None = None
+        self._tou_av_cycle_schedule_id: str | None = None
+        self._tou_av_cycle_capped_delta: float | None = None
 
         # Coordinator health observability (Issue #480): durable record of the most
         # recent _async_update_data() failure, persisted to survive HA restarts and
@@ -1865,6 +1885,172 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._occupancy_away_timer_cancel = None
             _LOGGER.debug("Occupancy away timer cancelled")
 
+    def _cancel_tou_av_stop_timer(self) -> None:
+        """Cancel any pending away/vacation TOU T_start guard timer (Issue #899).
+
+        ``getattr`` with a default: several tests partially-instantiate the coordinator
+        via ``object.__new__()`` + bound methods, bypassing ``__init__`` — see
+        ``_tou_precondition_window_tuple()``'s matching note.
+        """
+        if getattr(self, "_tou_av_stop_timer_cancel", None):
+            self._tou_av_stop_timer_cancel()
+            _LOGGER.debug("TOU away/vacation T_start guard timer cancelled")
+        self._tou_av_stop_timer_cancel = None
+        self._tou_av_stop_timer_schedule_start = None
+
+    def _sync_tou_away_vacation_state(self) -> None:
+        """Push this cycle's away/vacation TOU state to the automation engine and
+        (re)schedule the precise T_start guard timer (Issue #899).
+
+        Three responsibilities, all driven by ``self._tou_phase_resolution`` (already
+        resolved this cycle by ``_resolve_tou_schedule_state()``): live expansion state,
+        cycle-summary observability (snapshot/diff of existing runtime counters across one
+        window's active span), and the T_start guard timer.
+
+        1. **Live expansion state** — while ``now`` sits inside the resolved window itself
+           (``schedule_start <= now < window_end``), push ``expansion_f``/``schedule_id``/
+           ``target`` onto ``self.automation_engine`` so ANY call to
+           ``handle_occupancy_away()``/``handle_occupancy_vacation()`` this cycle or later
+           (the regular 30-min cycle, the T_start timer, or any other trigger) picks up the
+           currently active window's band expansion via
+           ``_apply_occupancy_away_vacation_decision()``. Zero outside an active window.
+        2. **The T_start guard timer** — while the resolution is ``PRECONDITIONING``
+           (before the window starts), ensures a precise ``async_call_later`` callback is
+           armed for the exact instant the window begins (fixing the up-to-30-minute gap a
+           plain reliance on the next regular cycle would leave — see the design plan's
+           "stop-before-TOU-starts guard" section). Re-scheduling is a no-op when a timer is
+           already armed for the same ``schedule_start`` (dedup via
+           ``self._tou_av_stop_timer_schedule_start``), and the timer is cancelled outright
+           whenever this cycle's resolution no longer calls for one (occupancy left away/
+           vacation, the schedule was removed, or the window already started).
+        """
+        resolution = self._tou_phase_resolution
+        occupancy_mode = self._occupancy_mode
+        is_away_vacation = occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+        now = dt_util.now()
+
+        # --- Responsibility 1: live expansion state ---
+        window_active = (
+            is_away_vacation
+            and resolution is not None
+            and resolution.schedule_start is not None
+            and resolution.window_end is not None
+            and resolution.schedule_start <= now < resolution.window_end
+        )
+        if self.automation_engine is not None:
+            if window_active:
+                self.automation_engine._tou_av_expansion_f = resolution.expansion_f or 0.0
+                self.automation_engine._tou_av_active_schedule_id = resolution.schedule_id
+                self.automation_engine._tou_av_precondition_target = resolution.target
+            else:
+                self.automation_engine._tou_av_expansion_f = 0.0
+                self.automation_engine._tou_av_active_schedule_id = None
+                self.automation_engine._tou_av_precondition_target = None
+
+        # --- Cycle-summary observability (Issue #899, Requirement 3): snapshot the
+        # existing hvac_runtime_minutes/fan-runtime counters when the window becomes
+        # active, diff them when it ends — no new runtime-tracking mechanism, just a
+        # diff of counters _flush_hvac_runtime()/_get_fan_runtime_minutes() already
+        # maintain. ``getattr`` with a default (not a plain attribute read): several tests
+        # partially-instantiate the coordinator via ``object.__new__()`` + bound methods,
+        # bypassing ``__init__`` — see ``_tou_precondition_window_tuple()``'s matching note.
+        # ---
+        _was_active = getattr(self, "_tou_av_window_was_active", False)
+        if window_active and not _was_active:
+            self._flush_hvac_runtime()
+            self._tou_av_cycle_start_hvac_runtime = (
+                self._today_record.hvac_runtime_minutes if self._today_record else 0.0
+            )
+            self._tou_av_cycle_start_fan_runtime = (
+                self.automation_engine._get_fan_runtime_minutes() if self.automation_engine else 0.0
+            )
+            self._tou_av_cycle_schedule_id = resolution.schedule_id if resolution else None
+            self._tou_av_cycle_capped_delta = 2.0 * (resolution.expansion_f or 0.0) if resolution else None
+        elif not window_active and _was_active:
+            self._flush_hvac_runtime()
+            _end_hvac = self._today_record.hvac_runtime_minutes if self._today_record else 0.0
+            _end_fan = self.automation_engine._get_fan_runtime_minutes() if self.automation_engine else 0.0
+            _hvac_delta = round(_end_hvac - (getattr(self, "_tou_av_cycle_start_hvac_runtime", None) or 0.0), 1)
+            _fan_delta = round(_end_fan - (getattr(self, "_tou_av_cycle_start_fan_runtime", None) or 0.0), 1)
+            _hvac_ran = _hvac_delta > 0.5
+            _cycle_schedule_id = getattr(self, "_tou_av_cycle_schedule_id", None)
+            _cycle_capped_delta = getattr(self, "_tou_av_cycle_capped_delta", None)
+            _LOGGER.info(
+                "TOU precondition cycle summary: schedule=%s capped_delta=%s hvac_ran_during_window=%s "
+                "precool_runtime_minutes=%.1f whf_runtime_minutes=%.1f",
+                _cycle_schedule_id,
+                _cycle_capped_delta,
+                _hvac_ran,
+                _hvac_delta,
+                _fan_delta,
+            )
+            self._emit_event(
+                "tou_precondition_cycle_summary",
+                {
+                    "schedule_id": _cycle_schedule_id,
+                    "capped_delta_f": _cycle_capped_delta,
+                    "precool_runtime_minutes": _hvac_delta,
+                    "whf_runtime_minutes": _fan_delta,
+                    "hvac_ran_during_window": _hvac_ran,
+                },
+            )
+            self._tou_av_cycle_start_hvac_runtime = None
+            self._tou_av_cycle_start_fan_runtime = None
+            self._tou_av_cycle_schedule_id = None
+            self._tou_av_cycle_capped_delta = None
+        self._tou_av_window_was_active = window_active
+
+        # --- Responsibility 2: the T_start guard timer ---
+        wants_timer = (
+            is_away_vacation
+            and resolution is not None
+            and resolution.phase == TOUPhase.PRECONDITIONING
+            and resolution.schedule_start is not None
+        )
+        if not wants_timer:
+            self._cancel_tou_av_stop_timer()
+            return
+        if getattr(self, "_tou_av_stop_timer_schedule_start", None) == resolution.schedule_start:
+            return  # already armed for the correct instant
+        self._cancel_tou_av_stop_timer()
+        delay = (resolution.schedule_start - now).total_seconds()
+        if delay <= 0:
+            return  # window already started this instant — the regular cycle handles it
+
+        schedule_id = resolution.schedule_id
+        mode_at_schedule = occupancy_mode
+
+        @callback
+        def _tou_av_window_start(_now: Any) -> None:
+            self._tou_av_stop_timer_cancel = None
+            self._tou_av_stop_timer_schedule_start = None
+            _LOGGER.info(
+                "TOU window starting for schedule=%s — stopping away/vacation pre-conditioning precisely on time",
+                schedule_id,
+            )
+            self.hass.async_create_task(self._fire_tou_av_window_start(mode_at_schedule))
+
+        self._tou_av_stop_timer_cancel = async_call_later(self.hass, delay, _tou_av_window_start)
+        self._tou_av_stop_timer_schedule_start = resolution.schedule_start
+
+    async def _fire_tou_av_window_start(self, mode: str) -> None:
+        """T_start guard timer callback body (Issue #899) — invokes the EXISTING away/
+        vacation occupancy handler early, rather than a second, parallel way to write a
+        setpoint. One implementation of "apply the band," triggered either by this precise
+        timer or the regular 30-min cycle.
+        """
+        if self.automation_engine is None:
+            return
+        # Re-resolve so the live expansion state (Responsibility 1 above) reflects "window
+        # now active" before the handler reads it — this fires between regular cycles, so
+        # _resolve_tou_schedule_state() won't run again on its own until the next 30-min
+        # tick.
+        self._resolve_tou_schedule_state()
+        if mode == OCCUPANCY_VACATION:
+            await self.automation_engine.handle_occupancy_vacation()
+        else:
+            await self.automation_engine.handle_occupancy_away()
+
     async def _async_occupancy_toggle_changed(self, event: Event) -> None:
         """Handle an occupancy toggle state change."""
         new_mode = self._compute_occupancy_mode()
@@ -1932,6 +2118,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         elif new_mode in present_modes:
             self._cancel_occupancy_away_timer()
+            # Issue #899: occupancy left away/vacation — cancel any pending TOU T_start
+            # guard timer rather than leaving it to fire later against a mode it no longer
+            # applies to.
+            self._cancel_tou_av_stop_timer()
             await self.automation_engine.handle_occupancy_home()
 
         await self._async_save_state()
@@ -4005,19 +4195,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._tou_phase_resolution = None
             self._tou_active_cost_resolution = None
             self._tou_active_window_notified = False
+            self._sync_tou_away_vacation_state()
             return
 
         schedules = [Schedule(**s) for s in raw_schedules]
         now = dt_util.now()
         self._tou_active_cost_resolution = resolve_active_schedules(schedules, now)
-        self._tou_phase_resolution = resolve_tou_phase(
-            schedules,
-            now,
-            self._get_indoor_temp(),
-            self._current_classification.hvac_mode,
-            self.automation_engine._thermal_model if self.automation_engine else None,
-            self.config,
-        )
+        thermal_model = self.automation_engine._thermal_model if self.automation_engine else None
+        if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
+            # Issue #899: split-delta precool/preheat + temporary band expansion, instead
+            # of resolve_tou_phase()'s Home/Guest "bank to the comfort-band edge" behavior.
+            self._tou_phase_resolution = resolve_tou_away_vacation_phase(
+                schedules,
+                now,
+                self._get_indoor_temp(),
+                self._last_outdoor_temp,
+                self._current_classification.hvac_mode,
+                thermal_model,
+                self.config,
+                self._occupancy_mode,
+            )
+        else:
+            self._tou_phase_resolution = resolve_tou_phase(
+                schedules,
+                now,
+                self._get_indoor_temp(),
+                self._current_classification.hvac_mode,
+                thermal_model,
+                self.config,
+            )
+        self._sync_tou_away_vacation_state()
         self._maybe_emit_tou_active_window_event()
 
     def _maybe_emit_tou_active_window_event(self) -> None:
@@ -4067,9 +4274,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         resolution = self._tou_phase_resolution
         if resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING:
-            await self.automation_engine.apply_tou_precondition(
-                self._current_classification, resolution.target, resolution.schedule_id
-            )
+            if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
+                # Issue #899: split-delta precool/preheat, bypassing the Issue #85
+                # occupancy-redirect safety net (this call site already IS the
+                # occupancy-aware away/vacation path — see
+                # apply_tou_away_vacation_precondition()'s own docstring).
+                await self.automation_engine.apply_tou_away_vacation_precondition(
+                    self._current_classification, resolution.target, resolution.schedule_id, resolution.mode
+                )
+            else:
+                await self.automation_engine.apply_tou_precondition(
+                    self._current_classification, resolution.target, resolution.schedule_id
+                )
 
     def _tou_precondition_window_tuple(self) -> tuple[datetime, datetime, float, str] | None:
         """Build the ``tou_precondition_window`` tuple ``_compute_target_band_schedule()``
@@ -9908,6 +10124,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Cancel any pending occupancy away setback timer
         self._cancel_occupancy_away_timer()
+        # Issue #899: cancel any pending TOU away/vacation T_start guard timer
+        self._cancel_tou_av_stop_timer()
 
         # Cancel any pending debounce timers
         for cancel in self._door_open_timers.values():

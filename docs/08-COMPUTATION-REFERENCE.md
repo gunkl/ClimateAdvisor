@@ -2721,13 +2721,15 @@ Routine diagnostic messages (coordinator polling, entity state reads, skip-due-t
 
 ## 14. "Prefer Savings Over Comfort" (aggressive_savings)
 
-The `aggressive_savings` flag currently affects one system:
+`aggressive_savings` currently affects three systems, each independently. Every fan-mode-scoped row below applies **only** to `FAN_MODE_HVAC` installs (the thermostat's own fan-only circulation, which coexists with the compressor) — it does **not** apply to a real whole-house fan (`FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`), which is always mutually exclusive with the compressor regardless of this flag. See §9 (Fan Archetype Behavioral Contract, Issue #277) for the underlying mutual-exclusion contract.
 
-| System | Normal (False) | Savings (True) |
-|---|---|---|
-| Economizer | Two-phase: AC cool-down first, then ventilation-only maintain | Skip AC entirely — go straight to ventilation-only maintain phase |
+| System | Fan-mode scope | Normal (False) | Savings (True) |
+|---|---|---|---|
+| Everyday comfort band | All fan modes / no fan involved | `select_comfort_band()` holds `[comfort_heat, comfort_cool]` for Home/Guest, occupied+awake | Widens both edges by `CEILING_ESCALATION_SAVINGS_MARGIN_F` (2.0°F): `[comfort_heat − 2, comfort_cool + 2]` (`automation.py:375`) |
+| Nat-vent ceiling-escalation threshold | `FAN_MODE_HVAC` only — `_ceiling_threshold()` returns `None` for `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH` (no ceiling-based handoff concept for a real WHF) | Escalates to active cooling once indoor crosses `comfort_cool` | Escalates once indoor crosses `comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F` (`automation.py:8886-8892`) |
+| Nat-vent AC-assist arming | `FAN_MODE_HVAC` only — a no-op for `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`/`DISABLED` (arming a band here would contradict `_activate_fan()` already having forced HVAC off for those archetypes) | Re-arms the full comfort band so the compressor may assist if the breeze alone can't hold the ceiling | No band arm at all — floor protection comes solely from `decide_nat_vent_exit()`'s `COMFORT_FLOOR` exit (`automation.py:9709-9809`, Issue #843) |
 
-Future versions may extend `aggressive_savings` to apply more aggressive setback values. At this time, setback formulas are identical regardless of this flag.
+**Economizer — not currently a distinct effect (corrected; a prior version of this table described stale pre-FSM behavior).** `decide_economizer_transition()` (`economizer_gate.py`) does select a `MAINTAIN`-vs-`COOL_DOWN` phase based on `aggressive_savings`, but both phases call the identical `_activate_fan()` action in the current FSM-authoritative path (`automation.py:11040-11067`); `_apply_economizer_fsm_state()` only writes internal tracking flags, never a direct HVAC/band command. Whatever compressor activity happens during the economizer is governed entirely by the everyday comfort band row above, not by anything specific to the economizer's own phase. If a real behavioral difference is later added here, update this section with the specific mechanism and its fan-mode scope — do not describe it generically.
 
 ---
 

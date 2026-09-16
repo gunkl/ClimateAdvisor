@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.38] — 2026-09-16
+
+- Fix #897: corrected inaccurate documentation and the in-app description of the "Prefer Savings Over Comfort" setting — no behavior change. The docs previously understated how many things that setting affects and described one part (the economizer) using outdated behavior; the in-app description mentioned an effect ("earlier setbacks") that didn't match any actual behavior.
+
 ## [0.7.37] — 2026-09-16
 
 - Feat #895: you can now point Climate Advisor at a second temperature sensor in the room that matters most at night (usually the bedroom). While your sleep schedule is active, comfort decisions and the chart use that sensor instead of the main one; if it ever goes offline, Climate Advisor automatically falls back to the main sensor so nothing gets left in a bad state overnight. The thermal-learning model that predicts how your house heats and cools always keeps using the main sensor, since it describes the whole house, not just the bedroom.

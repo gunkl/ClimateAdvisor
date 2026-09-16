@@ -245,6 +245,13 @@ def _make_update_data_coord(
     coord._last_briefing = ""
     coord._last_briefing_short = ""
     coord._get_indoor_temp = MagicMock(return_value=indoor_temp)
+    # Issue #895: _async_update_data() reads _get_indoor_temp_with_provenance()
+    # directly (for the sleep-sensor status field), not just _get_indoor_temp().
+    from custom_components.climate_advisor.indoor_temp import IndoorTempReading
+
+    coord._get_indoor_temp_with_provenance = MagicMock(
+        return_value=IndoorTempReading(indoor_temp, "climate.test", indoor_temp)
+    )
 
     coord._chart_log = MagicMock()
     coord._last_violation_check = None

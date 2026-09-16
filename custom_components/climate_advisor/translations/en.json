@@ -32,11 +32,13 @@
         "description": "Choose where Climate Advisor reads outdoor and indoor temperature data from.",
         "data": {
           "outdoor_temp_source": "Outdoor Temperature Source",
-          "indoor_temp_source": "Indoor Temperature Source"
+          "indoor_temp_source": "Indoor Temperature Source",
+          "sleep_indoor_temp_entity": "Sleep Indoor Temp Sensor"
         },
         "data_description": {
           "outdoor_temp_source": "Where to read outside temperature. 'Weather service' uses your weather integration; a dedicated sensor or input helper lets you use a specific entity.",
-          "indoor_temp_source": "Where to read inside temperature. 'Climate entity' uses your thermostat's built-in sensor; a dedicated sensor or input helper lets you use a separate entity."
+          "indoor_temp_source": "Where to read inside temperature. 'Climate entity' uses your thermostat's built-in sensor; a dedicated sensor or input helper lets you use a separate entity.",
+          "sleep_indoor_temp_entity": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable."
         }
       },
       "outdoor_temp_entity": {
@@ -203,13 +205,15 @@
           "outdoor_temp_source": "Outdoor Temperature Source",
           "outdoor_temp_entity": "Outdoor Temperature Entity",
           "indoor_temp_source": "Indoor Temperature Source",
-          "indoor_temp_entity": "Indoor Temperature Entity"
+          "indoor_temp_entity": "Indoor Temperature Entity",
+          "sleep_indoor_temp_entity": "Sleep Indoor Temp Sensor"
         },
         "data_description": {
           "outdoor_temp_source": "Where to read outside temperature. 'Weather service' uses your weather integration; a dedicated sensor or input helper lets you use a specific entity.",
           "outdoor_temp_entity": "Choose the sensor or input helper that reports outdoor temperature. Only needed if you selected 'Dedicated sensor' or 'Input helper' above.",
           "indoor_temp_source": "Where to read inside temperature. 'Climate entity' uses your thermostat's built-in sensor; a dedicated sensor or input helper lets you use a separate entity.",
-          "indoor_temp_entity": "Choose the sensor or input helper that reports indoor temperature. Only needed if you selected 'Dedicated sensor' or 'Input helper' above."
+          "indoor_temp_entity": "Choose the sensor or input helper that reports indoor temperature. Only needed if you selected 'Dedicated sensor' or 'Input helper' above.",
+          "sleep_indoor_temp_entity": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable."
         }
       },
       "sensors": {

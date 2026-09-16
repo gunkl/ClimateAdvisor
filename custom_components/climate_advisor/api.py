@@ -322,6 +322,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             "target_temp_low": target_temp_low,
             "target_temp_high": target_temp_high,
             ATTR_INDOOR_TEMP: indoor_temp_display,
+            "sleep_indoor_sensor_active": data.get("sleep_indoor_sensor_active", False),
             "outdoor_temp": outdoor_temp_display,
             "unit": unit,
             "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),

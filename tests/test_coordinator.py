@@ -1112,6 +1112,9 @@ class TestTemperatureNormalization:
 
         # Bind the real methods under test to our mock coordinator
         coord._get_outdoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_outdoor_temp, coord)
+        coord._get_indoor_temp_with_provenance = types.MethodType(
+            ClimateAdvisorCoordinator._get_indoor_temp_with_provenance, coord
+        )
         coord._get_indoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_indoor_temp, coord)
         return coord
 

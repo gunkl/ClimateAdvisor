@@ -58,6 +58,7 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     THERMAL_VENT_MIN_SAMPLES,
     THERMAL_VENTILATED_MIN_DELTA_F,
 )
+from custom_components.climate_advisor.indoor_temp import IndoorTempReading  # noqa: E402
 from custom_components.climate_advisor.learning import LearningEngine, _grade_passive_confidence  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -176,6 +177,14 @@ def _make_obs_coord(
 
     # ── helper methods ───────────────────────────────────────────────────────
     coord._get_indoor_temp = MagicMock(return_value=indoor_temp)
+    # Issue #895: thermal-observation call sites read .primary_value off
+    # _get_indoor_temp_with_provenance() (never .value, which is sleep-window
+    # swap-aware) — mock this too so it's controlled the same way _get_indoor_temp
+    # already is, rather than falling through to the real resolver against this
+    # stub's minimal climate_state (which has no current_temperature attribute).
+    coord._get_indoor_temp_with_provenance = MagicMock(
+        return_value=IndoorTempReading(indoor_temp, "climate.test", indoor_temp)
+    )
     coord._any_sensor_open = MagicMock(return_value=any_sensor_open)
     coord._async_save_state = AsyncMock()
 
@@ -2444,6 +2453,8 @@ class TestHvacObservationLogging:
         coord._hvac_on_since = None
 
         coord._get_indoor_temp = MagicMock(return_value=72.0)
+        # Issue #895: see the analogous comment in _make_obs_coord() above.
+        coord._get_indoor_temp_with_provenance = MagicMock(return_value=IndoorTempReading(72.0, "climate.test", 72.0))
         coord._any_sensor_open = MagicMock(return_value=False)
         coord._async_save_state = AsyncMock()
         coord._flush_hvac_runtime = MagicMock()
@@ -3736,3 +3747,108 @@ class TestSwingComputation:
         assert model["confidence_swing_cool"] == "none", (
             f"0 cool obs should give 'none', got {model['confidence_swing_cool']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #895 — structural enforcement: thermal-observation sampling must never
+# read the sleep-window-swapped indoor temp value, mirroring the AST-registry
+# pattern in test_executor_offload.py::TestBlockingIOExecutorOffload. A one-time
+# manual enumeration of call sites doesn't protect against a future change (a
+# new 7th observation type, a refactor that inlines one of these functions) —
+# this test fails CI immediately if any of the four confirmed thermal-sampling
+# functions below ever reads `.value` (or the `_get_indoor_temp()` convenience
+# wrapper, which returns `.value`) instead of `.primary_value`.
+# ---------------------------------------------------------------------------
+
+import ast as _ast  # noqa: E402
+
+_COORDINATOR_PY = Path(__file__).parent.parent / "custom_components" / "climate_advisor" / "coordinator.py"
+
+# The four call sites confirmed (by exhaustive grep of every self._get_indoor_temp()
+# call site in coordinator.py) to feed the thermal-learning OLS regression. Add a new
+# entry here whenever thermal-observation sampling gains a new indoor-temp read site.
+_THERMAL_INDOOR_TEMP_CALL_SITES: set[str] = {
+    "_get_current_sample",
+    "_start_hvac_observation",
+    "_sample_all_observations",
+    "_end_hvac_active_phase",
+}
+
+
+def _find_thermal_indoor_temp_violations(fn_node: _ast.AST) -> list[_ast.AST]:
+    """Return AST nodes where fn_node reads the sleep-window-swapped indoor value.
+
+    Two violation shapes:
+      1. `self._get_indoor_temp()` — the swap-aware convenience wrapper.
+      2. `self._get_indoor_temp_with_provenance(...).value` — the swap-aware field
+         accessed directly instead of `.primary_value`.
+    """
+    violations: list[_ast.AST] = []
+
+    class _Visitor(_ast.NodeVisitor):
+        def visit_Call(self, node: _ast.Call) -> None:  # noqa: N802
+            func = node.func
+            if (
+                isinstance(func, _ast.Attribute)
+                and func.attr == "_get_indoor_temp"
+                and isinstance(func.value, _ast.Name)
+                and func.value.id == "self"
+            ):
+                violations.append(node)
+            self.generic_visit(node)
+
+        def visit_Attribute(self, node: _ast.Attribute) -> None:  # noqa: N802
+            if (
+                node.attr == "value"
+                and isinstance(node.value, _ast.Call)
+                and isinstance(node.value.func, _ast.Attribute)
+                and node.value.func.attr == "_get_indoor_temp_with_provenance"
+            ):
+                violations.append(node)
+            self.generic_visit(node)
+
+    _Visitor().visit(fn_node)
+    return violations
+
+
+class TestThermalSamplingNeverUsesSleepSensor:
+    """Registry-driven structural guard for Issue #895's blast-radius finding.
+
+    Reference: this plan's Context section documents WHY thermal-learning must
+    never see the sleep-window sensor swap — the model fits the whole house's
+    envelope, not one room's comfort. This test protects that invariant against
+    silent regression, not just the four call sites known today.
+    """
+
+    def test_no_swap_aware_indoor_temp_reads_in_registered_functions(self):
+        source = _COORDINATOR_PY.read_text(encoding="utf-8")
+        tree = _ast.parse(source)
+
+        offenders: list[tuple[str, _ast.AST]] = []
+        for node in _ast.walk(tree):
+            if (
+                isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                and node.name in _THERMAL_INDOOR_TEMP_CALL_SITES
+            ):
+                for violation in _find_thermal_indoor_temp_violations(node):
+                    offenders.append((node.name, violation))
+
+        assert not offenders, (
+            "Thermal-observation function(s) read the sleep-window-swapped indoor temp "
+            "(.value / self._get_indoor_temp()) instead of the always-primary "
+            "self._get_indoor_temp_with_provenance().primary_value: "
+            + ", ".join(f"{name}() at line {node.lineno}" for name, node in offenders)
+            + ". The thermal model fits the whole house's envelope and must never see "
+            "the bedroom sensor swap, even while it's active elsewhere in the same cycle."
+        )
+
+    def test_registry_functions_all_exist_in_coordinator(self):
+        """Guard against the registry itself drifting from reality (e.g. a renamed
+        or removed function silently dropping out of coverage)."""
+        source = _COORDINATOR_PY.read_text(encoding="utf-8")
+        tree = _ast.parse(source)
+        defined_names = {
+            node.name for node in _ast.walk(tree) if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        }
+        missing = _THERMAL_INDOOR_TEMP_CALL_SITES - defined_names
+        assert not missing, f"Registered thermal call sites no longer exist in coordinator.py: {missing}"

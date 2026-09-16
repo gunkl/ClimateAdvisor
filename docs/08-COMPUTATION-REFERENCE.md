@@ -3310,6 +3310,40 @@ The range check applies to both the `TEMP_SOURCE_SENSOR` /
 `TEMP_SOURCE_INPUT_NUMBER` branch and the `TEMP_SOURCE_CLIMATE_FALLBACK`
 branch of `_get_indoor_temp()`.
 
+### Bug C — sleep-window bedroom sensor override (Issue #895)
+
+An optional `sleep_indoor_temp_entity` config field lets the user point at a
+second, bedroom-area sensor. While the sleep schedule window is active
+(`_in_sleep_window(dt_util.now(), config)`), `indoor_temp.py`'s
+`resolve_indoor_temp_with_provenance()` tries that sensor first for the
+*comfort-facing* reading — the value every comfort/display/control consumer
+(chart, compliance tracking, automation setpoint decisions) receives via
+`_get_indoor_temp()`/`_get_indoor_temp_f()`. Outside the window, or when the
+field is unset, behavior is unchanged from Bug B above.
+
+**Fallback, not failure.** If the sleep sensor's state is missing, non-numeric,
+or outside the same `[MIN_PLAUSIBLE_INDOOR_F, MAX_PLAUSIBLE_INDOOR_F]` band as
+Bug B, a `WARNING` is logged (`"Sleep sensor unavailable, falling back to
+primary indoor sensor" entity=<id>`) and resolution falls through to the
+primary source — the function never returns an unavailable reading just
+because the sleep sensor failed. Automation must never stall overnight
+because a bedroom sensor's battery died. An `INFO` line (`"Using sleep indoor
+sensor" entity=<id> value=<X.X>°F`) fires whenever the sleep reading is
+actually used.
+
+**Provenance, computed once.** `resolve_indoor_temp_with_provenance()` returns
+an `IndoorTempReading(value, source_entity, primary_value)` — `value`/
+`source_entity` are the (possibly swapped) comfort-facing result; `primary_value`
+is *always* the unswapped primary-source reading, computed in the same call.
+`_get_indoor_temp_with_provenance()` (coordinator.py) is the one place status
+(`sleep_indoor_sensor_active`, surfaced on the Status card per this project's
+Status Card Ontology rules) and thermal-learning sampling (see §22.x below)
+read from — neither re-derives "was the sleep sensor used" independently.
+
+The range check, unit conversion, and fallback-on-failure semantics are
+identical to the primary-sensor path in Bug B — this feature extends the
+resolver, it doesn't introduce a second set of rules.
+
 ### Test coverage
 
 | Test | File |
@@ -3319,6 +3353,9 @@ branch of `_get_indoor_temp()`.
 | `test_indoor_temp_range_check_rejects_extreme_low` | `tests/test_coordinator_chart.py` |
 | `test_indoor_temp_range_check_rejects_extreme_high` | `tests/test_coordinator_chart.py` |
 | `test_indoor_temp_range_check_accepts_normal` | `tests/test_coordinator_chart.py` |
+| `TestSleepSensorOverrideDirect` (9 cases: valid override, missing/non-numeric/implausible fallback, double-failure, window-inactive, entity-unset, Celsius) | `tests/test_indoor_temp_helper.py` |
+| `TestSleepSensorOverrideBothCallPaths` | `tests/test_indoor_temp_helper.py` |
+| `issue_895_sleep_indoor_sensor_swap` (pending scenario) | `tools/simulations/pending/` |
 
 ---
 

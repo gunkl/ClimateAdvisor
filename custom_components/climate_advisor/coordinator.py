@@ -241,7 +241,7 @@ from .fan_status import (
     parse_remote_timer_event,
     resolve_untracked_fan_status,
 )
-from .indoor_temp import resolve_indoor_temp_f
+from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import run_invariant_checks
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, compute_k_passive_endpoint
 from .nat_vent_cycling import compute_nat_vent_target
@@ -3059,7 +3059,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self._check_hvac_stabilization(_hvac_obs_type)
 
         # --- Temperatures for coordinator.data (sensor entities + AI context) ---
-        _indoor_temp = self._get_indoor_temp()
+        # Issue #895: single resolver call yields both the comfort-facing value and
+        # whether the sleep sensor is currently in use — never re-derive the latter
+        # separately (see indoor_temp.py's IndoorTempReading docstring).
+        _indoor_reading = self._get_indoor_temp_with_provenance()
+        _indoor_temp = _indoor_reading.value
+        _sleep_indoor_sensor_active = (
+            _indoor_reading.source_entity is not None
+            and _indoor_reading.source_entity == self.config.get("sleep_indoor_temp_entity")
+        )
         _outdoor_temp = forecast.current_outdoor_temp if forecast else None
 
         # Schedule overnight pre-cool if a warming trend is active (idempotent — runs once per day)
@@ -3114,6 +3122,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
             ATTR_INDOOR_TEMP: _indoor_temp,
+            "sleep_indoor_sensor_active": _sleep_indoor_sensor_active,
             ATTR_OUTDOOR_TEMP: _outdoor_temp,
             ATTR_FORECAST_HIGH: c.today_high if c else None,
             ATTR_FORECAST_LOW: c.today_low if c else None,
@@ -3279,17 +3288,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _get_indoor_temp(self) -> float | None:
         """Read indoor temperature based on configured source type.
 
-        Delegates to the shared ``indoor_temp.resolve_indoor_temp_f()`` helper
-        (Issue #796, Step 10) so the coordinator and ``AutomationEngine`` cannot
-        drift out of sync on source resolution or the plausibility guard again.
-        Reads ``self.config``/``self.hass`` fresh on every call — no caching.
+        Thin wrapper over ``_get_indoor_temp_with_provenance()`` — unaffected callers
+        keep working unchanged.
         """
-        return resolve_indoor_temp_f(
+        return self._get_indoor_temp_with_provenance().value
+
+    def _get_indoor_temp_with_provenance(self) -> IndoorTempReading:
+        """Comfort-facing indoor temp + provenance + always-primary value (Issue #895).
+
+        Delegates to the shared ``indoor_temp.resolve_indoor_temp_with_provenance()``
+        helper (Issue #796, Step 10; extended Issue #895) so the coordinator and
+        ``AutomationEngine`` cannot drift out of sync on source resolution or the
+        plausibility guard again. Reads ``self.config``/``self.hass`` fresh on every
+        call — no caching. This is the single call every provenance-needing consumer
+        uses (status field, thermal-learning's always-primary sampling) — never
+        re-derive "was the sleep sensor used" separately from this result.
+        """
+        return resolve_indoor_temp_with_provenance(
             hass=self.hass,
             source=self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
             unit=self.config.get("temp_unit", "fahrenheit"),
             indoor_temp_entity=self.config.get("indoor_temp_entity"),
             climate_entity=self.config["climate_entity"],
+            in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+            sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
         )
 
     async def _get_forecast_data(self) -> list:
@@ -6280,8 +6302,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------
 
     def _get_current_sample(self, elapsed_minutes: float) -> dict:
-        """Build a sample dict from current sensor readings."""
-        indoor = self._get_indoor_temp()
+        """Build a sample dict from current sensor readings.
+
+        Issue #895: deliberately reads ``.primary_value``, never ``.value`` — the
+        thermal model fits the whole house's envelope and must never see the
+        sleep-window sensor swap, even when it's active for comfort/display purposes
+        elsewhere in the same cycle. See indoor_temp.py's module docstring.
+        """
+        indoor = self._get_indoor_temp_with_provenance().primary_value
         weather_entity = self.config.get("weather_entity")
         weather_attrs = (
             self.hass.states.get(weather_entity).attributes
@@ -6371,7 +6399,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 }
             )
 
-        indoor = self._get_indoor_temp()
+        # Issue #895: .primary_value, not .value — see _get_current_sample() docstring.
+        indoor = self._get_indoor_temp_with_provenance().primary_value
         import uuid as _uuid_mod
 
         obs: dict = {
@@ -6437,7 +6466,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not hasattr(self, "learning"):
             return
 
-        indoor = self._get_indoor_temp()
+        # Issue #895: .primary_value, not .value — see _get_current_sample() docstring.
+        indoor = self._get_indoor_temp_with_provenance().primary_value
         outdoor = getattr(self, "_last_outdoor_temp", None)
 
         # Issue #130 D16: Use last-known outdoor temp if current reading is unavailable.
@@ -7579,8 +7609,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         now = dt_util.now()
 
-        # Capture indoor temp at the exact HVAC-off moment so swing uses the true shutoff temperature.
-        _final_indoor = self._get_indoor_temp()
+        # Capture indoor temp at the exact HVAC-off moment so swing uses the true shutoff
+        # temperature. Issue #895: .primary_value, not .value — see
+        # _get_current_sample()'s docstring for why thermal-learning must never see the
+        # sleep-window sensor swap.
+        _final_indoor = self._get_indoor_temp_with_provenance().primary_value
         if _final_indoor is not None:
             try:
                 _elapsed = (

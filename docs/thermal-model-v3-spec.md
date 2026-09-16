@@ -85,6 +85,38 @@ Line numbers shifted substantially from the pre-#587 table (coordinator.py grew 
 
 ---
 
+## Sleep-window sensor swap exclusion (Issue #895)
+
+Issue #895 added an optional `sleep_indoor_temp_entity` config field: while the sleep
+schedule is active, comfort-facing indoor-temp consumers (chart, compliance tracking,
+automation decisions) read a second, bedroom-area sensor instead of the primary sensor
+(`indoor_temp.py::resolve_indoor_temp_with_provenance()`, see
+`docs/08-COMPUTATION-REFERENCE.md`'s "Bug C" for the full mechanism).
+
+**Every observation-sampling function in this spec's Scope table above deliberately
+excludes itself from that swap and always reads the primary sensor**, via
+`self._get_indoor_temp_with_provenance().primary_value` rather than
+`self._get_indoor_temp()`/`.value`. This is not an oversight or a gap to close — the
+thermal model characterizes the *whole house's* envelope (`k_passive`, `k_active_heat/cool`,
+`k_vent`, `k_solar`), one physical structure with one set of decay/gain physics. The
+bedroom sensor is a comfort proxy for a single zone at night, not a valid stand-in for
+the house's thermal behavior; feeding it into the OLS regression — even for an
+observation that runs entirely within one sleep window — would fit the model against
+the wrong physical quantity, not just risk a mid-observation splice at the
+`sleep_time`/`wake_time` boundary.
+
+Enforced structurally, not by convention: `tests/test_thermal_observations.py`'s
+`TestThermalSamplingNeverUsesSleepSensor` is a registry-driven AST test (mirroring
+`tests/test_executor_offload.py`'s `_BLOCKING_METHODS` pattern) that fails CI if any
+function in its `_THERMAL_INDOOR_TEMP_CALL_SITES` registry — currently
+`_get_current_sample`, `_start_hvac_observation`, `_sample_all_observations`,
+`_end_hvac_active_phase` — ever reads the swap-aware `.value`/`_get_indoor_temp()`
+instead of `.primary_value`. Add a new function to that registry (and this note) if a
+future observation type gains its own indoor-temp read site outside the four listed
+here.
+
+---
+
 ## Observation Types
 
 All six types run concurrently in `_pending_observations: dict[str, PendingObservation]`. The dict is keyed by the `OBS_TYPE_*` string constant.

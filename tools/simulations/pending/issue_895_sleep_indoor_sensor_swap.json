@@ -1,0 +1,65 @@
+{
+  "name": "issue_895_sleep_indoor_sensor_swap",
+  "description": "While the sleep schedule window is active and a bedroom sensor is configured, the production engine's comfort-facing indoor temperature reading tracks the bedroom sensor rather than the primary thermostat sensor, even though the two disagree.",
+  "source": "Issue #895 planning — new feature, no production incident",
+  "issue": 895,
+  "use_coordinator": true,
+  "track": "integration",
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: reverting the Issue #895 sleep-sensor swap in indoor_temp.py (removing the in_sleep_window/sleep_indoor_temp_entity branch) causes the final assertion to FAIL — engine_state._last_indoor_temp would read the primary thermostat's 71F instead of the bedroom sensor's 65F.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md documents the swap+fallback and docs/thermal-model-v3-spec.md documents that thermal-observation sampling is deliberately excluded from it — both updated alongside this feature.",
+    "(c) Occupant experience: the user placed a sensor in the room that matters most at night (the bedroom) because the primary thermostat sensor is a poor proxy for nighttime comfort there. This scenario proves that once the sleep schedule begins, Climate Advisor actually uses that bedroom reading for comfort decisions and status display, not just accepts it as configuration.",
+    "The fallback path (bedroom sensor unavailable/non-numeric/implausible → primary sensor, with a WARNING logged) and the double-failure path (both sensors unavailable) are deliberately NOT re-proven here — this harness's field_equals assertion only reads a single end-of-run snapshot, not a per-timestamp series, so it cannot assert two different values at two different times in one run. Those paths are already covered precisely, case-by-case, by the mocked unit tests in tests/test_indoor_temp_helper.py (TestSleepSensorOverrideDirect), which is the right layer for exact branch coverage. This scenario's job is the thing unit tests with mocked hass can't prove: that the swap actually reaches the real running engine end-to-end through real HA state reads.",
+    "Thermal-observation sampling staying on the primary sensor during this same window is proven by tests/test_thermal_observations.py's TestThermalSamplingNeverUsesSleepSensor (structural, registry-driven) rather than this scenario, for the same reason — pending_observations/sample internals live on the coordinator and aren't part of this harness's engine_state snapshot."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:00",
+    "wake_time": "07:00",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp"
+  },
+  "events": [
+    {
+      "time": "2026-03-10T21:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 55.0,
+      "note": "Before the sleep window (sleep_time=22:00). Primary thermostat reads 72F; no bedroom sensor configured value read yet."
+    },
+    {
+      "time": "2026-03-10T21:30:00",
+      "type": "external_entity_state_change",
+      "entity": "sensor.bedroom_temp",
+      "state": "65",
+      "attributes": {},
+      "note": "Bedroom sensor reports 65F — noticeably cooler than the living-room thermostat, a realistic nighttime scenario (bedroom door closed, thermostat elsewhere in the house)."
+    },
+    {
+      "time": "2026-03-10T22:30:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 54.0,
+      "note": "Past sleep_time (22:00) — sleep window is active. Primary thermostat keeps updating (71F) to prove it's genuinely NOT what comfort decisions read during the window; the bedroom sensor stays at 65F."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-03-10T22:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._last_indoor_temp",
+      "value": 65.0,
+      "track": "integration",
+      "reason": "THE FIX: with the sleep window active and sensor.bedroom_temp configured, the engine's comfort-facing indoor reading is the bedroom sensor's 65F, not the primary thermostat's 71F — proving the sleep-window sensor swap (indoor_temp.py::resolve_indoor_temp_with_provenance) reaches the real running engine end-to-end, not just the unit-level resolver."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Comfort-facing indoor temperature tracks the configured bedroom sensor once the sleep schedule begins, even when it disagrees with the primary thermostat sensor.",
+    "observed_behavior": "engine._get_indoor_temp_f() (and therefore every comfort-facing consumer that calls it) resolves to the bedroom sensor's 65F reading once sleep_time passes, despite the primary thermostat continuing to report 71F.",
+    "expected_behavior": "The user configured a bedroom sensor specifically because the primary sensor is a poor nighttime-comfort proxy. Automation decisions, the chart, and status display should reflect the room that actually matters once the household is asleep — this scenario confirms that happens through the real production engine, not just in isolated unit tests."
+  }
+}

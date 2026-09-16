@@ -470,8 +470,14 @@ def run_production_scenario(
             # dispatch time, before any more wall-clock time is allowed to pass.
             scheduler.advance_to(scheduler.now())
 
-    # --- Capture final engine state snapshot ---
-    engine_state = _snapshot_engine_state(engine)
+        # --- Capture final engine state snapshot ---
+        # Issue #895: must stay inside scheduler.installed() — engine._get_indoor_temp_f()
+        # now evaluates _in_sleep_window(dt_util.now(), ...) for the sleep-sensor swap, so
+        # snapshotting outside the patched clock context hits an unconfigured dt_util.now()
+        # (a bare MagicMock) instead of the scenario's virtual clock. This also makes the
+        # snapshot semantically correct: "final state" should reflect the scenario's own
+        # simulated end time, not real wall-clock time.
+        engine_state = _snapshot_engine_state(engine)
 
     return ProductionRunResult(
         event_log=list(event_log),

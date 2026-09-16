@@ -264,6 +264,8 @@ weather_entity: weather.home
 climate_entity: climate.living_room
 outdoor_temp_entity: sensor.outdoor_temp (optional)
 indoor_temp_entity: sensor.indoor_temp (optional)
+sleep_indoor_temp_entity: sensor.bedroom_temp (optional — Issue #895; used for comfort/automation
+  instead of the primary indoor sensor while the sleep schedule is active, never for thermal learning)
 comfort_heat: 70 (°F)
 comfort_cool: 75 (°F)
 setback_heat: 60 (°F)

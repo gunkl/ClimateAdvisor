@@ -26,6 +26,7 @@ EXPECTED_KEYS = {
     "email_entity_health",
     "outdoor_temp_source",
     "indoor_temp_source",
+    "sleep_indoor_temp_entity",
     "door_window_sensors",
     "sensor_polarity_inverted",
     "sensor_debounce_seconds",

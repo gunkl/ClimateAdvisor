@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.36"
+VERSION = "0.7.37"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -594,6 +594,15 @@ CONFIG_METADATA = {
         ),
         "category": "sensors",
         "display_transform": "temp_source_label",
+    },
+    "sleep_indoor_temp_entity": {
+        "label": "Sleep Indoor Temp Sensor",
+        "description": (
+            "Optional bedroom sensor used for comfort and automation decisions while your sleep"
+            " schedule is active (the thermal model always uses the primary sensor). Falls back"
+            " to the primary sensor if unavailable. Leave blank to disable."
+        ),
+        "category": "sensors",
     },
     "door_window_sensors": {
         "label": "Door/Window Sensors",

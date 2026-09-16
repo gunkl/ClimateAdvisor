@@ -1157,6 +1157,9 @@
             ${escapeHtml(data.nat_vent_ac_assist ? 'AC assist' : 'savings mode')} · cycling ${Math.round(data.nat_vent_off_threshold)}${unitSym}–${Math.round(data.nat_vent_on_threshold)}${unitSym}
           </div>
           ` : ''}
+          ${data.sleep_indoor_sensor_active ? `
+          <div class="value" style="font-size:0.8rem;opacity:0.85">using sleep sensor (bedroom)</div>
+          ` : ''}
         </div>
         <div class="status-item">
           <div class="label">Occupancy</div>

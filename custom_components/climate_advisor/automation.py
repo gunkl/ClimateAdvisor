@@ -11135,6 +11135,8 @@ class AutomationEngine:
             unit=self.config.get("temp_unit", "fahrenheit"),
             indoor_temp_entity=self.config.get("indoor_temp_entity"),
             climate_entity=self.climate_entity,
+            in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+            sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
         )
 
     def _indoor_f_for_event(self) -> float | None:

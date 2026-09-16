@@ -36,6 +36,7 @@ from custom_components.climate_advisor.ai_skills_context import (  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
     OBS_TYPE_HVAC_HEAT,
 )
+from custom_components.climate_advisor.indoor_temp import IndoorTempReading  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -327,6 +328,11 @@ class TestHvacPeakCapture:
         coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
 
         coord._get_indoor_temp = MagicMock(return_value=indoor_temp)
+        # Issue #895: _end_hvac_active_phase() reads .primary_value off
+        # _get_indoor_temp_with_provenance(), not .value via _get_indoor_temp().
+        coord._get_indoor_temp_with_provenance = MagicMock(
+            return_value=IndoorTempReading(indoor_temp, "climate.test", indoor_temp)
+        )
 
         def _get_current_sample(elapsed: float) -> dict:
             return {

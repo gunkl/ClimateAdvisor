@@ -45,6 +45,7 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     THERMAL_ROLLING_MIN_WINDOW_MINUTES,
     THERMAL_VENTILATED_MIN_DELTA_F,
 )
+from custom_components.climate_advisor.indoor_temp import IndoorTempReading  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared helpers (mirrors tests/test_thermal_observations.py::_make_obs_coord)
@@ -152,6 +153,12 @@ def _make_obs_coord(
     coord._chart_log = None  # no chart_log wired — _run_vent_*_chart_log_fit no-ops cleanly
 
     coord._get_indoor_temp = MagicMock(return_value=indoor_temp)
+    # Issue #895: see the analogous comment in test_thermal_observations.py's
+    # _make_obs_coord() — the real observation-pipeline methods bound below read
+    # .primary_value off _get_indoor_temp_with_provenance(), not .value.
+    coord._get_indoor_temp_with_provenance = MagicMock(
+        return_value=IndoorTempReading(indoor_temp, "climate.test", indoor_temp)
+    )
     coord._any_sensor_open = MagicMock(return_value=any_sensor_open)
     coord._async_save_state = AsyncMock()
 

@@ -400,6 +400,9 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
+                    vol.Optional("sleep_indoor_temp_entity"): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+                    ),
                 }
             ),
         )
@@ -955,7 +958,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 user_input.get("outdoor_temp_source"),
                 user_input.get("indoor_temp_source"),
             )
-            await self._commit_section(user_input, clearable_keys=("outdoor_temp_entity", "indoor_temp_entity"))
+            await self._commit_section(
+                user_input,
+                clearable_keys=("outdoor_temp_entity", "indoor_temp_entity", "sleep_indoor_temp_entity"),
+            )
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -990,6 +996,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         "indoor_temp_entity",
                         description={"suggested_value": current.get("indoor_temp_entity")},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor", "input_number"])),
+                    vol.Optional(
+                        "sleep_indoor_temp_entity",
+                        description={"suggested_value": current.get("sleep_indoor_temp_entity")},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+                    ),
                 }
             ),
         )

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.37] — 2026-09-16
+
+- Feat #895: you can now point Climate Advisor at a second temperature sensor in the room that matters most at night (usually the bedroom). While your sleep schedule is active, comfort decisions and the chart use that sensor instead of the main one; if it ever goes offline, Climate Advisor automatically falls back to the main sensor so nothing gets left in a bad state overnight. The thermal-learning model that predicts how your house heats and cools always keeps using the main sensor, since it describes the whole house, not just the bedroom.
+
 ## [0.7.36] — 2026-09-10
 
 - Fix #887: no user-visible change. The dev-only thermostat simulator used for multi-zone testing was applying its configured swing/deadband only on HVAC turn-on, shutting off the instant indoor temperature reached setpoint instead of overshooting/undershooting by the configured amount — producing an unrealistic flat-spike temperature trace instead of a real hysteresis swing. Fixed to apply the deadband symmetrically on both turn-on and turn-off, and added a backward-compatible optional parameter to the shared ODE step function (default unchanged, only the simulator opts in) so the simulated temperature can actually reach the deadband edge instead of being clamped to the bare setpoint. A companion investigation used live production chart_log data to confirm the real (production) swing measurement shown on the dashboard is accurate and needed no change — see Issue #887 for the data.

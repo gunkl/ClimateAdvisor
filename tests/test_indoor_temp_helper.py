@@ -18,9 +18,10 @@ climate_fallback).
 
 from __future__ import annotations
 
+import datetime as _dt
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # ── HA module stubs (must happen before importing climate_advisor) ──────────
 if "homeassistant" not in sys.modules:
@@ -38,6 +39,7 @@ from custom_components.climate_advisor.indoor_temp import (  # noqa: E402
     MAX_PLAUSIBLE_INDOOR_F,
     MIN_PLAUSIBLE_INDOOR_F,
     resolve_indoor_temp_f,
+    resolve_indoor_temp_with_provenance,
 )
 
 
@@ -323,3 +325,264 @@ class TestResolveIndoorTempFDirect:
             )
             == MAX_PLAUSIBLE_INDOOR_F
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #895 — sleep-window bedroom sensor override
+# ---------------------------------------------------------------------------
+
+
+def _hass_with_entities(entity_states: dict) -> MagicMock:
+    """A hass whose states.get() returns different states per entity_id."""
+    hass = MagicMock()
+    hass.states.get = MagicMock(side_effect=lambda eid: entity_states.get(eid))
+    return hass
+
+
+class TestSleepSensorOverrideDirect:
+    """Each of the five distinct branches in resolve_indoor_temp_with_provenance()'s
+    sleep-sensor path gets its own case — deliberately not folded into one combined
+    test, since each exercises a different failure mode."""
+
+    def test_valid_sleep_reading_used(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                "sensor.bedroom_temp": _make_state("65"),
+            }
+        )
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity="sensor.bedroom_temp",
+        )
+        assert result.value == 65.0
+        assert result.source_entity == "sensor.bedroom_temp"
+        assert result.primary_value == 70.0
+
+    def test_sleep_entity_state_missing_falls_back(self):
+        hass = _hass_with_entities({"climate.thermostat": _make_state("heat", {"current_temperature": 70})})
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity="sensor.bedroom_temp",
+        )
+        assert result.value == 70.0
+        assert result.source_entity == "climate.thermostat"
+        assert result.primary_value == 70.0
+
+    def test_sleep_entity_non_numeric_falls_back(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                "sensor.bedroom_temp": _make_state("unavailable"),
+            }
+        )
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity="sensor.bedroom_temp",
+        )
+        assert result.value == 70.0
+        assert result.primary_value == 70.0
+
+    def test_sleep_entity_implausible_falls_back(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                "sensor.bedroom_temp": _make_state("200"),
+            }
+        )
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity="sensor.bedroom_temp",
+        )
+        assert result.value == 70.0
+        assert result.primary_value == 70.0
+
+    def test_both_sensors_unavailable_returns_none_cleanly(self):
+        hass = _hass_with_entities({})
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity="sensor.bedroom_temp",
+        )
+        assert result == (None, None, None)
+
+    def test_sleep_window_not_active_uses_primary_regardless_of_config(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                "sensor.bedroom_temp": _make_state("65"),
+            }
+        )
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=False,
+            sleep_indoor_temp_entity="sensor.bedroom_temp",
+        )
+        assert result.value == 70.0
+        assert result.source_entity == "climate.thermostat"
+
+    def test_sleep_entity_unset_uses_primary_even_in_window(self):
+        hass = _hass_with_entities({"climate.thermostat": _make_state("heat", {"current_temperature": 70})})
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity=None,
+        )
+        assert result.value == 70.0
+
+    def test_sleep_sensor_celsius_conversion(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 22}),
+                "sensor.bedroom_temp": _make_state("18"),
+            }
+        )
+        result = resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="celsius",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity="sensor.bedroom_temp",
+        )
+        assert result.value is not None
+        assert abs(result.value - 64.4) < 0.01  # 18C -> 64.4F
+        assert result.primary_value is not None
+        assert abs(result.primary_value - 71.6) < 0.01  # 22C -> 71.6F
+
+
+class TestSleepSensorOverrideBothCallPaths:
+    """The sleep-window swap must behave identically through both real bound methods,
+    with deterministic 'now' so the sleep-window check doesn't depend on wall-clock
+    time (per this project's existing dt_util-mocking convention)."""
+
+    def _sleep_config(self) -> dict:
+        return {
+            "climate_entity": "climate.thermostat",
+            "indoor_temp_source": TEMP_SOURCE_CLIMATE_FALLBACK,
+            "temp_unit": "fahrenheit",
+            "sleep_time": "22:00",
+            "wake_time": "07:00",
+            "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+        }
+
+    def test_engine_uses_sleep_sensor_in_window(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                "sensor.bedroom_temp": _make_state("65"),
+            }
+        )
+        ae = object.__new__(AutomationEngine)
+        ae.hass = hass
+        ae.climate_entity = "climate.thermostat"
+        ae.config = self._sleep_config()
+        ae._get_indoor_temp_f = types.MethodType(AutomationEngine._get_indoor_temp_f, ae)
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=_dt.datetime(2026, 1, 1, 23, 0),
+        ):
+            assert ae._get_indoor_temp_f() == 65.0
+
+    def test_coord_uses_sleep_sensor_in_window(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                "sensor.bedroom_temp": _make_state("65"),
+            }
+        )
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord.hass = hass
+        coord.config = self._sleep_config()
+        coord._get_indoor_temp_with_provenance = types.MethodType(
+            ClimateAdvisorCoordinator._get_indoor_temp_with_provenance, coord
+        )
+        coord._get_indoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_indoor_temp, coord)
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.now",
+            return_value=_dt.datetime(2026, 1, 1, 23, 0),
+        ):
+            assert coord._get_indoor_temp() == 65.0
+
+    def test_engine_uses_primary_outside_window(self):
+        hass = _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                "sensor.bedroom_temp": _make_state("65"),
+            }
+        )
+        ae = object.__new__(AutomationEngine)
+        ae.hass = hass
+        ae.climate_entity = "climate.thermostat"
+        ae.config = self._sleep_config()
+        ae._get_indoor_temp_f = types.MethodType(AutomationEngine._get_indoor_temp_f, ae)
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=_dt.datetime(2026, 1, 1, 12, 0),
+        ):
+            assert ae._get_indoor_temp_f() == 70.0
+
+    def test_coord_uses_primary_when_sleep_entity_unset(self):
+        hass = _hass_with_entities({"climate.thermostat": _make_state("heat", {"current_temperature": 70})})
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord.hass = hass
+        coord.config = {**self._sleep_config(), "sleep_indoor_temp_entity": None}
+        coord._get_indoor_temp_with_provenance = types.MethodType(
+            ClimateAdvisorCoordinator._get_indoor_temp_with_provenance, coord
+        )
+        coord._get_indoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_indoor_temp, coord)
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.now",
+            return_value=_dt.datetime(2026, 1, 1, 23, 0),
+        ):
+            assert coord._get_indoor_temp() == 70.0
+
+
+class TestExistingBehaviorUnaffectedBySleepSensorRefactor:
+    """Regression guard for the resolve_indoor_temp_f() extraction itself: calling
+    without any sleep-window args must be byte-for-byte identical to prior behavior."""
+
+    def test_resolve_indoor_temp_f_default_args_unchanged(self):
+        hass = MagicMock()
+        hass.states.get.return_value = _make_state("heat", {"current_temperature": 72})
+        result = resolve_indoor_temp_f(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+        )
+        assert result == 72.0

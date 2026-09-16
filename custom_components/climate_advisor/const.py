@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.38"
+VERSION = "0.7.39"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1201,6 +1201,12 @@ THERMAL_MAX_POST_HEAT_SAMPLES = 45  # cap on post_heat_samples list per event
 DEFAULT_PREHEAT_MINUTES = 120  # fallback when no model data
 MIN_PREHEAT_MINUTES = 30  # clamp floor
 DEFAULT_TOU_LEAD_MINUTES = 45  # fallback lead time when k_active_heat/k_active_cool not yet learned (Issue #797)
+# Issue #899: cap on the away/vacation TOU split-delta precondition (degrees banked below/
+# above the setback edge, and degrees the band edge is temporarily widened during the TOU
+# window — half the capped delta each). Also doubles as the fallback `required_delta` value
+# when the home's passive thermal rate (k_passive) isn't confidently known yet — see
+# scheduler.py's resolve_tou_away_vacation_phase() docstring.
+TOU_SETBACK_PRECOND_MAX_DELTA_F = 6.0
 MAX_PREHEAT_MINUTES = 240  # clamp ceiling (4 hrs)
 PREHEAT_SAFETY_MARGIN = 1.3  # multiply computed time by this
 DEFAULT_SETBACK_DEPTH_F = 4.0  # preserved fallback (current heat setback)

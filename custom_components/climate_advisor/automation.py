@@ -344,6 +344,7 @@ def select_comfort_band(
     occupancy_mode: str,
     in_sleep_window: bool,
     aggressive_savings: bool,
+    tou_expansion_f: float = 0.0,
 ) -> ComfortBand:
     """Compute the comfort band for the current plan — pure, no HA state access.
 
@@ -365,6 +366,18 @@ def select_comfort_band(
       day, ceiling otherwise).
     ``aggressive_savings`` widens BOTH comfort edges by ``CEILING_ESCALATION_SAVINGS_MARGIN_F``
     (floor down, ceiling up) so the system runs less; setback/sleep bands are unaffected.
+
+    ``tou_expansion_f`` (Issue #899, default ``0.0`` — a no-op for every caller except the
+    single away/vacation live-commit site, ``_apply_occupancy_away_vacation_decision()``):
+    while a TOU high-cost window is active for an away/vacation occupancy, widens the ONE
+    edge matching the day's anticipated HVAC direction — the ceiling on a cooling day, the
+    floor on a heating day (``classification.hvac_mode``) — by this many degrees. Half of
+    the same split-delta amount also becomes the precool/preheat depth commanded separately
+    by ``scheduler.resolve_tou_away_vacation_phase()``/``apply_tou_away_vacation_precondition()``
+    during the lead-time window before the TOU period starts; this parameter only ever
+    matters for the duration of the TOU window itself. Ignored (no-op) for every other
+    occupancy mode — Home/Guest's comfort band and the sleep band are untouched by this
+    parameter regardless of its value.
     """
     comfort_heat = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
     comfort_cool = float(config.get("comfort_cool", DEFAULT_COMFORT_COOL))
@@ -394,9 +407,19 @@ def select_comfort_band(
         ceiling = comfort_cool + margin
         ctx = "comfort"
 
+    # Issue #899: TOU away/vacation window expansion — widens only the edge matching the
+    # day's anticipated HVAC direction, and only for away/vacation (tou_expansion_f is
+    # always 0.0 for every other caller/occupancy mode, so this is a no-op elsewhere).
+    if occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION) and tou_expansion_f:
+        if classification.hvac_mode == "cool":
+            ceiling += tou_expansion_f
+        elif classification.hvac_mode == "heat":
+            floor -= tou_expansion_f
+
     reason = (
         f"{ctx} band [{floor:.0f}/{ceiling:.0f}] (day={classification.day_type}, active={active}"
-        f"{', aggressive' if aggressive_savings else ''})"
+        f"{', aggressive' if aggressive_savings else ''}"
+        f"{f', tou_expansion={tou_expansion_f:.1f}' if tou_expansion_f else ''})"
     )
     return ComfortBand(floor=floor, ceiling=ceiling, active=active, reason=reason)
 
@@ -1187,6 +1210,21 @@ class AutomationEngine:
 
         # Thermal model — set by coordinator before apply_classification()
         self._thermal_model: dict = {}
+
+        # Issue #899: away/vacation TOU pre-conditioning — live state pushed by the
+        # coordinator each cycle (_resolve_tou_schedule_state()), read by
+        # _apply_occupancy_away_vacation_decision() so ANY call to
+        # handle_occupancy_away()/handle_occupancy_vacation() (the regular 30-min cycle,
+        # the precise T_start guard timer, or any other trigger) picks up the currently
+        # active TOU window's band expansion, not just the trigger that happened to fire.
+        # All three are 0.0/None outside an active away/vacation TOU window.
+        self._tou_av_expansion_f: float = 0.0
+        self._tou_av_active_schedule_id: str | None = None
+        self._tou_av_precondition_target: float | None = None
+        # Dedup for the completed-vs-stopped-early observability log — only logged once per
+        # window (the first call that observes a nonzero _tou_av_expansion_f for a given
+        # schedule_id), not every cycle the window stays active.
+        self._tou_av_window_logged_schedule_id: str | None = None
 
         # Hourly forecast temps — injected by coordinator on each 30-min poll
         self._hourly_forecast_temps: list[dict] = []
@@ -3634,6 +3672,87 @@ class AutomationEngine:
                         "mode": classification.hvac_mode,
                     },
                 )
+
+    async def apply_tou_away_vacation_precondition(
+        self, classification: DayClassification, target: float, schedule_id: str, mode: str
+    ) -> None:
+        """Away/Vacation counterpart to ``apply_tou_precondition()`` (Issue #899).
+
+        Actively drives the setpoint toward the split-delta precool/preheat ``target``
+        (``scheduler.resolve_tou_away_vacation_phase()``) during the lead-time window
+        before a TOU high-cost period begins. Only ever called by the coordinator while
+        occupancy is already AWAY/VACATION and this resolution's phase is
+        ``PRECONDITIONING`` — so unlike ``apply_tou_precondition()``, this deliberately
+        calls ``_set_temperature()`` directly rather than ``_set_temperature_for_mode()``,
+        bypassing the Issue #85 occupancy safety net that would otherwise redirect the
+        write to the plain (unconditioned) setback band — that redirect exists to catch
+        code that ISN'T occupancy-aware writing a comfort setpoint over an away/vacation
+        home; this call site already IS the occupancy-aware away/vacation path, so
+        redirecting to itself would be circular and would silently defeat the whole
+        feature. The window-active phase (once the TOU period actually starts) is handled
+        separately, through the existing ``handle_occupancy_away()``/
+        ``handle_occupancy_vacation()`` → ``_apply_occupancy_away_vacation_decision()``
+        path via ``select_comfort_band()``'s ``tou_expansion_f`` — this method only ever
+        drives the pre-window precool/preheat leg.
+
+        Same defer set as ``apply_tou_precondition()`` (override/paused/nat-vent) —
+        ``DEFER_OCCUPANCY``/``PROCEED`` both fall through unchanged, since this method is
+        only ever invoked while occupancy already is away/vacation.
+        """
+        if self._override_confirm_pending:
+            _LOGGER.info(
+                "Override confirmation pending (detected=%s at %s) — skipping away/vacation "
+                "TOU pre-conditioning (schedule=%s)",
+                self._override_confirm_mode,
+                self._override_confirm_time,
+                schedule_id,
+            )
+            return
+
+        await self._sync_paused_by_door_with_live_sensors()
+        _gate = decide_scheduled_band_gate(
+            occupancy_mode=self._occupancy_mode,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+        if _gate in (
+            ScheduledBandGate.DEFER_OVERRIDE,
+            ScheduledBandGate.DEFER_PAUSED,
+            ScheduledBandGate.DEFER_NAT_VENT,
+        ):
+            _LOGGER.info(
+                "Away/vacation TOU pre-conditioning skipped this cycle — %s (schedule=%s)",
+                _gate.value,
+                schedule_id,
+            )
+            return
+
+        _LOGGER.info(
+            "Away/vacation TOU pre-conditioning: banking to %.1f°F ahead of schedule %s (mode=%s)",
+            target,
+            schedule_id,
+            mode,
+        )
+        await self._set_temperature(
+            target,
+            reason=f"tou_av_precondition schedule={schedule_id}",
+            mode=mode,
+            skip_setpoint_sanity_check=True,
+        )
+
+        _signature = (schedule_id, mode, round(target, 2))
+        if self._emit_event_callback and not self._recent_duplicate("tou_av_precondition_applied", _signature):
+            self._emit_event_callback(
+                "tou_av_precondition_applied",
+                {
+                    "schedule_id": schedule_id,
+                    "target": target,
+                    "mode": mode,
+                    "occupancy": self._occupancy_mode,
+                },
+            )
 
     async def _schedule_pre_condition(self, c: DayClassification) -> None:
         """Schedule pre-heating or pre-cooling based on trend.
@@ -9198,13 +9317,47 @@ class AutomationEngine:
 
         c = self._current_classification
         _occ_mode_const = OCCUPANCY_AWAY if mode == "away" else OCCUPANCY_VACATION
+        _tou_expansion = self._tou_av_expansion_f
         _band = select_comfort_band(
             c,
             self.config,
             occupancy_mode=_occ_mode_const,
             in_sleep_window=False,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            tou_expansion_f=_tou_expansion,
         )
+
+        # Issue #899: completed-vs-stopped-early observability — one log site, reached
+        # whether this call was triggered by the precise T_start guard timer or by a
+        # regular 30-min cycle that first observes the TOU window as active. Logged once
+        # per window (dedup via _tou_av_window_logged_schedule_id), not every cycle the
+        # window stays active.
+        if _tou_expansion and self._tou_av_active_schedule_id != self._tou_av_window_logged_schedule_id:
+            self._tou_av_window_logged_schedule_id = self._tou_av_active_schedule_id
+            _target = self._tou_av_precondition_target
+            _indoor = self._get_indoor_temp_f()
+            if _target is not None and _indoor is not None:
+                _reached = (c.hvac_mode == "cool" and _indoor <= _target) or (
+                    c.hvac_mode == "heat" and _indoor >= _target
+                )
+                if _reached:
+                    _LOGGER.info(
+                        "TOU precondition complete — house at %.1f°F, target %.1f°F reached before window start",
+                        _indoor,
+                        _target,
+                    )
+                else:
+                    _shortfall = abs(_indoor - _target)
+                    _LOGGER.warning(
+                        "TOU window started — stopping precondition early, house at %.1f°F "
+                        "(%.1f°F short of %.1f°F target); switching to expanded band [%.1f/%.1f]",
+                        _indoor,
+                        _shortfall,
+                        _target,
+                        _band.floor,
+                        _band.ceiling,
+                    )
+
         # Issue #591: WINDOWED dedup — see handle_occupancy_away()'s original comment for
         # the full rationale (repeated bands are often intentional re-confirmations, but
         # an unguarded site reopens the #584 double-emit shape within seconds).

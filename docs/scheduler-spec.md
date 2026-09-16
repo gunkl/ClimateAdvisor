@@ -13,6 +13,7 @@
 | How is the pre-conditioning lead time computed? | `thermal_lead_time.compute_lead_minutes_from_rate()` — one formula shared by 4 call sites (this feature, adaptive pre-heat, ODE ceiling guard, warm-day briefing), each with its own bounds/fallback. | [Lead-Time Computation](#lead-time-computation) |
 | Where does the chart's Target Band show pre-conditioning, and how does it stay in sync with what's actually commanded? | `_compute_target_band_schedule()`'s `tou_precondition_window` parameter — an additive override applied after the normal band, same shape as the existing `pre_cool_target` mechanism. Both call sites (chart builder, ODE curve builder) always receive the same resolved window. | [Chart Coverage](#chart-coverage) |
 | Does the chart show the actual system target (not just the comfort band range), and does it know about TOU/nat-vent? | Yes — one bold "Target" line, historical half from `chart_log`'s `setpoint`/`nat_vent_target` fields, forward half from `_compute_effective_target_forward()`'s 3-tier TOU→nat-vent→band-edge derivation. Supersedes the old dead `predicted_setpoint`/`historical_setpoint` fields and the thin `defense_lines` overlay. | [Unified Target Line](#unified-target-line-issue-786-follow-up-phase-3) |
+| Does TOU pre-conditioning work while Away/Vacation? | Yes (Issue #899) — but NOT by banking to the comfort-band edge like Home/Guest. Instead it predicts passive drift over the window (`k_passive * (indoor - outdoor)`, capped), splits the capped amount in half: half becomes precool/preheat depth, half becomes a temporary widening of the away/vacation setback edge for the window's duration. | [Away/Vacation Extension](#awayvacation-extension-issue-899) |
 
 ## Scope
 
@@ -23,6 +24,7 @@
   - `custom_components/climate_advisor/automation.py` — `apply_tou_precondition()` (L3137), `_set_temperature_for_mode()`'s `target_override` parameter (L3100)
   - `custom_components/climate_advisor/config_flow.py` — `async_step_scheduler()` (L1154), `async_step_scheduler_edit()` (L1179)
   - `custom_components/climate_advisor/nat_vent_gate.py` — `resolve_comfort_cool()` (the cool-side counterpart to the pre-existing `resolve_comfort_heat()`), reused (not reimplemented) by `scheduler.py`
+  - Issue #899 (Away/Vacation extension — see [Away/Vacation Extension](#awayvacation-extension-issue-899)): `scheduler.py::resolve_tou_away_vacation_phase()`; `automation.py::select_comfort_band()`'s `tou_expansion_f` parameter, `apply_tou_away_vacation_precondition()`, `_apply_occupancy_away_vacation_decision()`'s observability log; `coordinator.py::_sync_tou_away_vacation_state()`, `_fire_tou_av_window_start()`; `const.py::TOU_SETBACK_PRECOND_MAX_DELTA_F`
 
 What this spec does NOT cover:
 - The overnight weather-trend-driven pre-cool mechanism (`compute_pre_cool_target()`, `resolve_pre_cool_modifier()`, `automation.py`) — a structurally distinct, older mechanism kept architecturally separate from TOU banking (two different reasons to pre-cool, not one).
@@ -31,7 +33,7 @@ What this spec does NOT cover:
 
 ## Origin
 
-GitHub issue #786, following a request on the project roadmap issue (#11) from a user (DeppressedCabbage) who manually pre-cools/pre-heats a few degrees before a scheduled high electricity-rate window. The design generalizes this to arbitrary day-of-week/time windows with a design simplification made mid-implementation: rather than asking the user to configure a target temperature to bank to, the system reuses the home's own existing comfort-band edge and its already-learned thermal response rate — mirroring the project's existing overnight whole-house-fan "bank cool" pattern (`sleep_heat`/`sleep_cool`), generalized to any scheduled window instead of only the nightly one.
+GitHub issue #786, following a request on the project roadmap issue (#11) from a user who manually pre-cools/pre-heats a few degrees before a scheduled high electricity-rate window. The design generalizes this to arbitrary day-of-week/time windows with a design simplification made mid-implementation: rather than asking the user to configure a target temperature to bank to, the system reuses the home's own existing comfort-band edge and its already-learned thermal response rate — mirroring the project's existing overnight whole-house-fan "bank cool" pattern (`sleep_heat`/`sleep_cool`), generalized to any scheduled window instead of only the nightly one.
 
 ## Data Model
 
@@ -99,7 +101,7 @@ Direction follows the day's own anticipated HVAC need — mirroring the original
 | `"heat"` | comfort-band **ceiling** | `resolve_comfort_cool(comfort_cool_raw, sleep_cool, in_sleep_window)` (`nat_vent_gate.py`, added for this feature — symmetric counterpart to the pre-existing `resolve_comfort_heat()`) | `thermal_model["k_active_heat"]` |
 | anything else (`"off"`, etc.) | — | `TOUPhase.NONE`, no direction to bank | — |
 
-`in_sleep_window` is evaluated at `schedule_start` (the schedule's own start instant, via `automation.py::_in_sleep_window()`), not at "now" — the banking target itself never depends on the current time-of-day, only on whether the *destination* window is inside the sleep schedule. **This means the target is never a new number** — it is always exactly whichever value `resolve_comfort_heat()`/`resolve_comfort_cool()` would already return for that moment; a schedule confirmed with David: "match sleep_heat/sleep_cool when overlapping the sleep window" rather than always using the plain comfort value.
+`in_sleep_window` is evaluated at `schedule_start` (the schedule's own start instant, via `automation.py::_in_sleep_window()`), not at "now" — the banking target itself never depends on the current time-of-day, only on whether the *destination* window is inside the sleep schedule. **This means the target is never a new number** — it is always exactly whichever value `resolve_comfort_heat()`/`resolve_comfort_cool()` would already return for that moment; confirmed decision: "match sleep_heat/sleep_cool when overlapping the sleep window" rather than always using the plain comfort value.
 
 ## Coast Phase — Confirmed, Not Assumed
 
@@ -108,6 +110,69 @@ Before any pre-conditioning "stop" logic was written, a prerequisite test (`test
 Consequence: once a schedule's own `start` time arrives, `resolve_tou_phase()` reports `TOUPhase.NONE` and `apply_tou_precondition()` simply stops being called. The very next classification cycle's normal `apply_classification()` → `_apply_comfort_band()` call re-arms exactly the day's plain edge (e.g. `comfort_cool` on a cooling day) — which, given the banked starting position, is naturally idle until indoor actually reaches it. **No dedicated "coast" state, suppression guard, or new code exists anywhere in this feature for this behavior** — it falls out of the pre-existing threshold-command semantics for free. This is directly confirmed end-to-end by the golden scenario (see [Golden Scenario Coverage](#golden-scenario-coverage)).
 
 "Comfort always wins" (confirmed decision, not a design choice requiring code): if the banked thermal mass runs out before the scheduled window ends, `_apply_comfort_band()`'s normal edge-threshold command is exactly what corrects it — the same mechanism that corrects a comfort breach on any other day. No new escalation path exists.
+
+## Away/Vacation Extension (Issue #899)
+
+Everything above (Banking Target Resolution, Coast Phase) describes `resolve_tou_phase()`,
+which powers TOU pre-conditioning for **Home/Guest only**. Away/Vacation was unconditionally
+suppressed until Issue #899 — `apply_classification()`'s `DEFER_OCCUPANCY` branch means
+Away/Vacation never even reaches `select_comfort_band()`'s comfort-branch logic, so banking
+toward `comfort_heat`/`comfort_cool` the way Home/Guest does would be actively wrong even if
+it were reachable (nobody needs comfort in an empty home, and Away's/Vacation's setback band
+is 16°F/22°F wide by default — far wider than Home's 6°F comfort band, so "bank to the far
+edge" would waste far more energy than it saves).
+
+**The algorithm is deliberately different, not just "the same thing gated on occupancy":**
+`scheduler.resolve_tou_away_vacation_phase()` predicts how many degrees the house will
+passively drift during the upcoming window (`required_delta = abs(k_passive * (indoor -
+outdoor)) * window_hours` — the same passive-envelope-decay formula already used by the
+nat-vent floor-imminence guard, deliberately NOT `k_active_cool`/`k_active_heat`, which
+describes the HVAC's own power while running, not how far the house drifts while it's idle),
+caps that at `const.TOU_SETBACK_PRECOND_MAX_DELTA_F` (default 6.0°F — also the fallback value
+used when `k_passive` isn't confidently known yet, so the feature degrades gracefully rather
+than going inert), and splits the capped amount in half: half becomes precool/preheat depth
+below/above the away/vacation setback edge (commanded directly by
+`AutomationEngine.apply_tou_away_vacation_precondition()`, bypassing the Issue #85 occupancy
+safety net that would otherwise redirect the command back to the plain setback — this call
+site already IS the occupancy-aware path), half becomes a temporary widening of that same
+edge for the window's duration (`select_comfort_band()`'s new `tou_expansion_f` parameter,
+default `0.0`/no-op for every other of its 10 call sites).
+
+**Worked example** (the reporting user's own numbers from Issue #892): away setpoint 76°F,
+~6°F predicted drift over a 4.4hr window → precool to 73°F before the window starts, ceiling
+widens to 79°F for the window's duration — the house drifts 73°F→79°F without the AC running
+during the expensive period. Symmetric for a heating day (preheat above the setback floor,
+floor lowers for the window).
+
+**The precise stop-at-window-start guard.** `apply_classification()` unconditionally
+re-commands the plain away/vacation setback edge every cycle (Issue #505) — left unaddressed,
+this would both (a) let an in-progress precool/preheat keep running up to 30 minutes into the
+expensive window before the next cycle corrects it, and (b) immediately overwrite the
+intentionally-widened edge with the plain one the moment the window starts. Fixed two ways:
+`ClimateAdvisorCoordinator._sync_tou_away_vacation_state()` arms a precise `async_call_later`
+timer for the exact instant the window begins (`_fire_tou_av_window_start()`), which simply
+invokes the existing `handle_occupancy_away()`/`handle_occupancy_vacation()` early — the same
+command path the regular cycle already uses, not a second way to write a setpoint; and
+`_apply_occupancy_away_vacation_decision()` reads a live `_tou_av_expansion_f` attribute
+(pushed by the coordinator every cycle) so ANY invocation — the timer, or a regular cycle
+that happens to land inside an active window — picks up the currently-widened edge. The same
+call site logs, once per window, whether the precool/preheat target was actually reached
+before the window started (INFO) or the window began early and the precondition was cut short
+(WARNING, naming TOU as the reason) — see `docs/08-COMPUTATION-REFERENCE.md`'s Observability
+Requirements.
+
+**Observability**: a `tou_precondition_cycle_summary` event fires at window-end, diffing the
+existing `hvac_runtime_minutes`/fan-runtime counters across the window's active span — did the
+split-delta prediction actually hold (`hvac_ran_during_window: false`), or did the AC/heat
+still have to run mid-window?
+
+**Chart coverage**: the existing `_tou_precondition_window_tuple()` (used by both the chart
+band builder and the ODE prediction curve) is unaffected — it reads the same
+`precondition_start`/`schedule_start`/`target`/`mode` fields `TOUPhaseResolution` already
+carries, which `resolve_tou_away_vacation_phase()` populates identically. The precool/preheat
+leg is therefore automatically chart-covered; the widened-band leg during the window itself is
+not currently reflected on the chart (a scoped gap, not an oversight — tracked for a future
+pass rather than expanding this issue's surface further).
 
 ## Lead-Time Computation
 

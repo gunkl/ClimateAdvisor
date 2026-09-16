@@ -48,6 +48,13 @@ from datetime import time as dt_time
 from enum import Enum
 
 from .automation import _in_sleep_window
+from .const import (
+    DEFAULT_SETBACK_COOL,
+    DEFAULT_SETBACK_HEAT,
+    OCCUPANCY_VACATION,
+    TOU_SETBACK_PRECOND_MAX_DELTA_F,
+    VACATION_SETBACK_EXTRA,
+)
 from .nat_vent_gate import resolve_comfort_cool, resolve_comfort_heat
 from .thermal_lead_time import compute_lead_minutes_from_rate
 
@@ -119,6 +126,17 @@ class TOUPhaseResolution:
     schedule_id: str | None
     schedule_start: datetime | None
     precondition_start: datetime | None  # window's start instant — schedule_start - lead_minutes
+    # Issue #899, away/vacation only (always None for the Home/Guest resolution built by
+    # resolve_tou_phase()): half the capped split-delta — how many degrees the away/
+    # vacation band edge should temporarily widen by while the TOU window is active.
+    # `target` above doubles as the precool/preheat depth for this resolution (the other
+    # half of the same capped delta), so nothing new is needed there.
+    expansion_f: float | None = None
+    # Issue #899, away/vacation only: the instant the TOU window ITSELF ends (schedule_start
+    # + the schedule's own duration) — needed to know when the temporary band expansion
+    # should revert, since (unlike Home/Guest's open-ended "coast" phase) away/vacation's
+    # widened edge is only correct for the duration of the window, not indefinitely after.
+    window_end: datetime | None = None
 
 
 def _parse_hhmm(value: str) -> float:
@@ -163,6 +181,21 @@ def is_schedule_active_at(schedule: Schedule, now: datetime) -> bool:
         return _days_match(schedule.days, yesterday) and 0 <= h < end_h
 
     return _days_match(schedule.days, today) and start_h <= h < end_h
+
+
+def _schedule_duration_hours(schedule: Schedule) -> float:
+    """Civil-time duration of ``schedule``'s window, midnight-safe (Issue #899).
+
+    Unlike ``_schedule_end_datetime()``, this needs no ``now`` and doesn't require the
+    schedule to already be active — it's a pure property of the schedule's own start/end,
+    used to size how far the house is predicted to drift over the *upcoming* window, before
+    it has begun.
+    """
+    start_h = _parse_hhmm(schedule.start)
+    end_h = _parse_hhmm(schedule.end)
+    if end_h <= start_h:
+        return (24.0 - start_h) + end_h
+    return end_h - start_h
 
 
 def _schedule_end_datetime(schedule: Schedule, now: datetime) -> datetime:
@@ -295,3 +328,144 @@ def resolve_tou_phase(
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)
     phase = TOUPhase.PRECONDITIONING if precondition_start <= now < schedule_start else TOUPhase.NONE
     return TOUPhaseResolution(phase, target, mode, schedule.id, schedule_start, precondition_start)
+
+
+def resolve_tou_away_vacation_phase(
+    schedules: list[Schedule],
+    now: datetime,
+    current_indoor_temp: float | None,
+    current_outdoor_temp: float | None,
+    hvac_mode: str,
+    thermal_model: dict | None,
+    config: dict,
+    occupancy_mode: str,
+) -> TOUPhaseResolution:
+    """Away/Vacation TOU pre-conditioning (Issue #899, grounded in Issue #892).
+
+    Unlike ``resolve_tou_phase()`` (Home/Guest), this does NOT bank toward the comfort-band
+    edge — that would waste energy conditioning a home nobody occupies. Instead it predicts
+    how many degrees the house would passively drift during the upcoming high-cost window
+    (from the home's own envelope decay rate, NOT the HVAC's active rate — see below), caps
+    that at ``TOU_SETBACK_PRECOND_MAX_DELTA_F``, and splits the capped amount in half:
+    half becomes precool/preheat DEPTH below/above the away/vacation setback edge (the
+    ``target`` this resolution returns), half becomes a temporary EXPANSION of that same
+    edge for the duration of the window (``expansion_f``) — applied by
+    ``select_comfort_band()``'s ``tou_expansion_f`` parameter, not by this module. Worked
+    example (Issue #892, the reporting user's own numbers): setpoint 76°F, ~6°F predicted
+    drift over a 4.4hr window → precool to 73°F before the window, ceiling widens to 79°F
+    for the window's duration; the house drifts 73→79°F without the AC ever running during
+    the expensive period.
+
+    **The rate used for `required_delta` is deliberately NOT `k_active_cool`/`k_active_heat`
+    (the HVAC's own active-conditioning rate) — it's `k_passive * (indoor - outdoor)`**, the
+    same passive-envelope-decay formula already used at ``automation.py``'s nat-vent floor-
+    imminence guard and ``nat_vent_exit.py``'s proactive-floor exit. "How far will the house
+    drift on its own while the HVAC sits idle during the TOU window" is a passive-envelope
+    question, not a question about how fast the HVAC can move the temperature while running
+    — `k_active_*` remains correct for the lead-time calculation below (that phase genuinely
+    is HVAC-driven), but using it for `required_delta` would answer the wrong question.
+
+    When `k_passive` isn't confidently known yet (no observations, or `confidence_k_passive`/
+    `confidence` is "none"), `required_delta` falls back to the cap itself
+    (`TOU_SETBACK_PRECOND_MAX_DELTA_F`) rather than skipping the feature — the same "degrade
+    gracefully, don't go inert" precedent `compute_lead_minutes_from_rate()`'s own
+    `fallback_minutes` already establishes for the adjacent lead-time half of this same
+    calculation. This is a real, intentional tradeoff: a home with no thermal-model
+    confidence yet gets the maximum allowed precondition/expansion rather than none, until
+    its model gains confidence.
+
+    Returns the EARLIEST qualifying upcoming ``high`` schedule's decision, same convention
+    as ``resolve_tou_phase()``. ``expansion_f``/``window_end`` are populated whenever a
+    qualifying schedule was found, REGARDLESS of ``phase`` — same rationale as
+    ``resolve_tou_phase()``'s own docstring (a caller needs the full window shape for
+    timestamps that aren't "now", not just the current instant's answer).
+
+    **A currently-ACTIVE high-cost window takes priority over an upcoming one** (checked
+    first, via ``is_schedule_active_at()``) — this matters specifically for away/vacation
+    (unlike ``resolve_tou_phase()``, which never needs this): once a window's own start
+    time has passed, ``_next_start_within()`` can no longer find it (it only searches
+    FUTURE starts), so without this check the coordinator's "is the window active right
+    now, should the band be expanded" logic would never see the very window it started
+    pre-conditioning for. When a schedule is active, ``schedule_start``/``window_end`` are
+    derived from it directly (``_schedule_end_datetime()`` minus the schedule's own
+    duration) and ``phase`` is correctly ``NONE`` (``PRECONDITIONING`` only ever means
+    "before the window, actively driving toward the precool/preheat target" — once inside
+    the window the coordinator reads ``window_end`` directly rather than ``phase``).
+    """
+    if hvac_mode not in ("heat", "cool"):
+        return TOUPhaseResolution(TOUPhase.NONE, None, None, None, None, None)
+
+    thermal_model = thermal_model or {}
+
+    active_schedule = next(
+        (s for s in schedules if s.cost_tag == COST_TAG_HIGH and is_schedule_active_at(s, now)), None
+    )
+    if active_schedule is not None:
+        schedule = active_schedule
+        window_end = _schedule_end_datetime(schedule, now)
+        schedule_start = window_end - timedelta(hours=_schedule_duration_hours(schedule))
+    else:
+        candidates: list[tuple[datetime, Schedule]] = []
+        for schedule in schedules:
+            if schedule.cost_tag != COST_TAG_HIGH:
+                continue
+            start_at = _next_start_within(schedule, now, _LOOKAHEAD)
+            if start_at is not None:
+                candidates.append((start_at, schedule))
+
+        if not candidates:
+            return TOUPhaseResolution(TOUPhase.NONE, None, None, None, None, None)
+
+        candidates.sort(key=lambda pair: pair[0])
+        schedule_start, schedule = candidates[0]
+        window_end = schedule_start + timedelta(hours=_schedule_duration_hours(schedule))
+
+    setback_heat = float(config.get("setback_heat", DEFAULT_SETBACK_HEAT))
+    setback_cool = float(config.get("setback_cool", DEFAULT_SETBACK_COOL))
+    if occupancy_mode == OCCUPANCY_VACATION:
+        setback_heat -= VACATION_SETBACK_EXTRA
+        setback_cool += VACATION_SETBACK_EXTRA
+
+    k_passive = thermal_model.get("k_passive")
+    confidence = thermal_model.get("confidence_k_passive", thermal_model.get("confidence", "none"))
+    if (
+        k_passive is not None
+        and k_passive < 0
+        and confidence in ("medium", "high")
+        and current_indoor_temp is not None
+        and current_outdoor_temp is not None
+    ):
+        passive_rate = k_passive * (current_indoor_temp - current_outdoor_temp)  # °F/hr
+        required_delta = abs(passive_rate) * _schedule_duration_hours(schedule)
+    else:
+        # No confident passive rate — reuse the cap itself as the fallback degree value
+        # (see docstring above) rather than doing nothing.
+        required_delta = TOU_SETBACK_PRECOND_MAX_DELTA_F
+
+    capped_delta = min(required_delta, TOU_SETBACK_PRECOND_MAX_DELTA_F)
+    half = capped_delta / 2.0
+
+    if hvac_mode == "cool":
+        target = setback_cool - half  # precool depth below the away/vacation ceiling
+        rate = thermal_model.get("k_active_cool")
+        mode = "cool"
+    else:
+        target = setback_heat + half  # preheat depth above the away/vacation floor
+        rate = thermal_model.get("k_active_heat")
+        mode = "heat"
+
+    fallback_minutes = float(config.get("default_tou_lead_minutes", _TOU_LEAD_MIN_FALLBACK))
+    lead_minutes = compute_lead_minutes_from_rate(
+        delta_t=half,
+        rate=rate,
+        min_minutes=_TOU_LEAD_MIN_FLOOR,
+        max_minutes=_TOU_LEAD_MIN_CEIL,
+        safety_multiplier=_TOU_LEAD_MIN_SAFETY_MULTIPLIER,
+        fallback_minutes=fallback_minutes,
+    )
+
+    precondition_start = schedule_start - timedelta(minutes=lead_minutes)
+    phase = TOUPhase.PRECONDITIONING if precondition_start <= now < schedule_start else TOUPhase.NONE
+    return TOUPhaseResolution(
+        phase, target, mode, schedule.id, schedule_start, precondition_start, expansion_f=half, window_end=window_end
+    )

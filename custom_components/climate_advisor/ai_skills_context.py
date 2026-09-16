@@ -1640,6 +1640,34 @@ def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[str, str]:
     return label, settings
 
 
+def _render_tou_av_precondition_applied(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #899: away/vacation counterpart to tou_precondition_applied — the split-
+    delta precool/preheat leg, driven directly by apply_tou_away_vacation_precondition()
+    rather than the Home/Guest comfort-band path."""
+    mode = p.get("mode", "")
+    action = "Pre-cooling" if mode == "cool" else "Pre-heating" if mode == "heat" else "Pre-conditioning"
+    occupancy = p.get("occupancy", "")
+    schedule_id = p.get("schedule_id", "")
+    label = f"{action} ahead of scheduled high-cost period ({occupancy})" + (f" ({schedule_id})" if schedule_id else "")
+    target = p.get("target")
+    settings = f"target: {format_temp(target, unit)}" if target is not None else ""
+    return label, settings
+
+
+def _render_tou_precondition_cycle_summary(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #899: end-of-window observability for away/vacation TOU pre-conditioning —
+    did the split-delta prediction hold up, or did the AC/heat still have to run during
+    the (supposedly banked-through) high-cost window?"""
+    del unit  # no temperature value rendered here
+    hvac_ran = p.get("hvac_ran_during_window")
+    label = "TOU precondition window ended"
+    if hvac_ran:
+        settings = "HVAC still ran during the window — prediction fell short"
+    else:
+        settings = "house drifted through the window with no HVAC use"
+    return label, settings
+
+
 def _render_morning_wakeup(p: dict, unit: str) -> tuple[str, str]:
     mode = p.get("mode", "")
     label = f"Morning wake-up -- comfort restored ({mode})" if mode else "Morning wake-up -- comfort restored"
@@ -2541,6 +2569,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "comfort_band_applied": _render_comfort_band_applied,
     "tou_precondition_applied": _render_tou_precondition_applied,
     "tou_schedule_window_active": _render_tou_schedule_window_active,
+    "tou_av_precondition_applied": _render_tou_av_precondition_applied,
+    "tou_precondition_cycle_summary": _render_tou_precondition_cycle_summary,
     "bedtime_setback": _render_bedtime_setback,
     "morning_wakeup": _render_morning_wakeup,
     "occupancy_setback": _render_occupancy_setback,

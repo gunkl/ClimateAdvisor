@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.39] — 2026-09-16
+
+- Feat #899: Time-of-Use pre-conditioning now works while Away or Vacation, not just Home/Guest. Instead of banking to the far setback edge (wasteful for an empty home), it predicts how many degrees the house will drift during the high-cost window from the home's own passive thermal rate, then splits that (capped) amount in half: half becomes a precool/preheat depth before the window starts, half becomes a temporary widening of the setback edge for the window's duration. Precool/preheat stops precisely when the window begins (not up to 30 minutes late), with a log entry explaining whether the target was reached in time.
+
 ## [0.7.38] — 2026-09-16
 
 - Fix #897: corrected inaccurate documentation and the in-app description of the "Prefer Savings Over Comfort" setting — no behavior change. The docs previously understated how many things that setting affects and described one part (the economizer) using outdated behavior; the in-app description mentioned an effect ("earlier setbacks") that didn't match any actual behavior.

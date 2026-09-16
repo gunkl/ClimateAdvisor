@@ -14,10 +14,12 @@ Assistant instance before relying on it.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
@@ -29,8 +31,10 @@ from .const import (
     CONF_K_ACTIVE_COOL,
     CONF_K_ACTIVE_HEAT,
     CONF_K_PASSIVE,
+    CONF_MAX_OCCUPANCY_SCHEDULES,
     CONF_MIN_OFF_SECONDS,
     CONF_MIN_RUN_SECONDS,
+    CONF_OCCUPANCY_SCHEDULES,
     CONF_OUTDOOR_SOURCE,
     CONF_TICK_SECONDS,
     DEFAULT_COMFORT_COOL,
@@ -45,9 +49,25 @@ from .const import (
     DEFAULT_MIN_RUN_SECONDS,
     DEFAULT_TICK_SECONDS,
     DOMAIN,
+    OCCUPANCY_STATES,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+try:
+    # Same defensive-import shape climate.py already uses for its production import
+    # (Issue #898 DRY reuse) — config flow discovery can happen before
+    # async_setup_entry ever runs its own ConfigEntryNotReady check, so an
+    # unguarded top-level import failure here would break the config UI entirely
+    # rather than surfacing climate.py's clearer "install climate_advisor
+    # alongside this" error.
+    from custom_components.climate_advisor.scheduler import WEEKDAY_ABBREVS, _parse_hhmm
+except ImportError:
+    WEEKDAY_ABBREVS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+    def _parse_hhmm(value: str) -> float:
+        parts = value.split(":")
+        return int(parts[0]) + int(parts[1]) / 60.0
 
 
 def _num(
@@ -140,3 +160,122 @@ class CaDevThermostatSimConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure", data_schema=_build_schema(defaults=dict(entry.data)), errors=errors
         )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> CaDevThermostatSimOptionsFlow:
+        """Get the options flow handler — occupancy schedule management (Issue #898)."""
+        return CaDevThermostatSimOptionsFlow()
+
+
+class CaDevThermostatSimOptionsFlow(config_entries.OptionsFlow):
+    """Manage this zone's occupancy schedules (Issue #898).
+
+    Mirrors custom_components/climate_advisor/config_flow.py's own
+    async_step_scheduler()/async_step_scheduler_edit() list-management shape —
+    same add/edit/remove UX the user already knows from the real TOU calendar,
+    applied to occupancy-state scheduling instead of cost-period scheduling.
+    """
+
+    def __init__(self) -> None:
+        self._editing_schedule_id: str | None = None
+
+    @staticmethod
+    def _format_schedule_summary(schedule: dict[str, Any]) -> str:
+        days_label = "/".join(d.capitalize() for d in schedule.get("days", []))
+        window = f"{schedule.get('start')}-{schedule.get('end')}"
+        target = schedule.get("target", "?").capitalize()
+        name = schedule.get("name", "(unnamed)")
+        return f"{name} — {days_label} {window} → {target}"
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """List existing occupancy schedules; choose one to edit, or add a new one."""
+        schedules: list[dict[str, Any]] = list(self.config_entry.data.get(CONF_OCCUPANCY_SCHEDULES, []))
+
+        if user_input is not None:
+            selection = user_input["manage"]
+            self._editing_schedule_id = None if selection == "__add__" else selection
+            return await self.async_step_edit()
+
+        options = [selector.SelectOptionDict(value=s["id"], label=self._format_schedule_summary(s)) for s in schedules]
+        if len(schedules) < CONF_MAX_OCCUPANCY_SCHEDULES:
+            options.append(selector.SelectOptionDict(value="__add__", label="+ Add a new schedule"))
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("manage"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.LIST)
+                    ),
+                }
+            ),
+            description_placeholders={"count": str(len(schedules)), "max": str(CONF_MAX_OCCUPANCY_SCHEDULES)},
+        )
+
+    async def async_step_edit(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """Add, edit, or delete one occupancy schedule."""
+        errors: dict[str, str] = {}
+        schedules: list[dict[str, Any]] = list(self.config_entry.data.get(CONF_OCCUPANCY_SCHEDULES, []))
+        editing_id = self._editing_schedule_id
+        existing = next((s for s in schedules if s["id"] == editing_id), None) if editing_id else None
+
+        if user_input is not None:
+            if existing is not None and user_input.get("delete_schedule"):
+                schedules = [s for s in schedules if s["id"] != editing_id]
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data={**self.config_entry.data, CONF_OCCUPANCY_SCHEDULES: schedules}
+                )
+                self._editing_schedule_id = None
+                return await self.async_step_init()
+
+            if not user_input.get("days"):
+                errors["days"] = "schedule_days_required"
+            start_raw = user_input.get("start")
+            end_raw = user_input.get("end")
+            # Same start==end degenerate-window check production's own scheduler
+            # edit step uses, comparing parsed hour/minute (seconds ignored) to
+            # match is_schedule_active_at()'s own comparison semantics exactly.
+            if start_raw is not None and end_raw is not None and _parse_hhmm(start_raw) == _parse_hhmm(end_raw):
+                errors["end"] = "schedule_start_end_equal"
+
+            if not errors:
+                new_schedule = {
+                    "id": existing["id"] if existing else uuid.uuid4().hex,
+                    "name": user_input["name"],
+                    "days": list(user_input["days"]),
+                    "start": user_input["start"],
+                    "end": user_input["end"],
+                    "target": user_input["target"],
+                }
+                if existing is not None:
+                    schedules = [new_schedule if s["id"] == editing_id else s for s in schedules]
+                elif len(schedules) < CONF_MAX_OCCUPANCY_SCHEDULES:
+                    schedules = [*schedules, new_schedule]
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data={**self.config_entry.data, CONF_OCCUPANCY_SCHEDULES: schedules}
+                )
+                self._editing_schedule_id = None
+                return await self.async_step_init()
+
+        day_options = [selector.SelectOptionDict(value=d, label=d.capitalize()) for d in WEEKDAY_ABBREVS]
+        target_options = [selector.SelectOptionDict(value=t, label=t.capitalize()) for t in OCCUPANCY_STATES]
+        defaults = user_input if user_input is not None else (existing or {})
+
+        schema: dict[Any, Any] = {
+            vol.Required("name", default=defaults.get("name", "")): selector.TextSelector(),
+            vol.Required("days", default=defaults.get("days", [])): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=day_options, multiple=True, mode=selector.SelectSelectorMode.LIST)
+            ),
+            vol.Required("start", default=defaults.get("start", "09:00:00")): selector.TimeSelector(),
+            vol.Required("end", default=defaults.get("end", "17:00:00")): selector.TimeSelector(),
+            vol.Required("target", default=defaults.get("target", OCCUPANCY_STATES[1])): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=target_options, mode=selector.SelectSelectorMode.DROPDOWN)
+            ),
+        }
+        if existing is not None:
+            schema[vol.Optional("delete_schedule", default=False)] = selector.BooleanSelector()
+
+        return self.async_show_form(step_id="edit", data_schema=vol.Schema(schema), errors=errors)

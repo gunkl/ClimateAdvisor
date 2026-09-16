@@ -373,7 +373,7 @@
           "preheat_safety_margin": "Multiplier applied to model-computed pre-heat time as a buffer (e.g. 1.2 = 20% extra).",
           "max_setback_depth_f": "Largest overnight setback the adaptive engine may compute.",
           "comfort_mode_switch_min_interval_s": "How long to wait after commanding heat, active cooling, or a whole-house-fan session before switching between the heating and cooling families again \u2014 prevents rapid heat/cool hunting right after free cooling rides the house down to the comfort floor.",
-          "aggressive_savings": "When enabled, Climate Advisor favors energy savings over comfort \u2014 for example, using wider temperature swings and earlier setbacks.",
+          "aggressive_savings": "When enabled, Climate Advisor favors energy savings over comfort \u2014 for example, tolerating wider temperature swings before heating or cooling runs.",
           "comfort_deadband_hot_f": "On a hot day, how far indoor temp must drop below the comfort floor before the comfort-family FSM escalates to heat (the against-grain direction on a hot day).",
           "comfort_deadband_warm_f": "On a warm day, how far indoor temp must drop below the comfort floor before the comfort-family FSM escalates to heat.",
           "comfort_deadband_mild_f": "On a mild or off-classified day, how far indoor temp must move past a comfort edge before the comfort-family FSM escalates against the day's native direction.",

@@ -18,16 +18,36 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, PLATFORMS
+from .const import CONF_OCCUPANCY_SCHEDULES, DOMAIN, PLATFORMS
+from .occupancy_schedule import _IMPORT_ERROR, ZoneOccupancyState, schedule_from_dict
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up CA Dev Thermostat Sim from a config entry."""
+    if _IMPORT_ERROR is not None:
+        _LOGGER.error(
+            "CA Dev Thermostat Sim requires the climate_advisor integration to be "
+            "installed alongside it (occupancy_schedule.py imports scheduler.py). "
+            "Import failed: %s",
+            _IMPORT_ERROR,
+        )
+        raise ConfigEntryNotReady(
+            "climate_advisor is not installed — CA Dev Thermostat Sim reuses its scheduler.py and cannot run standalone"
+        )
+
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = dict(entry.data)
+
+    # Issue #898: build this zone's occupancy scheduler before forwarding to
+    # platforms — switch.py's entities register themselves into it during their own
+    # async_setup_entry, and climate.py's tick evaluates it every cycle.
+    raw_schedules = entry.data.get(CONF_OCCUPANCY_SCHEDULES) or []
+    schedules = [schedule_from_dict(raw) for raw in raw_schedules]
+    hass.data[DOMAIN][entry.entry_id]["occupancy_state"] = ZoneOccupancyState(schedules=schedules, switches={})
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

@@ -36,4 +36,24 @@ DEFAULT_DEADBAND_COOL_F = 1.5
 DEFAULT_MIN_RUN_SECONDS = 300
 DEFAULT_MIN_OFF_SECONDS = 300
 
-PLATFORMS = ["climate"]
+PLATFORMS = ["climate", "switch", "number"]
+
+# Occupancy scheduling (Issue #898). Reuses production's scheduler.Schedule dataclass
+# directly (see occupancy_schedule.py) — these are just the occupancy-state labels this
+# fixture's switches represent, matching climate_advisor's own OCCUPANCY_HOME/AWAY/
+# VACATION/GUEST constants by value (not imported — those are plain strings in
+# climate_advisor's const.py, duplicating the four literal values here is not a DRY
+# violation the way reimplementing schedule-matching logic would be).
+OCCUPANCY_HOME = "home"
+OCCUPANCY_AWAY = "away"
+OCCUPANCY_VACATION = "vacation"
+OCCUPANCY_GUEST = "guest"
+OCCUPANCY_STATES = (OCCUPANCY_HOME, OCCUPANCY_AWAY, OCCUPANCY_VACATION, OCCUPANCY_GUEST)
+
+CONF_OCCUPANCY_SCHEDULES = "occupancy_schedules"  # list[dict] — see occupancy_schedule.py
+CONF_MAX_OCCUPANCY_SCHEDULES = 10  # generous vs. production's MAX_SCHEDULES=5 — dev tooling, not user config sprawl
+
+# Manual current-temperature override (Issue #898) — a one-shot number input, not a
+# held override. See number.py.
+CONF_CURRENT_TEMP_OVERRIDE_MIN_F = 32.0
+CONF_CURRENT_TEMP_OVERRIDE_MAX_F = 110.0

@@ -96,6 +96,39 @@ had no support for that service at all. No thermal effect is modeled for
 fan-only mode (matches how a real furnace fan doesn't meaningfully heat/cool
 either) — it only needs to accept and report the command correctly.
 
+#### Occupancy scheduling and manual overrides (Issue #898)
+
+Each zone (config entry) also gets a `switch` and a `number` platform, in
+addition to `climate`:
+
+- **Four occupancy switches** — `switch.<zone>_occupancy_home/away/vacation/guest`.
+  Point `climate_advisor`'s own occupancy config
+  (`CONF_HOME_TOGGLE`/`CONF_VACATION_TOGGLE`/`CONF_GUEST_TOGGLE`) at whichever
+  of these your test scenario needs — this requires **zero** `climate_advisor`
+  changes, confirmed directly from `_is_toggle_on()` (`coordinator.py:1802-1814`),
+  which only ever checks `state.state == "on"` against whatever entity_id it's
+  configured with. These switches can always be toggled manually from a
+  dashboard in addition to being driven by the scheduler below.
+- **Occupancy scheduler** — configured via this integration's own Options flow
+  (gear icon on the zone → manage occupancy schedules), day-of-week + time
+  window + target occupancy state per entry, mirroring the real TOU calendar's
+  add/edit/remove UX. Reuses `custom_components/climate_advisor/scheduler.py`'s
+  `Schedule`/`is_schedule_active_at()` directly — same DRY precedent as the ODE
+  physics reuse above — rather than a second day-of-week/time matcher. Evaluated
+  on the same physics tick as `_async_tick()`, not a second timer. Exactly one
+  occupancy state is active at a time; a schedule only ever sets its own target
+  switch on and the others off when it's covering "now" — it never forces a
+  default state when nothing is scheduled.
+- **Manual current-temperature override** — `number.<zone>_set_current_temperature`.
+  A one-shot jump to a new simulated indoor temperature (e.g. to instantly test
+  behavior at 78°F without waiting for physics to get there); the input resets
+  to blank immediately after being applied, so it's visually clear this isn't a
+  held override — the thermostat's own `current_temperature` is the real,
+  physics-driven value going forward.
+- **Manual setpoint override** needs no new entity — the existing thermostat's
+  standard `climate.set_temperature` service (any dashboard, script, or
+  Developer Tools call) already provides this.
+
 ### `ca_dev_weather_proxy`
 
 A `weather` entity (`SyntheticWeatherEntity`) that produces a smooth,

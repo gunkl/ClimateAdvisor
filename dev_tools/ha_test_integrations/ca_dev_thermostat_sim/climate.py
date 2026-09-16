@@ -56,6 +56,7 @@ from .const import (
     DEFAULT_DEADBAND_HEAT_F,
     DEFAULT_MIN_OFF_SECONDS,
     DEFAULT_MIN_RUN_SECONDS,
+    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -212,9 +213,28 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # keeps the simulation correct across restarts and missed/delayed ticks.
         self._last_update_ts = dt_util.utcnow()
 
+        # Register this entity so number.py's manual temperature override (Issue #898)
+        # can reach it without a direct cross-platform object reference — same pattern
+        # occupancy_schedule.py's ZoneOccupancyState uses for the switch entities.
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(self._entry.entry_id, {})["thermostat_entity"] = self
+
         self.async_on_remove(
             async_track_time_interval(self.hass, self._async_tick, timedelta(seconds=self._tick_seconds))
         )
+
+    def apply_manual_temperature_override(self, value: float) -> None:
+        """Jump the simulated indoor temperature directly (Issue #898) — called by
+        number.py's CurrentTemperatureOverride entity. A one-shot override: physics
+        resumes from this new value on the next tick, same as if the real world had
+        instantaneously changed temperature."""
+        _LOGGER.info(
+            "CA Dev Thermostat Sim %s: manual override %.1f°F -> %.1f°F",
+            self.entity_id,
+            self._current_temp,
+            value,
+        )
+        self._current_temp = value
+        self.async_write_ha_state()
 
     @property
     def current_temperature(self) -> float | None:
@@ -342,7 +362,18 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             return None
 
     async def _async_tick(self, now: datetime) -> None:
-        """Advance the simulated indoor temperature by real elapsed wall time."""
+        """Advance the simulated indoor temperature by real elapsed wall time.
+
+        Also evaluates this zone's occupancy schedule (Issue #898 decision 1: reuse
+        this same tick rather than a second timer) — a no-op when no occupancy
+        schedules are configured for this zone.
+        """
+        zone_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        if zone_data is not None:
+            occupancy_state = zone_data.get("occupancy_state")
+            if occupancy_state is not None:
+                occupancy_state.evaluate(dt_util.as_local(now))
+
         dt_hours = (now - self._last_update_ts).total_seconds() / 3600.0
         if dt_hours <= 0:
             return

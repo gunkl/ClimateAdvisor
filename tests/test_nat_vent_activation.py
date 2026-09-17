@@ -1638,6 +1638,102 @@ class TestPostFanVerify:
 
         engine._set_temperature.assert_not_called()
 
+    def test_verify_callback_celsius_no_false_reassert_when_matching(self):
+        """Issue #903 regression: in Celsius installs, the thermostat's reported
+        ``temperature`` attribute is in Celsius, but ``_pending_setpoint_single``
+        (via ``_expected_temp``) is internal Fahrenheit. Comparing them directly
+        (without converting the reading through ``read_state_temp_f()``) produces
+        a spurious multi-degree "mismatch" on every single post-fan verify cycle,
+        even when the thermostat is holding the exact commanded setpoint —
+        needlessly re-sending commands to a correctly-behaving thermostat.
+        """
+        engine = _make_fan_engine()
+        engine.config["temp_unit"] = "celsius"
+        engine._pending_setpoint_single = 70.0  # internal Fahrenheit (~21.11°C)
+        engine._last_commanded_hvac_mode = "cool"
+        engine._manual_override_active = False
+
+        # Thermostat correctly reports ~21.1°C, matching the commanded 70.0°F within tolerance.
+        climate_state = MagicMock()
+        climate_state.state = "cool"
+        climate_state.attributes = {"current_temperature": 21.1, "temperature": 21.1}
+        engine.hass.states.get = MagicMock(return_value=climate_state)
+
+        engine._set_temperature = AsyncMock()
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with (
+            patch(_ACL_PATH, side_effect=_fake_acl),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        verify_calls = [(d, cb) for d, cb in captured_callbacks if d == 30.0]
+        assert len(verify_calls) == 1
+        _delay, verify_cb = verify_calls[0]
+
+        captured_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured_coros.append(c))
+
+        verify_cb(None)
+        assert len(captured_coros) == 1
+        asyncio.run(captured_coros[0])
+
+        engine._set_temperature.assert_not_called()
+
+    def test_verify_callback_celsius_repairs_true_drift(self):
+        """Celsius mirror of ``test_verify_callback_repairs_drifted_setpoint``: a
+        genuine drift (thermostat reporting a Celsius value that does NOT match
+        the commanded Fahrenheit setpoint once correctly converted) must still
+        trigger a repair, and the repair must be issued with the correct
+        internal-Fahrenheit ``_expected_temp`` (no wrapping needed post-fix)."""
+        engine = _make_fan_engine()
+        engine.config["temp_unit"] = "celsius"
+        engine._pending_setpoint_single = 70.0  # internal Fahrenheit (~21.11°C)
+        engine._last_commanded_hvac_mode = "cool"
+        engine._manual_override_active = False
+
+        # Thermostat reports 18.0°C (~64.4°F) — genuinely drifted from the 70.0°F target.
+        climate_state = MagicMock()
+        climate_state.state = "cool"
+        climate_state.attributes = {"current_temperature": 18.0, "temperature": 18.0}
+        engine.hass.states.get = MagicMock(return_value=climate_state)
+
+        engine._set_temperature = AsyncMock()
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with (
+            patch(_ACL_PATH, side_effect=_fake_acl),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        verify_calls = [(d, cb) for d, cb in captured_callbacks if d == 30.0]
+        assert len(verify_calls) == 1
+        _delay, verify_cb = verify_calls[0]
+
+        captured_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured_coros.append(c))
+
+        verify_cb(None)
+        assert len(captured_coros) == 1
+        asyncio.run(captured_coros[0])
+
+        engine._set_temperature.assert_called_once()
+        call_args = engine._set_temperature.call_args
+        # Positional arg 0 is _expected_temp — must be internal Fahrenheit (70.0), unwrapped.
+        assert call_args[0][0] == pytest.approx(70.0, abs=0.01)
+        assert call_args[1]["reason"] == "post-fan-verify/repair"
+        assert call_args[1]["mode"] == "cool"
+
 
 # ---------------------------------------------------------------------------
 # Issue #338 -- nat-vent AC assist HVAC state routing

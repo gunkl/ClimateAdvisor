@@ -23,7 +23,15 @@ def to_fahrenheit(value: float, unit: str) -> float:
 
     Passthrough for fahrenheit, C→F for celsius.
     Unknown units are treated as fahrenheit (passthrough).
+
+    Raises ValueError if ``value`` is None — every legitimate caller must resolve a
+    concrete fallback before calling (Issue #903: a caller that let None reach here
+    hit an unguarded ``None * 9.0`` in celsius mode, crashing the entire coordinator
+    update cycle with a cryptic ``unsupported operand type(s)`` error instead of a
+    clear one).
     """
+    if value is None:
+        raise ValueError("to_fahrenheit() received None — caller must resolve a fallback before calling")
     if unit == CELSIUS:
         return value * 9.0 / 5.0 + 32.0
     return float(value)
@@ -34,10 +42,40 @@ def from_fahrenheit(value: float, unit: str) -> float:
 
     Passthrough for fahrenheit, F→C for celsius.
     Unknown units are treated as fahrenheit (passthrough).
+
+    Raises ValueError if ``value`` is None — see ``to_fahrenheit()``'s docstring.
     """
+    if value is None:
+        raise ValueError("from_fahrenheit() received None — caller must resolve a fallback before calling")
     if unit == CELSIUS:
         return (value - 32.0) * 5.0 / 9.0
     return float(value)
+
+
+def read_state_temp_f(state, attr: str, unit: str) -> float | None:
+    """Read a numeric temperature attribute off an HA state object, converting it to
+    internal Fahrenheit.
+
+    This is the single sanctioned way to read a temperature attribute directly off an
+    HA entity state (a climate entity's "temperature"/"current_temperature" attribute,
+    etc.) — it pairs the read with the mandatory to_fahrenheit() conversion in one
+    place so a future call site cannot silently skip it (Issue #903 found six
+    independent call sites across the codebase that had done exactly that, each
+    "accidentally correct" in fahrenheit-configured installs and silently or loudly
+    wrong only in celsius-configured ones).
+
+    Returns None if the state is missing, the attribute is absent/None, or the value
+    isn't numeric — callers decide the fallback.
+    """
+    if state is None:
+        return None
+    raw = state.attributes.get(attr)
+    if raw is None:
+        return None
+    try:
+        return to_fahrenheit(float(raw), unit)
+    except (ValueError, TypeError):
+        return None
 
 
 def format_temp(value_fahrenheit: float, unit: str, decimals: int = 0) -> str:
@@ -149,7 +187,12 @@ def convert_delta(value_fahrenheit: float, unit: str) -> float:
         convert_delta(9.0, FAHRENHEIT)  → 9.0
         convert_delta(9.0, CELSIUS)     → 5.0
         convert_delta(0.0, CELSIUS)     → 0.0
+
+    Raises ValueError if ``value_fahrenheit`` is None — see ``to_fahrenheit()``'s
+    docstring.
     """
+    if value_fahrenheit is None:
+        raise ValueError("convert_delta() received None — caller must resolve a fallback before calling")
     if unit == CELSIUS:
         return value_fahrenheit * 5.0 / 9.0
     return float(value_fahrenheit)

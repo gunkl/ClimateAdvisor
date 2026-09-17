@@ -267,6 +267,7 @@ from .temperature import (
     format_temp,
     free_cooling_direction_ok,
     from_fahrenheit,
+    read_state_temp_f,
     to_fahrenheit,
 )
 
@@ -378,6 +379,18 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
     today = dt_util.now().date().isoformat()
     index = int(hashlib.sha256(f"{today}:{salt}".encode()).hexdigest(), 16) % len(pool)
     return pool[index]
+
+
+def _first_non_none(*values):
+    """Return the first non-None value, or None if all are None.
+
+    Used in place of chained ``dict.get(key, dict.get(other_key, default))`` calls,
+    which only substitute the default when a key is ABSENT — not when it's
+    present-but-``None`` (a real weather-API pattern, e.g. today's ``templow`` once
+    today's low has already passed). Deliberately not ``a or b or c``: ``0.0°F`` is a
+    legitimate, falsy-but-valid temperature that ``or`` would incorrectly discard.
+    """
+    return next((v for v in values if v is not None), None)
 
 
 def _prune_event_log(event_log: list[dict], now: datetime) -> list[dict]:
@@ -2573,6 +2586,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "Coordinator update failed (consecutive_failure_count=%d): %s",
                     self.consecutive_failure_count,
                     self.last_update_error,
+                    exc_info=err,
                 )
                 with contextlib.suppress(Exception):
                     await self._async_save_state()
@@ -3601,6 +3615,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         current_outdoor = self._get_outdoor_temp(attrs)
         current_indoor = self._get_indoor_temp()
+        # Resolved up front (not at the bottom of this method, where it used to live):
+        # the fallback values below (current_outdoor / current_outdoor - 15) are already
+        # internal Fahrenheit — they must NOT be run through to_fahrenheit() a second
+        # time. Only a value actually sourced from a forecast entry (still in the
+        # weather provider's configured display unit) needs that conversion. The old
+        # code applied to_fahrenheit() unconditionally to all four values regardless of
+        # origin, silently double-converting the fallback (e.g. 65°F -> 149°F) in any
+        # Celsius-configured install whenever the forecast was empty or missing today's/
+        # tomorrow's entry — a real, pre-existing sibling of the Issue #903 crash found
+        # while fixing it.
+        unit = self.config.get("temp_unit", "fahrenheit")
         forecast = await self._get_forecast_data()
         self._daily_forecast_full = forecast
 
@@ -3610,11 +3635,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # 2026-05-16T00:00:00+00:00 = 2026-05-15 17:00 PDT), which
         # dt_util.as_local() shifts to the previous local day. Build a
         # date-keyed dict so we never assume array position == calendar day.
-        today_high = current_outdoor
-        today_low = current_outdoor
-        tomorrow_high = current_outdoor
-        tomorrow_low = current_outdoor
-
+        # (today_high/today_low/tomorrow_high/tomorrow_low are assigned unconditionally
+        # below via _resolve_forecast_temp_f(), which already falls back to
+        # current_outdoor/current_outdoor - 15 — no separate pre-init needed.)
         today_fc = None
         tomorrow_fc = None
         if forecast:
@@ -3665,18 +3688,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 tomorrow_fc.get("temperature") if tomorrow_fc else f"none→{current_outdoor}°F fallback",
             )
 
-        if today_fc:
-            today_high = today_fc.get("temperature", today_fc.get("tempHigh", current_outdoor))
-            today_low = today_fc.get("templow", today_fc.get("tempLow", current_outdoor - 15))
-        if tomorrow_fc:
-            tomorrow_high = tomorrow_fc.get("temperature", tomorrow_fc.get("tempHigh", current_outdoor))
-            tomorrow_low = tomorrow_fc.get("templow", tomorrow_fc.get("tempLow", current_outdoor - 15))
+        def _warn_if_null_present(fc: dict, key: str, label: str, fallback: float) -> None:
+            # dict.get(key, default) only substitutes default when key is ABSENT, not
+            # when it's present-but-None (a real weather-API pattern — e.g. today's
+            # templow once today's low has already passed). Surface that distinct
+            # data-quality case separately from the missing-entry warning above.
+            if key in fc and fc.get(key) is None:
+                _LOGGER.warning(
+                    "Forecast entry for %s has a null %s field — falling back to %.1f°F",
+                    label,
+                    key,
+                    fallback,
+                )
 
-        unit = self.config.get("temp_unit", "fahrenheit")
-        today_high = to_fahrenheit(today_high, unit)
-        today_low = to_fahrenheit(today_low, unit)
-        tomorrow_high = to_fahrenheit(tomorrow_high, unit)
-        tomorrow_low = to_fahrenheit(tomorrow_low, unit)
+        def _resolve_forecast_temp_f(fc: dict | None, key: str, alt_key: str, fallback_f: float) -> float:
+            # fallback_f (current_outdoor / current_outdoor - 15) is already internal
+            # Fahrenheit — only a value actually sourced from the forecast entry (still
+            # in the weather provider's configured display unit) needs to_fahrenheit().
+            if fc:
+                raw = _first_non_none(fc.get(key), fc.get(alt_key))
+                if raw is not None:
+                    return to_fahrenheit(raw, unit)
+            return fallback_f
+
+        if today_fc:
+            _warn_if_null_present(today_fc, "temperature", f"today ({now_date})", current_outdoor)
+            _warn_if_null_present(today_fc, "templow", f"today ({now_date})", current_outdoor - 15)
+        if tomorrow_fc:
+            _warn_if_null_present(tomorrow_fc, "temperature", f"tomorrow ({tomorrow_date})", current_outdoor)
+            _warn_if_null_present(tomorrow_fc, "templow", f"tomorrow ({tomorrow_date})", current_outdoor - 15)
+
+        today_high = _resolve_forecast_temp_f(today_fc, "temperature", "tempHigh", current_outdoor)
+        today_low = _resolve_forecast_temp_f(today_fc, "templow", "tempLow", current_outdoor - 15)
+        tomorrow_high = _resolve_forecast_temp_f(tomorrow_fc, "temperature", "tempHigh", current_outdoor)
+        tomorrow_low = _resolve_forecast_temp_f(tomorrow_fc, "templow", "tempLow", current_outdoor - 15)
 
         # The forecast API returns "remaining period" data — as the day
         # progresses, today's high drops to the current temp and today's low
@@ -4951,6 +4996,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Bug 3 (Issue #321): Per-temperature-tick nat-vent cycling re-evaluation.
         # Fires on every thermostat state event (including attribute-only changes) when
         # a nat-vent session is active so the fan cycles before the hard comfort-floor exit.
+        # Issue #903: read via read_state_temp_f() so a Celsius-configured install's raw
+        # current_temperature attribute is converted to internal Fahrenheit before being
+        # compared against comfort_heat/comfort_cool/nat_vent_target (all internal-°F) —
+        # the other two nat_vent_temperature_check() call sites already do this correctly
+        # via _get_indoor_temp(). Raw attrs are still used for the "did it change" check,
+        # which is unit-agnostic (equality, not comparison against an internal-°F value).
+        unit = self.config.get("temp_unit", "fahrenheit")
         _new_temp_attr = new_state.attributes.get("current_temperature")
         _old_temp_attr = old_state.attributes.get("current_temperature")
         if (
@@ -4958,9 +5010,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and _new_temp_attr != _old_temp_attr
             and self.automation_engine._natural_vent_active
         ):
-            await self.automation_engine.nat_vent_temperature_check(
-                float(_new_temp_attr), outdoor=self._last_outdoor_temp
-            )
+            _new_temp_f = read_state_temp_f(new_state, "current_temperature", unit)
+            if _new_temp_f is not None:
+                await self.automation_engine.nat_vent_temperature_check(_new_temp_f, outdoor=self._last_outdoor_temp)
 
         # Issue #327: Thermostatic fan re-evaluation on every indoor temp tick.
         # Fires whenever the thermostat reports a new current_temperature and a CA fan is running

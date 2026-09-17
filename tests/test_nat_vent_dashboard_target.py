@@ -52,6 +52,13 @@ def _make_nat_vent_coord_stub(*, config: dict) -> object:
     coord._startup_coalesce_active = False
     coord._startup_coalesce_expiry = None
     coord._build_thermal_pipeline_summary = MagicMock(return_value={})
+    # Issue #912: get_debug_state() now also calls get_thermostat_fan_only_runtime_today(),
+    # which reads these via getattr()/direct access — object.__new__() skips __init__, so
+    # this partial-instantiation stub must set them explicitly.
+    coord._today_record = None
+    coord._hvac_on_since = None
+    coord._thermostat_fan_only_on_since = None
+    coord._hvac_session_mode = None
 
     ae = MagicMock()
     ae._natural_vent_active = True

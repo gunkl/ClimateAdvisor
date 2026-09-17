@@ -74,6 +74,11 @@ def _build_coordinator(occupancy_mode: str) -> ClimateAdvisorCoordinator:
     coord._get_indoor_temp = MagicMock(return_value=76.0)
     coord._last_outdoor_temp = 95.0
     coord._hvac_on_since = None
+    # Issue #912: new instance attrs read via getattr()/direct access by
+    # _flush_runtime_for_mode()/_glide_hvac_session_mode() — object.__new__() skips
+    # __init__, so partial-instantiation stubs must set these explicitly.
+    coord._thermostat_fan_only_on_since = None
+    coord._hvac_session_mode = None
     coord._today_record = None
     coord._tou_av_stop_timer_cancel = None
     coord._tou_av_stop_timer_schedule_start = None

@@ -145,6 +145,11 @@ def _make_thermostat_coord_stub(**overrides):
     coord._is_recent_temp_command = MagicMock(return_value=False)
     coord._emit_event = MagicMock()
     coord._hvac_on_since = None
+    # Issue #912: new instance attrs read via getattr()/direct access by
+    # _flush_runtime_for_mode()/_glide_hvac_session_mode() — object.__new__() skips
+    # __init__, so partial-instantiation stubs must set these explicitly.
+    coord._thermostat_fan_only_on_since = None
+    coord._hvac_session_mode = None
     coord._pending_thermal_event = None
     coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()

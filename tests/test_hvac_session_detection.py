@@ -22,6 +22,8 @@ import types
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 # ── HA module stubs ──────────────────────────────────────────────────────────
 if "homeassistant" not in sys.modules:
     from conftest import _install_ha_stubs
@@ -122,6 +124,11 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord._is_recent_hvac_command = MagicMock(return_value=False)
     coord._emit_event = MagicMock()
     coord._hvac_on_since = hvac_on_since
+    # Issue #912: new instance attrs read via getattr() by _runtime_today_for_mode()/
+    # _flush_runtime_for_mode()/_glide_hvac_session_mode() — object.__new__() skips
+    # __init__, so partial-instantiation stubs must set these explicitly.
+    coord._thermostat_fan_only_on_since = None
+    coord._hvac_session_mode = None
     coord._pending_thermal_event = None
     coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()
@@ -172,6 +179,10 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
 
     coord._today_record = DailyRecord(date="2026-04-08", day_type="warm", trend_direction="stable")
     coord._hvac_on_since = None
+    # Issue #912: see _make_thermostat_coord's comment above — same requirement here
+    # since _async_update_data_impl() now calls get_thermostat_fan_only_runtime_today().
+    coord._thermostat_fan_only_on_since = None
+    coord._hvac_session_mode = None
 
     ae = MagicMock()
     ae._fan_active = ca_fan_active
@@ -351,10 +362,18 @@ class TestThermalSessionDetectionReal:
         coord._start_hvac_observation.assert_called_once_with("cool")
 
     def test_turn_off_detected_when_hvac_action_stuck_at_fan(self):
-        """old=heat/fan, new=off/fan: turn-off fires and _end_hvac_active_phase is called."""
+        """old=heat/fan, new=off/fan: turn-off fires and _end_hvac_active_phase is called.
+
+        Issue #912: the turn-off path now calls `_flush_runtime_for_mode(self._hvac_session_mode)`
+        directly rather than the (now-unused-here) `_flush_hvac_runtime()` wrapper, so this
+        asserts the real accumulation effect on `hvac_runtime_minutes` instead of a mock call —
+        `_hvac_session_mode` must be pre-set to "heat" to mirror a session that was already
+        started via the real turn-on path.
+        """
         coord = _make_thermostat_coord(
             hvac_on_since=datetime(2026, 4, 8, 9, 0, 0),
         )
+        coord._hvac_session_mode = "heat"
         old = _make_state("heat", hvac_action="fan")
         new = _make_state("off", hvac_action="fan")
 
@@ -362,7 +381,9 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        coord._flush_hvac_runtime.assert_called_once()
+        assert coord._today_record.hvac_runtime_minutes == pytest.approx(60.0)
+        assert coord._today_record.thermostat_fan_only_runtime_minutes == 0.0
+        assert coord._hvac_session_mode is None
         assert coord._end_hvac_active_phase.call_count == 2
 
     def test_normal_heating_action_still_works(self):
@@ -378,8 +399,10 @@ class TestThermalSessionDetectionReal:
         assert coord._hvac_on_since is not None
         coord._start_hvac_observation.assert_called_once_with("heat")
 
-    def test_fan_only_mode_creates_fan_only_event(self):
-        """fan_only mode + fan action → _start_hvac_observation called with 'fan_only'."""
+    def test_fan_only_mode_never_starts_thermal_observation(self):
+        """fan_only mode + fan action → tracked under its own runtime timer, and
+        Issue #912 fixes fan_only from being mislabeled as an OBS_TYPE_HVAC_COOL
+        thermal observation — _start_hvac_observation must NOT be called."""
         coord = _make_thermostat_coord()
         old = _make_state("off", hvac_action="")
         new = _make_state("fan_only", hvac_action="fan")
@@ -388,7 +411,10 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        coord._start_hvac_observation.assert_called_once_with("fan_only")
+        coord._start_hvac_observation.assert_not_called()
+        assert coord._hvac_session_mode == "fan_only"
+        assert coord._thermostat_fan_only_on_since == datetime(2026, 4, 8, 10, 0, 0)
+        assert coord._hvac_on_since is None
 
 
 # ---------------------------------------------------------------------------
@@ -757,3 +783,245 @@ class TestFanModeOverrideActiveStillDispatches:
 
         coord.automation_engine.on_fan_turned_off.assert_not_called()
         coord.automation_engine.handle_fan_manual_override.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #912 — fan-only runtime falsely reported as heat/cool runtime
+# ---------------------------------------------------------------------------
+#
+# Occupant framing: before this fix, a night where only the thermostat's
+# fan_only mode (or a WHF-driven fan_only state) ran was reported to the user
+# as real heat/cool runtime — implying the heater or AC ran for hours when the
+# compressor/burner never turned on. These tests pin the fix: fan_only time
+# accumulates under its own counter, heat/cool accounting is unaffected, and a
+# fan_only session is never mistaken for a thermal (compressor/burner) event.
+
+
+class TestIssue912FanOnlyRuntimeTracking:
+    def test_fan_only_full_session_increments_only_its_own_counter(self):
+        """A fan_only-only session must leave hvac_runtime_minutes at 0 and
+        accumulate solely under thermostat_fan_only_runtime_minutes."""
+        coord = _make_thermostat_coord()
+        on_old = _make_state("off", hvac_action="")
+        on_new = _make_state("fan_only", hvac_action="fan")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(on_old, on_new)))
+
+        assert coord._hvac_session_mode == "fan_only"
+        assert coord._hvac_on_since is None
+        assert coord._thermostat_fan_only_on_since == datetime(2026, 4, 8, 10, 0, 0)
+
+        off_old = _make_state("fan_only", hvac_action="fan")
+        off_new = _make_state("off", hvac_action="")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 12, 10, 0)  # +130 min
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(off_old, off_new)))
+
+        assert coord._today_record.hvac_runtime_minutes == 0.0
+        assert coord._today_record.thermostat_fan_only_runtime_minutes == pytest.approx(130.0)
+        assert coord._hvac_session_mode is None
+
+    def test_heat_session_still_increments_hvac_runtime_regression_guard(self):
+        """A pure heat session must still accumulate hvac_runtime_minutes exactly
+        as before — this fix must not regress the existing, correct behavior."""
+        coord = _make_thermostat_coord()
+        on_old = _make_state("off", hvac_action="")
+        on_new = _make_state("heat", hvac_action="heating")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(on_old, on_new)))
+
+        off_old = _make_state("heat", hvac_action="heating")
+        off_new = _make_state("off", hvac_action="")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 45, 0)  # +45 min
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(off_old, off_new)))
+
+        assert coord._today_record.hvac_runtime_minutes == pytest.approx(45.0)
+        assert coord._today_record.thermostat_fan_only_runtime_minutes == 0.0
+
+    def test_mixed_day_heat_then_glide_to_fan_only_then_off_splits_counters(self):
+        """Heat runs 30 min, glides (no off-edge — hvac_action stays 'fan' the whole
+        time on a thermostat that never reliably reports 'heating') into a 90-min
+        fan_only purge tail, then fully turns off. Each counter must reflect only
+        its own true elapsed span — this is the most likely literal mechanism
+        behind Issue #912's reported 402-minute false HVAC runtime."""
+        coord = _make_thermostat_coord()
+
+        on_old = _make_state("off", hvac_action="")
+        on_new = _make_state("heat", hvac_action="fan")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(on_old, on_new)))
+        assert coord._hvac_session_mode == "heat"
+
+        # Glide: hvac_action stays "fan" on both sides (old_action == new_action) —
+        # the "no distinguishing signal at all" branch.
+        glide_old = _make_state("heat", hvac_action="fan")
+        glide_new = _make_state("fan_only", hvac_action="fan")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 30, 0)  # +30 min of heat
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(glide_old, glide_new)))
+
+        assert coord._today_record.hvac_runtime_minutes == pytest.approx(30.0)
+        assert coord._hvac_session_mode == "fan_only"
+        assert coord._hvac_on_since is None
+        assert coord._thermostat_fan_only_on_since == datetime(2026, 4, 8, 6, 30, 0)
+
+        off_old = _make_state("fan_only", hvac_action="fan")
+        off_new = _make_state("off", hvac_action="")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 8, 0, 0)  # +90 min of fan_only
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(off_old, off_new)))
+
+        assert coord._today_record.hvac_runtime_minutes == pytest.approx(30.0)
+        assert coord._today_record.thermostat_fan_only_runtime_minutes == pytest.approx(90.0)
+        assert coord._hvac_session_mode is None
+
+    def test_glide_via_differing_hvac_action_branch(self):
+        """The sibling glide branch: old_action != new_action but neither side is a
+        running heat/cool action (e.g. 'fan' -> ''), so the heat_cool-switch inner
+        check doesn't apply and this falls to the state-based glide detection."""
+        coord = _make_thermostat_coord()
+        on_old = _make_state("off", hvac_action="")
+        on_new = _make_state("heat", hvac_action="fan")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(on_old, on_new)))
+
+        glide_old = _make_state("heat", hvac_action="fan")
+        glide_new = _make_state("fan_only", hvac_action="")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 20, 0)  # +20 min of heat
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(glide_old, glide_new)))
+
+        assert coord._today_record.hvac_runtime_minutes == pytest.approx(20.0)
+        assert coord._hvac_session_mode == "fan_only"
+        # _start_hvac_observation must have fired exactly once — for the original
+        # turn-on into heat — and never again for the glide into fan_only.
+        coord._start_hvac_observation.assert_called_once_with("heat")
+
+
+# ---------------------------------------------------------------------------
+# Issue #912 — observation continuity across a heat/cool <-> fan_only glide
+# ---------------------------------------------------------------------------
+
+
+def _make_glide_continuity_coord():
+    """Minimal real-instance coordinator for exercising _glide_hvac_session_mode()
+    and the REAL _end_hvac_active_phase() (not mocked), to verify the in-progress
+    thermal observation is transitioned cleanly rather than left dangling or
+    silently dropped."""
+    ClimateAdvisorCoordinator = _get_coordinator_class()
+    coord = object.__new__(ClimateAdvisorCoordinator)
+
+    coord.config = {"weather_entity": "weather.test"}
+    hass = MagicMock()
+    hass.states.get = MagicMock(return_value=MagicMock(attributes={}))
+    coord.hass = hass
+
+    coord._today_record = None
+    coord._hvac_on_since = None
+    coord._thermostat_fan_only_on_since = None
+    coord._hvac_session_mode = None
+    coord._pending_observations = {}
+    coord._get_indoor_temp_with_provenance = MagicMock(return_value=MagicMock(primary_value=72.0))
+    coord._get_outdoor_temp = MagicMock(return_value=60.0)
+    coord._start_hvac_observation = AsyncMock()
+
+    return coord
+
+
+class TestObservationContinuityAcrossGlide:
+    def test_glide_out_of_heat_ends_active_phase_as_post_heat(self):
+        """Gliding out of heat must transition the in-progress observation's phase
+        from 'active' to 'post_heat' — same treatment as a real turn-off — not
+        leave it stuck at 'active' (which would silently drop the observation)."""
+        from custom_components.climate_advisor.const import OBS_TYPE_HVAC_HEAT
+
+        coord = _make_glide_continuity_coord()
+        coord._hvac_session_mode = "heat"
+        coord._hvac_on_since = datetime(2026, 4, 8, 6, 0, 0)
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = {
+            "_phase": "active",
+            "active_start": datetime(2026, 4, 8, 6, 0, 0).isoformat(),
+            "active_samples": [],
+            "peak_indoor_f": None,
+        }
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 30, 0)
+            mock_dt.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
+            coord._glide_hvac_session_mode("fan_only")
+
+        assert coord._pending_observations[OBS_TYPE_HVAC_HEAT]["_phase"] == "post_heat"
+        assert coord._hvac_session_mode == "fan_only"
+        coord._start_hvac_observation.assert_not_called()
+
+    def test_glide_back_into_heat_does_not_start_new_observation(self):
+        """Gliding back into heat/cool after a fan_only interlude must NOT itself
+        call _start_hvac_observation() — only a genuine turn-on edge (the
+        not-was_running/is_running branch in _async_thermostat_changed) does
+        that; otherwise gliding would double-count or falsely resume."""
+        coord = _make_glide_continuity_coord()
+        coord._hvac_session_mode = "fan_only"
+        coord._thermostat_fan_only_on_since = datetime(2026, 4, 8, 6, 30, 0)
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 6, 45, 0)
+            coord._glide_hvac_session_mode("heat")
+
+        coord._start_hvac_observation.assert_not_called()
+        assert coord._hvac_session_mode == "heat"
+        assert coord._hvac_on_since == datetime(2026, 4, 8, 6, 45, 0)
+
+
+# ---------------------------------------------------------------------------
+# Issue #912 — restart reconciliation must respect session mode
+# ---------------------------------------------------------------------------
+
+
+class TestRestartReconciliationFanOnly:
+    def test_restart_mid_fan_only_session_sets_fan_only_timer_not_hvac(self):
+        """HA restarting while the thermostat is already in fan_only must arm
+        _thermostat_fan_only_on_since (not _hvac_on_since), record
+        _hvac_session_mode == 'fan_only', and never start a thermal observation."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._hvac_on_since = None
+        coord._thermostat_fan_only_on_since = None
+        coord._hvac_session_mode = None
+        coord._start_hvac_observation = AsyncMock()
+
+        climate_state = _make_state("fan_only", hvac_action="fan")
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 7, 0, 0)
+            asyncio.run(ClimateAdvisorCoordinator._initialize_hvac_session_from_current_state(coord, climate_state))
+
+        assert coord._hvac_session_mode == "fan_only"
+        assert coord._thermostat_fan_only_on_since == datetime(2026, 4, 8, 7, 0, 0)
+        assert coord._hvac_on_since is None
+        coord._start_hvac_observation.assert_not_called()
+
+    def test_restart_mid_heat_session_still_sets_hvac_on_since(self):
+        """Regression guard: restart mid-heat must still arm _hvac_on_since and
+        start a thermal observation, exactly as before this fix."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._hvac_on_since = None
+        coord._thermostat_fan_only_on_since = None
+        coord._hvac_session_mode = None
+        coord._start_hvac_observation = AsyncMock()
+
+        climate_state = _make_state("heat", hvac_action="heating")
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 7, 0, 0)
+            asyncio.run(ClimateAdvisorCoordinator._initialize_hvac_session_from_current_state(coord, climate_state))
+
+        assert coord._hvac_session_mode == "heat"
+        assert coord._hvac_on_since == datetime(2026, 4, 8, 7, 0, 0)
+        assert coord._thermostat_fan_only_on_since is None
+        coord._start_hvac_observation.assert_called_once_with("heat")

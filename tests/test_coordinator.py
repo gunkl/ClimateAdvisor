@@ -1642,6 +1642,84 @@ class TestBriefingRegeneration:
         assert coord._briefing_day_type is None
         assert coord._briefing_sent_today is False
 
+    def test_end_of_day_watchdog_not_triggered_by_fan_only_only_night(self):
+        """Issue #912 direct regression: a fan-only-only night must NOT trip the
+        thermal_learning_no_observations watchdog.
+
+        Occupant impact: before this fix, an all-night whole-house-fan / thermostat
+        fan_only run (the compressor/burner never turned on) got reported to the
+        occupant as if 402 minutes of real heat/cool runtime had occurred with zero
+        thermal observations recorded — a false, alarming claim about energy use the
+        system never incurred. With hvac_runtime_minutes correctly at 0 for a
+        fan-only-only day, this watchdog (gated on hvac_runtime_minutes > 30.0) must
+        not fire at all.
+        """
+        import types
+
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+        from custom_components.climate_advisor.learning import DailyRecord
+
+        coord = self._make_coord()
+        coord._today_record = DailyRecord(
+            date="2026-04-05",
+            day_type="mild",
+            trend_direction="stable",
+            hvac_runtime_minutes=0.0,
+            thermostat_fan_only_runtime_minutes=402.0,
+            thermal_session_count=0,
+        )
+        coord._hvac_session_mode = None
+        coord._hvac_on_since = None
+        coord._thermostat_fan_only_on_since = None
+        coord._last_violation_check = None
+        coord._outdoor_temp_history = []
+        coord._indoor_temp_history = []
+        coord._hourly_forecast_temps = []
+        coord._emit_event = MagicMock()
+
+        coord._async_end_of_day = types.MethodType(ClimateAdvisorCoordinator._async_end_of_day, coord)
+
+        asyncio.run(coord._async_end_of_day(MagicMock()))
+
+        emitted_event_names = [call.args[0] for call in coord._emit_event.call_args_list]
+        assert "thermal_learning_no_observations" not in emitted_event_names
+        # The record itself must still show the true split after end-of-day processing.
+        # (record_day()/save_state() are MagicMock/AsyncMock on this stub, so
+        # _today_record is not reset to None here — only the watchdog gate matters.)
+
+    def test_end_of_day_watchdog_still_triggers_for_real_heat_runtime_regression_guard(self):
+        """Regression guard: real heat/cool runtime with zero observations must
+        still trip the watchdog exactly as before this fix."""
+        import types
+
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+        from custom_components.climate_advisor.learning import DailyRecord
+
+        coord = self._make_coord()
+        coord._today_record = DailyRecord(
+            date="2026-04-05",
+            day_type="cold",
+            trend_direction="stable",
+            hvac_runtime_minutes=45.0,
+            thermostat_fan_only_runtime_minutes=0.0,
+            thermal_session_count=0,
+        )
+        coord._hvac_session_mode = None
+        coord._hvac_on_since = None
+        coord._thermostat_fan_only_on_since = None
+        coord._last_violation_check = None
+        coord._outdoor_temp_history = []
+        coord._indoor_temp_history = []
+        coord._hourly_forecast_temps = []
+        coord._emit_event = MagicMock()
+
+        coord._async_end_of_day = types.MethodType(ClimateAdvisorCoordinator._async_end_of_day, coord)
+
+        asyncio.run(coord._async_end_of_day(MagicMock()))
+
+        emitted_event_names = [call.args[0] for call in coord._emit_event.call_args_list]
+        assert "thermal_learning_no_observations" in emitted_event_names
+
 
 # ---------------------------------------------------------------------------
 # TestStateContradictionEvent — Fix 2: state_contradiction_warning event bridge

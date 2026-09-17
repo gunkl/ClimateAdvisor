@@ -81,6 +81,7 @@ from .const import (
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
     ATTR_OUTDOOR_TEMP,
+    ATTR_THERMOSTAT_FAN_ONLY_RUNTIME_TODAY,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     ATTR_WHF_STATUS,
@@ -495,6 +496,21 @@ _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP: dict[str, str] = {
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     """Coordinate all Climate Advisor activities."""
 
+    # Issue #912: session_mode -> (on_since attr name, DailyRecord field name).
+    # Centralizes the "which mode -> which timer/field" decision so it is made once,
+    # not re-implemented at each of the turn-on/turn-off/glide/restart-reconciliation
+    # call sites. heat/cool share the pre-existing hvac_runtime_minutes counter;
+    # fan_only gets its own counter so a thermostat fan-only run (or WHF-driven
+    # fan_only state) is never blended into a number that implies the compressor/
+    # burner ran (see hvac_runtime_minutes vs. thermostat_fan_only_runtime_minutes
+    # in learning.py's DailyRecord, and automation.py's separate, unrelated WHF
+    # fan_runtime_minutes counter — these are three physically distinct things).
+    _RUNTIME_TRACKING: dict[str, tuple[str, str]] = {
+        "heat": ("_hvac_on_since", "hvac_runtime_minutes"),
+        "cool": ("_hvac_on_since", "hvac_runtime_minutes"),
+        "fan_only": ("_thermostat_fan_only_on_since", "thermostat_fan_only_runtime_minutes"),
+    }
+
     def __init__(self, hass: HomeAssistant, config: dict[str, Any], entry_id: str = "") -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -704,6 +720,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # HVAC runtime tracking
         self._hvac_on_since: datetime | None = None
+        # Issue #912: separate on-since timer + session-mode memory so a thermostat
+        # fan_only run is tracked (and reported) distinctly from real heat/cool
+        # runtime. self._hvac_session_mode persists the mode decided at turn-on
+        # (previously only a local variable) so flush-time logic can consult it.
+        self._thermostat_fan_only_on_since: datetime | None = None
+        self._hvac_session_mode: str | None = None
         self._last_outdoor_temp: float | None = None  # most recent outdoor reading for gate checks
         # Issue #130 D16: fallback outdoor temp when weather entity is temporarily unavailable
         self._last_known_outdoor_f: float | None = None
@@ -1834,13 +1856,116 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.exception("Failed to load investigation reports from %s", filepath)
             self._investigation_report_history = []
 
-    def _flush_hvac_runtime(self) -> None:
-        """Flush accumulated HVAC runtime to today's record."""
-        if self._hvac_on_since and self._today_record:
+    def _start_runtime_timer(self, mode: str) -> None:
+        """Start (or restart) the on-since timer for a tracked session mode.
+
+        Issue #912: single entry point for the four call sites (turn-on, glide,
+        restart reconciliation) that need to arm the correct timer for
+        ``mode`` — see ``_RUNTIME_TRACKING``.
+        """
+        on_since_attr, _field = self._RUNTIME_TRACKING[mode]
+        setattr(self, on_since_attr, dt_util.now())
+
+    def _flush_runtime_for_mode(self, mode: str | None) -> None:
+        """Flush accumulated runtime for ``mode`` into today's record.
+
+        Issue #912: generic replacement for a mode-blind flush — looks up the
+        correct on-since attribute and ``DailyRecord`` field via
+        ``_RUNTIME_TRACKING`` rather than always writing ``hvac_runtime_minutes``.
+        No-ops silently if ``mode`` is ``None`` or not a tracked mode (e.g. a
+        session that never resolved a mode).
+        """
+        if mode not in self._RUNTIME_TRACKING:
+            return
+        on_since_attr, field = self._RUNTIME_TRACKING[mode]
+        on_since = getattr(self, on_since_attr)
+        if on_since and self._today_record:
             now = dt_util.now()
-            elapsed = (now - self._hvac_on_since).total_seconds() / 60.0
-            self._today_record.hvac_runtime_minutes += elapsed
-            self._hvac_on_since = now  # Reset to now for continued tracking
+            elapsed = (now - on_since).total_seconds() / 60.0
+            setattr(self._today_record, field, getattr(self._today_record, field) + elapsed)
+            setattr(self, on_since_attr, now)  # Reset to now for continued tracking
+
+    def _runtime_today_for_mode(self, mode: str) -> float:
+        """Return today's accumulated runtime (minutes) for a tracked session mode.
+
+        Issue #912: adds the accumulated base runtime from today's record to the
+        elapsed time of any session of ``mode`` currently in progress — the same
+        "live, not just last-flushed" guarantee ``get_hvac_runtime_today()``
+        (Issue #464) already provided for heat/cool, generalized so
+        ``get_thermostat_fan_only_runtime_today()`` gets it for free.
+        """
+        on_since_attr, field = self._RUNTIME_TRACKING[mode]
+        base = getattr(self._today_record, field) if self._today_record is not None else 0.0
+        on_since = getattr(self, on_since_attr)
+        if on_since is not None:
+            base += (dt_util.now() - on_since).total_seconds() / 60.0
+        return round(base, 1)
+
+    def _flush_hvac_runtime(self) -> None:
+        """Flush accumulated heat/cool HVAC runtime to today's record.
+
+        Issue #912: thin named wrapper kept so existing call sites/tests that
+        reference ``_flush_hvac_runtime()`` by name don't need to change — real
+        work now lives in the generic ``_flush_runtime_for_mode()``. Only
+        flushes when the active session is heat or cool; a fan_only session's
+        runtime is flushed separately (see the fan_only-specific call sites).
+        """
+        if self._hvac_session_mode in ("heat", "cool"):
+            self._flush_runtime_for_mode(self._hvac_session_mode)
+
+    def _glide_hvac_session_mode(self, new_mode: str) -> None:
+        """Handle an in-place session-mode change with no intervening off-edge.
+
+        Issue #912: a thermostat can move directly between heat/cool/fan_only
+        (e.g. a post-heat-cycle fan_only purge) without ``hvac_action``/state
+        ever passing through an "off" edge that the turn-on/turn-off branches
+        would catch. Without this, the old mode's on-since timer keeps
+        accumulating indefinitely under the wrong ``DailyRecord`` field — the
+        most likely literal source of Issue #912's reported false runtime.
+        No-ops if the mode didn't actually change.
+
+        Observation continuity (Issue #912 follow-up): when the mode being left
+        is ``"heat"`` or ``"cool"``, end its in-progress thermal observation the
+        exact same way the real turn-off path does — by calling
+        ``_end_hvac_active_phase()`` for both HVAC observation types (mirrors
+        the ``was_running and not is_running`` branch in
+        ``_async_thermostat_changed``). That call transitions ``active`` ->
+        ``post_heat`` (not an outright abandon) so the post-heat decay window
+        still runs and can commit normally — it is a no-op if the observation
+        was already ended/abandoned elsewhere (e.g. the heat<->cool mid-session
+        switch branch, which abandons explicitly before calling this). Gliding
+        back INTO heat/cool later does not resume anything here — a fresh
+        observation starts normally through the real turn-on path, exactly as
+        if it were a new session; this method deliberately never calls
+        ``_start_hvac_observation()``.
+        """
+        old_mode = self._hvac_session_mode
+        if old_mode == new_mode:
+            return
+        _LOGGER.info(
+            "HVAC session mode glide %s -> %s (no off-edge) — splitting runtime tracking",
+            old_mode,
+            new_mode,
+        )
+        self._flush_runtime_for_mode(old_mode)
+        if old_mode in self._RUNTIME_TRACKING:
+            # Issue #912 follow-up (Toolsmith regression find): _flush_runtime_for_mode()
+            # resets on_since to `now` rather than `None` — correct for its other call
+            # site (a same-mode periodic flush that keeps a session running), wrong here
+            # since the OLD mode's session has actually ended. Left uncleared, the old
+            # mode's live getter (e.g. get_hvac_runtime_today()) keeps adding elapsed
+            # time on top of the already-flushed total for the rest of the new mode's
+            # session — a milder recurrence of the exact false-runtime bug this issue
+            # exists to fix, in the live getter instead of the persisted field. Mirrors
+            # the explicit `self._hvac_on_since = None` the real turn-off path already
+            # does after its own flush.
+            old_on_since_attr, _ = self._RUNTIME_TRACKING[old_mode]
+            setattr(self, old_on_since_attr, None)
+        if old_mode in ("heat", "cool"):
+            for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
+                self._end_hvac_active_phase(_hvac_ot)
+        self._hvac_session_mode = new_mode
+        self._start_runtime_timer(new_mode)
 
     def _resolve_monitored_sensors(self) -> list[str]:
         """Resolve all monitored sensor entity IDs.
@@ -3290,6 +3415,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
 
         hvac_runtime_today = self.get_hvac_runtime_today()
+        thermostat_fan_only_runtime_today = self.get_thermostat_fan_only_runtime_today()
 
         # --- Thermal observation pipeline sampling ---
         self._update_pre_heat_buffer()
@@ -3363,6 +3489,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "target_temp_low": _target_temp_low,
             "target_temp_high": _target_temp_high,
             ATTR_HVAC_RUNTIME_TODAY: hvac_runtime_today,
+            ATTR_THERMOSTAT_FAN_ONLY_RUNTIME_TODAY: thermostat_fan_only_runtime_today,
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
             ATTR_INDOOR_TEMP: _indoor_temp,
@@ -4008,6 +4135,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ),
             hvac_mode_recommended=classification.hvac_mode,
             hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
+            thermostat_fan_only_runtime_minutes=(_prev.thermostat_fan_only_runtime_minutes if _prev else 0.0),
             comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
             manual_overrides=_prev.manual_overrides if _prev else 0,
             thermal_session_count=_prev.thermal_session_count if _prev else 0,
@@ -4819,8 +4947,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 observed_temps = [t for _, t in self._outdoor_temp_history]
                 self._today_record.observed_high_f = round(max(observed_temps), 1)
                 self._today_record.observed_low_f = round(min(observed_temps), 1)
-            # Flush any accumulated HVAC runtime
-            self._flush_hvac_runtime()
+            # Flush any accumulated runtime for whichever session mode is active.
+            # Issue #912: previously an unconditional _flush_hvac_runtime() call, which
+            # only ever wrote hvac_runtime_minutes — a fan_only session spanning the
+            # day rollover would silently lose its tail. _flush_runtime_for_mode() is a
+            # strict superset: for heat/cool it does exactly what _flush_hvac_runtime()
+            # did, and additionally flushes fan_only's own counter when that's the
+            # active mode. No-ops safely if no session is active.
+            self._flush_runtime_for_mode(self._hvac_session_mode)
             # Watchdog: if HVAC ran significantly but no thermal observations were recorded, warn
             if self._today_record.hvac_runtime_minutes > 30.0 and self._today_record.thermal_session_count == 0:
                 _LOGGER.warning(
@@ -4832,6 +4966,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "thermal_learning_no_observations",
                     {
                         "hvac_runtime_minutes": round(self._today_record.hvac_runtime_minutes, 1),
+                        "thermostat_fan_only_runtime_minutes": round(
+                            self._today_record.thermostat_fan_only_runtime_minutes, 1
+                        ),
                         "thermal_session_count": self._today_record.thermal_session_count,
                     },
                 )
@@ -4847,6 +4984,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_nat_vent_cutoff_reason = None
         self._briefing_evening_open_time = None
         self._hvac_on_since = None
+        self._thermostat_fan_only_on_since = None
+        self._hvac_session_mode = None
         self._last_violation_check = None
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
@@ -5309,7 +5448,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if not was_running and is_running:
             # HVAC just turned on — determine session_mode from hvac_action or hvac_mode
-            self._hvac_on_since = dt_util.now()
             action = new_action
             if action == "heating":
                 session_mode = "heat"
@@ -5325,14 +5463,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 session_mode = "fan_only"
             else:
                 session_mode = None
-            if session_mode:
+            # Issue #912: store the resolved mode and start the correctly-scoped timer
+            # via _RUNTIME_TRACKING, instead of unconditionally setting _hvac_on_since
+            # (which blended fan_only runtime into hvac_runtime_minutes). Only heat/cool
+            # start a thermal observation — a fan_only session is not compressor/burner
+            # activity and must never be recorded as an OBS_TYPE_HVAC_COOL observation.
+            self._hvac_session_mode = session_mode
+            if session_mode in self._RUNTIME_TRACKING:
+                self._start_runtime_timer(session_mode)
+            if session_mode in ("heat", "cool"):
                 await self._start_hvac_observation(session_mode)
         elif was_running and not is_running:
-            # HVAC just turned off — flush runtime and end active phase
-            self._flush_hvac_runtime()
+            # HVAC just turned off — flush runtime (whichever mode was active) and end
+            # active phase
+            self._flush_runtime_for_mode(self._hvac_session_mode)
             for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
                 self._end_hvac_active_phase(_hvac_ot)
             self._hvac_on_since = None
+            self._thermostat_fan_only_on_since = None
+            self._hvac_session_mode = None
             self.hass.async_create_task(self._async_save_state())
         elif was_running and is_running and old_action != new_action:
             # heat_cool mode: hvac_action switched heating↔cooling mid-session
@@ -5345,7 +5494,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
                     self._abandon_observation(_hvac_ot, "heat_cool mode switch mid-session")
                 new_session_mode = "heat" if new_action == "heating" else "cool"
+                self._glide_hvac_session_mode(new_session_mode)
                 await self._start_hvac_observation(new_session_mode)
+            elif (
+                old_state.state != new_state.state
+                and old_state.state in self._RUNTIME_TRACKING
+                and new_state.state in self._RUNTIME_TRACKING
+            ):
+                # Issue #912: hvac_action distinguished old vs. new (e.g. "" vs. "fan")
+                # but neither side is a running heat/cool action, so the inner branch
+                # above didn't apply — this is a heat/cool <-> fan_only glide instead.
+                self._glide_hvac_session_mode(new_state.state)
+        elif (
+            was_running
+            and is_running
+            and old_action == new_action
+            and old_state.state != new_state.state
+            and old_state.state in self._RUNTIME_TRACKING
+            and new_state.state in self._RUNTIME_TRACKING
+        ):
+            # Issue #912: in-place mode change among tracked modes (heat/cool/fan_only)
+            # where hvac_action gave no distinguishing signal at all on either side (both
+            # sides fell back to state-based was_running/is_running detection above), so
+            # no on/off edge was ever detected for this transition. Most common case: a
+            # thermostat whose hvac_action doesn't reliably report during a post-heat-
+            # cycle fan_only purge.
+            self._glide_hvac_session_mode(new_state.state)
 
         # Issue #347: Post-startup reconcile for thermostat-autonomous fan-on.
         # When hvac_action transitions to "fan" (e.g. thermostat fan-circulation between
@@ -6597,7 +6771,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         only the post-restart portion — better than zero observations.
         Called from _async_update_data() on first update if HVAC is already running.
         """
-        self._hvac_on_since = dt_util.now()
         action = climate_state.attributes.get("hvac_action", "").lower()
         if action == "heating":
             session_mode = "heat"
@@ -6616,7 +6789,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "session duration will be shorter than actual)",
             session_mode,
         )
-        if session_mode:
+        # Issue #912: resolve session_mode before arming any timer so a restart mid
+        # fan_only session reconciles into thermostat_fan_only_runtime_minutes, not
+        # hvac_runtime_minutes — previously _hvac_on_since was set unconditionally here
+        # regardless of mode.
+        self._hvac_session_mode = session_mode
+        if session_mode in self._RUNTIME_TRACKING:
+            self._start_runtime_timer(session_mode)
+        if session_mode in ("heat", "cool"):
             await self._start_hvac_observation(session_mode)
 
     # ------------------------------------------------------------------
@@ -9643,20 +9823,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return self._today_record
 
     def get_hvac_runtime_today(self) -> float:
-        """Return today's HVAC runtime in minutes, computed live (Issue #464).
+        """Return today's heat/cool HVAC runtime in minutes, computed live (Issue #464).
 
         `coordinator.data[ATTR_HVAC_RUNTIME_TODAY]` is only refreshed once per
         update cycle (up to ~30 min stale) — this method is the single source of
         truth for consumers that need the current value right now (AI context
         builders previously hand-copied this exact formula for that reason).
         Adds the accumulated base runtime from today's record to the elapsed
-        time of any HVAC session currently in progress.
+        time of any HVAC session currently in progress. Thin wrapper over
+        ``_runtime_today_for_mode()`` (Issue #912) — "heat" and "cool" share the
+        same tracked tuple, so either key returns the identical value.
         """
-        base_runtime = self._today_record.hvac_runtime_minutes if self._today_record is not None else 0.0
-        session_elapsed = (
-            (dt_util.now() - self._hvac_on_since).total_seconds() / 60.0 if self._hvac_on_since is not None else 0.0
-        )
-        return round(base_runtime + session_elapsed, 1)
+        return self._runtime_today_for_mode("heat")
+
+    def get_thermostat_fan_only_runtime_today(self) -> float:
+        """Return today's thermostat fan_only runtime in minutes, computed live.
+
+        Issue #912: mirrors ``get_hvac_runtime_today()`` but for fan_only
+        sessions — kept as a physically distinct counter from both
+        ``hvac_runtime_minutes`` (true compressor/burner runtime) and
+        ``automation.py``'s unrelated WHF ``_get_fan_runtime_minutes()``.
+        """
+        return self._runtime_today_for_mode("fan_only")
 
     @property
     def yesterday_record(self) -> dict | None:
@@ -10149,6 +10337,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "fan_active": ae._fan_active,
             "fan_on_since": ae._fan_on_since,
             "fan_runtime_minutes": ae._get_fan_runtime_minutes(),
+            # Issue #912: thermostat fan_only runtime — physically distinct from the
+            # WHF automation runtime above and from true heat/cool hvac_runtime_minutes.
+            "thermostat_fan_only_runtime_minutes": self.get_thermostat_fan_only_runtime_today(),
             "fan_override_active": ae._fan_override_active,
             "fan_override_time": ae._fan_override_time,
             "fan_remote_timer_hours": _fan_remote_fields["fan_remote_timer_hours"],
@@ -10240,8 +10431,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # next startup can distinguish a routine restart from a crash.
         await self._persist_shutdown_diagnostics()
 
-        # Flush HVAC runtime and save state before cleanup
-        self._flush_hvac_runtime()
+        # Flush any accumulated runtime (heat/cool or fan_only) and save state before
+        # cleanup. Issue #912: _flush_runtime_for_mode() replaces the old unconditional
+        # _flush_hvac_runtime() so an in-progress fan_only session isn't lost on shutdown.
+        self._flush_runtime_for_mode(self._hvac_session_mode)
         await self._async_save_state()
 
         # Cancel any pending occupancy away setback timer

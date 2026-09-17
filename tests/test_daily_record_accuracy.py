@@ -707,3 +707,64 @@ class TestEnsureTodayRecord:
                 coord._ensure_today_record(cls)
         assert coord._today_record.manual_overrides == 2
         assert coord._today_record.hvac_runtime_minutes == 45.0
+
+
+# ---------------------------------------------------------------------------
+# TestIssue912ThermostatFanOnlyRuntimeField — DailyRecord persistence
+# ---------------------------------------------------------------------------
+
+
+class TestIssue912ThermostatFanOnlyRuntimeField:
+    """New DailyRecord field must round-trip through persistence and default
+    safely for records saved before this field existed (Issue #912)."""
+
+    def test_field_persists_through_asdict_and_reconstruction(self):
+        """Full dataclass round-trip: asdict() -> DailyRecord(**dict) must
+        preserve the new field exactly, same as every other DailyRecord field."""
+        from dataclasses import asdict
+
+        record = _make_today_record(thermostat_fan_only_runtime_minutes=123.4)
+        record_data = asdict(record)
+        assert record_data["thermostat_fan_only_runtime_minutes"] == 123.4
+
+        reloaded = DailyRecord(**record_data)
+        assert reloaded.thermostat_fan_only_runtime_minutes == 123.4
+
+    def test_legacy_record_dict_missing_key_defaults_to_zero(self):
+        """A record dict persisted before Issue #912 (no such key at all) must
+        still construct cleanly, defaulting the new field to 0.0 — no migration
+        step is required since DailyRecord is a plain @dataclass with a default
+        on every field."""
+        from dataclasses import asdict
+
+        legacy_record = _make_today_record(hvac_runtime_minutes=45.0)
+        legacy_data = asdict(legacy_record)
+        assert "thermostat_fan_only_runtime_minutes" in legacy_data  # sanity: field exists in current schema
+        del legacy_data["thermostat_fan_only_runtime_minutes"]  # simulate a pre-Issue-912 persisted record
+
+        reloaded = DailyRecord(**legacy_data)
+        assert reloaded.thermostat_fan_only_runtime_minutes == 0.0
+        assert reloaded.hvac_runtime_minutes == 45.0
+
+    def test_ensure_today_record_rollover_resets_fan_only_runtime_on_new_day(self):
+        """Regression guard mirroring test_rolls_over_on_new_day_preserving_no_counters:
+        a genuine day rollover must start the new field at 0.0 too, not carry
+        yesterday's fan-only runtime into a fresh day."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._today_record = _make_today_record(
+            date="2026-04-04",  # yesterday
+            hvac_runtime_minutes=10.0,
+            thermostat_fan_only_runtime_minutes=402.0,
+        )
+        coord.config = {"learning_enabled": False}
+        coord._ensure_today_record = types.MethodType(ClimateAdvisorCoordinator._ensure_today_record, coord)
+
+        cls = _make_classification(day_type="mild", hvac_mode="off")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util:
+            mock_dt_util.now.return_value = datetime(2026, 4, 5, 0, 30, 0)
+            coord._ensure_today_record(cls)
+
+        assert coord._today_record.date == "2026-04-05"
+        assert coord._today_record.thermostat_fan_only_runtime_minutes == 0.0
+        assert coord._today_record.hvac_runtime_minutes == 0.0

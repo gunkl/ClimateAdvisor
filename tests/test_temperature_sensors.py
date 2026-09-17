@@ -146,6 +146,11 @@ def _make_update_data_coord(
 
     coord._today_record = DailyRecord(date="2026-04-09", day_type="warm", trend_direction="stable")
     coord._hvac_on_since = None
+    # Issue #912: new instance attrs read via getattr()/direct access by
+    # _flush_runtime_for_mode()/_glide_hvac_session_mode() — object.__new__() skips
+    # __init__, so partial-instantiation stubs must set these explicitly.
+    coord._thermostat_fan_only_on_since = None
+    coord._hvac_session_mode = None
 
     ae = MagicMock()
     ae._fan_active = False

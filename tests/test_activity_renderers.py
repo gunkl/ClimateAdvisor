@@ -1290,6 +1290,24 @@ class TestPayloadCompletenessFollowUp:
         )
         assert "sessions today: 0" in settings
 
+    def test_thermal_learning_no_observations_disambiguates_fan_only(self):
+        """Issue #912: when hvac_runtime_minutes is 0 (fan-only-only night) but
+        thermostat_fan_only_runtime_minutes is nonzero, the rendered event must
+        make clear that fan-only time ran and was excluded — never leave the
+        occupant to infer that the heater or AC ran when it never did."""
+        label, settings = self._render(
+            "thermal_learning_no_observations",
+            {
+                "hvac_runtime_minutes": 0.0,
+                "thermostat_fan_only_runtime_minutes": 402.0,
+                "thermal_session_count": 0,
+            },
+        )
+        # The label must not claim HVAC runtime occurred (falsy runtime -> generic label).
+        assert "HVAC runtime" not in label
+        assert "fan-only runtime: 402.0 min (excluded)" in settings
+        assert "sessions today: 0" in settings
+
     # -- K5: fan_untracked_cleared uses fan_device -----------------------------
 
     def test_fan_untracked_cleared_shows_fan_device(self):

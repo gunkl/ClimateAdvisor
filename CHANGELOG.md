@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.43] — 2026-09-17
+
+- Fix #913: Activity Report rows now use plain language instead of internal engineering terms (e.g. a routine door/window re-check no longer reads as a fresh open, and a purely internal diagnostic row no longer shows up as a confusing duplicate).
+
 ## [0.7.42] — 2026-09-17
 
 - Fix #911: fixed a bug where, on a multi-zone install, a warning or temperature from a different zone (including a dev/test "Simulated" zone) could occasionally appear in another zone's AI Investigator report, labeled "unknown zone" — this could make it look like something happened in your home that didn't. Every scheduled check (morning wake-up, bedtime, end-of-day, pre-cool, door/window, occupancy, thermostat, and fan changes) and every dashboard/API request now correctly attributes its own log messages to the zone that generated them.

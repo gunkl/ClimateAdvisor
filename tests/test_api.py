@@ -1134,3 +1134,114 @@ class TestEventLogAndActivityRecordTruncationSignal:
 
         assert body["is_truncated"] is False
         assert body["oldest_available"] is None
+
+
+class TestIssue911ZoneScopedHandlers:
+    """Issue #911: REST view handlers must run their body inside
+    log_capture.zone_scope(coordinator.zone_label) once a coordinator is resolved, so any
+    _LOGGER call reached during request handling is attributed to the right zone instead of
+    falling through as "unknown zone" and leaking into every zone's AI Investigator report.
+    """
+
+    def _make_request(self, coordinator) -> MagicMock:
+        hass = MagicMock()
+        hass.data = {DOMAIN: {"entry1": coordinator}}
+        req = MagicMock()
+        req.app = {"hass": hass}
+        req.query = {}
+        req.rel_url = MagicMock()
+        req.rel_url.query = {}
+        return req
+
+    def test_briefing_view_regenerate_failure_warning_tagged_with_zone(self):
+        """ClimateAdvisorBriefingView.get() logs a WARNING when _regenerate_briefing()
+        raises — real production code path, not a mirrored/injected one."""
+        import asyncio
+        import logging
+
+        from custom_components.climate_advisor import log_capture
+        from custom_components.climate_advisor.api import ClimateAdvisorBriefingView
+
+        coordinator = MagicMock()
+        coordinator.zone_label = "zone_under_test"
+        coordinator._last_briefing = "cached briefing text"
+        coordinator._briefing_sent_today = False
+
+        async def _boom(verbosity):
+            raise RuntimeError("boom")
+
+        coordinator._regenerate_briefing = _boom
+
+        request = self._make_request(coordinator)
+        request.rel_url.query = {"verbosity": "verbose"}
+
+        handler = log_capture.ClimateAdvisorLogRingBuffer()
+        logger = logging.getLogger("custom_components.climate_advisor.api")
+        logger.addHandler(handler)
+        try:
+            asyncio.run(ClimateAdvisorBriefingView().get(request))
+        finally:
+            logger.removeHandler(handler)
+
+        records = handler.get_records()
+        assert any(r["zone"] == "zone_under_test" and "regenerate briefing" in r["message"] for r in records)
+
+    def test_investigate_view_truncated_warning_tagged_with_zone(self):
+        """ClimateAdvisorInvestigateView.post() (non-streaming path) logs a WARNING when
+        the AI response was truncated — a second handler on a POST with several guard
+        clauses (AI enabled, investigator enabled, client present, rate limit) before the
+        wrapped body, verifying the wrap sits after all of them, not just the two shared
+        coordinator-resolution guards every handler has."""
+        import asyncio
+        import logging
+        from unittest.mock import AsyncMock
+
+        from custom_components.climate_advisor import log_capture
+        from custom_components.climate_advisor.api import ClimateAdvisorInvestigateView
+        from custom_components.climate_advisor.const import (
+            CONF_AI_ENABLED,
+            CONF_AI_INVESTIGATOR_ENABLED,
+        )
+
+        coordinator = MagicMock()
+        coordinator.zone_label = "zone_under_test"
+        coordinator.config = {CONF_AI_ENABLED: True, CONF_AI_INVESTIGATOR_ENABLED: True}
+        coordinator.claude_client.check_investigator_rate_limit.return_value = (True, None)
+        coordinator.ai_skills.async_execute = AsyncMock(
+            return_value={"success": True, "source": "ai", "truncated": True, "truncated_empty": False}
+        )
+        coordinator.async_store_investigation_report = AsyncMock()
+
+        request = self._make_request(coordinator)
+        request.headers = {}
+        request.json = AsyncMock(return_value={"focus": "", "hours": 24})
+
+        handler = log_capture.ClimateAdvisorLogRingBuffer()
+        logger = logging.getLogger("custom_components.climate_advisor.api")
+        logger.addHandler(handler)
+        try:
+            asyncio.run(ClimateAdvisorInvestigateView().post(request))
+        finally:
+            logger.removeHandler(handler)
+
+        records = handler.get_records()
+        assert any(r["zone"] == "zone_under_test" and "truncated" in r["message"].lower() for r in records)
+
+    def test_guard_clauses_return_before_any_coordinator_attribute_access(self):
+        """The ambiguous-zone / not-loaded early returns must exit before
+        coordinator.zone_label is ever read — if the zone_scope() wrap were accidentally
+        hoisted above the guards, a `None` coordinator would raise AttributeError here
+        instead of returning a clean 503."""
+        import asyncio
+
+        from custom_components.climate_advisor.api import ClimateAdvisorAutomationStateView
+
+        hass = MagicMock()
+        hass.data = {}  # no coordinator loaded
+        request = MagicMock()
+        request.app = {"hass": hass}
+        request.query = {}
+
+        response = asyncio.run(ClimateAdvisorAutomationStateView().get(request))
+
+        assert response.status == 503

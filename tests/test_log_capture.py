@@ -8,6 +8,7 @@ substring "error"/"warning" — coincidental naming, not severity.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -23,6 +24,18 @@ from custom_components.climate_advisor.log_capture import (
     uninstall,
     zone_scope,
 )
+
+
+def _get_coordinator_class():
+    """Return the current ClimateAdvisorCoordinator class.
+
+    Always import fresh via importlib (rather than holding a module-level reference) —
+    test_occupancy.py deletes and re-imports the coordinator module, and a stale reference
+    would have __globals__ pointing at the old module, silently missing patches applied to
+    the new one. Same helper as tests/test_coordinator.py.
+    """
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    return mod.ClimateAdvisorCoordinator
 
 
 def _make_hass(domain_data: dict | None = None) -> SimpleNamespace:
@@ -316,3 +329,173 @@ def test_ai_skills_context_filters_to_investigated_zone():
     assert "zone a warning" in report
     assert "untagged warning" in report
     assert "zone b warning" not in report
+
+
+# --- Issue #911: coordinator._zone_scoped/_zone_scoped_sync registration wrapper ----
+
+
+def _make_coordinator_with_zone(entry_id: str | None) -> object:
+    """Partially instantiate the real coordinator with only `_entry_id` set.
+
+    `_zone_scoped`/`_zone_scoped_sync` read only `self.zone_label` (itself derived from
+    `self._entry_id`), so no other coordinator state is needed to exercise them for real —
+    per the project's "never mirror the logic under test" doctrine, this binds and calls
+    the actual methods rather than reimplementing their wrapping behavior inline.
+    """
+    ClimateAdvisorCoordinator = _get_coordinator_class()
+    coord = object.__new__(ClimateAdvisorCoordinator)
+    coord._entry_id = entry_id
+    return coord
+
+
+def test_zone_scoped_tags_records_emitted_by_the_wrapped_async_callback():
+    """The real gap Issue #911 fixes: an HA-registered async callback (e.g.
+    async_track_time_change(self.hass, self._zone_scoped(self._async_morning_wakeup), ...))
+    must run inside this coordinator's zone_scope so any _LOGGER call it makes is tagged,
+    instead of falling through as "unknown zone" in every zone's AI Investigator report."""
+    coord = _make_coordinator_with_zone("real_zone_entry_id")
+    handler = ClimateAdvisorLogRingBuffer()
+    logger = logging.getLogger("custom_components.climate_advisor.test_zone_scoped_async")
+    logger.addHandler(handler)
+
+    async def _target(now):
+        logger.warning("morning wakeup fired at %s", now)
+        return "ok"
+
+    try:
+        wrapped = coord.__class__._zone_scoped(coord, _target)
+        result = asyncio.run(wrapped("06:30"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result == "ok"
+    record = handler.get_records()[0]
+    assert record["zone"] == "real_zone_entry_id"
+
+
+def test_zone_scoped_sync_tags_records_emitted_by_the_wrapped_sync_callback():
+    """Sync counterpart — e.g. async_track_time_interval(self.hass,
+    self._zone_scoped_sync(self._async_thermal_sample_tick), ...), a @callback-decorated
+    synchronous target."""
+    coord = _make_coordinator_with_zone("real_zone_entry_id")
+    handler = ClimateAdvisorLogRingBuffer()
+    logger = logging.getLogger("custom_components.climate_advisor.test_zone_scoped_sync")
+    logger.addHandler(handler)
+
+    def _target(now):
+        logger.warning("thermal sample tick at %s", now)
+        return "ok"
+
+    try:
+        wrapped = coord.__class__._zone_scoped_sync(coord, _target)
+        result = wrapped("12:00")
+    finally:
+        logger.removeHandler(handler)
+
+    assert result == "ok"
+    record = handler.get_records()[0]
+    assert record["zone"] == "real_zone_entry_id"
+
+
+def test_zone_scoped_preserves_callback_identity_via_functools_wraps():
+    """A registration-coverage check (e.g. in test_coordinator.py, asserting async_setup()
+    actually wraps a given registration) needs to unwrap back to the original target —
+    functools.wraps on _zone_scoped/_zone_scoped_sync makes that possible via __wrapped__."""
+    coord = _make_coordinator_with_zone("z")
+
+    async def _original(now):
+        return now
+
+    wrapped = coord.__class__._zone_scoped(coord, _original)
+    assert wrapped.__wrapped__ is _original
+
+
+def test_zone_scoped_propagates_exceptions_from_the_wrapped_callback():
+    """A wrapped callback's exception must not be swallowed by the zone_scope wrapper —
+    HA's event-listener machinery needs to see real failures, not a silently-eaten one."""
+    coord = _make_coordinator_with_zone("z")
+
+    async def _boom(now):
+        raise ValueError("boom")
+
+    wrapped = coord.__class__._zone_scoped(coord, _boom)
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(wrapped("now"))
+
+
+def test_zone_scoped_uses_none_when_entry_id_unset():
+    """A coordinator instantiated without a real ConfigEntry (e.g. simulation harness,
+    entry_id="") falls back to zone_label=None (log_capture's "unknown zone" marker), same
+    as every other zone_label consumer — no special-casing inside _zone_scoped itself."""
+    coord = _make_coordinator_with_zone("")
+    handler = ClimateAdvisorLogRingBuffer()
+    logger = logging.getLogger("custom_components.climate_advisor.test_zone_scoped_none")
+    logger.addHandler(handler)
+
+    async def _target(now):
+        logger.warning("fired")
+
+    try:
+        wrapped = coord.__class__._zone_scoped(coord, _target)
+        asyncio.run(wrapped("now"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert handler.get_records()[0]["zone"] is None
+
+
+def test_call_later_captures_context_at_schedule_time_not_fire_time():
+    """Verifying test for the `_schedule_retry` (coordinator.py) design assumption, per
+    Issue #911's plan: a closure defined and scheduled via asyncio's call_later/
+    call_soon-family APIs while a zone_scope() block is active should still carry that
+    zone's label when it actually fires later, even after the scheduling block has exited —
+    because asyncio snapshots contextvars.copy_context() at schedule time, not fire time.
+    This is the same mechanism call_later relies on generally (asyncio.loop.call_later,
+    which HA's async_call_later wraps) — not coordinator-specific, so this test exercises
+    the real stdlib primitive directly rather than mirroring coordinator internals."""
+    fired_zone: list[str | None] = []
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        with zone_scope("scheduled_while_scoped"):
+            loop.call_later(0.01, lambda: fired_zone.append(log_capture.current_zone_label()))
+        # The zone_scope block has now exited — if context were captured at FIRE time
+        # instead of schedule time, the callback below would see None here.
+        assert log_capture.current_zone_label() is None
+        await asyncio.sleep(0.05)
+
+    asyncio.run(_run())
+
+    assert fired_zone == ["scheduled_while_scoped"]
+
+
+def test_three_zone_concurrency_real_zone_plus_two_dev_test_zones():
+    """Extends test_concurrent_coordinators_do_not_cross_contaminate_zone_tags to the
+    maintainer's actual repro shape for Issue #911: one real production zone running
+    alongside two dev/test zones (e.g. a "Simulated" thermostat zone per CHANGELOG #830)
+    on the same HA instance — not just a generic two-zone install."""
+    handler = ClimateAdvisorLogRingBuffer()
+    logger = logging.getLogger("custom_components.climate_advisor.test_zone_three_way")
+    logger.addHandler(handler)
+
+    async def _zone_cycle(zone_label: str, delay: float) -> None:
+        with zone_scope(zone_label):
+            await asyncio.sleep(delay)
+            logger.warning("cycle warning for %s", zone_label)
+
+    async def _run() -> None:
+        await asyncio.gather(
+            _zone_cycle("santa_maria_hallway", 0.03),
+            _zone_cycle("dev_simulated_zone", 0.01),
+            _zone_cycle("dev_test_zone_2", 0.02),
+        )
+
+    try:
+        asyncio.run(_run())
+    finally:
+        logger.removeHandler(handler)
+
+    records = {r["message"]: r["zone"] for r in handler.get_records()}
+    assert records["cycle warning for santa_maria_hallway"] == "santa_maria_hallway"
+    assert records["cycle warning for dev_simulated_zone"] == "dev_simulated_zone"
+    assert records["cycle warning for dev_test_zone_2"] == "dev_test_zone_2"

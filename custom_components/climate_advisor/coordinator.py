@@ -1089,7 +1089,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.append(
             async_track_time_change(
                 self.hass,
-                self._async_morning_wakeup,
+                self._zone_scoped(self._async_morning_wakeup),
                 hour=wake_time.hour,
                 minute=wake_time.minute,
                 second=0,
@@ -1100,7 +1100,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.append(
             async_track_time_change(
                 self.hass,
-                self._async_bedtime,
+                self._zone_scoped(self._async_bedtime),
                 hour=sleep_time.hour,
                 minute=sleep_time.minute,
                 second=0,
@@ -1111,7 +1111,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.append(
             async_track_time_change(
                 self.hass,
-                self._async_end_of_day,
+                self._zone_scoped(self._async_end_of_day),
                 hour=23,
                 minute=59,
                 second=0,
@@ -1124,7 +1124,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.append(
             async_track_time_interval(
                 self.hass,
-                self._async_thermal_sample_tick,
+                self._zone_scoped_sync(self._async_thermal_sample_tick),
                 timedelta(minutes=5),
             )
         )
@@ -1142,7 +1142,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             async_track_state_change_event(
                 self.hass,
                 self.config["climate_entity"],
-                self._async_thermostat_changed,
+                self._zone_scoped(self._async_thermostat_changed),
             )
         )
 
@@ -1153,7 +1153,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 async_track_state_change_event(
                     self.hass,
                     fan_entity,
-                    self._async_fan_entity_changed,
+                    self._zone_scoped(self._async_fan_entity_changed),
                 )
             )
 
@@ -1166,7 +1166,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 async_track_state_change_event(
                     self.hass,
                     _fan_state_entity,
-                    self._async_fan_entity_changed,
+                    self._zone_scoped(self._async_fan_entity_changed),
                 )
             )
 
@@ -1179,7 +1179,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 async_track_state_change_event(
                     self.hass,
                     fan_remote_entity,
-                    self._async_fan_remote_changed,
+                    self._zone_scoped(self._async_fan_remote_changed),
                 )
             )
 
@@ -1220,7 +1220,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
 
             self._unsub_listeners.append(
-                async_track_state_change_event(self.hass, _indoor_temp_entity, _async_indoor_temp_changed)
+                async_track_state_change_event(
+                    self.hass, _indoor_temp_entity, self._zone_scoped_sync(_async_indoor_temp_changed)
+                )
             )
 
         # Outdoor temp: register a listener on the configured outdoor sensor entity (Issue #327).
@@ -1255,7 +1257,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
 
             self._unsub_listeners.append(
-                async_track_state_change_event(self.hass, _outdoor_temp_entity, _async_outdoor_temp_changed)
+                async_track_state_change_event(
+                    self.hass, _outdoor_temp_entity, self._zone_scoped_sync(_async_outdoor_temp_changed)
+                )
             )
 
         _LOGGER.info(
@@ -1362,6 +1366,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         value (the executor future) and exception propagation as before.
         """
         return self.hass.async_add_executor_job(log_capture.bind_zone_for_executor(fn), *args)
+
+    def _zone_scoped(self, callback_fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap an async HA-registered callback to run inside this coordinator's zone_scope.
+
+        Issue #911: callbacks registered directly with HA (``async_track_time_change``,
+        ``async_track_state_change_event``, ``async_call_later``,
+        ``async_track_point_in_time``) run outside any ``zone_scope()`` block, so any
+        ``_LOGGER`` call they make is captured as "unknown zone" and leaks into every
+        zone's AI Investigator report — the same class of gap Issue #812 fixed for the
+        main update cycle and briefing send. Wrapping at the registration site — once,
+        here — instead of inside every callback body avoids duplicating the same
+        ``with log_capture.zone_scope(...)`` line at each of the ~13 gap sites.
+        """
+
+        @functools.wraps(callback_fn)
+        async def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            with log_capture.zone_scope(self.zone_label):
+                return await callback_fn(*args, **kwargs)
+
+        return _wrapped
+
+    def _zone_scoped_sync(self, callback_fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Sync counterpart of ``_zone_scoped``, for ``@callback``-decorated sync targets."""
+
+        @functools.wraps(callback_fn)
+        def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            with log_capture.zone_scope(self.zone_label):
+                return callback_fn(*args, **kwargs)
+
+        return _wrapped
 
     async def async_restore_state(self) -> None:
         """Restore operational state from disk after startup."""
@@ -1949,7 +1983,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 async_track_state_change_event(
                     self.hass,
                     sensor_id,
-                    self._async_door_window_changed,
+                    self._zone_scoped(self._async_door_window_changed),
                 )
             )
 
@@ -2010,7 +2044,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     async_track_state_change_event(
                         self.hass,
                         entity_id,
-                        self._async_occupancy_toggle_changed,
+                        self._zone_scoped(self._async_occupancy_toggle_changed),
                     )
                 )
 
@@ -2172,7 +2206,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self.hass.async_create_task(self._fire_tou_av_window_start(mode_at_schedule))
 
-        self._tou_av_stop_timer_cancel = async_call_later(self.hass, delay, _tou_av_window_start)
+        self._tou_av_stop_timer_cancel = async_call_later(
+            self.hass, delay, self._zone_scoped_sync(_tou_av_window_start)
+        )
         self._tou_av_stop_timer_schedule_start = resolution.schedule_start
 
     async def _fire_tou_av_window_start(self, mode: str) -> None:
@@ -4832,7 +4868,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _modifier = resolve_pre_cool_modifier(c, self.config) if c else None
         pre_cool_target = compute_pre_cool_target(self.config, _modifier if _modifier is not None else 0.0)
 
-        self._pre_cool_trigger_cancel = async_track_point_in_time(self.hass, self._async_pre_cool_trigger, trigger_time)
+        self._pre_cool_trigger_cancel = async_track_point_in_time(
+            self.hass, self._zone_scoped(self._async_pre_cool_trigger), trigger_time
+        )
         self._pre_cool_trigger_scheduled = True
         self._pre_cool_trigger_dt = trigger_time
         self._pre_cool_target = pre_cool_target
@@ -4883,7 +4921,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         if self._pre_cool_trigger_cancel is not None:
             self._pre_cool_trigger_cancel()
-        self._pre_cool_trigger_cancel = async_track_point_in_time(self.hass, self._async_pre_cool_trigger, new_trigger)
+        self._pre_cool_trigger_cancel = async_track_point_in_time(
+            self.hass, self._zone_scoped(self._async_pre_cool_trigger), new_trigger
+        )
         self._pre_cool_trigger_dt = new_trigger
         self._pre_cool_status = (
             f"Pre-cool rescheduled ({new_trigger.strftime('%I:%M %p').lstrip('0')}) — nat-vent exited early"
@@ -6169,7 +6209,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._fan_remote_burst_cancel = None
             self.hass.async_create_task(self._flush_fan_remote_burst())
 
-        self._fan_remote_burst_cancel = async_call_later(self.hass, REMOTE_BURST_WINDOW_SECONDS, _burst_window_elapsed)
+        self._fan_remote_burst_cancel = async_call_later(
+            self.hass, REMOTE_BURST_WINDOW_SECONDS, self._zone_scoped_sync(_burst_window_elapsed)
+        )
 
     async def _flush_fan_remote_burst(self) -> None:
         """Apply the accumulated burst's decision once the combining window elapses (Issue #519).
@@ -10362,16 +10404,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         HA restart/deploy, which does NOT call async_unload_entry). Both paths must
         write these fields for the restart-cause classifier in async_restore_state()
         to work on the restarts that actually happen in practice.
+
+        Issue #911: wrapped here (rather than at a registration site, like the other
+        callback-based gaps this issue fixed) because this method has two callers and
+        only one of them (the EVENT_HOMEASSISTANT_STOP listener) is a registered
+        callback — async_shutdown() calls it directly from HA's config-entry-unload
+        flow, so wrapping the shared method body is the single choke point that
+        covers both.
         """
-        self.learning._state.clean_shutdown = True
-        self.learning._state.last_shutdown_version = VERSION
-        self.learning._state.user_initiated_restart = self._user_initiated_shutdown
-        await self._executor_job(self.learning.save_state)
-        _LOGGER.info(
-            "Shutdown diagnostics persisted: version=%s user_initiated=%s",
-            VERSION,
-            self._user_initiated_shutdown,
-        )
+        with log_capture.zone_scope(self.zone_label):
+            self.learning._state.clean_shutdown = True
+            self.learning._state.last_shutdown_version = VERSION
+            self.learning._state.user_initiated_restart = self._user_initiated_shutdown
+            await self._executor_job(self.learning.save_state)
+            _LOGGER.info(
+                "Shutdown diagnostics persisted: version=%s user_initiated=%s",
+                VERSION,
+                self._user_initiated_shutdown,
+            )
 
     async def async_shutdown(self) -> None:
         """Clean up on shutdown."""

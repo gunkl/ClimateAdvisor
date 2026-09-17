@@ -546,12 +546,20 @@ class TestEventRenderersCoverage:
     # dedicated renderer.  Add here only with a comment explaining why.
     _DEFAULT_RENDERER_ALLOWLIST: frozenset[str] = frozenset(
         {
-            # Issue #672: purely a technical signal feeding coordinator.py's diagnostic
-            # override/grace FSM tracker (_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP) — the SAME
-            # real grace-start _start_grace_period_action() already emits as the
-            # user-facing "grace_started" event (which has its own dedicated renderer)
-            # moments earlier. Giving this one its own renderer too would narrate the
-            # identical real-world event twice in the Activity Report.
+            # Issue #672 (superseded by Issue #913): purely a technical signal feeding
+            # coordinator.py's diagnostic override/grace FSM tracker
+            # (_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP) — the SAME real grace-start
+            # _start_grace_period_action() already emits as the user-facing
+            # "grace_started" event (which has its own dedicated renderer) moments
+            # earlier. Issue #913: this type is no longer routed to _default_renderer at
+            # all — build_event_timeline_table() now skips it entirely (no row rendered),
+            # since even the default-renderer fallback narrated the identical real-world
+            # event twice in the Activity Report. It stays in this allowlist only so this
+            # coverage guardrail (which checks "every emitted type is accounted for
+            # somewhere") doesn't flag it as an accidentally-uncovered event type — the
+            # allowlist's meaning here is "intentionally has no rendered row", not
+            # "routes to the default renderer". See TestUnprotectedGraceStartedHidden
+            # below for the test that locks in the actual hide-the-row behavior.
             "unprotected_grace_started",
         }
     )
@@ -686,15 +694,19 @@ class TestFanEventRenderers:
         assert st == "fan: on->off"
 
     def test_fan_running_untracked_shows_source(self):
+        """Issue #913: label uses plain 'external' instead of the internal term 'untracked'."""
         ev, st = _act_mod.EVENT_RENDERERS["fan_running_untracked"](
             {"source": "thermostat blower during cool cycle", "hvac_action": "fan"}, "fahrenheit"
         )
-        assert "untracked" in ev.lower() and "thermostat blower during cool cycle" in ev
-        assert "untracked" in st
+        assert "external" in ev.lower() and "thermostat blower during cool cycle" in ev
+        assert "untracked" not in ev.lower(), f"Issue #913: jargon 'untracked' must not appear in label. Got: {ev!r}"
+        assert isinstance(st, str)  # settings cell renders without crashing
 
     def test_fan_untracked_cleared(self):
+        """Issue #913: label uses plain 'external' instead of the internal term 'untracked'."""
         ev, st = _act_mod.EVENT_RENDERERS["fan_untracked_cleared"]({}, "fahrenheit")
-        assert "untracked" in ev.lower()
+        assert "external" in ev.lower()
+        assert "untracked" not in ev.lower(), f"Issue #913: jargon 'untracked' must not appear in label. Got: {ev!r}"
         assert st == "fan: off"
 
 
@@ -715,11 +727,15 @@ class TestGraceStartedRendering:
         assert "manual fan change" in st
 
     def test_hvac_override_trigger(self):
+        """Issue #913 (newly discovered while fixing this file): _GRACE_TRIGGER_LABELS'
+        override_confirmed label used the internal term 'HVAC' -- now 'AC/heat', matching
+        the same jargon swap applied to the other HVAC-labeled renderers in this plan."""
         ev, st = _act_mod.EVENT_RENDERERS["grace_started"](
             {"source": "manual", "duration_seconds": 5400, "trigger": "override_confirmed"},
             "fahrenheit",
         )
-        assert "HVAC mode override" in st
+        assert "AC/heat mode override" in st
+        assert "HVAC" not in st
 
     def test_sensor_closed_resume_trigger(self):
         ev, st = _act_mod.EVENT_RENDERERS["grace_started"](
@@ -1644,3 +1660,291 @@ class TestFilterThenLimitOrdering:
         table = _build_table(events, hours=12.0)
 
         assert "more than 200 events" not in table
+
+
+# ---------------------------------------------------------------------------
+# TestIssue913PlainLanguageLabels
+# ---------------------------------------------------------------------------
+#
+# Issue #913: several Activity Report labels used internal engineering shorthand
+# ("HVAC", "untracked", "stuck", raw invariant enum names) that reads as alarming
+# or meaningless to the person living in the home. Fixed at the label source in
+# ai_skills_context.py per the approved plan's "Scope: labels to fix" table —
+# these tests lock in the exact new strings, not the old ones. Per the plan's
+# wording principle: swap the jargon word for a plain one at the same length,
+# don't pad the sentence into something longer.
+
+
+class TestIssue913PlainLanguageLabels:
+    """Exact new-label assertions for every renderer touched by Issue #913."""
+
+    def _render(self, event_type: str, payload: dict, unit: str = "fahrenheit") -> tuple[str, str]:
+        return _act_mod.EVENT_RENDERERS[event_type](payload, unit)
+
+    # -- sensor_opened: open_door_reeval trigger gets its own distinguishing branch --
+
+    def test_sensor_opened_open_door_reeval_new_label(self):
+        """entity='natural_vent_reeval' + trigger='open_door_reeval' must render the new
+        plain-language label, not the old generic 'Sensor opened -- open_door_reeval'
+        fallback (which reads as if a door/window just newly opened)."""
+        ev, _st = self._render(
+            "sensor_opened",
+            {"entity": "natural_vent_reeval", "trigger": "open_door_reeval"},
+        )
+        assert ev == "Re-check: door/window confirmed open", (
+            f"Issue #913: open_door_reeval must render the new re-check label. Got: {ev!r}"
+        )
+
+    def test_sensor_opened_open_door_reeval_end_to_end_in_table(self):
+        """End-to-end: the open_door_reeval trigger's new label appears in the built table,
+        and the old confusing generic fallback text does not."""
+        event = _make_event(
+            "sensor_opened",
+            entity="natural_vent_reeval",
+            trigger="open_door_reeval",
+        )
+        table = _build_table([event])
+        assert "Re-check: door/window confirmed open" in table, (
+            f"Issue #913: new label must appear in the rendered table. Table:\n{table}"
+        )
+        assert "open_door_reeval" not in table, (
+            f"Issue #913: the raw internal trigger code must not leak into the rendered row. Table:\n{table}"
+        )
+
+    def test_sensor_opened_other_triggers_unaffected(self):
+        """A different (non-open_door_reeval) trigger must keep the pre-existing generic
+        fallback -- this fix is a narrow branch, not a blanket rewrite of _render_sensor_opened."""
+        ev, _st = self._render(
+            "sensor_opened",
+            {"entity": "re-check", "trigger": "some_other_trigger"},
+        )
+        assert ev == "Sensor opened -- some_other_trigger"
+
+    # -- hvac_write_blocked_whf_active: "HVAC" -> "AC/heat" --
+
+    def test_hvac_write_blocked_whf_active_new_label(self):
+        ev, _st = self._render(
+            "hvac_write_blocked_whf_active",
+            {"attempted_mode": "cool", "reason": "whf session active"},
+        )
+        assert ev == "AC/heat blocked (whole-house fan active) -- whf session active", (
+            f"Issue #913: label must use 'AC/heat' instead of 'HVAC'. Got: {ev!r}"
+        )
+        assert "HVAC" not in ev
+
+    # -- whf_hvac_suppressed: "HVAC suppressed" -> "AC/heat paused" --
+
+    def test_whf_hvac_suppressed_new_label(self):
+        ev, _st = self._render(
+            "whf_hvac_suppressed",
+            {"prior_mode": "cool", "reason": "whf activated"},
+        )
+        assert ev == "AC/heat paused (whole-house fan) -- whf activated", (
+            f"Issue #913: label must read 'AC/heat paused', not 'HVAC suppressed'. Got: {ev!r}"
+        )
+        assert "HVAC" not in ev and "suppressed" not in ev.lower()
+
+    # -- whf_hvac_released: "HVAC suppression released" -> "AC/heat resumed" --
+
+    def test_whf_hvac_released_new_label(self):
+        ev, _st = self._render(
+            "whf_hvac_released",
+            {"reason": "fan cycle ended"},
+        )
+        assert ev == "AC/heat resumed -- fan cycle ended", f"Issue #913: label must read 'AC/heat resumed'. Got: {ev!r}"
+        assert "HVAC" not in ev
+
+    # -- stranded_hvac_suppression_restored: "Restored HVAC mode from stranded fan
+    #    suppression" -> "AC/heat restored (fan session ended)" --
+
+    def test_stranded_hvac_suppression_restored_new_label(self):
+        ev, _st = self._render(
+            "stranded_hvac_suppression_restored",
+            {"reason": "fan already off", "restore_mode": "heat"},
+        )
+        assert ev == "AC/heat restored (fan session ended) -- fan already off", (
+            f"Issue #913: label must read 'AC/heat restored (fan session ended)'. Got: {ev!r}"
+        )
+        assert "HVAC" not in ev and "stranded" not in ev.lower()
+
+    def test_stranded_hvac_suppression_restored_no_reason(self):
+        """No reason field -> label still drops HVAC/stranded jargon (no trailing dash)."""
+        ev, _st = self._render("stranded_hvac_suppression_restored", {})
+        assert ev == "AC/heat restored (fan session ended)"
+
+    # -- fan_running_untracked / fan_untracked_cleared: "untracked" -> "external" --
+    # (covered above in TestFanEventRenderers with updated assertions)
+
+    # -- nat_vent_reconcile_exit: drop "CA-owned session" internal phrasing --
+
+    def test_nat_vent_reconcile_exit_new_label(self):
+        ev, _st = self._render("nat_vent_reconcile_exit", {"reason": "some detail"})
+        assert ev == "Nat-vent exit -- fan already running independently", (
+            f"Issue #913: label must read 'fan already running independently'. Got: {ev!r}"
+        )
+        assert "CA-owned" not in ev
+
+    # -- stuck_grace_recovered: drop "stuck" --
+
+    def test_stuck_grace_recovered_no_override_new_label(self):
+        ev, _st = self._render(
+            "stuck_grace_recovered",
+            {"grace_end_time": "2026-07-22T20:53:00+00:00", "reason": "grace_without_override"},
+        )
+        assert ev == "Grace period recovered (no override was active)", (
+            f"Issue #913: label must drop 'stuck' and read 'Grace period recovered'. Got: {ev!r}"
+        )
+        assert "stuck" not in ev.lower()
+
+    def test_stuck_grace_recovered_expired_new_label(self):
+        ev, _st = self._render(
+            "stuck_grace_recovered",
+            {"grace_end_time": "2026-06-12T13:00:00+00:00"},
+        )
+        assert ev == "Grace period recovered (expired 2026-06-12T13:00:00+00:00)", (
+            f"Issue #913: label must drop 'stuck' and read 'Grace period recovered (expired ...)'. Got: {ev!r}"
+        )
+        assert "stuck" not in ev.lower()
+
+    # -- state_contradiction_warning: plain "Mode/action mismatch" --
+
+    def test_state_contradiction_warning_new_label(self):
+        ev, _st = self._render(
+            "state_contradiction_warning",
+            {"hvac_mode": "heat", "hvac_action": "cooling"},
+        )
+        assert ev == "Mode/action mismatch: heat vs cooling", (
+            f"Issue #913: label must read 'Mode/action mismatch: X vs Y'. Got: {ev!r}"
+        )
+        assert "contradiction" not in ev.lower()
+
+    # -- invariant_violation: plain-English `detail` becomes the label; raw `invariant`
+    #    enum code moves to the settings/Settings-column return value --
+
+    def test_invariant_violation_detail_is_label_invariant_is_settings(self):
+        ev, st = self._render(
+            "invariant_violation",
+            {
+                "invariant": "AC_AND_WHF_BOTH_RUNNING",
+                "detail": "AC and the whole-house fan are both running at the same time",
+            },
+        )
+        assert ev == "AC and the whole-house fan are both running at the same time", (
+            f"Issue #913: label must be the plain-English detail field. Got: {ev!r}"
+        )
+        assert "AC_AND_WHF_BOTH_RUNNING" in st, (
+            f"Issue #913: the raw invariant code must move to the settings return value. Got: {st!r}"
+        )
+        assert "AC_AND_WHF_BOTH_RUNNING" not in ev, (
+            f"Issue #913: the raw invariant enum code must not appear in the label. Got: {ev!r}"
+        )
+        assert "Hard invariant violated" not in ev
+
+    # -- comfort_family_switch_locked_out: "blocked by lockout" -> "delayed (recent change)" --
+
+    def test_comfort_family_switch_locked_out_with_candidate_new_label(self):
+        ev, _st = self._render(
+            "comfort_family_switch_locked_out",
+            {"candidate_family": "cool", "reason": "interval not yet elapsed"},
+        )
+        assert ev == "Switch to cool delayed (recent change)", (
+            f"Issue #913: label must read 'Switch to X delayed (recent change)'. Got: {ev!r}"
+        )
+        assert "lockout" not in ev.lower() and "blocked" not in ev.lower()
+
+    def test_comfort_family_switch_locked_out_no_candidate_new_label(self):
+        ev, _st = self._render("comfort_family_switch_locked_out", {})
+        assert ev == "Switch delayed (recent change)", (
+            f"Issue #913: label must read 'Switch delayed (recent change)'. Got: {ev!r}"
+        )
+        assert "lockout" not in ev.lower() and "blocked" not in ev.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestUnprotectedGraceStartedHidden
+# ---------------------------------------------------------------------------
+
+
+class TestUnprotectedGraceStartedHidden:
+    """Issue #913: unprotected_grace_started is now hidden from the Activity Report
+    entirely -- build_event_timeline_table() must skip rendering a row for it, even
+    though the raw event stays present in raw_event_log (coordinator.py's diagnostic
+    override/grace FSM tracker still reads the raw log, unaffected by this change).
+
+    This supersedes the old #672 intent (route to _default_renderer, which produced
+    a humanized "Unprotected grace started" row) -- that fallback accidentally
+    narrated the same real-world grace-start twice, once for this diagnostic event
+    and once for the sibling user-facing grace_started event for the same action.
+    """
+
+    def test_unprotected_grace_started_produces_zero_rows(self):
+        event = _make_event(
+            "unprotected_grace_started",
+            trigger="fan_manual_override",
+            duration_seconds=5400,
+        )
+        table = _build_table([event])
+
+        assert "Unprotected grace started" not in table, (
+            f"Issue #913: unprotected_grace_started must produce no row at all. Table:\n{table}"
+        )
+        assert "unprotected" not in table.lower(), (
+            f"Issue #913: no trace of the diagnostic event should leak into the table. Table:\n{table}"
+        )
+        # An otherwise-empty log renders the empty-window sentinel.
+        assert "no events in window" in table, (
+            f"Issue #913: with only a hidden event type present, the table must fall back to "
+            f"the empty-window sentinel, not a blank/malformed row. Table:\n{table}"
+        )
+
+    def test_sibling_grace_started_still_renders_normally(self):
+        """The sibling user-facing grace_started event for the SAME action must still get
+        its own normal row -- only the diagnostic unprotected_grace_started is suppressed,
+        not grace-start narration in general."""
+        events = [
+            _make_event(
+                "grace_started",
+                hours_ago=1.01,
+                trigger="fan_manual_override",
+                duration_seconds=5400,
+                source="manual",
+            ),
+            _make_event(
+                "unprotected_grace_started",
+                hours_ago=1.0,
+                trigger="fan_manual_override",
+                duration_seconds=5400,
+            ),
+        ]
+        table = _build_table(events)
+
+        assert "Grace period started" in table, (
+            f"Issue #913: sibling grace_started row must still render normally. Table:\n{table}"
+        )
+        assert "Unprotected grace started" not in table
+        assert "unprotected" not in table.lower()
+        # Exactly one grace-related row should be present (the real grace_started row) --
+        # not two rows narrating what is really a single grace-start action.
+        grace_rows = [line for line in table.splitlines() if "Grace period started" in line]
+        assert len(grace_rows) == 1, (
+            f"Issue #913: only the sibling grace_started event should produce a row; "
+            f"unprotected_grace_started must not add a second one. Table:\n{table}"
+        )
+
+    def test_unprotected_grace_started_does_not_break_coverage_guardrail(self):
+        """The coverage guardrail (TestEventRenderersCoverage) must still pass with
+        unprotected_grace_started intentionally absent from EVENT_RENDERERS -- it stays
+        covered via _DEFAULT_RENDERER_ALLOWLIST, now re-documented as 'intentionally
+        hidden' rather than 'routes to default renderer'. This test locks in that the
+        allowlist mechanism itself still works for a genuinely new, un-registered type
+        (i.e. the allowlist is not silently swallowing unrelated future event types)."""
+        from custom_components.climate_advisor.ai_skills_context import EVENT_RENDERERS
+
+        assert "unprotected_grace_started" not in EVENT_RENDERERS, (
+            "Issue #913: unprotected_grace_started must not have a dedicated renderer -- "
+            "it is suppressed upstream in build_event_timeline_table(), not rendered blank."
+        )
+        # A genuinely new, never-seen event type must NOT be swallowed by the same
+        # allowlist mechanism -- it must still show up via _default_renderer.
+        ev_text, _settings = _act_mod._default_renderer("a_brand_new_never_seen_event_type_913", {}, "fahrenheit")
+        assert ev_text, "An unrelated new event type must still get a non-empty default-rendered label"

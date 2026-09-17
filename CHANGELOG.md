@@ -5,6 +5,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.7.43] — 2026-09-17
 
+- Fix #913: Activity Report rows now use plain language instead of internal engineering terms (e.g. a routine door/window re-check no longer reads as a fresh open, and a purely internal diagnostic row no longer shows up as a confusing duplicate).
 - Fix #912: a night where only the whole-house fan (or thermostat fan-only mode) ran no longer shows up in your activity report as hours of heating or cooling. Fan-only runtime is now tracked and reported separately from true heat/cool runtime, and the "thermal learning found no observations" warning no longer fires on fan-only-only nights.
 
 ## [0.7.42] — 2026-09-17

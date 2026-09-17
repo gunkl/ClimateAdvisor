@@ -1799,7 +1799,7 @@ def _render_setpoint_nudge(p: dict, unit: str) -> tuple[str, str]:
     real_target = p.get("real_target")
     mode = p.get("mode", "")
     streak = p.get("reject_streak")
-    label = "Reconciling stuck setpoint -- nudging thermostat"
+    label = "Reconciling setpoint -- nudging thermostat"
     settings = ""
     if nudge_value is not None and real_target is not None:
         with contextlib.suppress(TypeError, ValueError):
@@ -1856,7 +1856,7 @@ def _render_override_adopted(p: dict, unit: str) -> tuple[str, str]:
 
 _GRACE_TRIGGER_LABELS: dict[str, str] = {
     "fan_manual_override": "fan override (manual fan change)",
-    "override_confirmed": "HVAC mode override",
+    "override_confirmed": "AC/heat mode override",
     "dashboard_resume": "user resumed from dashboard",
     "sensor_closed_resume": "all sensors closed",
     "nat_vent_exit_resume": "natural ventilation ended",
@@ -1944,7 +1944,7 @@ def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[str, str]
     """
     attempted_mode = str(p.get("attempted_mode", "")).strip()
     reason = str(p.get("reason", "")).strip()
-    label = f"HVAC write blocked (whole-house fan active) -- {reason}" if reason else "HVAC write blocked"
+    label = f"AC/heat blocked (whole-house fan active) -- {reason}" if reason else "AC/heat blocked"
     settings = f"hvac: blocked ({attempted_mode})" if attempted_mode else ""
     return label, settings
 
@@ -1955,7 +1955,7 @@ def _render_whf_hvac_suppressed(p: dict, unit: str) -> tuple[str, str]:
     """
     prior_mode = str(p.get("prior_mode", "")).strip()
     reason = str(p.get("reason", "")).strip()
-    label = f"HVAC suppressed (whole-house fan) -- {reason}" if reason else "HVAC suppressed (whole-house fan)"
+    label = f"AC/heat paused (whole-house fan) -- {reason}" if reason else "AC/heat paused (whole-house fan)"
     settings = f"hvac: {prior_mode}->off" if prior_mode else "hvac: ->off"
     return label, settings
 
@@ -1966,7 +1966,7 @@ def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
     since a remote-timer session can span hours).
     """
     reason = str(p.get("reason", "")).strip()
-    label = f"HVAC suppression released -- {reason}" if reason else "HVAC suppression released"
+    label = f"AC/heat resumed -- {reason}" if reason else "AC/heat resumed"
     return label, "hvac: reclassifying"
 
 
@@ -1979,11 +1979,7 @@ def _render_stranded_hvac_suppression_restored(p: dict, unit: str) -> tuple[str,
     """
     reason = str(p.get("reason", "")).strip()
     restore_mode = str(p.get("restore_mode", "")).strip()
-    label = (
-        f"Restored HVAC mode from stranded fan suppression -- {reason}"
-        if reason
-        else ("Restored HVAC mode from stranded fan suppression")
-    )
+    label = f"AC/heat restored (fan session ended) -- {reason}" if reason else ("AC/heat restored (fan session ended)")
     settings = f"hvac: ->{restore_mode}" if restore_mode else "hvac: restored"
     return label, settings
 
@@ -2022,15 +2018,15 @@ def _render_fan_speed_observed(p: dict, unit: str) -> tuple[str, str]:
 def _render_fan_running_untracked(p: dict, unit: str) -> tuple[str, str]:
     source = str(p.get("source", "")).strip() or "thermostat-initiated"
     action = str(p.get("hvac_action", "")).strip()
-    label = f"Fan running (untracked) -- {source}"
-    settings = f"fan: on (untracked; hvac_action={action})" if action else "fan: on (untracked)"
+    label = f"Fan running (external) -- {source}"
+    settings = f"fan: on (external; hvac_action={action})" if action else "fan: on (external)"
     return label, settings
 
 
 def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
     fan_device = p.get("fan_device")
     settings = f"fan: {fan_device} off" if fan_device else "fan: off"
-    return "Fan stopped (untracked fan ended)", settings
+    return "Fan stopped (external)", settings
 
 
 def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
@@ -2106,7 +2102,7 @@ def _render_nat_vent_manual_override_exit(p: dict, unit: str) -> tuple[str, str]
 
 
 def _render_nat_vent_reconcile_exit(p: dict, unit: str) -> tuple[str, str]:
-    label = "Nat-vent exit -- fan found running without a CA-owned session"
+    label = "Nat-vent exit -- fan already running independently"
     reason = p.get("reason", "")
     return label, reason
 
@@ -2257,7 +2253,9 @@ def _render_sensor_opened(p: dict, unit: str) -> tuple[str, str]:
     result = p.get("result", "")
     trigger = p.get("trigger", "")
     label = f"Sensor opened -- {result}" if result else "Sensor opened"
-    if entity and entity not in ("re-check", "natural_vent_reeval"):
+    if entity == "natural_vent_reeval" and trigger == "open_door_reeval":
+        label = "Re-check: door/window confirmed open"
+    elif entity and entity not in ("re-check", "natural_vent_reeval"):
         label = f"Sensor opened: {entity} ({result})" if result else f"Sensor opened: {entity}"
     elif trigger:
         label = f"Sensor opened -- {trigger}"
@@ -2431,22 +2429,28 @@ def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
     if p.get("reason") == "grace_without_override":
         # Issue #508's watchdog mirror: grace_end_time is typically still in the future here
         # (the timer would have fired correctly on its own) — "expired" would be misleading.
-        return "Stuck grace recovered (no override was active to protect it)", settings
-    return f"Stuck grace recovered (expired {grace_end})", settings
+        return "Grace period recovered (no override was active)", settings
+    return f"Grace period recovered (expired {grace_end})", settings
 
 
 def _render_state_contradiction_warning(p: dict, unit: str) -> tuple[str, str]:
     hvac_mode = p.get("hvac_mode", "")
     hvac_action = p.get("hvac_action", "")
-    return f"State contradiction: mode={hvac_mode} but action={hvac_action}", ""
+    return f"Mode/action mismatch: {hvac_mode} vs {hvac_action}", ""
 
 
 def _render_invariant_violation(p: dict, unit: str) -> tuple[str, str]:
     """Issue #749: a hard system invariant was violated (e.g. AC and the whole-house
-    fan both physically running at once)."""
+    fan both physically running at once).
+
+    Issue #913: lead with the already-plain-English `detail` field (same text already
+    shown on the dashboard Status card) as the label; the raw `invariant` enum-name code
+    moves to the settings column instead of being the label.
+    """
     invariant = p.get("invariant", "")
     detail = p.get("detail", "")
-    return f"Hard invariant violated: {invariant}", detail
+    label = detail or (f"Hard invariant violated: {invariant}" if invariant else "Hard invariant violated")
+    return label, (f"invariant: {invariant}" if invariant else "")
 
 
 def _render_thermal_learning_no_observations(p: dict, unit: str) -> tuple[str, str]:
@@ -2547,7 +2551,7 @@ def _render_comfort_family_switch_locked_out(p: dict, unit: str) -> tuple[str, s
     # blocked breach is observable, not silent (per that issue's own design note).
     candidate = p.get("candidate_family", "")
     reason = p.get("reason", "")
-    label = f"Family switch to {candidate} blocked by lockout" if candidate else "Family switch blocked by lockout"
+    label = f"Switch to {candidate} delayed (recent change)" if candidate else "Switch delayed (recent change)"
     return label, reason
 
 
@@ -2710,6 +2714,19 @@ _NO_DEDUP: frozenset[str] = frozenset(
 )
 
 
+# Issue #913: event types that fire internally (coordinator's diagnostic override/grace
+# FSM tracker still reads raw_event_log for these) but whose Activity Report row is
+# intentionally suppressed -- purely internal diagnostic signals that read as confusing
+# duplicates of an adjacent, already-rendered row (e.g. unprotected_grace_started duplicates
+# the preceding grace_started row for the same action). Only the rendered row disappears;
+# raw_event_log itself is untouched.
+_REPORT_HIDDEN_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "unprotected_grace_started",
+    }
+)
+
+
 def _maybe_prepend_whf_warning(table: str, config: dict[str, Any]) -> str:
     """Prepend a WHF command-only warning banner when fan_state_feedback is disabled."""
     _fsf = config.get("fan_state_feedback", False)
@@ -2815,6 +2832,10 @@ def build_event_timeline_table(
 
     for entry in filtered:
         event_type = str(entry.get("type", "unknown"))
+        if event_type in _REPORT_HIDDEN_EVENT_TYPES:
+            # Issue #913: intentionally hidden from the report (still present in
+            # raw_event_log, untouched, for coordinator-side diagnostic consumers).
+            continue
         payload = {k: v for k, v in entry.items() if k not in ("time", "type")}
         time_str = _fmt_time(entry.get("time"))
 

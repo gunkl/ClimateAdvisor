@@ -28,6 +28,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from tests.helpers.date_boundary_fixtures import DATE_BOUNDARY_CASES  # noqa: E402
 
 _TODAY = date(2026, 5, 15)
 _TOMORROW = _TODAY + timedelta(days=1)
@@ -228,4 +229,32 @@ class TestForecastDateMatching:
         )
         assert result.tomorrow_high == pytest.approx(91.0), (
             "REGRESSION #190: tomorrow_high should be May 16 entry (91°F), not May 17 (68°F)"
+        )
+
+
+class TestForecastDateMatchingBoundaryFixtures:
+    """Retrofit (Issue #906): _get_forecast()'s raw-date matching, re-exercised
+    against the shared DST/rollover/calendar-boundary hazard set in
+    tests/helpers/date_boundary_fixtures.py — so a hazard added to that shared
+    list automatically re-exercises this older function too, not just the two
+    new Issue #906 functions.
+    """
+
+    @pytest.mark.parametrize("case", DATE_BOUNDARY_CASES, ids=lambda c: c.label)
+    def test_today_and_tomorrow_matched_by_raw_date(self, case, tmp_path: Path):
+        today_date = case.now.date()
+        tomorrow_date = today_date + timedelta(days=1)
+        forecast = [
+            _make_entry(today_date, 72.0, utc_midnight=True),
+            _make_entry(tomorrow_date, 79.0, utc_midnight=True),
+        ]
+        coord = _make_coordinator_stub(forecast)
+        result = _run_get_forecast(coord, now_local=case.now)
+
+        assert result is not None
+        assert result.today_high == pytest.approx(72.0), (
+            f"{case.label}: today_high should match the {today_date} entry via raw date"
+        )
+        assert result.tomorrow_high == pytest.approx(79.0), (
+            f"{case.label}: tomorrow_high should match the {tomorrow_date} entry via raw date"
         )

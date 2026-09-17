@@ -2,3 +2,9 @@ pytest>=7.0
 pytest-cov>=4.0
 ruff>=0.4.0,<0.17
 pre-commit>=4.0
+# Issue #906 verification round (Fix 4): tests exercise a real IANA zone via
+# zoneinfo.ZoneInfo("America/Los_Angeles") across an actual DST transition.
+# Python's zoneinfo relies on the system tz database, which isn't guaranteed
+# present (e.g. some Windows dev environments) — the tzdata package provides
+# it portably regardless of host OS/CI image.
+tzdata>=2024.1

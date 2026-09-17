@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.42] — 2026-09-17
+
+- Fix #911: fixed a bug where, on a multi-zone install, a warning or temperature from a different zone (including a dev/test "Simulated" zone) could occasionally appear in another zone's AI Investigator report, labeled "unknown zone" — this could make it look like something happened in your home that didn't. Every scheduled check (morning wake-up, bedtime, end-of-day, pre-cool, door/window, occupancy, thermostat, and fan changes) and every dashboard/API request now correctly attributes its own log messages to the zone that generated them.
+
 ## [0.7.41] — 2026-09-16
 
 - Fix #903: fixed a bug where, on Celsius-unit installs, a temporary gap in the weather forecast data could crash Climate Advisor entirely and stop all automation until a restart. Also fixed several related issues on Celsius-unit installs: the temperature Climate Advisor asked the thermostat to hold could occasionally be wrong after the fan turned on or off or after a rejected setpoint, and the dashboard's target-temperature and natural-ventilation cycling-range numbers were shown in the wrong unit.

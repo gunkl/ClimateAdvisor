@@ -23,7 +23,7 @@
 **Explicitly does NOT own:**
 - `LearningState` — lives in `learning.py`; persists to `climate_advisor_learning.json` via `LearningEngine`
 - The schema of the state dict — the coordinator (`coordinator.py`) is responsible for what keys are written and read
-- File permissions — not set by this module on any platform (see Invariants for the gap)
+- Nothing else — file permissions (`0o600` via `os.chmod` after `os.replace()`, guarded by `hasattr(os, "chmod")` for cross-platform safety) ARE set by this module; see Invariants
 - Migration logic — version mismatches are handled by discarding and starting fresh; no field-level upgrade path exists in `state.py`
 
 ## Responsibilities
@@ -99,7 +99,7 @@ There is no migration path in `state.py`. Any breaking schema change requires bu
 3. **`save()` never raises.** All exceptions are caught and logged; callers do not need try/except around `save()`.
 4. **Version is always written by `save()`, never by the caller.** The coordinator passes a state dict without a `version` key; `save()` injects it.
 5. **No leftover `.tmp` files after `delete()`.** `delete()` globs for `climate_advisor_state_*.tmp` and removes all matches.
-6. **File permissions gap (assumed, not confirmed in code):** `state.py` does not set `0o600` permissions. The CLAUDE.md security rule requiring `0o600` on persisted state files is not currently enforced here for `climate_advisor_state.json`. This is an unverified assumption — the code was read and no `chmod`/`os.chmod` call was found.
+6. **File permissions are set.** After `os.replace()`, `save()` calls `os.chmod(str(self._path), 0o600)` (guarded by `hasattr(os, "chmod")`, so it's a no-op on platforms without it, e.g. Windows) — satisfying the CLAUDE.md security rule requiring `0o600` on persisted state files. Fixed in Issue #384 (v0.4.53); this section previously described a gap that no longer exists — verified directly against `state.py` during the 2026-09-16 documentation staleness audit.
 
 ## Disclosure Path
 

@@ -528,14 +528,14 @@ Each of 19 modules earns up to 4 points: Tier 2 brief present = 1pt, real anchor
 
 Authoring templates for new Tier 2 briefs and Tier 3 specs live in `docs/templates/`. Always use them — they encode the correct section structure and disclosure path requirements.
 
-### Known Gaps (Phase 1 complete — 2026-05-09)
+### Known Gaps (Phase 1 complete — 2026-05-09; re-verified 2026-09-16 doc audit)
 
-- `docs/thermal-model-v3-spec.md` — Tier 3 spec: six observation types, OLS solvers, EWMA, gate bridge, swing
-- `docs/grace-periods-spec.md` — Tier 3 spec: grace period state machine, timer lifecycle, pre-pause storage
-- `docs/state-persistence.md` — Tier 2 brief: state.py + learning DB persistence
-- `docs/temperature-conversion.md` — Tier 2 brief: from_fahrenheit() vs convert_delta() distinction
-- **Security gap:** `climate_advisor_state.json` is not created with `0o600` permissions — `state.py` does not `chmod` after `os.replace`. Tracked for fix.
-- **Behavioral gap:** Sensor going unavailable during a grace pause leaves the system paused indefinitely (no unavailable-state handler). Tracked for fix.
+- ~~`docs/thermal-model-v3-spec.md` — Tier 3 spec~~ — written (974 lines).
+- ~~`docs/grace-periods-spec.md` — Tier 3 spec~~ — written (825 lines).
+- ~~`docs/state-persistence.md` — Tier 2 brief~~ — written (108 lines).
+- ~~`docs/temperature-conversion.md` — Tier 2 brief~~ — written (140 lines).
+- ~~**Security gap:** `climate_advisor_state.json` is not created with `0o600` permissions~~ — fixed in Issue #384 (v0.4.53); `state.py::save()` calls `os.chmod(path, 0o600)` after `os.replace()`. Confirmed against current code 2026-09-16.
+- **Behavioral gap (still open):** Sensor going unavailable during a grace pause leaves the system paused indefinitely (no unavailable-state handler) — confirmed still present in `docs/grace-periods-spec.md`'s "Door/Window Sensor Goes Unavailable During Grace" error-condition writeup and in `coordinator.py`'s `_is_sensor_open()`/`_async_door_window_changed()`. Tracked for fix.
 
 ---
 

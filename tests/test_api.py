@@ -499,6 +499,130 @@ class TestCATargetSleepAware:
         assert cool == 80.0 + VACATION_SETBACK_EXTRA
 
 
+class TestCATargetAndNatVentCelsiusConversion:
+    """Issue #903: ca_target_heat/cool and the nat-vent cycling band are internal-Fahrenheit
+    values (from select_comfort_band()/compute_nat_vent_cycling_band(), both internal-°F
+    per temperature.py's module docstring) and must be converted to the display unit before
+    landing in the status payload — the frontend renders them directly with the configured
+    unit symbol appended (see index.html), so a Celsius-configured install was showing the
+    raw Fahrenheit number labeled "°C" on every status poll before this fix.
+    """
+
+    def _make_coordinator(
+        self,
+        temp_unit="celsius",
+        comfort_heat=68.0,
+        comfort_cool=75.2,
+        nat_vent_band=None,
+    ):
+        state = MagicMock()
+        state.state = "heat"
+        state.attributes = {"temperature": 70, "target_temp_low": None, "target_temp_high": None}
+
+        coord = MagicMock()
+        coord.config = {
+            "temp_unit": temp_unit,
+            "comfort_heat": comfort_heat,
+            "comfort_cool": comfort_cool,
+            "sleep_time": "22:30",
+            "wake_time": "07:00",
+        }
+        coord.data = {}
+        coord._get_indoor_temp.return_value = 70.0
+        coord._last_outdoor_temp = None
+        coord.automation_enabled = True
+        coord._occupancy_mode = "home"
+        coord.current_classification = _make_classification()
+        coord.compute_nat_vent_cycling_band.return_value = (
+            nat_vent_band
+            if nat_vent_band is not None
+            else {"nat_vent_target": None, "nat_vent_on_threshold": None, "nat_vent_off_threshold": None}
+        )
+        ae = MagicMock()
+        ae._manual_override_active = False
+        ae._override_confirm_pending = False
+        ae._fan_override_active = False
+        ae._pre_condition_achieved = False
+        ae.is_paused_by_door = False
+        coord.automation_engine = ae
+        coord._compute_contact_details.return_value = []
+        return coord, state
+
+    def test_ca_target_heat_cool_converted_to_celsius(self):
+        """comfort_cool=75.2°F (24.0°C) must NOT come back as the raw 75.2 number labeled
+        Celsius — this was the exact everyday-dashboard bug reported in Issue #903."""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        import pytest
+        from homeassistant.util import dt as dt_util
+
+        coord, state = self._make_coordinator(temp_unit="celsius", comfort_heat=68.0, comfort_cool=75.2)
+        now = datetime(2026, 7, 21, 14, 0, 0)  # 14:00 — outside sleep window
+        with patch.object(dt_util, "now", return_value=now):
+            response = _simulate_status_get(coord, state)
+
+        assert response["ca_target_heat"] == pytest.approx(20.0, abs=0.1)  # 68°F -> 20.0°C
+        assert response["ca_target_cool"] == pytest.approx(24.0, abs=0.1)  # 75.2°F -> 24.0°C
+        assert response["ca_target_cool"] != 75.2, "must not send the raw Fahrenheit number labeled Celsius"
+
+    def test_ca_target_heat_cool_passthrough_when_fahrenheit(self):
+        """Fahrenheit-configured installs must be unaffected by the conversion fix."""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        from homeassistant.util import dt as dt_util
+
+        coord, state = self._make_coordinator(temp_unit="fahrenheit", comfort_heat=68.0, comfort_cool=75.2)
+        now = datetime(2026, 7, 21, 14, 0, 0)
+        with patch.object(dt_util, "now", return_value=now):
+            response = _simulate_status_get(coord, state)
+
+        assert response["ca_target_heat"] == 68.0
+        assert response["ca_target_cool"] == 75.2
+
+    def test_nat_vent_band_converted_to_celsius(self):
+        """nat_vent_target/on_threshold/off_threshold must convert the same way as
+        ca_target_heat/cool — same internal-°F source, same frontend display pattern."""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        import pytest
+        from homeassistant.util import dt as dt_util
+
+        nat_vent_band = {
+            "nat_vent_target": 71.0,  # ~21.7°C
+            "nat_vent_on_threshold": 73.0,  # ~22.8°C
+            "nat_vent_off_threshold": 69.0,  # ~20.6°C
+        }
+        coord, state = self._make_coordinator(temp_unit="celsius", nat_vent_band=nat_vent_band)
+        now = datetime(2026, 7, 21, 14, 0, 0)
+        with patch.object(dt_util, "now", return_value=now):
+            response = _simulate_status_get(coord, state)
+
+        assert response["nat_vent_target"] == pytest.approx(21.7, abs=0.1)
+        assert response["nat_vent_on_threshold"] == pytest.approx(22.8, abs=0.1)
+        assert response["nat_vent_off_threshold"] == pytest.approx(20.6, abs=0.1)
+        assert response["nat_vent_target"] != 71.0, "must not send the raw Fahrenheit number labeled Celsius"
+
+    def test_nat_vent_band_none_when_no_active_target(self):
+        """compute_nat_vent_cycling_band() returns all-None when there's no active target —
+        the conversion must not raise or synthesize a value."""
+        coord, state = self._make_coordinator(temp_unit="celsius", nat_vent_band=None)
+        from datetime import datetime
+        from unittest.mock import patch
+
+        from homeassistant.util import dt as dt_util
+
+        now = datetime(2026, 7, 21, 14, 0, 0)
+        with patch.object(dt_util, "now", return_value=now):
+            response = _simulate_status_get(coord, state)
+
+        assert response["nat_vent_target"] is None
+        assert response["nat_vent_on_threshold"] is None
+        assert response["nat_vent_off_threshold"] is None
+
+
 class TestStatusSetpointExtraction:
     """Issue #266: the status endpoint must expose the dual band setpoints in heat_cool mode."""
 

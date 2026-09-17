@@ -230,10 +230,10 @@ from .override_grace_lifecycle import (
 )
 from .setpoint_verify_decision import SetpointVerifyOutcome, decide_setpoint_verify
 from .temperature import (
-    convert_delta,
     format_temp,
     format_temp_delta,
     from_fahrenheit,
+    read_state_temp_f,
     to_fahrenheit,
 )
 from .thermal_lead_time import compute_lead_minutes_from_rate
@@ -860,7 +860,8 @@ class AutomationEngine:
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
-        self._pending_setpoint_single: float | None = None  # single setpoint validation: commanded temp (service units)
+        # single setpoint validation: commanded temp (internal Fahrenheit)
+        self._pending_setpoint_single: float | None = None
         self._pending_setpoint_mode: str | None = None  # single setpoint validation: commanded mode ("cool"|"heat")
         # Issue #411: consecutive setpoint_rejected count for the current commanded value.
         # Reset to 0 whenever a setpoint is confirmed/accepted; incremented on each rejection.
@@ -3267,7 +3268,7 @@ class AutomationEngine:
         # Set state tracking BEFORE the write so the validation callback always
         # compares against the intended final setpoint.
         _now = dt_util.now()
-        self._pending_setpoint_single = service_temp
+        self._pending_setpoint_single = temperature
         self._pending_setpoint_mode = mode
         self._write_seq += 1
         _my_seq = self._write_seq
@@ -3333,14 +3334,7 @@ class AutomationEngine:
             # (pending_setpoint_single/_mode are always set by this point, and this check
             # doesn't consider manual override).
             state = self.hass.states.get(self.climate_entity)
-            reported: float | None = None
-            if state is not None:
-                _reported_raw = state.attributes.get("temperature")
-                if _reported_raw is not None:
-                    try:
-                        reported = float(_reported_raw)
-                    except (ValueError, TypeError):
-                        reported = None
+            reported = read_state_temp_f(state, "temperature", unit)
             outcome = decide_setpoint_verify(
                 current_write_seq=self._write_seq,
                 verify_write_seq=_my_seq,
@@ -3380,7 +3374,7 @@ class AutomationEngine:
                 # dt_util is a bare, unpatched MagicMock in these tests, so a mocked
                 # `(at - now).total_seconds()` returns a MagicMock, not a real float.
                 _retry_seq = _my_seq
-                _retry_temp = service_temp
+                _retry_temp = temperature
                 _retry_mode = mode
 
                 async def _retry_callback(_now: Any) -> None:
@@ -3397,10 +3391,8 @@ class AutomationEngine:
                     if _action is SetpointRetryAction.SUPERSEDED:
                         return  # newer command superseded; skip retry
                     if _action is SetpointRetryAction.NUDGE_THEN_TARGET:
-                        _nudge_delta = convert_delta(1.0, unit)
-                        _nudge_temp = (
-                            _retry_temp + _nudge_delta if _retry_mode == "cool" else _retry_temp - _nudge_delta
-                        )
+                        _nudge_temp_f = _retry_temp + 1.0 if _retry_mode == "cool" else _retry_temp - 1.0
+                        _nudge_temp = from_fahrenheit(_nudge_temp_f, unit)
                         _LOGGER.warning(
                             "Retrying setpoint write after repeated rejection (streak=%d):"
                             " nudging to %.1f %s before real target %.1f %s",
@@ -10392,15 +10384,9 @@ class AutomationEngine:
                 # setpoint_verify_decision.decide_setpoint_verify() — shared with
                 # _do_verify_after_fan_off(), which had byte-for-byte identical logic
                 # before this consolidation (found during the #429 dedup sweep).
+                unit = self.config.get("temp_unit", "fahrenheit")
                 current_state = self.hass.states.get(self.climate_entity)
-                actual_temp: float | None = None
-                if current_state is not None:
-                    _actual_raw = current_state.attributes.get("temperature")
-                    if _actual_raw is not None:
-                        try:
-                            actual_temp = float(_actual_raw)
-                        except (ValueError, TypeError):
-                            actual_temp = None
+                actual_temp = read_state_temp_f(current_state, "temperature", unit)
                 outcome = decide_setpoint_verify(
                     current_write_seq=self._write_seq,
                     verify_write_seq=_verify_seq,
@@ -11033,15 +11019,9 @@ class AutomationEngine:
                 # setpoint_verify_decision.decide_setpoint_verify() — shared with
                 # _do_verify_after_fan_on(), which had byte-for-byte identical logic
                 # before this consolidation (found during the #429 dedup sweep).
+                unit = self.config.get("temp_unit", "fahrenheit")
                 current_state = self.hass.states.get(self.climate_entity)
-                actual_temp: float | None = None
-                if current_state is not None:
-                    _actual_raw = current_state.attributes.get("temperature")
-                    if _actual_raw is not None:
-                        try:
-                            actual_temp = float(_actual_raw)
-                        except (ValueError, TypeError):
-                            actual_temp = None
+                actual_temp = read_state_temp_f(current_state, "temperature", unit)
                 outcome = decide_setpoint_verify(
                     current_write_seq=self._write_seq,
                     verify_write_seq=_verify_seq,

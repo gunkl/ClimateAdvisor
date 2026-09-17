@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.temperature import convert_delta
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -1041,3 +1044,226 @@ class TestSetpointRetryActionLoadBearing:
         assert abs(nudge_temp - 76.0) < 0.01, "cool mode nudges +1.0F"
         thirty_s_calls = [(d, cb) for d, cb in nested_call_later if d == 30]
         assert len(thirty_s_calls) == 1, "must also schedule the 30s real-target follow-up"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Issue #903 regression — retry/nudge paths must not double-convert
+# internal Fahrenheit through a display-unit value in Celsius-configured installs.
+# ---------------------------------------------------------------------------
+
+
+class TestSetpointRetryCelsius:
+    """Celsius-mode regression for the retry scheduler (Issue #903, Fix 1/2).
+
+    Before the fix, ``_retry_temp`` captured ``service_temp`` (already converted
+    to the display unit) from the enclosing ``_set_temperature()`` scope. The
+    retry path then re-issued ``_set_temperature(_retry_temp, ...)``, which
+    converts AGAIN via ``from_fahrenheit()`` — double-converting a Celsius value
+    and sending garbage to the thermostat (e.g. commanding 24.0°C would retry
+    with a converted value far from the intended target). This test locks in
+    that ``_retry_temp`` is internal Fahrenheit, so the retry's eventual service
+    call lands on the correct Celsius value.
+    """
+
+    def _make_engine_stub(self) -> AutomationEngine:
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock()
+        hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+
+        config: dict = {
+            "climate_entity": "climate.test_thermostat",
+            "temp_unit": "celsius",
+            "comfort_heat": 68.0,
+            "comfort_cool": 75.2,  # 24.0°C
+            "setback_heat": 60.0,
+            "setback_cool": 80.0,
+            "notify_service": "notify.notify",
+        }
+        return AutomationEngine(
+            hass=hass,
+            climate_entity=config["climate_entity"],
+            weather_entity="weather.forecast_home",
+            door_window_sensors=[],
+            notify_service=config["notify_service"],
+            config=config,
+        )
+
+    def _fire_validation_cb(self, engine: AutomationEngine, validation_cb, captured_call_later: list) -> None:
+        coros: list = []
+
+        def capture_task(coro):
+            coros.append(coro)
+
+        engine.hass.async_create_task = MagicMock(side_effect=capture_task)
+        validation_cb(None)
+        assert len(coros) == 1, "validation lambda must call async_create_task once"
+        asyncio.run(coros[0])
+
+    def test_retry_sends_correct_celsius_value_not_double_converted(self):
+        """Retry callback re-sends the correct ~24.0°C target, not a double-converted value.
+
+        Setup: command comfort_cool (75.2°F = 24.0°C). Thermostat reports a wrong
+        Celsius value (20.0°C), triggering the 10s validation mismatch and a 900s
+        retry. Firing the retry must send ``temperature`` ≈ 24.0 — a double
+        conversion of the display-unit value would instead send something like
+        ``from_fahrenheit(24.0, "celsius")`` ≈ -4.4, an obviously-wrong value no
+        real thermostat would accept.
+        """
+        engine = self._make_engine_stub()
+
+        wrong_state = MagicMock()
+        wrong_state.state = "cool"
+        wrong_state.attributes = {"temperature": 20.0, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(75.2, reason="test", mode="cool"))
+
+        # First service call (the original command) must already be the correct Celsius value.
+        first_call_data = engine.hass.services.async_call.call_args_list[0][0][2]
+        assert first_call_data["temperature"] == pytest.approx(24.0, abs=0.1)
+
+        validation_cb = captured_call_later[0][1]
+        captured_call_later.clear()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            self._fire_validation_cb(engine, validation_cb, captured_call_later)
+
+        retry_calls = [(d, cb) for d, cb in captured_call_later if d == 900]
+        assert len(retry_calls) == 1
+        _, retry_lambda = retry_calls[0]
+
+        retry_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: retry_coros.append(coro))
+        engine.hass.services.async_call.reset_mock()
+
+        retry_lambda(None)
+        assert len(retry_coros) == 1
+        asyncio.run(retry_coros[0])
+
+        calls = engine.hass.services.async_call.call_args_list
+        assert len(calls) >= 1
+        last_call_data = calls[-1][0][2]
+        assert last_call_data["temperature"] == pytest.approx(24.0, abs=0.1), (
+            f"retry must resend the correct Celsius value ~24.0, not a double-converted value; "
+            f"got {last_call_data['temperature']}"
+        )
+
+    def test_nudge_and_real_target_send_correct_celsius_values(self):
+        """Celsius mirror of ``test_nudge_sends_nudge_value_then_real_target_after_30s``.
+
+        On the 2nd consecutive rejection, the nudge sent immediately must be a
+        small (~0.56°C, i.e. ``convert_delta(1.0, "celsius")``) offset from the
+        correct Celsius target, and the real target delivered 30s later must be
+        the correct ~24.0°C value — neither double-converted nor left in raw
+        Fahrenheit units.
+        """
+        engine = self._make_engine_stub()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        wrong_state = MagicMock()
+        wrong_state.state = "cool"
+        wrong_state.attributes = {"temperature": 20.0, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        # First rejection cycle — streak becomes 1 (plain retry, no nudge yet).
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(75.2, reason="test", mode="cool"))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+            self._fire_validation_cb(engine, validation_cb, captured_call_later)
+
+        assert engine._setpoint_reject_streak == 1
+        # Drop the leftover 900s plain-retry callback scheduled by cycle 1 — it must
+        # not be mistaken for cycle 2's fresh 10s validation callback below.
+        captured_call_later.clear()
+
+        # Second rejection cycle — streak becomes 2, retry callback will nudge.
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(75.2, reason="test", mode="cool"))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+            self._fire_validation_cb(engine, validation_cb, captured_call_later)
+
+        assert engine._setpoint_reject_streak == 2
+        retry_delay, retry_lambda = captured_call_later[0]
+        assert retry_delay == 900
+
+        nested_call_later: list = []
+
+        def fake_call_later_nested(hass, delay, callback):
+            nested_call_later.append((delay, callback))
+            return MagicMock()
+
+        retry_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: retry_coros.append(coro))
+        engine.hass.services.async_call.reset_mock()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=fake_call_later_nested,
+            ),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            retry_lambda(None)
+            assert len(retry_coros) == 1
+            asyncio.run(retry_coros[0])
+
+        # Immediate nudge: real Celsius target (~24.0) plus a small ~0.56°C offset.
+        nudge_calls = engine.hass.services.async_call.call_args_list
+        assert len(nudge_calls) == 1
+        nudge_temp = nudge_calls[0][0][2]["temperature"]
+        expected_nudge = 24.0 + convert_delta(1.0, "celsius")
+        assert nudge_temp == pytest.approx(expected_nudge, abs=0.05), (
+            f"expected a small Celsius nudge near {expected_nudge:.2f}, got {nudge_temp}"
+        )
+
+        # 30s later, the real target must be sent — correct Celsius value, not garbage.
+        thirty_s_calls = [(d, cb) for d, cb in nested_call_later if d == 30]
+        assert len(thirty_s_calls) == 1
+        _, real_target_cb = thirty_s_calls[0]
+
+        real_target_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: real_target_coros.append(coro))
+        engine.hass.services.async_call.reset_mock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            real_target_cb(None)
+            assert len(real_target_coros) == 1
+            asyncio.run(real_target_coros[0])
+
+        real_target_calls = engine.hass.services.async_call.call_args_list
+        assert len(real_target_calls) == 1
+        real_target_temp = real_target_calls[0][0][2]["temperature"]
+        assert real_target_temp == pytest.approx(24.0, abs=0.1), (
+            f"real target after nudge must be the correct Celsius value ~24.0; got {real_target_temp}"
+        )

@@ -279,6 +279,25 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         # Vent" status-item has been unreachable dead code since it was written, since
         # data.nat_vent_active was always undefined here.
         _nat_vent_band = coordinator.compute_nat_vent_cycling_band()
+        # Issue #903: compute_nat_vent_cycling_band() returns internal-Fahrenheit values
+        # (same as _ca_target_heat/_ca_target_cool above) — convert to display units here,
+        # matching the indoor_temp_display/outdoor_temp_display pattern, since the frontend
+        # renders these directly with the configured unit symbol appended.
+        _nat_vent_target_display = (
+            round(from_fahrenheit(_nat_vent_band["nat_vent_target"], unit), 1)
+            if _nat_vent_band["nat_vent_target"] is not None
+            else None
+        )
+        _nat_vent_on_threshold_display = (
+            round(from_fahrenheit(_nat_vent_band["nat_vent_on_threshold"], unit), 1)
+            if _nat_vent_band["nat_vent_on_threshold"] is not None
+            else None
+        )
+        _nat_vent_off_threshold_display = (
+            round(from_fahrenheit(_nat_vent_band["nat_vent_off_threshold"], unit), 1)
+            if _nat_vent_band["nat_vent_off_threshold"] is not None
+            else None
+        )
         _nat_vent_active = bool(ae._natural_vent_active)
         _nat_vent_ac_assist = (
             _nat_vent_active
@@ -358,13 +377,13 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             "paused_by_door": ae.is_paused_by_door,
             "pause_suppressed_classification": _pause_suppressed_classification,
             "pause_suppressed_classification_text": _pause_suppressed_classification_text,
-            "ca_target_heat": _ca_target_heat,
-            "ca_target_cool": _ca_target_cool,
+            "ca_target_heat": round(from_fahrenheit(_ca_target_heat, unit), 1) if _ca_target_heat is not None else None,
+            "ca_target_cool": round(from_fahrenheit(_ca_target_cool, unit), 1) if _ca_target_cool is not None else None,
             "nat_vent_active": _nat_vent_active,
             "nat_vent_ac_assist": _nat_vent_ac_assist,
-            "nat_vent_target": _nat_vent_band["nat_vent_target"],
-            "nat_vent_on_threshold": _nat_vent_band["nat_vent_on_threshold"],
-            "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],
+            "nat_vent_target": _nat_vent_target_display,
+            "nat_vent_on_threshold": _nat_vent_on_threshold_display,
+            "nat_vent_off_threshold": _nat_vent_off_threshold_display,
             "pre_cool_status": data.get("pre_cool_status"),
             "coordinator_healthy": _coordinator_healthy,
             # Issue #796 PR9: dashboard zone selector. loadStatus() polls every

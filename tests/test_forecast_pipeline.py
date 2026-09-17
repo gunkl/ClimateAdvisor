@@ -28,6 +28,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from custom_components.climate_advisor.temperature import to_fahrenheit  # noqa: E402
 from tests.helpers.date_boundary_fixtures import DATE_BOUNDARY_CASES  # noqa: E402
 
 _TODAY = date(2026, 5, 15)
@@ -63,10 +64,14 @@ def _make_entry(d: date, temp: float, *, utc_midnight: bool = False) -> dict:
     }
 
 
-def _make_coordinator_stub(forecast_data: list) -> MagicMock:
+def _make_coordinator_stub(forecast_data: list, *, temp_unit: str = "fahrenheit") -> MagicMock:
     """Build a minimal coordinator-like stub for testing _get_forecast().
 
     Uses the types.MethodType pattern consistent with test_coordinator.py.
+    ``temp_unit`` selects "fahrenheit" (default) or "celsius" — Issue #903 added
+    Celsius coverage since the reported crash only manifested in Celsius-configured
+    installs (to_fahrenheit()'s `value * 9.0 / 5.0` with value=None raises there;
+    Fahrenheit mode's plain `float(None)` produces a different, also-crashing error).
     """
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
 
@@ -85,7 +90,7 @@ def _make_coordinator_stub(forecast_data: list) -> MagicMock:
     coord.config = {
         "climate_entity": "climate.test",
         "weather_entity": "weather.test",
-        "temp_unit": "fahrenheit",
+        "temp_unit": temp_unit,
         "learning_enabled": False,  # skip bias correction
     }
 
@@ -178,6 +183,21 @@ class TestForecastDateMatching:
         assert result.today_high == pytest.approx(_CURRENT_OUTDOOR)
         assert result.tomorrow_high == pytest.approx(_CURRENT_OUTDOOR)
 
+    def test_empty_forecast_celsius_fallback_not_double_converted(self, tmp_path: Path):
+        """Empty forecast in a Celsius-configured install (e.g. right after HA restart,
+        before the weather integration has forecast data yet) must fall back to
+        current_outdoor as-is — current_outdoor is already internal Fahrenheit and must
+        not be run through to_fahrenheit() a second time. Regression test for a sibling
+        of the Issue #903 crash: the fallback path itself was never unit-safe."""
+        coord = _make_coordinator_stub([], temp_unit="celsius")
+        result = _run_get_forecast(coord)
+
+        assert result is not None
+        assert result.today_high == pytest.approx(_CURRENT_OUTDOOR)
+        assert result.today_low == pytest.approx(_CURRENT_OUTDOOR - 15)
+        assert result.tomorrow_high == pytest.approx(_CURRENT_OUTDOOR)
+        assert result.tomorrow_low == pytest.approx(_CURRENT_OUTDOOR - 15)
+
     def test_utc_midnight_entries_matched_by_raw_date(self, tmp_path: Path):
         """UTC midnight timestamps are matched by their raw date, not local-converted date.
 
@@ -258,3 +278,96 @@ class TestForecastDateMatchingBoundaryFixtures:
         assert result.tomorrow_high == pytest.approx(79.0), (
             f"{case.label}: tomorrow_high should match the {tomorrow_date} entry via raw date"
         )
+
+
+class TestForecastNullFieldHandling:
+    """Regression tests for Issue #903: a forecast entry with a field PRESENT but
+    ``None`` (a real weather-API pattern, e.g. today's ``templow`` once today's low
+    has already passed) must fall back gracefully, not crash.
+
+    Pre-fix, ``dict.get(key, default)`` only substitutes ``default`` when ``key`` is
+    ABSENT — a present-but-None value passed straight through to ``to_fahrenheit()``,
+    which (post Phase-1 None-guard) raises ``ValueError`` instead of the old cryptic
+    ``TypeError``. Either way it crashed the entire coordinator update cycle. At
+    least one of these tests would have raised before the ``_first_non_none()`` fix
+    in ``_get_forecast()``; all must pass afterward.
+    """
+
+    def _entry_with_null(self, d: date, *, null_field: str, other_value: float) -> dict:
+        """Build a forecast entry where ``null_field`` is present but None, and the
+        other of temperature/templow carries ``other_value``."""
+        entry = {
+            "datetime": f"{d.isoformat()}T12:00:00-07:00",
+            "temperature": other_value,
+            "templow": other_value - 15,
+        }
+        entry[null_field] = None
+        return entry
+
+    def test_null_temperature_present_fahrenheit_falls_back(self, tmp_path: Path):
+        """today.temperature present-but-None (Fahrenheit mode) → falls back to
+        current_outdoor, does not crash."""
+        forecast = [self._entry_with_null(_TODAY, null_field="temperature", other_value=50.0)]
+        coord = _make_coordinator_stub(forecast, temp_unit="fahrenheit")
+        result = _run_get_forecast(coord)
+
+        assert result is not None
+        assert result.today_high == pytest.approx(_CURRENT_OUTDOOR)
+        # templow was a real (non-null) value and must still be honored
+        assert result.today_low == pytest.approx(35.0)
+
+    def test_null_templow_present_fahrenheit_falls_back(self, tmp_path: Path):
+        """today.templow present-but-None (Fahrenheit mode) → falls back to
+        current_outdoor - 15, does not crash. This is the exact reported shape:
+        today's low goes null once today's actual low has already passed."""
+        forecast = [self._entry_with_null(_TODAY, null_field="templow", other_value=78.0)]
+        coord = _make_coordinator_stub(forecast, temp_unit="fahrenheit")
+        result = _run_get_forecast(coord)
+
+        assert result is not None
+        assert result.today_high == pytest.approx(78.0)
+        assert result.today_low == pytest.approx(_CURRENT_OUTDOOR - 15)
+
+    def test_null_temperature_present_celsius_falls_back_no_crash(self, tmp_path: Path):
+        """today.temperature present-but-None (Celsius mode) is the reported crash
+        shape: to_fahrenheit(None, 'celsius') raised 'NoneType * float'. Must not
+        crash and must still convert the real (non-null) templow value correctly."""
+        forecast = [self._entry_with_null(_TODAY, null_field="temperature", other_value=10.0)]
+        coord = _make_coordinator_stub(forecast, temp_unit="celsius")
+        result = _run_get_forecast(coord)
+
+        assert result is not None
+        # today_high falls back to current_outdoor, which is ALREADY internal
+        # Fahrenheit (from _get_outdoor_temp()) — it must not be converted a second
+        # time. (A prior version of this fix double-converted fallback values here;
+        # this assertion is the regression test for that sibling bug.)
+        assert result.today_high == pytest.approx(_CURRENT_OUTDOOR)
+        # today_low (10.0 - 15 = -5.0 °C) is a real forecast-sourced value and must
+        # still convert correctly.
+        assert result.today_low == pytest.approx(to_fahrenheit(-5.0, "celsius"))
+
+    def test_null_templow_present_celsius_falls_back_no_crash(self, tmp_path: Path):
+        """today.templow present-but-None (Celsius mode) → falls back, no crash;
+        the real (non-null) temperature value still converts correctly."""
+        forecast = [self._entry_with_null(_TODAY, null_field="templow", other_value=25.0)]
+        coord = _make_coordinator_stub(forecast, temp_unit="celsius")
+        result = _run_get_forecast(coord)
+
+        assert result is not None
+        assert result.today_high == pytest.approx(to_fahrenheit(25.0, "celsius"))
+        # today_low falls back to current_outdoor - 15, already internal Fahrenheit —
+        # must not be converted a second time (see the sibling test above).
+        assert result.today_low == pytest.approx(_CURRENT_OUTDOOR - 15)
+
+    def test_null_field_logs_warning(self, tmp_path: Path, caplog):
+        """A present-but-null field logs a WARNING distinct from the missing-entry
+        warning, surfacing the underlying weather-provider data-quality issue."""
+        import logging
+
+        forecast = [self._entry_with_null(_TODAY, null_field="templow", other_value=78.0)]
+        coord = _make_coordinator_stub(forecast, temp_unit="fahrenheit")
+        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"):
+            result = _run_get_forecast(coord)
+
+        assert result is not None
+        assert any("null templow field" in rec.message for rec in caplog.records)

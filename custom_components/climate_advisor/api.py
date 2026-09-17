@@ -13,7 +13,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from . import zone_registry
+from . import log_capture, zone_registry
 from .ai_skills_context import build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
@@ -183,225 +183,232 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        data = coordinator.data or {}
-        ae = coordinator.automation_engine
-        # Issue #466: deliberately NOT read from coordinator.data (which is only refreshed
-        # once per ~30-min update cycle) — this powers the ca_target_heat/cool divergence
-        # check (#402/#462), whose entire purpose is comparing CA's computed target against
-        # the REAL thermostat right now. Reading a stale cached setpoint here would mask
-        # exactly the kind of stuck/frozen-target bug that check exists to catch.
-        climate_state = hass.states.get(coordinator.config.get("climate_entity", ""))
-        hvac_mode = climate_state.state if climate_state else "unknown"
+        with log_capture.zone_scope(coordinator.zone_label):
+            data = coordinator.data or {}
+            ae = coordinator.automation_engine
+            # Issue #466: deliberately NOT read from coordinator.data (which is only refreshed
+            # once per ~30-min update cycle) — this powers the ca_target_heat/cool divergence
+            # check (#402/#462), whose entire purpose is comparing CA's computed target against
+            # the REAL thermostat right now. Reading a stale cached setpoint here would mask
+            # exactly the kind of stuck/frozen-target bug that check exists to catch.
+            climate_state = hass.states.get(coordinator.config.get("climate_entity", ""))
+            hvac_mode = climate_state.state if climate_state else "unknown"
 
-        # Set point(s): only include when HVAC is actively running. Single-setpoint modes
-        # (cool/heat) expose `temperature`; the heat_cool band (Issue #249/#266) exposes
-        # `target_temp_low`/`target_temp_high` instead. Attributes are already in the thermostat's
-        # display unit, so they are sent as-is (matching `current_setpoint`).
-        setpoint = None
-        target_temp_low = None
-        target_temp_high = None
-        if climate_state and hvac_mode != "off":
-            setpoint = climate_state.attributes.get("temperature")
-            target_temp_low = climate_state.attributes.get("target_temp_low")
-            target_temp_high = climate_state.attributes.get("target_temp_high")
+            # Set point(s): only include when HVAC is actively running. Single-setpoint modes
+            # (cool/heat) expose `temperature`; the heat_cool band (Issue #249/#266) exposes
+            # `target_temp_low`/`target_temp_high` instead. Attributes are already in the thermostat's
+            # display unit, so they are sent as-is (matching `current_setpoint`).
+            setpoint = None
+            target_temp_low = None
+            target_temp_high = None
+            if climate_state and hvac_mode != "off":
+                setpoint = climate_state.attributes.get("temperature")
+                target_temp_low = climate_state.attributes.get("target_temp_low")
+                target_temp_high = climate_state.attributes.get("target_temp_high")
 
-        indoor_temp = coordinator._get_indoor_temp()
-        outdoor_temp = coordinator._last_outdoor_temp
-        unit = coordinator.config.get("temp_unit", "fahrenheit")
-        indoor_temp_display = round(from_fahrenheit(indoor_temp, unit), 1) if indoor_temp is not None else None
-        outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
-        # Deliberately NOT read from coordinator.data (only refreshed once per ~30-min
-        # update cycle) — same staleness class as the ca_target_heat/cool fields below,
-        # and the same fix: read the live classification instead of the cached snapshot.
-        # Before this, a report could show e.g. "warming 3.5°F" from a stale cycle while
-        # the classifier's own current output was "stable" — see docs investigation for
-        # the exact reproduction. Falls back to the coordinator.data snapshot only when no
-        # classification has run yet (e.g. right after restart), matching the fallback
-        # pattern already used for _ca_target_heat/_ca_target_cool just below.
-        trend_direction_display = data.get(ATTR_TREND, "unknown")
-        trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
+            indoor_temp = coordinator._get_indoor_temp()
+            outdoor_temp = coordinator._last_outdoor_temp
+            unit = coordinator.config.get("temp_unit", "fahrenheit")
+            indoor_temp_display = round(from_fahrenheit(indoor_temp, unit), 1) if indoor_temp is not None else None
+            outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
+            # Deliberately NOT read from coordinator.data (only refreshed once per ~30-min
+            # update cycle) — same staleness class as the ca_target_heat/cool fields below,
+            # and the same fix: read the live classification instead of the cached snapshot.
+            # Before this, a report could show e.g. "warming 3.5°F" from a stale cycle while
+            # the classifier's own current output was "stable" — see docs investigation for
+            # the exact reproduction. Falls back to the coordinator.data snapshot only when no
+            # classification has run yet (e.g. right after restart), matching the fallback
+            # pattern already used for _ca_target_heat/_ca_target_cool just below.
+            trend_direction_display = data.get(ATTR_TREND, "unknown")
+            trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
 
-        # Issue #402: ca_target_heat/cool must reflect the sleep band during the sleep
-        # window, not always the flat daytime comfort_heat/comfort_cool — otherwise the
-        # single-setpoint divergence check below (and any heat_cool-mode consumer of these
-        # fields) compares the real thermostat setpoint against the wrong intended value
-        # all night, masking exactly the kind of stuck/frozen-target bug this issue covers.
-        #
-        # Issue #462: route through select_comfort_band() — the canonical resolver every
-        # real setpoint-writing code path (apply_classification, handle_bedtime,
-        # handle_pre_cool, handle_morning_wakeup, occupancy handlers) already uses — instead
-        # of a third independent inline implementation of this branch. Deliberately NOT
-        # compute_bedtime_setback() (the chart/briefing's adaptive resolver, a different,
-        # documented split — see const.py's #333 changelog): this field exists to detect
-        # divergence from what the thermostat is ACTUALLY being driven to, which is
-        # select_comfort_band()'s job. Routing through it also fixes a real gap the old
-        # inline branch had: it ignored occupancy mode entirely, so away/vacation setback
-        # was never reflected here even though the thermostat was really being held at the
-        # setback band — exactly the kind of divergence this field exists to catch.
-        from homeassistant.util import dt as dt_util  # noqa: PLC0415
+            # Issue #402: ca_target_heat/cool must reflect the sleep band during the sleep
+            # window, not always the flat daytime comfort_heat/comfort_cool — otherwise the
+            # single-setpoint divergence check below (and any heat_cool-mode consumer of these
+            # fields) compares the real thermostat setpoint against the wrong intended value
+            # all night, masking exactly the kind of stuck/frozen-target bug this issue covers.
+            #
+            # Issue #462: route through select_comfort_band() — the canonical resolver every
+            # real setpoint-writing code path (apply_classification, handle_bedtime,
+            # handle_pre_cool, handle_morning_wakeup, occupancy handlers) already uses — instead
+            # of a third independent inline implementation of this branch. Deliberately NOT
+            # compute_bedtime_setback() (the chart/briefing's adaptive resolver, a different,
+            # documented split — see const.py's #333 changelog): this field exists to detect
+            # divergence from what the thermostat is ACTUALLY being driven to, which is
+            # select_comfort_band()'s job. Routing through it also fixes a real gap the old
+            # inline branch had: it ignored occupancy mode entirely, so away/vacation setback
+            # was never reflected here even though the thermostat was really being held at the
+            # setback band — exactly the kind of divergence this field exists to catch.
+            from homeassistant.util import dt as dt_util  # noqa: PLC0415
 
-        from .automation import _in_sleep_window, select_comfort_band  # noqa: PLC0415
+            from .automation import _in_sleep_window, select_comfort_band  # noqa: PLC0415
 
-        classification = coordinator.current_classification
-        if classification is not None:
-            _band = select_comfort_band(
-                classification,
-                coordinator.config,
-                occupancy_mode=coordinator._occupancy_mode,
-                in_sleep_window=_in_sleep_window(dt_util.now(), coordinator.config),
-                aggressive_savings=bool(coordinator.config.get("aggressive_savings", False)),
-            )
-            _ca_target_heat = _band.floor
-            _ca_target_cool = _band.ceiling
-        else:
-            # No classification yet (e.g., right after HA restart, before the first
-            # classification cycle completes) — fall back to the old sleep/day-only
-            # heuristic so the field is never simply absent.
-            if _in_sleep_window(dt_util.now(), coordinator.config):
-                _ca_target_heat = coordinator.config.get("sleep_heat", coordinator.config.get("comfort_heat"))
-                _ca_target_cool = coordinator.config.get("sleep_cool", coordinator.config.get("comfort_cool"))
+            classification = coordinator.current_classification
+            if classification is not None:
+                _band = select_comfort_band(
+                    classification,
+                    coordinator.config,
+                    occupancy_mode=coordinator._occupancy_mode,
+                    in_sleep_window=_in_sleep_window(dt_util.now(), coordinator.config),
+                    aggressive_savings=bool(coordinator.config.get("aggressive_savings", False)),
+                )
+                _ca_target_heat = _band.floor
+                _ca_target_cool = _band.ceiling
             else:
-                _ca_target_heat = coordinator.config.get("comfort_heat")
-                _ca_target_cool = coordinator.config.get("comfort_cool")
+                # No classification yet (e.g., right after HA restart, before the first
+                # classification cycle completes) — fall back to the old sleep/day-only
+                # heuristic so the field is never simply absent.
+                if _in_sleep_window(dt_util.now(), coordinator.config):
+                    _ca_target_heat = coordinator.config.get("sleep_heat", coordinator.config.get("comfort_heat"))
+                    _ca_target_cool = coordinator.config.get("sleep_cool", coordinator.config.get("comfort_cool"))
+                else:
+                    _ca_target_heat = coordinator.config.get("comfort_heat")
+                    _ca_target_cool = coordinator.config.get("comfort_cool")
 
-        if classification is not None:
-            trend_direction_display = classification.trend_direction
-            trend_magnitude_display = round(convert_delta(classification.trend_magnitude, unit), 1)
+            if classification is not None:
+                trend_direction_display = classification.trend_direction
+                trend_magnitude_display = round(convert_delta(classification.trend_magnitude, unit), 1)
 
-        # Issue #402 follow-up: surface the WHF fan's actual on/off cycling band so the
-        # Natural Vent status card can show it instead of a single static midpoint number
-        # with no visible range — this was part of why "target 71°F but indoor is 69°F,
-        # why is the fan still on" read as contradictory (69°F is within the 70-72°F
-        # cycling band, the fan just hasn't ticked past 70°F yet).
-        #
-        # nat_vent_active/nat_vent_ac_assist were never included in this endpoint at all
-        # (only in the Debug tab's automation_state endpoint) — the frontend's "Natural
-        # Vent" status-item has been unreachable dead code since it was written, since
-        # data.nat_vent_active was always undefined here.
-        _nat_vent_band = coordinator.compute_nat_vent_cycling_band()
-        # Issue #903: compute_nat_vent_cycling_band() returns internal-Fahrenheit values
-        # (same as _ca_target_heat/_ca_target_cool above) — convert to display units here,
-        # matching the indoor_temp_display/outdoor_temp_display pattern, since the frontend
-        # renders these directly with the configured unit symbol appended.
-        _nat_vent_target_display = (
-            round(from_fahrenheit(_nat_vent_band["nat_vent_target"], unit), 1)
-            if _nat_vent_band["nat_vent_target"] is not None
-            else None
-        )
-        _nat_vent_on_threshold_display = (
-            round(from_fahrenheit(_nat_vent_band["nat_vent_on_threshold"], unit), 1)
-            if _nat_vent_band["nat_vent_on_threshold"] is not None
-            else None
-        )
-        _nat_vent_off_threshold_display = (
-            round(from_fahrenheit(_nat_vent_band["nat_vent_off_threshold"], unit), 1)
-            if _nat_vent_band["nat_vent_off_threshold"] is not None
-            else None
-        )
-        _nat_vent_active = bool(ae._natural_vent_active)
-        _nat_vent_ac_assist = (
-            _nat_vent_active
-            and coordinator.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
-            and not coordinator.config.get("aggressive_savings", False)
-        )
+            # Issue #402 follow-up: surface the WHF fan's actual on/off cycling band so the
+            # Natural Vent status card can show it instead of a single static midpoint number
+            # with no visible range — this was part of why "target 71°F but indoor is 69°F,
+            # why is the fan still on" read as contradictory (69°F is within the 70-72°F
+            # cycling band, the fan just hasn't ticked past 70°F yet).
+            #
+            # nat_vent_active/nat_vent_ac_assist were never included in this endpoint at all
+            # (only in the Debug tab's automation_state endpoint) — the frontend's "Natural
+            # Vent" status-item has been unreachable dead code since it was written, since
+            # data.nat_vent_active was always undefined here.
+            _nat_vent_band = coordinator.compute_nat_vent_cycling_band()
+            # Issue #903: compute_nat_vent_cycling_band() returns internal-Fahrenheit values
+            # (same as _ca_target_heat/_ca_target_cool above) — convert to display units here,
+            # matching the indoor_temp_display/outdoor_temp_display pattern, since the frontend
+            # renders these directly with the configured unit symbol appended.
+            _nat_vent_target_display = (
+                round(from_fahrenheit(_nat_vent_band["nat_vent_target"], unit), 1)
+                if _nat_vent_band["nat_vent_target"] is not None
+                else None
+            )
+            _nat_vent_on_threshold_display = (
+                round(from_fahrenheit(_nat_vent_band["nat_vent_on_threshold"], unit), 1)
+                if _nat_vent_band["nat_vent_on_threshold"] is not None
+                else None
+            )
+            _nat_vent_off_threshold_display = (
+                round(from_fahrenheit(_nat_vent_band["nat_vent_off_threshold"], unit), 1)
+                if _nat_vent_band["nat_vent_off_threshold"] is not None
+                else None
+            )
+            _nat_vent_active = bool(ae._natural_vent_active)
+            _nat_vent_ac_assist = (
+                _nat_vent_active
+                and coordinator.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
+                and not coordinator.config.get("aggressive_savings", False)
+            )
 
-        # Issue #527: pause_suppressed_classification had the identical "documented but
-        # never wired in" gap as nat_vent_active above (see KNOWN_FIXES[367] in const.py) —
-        # the frontend's Status-card line reading data.pause_suppressed_classification was
-        # unreachable dead code because this endpoint never included the key. Computed live
-        # (not from coordinator.data) for the same freshness reason as ca_target_heat/cool.
-        # The text itself now lives here (backend) instead of hardcoded in index.html, so
-        # the Status card's text has one source, like every other line on that card.
-        _pause_suppressed_classification = bool(ae.is_paused_by_door) and ae._last_classification_applied is not None
-        _pause_suppressed_classification_text = (
-            "Classification suppressed — HVAC held off until windows close"
-            if _pause_suppressed_classification
-            else None
-        )
+            # Issue #527: pause_suppressed_classification had the identical "documented but
+            # never wired in" gap as nat_vent_active above (see KNOWN_FIXES[367] in const.py) —
+            # the frontend's Status-card line reading data.pause_suppressed_classification was
+            # unreachable dead code because this endpoint never included the key. Computed live
+            # (not from coordinator.data) for the same freshness reason as ca_target_heat/cool.
+            # The text itself now lives here (backend) instead of hardcoded in index.html, so
+            # the Status card's text has one source, like every other line on that card.
+            _pause_suppressed_classification = (
+                bool(ae.is_paused_by_door) and ae._last_classification_applied is not None
+            )
+            _pause_suppressed_classification_text = (
+                "Classification suppressed — HVAC held off until windows close"
+                if _pause_suppressed_classification
+                else None
+            )
 
-        # Issue #480: gate on coordinator.last_update_success instead of silently
-        # serving coordinator.data forever once updates start failing. HA's own
-        # DataUpdateCoordinator retains the last successful snapshot indefinitely
-        # after a failure — that's the correct behavior for entity state (avoids
-        # flapping to unknown), but this status endpoint was reading that frozen
-        # snapshot with zero indication anything was wrong. Same failure shape as
-        # the ca_target_heat/cool staleness Issue #466 fixed above, applied to the
-        # coordinator's overall health rather than those two fields specifically.
-        _coordinator_healthy = bool(coordinator.last_update_success)
-        _zones = zone_registry.list_zones(hass)
-        _status_payload = {
-            "version": VERSION,
-            "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
-            "trend_direction": trend_direction_display,
-            "trend_magnitude": trend_magnitude_display,
-            "hvac_mode": hvac_mode,
-            ATTR_HVAC_ACTION: data.get(ATTR_HVAC_ACTION, ""),
-            ATTR_HVAC_RUNTIME_TODAY: data.get(ATTR_HVAC_RUNTIME_TODAY, 0),
-            ATTR_CURRENT_SETPOINT: setpoint,
-            "target_temp_low": target_temp_low,
-            "target_temp_high": target_temp_high,
-            ATTR_INDOOR_TEMP: indoor_temp_display,
-            "sleep_indoor_sensor_active": data.get("sleep_indoor_sensor_active", False),
-            "outdoor_temp": outdoor_temp_display,
-            "unit": unit,
-            "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
-            # Issue #749: hard-invariant watchdog violations (e.g. AC and WHF both
-            # physically on at once) — empty list when nothing is wrong. Surfaced on the
-            # Status card only, per this project's Status Card Ontology: it answers "what's
-            # happening right now, and why."
-            "invariant_violations": data.get("invariant_violations", []),
-            # Issue #805: entities (thermostat, weather source, sensors, fan, toggles,
-            # notify service) currently missing or unavailable — empty list when
-            # everything is fine. Same Status Card Ontology as invariant_violations above.
-            "entity_health_issues": data.get("entity_health_issues", []),
-            "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
-            "next_action": data.get(ATTR_NEXT_ACTION, ""),
-            "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),
-            "next_automation_time": data.get(ATTR_NEXT_AUTOMATION_TIME, ""),
-            "automation_enabled": coordinator.automation_enabled,
-            "occupancy_mode": coordinator._occupancy_mode,
-            "fan_status": data.get(ATTR_FAN_STATUS, "disabled"),
-            "whf_status": data.get(ATTR_WHF_STATUS),
-            "hvac_fan_status": data.get(ATTR_HVAC_FAN_STATUS),
-            "contact_status": data.get(ATTR_CONTACT_STATUS, "no sensors"),
-            "contact_sensors": coordinator._compute_contact_details(),
-            "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
-            "fan_override_active": ae._fan_override_active,
-            # Issue #486: QuietCool RF remote timer selection, null unless a timer set the
-            # active fan override's grace duration.
-            "fan_remote_timer_hours": data.get("fan_remote_timer_hours"),
-            "fan_remote_timer_ends": data.get("fan_remote_timer_ends"),
-            # Issue #519: current QuietCool remote-reported speed, null when unknown (no
-            # ambient sensor discoverable, or no press observed yet this session).
-            "fan_remote_speed": data.get("fan_remote_speed"),
-            "paused_by_door": ae.is_paused_by_door,
-            "pause_suppressed_classification": _pause_suppressed_classification,
-            "pause_suppressed_classification_text": _pause_suppressed_classification_text,
-            "ca_target_heat": round(from_fahrenheit(_ca_target_heat, unit), 1) if _ca_target_heat is not None else None,
-            "ca_target_cool": round(from_fahrenheit(_ca_target_cool, unit), 1) if _ca_target_cool is not None else None,
-            "nat_vent_active": _nat_vent_active,
-            "nat_vent_ac_assist": _nat_vent_ac_assist,
-            "nat_vent_target": _nat_vent_target_display,
-            "nat_vent_on_threshold": _nat_vent_on_threshold_display,
-            "nat_vent_off_threshold": _nat_vent_off_threshold_display,
-            "pre_cool_status": data.get("pre_cool_status"),
-            "coordinator_healthy": _coordinator_healthy,
-            # Issue #796 PR9: dashboard zone selector. loadStatus() polls every
-            # cycle regardless of which tab is active, so this is the one
-            # endpoint guaranteed to have data by the time the page needs to
-            # decide whether to render the selector row at all. zone_count is
-            # the same "is this a multi-zone install" question the
-            # Transitional Safety Window Repairs check answers — reusing
-            # zone_registry.list_zones() here keeps that a single computation
-            # instead of a second parallel counting implementation.
-            "zones": _zones,
-            "zone_count": len(_zones),
-        }
-        if not _coordinator_healthy:
-            _status_payload["last_error"] = coordinator.last_update_error
-            _status_payload["stale_since"] = coordinator.last_update_error_time
+            # Issue #480: gate on coordinator.last_update_success instead of silently
+            # serving coordinator.data forever once updates start failing. HA's own
+            # DataUpdateCoordinator retains the last successful snapshot indefinitely
+            # after a failure — that's the correct behavior for entity state (avoids
+            # flapping to unknown), but this status endpoint was reading that frozen
+            # snapshot with zero indication anything was wrong. Same failure shape as
+            # the ca_target_heat/cool staleness Issue #466 fixed above, applied to the
+            # coordinator's overall health rather than those two fields specifically.
+            _coordinator_healthy = bool(coordinator.last_update_success)
+            _zones = zone_registry.list_zones(hass)
+            _status_payload = {
+                "version": VERSION,
+                "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
+                "trend_direction": trend_direction_display,
+                "trend_magnitude": trend_magnitude_display,
+                "hvac_mode": hvac_mode,
+                ATTR_HVAC_ACTION: data.get(ATTR_HVAC_ACTION, ""),
+                ATTR_HVAC_RUNTIME_TODAY: data.get(ATTR_HVAC_RUNTIME_TODAY, 0),
+                ATTR_CURRENT_SETPOINT: setpoint,
+                "target_temp_low": target_temp_low,
+                "target_temp_high": target_temp_high,
+                ATTR_INDOOR_TEMP: indoor_temp_display,
+                "sleep_indoor_sensor_active": data.get("sleep_indoor_sensor_active", False),
+                "outdoor_temp": outdoor_temp_display,
+                "unit": unit,
+                "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
+                # Issue #749: hard-invariant watchdog violations (e.g. AC and WHF both
+                # physically on at once) — empty list when nothing is wrong. Surfaced on the
+                # Status card only, per this project's Status Card Ontology: it answers "what's
+                # happening right now, and why."
+                "invariant_violations": data.get("invariant_violations", []),
+                # Issue #805: entities (thermostat, weather source, sensors, fan, toggles,
+                # notify service) currently missing or unavailable — empty list when
+                # everything is fine. Same Status Card Ontology as invariant_violations above.
+                "entity_health_issues": data.get("entity_health_issues", []),
+                "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
+                "next_action": data.get(ATTR_NEXT_ACTION, ""),
+                "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),
+                "next_automation_time": data.get(ATTR_NEXT_AUTOMATION_TIME, ""),
+                "automation_enabled": coordinator.automation_enabled,
+                "occupancy_mode": coordinator._occupancy_mode,
+                "fan_status": data.get(ATTR_FAN_STATUS, "disabled"),
+                "whf_status": data.get(ATTR_WHF_STATUS),
+                "hvac_fan_status": data.get(ATTR_HVAC_FAN_STATUS),
+                "contact_status": data.get(ATTR_CONTACT_STATUS, "no sensors"),
+                "contact_sensors": coordinator._compute_contact_details(),
+                "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
+                "fan_override_active": ae._fan_override_active,
+                # Issue #486: QuietCool RF remote timer selection, null unless a timer set the
+                # active fan override's grace duration.
+                "fan_remote_timer_hours": data.get("fan_remote_timer_hours"),
+                "fan_remote_timer_ends": data.get("fan_remote_timer_ends"),
+                # Issue #519: current QuietCool remote-reported speed, null when unknown (no
+                # ambient sensor discoverable, or no press observed yet this session).
+                "fan_remote_speed": data.get("fan_remote_speed"),
+                "paused_by_door": ae.is_paused_by_door,
+                "pause_suppressed_classification": _pause_suppressed_classification,
+                "pause_suppressed_classification_text": _pause_suppressed_classification_text,
+                "ca_target_heat": round(from_fahrenheit(_ca_target_heat, unit), 1)
+                if _ca_target_heat is not None
+                else None,
+                "ca_target_cool": round(from_fahrenheit(_ca_target_cool, unit), 1)
+                if _ca_target_cool is not None
+                else None,
+                "nat_vent_active": _nat_vent_active,
+                "nat_vent_ac_assist": _nat_vent_ac_assist,
+                "nat_vent_target": _nat_vent_target_display,
+                "nat_vent_on_threshold": _nat_vent_on_threshold_display,
+                "nat_vent_off_threshold": _nat_vent_off_threshold_display,
+                "pre_cool_status": data.get("pre_cool_status"),
+                "coordinator_healthy": _coordinator_healthy,
+                # Issue #796 PR9: dashboard zone selector. loadStatus() polls every
+                # cycle regardless of which tab is active, so this is the one
+                # endpoint guaranteed to have data by the time the page needs to
+                # decide whether to render the selector row at all. zone_count is
+                # the same "is this a multi-zone install" question the
+                # Transitional Safety Window Repairs check answers — reusing
+                # zone_registry.list_zones() here keeps that a single computation
+                # instead of a second parallel counting implementation.
+                "zones": _zones,
+                "zone_count": len(_zones),
+            }
+            if not _coordinator_healthy:
+                _status_payload["last_error"] = coordinator.last_update_error
+                _status_payload["stale_since"] = coordinator.last_update_error_time
 
-        return self.json(_status_payload)
+            return self.json(_status_payload)
 
 
 class ClimateAdvisorBriefingView(HomeAssistantView):
@@ -427,33 +434,34 @@ class ClimateAdvisorBriefingView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        verbosity = request.rel_url.query.get("verbosity", "normal")
-        if verbosity not in ("tldr_only", "normal", "verbose"):
-            return self.json(
-                {"error": "verbosity must be one of: tldr_only, normal, verbose"},
-                status_code=400,
-            )
-
-        briefing = coordinator._last_briefing
-
-        # If a non-default verbosity is requested and the coordinator exposes
-        # the data needed to regenerate, do so.  Otherwise return cached text.
-        if verbosity != "normal" and briefing and hasattr(coordinator, "_regenerate_briefing"):
-            try:
-                briefing = await coordinator._regenerate_briefing(verbosity=verbosity)
-            except Exception:
-                _LOGGER.warning(
-                    "Could not regenerate briefing for verbosity=%s; returning cached text",
-                    verbosity,
+        with log_capture.zone_scope(coordinator.zone_label):
+            verbosity = request.rel_url.query.get("verbosity", "normal")
+            if verbosity not in ("tldr_only", "normal", "verbose"):
+                return self.json(
+                    {"error": "verbosity must be one of: tldr_only, normal, verbose"},
+                    status_code=400,
                 )
 
-        return self.json(
-            {
-                "briefing": briefing,
-                "briefing_sent_today": coordinator._briefing_sent_today,
-                "verbosity": verbosity,
-            }
-        )
+            briefing = coordinator._last_briefing
+
+            # If a non-default verbosity is requested and the coordinator exposes
+            # the data needed to regenerate, do so.  Otherwise return cached text.
+            if verbosity != "normal" and briefing and hasattr(coordinator, "_regenerate_briefing"):
+                try:
+                    briefing = await coordinator._regenerate_briefing(verbosity=verbosity)
+                except Exception:
+                    _LOGGER.warning(
+                        "Could not regenerate briefing for verbosity=%s; returning cached text",
+                        verbosity,
+                    )
+
+            return self.json(
+                {
+                    "briefing": briefing,
+                    "briefing_sent_today": coordinator._briefing_sent_today,
+                    "verbosity": verbosity,
+                }
+            )
 
 
 class ClimateAdvisorChartDataView(HomeAssistantView):
@@ -471,25 +479,26 @@ class ClimateAdvisorChartDataView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        range_str = request.rel_url.query.get("range", "24h")
-        valid_ranges = {"6h", "12h", "24h", "3d", "7d", "30d", "1y"}
-        if range_str not in valid_ranges:
-            range_str = "24h"
+        with log_capture.zone_scope(coordinator.zone_label):
+            range_str = request.rel_url.query.get("range", "24h")
+            valid_ranges = {"6h", "12h", "24h", "3d", "7d", "30d", "1y"}
+            if range_str not in valid_ranges:
+                range_str = "24h"
 
-        before_ts_str = request.rel_url.query.get("before_ts")
-        before_ts: float | None = None
-        if before_ts_str:
-            try:
-                # Frontend sends milliseconds; coordinator expects seconds
-                before_ts = float(before_ts_str) / 1000.0
-            except (ValueError, TypeError):
-                before_ts = None
+            before_ts_str = request.rel_url.query.get("before_ts")
+            before_ts: float | None = None
+            if before_ts_str:
+                try:
+                    # Frontend sends milliseconds; coordinator expects seconds
+                    before_ts = float(before_ts_str) / 1000.0
+                except (ValueError, TypeError):
+                    before_ts = None
 
-        # get_chart_data runs ODE prediction inline — offload to executor to avoid blocking event loop.
-        chart_data = await hass.async_add_executor_job(
-            functools.partial(coordinator.get_chart_data, range_str=range_str, before_ts=before_ts)
-        )
-        return self.json(chart_data)
+            # get_chart_data runs ODE prediction inline — offload to executor to avoid blocking event loop.
+            chart_data = await hass.async_add_executor_job(
+                functools.partial(coordinator.get_chart_data, range_str=range_str, before_ts=before_ts)
+            )
+            return self.json(chart_data)
 
 
 class ClimateAdvisorAutomationStateView(HomeAssistantView):
@@ -507,7 +516,8 @@ class ClimateAdvisorAutomationStateView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        return self.json(coordinator.get_debug_state())
+        with log_capture.zone_scope(coordinator.zone_label):
+            return self.json(coordinator.get_debug_state())
 
 
 class ClimateAdvisorLearningView(HomeAssistantView):
@@ -525,28 +535,29 @@ class ClimateAdvisorLearningView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        today_record = None
-        if coordinator.today_record:
-            today_record = asdict(coordinator.today_record)
+        with log_capture.zone_scope(coordinator.zone_label):
+            today_record = None
+            if coordinator.today_record:
+                today_record = asdict(coordinator.today_record)
 
-        suggestion_texts = coordinator.learning.generate_suggestions()
-        suggestion_keys = coordinator.learning.get_last_suggestion_keys()
-        suggestions = [{"key": k, "text": t} for k, t in zip(suggestion_keys, suggestion_texts, strict=False)]
+            suggestion_texts = coordinator.learning.generate_suggestions()
+            suggestion_keys = coordinator.learning.get_last_suggestion_keys()
+            suggestions = [{"key": k, "text": t} for k, t in zip(suggestion_keys, suggestion_texts, strict=False)]
 
-        unit = coordinator.config.get("temp_unit", "fahrenheit")
+            unit = coordinator.config.get("temp_unit", "fahrenheit")
 
-        return self.json(
-            {
-                "today_record": today_record,
-                "yesterday_record": coordinator.yesterday_record,
-                "tomorrow_plan": coordinator.tomorrow_plan,
-                "suggestions": suggestions,
-                "compliance": coordinator.learning.get_compliance_summary(),
-                "comfort_range_low": round(from_fahrenheit(coordinator.config.get("comfort_heat", 70), unit), 1),
-                "comfort_range_high": round(from_fahrenheit(coordinator.config.get("comfort_cool", 75), unit), 1),
-                "unit": unit,
-            }
-        )
+            return self.json(
+                {
+                    "today_record": today_record,
+                    "yesterday_record": coordinator.yesterday_record,
+                    "tomorrow_plan": coordinator.tomorrow_plan,
+                    "suggestions": suggestions,
+                    "compliance": coordinator.learning.get_compliance_summary(),
+                    "comfort_range_low": round(from_fahrenheit(coordinator.config.get("comfort_heat", 70), unit), 1),
+                    "comfort_range_high": round(from_fahrenheit(coordinator.config.get("comfort_cool", 75), unit), 1),
+                    "unit": unit,
+                }
+            )
 
 
 class ClimateAdvisorForceReclassifyView(HomeAssistantView):
@@ -564,8 +575,9 @@ class ClimateAdvisorForceReclassifyView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        await coordinator.async_request_refresh()
-        return self.json({"status": "ok", "message": "Reclassification triggered"})
+        with log_capture.zone_scope(coordinator.zone_label):
+            await coordinator.async_request_refresh()
+            return self.json({"status": "ok", "message": "Reclassification triggered"})
 
 
 class ClimateAdvisorSendBriefingView(HomeAssistantView):
@@ -583,25 +595,26 @@ class ClimateAdvisorSendBriefingView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        # Issue #817 Part 4: optional {"notify": bool} body, default True — backward
-        # compatible with the debug tab's "Send Briefing" button, which sends no body and
-        # must keep always sending a real push/email. The dashboard's "Regenerate" button
-        # sends {"notify": false} — the user is already looking at the screen, so a real
-        # notification is unnecessary. Either way this is a manual invocation, so it never
-        # sets respect_notification_mute — see _async_send_briefing()'s docstring.
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        notify = bool(body.get("notify", True)) if isinstance(body, dict) else True
+        with log_capture.zone_scope(coordinator.zone_label):
+            # Issue #817 Part 4: optional {"notify": bool} body, default True — backward
+            # compatible with the debug tab's "Send Briefing" button, which sends no body and
+            # must keep always sending a real push/email. The dashboard's "Regenerate" button
+            # sends {"notify": false} — the user is already looking at the screen, so a real
+            # notification is unnecessary. Either way this is a manual invocation, so it never
+            # sets respect_notification_mute — see _async_send_briefing()'s docstring.
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            notify = bool(body.get("notify", True)) if isinstance(body, dict) else True
 
-        coordinator._briefing_sent_today = False
-        from homeassistant.util import dt as dt_util
+            coordinator._briefing_sent_today = False
+            from homeassistant.util import dt as dt_util
 
-        await coordinator._async_send_briefing(dt_util.now(), send_notifications=notify)
-        return self.json(
-            {"status": "ok", "message": "Briefing sent" if notify else "Briefing regenerated (no notification)"}
-        )
+            await coordinator._async_send_briefing(dt_util.now(), send_notifications=notify)
+            return self.json(
+                {"status": "ok", "message": "Briefing sent" if notify else "Briefing regenerated (no notification)"}
+            )
 
 
 class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
@@ -619,70 +632,71 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        try:
-            body = await request.json()
-        except Exception:
-            return self.json({"error": "Invalid JSON body"}, status_code=400)
+        with log_capture.zone_scope(coordinator.zone_label):
+            try:
+                body = await request.json()
+            except Exception:
+                return self.json({"error": "Invalid JSON body"}, status_code=400)
 
-        action = body.get("action")
-        suggestion_key = body.get("suggestion_key")
-        feedback = body.get("feedback")
+            action = body.get("action")
+            suggestion_key = body.get("suggestion_key")
+            feedback = body.get("feedback")
 
-        # Validate feedback if present
-        if feedback is not None and feedback not in ("correct", "incorrect"):
-            return self.json(
-                {"error": "feedback must be 'correct' or 'incorrect'"},
-                status_code=400,
-            )
+            # Validate feedback if present
+            if feedback is not None and feedback not in ("correct", "incorrect"):
+                return self.json(
+                    {"error": "feedback must be 'correct' or 'incorrect'"},
+                    status_code=400,
+                )
 
-        # suggestion_key is required; action is required only when feedback is absent
-        if not suggestion_key:
-            return self.json(
-                {"error": "Required: suggestion_key"},
-                status_code=400,
-            )
-        if action is None and feedback is None:
-            return self.json(
-                {"error": "Required: action (accept/dismiss) or feedback (correct/incorrect)"},
-                status_code=400,
-            )
-        if action is not None and action not in ("accept", "dismiss"):
-            return self.json(
-                {"error": "action must be 'accept' or 'dismiss'"},
-                status_code=400,
-            )
+            # suggestion_key is required; action is required only when feedback is absent
+            if not suggestion_key:
+                return self.json(
+                    {"error": "Required: suggestion_key"},
+                    status_code=400,
+                )
+            if action is None and feedback is None:
+                return self.json(
+                    {"error": "Required: action (accept/dismiss) or feedback (correct/incorrect)"},
+                    status_code=400,
+                )
+            if action is not None and action not in ("accept", "dismiss"):
+                return self.json(
+                    {"error": "action must be 'accept' or 'dismiss'"},
+                    status_code=400,
+                )
 
-        # Handle feedback recording (independent of action)
-        if feedback is not None:
-            coordinator.learning.record_feedback(suggestion_key, feedback)
-            await hass.async_add_executor_job(coordinator.learning.save_state)
+            # Handle feedback recording (independent of action)
+            if feedback is not None:
+                coordinator.learning.record_feedback(suggestion_key, feedback)
+                await hass.async_add_executor_job(coordinator.learning.save_state)
 
-        # Handle accept/dismiss action
-        if action == "accept":
-            changes = coordinator.learning.accept_suggestion(suggestion_key)
-            await hass.async_add_executor_job(coordinator.learning.save_state)
-            coordinator.config.update(changes)
-            # Persist valid config keys to the config entry so changes survive reload
-            valid_keys = set(CONFIG_METADATA.keys())
-            entry_changes = {k: v for k, v in changes.items() if k in valid_keys}
-            if entry_changes:
-                entries = hass.data.get(DOMAIN, {})
-                entry_id = next((eid for eid, c in entries.items() if c is coordinator), None)
-                if entry_id:
-                    config_entry = hass.config_entries.async_get_entry(entry_id)
-                    if config_entry:
-                        hass.config_entries.async_update_entry(
-                            config_entry,
-                            data={**config_entry.data, **entry_changes},
-                        )
-            return self.json({"status": "ok", "changes": changes})
-        elif action == "dismiss":
-            coordinator.learning.dismiss_suggestion(suggestion_key)
-            await hass.async_add_executor_job(coordinator.learning.save_state)
-            return self.json({"status": "ok", "dismissed": suggestion_key})
-        else:
-            # feedback-only request
-            return self.json({"status": "ok"})
+            # Handle accept/dismiss action
+            if action == "accept":
+                changes = coordinator.learning.accept_suggestion(suggestion_key)
+                await hass.async_add_executor_job(coordinator.learning.save_state)
+                coordinator.config.update(changes)
+                # Persist valid config keys to the config entry so changes survive reload
+                valid_keys = set(CONFIG_METADATA.keys())
+                entry_changes = {k: v for k, v in changes.items() if k in valid_keys}
+                if entry_changes:
+                    entries = hass.data.get(DOMAIN, {})
+                    entry_id = next((eid for eid, c in entries.items() if c is coordinator), None)
+                    if entry_id:
+                        config_entry = hass.config_entries.async_get_entry(entry_id)
+                        if config_entry:
+                            hass.config_entries.async_update_entry(
+                                config_entry,
+                                data={**config_entry.data, **entry_changes},
+                            )
+                return self.json({"status": "ok", "changes": changes})
+            elif action == "dismiss":
+                coordinator.learning.dismiss_suggestion(suggestion_key)
+                await hass.async_add_executor_job(coordinator.learning.save_state)
+                return self.json({"status": "ok", "dismissed": suggestion_key})
+            else:
+                # feedback-only request
+                return self.json({"status": "ok"})
 
 
 class ClimateAdvisorConfigView(HomeAssistantView):
@@ -700,42 +714,43 @@ class ClimateAdvisorConfigView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        config = coordinator.config
-        settings = []
+        with log_capture.zone_scope(coordinator.zone_label):
+            config = coordinator.config
+            settings = []
 
-        for key, meta in CONFIG_METADATA.items():
-            value = config.get(key)
-            # Fall back to the metadata default so the UI shows the effective value,
-            # not "not set", when a key was added after the config entry was created.
-            if value is None:
-                value = meta.get("default")
-            # Sanitize: replace notify service names (may reveal personal info)
-            if key == "notify_service" or meta.get("sensitive"):
-                value = "configured" if value else "not set"
-            # Convert time objects to strings
-            if hasattr(value, "strftime"):
-                value = str(value)
-            # Convert lists to counts for display
-            if isinstance(value, list):
-                value = f"{len(value)} configured"
-            # Apply display transforms (e.g., seconds → minutes for UI)
-            transform = meta.get("display_transform")
-            if transform == "seconds_to_minutes" and isinstance(value, (int, float)):
-                value = value // 60
-            elif transform == "temp_source_label" and isinstance(value, str):
-                value = _TEMP_SOURCE_LABELS.get(value, value)
+            for key, meta in CONFIG_METADATA.items():
+                value = config.get(key)
+                # Fall back to the metadata default so the UI shows the effective value,
+                # not "not set", when a key was added after the config entry was created.
+                if value is None:
+                    value = meta.get("default")
+                # Sanitize: replace notify service names (may reveal personal info)
+                if key == "notify_service" or meta.get("sensitive"):
+                    value = "configured" if value else "not set"
+                # Convert time objects to strings
+                if hasattr(value, "strftime"):
+                    value = str(value)
+                # Convert lists to counts for display
+                if isinstance(value, list):
+                    value = f"{len(value)} configured"
+                # Apply display transforms (e.g., seconds → minutes for UI)
+                transform = meta.get("display_transform")
+                if transform == "seconds_to_minutes" and isinstance(value, (int, float)):
+                    value = value // 60
+                elif transform == "temp_source_label" and isinstance(value, str):
+                    value = _TEMP_SOURCE_LABELS.get(value, value)
 
-            settings.append(
-                {
-                    "key": key,
-                    "value": value,
-                    "label": meta["label"],
-                    "description": meta["description"],
-                    "category": meta["category"],
-                }
-            )
+                settings.append(
+                    {
+                        "key": key,
+                        "value": value,
+                        "label": meta["label"],
+                        "description": meta["description"],
+                        "category": meta["category"],
+                    }
+                )
 
-        return self.json({"settings": settings})
+            return self.json({"settings": settings})
 
 
 def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae: Any) -> None:
@@ -752,8 +767,12 @@ def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae:
 
     @callback
     def _apply_after_delay(_now):
-        if coordinator._current_classification:
-            hass.async_create_task(ae.apply_classification(coordinator._current_classification))
+        # Issue #911: fires ~10s after the request that scheduled it, well outside that
+        # request handler's own zone_scope() block — needs its own explicit wrap so any
+        # logging from apply_classification() attributes to the right zone.
+        with log_capture.zone_scope(coordinator.zone_label):
+            if coordinator._current_classification:
+                hass.async_create_task(ae.apply_classification(coordinator._current_classification))
 
     async_call_later(hass, 10, _apply_after_delay)
 
@@ -773,20 +792,21 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        ae = coordinator.automation_engine
-        cancelled = ae.cancel_override(reason="user_cancel_override")
-        if not cancelled:
-            return self.json({"status": "ok", "message": "No active override to cancel"})
+        with log_capture.zone_scope(coordinator.zone_label):
+            ae = coordinator.automation_engine
+            cancelled = ae.cancel_override(reason="user_cancel_override")
+            if not cancelled:
+                return self.json({"status": "ok", "message": "No active override to cancel"})
 
-        coordinator._feed_override_grace_fsm_cancelled()  # Issue #647
-        _schedule_reclassify_after_cancel(hass, coordinator, ae)
+            coordinator._feed_override_grace_fsm_cancelled()  # Issue #647
+            _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
-        return self.json(
-            {
-                "status": "ok",
-                "message": "Override cancelled. Automated control resumes in 10 seconds.",
-            }
-        )
+            return self.json(
+                {
+                    "status": "ok",
+                    "message": "Override cancelled. Automated control resumes in 10 seconds.",
+                }
+            )
 
 
 class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
@@ -804,23 +824,26 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        ae = coordinator.automation_engine
-        if not ae.is_paused_by_door:
-            return self.json({"status": "ok", "message": "Not currently paused"})
+        with log_capture.zone_scope(coordinator.zone_label):
+            ae = coordinator.automation_engine
+            if not ae.is_paused_by_door:
+                return self.json({"status": "ok", "message": "Not currently paused"})
 
-        restored_mode = await ae.resume_from_pause()
-        # Issue #757 Phase 6 Step 8: dual-engine shell removed; this call used to also
-        # mirror onto the shadow engine, whose _mirror_to_shadow() finally block secretly
-        # fed the override/grace FSM's DASHBOARD_RESUME entry event as a side effect.
-        # Feed it directly now that the shadow engine is gone.
-        coordinator._feed_override_grace_fsm_on_detect("resume_from_pause")
-        return self.json(
-            {
-                "status": "ok",
-                "message": f"Resumed from pause. HVAC set to {restored_mode or 'N/A'}. Manual grace period started.",
-                "restored_mode": restored_mode,
-            }
-        )
+            restored_mode = await ae.resume_from_pause()
+            # Issue #757 Phase 6 Step 8: dual-engine shell removed; this call used to also
+            # mirror onto the shadow engine, whose _mirror_to_shadow() finally block secretly
+            # fed the override/grace FSM's DASHBOARD_RESUME entry event as a side effect.
+            # Feed it directly now that the shadow engine is gone.
+            coordinator._feed_override_grace_fsm_on_detect("resume_from_pause")
+            return self.json(
+                {
+                    "status": "ok",
+                    "message": (
+                        f"Resumed from pause. HVAC set to {restored_mode or 'N/A'}. Manual grace period started."
+                    ),
+                    "restored_mode": restored_mode,
+                }
+            )
 
 
 class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
@@ -838,15 +861,16 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        ae = coordinator.automation_engine
-        cancelled = ae.cancel_override(reason="user_cancel_fan_override")
-        if not cancelled:
-            return self.json({"status": "ok", "message": "No active fan override to cancel."})
+        with log_capture.zone_scope(coordinator.zone_label):
+            ae = coordinator.automation_engine
+            cancelled = ae.cancel_override(reason="user_cancel_fan_override")
+            if not cancelled:
+                return self.json({"status": "ok", "message": "No active fan override to cancel."})
 
-        coordinator._feed_override_grace_fsm_cancelled()  # Issue #647
-        _schedule_reclassify_after_cancel(hass, coordinator, ae)
+            coordinator._feed_override_grace_fsm_cancelled()  # Issue #647
+            _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
-        return self.json({"status": "ok", "message": "Fan override cleared."})
+            return self.json({"status": "ok", "message": "Fan override cleared."})
 
 
 class ClimateAdvisorToggleAutomationView(HomeAssistantView):
@@ -864,16 +888,17 @@ class ClimateAdvisorToggleAutomationView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        new_state = not coordinator.automation_enabled
-        coordinator.set_automation_enabled(new_state)
+        with log_capture.zone_scope(coordinator.zone_label):
+            new_state = not coordinator.automation_enabled
+            coordinator.set_automation_enabled(new_state)
 
-        return self.json(
-            {
-                "status": "ok",
-                "automation_enabled": new_state,
-                "message": f"Automation {'enabled' if new_state else 'disabled'}.",
-            }
-        )
+            return self.json(
+                {
+                    "status": "ok",
+                    "automation_enabled": new_state,
+                    "message": f"Automation {'enabled' if new_state else 'disabled'}.",
+                }
+            )
 
 
 class ClimateAdvisorAIStatusView(HomeAssistantView):
@@ -891,23 +916,24 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        if coordinator.claude_client:
-            status = coordinator.claude_client.get_status()
-            history = coordinator.claude_client.get_request_history()
-            # SECURITY: ensure API key is not in the response
-            status.pop("api_key", None)
+        with log_capture.zone_scope(coordinator.zone_label):
+            if coordinator.claude_client:
+                status = coordinator.claude_client.get_status()
+                history = coordinator.claude_client.get_request_history()
+                # SECURITY: ensure API key is not in the response
+                status.pop("api_key", None)
+                return self.json(
+                    {
+                        "status": status,
+                        "recent_requests": history[-10:],
+                    }
+                )
             return self.json(
                 {
-                    "status": status,
-                    "recent_requests": history[-10:],
+                    "status": {"status": "disabled"},
+                    "recent_requests": [],
                 }
             )
-        return self.json(
-            {
-                "status": {"status": "disabled"},
-                "recent_requests": [],
-            }
-        )
 
 
 def _oldest_event_time(event_log: list[dict]) -> str | None:
@@ -936,36 +962,37 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        try:
-            hours = float(request.query.get("hours", 12))
-        except (TypeError, ValueError):
-            hours = 12.0
-        hours = max(1.0, min(hours, 168.0))
+        with log_capture.zone_scope(coordinator.zone_label):
+            try:
+                hours = float(request.query.get("hours", 12))
+            except (TypeError, ValueError):
+                hours = 12.0
+            hours = max(1.0, min(hours, 168.0))
 
-        from homeassistant.util import dt as dt_util
+            from homeassistant.util import dt as dt_util
 
-        event_log = list(getattr(coordinator, "_event_log", []) or [])
-        table = build_event_timeline_table(
-            event_log,
-            coordinator.config or {},
-            hours,
-            dt_util.now(),
-            newest_first=True,
-        )
+            event_log = list(getattr(coordinator, "_event_log", []) or [])
+            table = build_event_timeline_table(
+                event_log,
+                coordinator.config or {},
+                hours,
+                dt_util.now(),
+                newest_first=True,
+            )
 
-        cutoff_iso = (dt_util.now() - timedelta(hours=hours)).isoformat()
-        oldest_stored = _oldest_event_time(event_log)
-        is_truncated = bool(oldest_stored) and oldest_stored > cutoff_iso
+            cutoff_iso = (dt_util.now() - timedelta(hours=hours)).isoformat()
+            oldest_stored = _oldest_event_time(event_log)
+            is_truncated = bool(oldest_stored) and oldest_stored > cutoff_iso
 
-        return self.json(
-            {
-                "table": table,
-                "hours": hours,
-                "generated_at": dt_util.now().isoformat(),
-                "is_truncated": is_truncated,
-                "oldest_available": oldest_stored,
-            }
-        )
+            return self.json(
+                {
+                    "table": table,
+                    "hours": hours,
+                    "generated_at": dt_util.now().isoformat(),
+                    "is_truncated": is_truncated,
+                    "oldest_available": oldest_stored,
+                }
+            )
 
 
 class ClimateAdvisorInvestigateView(HomeAssistantView):
@@ -983,132 +1010,133 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        # Parse optional JSON body — body may be absent
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        with log_capture.zone_scope(coordinator.zone_label):
+            # Parse optional JSON body — body may be absent
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
 
-        focus: str = str(body.get("focus", ""))
-        try:
-            hours: int = max(1, min(int(body.get("hours", 24)), 720))
-        except (ValueError, TypeError):
-            hours = 24
+            focus: str = str(body.get("focus", ""))
+            try:
+                hours: int = max(1, min(int(body.get("hours", 24)), 720))
+            except (ValueError, TypeError):
+                hours = 24
 
-        if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
-            return self.json_message("AI features are not enabled", status_code=403)
+            if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
+                return self.json_message("AI features are not enabled", status_code=403)
 
-        if not coordinator.config.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED):
-            return self.json_message("Investigative agent is not enabled", status_code=403)
+            if not coordinator.config.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED):
+                return self.json_message("Investigative agent is not enabled", status_code=403)
 
-        if coordinator.claude_client is None:
-            return self.json_message("AI client not available", status_code=503)
+            if coordinator.claude_client is None:
+                return self.json_message("AI client not available", status_code=503)
 
-        allowed, reason = coordinator.claude_client.check_investigator_rate_limit()
-        if not allowed:
-            return self.json_message(reason, status_code=429)
+            allowed, reason = coordinator.claude_client.check_investigator_rate_limit()
+            if not allowed:
+                return self.json_message(reason, status_code=429)
 
-        _LOGGER.info(
-            "Investigation requested: focus_len=%d hours=%d",
-            len(focus),
-            hours,
-        )
-
-        accept = request.headers.get("Accept", "")
-        if "text/event-stream" in accept:
-            stream_resp = web.StreamResponse(
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                    "Access-Control-Allow-Origin": "*",
-                }
+            _LOGGER.info(
+                "Investigation requested: focus_len=%d hours=%d",
+                len(focus),
+                hours,
             )
-            stream_resp.content_type = "text/event-stream"
-            await stream_resp.prepare(request)
 
-            final_result: dict | None = None
-            chunk_count = 0
-            async for event in coordinator.ai_skills.async_execute_streaming(
+            accept = request.headers.get("Accept", "")
+            if "text/event-stream" in accept:
+                stream_resp = web.StreamResponse(
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                        "Access-Control-Allow-Origin": "*",
+                    }
+                )
+                stream_resp.content_type = "text/event-stream"
+                await stream_resp.prepare(request)
+
+                final_result: dict | None = None
+                chunk_count = 0
+                async for event in coordinator.ai_skills.async_execute_streaming(
+                    "investigator",
+                    hass,
+                    coordinator,
+                    coordinator.claude_client,
+                    focus=focus,
+                    hours=hours,
+                ):
+                    await stream_resp.write(("data: " + json.dumps(event) + "\n\n").encode())
+                    await stream_resp.drain()
+                    if event.get("type") == "chunk":
+                        chunk_count += 1
+                        if chunk_count == 1:
+                            _LOGGER.debug("SSE first chunk flushed to client")
+                    elif event.get("type") == "done":
+                        _LOGGER.info("SSE stream complete: chunks=%d", chunk_count)
+                        final_result = {
+                            "success": event.get("success", True),
+                            "source": event.get("source", "ai"),
+                            "data": event.get("data", {}),
+                            "error": None,
+                            "input_context": event.get("input_context", ""),
+                            "raw_response": event.get("raw_response", ""),
+                            "truncated": event.get("truncated", False),
+                            "truncated_empty": event.get("truncated_empty", False),
+                        }
+                        if final_result["truncated_empty"]:
+                            # Issue #563 follow-on: distinct from ordinary truncation — the
+                            # model produced zero visible answer text despite consuming the
+                            # full response budget. "Raise max response length" is misleading
+                            # here since there's no partial content that a bigger budget would
+                            # have salvaged; the model itself may need a different
+                            # reasoning_effort or a much larger ceiling to answer at all.
+                            _LOGGER.warning(
+                                "Investigation report produced zero visible output despite "
+                                "consuming the full response budget — raising Investigator "
+                                "Max Response Length may not fix this; consider trying a "
+                                "different reasoning effort for this model"
+                            )
+                        elif final_result["truncated"]:
+                            _LOGGER.warning(
+                                "Investigation report truncated: hit max_tokens limit; "
+                                "consider raising Investigator Max Response Length"
+                            )
+
+                if final_result and final_result.get("success"):
+                    coordinator.claude_client.increment_investigator_counter()
+                    await coordinator.async_store_investigation_report(final_result)
+                    _LOGGER.info("Investigation (streaming) stored")
+
+                await stream_resp.write_eof()
+                return stream_resp
+
+            result = await coordinator.ai_skills.async_execute(
                 "investigator",
                 hass,
                 coordinator,
                 coordinator.claude_client,
                 focus=focus,
                 hours=hours,
-            ):
-                await stream_resp.write(("data: " + json.dumps(event) + "\n\n").encode())
-                await stream_resp.drain()
-                if event.get("type") == "chunk":
-                    chunk_count += 1
-                    if chunk_count == 1:
-                        _LOGGER.debug("SSE first chunk flushed to client")
-                elif event.get("type") == "done":
-                    _LOGGER.info("SSE stream complete: chunks=%d", chunk_count)
-                    final_result = {
-                        "success": event.get("success", True),
-                        "source": event.get("source", "ai"),
-                        "data": event.get("data", {}),
-                        "error": None,
-                        "input_context": event.get("input_context", ""),
-                        "raw_response": event.get("raw_response", ""),
-                        "truncated": event.get("truncated", False),
-                        "truncated_empty": event.get("truncated_empty", False),
-                    }
-                    if final_result["truncated_empty"]:
-                        # Issue #563 follow-on: distinct from ordinary truncation — the
-                        # model produced zero visible answer text despite consuming the
-                        # full response budget. "Raise max response length" is misleading
-                        # here since there's no partial content that a bigger budget would
-                        # have salvaged; the model itself may need a different
-                        # reasoning_effort or a much larger ceiling to answer at all.
-                        _LOGGER.warning(
-                            "Investigation report produced zero visible output despite "
-                            "consuming the full response budget — raising Investigator "
-                            "Max Response Length may not fix this; consider trying a "
-                            "different reasoning effort for this model"
-                        )
-                    elif final_result["truncated"]:
-                        _LOGGER.warning(
-                            "Investigation report truncated: hit max_tokens limit; "
-                            "consider raising Investigator Max Response Length"
-                        )
+            )
 
-            if final_result and final_result.get("success"):
+            if result.get("success") or result.get("source") == "fallback":
+                if result.get("truncated_empty"):
+                    _LOGGER.warning(
+                        "Investigation report produced zero visible output despite "
+                        "consuming the full response budget — raising Investigator "
+                        "Max Response Length may not fix this; consider trying a "
+                        "different reasoning effort for this model"
+                    )
+                elif result.get("truncated"):
+                    _LOGGER.warning(
+                        "Investigation report truncated: hit max_tokens limit; "
+                        "consider raising Investigator Max Response Length"
+                    )
                 coordinator.claude_client.increment_investigator_counter()
-                await coordinator.async_store_investigation_report(final_result)
-                _LOGGER.info("Investigation (streaming) stored")
+                await coordinator.async_store_investigation_report(result)
+                _LOGGER.info("Investigation complete: source=%s", result.get("source", "unknown"))
+                return self.json(result)
 
-            await stream_resp.write_eof()
-            return stream_resp
-
-        result = await coordinator.ai_skills.async_execute(
-            "investigator",
-            hass,
-            coordinator,
-            coordinator.claude_client,
-            focus=focus,
-            hours=hours,
-        )
-
-        if result.get("success") or result.get("source") == "fallback":
-            if result.get("truncated_empty"):
-                _LOGGER.warning(
-                    "Investigation report produced zero visible output despite "
-                    "consuming the full response budget — raising Investigator "
-                    "Max Response Length may not fix this; consider trying a "
-                    "different reasoning effort for this model"
-                )
-            elif result.get("truncated"):
-                _LOGGER.warning(
-                    "Investigation report truncated: hit max_tokens limit; "
-                    "consider raising Investigator Max Response Length"
-                )
-            coordinator.claude_client.increment_investigator_counter()
-            await coordinator.async_store_investigation_report(result)
-            _LOGGER.info("Investigation complete: source=%s", result.get("source", "unknown"))
-            return self.json(result)
-
-        return self.json_message(result.get("error", "Investigation failed"), status_code=500)
+            return self.json_message(result.get("error", "Investigation failed"), status_code=500)
 
 
 class ClimateAdvisorInvestigationReportsView(HomeAssistantView):
@@ -1126,7 +1154,8 @@ class ClimateAdvisorInvestigationReportsView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        return self.json(coordinator.get_investigation_report_history())
+        with log_capture.zone_scope(coordinator.zone_label):
+            return self.json(coordinator.get_investigation_report_history())
 
 
 class ClimateAdvisorEventLogView(HomeAssistantView):
@@ -1146,27 +1175,28 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        try:
-            hours = float(request.rel_url.query.get("hours", "24"))
-            hours = max(0.5, min(hours, 168))  # clamp: 30 min – 7 days
-        except (ValueError, TypeError):
-            hours = 24.0
+        with log_capture.zone_scope(coordinator.zone_label):
+            try:
+                hours = float(request.rel_url.query.get("hours", "24"))
+                hours = max(0.5, min(hours, 168))  # clamp: 30 min – 7 days
+            except (ValueError, TypeError):
+                hours = 24.0
 
-        cutoff = (dt_util.now() - timedelta(hours=hours)).isoformat()
-        events = [e for e in coordinator._event_log if e.get("time", "") >= cutoff]
+            cutoff = (dt_util.now() - timedelta(hours=hours)).isoformat()
+            events = [e for e in coordinator._event_log if e.get("time", "") >= cutoff]
 
-        oldest_stored = _oldest_event_time(coordinator._event_log)
-        is_truncated = bool(oldest_stored) and oldest_stored > cutoff
+            oldest_stored = _oldest_event_time(coordinator._event_log)
+            is_truncated = bool(oldest_stored) and oldest_stored > cutoff
 
-        return self.json(
-            {
-                "events": events,
-                "total": len(events),
-                "hours": hours,
-                "is_truncated": is_truncated,
-                "oldest_available": oldest_stored,
-            }
-        )
+            return self.json(
+                {
+                    "events": events,
+                    "total": len(events),
+                    "hours": hours,
+                    "is_truncated": is_truncated,
+                    "oldest_available": oldest_stored,
+                }
+            )
 
 
 class ClimateAdvisorEnginesView(HomeAssistantView):
@@ -1184,12 +1214,13 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        if not hasattr(coordinator, "learning") or not hasattr(coordinator.learning, "get_engine_status"):
-            return self.json({"error": "Engine status not available"}, status_code=503)
+        with log_capture.zone_scope(coordinator.zone_label):
+            if not hasattr(coordinator, "learning") or not hasattr(coordinator.learning, "get_engine_status"):
+                return self.json({"error": "Engine status not available"}, status_code=503)
 
-        status = coordinator.learning.get_engine_status()
-        status["unit"] = coordinator.config.get("temp_unit", "fahrenheit")
-        return self.json(status)
+            status = coordinator.learning.get_engine_status()
+            status["unit"] = coordinator.config.get("temp_unit", "fahrenheit")
+            return self.json(status)
 
 
 class ClimateAdvisorDeleteReportView(HomeAssistantView):
@@ -1207,24 +1238,25 @@ class ClimateAdvisorDeleteReportView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        try:
-            body = await request.json()
-        except Exception:
-            return self.json({"error": "invalid_json"}, status_code=400)
+        with log_capture.zone_scope(coordinator.zone_label):
+            try:
+                body = await request.json()
+            except Exception:
+                return self.json({"error": "invalid_json"}, status_code=400)
 
-        report_type = body.get("report_type", "")
-        timestamp = body.get("timestamp", "")
-        if not timestamp:
-            return self.json({"error": "missing_timestamp"}, status_code=400)
+            report_type = body.get("report_type", "")
+            timestamp = body.get("timestamp", "")
+            if not timestamp:
+                return self.json({"error": "missing_timestamp"}, status_code=400)
 
-        if report_type == "investigation":
-            found = coordinator.delete_investigation_report(timestamp)
-            if found:
-                await hass.async_add_executor_job(coordinator._save_investigation_reports)
-        else:
-            return self.json({"error": "invalid_type"}, status_code=400)
+            if report_type == "investigation":
+                found = coordinator.delete_investigation_report(timestamp)
+                if found:
+                    await hass.async_add_executor_job(coordinator._save_investigation_reports)
+            else:
+                return self.json({"error": "invalid_type"}, status_code=400)
 
-        return self.json({"success": True, "found": found})
+            return self.json({"success": True, "found": found})
 
 
 class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
@@ -1244,56 +1276,57 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
         if not coordinator:
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
-        token = coordinator.config.get(CONF_GITHUB_TOKEN, "")
-        repo = coordinator.config.get(CONF_GITHUB_REPO, "")
-        if not token or not repo:
-            return self.json({"success": False, "error": "not_configured"})
+        with log_capture.zone_scope(coordinator.zone_label):
+            token = coordinator.config.get(CONF_GITHUB_TOKEN, "")
+            repo = coordinator.config.get(CONF_GITHUB_REPO, "")
+            if not token or not repo:
+                return self.json({"success": False, "error": "not_configured"})
 
-        try:
-            body = await request.json()
-        except Exception:
-            return self.json({"error": "invalid_json"}, status_code=400)
+            try:
+                body = await request.json()
+            except Exception:
+                return self.json({"error": "invalid_json"}, status_code=400)
 
-        title = str(body.get("title", "")).strip()
-        issue_body = str(body.get("body", "")).strip()
-        labels = body.get("labels", ["bug"])
+            title = str(body.get("title", "")).strip()
+            issue_body = str(body.get("body", "")).strip()
+            labels = body.get("labels", ["bug"])
 
-        if not title:
-            return self.json({"error": "missing_title"}, status_code=400)
-        if not isinstance(labels, list):
-            labels = ["bug"]
+            if not title:
+                return self.json({"error": "missing_title"}, status_code=400)
+            if not isinstance(labels, list):
+                labels = ["bug"]
 
-        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-        session = async_get_clientsession(hass)
-        try:
-            resp = await session.post(
-                f"https://api.github.com/repos/{repo}/issues",
-                json={"title": title, "body": issue_body, "labels": labels},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-                timeout=aiohttp.ClientTimeout(total=15),
-            )
-        except Exception:
-            _LOGGER.exception("GitHub issue submission: network error")
-            return self.json({"success": False, "error": "network_error"})
+            session = async_get_clientsession(hass)
+            try:
+                resp = await session.post(
+                    f"https://api.github.com/repos/{repo}/issues",
+                    json={"title": title, "body": issue_body, "labels": labels},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
+            except Exception:
+                _LOGGER.exception("GitHub issue submission: network error")
+                return self.json({"success": False, "error": "network_error"})
 
-        if resp.status == 201:
-            issue = await resp.json()
-            return self.json(
-                {
-                    "success": True,
-                    "issue_url": issue.get("html_url", ""),
-                    "issue_number": issue.get("number"),
-                }
-            )
+            if resp.status == 201:
+                issue = await resp.json()
+                return self.json(
+                    {
+                        "success": True,
+                        "issue_url": issue.get("html_url", ""),
+                        "issue_number": issue.get("number"),
+                    }
+                )
 
-        # Never log the token — log only the HTTP status
-        _LOGGER.warning("GitHub issue submission: API returned status %d", resp.status)
-        return self.json({"success": False, "error": f"github_api_{resp.status}"})
+            # Never log the token — log only the HTTP status
+            _LOGGER.warning("GitHub issue submission: API returned status %d", resp.status)
+            return self.json({"success": False, "error": f"github_api_{resp.status}"})
 
 
 # All views to register

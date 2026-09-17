@@ -171,8 +171,9 @@ implementation followed and shipped as v0.7.0.
 | What does each user-visible change actually look like? | Five mocked surfaces (naming field, entry list, Repairs card, diagnostics menu item, dashboard selector); mocking them surfaced two real refinements (conditional selector rendering, explicit Repairs card copy). | [UI Mocks](#ui-mocks) |
 | What changes for a user, in plain terms? | A before/after table across eight areas, each tied to the design choice behind it. | [Outcomes: Before and After](#outcomes-before-and-after) |
 | What's still open now that every step is built? | As of v0.7.26 (26 releases in production): PR3's spike and real-HA verification of PR9 are now considered empirically closed by field use; a known test-harness dt-shadowing gap and pre-existing citation debt remain genuinely open (neither is something production usage can close). None ever blocked shipping. | [Open Questions](#open-questions-carried-forward-out-of-this-build) |
-| Were all zone-context gaps caught by the original nine-gap review? | No — Issue #812's audit found four more (dashboard first-load, Repairs `entries[0]`, zero log attribution, non-deterministic registry fallback order), all fixed. `api.py`'s own logging remains unscoped (flagged, not fixed). | [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit) |
+| Were all zone-context gaps caught by the original nine-gap review? | No — Issue #812's audit found four more (dashboard first-load, Repairs `entries[0]`, zero log attribution, non-deterministic registry fallback order); Issue #911 later closed the remainder — every scheduled/event coordinator callback and every `api.py` REST handler are now zone-scoped too. | [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit) |
 | Does every zone send its own copy of the daily briefing notification? | It used to — Issue #817 Part 3/4 added a per-zone mute (`CONF_BRIEFING_NOTIFICATIONS_ENABLED`), defaulting only the stably-first zone to notifying, plus made the dashboard's Regenerate button stop force-sending a real push/email. | [Gap 10e](#10e--every-zone-independently-sent-its-own-daily-briefing-notification-issue-817-part-34) |
+| Did 10c's zone-attribution fix cover every log call site? | No — it wrapped only 7 sites (update cycle, briefing send, 5 service handlers). Issue #911 found ~13 unwrapped coordinator.py callbacks (door/window, occupancy, thermostat/fan listeners, pre-cool, etc.) plus all ~20 `api.py` REST handlers, still leaking cross-zone warnings — now fixed. | [Gap 10f](#10f--remaining-zone-attribution-gaps-closed-coordinator-callbacks-and-apipy-issue-911) |
 
 ## Scope
 
@@ -1341,20 +1342,84 @@ they didn't ask for.
 (`TestMigrationV19ToV20`, the new notifications-step toggle tests in
 `TestNotificationsStep`).
 
-##### Known residual gap — `api.py` itself is not zone-scoped in logging
+##### 10f — remaining zone-attribution gaps closed: coordinator callbacks and api.py (Issue #911)
 
-**Explicitly flagged, not fixed by #812, not hidden.** `api.py`'s own
-executor-job/handler code was not wrapped in `log_capture.zone_scope()` —
-confirmed by grep: `zone_scope`/`bind_zone_for_executor` appear in
-`coordinator.py` and `__init__.py` but nowhere in `api.py`. A warning raised
-while `api.py` is servicing one zone's dashboard request is tagged
-`"unknown zone"` by `ai_skills_context.py` rather than mis-attributed to the
-wrong zone — this is fail-safe by design (10c's fix explicitly renders
-untagged records as `"unknown zone"` instead of guessing), not a defect —
-but it is also not full coverage. A future pass wrapping `api.py`'s request
-handlers in `zone_scope(entry_id)` (once the request's `entry_id` is
-resolved) would close this and let the Investigator attribute API-layer
-warnings to the right zone instead of showing them as unknown.
+**What:** #812's 10c fix wrapped only 7 call sites in `log_capture.zone_scope()`
+— the main update cycle, `_async_send_briefing()`, and 5 dashboard service
+handlers in `__init__.py`. It never audited every HA-registered
+scheduled/event callback in `coordinator.py` (`async_track_time_change`,
+`async_track_time_interval`, `async_call_later`, `async_track_state_change_event`,
+`async_track_point_in_time`), nor any of `api.py`'s ~20 REST view handlers or
+the ~5 `async_call_later`-scheduled closures reachable from them — both
+previously documented here as a known, unfixed residual gap. Split off from
+Issue #910, which surfaced the concrete occupant-facing symptom: a 64°F
+"Morning check" warning that actually fired in a different (dev/test) zone
+leaked into the real `santa_maria_hallway` zone's AI Investigator report,
+labeled `(zone=unknown zone)`, even though that zone's own logs showed 66°F
+at the same timestamp.
+
+**Occupant-facing consequence:** on any install running 2+ zones — including
+this project's own common dev pattern of one real production zone alongside
+a "Simulated" dev/test thermostat zone (#830) — a warning or temperature from
+an unrelated zone's scheduled check (morning wake-up, bedtime, end-of-day,
+pre-cool, door/window, occupancy toggle, thermostat/fan state changes, any
+REST dashboard request) could appear in a completely different zone's AI
+Investigator report, making it look like something happened in a home that
+didn't.
+
+**Fix (`coordinator.py`, `api.py`):**
+- `coordinator.py`: two new small wrapper methods, `_zone_scoped()` (async)
+  and `_zone_scoped_sync()` (for `@callback`-decorated sync targets), defined
+  next to `zone_label`/`_executor_job`. Rather than wrapping each of the ~13
+  gap-site method bodies individually (copy-pasting the 10c idiom 13 more
+  times — a DRY violation and unnecessarily large diff), every HA
+  registration call (`async_track_time_change(self.hass,
+  self._zone_scoped(self._async_morning_wakeup), ...)`, etc.) now wraps the
+  callback reference at the registration site in `async_setup()` /
+  `_subscribe_door_window_listeners()` / `_subscribe_occupancy_listeners()` —
+  zero edits to the target method bodies themselves. Nested closures
+  scheduled from inside an already-wrapped callback (e.g. `_debounce_expired`
+  inside `_async_door_window_changed`) inherit the zone label for free via
+  asyncio's context-capture-at-schedule-time semantics, with no separate wrap
+  needed. `_persist_shutdown_diagnostics()` is the one exception: it's shared
+  by two callers, only one of which is itself a registration site
+  (`async_shutdown()` is called directly by HA's config-entry-unload flow),
+  so its body is wrapped directly — the single choke point covering both
+  callers.
+- `api.py`: no equivalent centralized choke point exists (each view's
+  `get()`/`post()` is called directly by HA's aiohttp dispatch, with
+  coordinator resolution happening inside each handler) — introducing one
+  would mean restructuring ~20 view classes for a logging-attribution fix,
+  disproportionate to the task. Instead, each handler's body is wrapped in
+  `with log_capture.zone_scope(coordinator.zone_label):` immediately after
+  its existing `ambiguous_refused`/`not coordinator` guard clauses, mirroring
+  the same manual idiom 10c already established at 7 sites. The
+  `_schedule_reclassify_after_cancel()` shared helper's `_apply_after_delay`
+  closure (fires ~10s after the request that scheduled it, shared by the two
+  cancel-override views) is wrapped directly, the same shape as
+  `_persist_shutdown_diagnostics` above.
+
+**Verified, not wrapped:** `_async_send_briefing_scheduled` needs no wrap —
+it delegates directly into the already-wrapped `_async_send_briefing()`.
+`_schedule_retry` (inside `_async_update_data_impl()`, itself inside
+`_async_update_data()`'s own `zone_scope()` block) was verified rather than
+assumed correct: `tests/test_log_capture.py::test_call_later_captures_context_at_schedule_time_not_fire_time`
+confirms `asyncio`'s `call_later` snapshots `contextvars.copy_context()` at
+schedule time, not fire time, so a closure scheduled while a `zone_scope()`
+block is active still carries that zone's label when it fires later, even
+after the scheduling block has exited.
+
+**Test coverage:** `tests/test_log_capture.py` — unit tests for
+`_zone_scoped`/`_zone_scoped_sync` (zone tagging, `functools.wraps` identity
+preservation, exception propagation, the `entry_id`-unset → `None` fallback,
+and the `call_later` context-capture verification above), plus a three-zone
+concurrency test (`test_three_zone_concurrency_real_zone_plus_two_dev_test_zones`)
+extending 10c's two-zone test to the real-zone-plus-two-dev-zones shape this
+issue's own repro used. `tests/test_api.py::TestIssue911ZoneScopedHandlers`
+covers two representative handlers' real warning-logging code paths (not
+mirrored/injected) plus a guard-ordering regression test confirming the
+`ambiguous_refused`/`not coordinator` early returns exit before any
+`coordinator.zone_label` access.
 
 ### Why config-entry-per-zone is still right despite the longer gap list
 

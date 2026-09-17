@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.43] — 2026-09-17
+
+- Fix #912: a night where only the whole-house fan (or thermostat fan-only mode) ran no longer shows up in your activity report as hours of heating or cooling. Fan-only runtime is now tracked and reported separately from true heat/cool runtime, and the "thermal learning found no observations" warning no longer fires on fan-only-only nights.
+
 ## [0.7.41] — 2026-09-16
 
 - Fix #903: fixed a bug where, on Celsius-unit installs, a temporary gap in the weather forecast data could crash Climate Advisor entirely and stop all automation until a restart. Also fixed several related issues on Celsius-unit installs: the temperature Climate Advisor asked the thermostat to hold could occasionally be wrong after the fan turned on or off or after a rejected setpoint, and the dashboard's target-temperature and natural-ventilation cycling-range numbers were shown in the wrong unit.

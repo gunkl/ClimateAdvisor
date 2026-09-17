@@ -868,6 +868,11 @@ class DailyRecord:
     window_open_actual_time: str | None = None
     window_close_actual_time: str | None = None
     hvac_runtime_minutes: float = 0.0
+    # Issue #912: fan_only (thermostat or WHF-driven) runtime tracked separately from
+    # true compressor/burner runtime above — never blend the two into a number that
+    # implies heat/cool actually ran. Deliberately prefixed "thermostat_" to avoid
+    # confusion with automation.py's unrelated WHF fan_runtime_minutes counter.
+    thermostat_fan_only_runtime_minutes: float = 0.0
     occupancy_away_minutes: float = 0.0
     occupancy_mode: str = "home"
     door_window_pause_events: int = 0
@@ -2325,6 +2330,7 @@ class LearningEngine:
 
         # Average runtime
         avg_runtime = sum(r.get("hvac_runtime_minutes", 0) for r in recent) / len(recent)
+        avg_fan_only_runtime = sum(r.get("thermostat_fan_only_runtime_minutes", 0) for r in recent) / len(recent)
 
         # Comfort score (% of time in comfort range)
         total_day_minutes = len(recent) * 1440  # Minutes in a day
@@ -2337,6 +2343,7 @@ class LearningEngine:
             "window_compliance": window_compliance,
             "window_compliance_denominator": len(window_days),
             "avg_daily_hvac_runtime_minutes": avg_runtime,
+            "avg_daily_thermostat_fan_only_runtime_minutes": avg_fan_only_runtime,
             "comfort_score": comfort_score,
             "total_manual_overrides": sum(r.get("manual_overrides", 0) for r in recent),
             "pending_suggestions": len(self.generate_suggestions()),

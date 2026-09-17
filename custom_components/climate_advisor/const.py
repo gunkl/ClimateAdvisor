@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.41"
+VERSION = "0.7.43"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -474,6 +474,9 @@ ATTR_FORECAST_HIGH_TOMORROW = "forecast_high_tomorrow"
 ATTR_FORECAST_LOW_TOMORROW = "forecast_low_tomorrow"
 ATTR_HVAC_ACTION = "hvac_action"
 ATTR_HVAC_RUNTIME_TODAY = "hvac_runtime_today"
+# Issue #912: fan_only runtime tracked separately from true compressor/burner runtime
+# so it is never blended into a number that implies heat/cool actually ran.
+ATTR_THERMOSTAT_FAN_ONLY_RUNTIME_TODAY = "thermostat_fan_only_runtime_today"
 ATTR_CONTACT_STATUS = "contact_status"
 
 # Revisit delay — follow-up check after any HVAC action (seconds)

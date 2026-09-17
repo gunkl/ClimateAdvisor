@@ -733,6 +733,8 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 "=== LEARNING — COMPLIANCE SUMMARY ===",
                 f"  window_compliance:              {_fmt_window_compliance(compliance)}",
                 f"  avg_daily_hvac_runtime_minutes: {compliance.get('avg_daily_hvac_runtime_minutes', 'unknown')}",
+                "  avg_daily_thermostat_fan_only_runtime_minutes: "
+                f"{compliance.get('avg_daily_thermostat_fan_only_runtime_minutes', 'unknown')}",
                 f"  comfort_score:                  {compliance.get('comfort_score', 'unknown')}",
                 f"  total_manual_overrides:         {compliance.get('total_manual_overrides', 'unknown')}",
                 f"  pending_suggestions:            {compliance.get('pending_suggestions', 'unknown')}",
@@ -831,10 +833,11 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                         opened = rec.get("windows_physically_opened", rec.get("windows_opened", False))
                         compliance_val = ("opened" if opened else "not-opened") if recommended else "n/a"
                         runtime = rec.get("hvac_runtime_minutes", "?")
+                        fan_only_runtime = rec.get("thermostat_fan_only_runtime_minutes", "?")
                         overrides = rec.get("manual_overrides", "?")
                         section_lines.append(
                             f"  {date_val}: opened={opened} window_rec={compliance_val}"
-                            f" runtime={runtime}min overrides={overrides}"
+                            f" runtime={runtime}min fan_only_runtime={fan_only_runtime}min overrides={overrides}"
                         )
             else:
                 section_lines.append("  (no records)")
@@ -1438,13 +1441,14 @@ def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
             return ["", "## HISTORICAL DAILY SUMMARIES", "  (no past records available)"]
 
         header = f"## HISTORICAL DAILY SUMMARIES (last {days_back} days, excluding today)"
-        col_hdr = "  Date       | DayType | HVAC(min) | Overrides | Viol(min) | AvgIndoor | ObsHigh/Low"
-        sep = "  -----------|---------|-----------|-----------|-----------|-----------|------------"
+        col_hdr = "  Date       | DayType | HVAC(min) | FanOnly(min) | Overrides | Viol(min) | AvgIndoor | ObsHigh/Low"
+        sep = "  -----------|---------|-----------|--------------|-----------|-----------|-----------|------------"
         rows = []
         for r in sorted(past, key=lambda x: x.get("date", "")):
             date = r.get("date", "?")
             day_type = str(r.get("day_type", "?"))[:7]
             hvac_min = int(r.get("hvac_runtime_minutes", 0) or 0)
+            fan_only_min = int(r.get("thermostat_fan_only_runtime_minutes", 0) or 0)
             overrides = int(r.get("manual_overrides", 0) or 0)
             viol_min = int(r.get("comfort_violations_minutes", 0) or 0)
             avg_in = r.get("avg_indoor_temp")
@@ -1457,8 +1461,8 @@ def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
                 else "n/a"
             )
             row = (
-                f"  {date} | {day_type:<7} | {hvac_min:<9} | {overrides:<9}"
-                f" | {viol_min:<9} | {avg_in_str:<9} | {hl_str}"
+                f"  {date} | {day_type:<7} | {hvac_min:<9} | {fan_only_min:<12}"
+                f" | {overrides:<9} | {viol_min:<9} | {avg_in_str:<9} | {hl_str}"
             )
             rows.append(row)
 
@@ -2447,12 +2451,18 @@ def _render_invariant_violation(p: dict, unit: str) -> tuple[str, str]:
 
 def _render_thermal_learning_no_observations(p: dict, unit: str) -> tuple[str, str]:
     runtime = p.get("hvac_runtime_minutes", "")
+    fan_only_runtime = p.get("thermostat_fan_only_runtime_minutes", "")
     if runtime:
         label = f"Thermal learning: no observations despite {runtime} min HVAC runtime"
     else:
         label = "Thermal learning: no observations recorded"
+    settings_parts = []
+    if fan_only_runtime:
+        settings_parts.append(f"fan-only runtime: {fan_only_runtime} min (excluded)")
     session_count = p.get("thermal_session_count")
-    settings = f"sessions today: {session_count}" if session_count is not None else ""
+    if session_count is not None:
+        settings_parts.append(f"sessions today: {session_count}")
+    settings = ", ".join(settings_parts)
     return label, settings
 
 

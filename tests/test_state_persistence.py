@@ -188,6 +188,57 @@ class TestHVACRuntimeTracking:
         assert d["hvac_runtime_minutes"] == 123.5
 
 
+class TestIssue912ThermostatFanOnlyRuntimePersistence:
+    """Fan-only runtime (Issue #912) must survive an HA restart mid-session the
+    same way hvac_runtime_minutes already does — a fan-only run spanning a
+    restart must not silently lose its pre-restart minutes, and must never be
+    blended into hvac_runtime_minutes."""
+
+    def test_fan_only_runtime_accumulates_independently_of_hvac_runtime(self):
+        record = DailyRecord(date="2026-03-18", day_type="mild", trend_direction="stable")
+        record.thermostat_fan_only_runtime_minutes += 245.0
+        assert record.thermostat_fan_only_runtime_minutes == 245.0
+        assert record.hvac_runtime_minutes == 0.0
+
+    def test_fan_only_runtime_persists_in_record_dict(self):
+        record = DailyRecord(date="2026-03-18", day_type="mild", trend_direction="stable")
+        record.thermostat_fan_only_runtime_minutes = 245.0
+        d = asdict(record)
+        assert d["thermostat_fan_only_runtime_minutes"] == 245.0
+
+    def test_mid_fan_only_session_restart_persistence_round_trip(self, tmp_path: Path):
+        """Simulate an HA restart mid-fan_only-session: the pre-restart accumulated
+        thermostat_fan_only_runtime_minutes must survive a save/load cycle intact
+        and distinct from hvac_runtime_minutes, exactly as the existing full
+        state round-trip test already proves for heat/cool runtime."""
+        sp = StatePersistence(tmp_path)
+
+        record = DailyRecord(
+            date="2026-03-18",
+            day_type="mild",
+            trend_direction="stable",
+            hvac_runtime_minutes=0.0,
+            thermostat_fan_only_runtime_minutes=245.0,  # accumulated before restart
+        )
+        state = {
+            "date": "2026-03-18",
+            "last_saved": "2026-03-18T22:00:00",
+            "today_record": asdict(record),
+        }
+
+        sp.save(state)
+        loaded = sp.load()
+
+        assert loaded["today_record"]["thermostat_fan_only_runtime_minutes"] == 245.0
+        assert loaded["today_record"]["hvac_runtime_minutes"] == 0.0
+
+        # Reconstructing a DailyRecord from the loaded dict (as the coordinator
+        # does on restore) must preserve the value exactly.
+        restored = DailyRecord(**loaded["today_record"])
+        assert restored.thermostat_fan_only_runtime_minutes == 245.0
+        assert restored.hvac_runtime_minutes == 0.0
+
+
 class TestComfortViolationTracking:
     """Test comfort violation accumulation logic."""
 

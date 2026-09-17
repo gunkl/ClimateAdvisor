@@ -361,10 +361,12 @@ On match: logs an ERROR, calls `ae._cancel_grace_timers()`, and emits `"stuck_gr
 with `{"grace_end_time": ..., "reason": "grace_without_override"}`.
 
 **Renderer note:** `_render_stuck_grace_recovered()` (`ai_skills_context.py`) branches on the
-`reason` field — the pre-existing Issue #321 call site never sets it and keeps its original
-`"Stuck grace recovered (expired {grace_end})"` label; this call site renders `"Stuck grace
-recovered (no override was active to protect it)"` instead, since `grace_end` is misleadingly
-labeled "expired" when it's actually still in the future.
+`reason` field — the pre-existing Issue #321 call site never sets it and keeps its
+`"Grace period recovered (expired {grace_end})"` label; this call site renders `"Grace period
+recovered (no override was active)"` instead, since `grace_end` is misleadingly labeled
+"expired" when it's actually still in the future. (Issue #913 renamed both labels from
+"Stuck grace recovered..." to "Grace period recovered..." to drop the "stuck" jargon — the
+branching logic described above is unchanged.)
 
 **These two watchdog checks are mutually exclusive** — one requires `_grace_active=False`, the
 other requires `_grace_active=True` — and run independently in the same update cycle.

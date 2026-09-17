@@ -13,6 +13,7 @@ import functools
 import hashlib
 import logging
 import math
+import statistics
 from collections.abc import Callable, Container
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -658,6 +659,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_temp_history: list[tuple[str, float]] = []
         self._indoor_temp_history: list[tuple[str, float]] = []
         self._hourly_forecast_temps: list[dict] = []
+        # Full multi-day daily forecast (Issue #906) — cached by _get_forecast()
+        # for chart-only forecast extension via _build_extended_hourly_forecast().
+        self._daily_forecast_full: list[dict] = []
         self._last_predicted_indoor: list[dict] = []
         # Issue #874: retry-style escalation for hourly-forecast-interpolation failures.
         # Streak resets on success; not persisted, so it (and the confirmed-unsupported
@@ -3598,6 +3602,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         current_outdoor = self._get_outdoor_temp(attrs)
         current_indoor = self._get_indoor_temp()
         forecast = await self._get_forecast_data()
+        self._daily_forecast_full = forecast
 
         # Extract today and tomorrow from forecast by matching dates.
         # HA daily forecasts vary by provider: some include today, some start
@@ -4314,7 +4319,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         return _compute_pre_cool_trigger_time_pure(self._current_classification, self.config, dt_util.now())
 
-    def _build_target_band_for(self, now: datetime, thermal_model: dict | None) -> list[dict]:
+    def _build_target_band_for(
+        self,
+        now: datetime,
+        thermal_model: dict | None,
+        hourly_forecast_override: list[dict] | None = None,
+    ) -> list[dict]:
         """Compute the target-band schedule for *now* — the single shared implementation
         behind both ``get_chart_data()``'s own on-demand computation (which supplies its
         own live ``now`` and freshly-fetched ``thermal_model``) and the once-per-cycle
@@ -4327,7 +4337,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         this block anywhere in the module.
         """
         _band_timestamps = []
-        for _fc_entry in self._hourly_forecast_temps or []:
+        for _fc_entry in (
+            hourly_forecast_override if hourly_forecast_override is not None else self._hourly_forecast_temps
+        ) or []:
             _dt_str = _fc_entry.get("datetime") or _fc_entry.get("time")
             if not _dt_str:
                 continue
@@ -9684,7 +9696,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 for e in _extract_historical_target_band(log_entries)
             ]
         else:
-            _raw_band = self._build_target_band_for(now, thermal_model)
+            # Issue #906: extend the real hourly forecast with synthetic days derived
+            # from the daily forecast so the chart's Target Band/Predicted Indoor/
+            # Forecast Outdoor/activity bars aren't stuck at the weather integration's
+            # short hourly horizon (met.no: 48h) — see _build_extended_hourly_forecast()
+            # for the synthesis details and its own INFO-level summary logging.
+            _extended_forecast = _build_extended_hourly_forecast(
+                self._hourly_forecast_temps, getattr(self, "_daily_forecast_full", None), now, unit
+            )
+            _raw_band = self._build_target_band_for(now, thermal_model, hourly_forecast_override=_extended_forecast)
             _conv_band = [{"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _raw_band]
 
         # Historical views suppress forward-looking series (prediction + forecast).
@@ -9711,7 +9731,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # converted a second time via _conv(e["target"]) below — a real double-conversion
             # for Celsius-display users, invisible on an all-Fahrenheit install.
             _raw_predicted_indoor = _build_predicted_indoor_future(
-                self._hourly_forecast_temps,
+                _extended_forecast,
                 self.config,
                 now,
                 current_indoor_temp=self._get_indoor_temp(),
@@ -9722,7 +9742,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             predicted_indoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_predicted_indoor]
             _raw_forecast_outdoor = _build_future_forecast_outdoor(
-                self._hourly_forecast_temps,
+                _extended_forecast,
                 classification=self._current_classification,
             )
             forecast_outdoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_forecast_outdoor]
@@ -9762,7 +9782,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _regime_by_ts: dict[str, dict] = {}
         else:
             _ae = getattr(self, "automation_engine", None)
-            _day_modes = _compute_day_hvac_modes(self._hourly_forecast_temps, now, self._current_classification)
+            _day_modes = _compute_day_hvac_modes(_extended_forecast, now, self._current_classification)
             _comfort_cool_raw = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             _ceiling_threshold = _ae._ceiling_threshold(_comfort_cool_raw) if _ae else None
             _regime_by_ts = _walk_forward_regime(
@@ -10922,25 +10942,23 @@ def _build_predicted_indoor_future(
     if not hourly_forecast:
         if classification is not None:
             _LOGGER.debug("_build_predicted_indoor_future: no hourly_forecast — using cosine fallback")
-            # Build synthetic hourly list from cosine model so the function can proceed normally
+            # Build synthetic hourly list from cosine model so the function can proceed
+            # normally. Each hour is anchored to today's calendar date unless that hour
+            # has already passed, in which case it rolls to tomorrow — giving a rolling
+            # ~24h window starting from "now".
             now_local = dt_util.as_local(dt_util.now())
-            cosine = _build_outdoor_curve(
-                high=classification.today_high,
-                low=classification.today_low,
-                hourly_forecast=None,
+            today_entries = _synthesize_hourly_day(
+                classification.today_high, classification.today_low, now_local.date()
+            )
+            tomorrow_entries = _synthesize_hourly_day(
+                classification.today_high,
+                classification.today_low,
+                now_local.date() + timedelta(days=1),
             )
             synthetic = []
-            for entry in cosine:
-                h = entry["hour"]
-                future_dt = now_local.replace(hour=h, minute=0, second=0, microsecond=0)
-                if future_dt <= now_local:
-                    future_dt += timedelta(days=1)
-                synthetic.append(
-                    {
-                        "datetime": future_dt.isoformat(),
-                        "temperature": entry["temp"],
-                    }
-                )
+            for today_entry, tomorrow_entry in zip(today_entries, tomorrow_entries, strict=True):
+                future_dt = datetime.fromisoformat(today_entry["datetime"])
+                synthetic.append(tomorrow_entry if future_dt <= now_local else today_entry)
             hourly_forecast = synthetic
         else:
             _LOGGER.debug("_build_predicted_indoor_future: no hourly_forecast — returning empty")
@@ -11389,6 +11407,51 @@ def _build_outdoor_curve(
     return result
 
 
+def _synthesize_hourly_day(high: float, low: float, day_date: date, hours: range | None = None) -> list[dict]:
+    """Build synthetic hourly forecast entries for a specific calendar date.
+
+    Uses the sinusoidal cosine outdoor-temperature model (peak 3 PM, trough 3 AM)
+    to shape the day, scaled to the given ``high``/``low``. Extracted from the
+    former inline cosine-fallback block in ``_build_predicted_indoor_future()``
+    (Issue #906) so it can be reused both for that fallback (today/tomorrow) and
+    for chart forecast extension beyond met.no's 48-hour hourly horizon
+    (arbitrary future ``day_date``, potentially many days out).
+
+    Each hourly timestamp is built via
+    ``dt_util.as_local(datetime.combine(day_date, time(hour=h)).replace(tzinfo=None))``
+    — the same DST-safe pattern already used elsewhere in this file for
+    constructing a datetime on an arbitrary future date (see
+    ``compute_pre_cool_trigger_time()``). This re-derives the correct UTC offset
+    per date from the timezone database, so a synthetic day that falls on the far
+    side of a DST transition from "now" does not silently drift by an hour —
+    unlike timedelta arithmetic on an already-localized datetime, which reuses
+    the offset computed for a different date.
+
+    ``hours``, when given, restricts synthesis to that subset of hours (e.g.
+    ``range(11, 24)`` to fill only the remainder of a partially-real day at the
+    48h-horizon seam — Issue #906 verification round, Fix 2). Defaults to all
+    24 hours of ``day_date``.
+
+    Returns list of {"datetime": ISO_str, "temperature": float} for the
+    requested hours of ``day_date``.
+    """
+    cosine = _cosine_outdoor_curve(high, low)
+    wanted_hours = set(hours) if hours is not None else None
+    result = []
+    for entry in cosine:
+        h = entry["hour"]
+        if wanted_hours is not None and h not in wanted_hours:
+            continue
+        hour_dt = dt_util.as_local(datetime.combine(day_date, time(hour=h)).replace(tzinfo=None))
+        result.append(
+            {
+                "datetime": hour_dt.isoformat(),
+                "temperature": entry["temp"],
+            }
+        )
+    return result
+
+
 def _parse_forecast_entries(hourly_forecast: list[dict] | None) -> list[tuple[datetime, float]]:
     """Extract raw (datetime, temperature) pairs from hourly forecast entries.
 
@@ -11415,6 +11478,218 @@ def _parse_forecast_entries(hourly_forecast: list[dict] | None) -> list[tuple[da
         except (ValueError, TypeError):
             continue
     return result
+
+
+_DAILY_FORECAST_MIN_SPACING_HOURS: Final = 20
+
+
+def _build_extended_hourly_forecast(
+    hourly_forecast: list[dict] | None,
+    daily_forecast: list[dict] | None,
+    now: datetime,
+    unit: str,
+) -> list[dict]:
+    """Extend a real hourly forecast with synthetic days derived from the daily forecast.
+
+    Chart-only helper (Issue #906) — the weather integration's hourly forecast
+    (met.no: 48h) is far shorter than its daily forecast (met.no: 6 days), which
+    left the chart's Target Band/Predicted Indoor/Forecast Outdoor/activity bars
+    stuck at ~2 days regardless of the selected chart range. This function builds
+    a longer list for chart rendering only — callers must NOT assign the result
+    back onto ``self._hourly_forecast_temps`` or the automation engine's copy;
+    real HVAC control must never see low-confidence multi-day extrapolation.
+
+    For each day covered by ``daily_forecast`` beyond the last local calendar
+    date covered by ``hourly_forecast``, synthesizes 24 hourly entries via
+    ``_synthesize_hourly_day()`` from that day's forecast high/low, tagged
+    ``"synthetic": True`` (an additive key — existing parsers only read
+    ``"datetime"``/``"temperature"`` so this is safe to add).
+
+    Timezone handling (see Issue #190 — do not swap these two conventions):
+    - ``hourly_forecast`` entries are genuine specific-moment timestamps, so
+      their calendar date is found via ``dt_util.as_local(dt).date()``,
+      matching ``_compute_day_hvac_modes()``'s existing convention.
+    - ``daily_forecast`` entries are day-labels whose UTC-midnight timestamp
+      encodes the provider's intended calendar day in the date component
+      itself. Their date is read via the raw ``.date()`` on the parsed
+      datetime — explicitly NOT ``dt_util.as_local()`` — exactly as
+      ``_get_forecast()`` already does. Converting via ``as_local()`` here
+      would shift the date backward a day in negative-UTC-offset zones and
+      silently reintroduce Issue #190.
+
+    Fails safe (returns ``hourly_forecast`` unchanged) when ``daily_forecast``
+    doesn't look day-spaced — e.g. the deprecated ``forecast`` attribute
+    fallback, which isn't guaranteed to be day-spaced.
+
+    Partial-day seam fill (Issue #906 verification round, Fix 2): met.no's 48h
+    hourly window ends mid-day, not at a day boundary, so the LAST calendar day
+    covered by real hourly data is usually only partially covered. When
+    ``daily_forecast`` has a raw-date-matched entry for that same date, the
+    hours strictly after the last real hourly timestamp are filled with
+    synthetic entries too (tagged ``"synthetic": True``), closing the seam
+    before full synthetic days begin. If no daily-forecast entry exists for
+    that exact date, the boundary is left as-is — there's no high/low to
+    extrapolate a partial fill from.
+
+    Entries with an unparseable or missing ``datetime``/``time`` field (Issue
+    #906 verification round, Fix 1) are dropped from the merge entirely rather
+    than given a sentinel timestamp — a sentinel is not safely comparable
+    against the aware datetimes produced elsewhere in this merge.
+
+    Does not mutate either input list.
+    """
+    raw_real_entries = list(hourly_forecast) if hourly_forecast else []
+
+    # Fix 1(a): drop real entries whose datetime can't be parsed, instead of
+    # letting them reach the sort key with a sentinel value later. Mirrors
+    # _parse_forecast_entries()'s existing skip-on-failure behavior.
+    real_entries: list[dict] = []
+    for entry in raw_real_entries:
+        dt_str = entry.get("datetime") or entry.get("time")
+        if not dt_str:
+            continue
+        try:
+            datetime.fromisoformat(dt_str)
+        except (ValueError, TypeError):
+            continue
+        real_entries.append(entry)
+
+    if not daily_forecast:
+        return real_entries
+
+    # Parse daily entries as (raw_datetime, entry) pairs — raw date, no as_local().
+    daily_parsed: list[tuple[datetime, dict]] = []
+    for entry in daily_forecast:
+        dt_str = entry.get("datetime")
+        if not dt_str:
+            continue
+        try:
+            dt_obj = datetime.fromisoformat(dt_str)
+        except (ValueError, TypeError):
+            continue
+        daily_parsed.append((dt_obj, entry))
+
+    if len(daily_parsed) < 2:
+        _LOGGER.debug(
+            "Daily forecast has too few entries (%d) to establish day-spacing — skipping chart extension",
+            len(daily_parsed),
+        )
+        return real_entries
+
+    daily_parsed.sort(key=lambda pair: pair[0])
+    gaps_hours = [(b[0] - a[0]).total_seconds() / 3600.0 for a, b in zip(daily_parsed, daily_parsed[1:], strict=False)]
+    median_gap = statistics.median(gaps_hours)
+    if median_gap < _DAILY_FORECAST_MIN_SPACING_HOURS:
+        _LOGGER.debug(
+            "Daily forecast spacing too tight for day-shaped data (median gap %.1fh) — skipping chart extension",
+            median_gap,
+        )
+        return real_entries
+
+    # Last LOCAL calendar date (and instant) covered by real hourly data.
+    last_real_local_date: date | None = None
+    last_real_local_dt: datetime | None = None
+    for dt_obj, _temp in _parse_forecast_entries(hourly_forecast):
+        local_dt = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
+        local_date = local_dt.date()
+        if last_real_local_date is None or local_date > last_real_local_date:
+            last_real_local_date = local_date
+            last_real_local_dt = local_dt
+        elif local_date == last_real_local_date and (last_real_local_dt is None or local_dt > last_real_local_dt):
+            last_real_local_dt = local_dt
+
+    if last_real_local_date is None:
+        # No real hourly data at all — anchor to "now"'s local date so we extend
+        # from today forward rather than synthesizing already-past daily-forecast days.
+        now_local = dt_util.as_local(now) if now.tzinfo else now
+        last_real_local_date = now_local.date() - timedelta(days=1)
+
+    def _daily_high_low(entry: dict) -> tuple[float, float] | None:
+        high_raw = entry.get("temperature", entry.get("tempHigh"))
+        low_raw = entry.get("templow", entry.get("tempLow"))
+        if high_raw is None or low_raw is None:
+            return None
+        return to_fahrenheit(high_raw, unit), to_fahrenheit(low_raw, unit)
+
+    synthetic_entries: list[dict] = []
+    synthetic_days = 0
+
+    # Fix 2: partial-day fill for the boundary day itself, if the daily
+    # forecast has a raw-date match for it — closes the real ~14h hole that
+    # would otherwise sit between the last real hourly entry and the first
+    # full synthetic day.
+    if last_real_local_dt is not None:
+        for dt_obj, entry in daily_parsed:
+            if dt_obj.date() != last_real_local_date:
+                continue
+            hl = _daily_high_low(entry)
+            if hl is None:
+                _LOGGER.debug(
+                    "_build_extended_hourly_forecast: skipping partial-day fill for %s — missing high/low",
+                    last_real_local_date,
+                )
+                break
+            remaining_hours = range(last_real_local_dt.hour + 1, 24)
+            if remaining_hours:
+                high_f, low_f = hl
+                partial_entries = _synthesize_hourly_day(high_f, low_f, last_real_local_date, hours=remaining_hours)
+                for day_entry in partial_entries:
+                    day_entry["synthetic"] = True
+                synthetic_entries.extend(partial_entries)
+            break
+
+    for dt_obj, entry in daily_parsed:
+        # Raw date — API date intent, no tz conversion (Issue #190 convention).
+        entry_date = dt_obj.date()
+        if last_real_local_date is not None and entry_date <= last_real_local_date:
+            continue
+
+        hl = _daily_high_low(entry)
+        if hl is None:
+            _LOGGER.debug(
+                "_build_extended_hourly_forecast: skipping %s — missing high/low",
+                entry_date,
+            )
+            continue
+
+        high_f, low_f = hl
+        day_entries = _synthesize_hourly_day(high_f, low_f, entry_date)
+        for day_entry in day_entries:
+            day_entry["synthetic"] = True
+        synthetic_entries.extend(day_entries)
+        synthetic_days += 1
+
+    if not synthetic_entries:
+        return real_entries
+
+    combined = real_entries + synthetic_entries
+
+    def _sort_key(entry: dict) -> datetime:
+        # Fix 1(b): normalize every remaining entry's sort key to a mutually
+        # comparable AWARE local datetime — real entries may be naive or aware
+        # depending on the weather integration, synthetic entries are always
+        # aware (via dt_util.as_local() in _synthesize_hourly_day()). Mixing
+        # naive and aware datetimes in a sort key raises TypeError; both
+        # naive and aware inputs are normalized via dt_util.as_local() here
+        # (HA's own convention: a naive datetime is treated as already being
+        # in local time), which is idempotent for already-aware input. This
+        # only affects the transient sort key, not the stored "datetime"
+        # string values in the returned entries.
+        dt_str = entry.get("datetime") or entry.get("time")
+        dt_obj = datetime.fromisoformat(dt_str)
+        return dt_util.as_local(dt_obj)
+
+    combined.sort(key=_sort_key)
+
+    _LOGGER.info(
+        "Chart forecast extended: %d real hourly entries + %d synthetic entries from daily forecast "
+        "(hourly horizon: %s)",
+        len(real_entries),
+        len(synthetic_entries),
+        last_real_local_date.isoformat() if last_real_local_date else "none",
+    )
+
+    return combined
 
 
 def _build_future_forecast_outdoor(

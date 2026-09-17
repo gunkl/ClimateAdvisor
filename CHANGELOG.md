@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.40] — 2026-09-16
+
+- Feat #906: the Temperature Forecast chart's forecast curve, target band, and activity bars now extend to your weather provider's full multi-day forecast (e.g. ~6 days for met.no) instead of stopping after ~2 days, regardless of which range button you select.
+
 ## [0.7.39] — 2026-09-16
 
 - Feat #899: Time-of-Use pre-conditioning now works while Away or Vacation, not just Home/Guest. Instead of banking to the far setback edge (wasteful for an empty home), it predicts how many degrees the house will drift during the high-cost window from the home's own passive thermal rate, then splits that (capped) amount in half: half becomes a precool/preheat depth before the window starts, half becomes a temporary widening of the setback edge for the window's duration. Precool/preheat stops precisely when the window begins (not up to 30 minutes late), with a log entry explaining whether the target was reached in time.

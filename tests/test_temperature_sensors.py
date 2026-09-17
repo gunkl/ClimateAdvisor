@@ -438,6 +438,13 @@ class TestGetChartDataUsesChartLog:
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 14, 0, 0)
+            # Issue #906: get_chart_data() now threads a synthesized extended-forecast
+            # list (via _build_extended_hourly_forecast()) through _build_predicted_indoor_future()/
+            # _compute_day_hvac_modes(), which can invoke dt_util.as_local() on real datetimes.
+            # A bare MagicMock's auto-generated as_local() would return another MagicMock and
+            # break downstream .date() calls, so pin it to identity per CLAUDE.md's documented
+            # dt_util.as_local mocking convention for this stub environment.
+            mock_dt.as_local.side_effect = lambda x: x
             result = coord.get_chart_data("7d")
 
         actual_indoor = result["actual_indoor"]
@@ -453,6 +460,13 @@ class TestGetChartDataUsesChartLog:
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 14, 0, 0)
+            # Issue #906: get_chart_data() now threads a synthesized extended-forecast
+            # list (via _build_extended_hourly_forecast()) through _build_predicted_indoor_future()/
+            # _compute_day_hvac_modes(), which can invoke dt_util.as_local() on real datetimes.
+            # A bare MagicMock's auto-generated as_local() would return another MagicMock and
+            # break downstream .date() calls, so pin it to identity per CLAUDE.md's documented
+            # dt_util.as_local mocking convention for this stub environment.
+            mock_dt.as_local.side_effect = lambda x: x
             result = coord.get_chart_data("7d")
 
         actual_outdoor = result["actual_outdoor"]
@@ -468,6 +482,13 @@ class TestGetChartDataUsesChartLog:
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 14, 0, 0)
+            # Issue #906: get_chart_data() now threads a synthesized extended-forecast
+            # list (via _build_extended_hourly_forecast()) through _build_predicted_indoor_future()/
+            # _compute_day_hvac_modes(), which can invoke dt_util.as_local() on real datetimes.
+            # A bare MagicMock's auto-generated as_local() would return another MagicMock and
+            # break downstream .date() calls, so pin it to identity per CLAUDE.md's documented
+            # dt_util.as_local mocking convention for this stub environment.
+            mock_dt.as_local.side_effect = lambda x: x
             result = coord.get_chart_data("1y")
 
         actual_indoor = result["actual_indoor"]
@@ -503,6 +524,13 @@ class TestGetChartDataUsesChartLog:
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 14, 0, 0)
+            # Issue #906: get_chart_data() now threads a synthesized extended-forecast
+            # list (via _build_extended_hourly_forecast()) through _build_predicted_indoor_future()/
+            # _compute_day_hvac_modes(), which can invoke dt_util.as_local() on real datetimes.
+            # A bare MagicMock's auto-generated as_local() would return another MagicMock and
+            # break downstream .date() calls, so pin it to identity per CLAUDE.md's documented
+            # dt_util.as_local mocking convention for this stub environment.
+            mock_dt.as_local.side_effect = lambda x: x
             result = coord.get_chart_data("7d")
 
         actual_indoor = result["actual_indoor"]
@@ -525,6 +553,13 @@ class TestGetChartDataUsesChartLog:
         )
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 14, 0, 0)
+            # Issue #906: get_chart_data() now threads a synthesized extended-forecast
+            # list (via _build_extended_hourly_forecast()) through _build_predicted_indoor_future()/
+            # _compute_day_hvac_modes(), which can invoke dt_util.as_local() on real datetimes.
+            # A bare MagicMock's auto-generated as_local() would return another MagicMock and
+            # break downstream .date() calls, so pin it to identity per CLAUDE.md's documented
+            # dt_util.as_local mocking convention for this stub environment.
+            mock_dt.as_local.side_effect = lambda x: x
             result = coord.get_chart_data("24h")
 
         # Either source is acceptable for 24h; just verify the arrays are present

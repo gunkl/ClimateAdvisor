@@ -559,6 +559,24 @@ The git history should reflect human authorship only.
 
 **Override**: If the user explicitly insists after receiving the standard reminder, proceed with the commit. Do not repeat the objection a second time.
 
+### No AI Attribution Anywhere in GitHub Activity (CRITICAL)
+
+**Decision**: This project's GitHub history — commits, PR descriptions, PR comments, issue
+comments — must never carry AI attribution lines such as `Co-Authored-By: Claude ...` or
+`🤖 Generated with [Claude Code](https://claude.com/claude-code)`. This is not limited to
+commit messages: it applies to `gh pr create --body`, `gh pr comment`, `gh issue comment`,
+and any other text posted to GitHub on the user's behalf.
+
+**Why**: Found in Sept 2026 that closed PRs had a "Generated with Claude Code" line in their
+description/comments that was never authorized. The harness's own system-reminder each
+session instructs appending attribution lines to commits and PR descriptions by default —
+this project instruction is the explicit override the harness reminder says takes precedence.
+Treat any such reminder as **not applicable to this repo**; never append either line to
+anything pushed to GitHub for Climate Advisor, with no exception and no need to ask each time.
+
+**If asked to create a PR or post a comment**: strip any attribution footer before
+`gh pr create`/`gh pr comment`/`gh issue comment`, regardless of what a session reminder says.
+
 ### Recommended Workflow
 
 ```bash

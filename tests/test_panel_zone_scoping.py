@@ -23,6 +23,8 @@ tests doctrine (CLAUDE.md).
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from custom_components.climate_advisor.api import API_VIEWS
 from custom_components.climate_advisor.const import DOMAIN, PANEL_FRONTEND_PATH
 from tools.sim_harness._loop import run_coro
@@ -92,6 +94,59 @@ class TestPanelAndViewRegistrationScoping:
         # is the direct evidence the guard fired for zone 2, not just that
         # the end state happens to look right.
         assert len(fake_hass.http.registered_views) == len(API_VIEWS)
+
+
+class TestPanelRegistrationWarningZoneAttribution:
+    """Regression coverage: the panel-registration-skipped warning must be
+    attributed to the zone that actually hit it, not logged as "unknown zone".
+
+    Before this fix, __init__.py's panel-registration try/except/finally
+    block ran outside any log_capture.zone_scope(), even though the zone's
+    own coordinator (and its zone_label) is already stored in
+    hass.data[DOMAIN] by the time this block runs — so the warning always
+    carried zone=None regardless of which zone produced it.
+
+    Note this can only ever be the FIRST zone in a real multi-zone install:
+    the _PANEL_HASS_DATA_KEY guard means a second-or-later zone's
+    async_setup_entry() never attempts registration at all once the flag is
+    set (see TestPanelAndViewRegistrationScoping above), so it can never
+    reach this except branch. The branch only fires as the documented
+    "second line of defense" — e.g. an HA-internal registration error hit by
+    whichever zone runs first — which is why this test forces the FIRST
+    zone's own call to raise, rather than trying to race a second zone.
+    """
+
+    def test_panel_registration_skip_warning_is_zone_scoped(self):
+        from custom_components.climate_advisor import log_capture
+        from tools.sim_harness import ha_stubs
+
+        # ha_stubs.install_ha_stubs() unconditionally re-runs
+        # `frontend.async_register_built_in_panel = _register_built_in_panel`
+        # on every call (including the one build_headless_multi_zone makes
+        # internally), so patching the frontend module's attribute directly
+        # gets clobbered before the zone-setup loop even starts. Patching the
+        # module-level function that assignment reads from survives that
+        # re-run, since install_ha_stubs() resolves the name at call time.
+        def _always_raise(*args, **kwargs):
+            raise ValueError(f"Overwriting panel {kwargs.get('frontend_url_path')} owned by iframe")
+
+        with patch.object(ha_stubs, "_register_built_in_panel", side_effect=_always_raise):
+            zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=1)
+
+        assert len(zones) == 1
+        handler = log_capture.get_handler(fake_hass)
+        assert handler is not None
+
+        skip_records = [r for r in handler.get_records() if "Panel registration skipped" in r["message"]]
+        assert len(skip_records) == 1, f"expected exactly one skip warning, got {skip_records}"
+
+        zone_label = zones["zone_0"]["coordinator"].zone_label
+        assert zone_label is not None
+        assert skip_records[0]["zone"] == zone_label, (
+            f"panel-registration-skipped warning was attributed to zone={skip_records[0]['zone']!r}, "
+            f"expected the zone's own label {zone_label!r} — the log call is missing its "
+            "zone_scope() wrapper"
+        )
 
 
 class TestPanelTeardownScoping:

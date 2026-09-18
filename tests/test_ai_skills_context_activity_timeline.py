@@ -12,13 +12,21 @@ import asyncio
 import datetime
 from unittest.mock import MagicMock, patch
 
+import custom_components.climate_advisor.ai_skills_context as _ctx_mod
 from custom_components.climate_advisor.ai_skills_context import (
+    _group_timeline_sessions,
+    build_activity_sessions_context,
     build_activity_timeline_context,
     build_event_log_context,
     get_provider_registry,
 )
 
 _NOW = datetime.datetime(2026, 7, 10, 14, 0, 0, tzinfo=datetime.UTC)
+
+# Patch dt_util.as_local to be identity so real-datetime arithmetic in
+# _group_timeline_sessions() uses actual datetimes rather than MagicMock objects
+# (same pattern as test_activity_renderers.py).
+_as_local_identity = patch.object(_ctx_mod.dt_util, "as_local", side_effect=lambda x: x)
 
 
 def _make_coordinator(event_log=None, config=None):
@@ -45,7 +53,7 @@ class TestBuildActivityTimelineContext:
 
     def test_hours_kwarg_is_clamped(self):
         coord = _make_coordinator()
-        # Should not raise even with an out-of-range value; clamped to [1, 720].
+        # Should not raise even with an out-of-range value; clamped to [1, 168].
         with patch("custom_components.climate_advisor.ai_skills_context.dt_util.now", return_value=_NOW):
             ctx = asyncio.run(build_activity_timeline_context(None, coord, hours=99999))
         assert "=== ACTIVITY TIMELINE" in ctx
@@ -54,6 +62,103 @@ class TestBuildActivityTimelineContext:
         registry = get_provider_registry()
         names = [p.name for p in registry.select()]
         assert "activity_timeline" in names
+
+
+class TestGroupTimelineSessions:
+    """Tests for _group_timeline_sessions() and build_activity_sessions_context()
+    (Issue #925) — the deterministic input for the LLM-authored ACTIVITY SUMMARY."""
+
+    def test_empty_event_log_returns_no_sessions(self):
+        sessions, limited = _group_timeline_sessions([], {"temp_unit": "fahrenheit"}, 24, _NOW)
+        assert sessions == []
+        assert limited is False
+
+    def test_burst_of_different_types_collapses_into_one_session(self):
+        """A tight burst of different event types within a few minutes must produce
+        ONE session, not one entry per event — the direct regression test for the
+        "multiple lines per same minute" complaint."""
+        base = _NOW
+        event_log = [
+            {
+                "type": "comfort_band_applied",
+                "time": base,
+                "mode": "cool",
+                "floor": 64,
+                "ceiling": 72,
+                "active": "ceiling",
+            },
+            {"type": "fan_activated", "time": base + datetime.timedelta(minutes=1), "reason": "natural ventilation"},
+            {"type": "fan_deactivated", "time": base + datetime.timedelta(minutes=3)},
+            {"type": "classification_applied", "time": base + datetime.timedelta(minutes=4), "day_type": "warm"},
+        ]
+        with _as_local_identity:
+            sessions, _limited = _group_timeline_sessions(
+                event_log, {"temp_unit": "fahrenheit"}, 24, base + datetime.timedelta(minutes=10)
+            )
+        assert len(sessions) == 1
+        assert sessions[0].event_count == 4
+
+    def test_events_separated_by_a_quiet_gap_stay_separate(self):
+        base = _NOW
+        event_log = [
+            {"type": "fan_activated", "time": base},
+            {"type": "fan_deactivated", "time": base + datetime.timedelta(minutes=2)},
+            # 40 minutes of quiet -- exceeds _SESSION_GAP_MINUTES (25)
+            {"type": "override_detected", "time": base + datetime.timedelta(minutes=42)},
+        ]
+        with _as_local_identity:
+            sessions, _limited = _group_timeline_sessions(
+                event_log, {"temp_unit": "fahrenheit"}, 24, base + datetime.timedelta(minutes=50)
+            )
+        assert len(sessions) == 2
+
+    def test_session_event_lines_exclude_settings_text_jargon(self):
+        """Session event_lines carry only ev_text (already fairly plain), never the
+        jargon-dense settings_text (e.g. "setpoint: 72°F Cool (64°F Heat)")."""
+        event_log = [
+            {
+                "type": "comfort_band_applied",
+                "time": _NOW,
+                "mode": "cool",
+                "floor": 64,
+                "ceiling": 72,
+                "active": "ceiling",
+            },
+        ]
+        sessions, _limited = _group_timeline_sessions(
+            event_log, {"temp_unit": "fahrenheit"}, 24, _NOW + datetime.timedelta(minutes=1)
+        )
+        assert len(sessions) == 1
+        combined = " ".join(sessions[0].event_lines).lower()
+        assert "setpoint:" not in combined
+
+    def test_registered_in_provider_registry(self):
+        registry = get_provider_registry()
+        names = [p.name for p in registry.select()]
+        assert "activity_sessions" in names
+
+
+class TestBuildActivitySessionsContext:
+    def test_empty_event_log_produces_no_sessions_note(self):
+        coord = _make_coordinator()
+        with patch("custom_components.climate_advisor.ai_skills_context.dt_util.now", return_value=_NOW):
+            ctx = asyncio.run(build_activity_sessions_context(None, coord))
+        assert "=== ACTIVITY SESSIONS" in ctx
+        assert "No activity in this window" in ctx
+
+    def test_sessions_render_with_time_range_and_events(self):
+        event_log = [
+            {"type": "fan_activated", "time": _NOW - datetime.timedelta(minutes=2), "reason": "natural ventilation"},
+            {"type": "fan_deactivated", "time": _NOW},
+        ]
+        coord = _make_coordinator(event_log=event_log)
+        with (
+            patch("custom_components.climate_advisor.ai_skills_context.dt_util.now", return_value=_NOW),
+            _as_local_identity,
+        ):
+            ctx = asyncio.run(build_activity_sessions_context(None, coord, hours=24))
+        assert "SESSION 1:" in ctx
+        assert "setpoint:" not in ctx.lower()
 
 
 class TestBuildEventLogContext:

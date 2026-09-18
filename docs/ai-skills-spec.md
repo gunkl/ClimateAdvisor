@@ -197,7 +197,7 @@ A thin orchestrator: calls `ContextProviderRegistry.select(focus, narration=...)
 for the narration path, by a flat `priority <= 1` cutoff, then concatenates each provider's
 output. Each provider is wrapped in its own `try/except`. If a provider fails, its section is
 replaced with `"  unavailable"` and assembly continues — a failure in one provider never
-aborts the others. As of Issue #578 there are 15 registered providers; treat the
+aborts the others. As of Issue #925 there are 16 registered providers; treat the
 registration list in `ai_skills_context.py` (search `_PROVIDER_REGISTRY.register`) as
 authoritative if this table and the code ever disagree.
 
@@ -230,6 +230,7 @@ available by default. The `Narration`/`Default (non-deep)` column below reflects
 | `thermal_pipeline` | 1 | ✅ | `THERMAL OBSERVATION PIPELINE` | Per-type committed/rejected counts, top reason codes, pending observations, `NEVER LEARNED` / `*** PIPELINE FAILURE ***` markers |
 | `event_log` | 1 | ✅ | `EVENT LOG` + `SYSTEM LOG RECORDS` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log` filtered to last N hours via `filter_events_by_window()` (`kwargs.get("hours", 168)`, clamped 1–168 as of Issue #920 — matches the real `EVENT_LOG_MAX_AGE_HOURS` retention ceiling; the old 1–720 clamp was dead since retention never held more than 168h), then budget-limited to 200 entries + `log_capture` ring buffer; see [Event Log Provider](#event-log-provider) |
 | `activity_timeline` | 1 | ✅ | `ACTIVITY TIMELINE` | Deterministic markdown event timeline table — ported from the retired activity context (Issue #563); never LLM-authored. Also clamped to 1–168h (Issue #920, was 1–720) |
+| `activity_sessions` | 1 | ✅ | `ACTIVITY SESSIONS (for Activity Summary only)` | Deterministic gap-bounded session grouping (Issue #925) — the LLM's sole input for the `## ACTIVITY SUMMARY` output section; deliberately separate from `ACTIVITY TIMELINE` above (which stays raw/technical for the rest of the report). See [Activity Sessions Provider](#activity-sessions-provider) |
 | `override_details` | 1 | ✅ | `MANUAL OVERRIDES TODAY` + `FAN OWNERSHIP HISTORY` | Override count/history/current-duration, Issue #321 stuck-grace critical warning, fan ownership transitions — ported (Issue #563) |
 | `config` | 1 (was 2, Issue #920) | ✅ | `CONFIGURATION` | See [Config Provider](#config-provider) |
 | `daily_summaries` | 2 | ❌ (opt in via `deep=True`) | `HISTORICAL DAILY SUMMARIES` | Only populated when `hours > 36` — ported (Issue #563) |
@@ -277,6 +278,36 @@ Assembles five sub-sections:
 3. **`KNOWN OVERRIDE FALSE POSITIVES`** (Issue #563) — `override_detected` events within 60 seconds of an automation-initiated event (e.g., `nat_vent_*`, `classification_applied`, `grace_started`). Distinct from Timing Correlations above — a deterministic ≤60s match, not a cycle-period match.
 4. **`RESTART HISTORY`** (Issue #563) — `_build_restart_summary()` breaks down `system_restarted` events by `cause` (already computed by `coordinator.py`'s restart classification, Issue #403/#413: `user_restart`/`version_changed`/`unknown`). Only `cause=unknown` restarts are presented as noteworthy; benign restarts are never narrated as problems — this closes the "6 restarts today" hallucination class, which previously happened because only a raw count was visible with no cause breakdown.
 
+### Activity Sessions Provider
+
+`build_activity_sessions_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
+
+Builds the `=== ACTIVITY SESSIONS (for Activity Summary only) ===` section (Issue #925)
+— the only context the model may draw on when writing the `## ACTIVITY SUMMARY` output
+section (see [Response Parser](#response-parser) below).
+
+**Session grouping (`_group_timeline_sessions()`):** shares `_render_timeline_events()`
+with `build_event_timeline_table()` (one per-event render pass, no duplicated
+`EVENT_RENDERERS` dispatch), but applies a different grouping strategy: a new session
+starts whenever the gap since the previous event exceeds `_SESSION_GAP_MINUTES` (25
+minutes) of quiet, across ANY event type — unlike the timeline table's
+consecutive-*same-type*-only collapsing. This is what absorbs a tightly-clustered burst
+of different event types (e.g. a comfort-band change, a fan cycle, and a
+reclassification within one minute) into a single unit instead of N separate lines.
+
+**What each session carries:** start/end time, indoor/outdoor temp at session start and
+end, and `event_lines` — each event's already-fairly-plain `ev_text` (e.g.
+"Classification applied: warm (warming)"), deliberately **excluding** `settings_text`
+(the most jargon-dense field, e.g. `"setpoint: 72°F Cool (64°F Heat)"`, `"mode:
+heat→cool"`) so the model has less technical material to draw from when writing its one
+sentence per session.
+
+**Why a separate section from `ACTIVITY TIMELINE`:** the raw timeline table (and its
+`settings_text` column) remains available to the model for the rest of the report's
+investigative sections — system prompt rule #11 (tracing automation actions to cause)
+still needs it. `ACTIVITY SESSIONS` exists solely to give `## ACTIVITY SUMMARY` a
+bounded, lower-jargon input distinct from that raw table.
+
 ### Known Fixes Context
 
 `build_known_fixes_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
@@ -310,6 +341,7 @@ Splits on `## HEADER` lines. Expected headers and output keys:
 
 | Claude header | Output key |
 |---|---|
+| `## ACTIVITY SUMMARY` | `"activity_summary"` |
 | `## INCONGRUITIES FOUND` | `"incongruities"` |
 | `## DATA QUALITY ISSUES` | `"data_quality"` |
 | `## SYSTEM ERRORS / WARNINGS` | `"errors_warnings"` |
@@ -325,6 +357,7 @@ Splits on `## HEADER` lines. Expected headers and output keys:
 
 ```python
 {
+    "activity_summary": str,
     "incongruities": str,
     "data_quality": str,
     "errors_warnings": str,
@@ -335,19 +368,35 @@ Splits on `## HEADER` lines. Expected headers and output keys:
 }
 ```
 
-**Activity Summary (Issue #920):** the LLM no longer produces a summary/overview
-section — the old `## INVESTIGATION SUMMARY` header and `"summary"` key were removed
-because that section conflated a plain activity account with investigative synthesis.
-Both `api.py` Investigate handlers (streaming and non-streaming) now inject a separate
-`"activity_summary"` key into the result's `data` dict after `parse_investigation_response()`/
-`investigation_fallback()` returns, via `build_activity_summary_narrative()`
-(`ai_skills_context.py`) — a deterministic, code-generated, chronologically-ordered
-plain-English account built from the same row data as `build_event_timeline_table()`
-(the Activity Record's table). It is never LLM-authored, applies to both the AI-success
-and no-AI-fallback paths identically (fallback no longer has its own separate
-`"summary"` roll-up), and is not part of the generic `AISkillRegistry`
-`context_builder`/`response_parser` contract — it's spliced in at the `api.py` call site
-as an investigator-specific concern.
+**Activity Summary (Issue #920, redesigned Issue #925):** Issue #920 first removed the
+old `## INVESTIGATION SUMMARY` header (which conflated a plain activity account with
+investigative synthesis) and replaced it with a fully deterministic, code-generated
+`"activity_summary"` injected by `api.py` after parsing — a straight 1:1 restatement of
+the Activity Record's rows, bulleted instead of tabled. In practice this still read as
+the same jargon-heavy technical rows, and it also had a live-render bug (the SSE
+`"done"` event was written to the client before the injection ran, so it only ever
+appeared on history reopen, never in the live report).
+
+Issue #925 restored `## ACTIVITY SUMMARY` as an **LLM-authored** section — the first
+required output section, ahead of `INCONGRUITIES FOUND` — fed *only* by the
+`ACTIVITY SESSIONS` context section (see [Activity Sessions Provider](#activity-sessions-provider)),
+never the raw `ACTIVITY TIMELINE` table. The system prompt constrains it with an exact
+output format (`<start>–<end>: <one sentence>`, one line per session), a banned-terms
+list (no `"setpoint:"`, no `"mode: X to Y"`, no raw snake_case event-type names), and an
+embedded few-shot calibration example. Because it's an ordinary parsed LLM section
+again, it streams live with the rest of the report — the SSE ordering bug from Issue
+#920 no longer applies to the AI-success path; `api.py` no longer does any post-parse
+injection at all for this field. `investigation_fallback()` still populates
+`"activity_summary"` for the no-AI path, but now via a small, separate, deliberately
+plain deterministic renderer (`build_activity_summary_narrative()`, rewritten in
+`ai_skills_context.py` to consume `_group_timeline_sessions()`'s output) — not the
+LLM's phrasing logic, preserving the fallback's Claude-independence.
+
+**Drift guardrail (Issue #925, detection only):** `parse_investigation_response()` calls
+`_check_activity_summary_drift()` after parsing, which logs a WARNING if the parsed
+`activity_summary` text contains banned substrings, snake_case-looking tokens, or lines
+missing a leading time — visibility for iterating on prompt quality, never a rewrite or
+rejection of the model's output.
 
 ### Fallback
 
@@ -360,7 +409,7 @@ Deterministic scan without Claude. Checks:
 - `total_manual_overrides > 50` threshold check
 - `frequent_overrides` suggestion evidence `override_count > 50` check
 
-Returns the same 8-key schema as `parse_investigation_response`. `full_text` is `""` (no raw Claude response). `hypotheses` and `recommended_actions` note that AI was unavailable.
+Returns the same 8-key schema as `parse_investigation_response`. `full_text` is `""` (no raw Claude response). `hypotheses` and `recommended_actions` note that AI was unavailable. `activity_summary` is populated via `build_activity_summary_narrative()` (Issue #925) rather than left empty — see [Activity Summary](#activity-summary-issue-920-redesigned-issue-925) above.
 
 ---
 
@@ -378,7 +427,7 @@ Returns the same 8-key schema as `parse_investigation_response`. `full_text` is 
 
 6. **`ai_api_key` is not sent to Claude.** The `config` provider's config copy is `.pop()`-cleaned before serialisation. The original `coordinator.config` is not mutated (a copy is made via `dict(coordinator.config or {})`).
 
-7. **Investigator context build failures are provider-local.** Each of the 15 registered context providers is wrapped in its own `try/except`. A failure marks that provider's section as `"  unavailable"` but does not abort the others.
+7. **Investigator context build failures are provider-local.** Each of the 16 registered context providers (added `activity_sessions`, Issue #925) is wrapped in its own `try/except`. A failure marks that provider's section as `"  unavailable"` but does not abort the others.
 
 8. **`parse_investigation_response()` always preserves `full_text`.** The loop's `_flush()` closure cannot overwrite `full_text` because it is not in `_header_map`; after the loop, `sections["full_text"] = raw_text` is re-assigned unconditionally.
 
@@ -414,7 +463,8 @@ The execution pipeline has no persistent state. From the registry's perspective,
 - [`_run_fallback()`](../custom_components/climate_advisor/ai_skills.py#L148) — fallback invocation with exception guard
 - [`_error_result()`](../custom_components/climate_advisor/ai_skills.py#L174) — standard error dict builder
 - [`async_build_investigator_context()`](../custom_components/climate_advisor/ai_skills_investigator.py) — thin orchestrator calling `ContextProviderRegistry.select(focus)`
-- [`parse_investigation_response()`](../custom_components/climate_advisor/ai_skills_investigator.py) — seven-section + `full_text` response parser
+- [`parse_investigation_response()`](../custom_components/climate_advisor/ai_skills_investigator.py) — eight-section + `full_text` response parser
+- [`_check_activity_summary_drift()`](../custom_components/climate_advisor/ai_skills_investigator.py) — post-parse drift guardrail for `## ACTIVITY SUMMARY` (Issue #925, detection/logging only)
 - [`investigation_fallback()`](../custom_components/climate_advisor/ai_skills_investigator.py) — deterministic fallback scan
 - [`register_investigator_skill()`](../custom_components/climate_advisor/ai_skills_investigator.py) — registers the sole skill, no per-skill config overrides
 - [`ContextProviderRegistry`](../custom_components/climate_advisor/ai_skills_context.py) — provider registration, priority sort, `focus`-tag filtering (`select()`)
@@ -426,3 +476,6 @@ The execution pipeline has no persistent state. From the registry's perspective,
 - [`build_override_details_context()`](../custom_components/climate_advisor/ai_skills_context.py) — ported, includes Issue #321 stuck-grace detection (Issue #563)
 - [`build_daily_summaries_context()`](../custom_components/climate_advisor/ai_skills_context.py) — ported, `hours > 36` only (Issue #563)
 - [`build_activity_timeline_context()`](../custom_components/climate_advisor/ai_skills_context.py) — deterministic timeline table, ported (Issue #563)
+- [`build_activity_sessions_context()`](../custom_components/climate_advisor/ai_skills_context.py) — gap-bounded session grouping, the LLM's sole input for `## ACTIVITY SUMMARY` (Issue #925)
+- [`_group_timeline_sessions()`](../custom_components/climate_advisor/ai_skills_context.py) — session-grouping core, shares `_render_timeline_events()` with `build_event_timeline_table()` (Issue #925)
+- [`build_activity_summary_narrative()`](../custom_components/climate_advisor/ai_skills_context.py) — deterministic no-AI-fallback `activity_summary` renderer (Issue #925; was the primary implementation under Issue #920)

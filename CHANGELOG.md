@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.47] — 2026-09-18
+
+- Fix #925: the AI Investigator's "Activity Summary" now appears immediately when a report finishes generating live, instead of only after you click away and reopen it from history — and it's now a genuinely condensed, plain-English account of what happened, grouped by activity period, instead of the same technical rows just reformatted as bullet points.
+
 ## [0.7.46] — 2026-09-18
 
 - Fix #922: the rare "panel registration skipped" log warning now shows which zone it came from instead of an unattributable "unknown zone" — no change to when or why it fires.

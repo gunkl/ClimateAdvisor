@@ -30,6 +30,7 @@ _NARRATION_EXPECTED_NAMES = {
     "thermal_pipeline",
     "event_log",
     "activity_timeline",
+    "activity_sessions",
     "override_details",
     "config",
 }

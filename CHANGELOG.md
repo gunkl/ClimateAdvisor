@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.48] — 2026-09-18
+
+- Fix #925: the AI Investigator's "Activity Summary" now actually renders live as the report streams in — a second, independent section-name list in the frontend was missed by the previous fix, so its content was silently dropped until the next section header arrived. Software-update lines now state the version number (e.g. "updated to version 0.7.48") instead of a vague "a software update", and fan-timer activity now states the timer's duration both when it's set and when it expires, instead of dropping that context.
+
 ## [0.7.47] — 2026-09-18
 
 - Fix #925: the AI Investigator's "Activity Summary" now appears immediately when a report finishes generating live, instead of only after you click away and reopen it from history — and it's now a genuinely condensed, plain-English account of what happened, grouped by activity period, instead of the same technical rows just reformatted as bullet points.

@@ -82,6 +82,8 @@ class TestBuildDailySummariesContext:
         assert ctx == ""
 
     def test_registered_in_provider_registry(self):
+        # Issue #920: daily_summaries is a priority-2 "deep" provider, excluded from
+        # the default (non-deep) selection -- assert via deep=True.
         registry = get_provider_registry()
-        names = [p.name for p in registry.select()]
+        names = [p.name for p in registry.select(deep=True)]
         assert "daily_summaries" in names

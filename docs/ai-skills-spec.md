@@ -302,6 +302,15 @@ end, and `event_lines` — each event's already-fairly-plain `ev_text` (e.g.
 heat→cool"`) so the model has less technical material to draw from when writing its one
 sentence per session.
 
+**Plain-fact whitelist (Issue #925 follow-up):** blanket-excluding `settings_text` also
+threw out a small number of genuinely useful, non-jargon facts — most notably an
+RF-remote-armed fan timer's duration (`"remote timer: 4h"`), which lives only in
+`settings_text`. `_extract_plain_facts()` recognizes a narrow whitelist of safe patterns
+(currently: remote timer duration, remote speed setting) via regex and appends them as a
+plain-English parenthetical onto the corresponding `event_lines` entry (e.g. "Fan
+override applied (4-hour timer)") — never a general `settings_text` passthrough, so it
+cannot reintroduce `setpoint:`/`mode:` jargon.
+
 **Why a separate section from `ACTIVITY TIMELINE`:** the raw timeline table (and its
 `settings_text` column) remains available to the model for the rest of the report's
 investigative sections — system prompt rule #11 (tracing automation actions to cause)
@@ -392,6 +401,29 @@ plain deterministic renderer (`build_activity_summary_narrative()`, rewritten in
 `ai_skills_context.py` to consume `_group_timeline_sessions()`'s output) — not the
 LLM's phrasing logic, preserving the fallback's Claude-independence.
 
+**Issue #925 follow-up (v0.7.48) — two further gaps found using the shipped v0.7.47
+feature live:**
+
+1. **The live-render fix was incomplete.** `frontend/index.html` has three independent
+   places that must agree on section names: `_INVESTIGATION_SECTION_DEFS`,
+   `_formatInvestigationReport()`'s own `sections` list, and — the one the v0.7.47 fix
+   missed — `_INVESTIGATION_HEADER_MAP`, used only by the live-streaming parser
+   `_parseInvestigationSections()`. Without an `'ACTIVITY SUMMARY': 'activity_summary'`
+   entry there, every line streamed under that header was attributed to a `null` key and
+   silently dropped until the next recognized header (`## INCONGRUITIES FOUND`) arrived —
+   matching the reported symptom exactly (nothing renders until Incongruities starts).
+   Fixed by adding the missing entry; `tests/test_frontend_investigation_sections.py`
+   asserts all three lists stay in agreement going forward.
+2. **Content gaps in the generated prose**, addressed with a mix of a data fix and
+   prompt-instruction fixes: (a) software-update lines omitted the version number even
+   though it was already present in the underlying fact (`_render_system_restarted()`'s
+   `ev_text`) — fixed by adding an explicit `_SYSTEM_PROMPT` rule requiring concrete
+   identifiers to be stated plainly; (b) a fan timer's duration was genuinely being
+   dropped by the `settings_text` exclusion above (not a phrasing issue) — fixed by the
+   plain-fact whitelist; (c) a timer's expiration didn't reference its original duration
+   — fixed by an explicit prompt rule tying an expiry sentence back to the earlier
+   session's stated duration.
+
 **Drift guardrail (Issue #925, detection only):** `parse_investigation_response()` calls
 `_check_activity_summary_drift()` after parsing, which logs a WARNING if the parsed
 `activity_summary` text contains banned substrings, snake_case-looking tokens, or lines
@@ -465,6 +497,7 @@ The execution pipeline has no persistent state. From the registry's perspective,
 - [`async_build_investigator_context()`](../custom_components/climate_advisor/ai_skills_investigator.py) — thin orchestrator calling `ContextProviderRegistry.select(focus)`
 - [`parse_investigation_response()`](../custom_components/climate_advisor/ai_skills_investigator.py) — eight-section + `full_text` response parser
 - [`_check_activity_summary_drift()`](../custom_components/climate_advisor/ai_skills_investigator.py) — post-parse drift guardrail for `## ACTIVITY SUMMARY` (Issue #925, detection/logging only)
+- [`_extract_plain_facts()`](../custom_components/climate_advisor/ai_skills_context.py) — narrow whitelist pulling non-jargon facts (timer duration, remote speed) out of `settings_text` for `event_lines` (Issue #925 follow-up)
 - [`investigation_fallback()`](../custom_components/climate_advisor/ai_skills_investigator.py) — deterministic fallback scan
 - [`register_investigator_skill()`](../custom_components/climate_advisor/ai_skills_investigator.py) — registers the sole skill, no per-skill config overrides
 - [`ContextProviderRegistry`](../custom_components/climate_advisor/ai_skills_context.py) — provider registration, priority sort, `focus`-tag filtering (`select()`)

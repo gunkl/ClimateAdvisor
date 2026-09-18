@@ -149,28 +149,38 @@ Return your investigation using these exact section headers (## prefix, exact ca
 Using ONLY the facts in the ACTIVITY SESSIONS section (never the raw ACTIVITY TIMELINE\
  table, never data from any other section), write exactly one line per session in this\
  exact format:
-<start>â€“<end>: <one plain-English sentence>
+<start> to <end>: <one plain-English sentence>
 (use a single time, not a range, for a session with only one moment of activity)
 
-Rules â€" violating any of these makes this section unusable, not just imperfect:
+Rules -- violating any of these makes this section unusable, not just imperfect:
 - Do not introduce any fact not present in the supplied ACTIVITY SESSIONS data.
 - Do not use internal/technical terms: no "setpoint:", no "mode: X to Y", no raw\
  event-type names (e.g. never write "nat_vent_fan_on" or "classification_applied"),\
  no field names from the supplied data.
-- Write for a homeowner with no technical background â€" describe what happened and,\
+- Write for a homeowner with no technical background -- describe what happened and,\
  where the supplied facts make it clear, briefly why (e.g. "because a window was\
  open"), not the internal mechanism name.
+- If a session's facts include a specific version number, restart cause, or similar\
+ concrete identifier, state it plainly (e.g. "updated to version 0.7.47") -- never\
+ generalize a specific fact away into something vague like "a software update".
+- If a session's facts include a timer duration being set (e.g. "4-hour timer"), and\
+ a later session shows that same timer's grace period expiring, state the expiration\
+ using that original duration (e.g. "your 4-hour fan timer ended") -- never a bare\
+ "the fan turned off automatically" that drops the timer context.
 - One sentence per session. Do not add analysis, causes you are inferring, or\
- recommendations here â€" those belong in later sections of this report, not this one.
+ recommendations here -- those belong in later sections of this report, not this one.
 - If the ACTIVITY SESSIONS section is empty or says there is no activity, write\
  exactly: "No notable activity in the analyzed window."
 
-Example shape (for calibration only â€" never reuse these exact facts):
-10:53 AM â€“ 10:58 AM: Automation restarted after an update and classified today as\
- warm. A door/window opened almost immediately, so automation paused itself and left\
- the AC off â€" expected, since fresh air alone was already holding the house steady.
-12:31 PM: You turned on the whole-house fan by remote for 1 hour; automation backed\
- off for about an hour so it wouldn't fight the fan.
+Example shape (for calibration only -- never reuse these exact facts):
+10:53 AM to 10:58 AM: Automation restarted after updating to version 0.7.47 and\
+ classified today as warm. A door/window opened almost immediately, so automation\
+ paused itself and left the AC off -- expected, since fresh air alone was already\
+ holding the house steady.
+12:31 PM: You turned the whole-house fan on by remote with a 4-hour timer; automation\
+ backed off so it wouldn't fight the fan.
+4:31 PM: Your 4-hour fan timer ended and the fan turned off; automation resumed its\
+ normal schedule.
 
 ## INCONGRUITIES FOUND
 List every place where two data sources contradict each other. Lead each with the\

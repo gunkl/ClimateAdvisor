@@ -18,6 +18,7 @@ import bisect
 import contextlib
 import datetime
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -2950,6 +2951,28 @@ def _build_timeline_rows(
 
 _SESSION_GAP_MINUTES = 25  # gap-bounded session boundary threshold (Issue #925)
 
+# Issue #925 follow-up: settings_text carries genuinely jargon-dense fields
+# ("setpoint: 72°F Cool (64°F Heat)", "mode: heat->cool") that event_lines must
+# never surface -- but it also carries a small number of plain, human-meaningful
+# facts (a remote timer's duration, a remote's speed setting) that got thrown out
+# with that jargon. This is a narrow whitelist, not a settings_text passthrough,
+# so it can only ever add these specific plain phrases -- never any other
+# settings_text content.
+_SETTINGS_TEXT_FACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"remote timer:\s*(\d+(?:\.\d+)?)h"), "{0}-hour timer"),
+    (re.compile(r"remote:\s*(\w+)\s*speed"), "{0} speed"),
+]
+
+
+def _extract_plain_facts(settings_text: str) -> list[str]:
+    """Pull whitelisted, jargon-free facts out of a settings_text cell."""
+    facts: list[str] = []
+    for pattern, template in _SETTINGS_TEXT_FACT_PATTERNS:
+        match = pattern.search(settings_text)
+        if match:
+            facts.append(template.format(match.group(1)))
+    return facts
+
 
 class _TimelineSession(NamedTuple):
     """One gap-bounded group of activity, the deterministic input for the
@@ -3002,6 +3025,11 @@ def _group_timeline_sessions(
             return
         indoor_vals = [e.indoor for e in current if e.indoor and e.indoor != "—"]
         outdoor_vals = [e.outdoor for e in current if e.outdoor and e.outdoor != "—"]
+
+        def _line_for(ev: _RenderedEvent) -> str:
+            facts = _extract_plain_facts(ev.settings_text) if ev.settings_text else []
+            return f"{ev.ev_text} ({', '.join(facts)})" if facts else ev.ev_text
+
         sessions.append(
             _TimelineSession(
                 start_time_str=current[0].time_str,
@@ -3010,7 +3038,7 @@ def _group_timeline_sessions(
                 indoor_end=indoor_vals[-1] if indoor_vals else "—",
                 outdoor_start=outdoor_vals[0] if outdoor_vals else "—",
                 outdoor_end=outdoor_vals[-1] if outdoor_vals else "—",
-                event_lines=[e.ev_text for e in current],
+                event_lines=[_line_for(e) for e in current],
                 event_count=len(current),
             )
         )

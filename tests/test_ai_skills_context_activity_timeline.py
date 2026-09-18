@@ -137,6 +137,28 @@ class TestGroupTimelineSessions:
         names = [p.name for p in registry.select()]
         assert "activity_sessions" in names
 
+    def test_remote_timer_duration_surfaces_in_plain_form(self):
+        """Issue #925 follow-up: a remote-armed fan timer's duration is real,
+        useful, non-jargon information -- it must survive into event_lines even
+        though it originates in settings_text (excluded above for jargon), via
+        the narrow plain-fact whitelist."""
+        event_log = [
+            {
+                "type": "fan_manual_override",
+                "time": _NOW,
+                "fan_before": "off",
+                "fan_after": "on",
+                "remote_timer_hours": 4,
+            },
+        ]
+        sessions, _limited = _group_timeline_sessions(
+            event_log, {"temp_unit": "fahrenheit"}, 24, _NOW + datetime.timedelta(minutes=1)
+        )
+        assert len(sessions) == 1
+        combined = " ".join(sessions[0].event_lines)
+        assert "4-hour timer" in combined
+        assert "remote timer:" not in combined.lower()
+
 
 class TestBuildActivitySessionsContext:
     def test_empty_event_log_produces_no_sessions_note(self):

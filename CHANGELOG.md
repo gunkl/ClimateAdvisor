@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.44] — 2026-09-18
+
+- Fix #918: comfort under/over-temp incident alerts no longer use a stale indoor reading left over from before your sleep/wake schedule switches sensors. Right around wake-up or bedtime, the incident detector could compare an already up-to-date comfort target against an indoor temperature reading from up to 30 minutes earlier — sometimes still reflecting the bedroom sensor used overnight even after the house had already warmed back up — producing a false or stale comfort alert.
+
 ## [0.7.43] — 2026-09-17
 
 - Fix #913: Activity Report rows now use plain language instead of internal engineering terms (e.g. a routine door/window re-check no longer reads as a fresh open, and a purely internal diagnostic row no longer shows up as a confusing duplicate).

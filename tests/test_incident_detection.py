@@ -83,6 +83,15 @@ def _make_coordinator_stub(config: dict | None = None):
         coord.config.get("comfort_heat"),
         coord.config.get("comfort_cool"),
     )
+    # Issue #918: _detect_and_emit_incidents() now reads indoor temp via
+    # self._get_indoor_temp() (fresh) instead of self.data["indoor_temp"] (cached, up to
+    # 30-min stale) — see coordinator.py for why. `coord` is a bare MagicMock, so stub this
+    # seam the same way _resolve_active_comfort_band is stubbed above: these tests are about
+    # _detect_and_emit_incidents()'s own threshold/dedup/tolerance logic, not about the real
+    # sleep-window-aware sensor resolution (covered separately by
+    # tests/test_incident_detection.py::TestSleepWakeBoundaryFreshness). Each test sets
+    # coord._get_indoor_temp.return_value directly instead of coord.data["indoor_temp"].
+    coord._get_indoor_temp = MagicMock(return_value=None)
     # Issue #411: shared nat-vent-tolerance comfort-deviation gate, consumed by both
     # _detect_and_emit_incidents (above) and coordinator.py's comfort_violations_minutes
     # accumulation (tested separately below via direct calls on this same bound method).
@@ -107,7 +116,8 @@ class TestComfortViolationIncident:
     def test_incident_detected_comfort_violation(self) -> None:
         """Indoor temp above comfort_cool + 0.5 → comfort_violation incident emitted."""
         coord = _make_coordinator_stub({"comfort_cool": 75})
-        coord.data = {"indoor_temp": 76.5, "outdoor_temp": 85.0, "hvac_mode": "off"}
+        coord._get_indoor_temp.return_value = 76.5
+        coord.data = {"outdoor_temp": 85.0, "hvac_mode": "off"}
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             now = datetime.now(UTC)
@@ -126,7 +136,8 @@ class TestComfortViolationIncident:
     def test_incident_detected_comfort_violation_dedup(self) -> None:
         """Calling _detect_and_emit_incidents twice within 30 min emits only 1 incident."""
         coord = _make_coordinator_stub({"comfort_cool": 75})
-        coord.data = {"indoor_temp": 76.5, "outdoor_temp": 85.0, "hvac_mode": "off"}
+        coord._get_indoor_temp.return_value = 76.5
+        coord.data = {"outdoor_temp": 85.0, "hvac_mode": "off"}
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             now = datetime.now(UTC)
@@ -147,7 +158,8 @@ class TestComfortViolationIncident:
     def test_no_incident_when_indoor_within_comfort(self) -> None:
         """Indoor temp at comfort_cool — no incident emitted."""
         coord = _make_coordinator_stub({"comfort_cool": 75})
-        coord.data = {"indoor_temp": 75.0, "outdoor_temp": 80.0, "hvac_mode": "cool"}
+        coord._get_indoor_temp.return_value = 75.0
+        coord.data = {"outdoor_temp": 80.0, "hvac_mode": "cool"}
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime.now(UTC)
@@ -170,7 +182,8 @@ class TestComfortViolationIncident:
         coord = _make_coordinator_stub({"comfort_cool": 75, "comfort_heat": 70})
         coord.automation_engine._natural_vent_active = True
         # Within CONF_NAT_VENT_HYSTERESIS_F (default 1.0F) of the ceiling: 75.5 <= 75+1.0
-        coord.data = {"indoor_temp": 75.6, "outdoor_temp": 72.0, "hvac_mode": "off"}
+        coord._get_indoor_temp.return_value = 75.6
+        coord.data = {"outdoor_temp": 72.0, "hvac_mode": "off"}
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime.now(UTC)
@@ -189,7 +202,8 @@ class TestComfortViolationIncident:
         coord = _make_coordinator_stub({"comfort_cool": 75, "comfort_heat": 70})
         coord.automation_engine._natural_vent_active = True
         # Far beyond hysteresis tolerance (default 1.0F): 79 >> 75+1.0
-        coord.data = {"indoor_temp": 79.0, "outdoor_temp": 85.0, "hvac_mode": "off"}
+        coord._get_indoor_temp.return_value = 79.0
+        coord.data = {"outdoor_temp": 85.0, "hvac_mode": "off"}
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime.now(UTC)
@@ -210,7 +224,8 @@ class TestComfortViolationIncident:
         coord = _make_coordinator_stub({"comfort_cool": 75, "comfort_heat": 70})
         coord.automation_engine._natural_vent_active = True
         # Within hysteresis (1.0F) below comfort_heat: 69.5 >= 70-1.0
-        coord.data = {"indoor_temp": 69.4, "outdoor_temp": 60.0, "hvac_mode": "off"}
+        coord._get_indoor_temp.return_value = 69.4
+        coord.data = {"outdoor_temp": 60.0, "hvac_mode": "off"}
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime.now(UTC)
@@ -226,7 +241,8 @@ class TestComfortViolationIncident:
         coord = _make_coordinator_stub({"comfort_cool": 75, "comfort_heat": 70})
         coord.automation_engine._natural_vent_active = True
         # Far below hysteresis tolerance: 65 << 70-1.0
-        coord.data = {"indoor_temp": 65.0, "outdoor_temp": 55.0, "hvac_mode": "off"}
+        coord._get_indoor_temp.return_value = 65.0
+        coord.data = {"outdoor_temp": 55.0, "hvac_mode": "off"}
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime.now(UTC)
@@ -238,6 +254,153 @@ class TestComfortViolationIncident:
             if e.get("type") == "incident_detected" and e.get("incident_class") == "comfort_undertemp"
         ]
         assert len(incident_events) == 1, "a genuine sustained undertemp violation during nat-vent must still fire"
+
+
+# ---------------------------------------------------------------------------
+# TestSleepWakeBoundaryFreshness — Issue #918
+# ---------------------------------------------------------------------------
+
+
+def _make_boundary_coordinator_stub(config: dict | None = None):
+    """Build a coordinator stub with the REAL indoor-temp resolver bound (unlike
+    _make_coordinator_stub() above, which stubs _get_indoor_temp to avoid exercising the
+    real sleep-window path). This stub exists specifically to exercise that real path —
+    it binds _get_indoor_temp/_get_indoor_temp_with_provenance so _in_sleep_window() and
+    the sleep_indoor_temp_entity swap actually run against mocked hass.states.
+    """
+    import importlib
+
+    coord_mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    ClimateAdvisorCoordinator = coord_mod.ClimateAdvisorCoordinator
+
+    coord = MagicMock()
+    coord.hass = MagicMock()
+    coord.hass.states = MagicMock()
+    coord.config = {
+        "climate_entity": "climate.test_thermostat",
+        "indoor_temp_source": "sensor",
+        "indoor_temp_entity": "sensor.primary_indoor",
+        "sleep_indoor_temp_entity": "sensor.bedroom_indoor",
+        "temp_unit": "fahrenheit",
+        "sleep_time": "20:30",
+        "wake_time": "06:30",
+        "comfort_heat": 68,
+        "comfort_cool": 78,
+        **(config or {}),
+    }
+    coord._event_log = []
+    coord.data = {}
+    coord.automation_engine = MagicMock()
+    coord.automation_engine._occupancy_mode = "home"
+    coord.automation_engine._natural_vent_active = False
+    coord.automation_engine._manual_override_active = False
+
+    coord._emit_event = types.MethodType(ClimateAdvisorCoordinator._emit_event, coord)
+    coord._emit_incident = types.MethodType(ClimateAdvisorCoordinator._emit_incident, coord)
+    coord._detect_and_emit_incidents = types.MethodType(ClimateAdvisorCoordinator._detect_and_emit_incidents, coord)
+    coord._is_nat_vent_tolerated_deviation = types.MethodType(
+        ClimateAdvisorCoordinator._is_nat_vent_tolerated_deviation, coord
+    )
+    # Real methods under test for this class — the whole point is to exercise the
+    # sleep-window-aware resolution, not stub around it.
+    coord._get_indoor_temp_with_provenance = types.MethodType(
+        ClimateAdvisorCoordinator._get_indoor_temp_with_provenance, coord
+    )
+    coord._get_indoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_indoor_temp, coord)
+    # The comfort band itself is not what this class is testing (Issue #481 already
+    # covers sleep-aware band resolution) — hold it static so only the indoor-reading
+    # side varies between assertions.
+    coord._resolve_active_comfort_band = lambda: (
+        coord.config.get("comfort_heat"),
+        coord.config.get("comfort_cool"),
+    )
+    return coord
+
+
+def _make_ha_state(state_value: str) -> SimpleNamespace:
+    return SimpleNamespace(state=state_value, attributes={})
+
+
+class TestSleepWakeBoundaryFreshness:
+    """Regression tests for Issue #918: _detect_and_emit_incidents() previously read
+    indoor temp from self.data["indoor_temp"] (cached, up to 30 min stale — refreshed only
+    once per the coordinator's 30-minute update_interval) while _resolve_active_comfort_band()
+    resolved the sleep/wake-aware comfort band FRESH on every call. Right at the sleep_time/
+    wake_time boundary this compared a stale, wrong-sensor indoor reading against an
+    already-updated comfort band, producing false comfort_undertemp/comfort_violation
+    incidents. Confirmed against real production telemetry: a comfort_undertemp incident
+    fired 11 minutes after wake_time using a stale bedroom-sensor reading (65F) while the
+    real primary sensor already read 68F.
+    """
+
+    def test_wake_boundary_uses_fresh_indoor_not_stale_cached_sleep_value(self) -> None:
+        """11 minutes after wake_time, self.data["indoor_temp"] still holds the stale
+        bedroom-sensor value cached at the last 30-min refresh (while still asleep).
+        _get_indoor_temp() must read the live primary sensor instead, which is already
+        back above the daytime floor — no false incident should fire.
+        """
+        coord = _make_boundary_coordinator_stub()
+
+        def _states_get(entity_id):
+            if entity_id == "sensor.primary_indoor":
+                return _make_ha_state("68.0")
+            if entity_id == "sensor.bedroom_indoor":
+                return _make_ha_state("65.0")
+            return None
+
+        coord.hass.states.get.side_effect = _states_get
+        # Stale value left over from the last 30-min refresh cycle (while still in the
+        # sleep window) — must NOT be read by the fixed code.
+        coord.data = {"indoor_temp": 65.0, "outdoor_temp": 60.0, "hvac_mode": "heat"}
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 1, 1, 6, 41)  # 11 min after wake_time
+            coord._detect_and_emit_incidents()
+
+        undertemp_events = [
+            e
+            for e in coord._event_log
+            if e.get("type") == "incident_detected" and e.get("incident_class") == "comfort_undertemp"
+        ]
+        assert undertemp_events == [], (
+            f"false comfort_undertemp using stale sleep-sensor value; got: {undertemp_events}"
+        )
+        coord.hass.states.get.assert_any_call("sensor.primary_indoor")
+
+    def test_sleep_boundary_uses_fresh_indoor_not_stale_cached_daytime_value(self) -> None:
+        """Inverse case: 11 minutes after sleep_time, self.data["indoor_temp"] still holds
+        the stale, warm daytime-sensor value cached at the last 30-min refresh. The bedroom
+        sensor already reads below the comfort floor — _get_indoor_temp() must pick that up
+        immediately, not lag up to 30 minutes behind the sleep-window switch.
+        """
+        coord = _make_boundary_coordinator_stub()
+
+        def _states_get(entity_id):
+            if entity_id == "sensor.primary_indoor":
+                return _make_ha_state("72.0")
+            if entity_id == "sensor.bedroom_indoor":
+                return _make_ha_state("66.0")
+            return None
+
+        coord.hass.states.get.side_effect = _states_get
+        # Stale warm value left over from the last 30-min refresh cycle (while still in
+        # the daytime window) — must NOT be what the emitted incident reports.
+        coord.data = {"indoor_temp": 72.0, "outdoor_temp": 58.0, "hvac_mode": "off"}
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 1, 1, 20, 41)  # 11 min after sleep_time
+            coord._detect_and_emit_incidents()
+
+        undertemp_events = [
+            e
+            for e in coord._event_log
+            if e.get("type") == "incident_detected" and e.get("incident_class") == "comfort_undertemp"
+        ]
+        assert len(undertemp_events) == 1, f"expected a fresh comfort_undertemp incident; got: {undertemp_events}"
+        assert undertemp_events[0]["indoor_f"] == 66.0, (
+            "incident must report the fresh bedroom-sensor reading, not the stale cached daytime value"
+        )
+        coord.hass.states.get.assert_any_call("sensor.bedroom_indoor")
 
 
 # ---------------------------------------------------------------------------

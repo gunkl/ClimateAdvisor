@@ -9023,7 +9023,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     pass
 
         current_data = self.data or {}
-        indoor = current_data.get("indoor_temp")
+        # Issue #918: read indoor temp fresh via _get_indoor_temp() rather than the
+        # 30-minute-stale self.data["indoor_temp"] cache. self.data["indoor_temp"] is only
+        # refreshed once per coordinator update_interval (30 min), via
+        # _get_indoor_temp_with_provenance(), which resolves _in_sleep_window() AT WRITE
+        # TIME. _resolve_active_comfort_band() below resolves _in_sleep_window() FRESH on
+        # every call (Issue #481) — pairing a stale sleep/wake-aware indoor reading against
+        # an already-fresh comfort band produced false comfort_undertemp/comfort_violation
+        # incidents right at the sleep_time/wake_time boundary. _get_indoor_temp() is the
+        # same fresh, sleep-window-aware resolver every other comfort-facing call site in
+        # this file already uses — do not revert this back to a self.data read.
+        indoor = self._get_indoor_temp()
         # Issue #481: resolve the currently-active band (sleep/away/vacation-aware) once,
         # instead of reading the static daytime comfort_heat/comfort_cool config directly —
         # used for both the violation-detection comparison below and the incident payload

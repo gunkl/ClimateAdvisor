@@ -45,7 +45,6 @@ from custom_components.climate_advisor.const import INVESTIGATION_REPORT_HISTORY
 # ---------------------------------------------------------------------------
 
 _EXPECTED_PARSE_KEYS = {
-    "summary",
     "incongruities",
     "data_quality",
     "errors_warnings",
@@ -56,7 +55,6 @@ _EXPECTED_PARSE_KEYS = {
 }
 
 _EXPECTED_FALLBACK_KEYS = {
-    "summary",
     "incongruities",
     "data_quality",
     "errors_warnings",
@@ -200,9 +198,6 @@ class TestParseInvestigationResponse:
     """Tests for the pure parse_investigation_response() function."""
 
     _FULL_RESPONSE = (
-        "## INVESTIGATION SUMMARY\n"
-        "The system appears healthy. One minor discrepancy found.\n"
-        "\n"
         "## INCONGRUITIES FOUND\n"
         "- window_compliance=0.0 but windows_physically_opened=True on 2026-04-01\n"
         "\n"
@@ -225,11 +220,12 @@ class TestParseInvestigationResponse:
         "Overall confidence: Medium.\n"
     )
 
-    def test_all_seven_sections_parsed(self):
-        """A response with all 7 headers populates every key."""
+    def test_all_six_sections_parsed(self):
+        """A response with all 6 remaining headers populates every key
+        (Issue #920: INVESTIGATION SUMMARY/"summary" was removed — that content is
+        now a deterministic Activity Summary, injected outside this parser)."""
         result = parse_investigation_response(self._FULL_RESPONSE)
 
-        assert "healthy" in result["summary"]
         assert "window_compliance=0.0" in result["incongruities"]
         assert "observation_count_heat" in result["data_quality"]
         assert "No errors or warnings" in result["errors_warnings"]
@@ -252,10 +248,13 @@ class TestParseInvestigationResponse:
             assert result[key] == "", f"Expected {key!r} to be empty, got {result[key]!r}"
 
     def test_unknown_headers_silently_skipped(self):
-        """Content under unrecognised headers does not appear in any known section."""
+        """Content under unrecognised headers does not appear in any known section.
+
+        Issue #920: "## INVESTIGATION SUMMARY" is itself now an unrecognised header
+        (removed from the parser's header map), so it doubles as coverage for that."""
         raw = (
             "## INVESTIGATION SUMMARY\n"
-            "Known summary.\n"
+            "This should be silently ignored -- no longer a recognised header.\n"
             "\n"
             "## FUTURE_PLANS\n"
             "This content should be silently ignored.\n"
@@ -265,26 +264,27 @@ class TestParseInvestigationResponse:
         )
         result = parse_investigation_response(raw)
 
-        assert "Known summary" in result["summary"]
         assert "real hypothesis" in result["hypotheses"]
         for key in _EXPECTED_PARSE_KEYS - {"full_text"}:
             assert "silently ignored" not in result[key]
 
-    def test_only_investigation_summary_header(self):
-        """Only summary is populated when only that header appears."""
+    def test_only_unrecognised_header_leaves_all_sections_empty(self):
+        """Issue #920: INVESTIGATION SUMMARY is no longer a recognised header, so a
+        response containing only it parses to an all-empty result (no "summary" key
+        exists any more -- that content is now the deterministic Activity Summary,
+        injected outside this parser)."""
         raw = "## INVESTIGATION SUMMARY\nJust a summary.\n"
         result = parse_investigation_response(raw)
 
-        assert "Just a summary" in result["summary"]
-        for key in _EXPECTED_PARSE_KEYS - {"summary", "full_text"}:
+        for key in _EXPECTED_PARSE_KEYS - {"full_text"}:
             assert result[key] == "", f"Expected {key!r} to be empty"
 
     def test_section_content_stripped_of_whitespace(self):
         """Leading and trailing whitespace around section content is stripped."""
-        raw = "## INVESTIGATION SUMMARY\n\n   Trimmed content.   \n\n"
+        raw = "## HYPOTHESES\n\n   Trimmed content.   \n\n"
         result = parse_investigation_response(raw)
 
-        assert result["summary"] == "Trimmed content."
+        assert result["hypotheses"] == "Trimmed content."
 
     def test_returned_dict_has_all_expected_keys(self):
         """Result always contains exactly the 8 expected keys."""
@@ -415,24 +415,26 @@ class TestInvestigationFallback:
 
         assert "99" in result["data_quality"] or "unusually high" in result["data_quality"]
 
-    def test_fallback_summary_reflects_issue_count(self):
-        """Summary mentions the number of issues when any are found."""
-        now = datetime.datetime.now(datetime.UTC)
-        error_event = {"type": "automation_error", "time": now.isoformat()}
-        coord = _make_coordinator(event_log=[error_event])
-
-        result = investigation_fallback(coord)
-
-        # Should mention issues were found
-        assert "issue" in result["summary"].lower() or "error" in result["summary"].lower()
-
-    def test_fallback_summary_says_no_issues_when_clean(self):
-        """Summary says no obvious incongruities when none are found."""
+    def test_fallback_has_no_summary_key(self):
+        """Issue #920: the fallback's own "Fallback scan found N issues..." roll-up
+        was removed -- that information was redundant with errors_warnings/
+        incongruities/data_quality (which list the actual items) and with
+        hypotheses' own AI-unavailable notice. The deterministic Activity Summary
+        shown to the user is now injected by the caller (api.py), not this function."""
         coord = _make_coordinator()
 
         result = investigation_fallback(coord)
 
-        assert "no obvious" in result["summary"].lower()
+        assert "summary" not in result
+
+    def test_fallback_hypotheses_states_ai_unavailable(self):
+        """The AI-unavailable signal is still communicated, just via "hypotheses"
+        rather than a separate "summary" roll-up."""
+        coord = _make_coordinator()
+
+        result = investigation_fallback(coord)
+
+        assert "AI unavailable" in result["hypotheses"]
 
 
 # ---------------------------------------------------------------------------
@@ -1429,18 +1431,22 @@ class TestCAOperationalDesignContext:
     def _run(self, coro):
         return asyncio.run(coro)
 
+    # Issue #920: `operational_design` is a priority-3 provider, excluded from the
+    # default (non-deep) context — these tests specifically exercise its content, so
+    # they opt in via deep=True.
+
     def test_context_includes_ca_operational_design_section(self):
         """Context output must contain the CA OPERATIONAL DESIGN header."""
         coord = _make_coordinator()
         hass = _make_hass()
-        ctx = self._run(async_build_investigator_context(hass, coord))
+        ctx = self._run(async_build_investigator_context(hass, coord, deep=True))
         assert "CA OPERATIONAL DESIGN" in ctx
 
     def test_context_explains_fan_status_values(self):
         """Context must describe all four fan_status values so AI can interpret them."""
         coord = _make_coordinator()
         hass = _make_hass()
-        ctx = self._run(async_build_investigator_context(hass, coord))
+        ctx = self._run(async_build_investigator_context(hass, coord, deep=True))
         assert "running (untracked)" in ctx
         assert "running (manual override)" in ctx
         assert "active" in ctx  # fan_status=active description
@@ -1449,14 +1455,14 @@ class TestCAOperationalDesignContext:
         """Context must explain thermostat deadband so AI doesn't misread idle as failure."""
         coord = _make_coordinator()
         hass = _make_hass()
-        ctx = self._run(async_build_investigator_context(hass, coord))
+        ctx = self._run(async_build_investigator_context(hass, coord, deep=True))
         assert "deadband" in ctx.lower()
 
     def test_context_clarifies_programmatic_control(self):
         """Context must assert CA has 100% programmatic control (no physical switch)."""
         coord = _make_coordinator()
         hass = _make_hass()
-        ctx = self._run(async_build_investigator_context(hass, coord))
+        ctx = self._run(async_build_investigator_context(hass, coord, deep=True))
         assert "programmatic control" in ctx.lower() or "100%" in ctx
 
 

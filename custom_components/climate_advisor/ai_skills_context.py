@@ -97,19 +97,18 @@ class ContextProviderRegistry:
         """Append a provider to the registry."""
         self._providers.append(provider)
 
-    def select(self, focus: str = "", narration: bool = False) -> list[ContextProvider]:
+    def select(self, focus: str = "", narration: bool = False, deep: bool = False) -> list[ContextProvider]:
         """Return providers relevant to the given focus string, sorted by priority.
 
-        If focus is empty or contains no recognised keywords, all providers are
-        returned (backward-compatible with no-focus behaviour) — UNLESS narration=True.
+        If focus is empty or contains no recognised keywords, and `deep` is False,
+        providers are capped to priority <= 1 (current-state + recent-activity) — the
+        same narrowing narration already used, extended to on-demand investigations
+        (Issue #920) to cut default noise. Pass `deep=True` for the old
+        "run everything" default-investigation behavior (audit-depth and network-bound
+        providers: daily summaries, operational design, known fixes, version, GitHub).
 
         narration=True is for the silent/scheduled narration path (never combined with
-        a non-empty focus in practice — narration call sites never set one, and the
-        on-demand Investigate call site never sets narration). It caps providers to
-        priority <= 1 (current-state + recent-activity), skipping the audit-depth and
-        network-bound providers (priority 2-4: daily summaries, report history, config,
-        operational design, known fixes, version, GitHub) that a "what happened
-        recently" narration doesn't need — see Issue #563.
+        a non-empty focus or deep=True in practice) — see Issue #563.
 
         Priority-0 providers are always included regardless of tag match —
         they provide the essential current-state context every investigation needs.
@@ -118,15 +117,16 @@ class ContextProviderRegistry:
         if narration:
             return [p for p in sorted_providers if p.priority <= 1]
         if not focus:
-            return sorted_providers
+            return sorted_providers if deep else [p for p in sorted_providers if p.priority <= 1]
         focus_lower = focus.lower()
         tag_set: frozenset[str] = frozenset()
         for keyword, tags in FOCUS_TAG_MAP.items():
             if keyword in focus_lower:
                 tag_set = tag_set | tags
         if not tag_set:
-            # No recognised keyword — run everything so we don't silently under-investigate
-            return sorted_providers
+            # No recognised keyword — fall back to the same default-depth behavior as
+            # an empty focus, rather than always running everything (Issue #920).
+            return sorted_providers if deep else [p for p in sorted_providers if p.priority <= 1]
         return [p for p in sorted_providers if p.priority == 0 or bool(p.tags & tag_set)]
 
 
@@ -2740,47 +2740,40 @@ def _maybe_prepend_whf_warning(table: str, config: dict[str, Any]) -> str:
     return table
 
 
-def build_event_timeline_table(
+def _build_timeline_rows(
     raw_event_log: list[Any],
     config: dict[str, Any],
     hours: float,
     now: datetime.datetime,
-    newest_first: bool = False,
-) -> str:
-    """Build a deterministic markdown timeline table from the event log.
+    limit: int = 200,
+) -> tuple[list[tuple[str, str, str, str, str, str]], bool]:
+    """Filter, render, and deduplicate the event log into timeline rows.
 
-    Returns a markdown table string:
-      | Time | Event | Settings | Source |
+    Shared row-building core for `build_event_timeline_table()` (markdown table,
+    Activity Record + LLM context) and `build_activity_summary_narrative()`
+    (plain-English narrative, Issue #920) — both are thin formatters over the same
+    rows so the event-type catalog and dedup logic are never re-implemented.
 
-    Consecutive same-type events (excluding types in _NO_DEDUP) are collapsed
-    into a single row with a xN count and time range.  The Settings cell of the
-    collapsed row is taken from the LAST event in the run (most recent setpoint wins).
-
-    Rows are built in chronological order internally (dedup depends on forward
-    iteration). When `newest_first` is True, the final row order is reversed for
-    display — most recent event first, oldest last.
+    Returns (rows, limited) where each row is
+    (time_str, event_text, settings_text, source, indoor, outdoor), in chronological
+    order, and `limited` is True if the window contained more than `limit` events.
 
     Events are filtered to the requested `hours` window FIRST, then capped to the
-    most recent 200 for rendering (Issue #432) — capping the raw log to its last
-    200 entries before filtering would silently drop older-but-still-in-window
-    events whenever recent event volume exceeds 200.
+    most recent `limit` for rendering (Issue #432) — capping the raw log to its last
+    N entries before filtering would silently drop older-but-still-in-window
+    events whenever recent event volume exceeds the limit.
     """
     unit: str = config.get("temp_unit", "fahrenheit")
     if now.tzinfo is None:
         now = now.replace(tzinfo=datetime.UTC)
 
-    # ---- filter within window (Issue #432: filter FIRST, then apply the 200-row
-    # display budget — filtering a raw last-200 slice instead would silently drop
-    # older-but-still-in-window events whenever recent volume exceeds 200) ----
-    filtered, limited = filter_events_by_window(raw_event_log, hours, now, limit=200)
+    # ---- filter within window (Issue #432: filter FIRST, then apply the row
+    # display budget — filtering a raw last-N slice instead would silently drop
+    # older-but-still-in-window events whenever recent volume exceeds the limit) ----
+    filtered, limited = filter_events_by_window(raw_event_log, hours, now, limit=limit)
 
     if not filtered:
-        table = (
-            "| Time | Event | Settings | Source | Indoor | Outdoor |\n"
-            "|---|---|---|---|---|---|\n"
-            "| -- | (no events in window) | | | | |"
-        )
-        return _maybe_prepend_whf_warning(table, config)
+        return [], limited
 
     # ---- render & deduplicate ----
     rows: list[
@@ -2894,6 +2887,35 @@ def build_event_timeline_table(
                 run_settings = settings_text
 
     _flush_run()
+    return rows, limited
+
+
+def build_event_timeline_table(
+    raw_event_log: list[Any],
+    config: dict[str, Any],
+    hours: float,
+    now: datetime.datetime,
+    newest_first: bool = False,
+    limit: int = 200,
+) -> str:
+    """Build a deterministic markdown timeline table from the event log.
+
+    Returns a markdown table string:
+      | Time | Event | Settings | Source |
+
+    Consecutive same-type events (excluding types in _NO_DEDUP) are collapsed
+    into a single row with a xN count and time range.  The Settings cell of the
+    collapsed row is taken from the LAST event in the run (most recent setpoint wins).
+
+    Rows are built in chronological order internally (dedup depends on forward
+    iteration). When `newest_first` is True, the final row order is reversed for
+    display — most recent event first, oldest last.
+
+    `limit` (default 200) bounds how many in-window events are rendered — callers
+    that feed an LLM should keep the default; the display-only Activity Record view
+    passes a much higher limit since no LLM ever sees this output (Issue #920).
+    """
+    rows, limited = _build_timeline_rows(raw_event_log, config, hours, now, limit=limit)
 
     if not rows:
         table = (
@@ -2910,9 +2932,44 @@ def build_event_timeline_table(
     row_lines = [f"| {t} | {ev} | {st} | {src} | {ind} | {out} |" for t, ev, st, src, ind, out in ordered_rows]
     table = "\n".join([header, sep, *row_lines])
     if limited:
-        table = "NOTE: window contains more than 200 events — showing the most recent 200.\n\n" + table
+        table = f"NOTE: window contains more than {limit} events — showing the most recent {limit}.\n\n" + table
 
     return _maybe_prepend_whf_warning(table, config)
+
+
+def build_activity_summary_narrative(
+    raw_event_log: list[Any],
+    config: dict[str, Any],
+    hours: float,
+    now: datetime.datetime,
+) -> str:
+    """Build a deterministic, plain-English, chronological account of the event log.
+
+    Issue #920: replaces the old LLM-authored "Investigation Summary" section, which
+    conflated a plain activity account with investigative synthesis. This is purely
+    code-generated from the same rows `build_event_timeline_table()` renders — no LLM
+    call, so it can't hallucinate, and it's used for both the AI-success and
+    fallback-no-AI investigation paths (single source of truth for "what happened").
+
+    Returns one bullet line per row, e.g.
+    "- 2:14 PM: Comfort band applied (72°F cool / 64°F heat)".
+    """
+    rows, limited = _build_timeline_rows(raw_event_log, config, hours, now, limit=200)
+
+    if not rows:
+        return "No activity recorded in the analyzed window."
+
+    lines: list[str] = []
+    for time_str, event_text, settings_text, _source, _indoor, _outdoor in rows:
+        entry = f"- {time_str}: {event_text}"
+        if settings_text:
+            entry += f" ({settings_text})"
+        lines.append(entry)
+
+    narrative = "\n".join(lines)
+    if limited:
+        narrative = "NOTE: window contains more than 200 events — showing the most recent 200.\n\n" + narrative
+    return narrative
 
 
 async def build_daily_summaries_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
@@ -2938,8 +2995,10 @@ async def build_activity_timeline_context(hass: Any, coordinator: Any, **kwargs:
     ground their narrative in an actual chronological record instead of re-deriving
     one from raw event-log counts.
     """
+    # Issue #920: clamp to 168h (7 days), matching EVENT_LOG_MAX_AGE_HOURS — the event
+    # log itself never retains more, so a 720h ceiling was dead and misleading.
     hours = float(kwargs.get("hours", 24))
-    hours = max(1.0, min(hours, 720.0))
+    hours = max(1.0, min(hours, 168.0))
     raw_event_log = list(getattr(coordinator, "_event_log", []) or [])
     config = getattr(coordinator, "config", {}) or {}
     table = build_event_timeline_table(raw_event_log, config, hours, dt_util.now())
@@ -3230,7 +3289,11 @@ _PROVIDER_REGISTRY.register(
     ContextProvider(
         name="config",
         tags=frozenset({"config"}),
-        priority=2,
+        # Issue #920: priority 1, not 2 — comfort_heat/comfort_cool (the values the
+        # system prompt's NUMERIC VERIFICATION RULE checks against) are supplied only
+        # by this provider. Dropping it from the default (non-deep) investigation would
+        # silently break that rule for every default run.
+        priority=1,
         builder=build_config_context,
     )
 )

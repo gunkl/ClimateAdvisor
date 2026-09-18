@@ -201,16 +201,26 @@ aborts the others. As of Issue #578 there are 15 registered providers; treat the
 registration list in `ai_skills_context.py` (search `_PROVIDER_REGISTRY.register`) as
 authoritative if this table and the code ever disagree.
 
-**Narration vs investigation scope (historical, Issue #563):** the skill's `narration=True`
-kwarg caps providers to `priority <= 1` (current-state and recent-activity data only). Its only
-callers — `ClimateAdvisorAIActivityView` and the `ai_activity_report` service — were retired in
-Issue #578 along with the AI Activity Report feature, so no live code path currently sets
-`narration=True`; the `priority` gating remains in `ai_skills_investigator.py` in case a future
-skill entry point needs it. The on-demand `ai_investigate` (SSE) path never sets `narration`, so
-an empty `focus` there means "audit everything" (all 15 providers). The `Narration`
-column below reflects the `priority` cutoff, not a separately maintained list.
+**Narration vs investigation scope (Issue #563, revised Issue #920):** the skill's
+`narration=True` kwarg caps providers to `priority <= 1` (current-state and
+recent-activity data only). Its only callers — `ClimateAdvisorAIActivityView` and the
+`ai_activity_report` service — were retired in Issue #578 along with the AI Activity
+Report feature, so no live code path currently sets `narration=True`; the `priority`
+gating remains in `ai_skills_investigator.py` in case a future skill entry point needs
+it.
 
-| Provider name | Priority | Narration | Section label | Data source |
+As of Issue #920, the on-demand `ai_investigate` (SSE) path applies the **same**
+`priority <= 1` narrowing by default (an empty `focus`, or a `focus` with no recognized
+keyword, no longer means "audit everything") — this cuts the technical-jargon volume of
+a default investigation. Callers opt into the old "all 15 providers" behavior by passing
+`deep=True` (surfaced in the dashboard as the "Deep investigation" checkbox). The
+`config` provider was reclassified from priority 2 to priority 1 as part of this change,
+since `comfort_heat`/`comfort_cool` — the values the system prompt's NUMERIC
+VERIFICATION RULE checks against — are supplied only by that provider; it must remain
+available by default. The `Narration`/`Default (non-deep)` column below reflects the
+`priority` cutoff shared by both paths, not a separately maintained list.
+
+| Provider name | Priority | Narration / Default (non-deep) | Section label | Data source |
 |---|---|---|---|---|
 | `current_state` | 0 | ✅ | `CURRENT STATE` | `coordinator.data` + fresh HVAC runtime |
 | `hvac_entity` | 0 | ✅ | `HVAC ENTITY` | `hass.states.get(climate_entity_id)` — `hvac_mode` and `current_temperature` |
@@ -218,17 +228,17 @@ column below reflects the `priority` cutoff, not a separately maintained list.
 | `last_briefing` | 1 | ✅ | `LAST BRIEFING` | `coordinator._last_briefing` — the most recently rendered daily briefing text, verbatim |
 | `learning` | 1 | ✅ | `LEARNING — *` (5 sub-sections) | Compliance summary, thermal model, weather bias, active suggestions (full text + evidence, unfiltered), last N daily records |
 | `thermal_pipeline` | 1 | ✅ | `THERMAL OBSERVATION PIPELINE` | Per-type committed/rejected counts, top reason codes, pending observations, `NEVER LEARNED` / `*** PIPELINE FAILURE ***` markers |
-| `event_log` | 1 | ✅ | `EVENT LOG` + `SYSTEM LOG RECORDS` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log` filtered to last N hours via `filter_events_by_window()` (`kwargs.get("hours", 168)`, clamped 1–720 — but retention (`EVENT_LOG_MAX_AGE_HOURS`) only holds 168h, so a request above 168 returns whatever's stored, not a genuinely wider window), then budget-limited to 200 entries + `log_capture` ring buffer; see [Event Log Provider](#event-log-provider) |
-| `activity_timeline` | 1 | ✅ | `ACTIVITY TIMELINE` | Deterministic markdown event timeline table — ported from the retired activity context (Issue #563); never LLM-authored |
+| `event_log` | 1 | ✅ | `EVENT LOG` + `SYSTEM LOG RECORDS` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log` filtered to last N hours via `filter_events_by_window()` (`kwargs.get("hours", 168)`, clamped 1–168 as of Issue #920 — matches the real `EVENT_LOG_MAX_AGE_HOURS` retention ceiling; the old 1–720 clamp was dead since retention never held more than 168h), then budget-limited to 200 entries + `log_capture` ring buffer; see [Event Log Provider](#event-log-provider) |
+| `activity_timeline` | 1 | ✅ | `ACTIVITY TIMELINE` | Deterministic markdown event timeline table — ported from the retired activity context (Issue #563); never LLM-authored. Also clamped to 1–168h (Issue #920, was 1–720) |
 | `override_details` | 1 | ✅ | `MANUAL OVERRIDES TODAY` + `FAN OWNERSHIP HISTORY` | Override count/history/current-duration, Issue #321 stuck-grace critical warning, fan ownership transitions — ported (Issue #563) |
-| `daily_summaries` | 2 | ❌ | `HISTORICAL DAILY SUMMARIES` | Only populated when `hours > 36` — ported (Issue #563) |
-| `config` | 2 | ❌ | `CONFIGURATION` | See [Config Provider](#config-provider) |
-| `operational_design` | 3 | ❌ | `CA OPERATIONAL DESIGN` | Static prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
-| `known_fixes` | 3 | ❌ | `KNOWN-FIXED ISSUES` | See [Known Fixes Context](#known-fixes-context) |
-| `version` | 3 | ❌ | `RUNNING VERSION` + `RECENT RELEASE NOTES` | Last 5 versions with a `user_summary`, streamed from `fix_history.jsonl` via `fix_history.py` (Issue #702; formerly `RELEASE_NOTES` in `const.py`) |
-| `github` | 4 | ❌ | `GITHUB REPOSITORY` + `RECENT GITHUB ISSUES` | Live open + closed GitHub issues (TTL-cached; trimmed to `number`/`title`/`state`/`labels` before caching — Issue #563); silently omitted on network error |
+| `config` | 1 (was 2, Issue #920) | ✅ | `CONFIGURATION` | See [Config Provider](#config-provider) |
+| `daily_summaries` | 2 | ❌ (opt in via `deep=True`) | `HISTORICAL DAILY SUMMARIES` | Only populated when `hours > 36` — ported (Issue #563) |
+| `operational_design` | 3 | ❌ (opt in via `deep=True`) | `CA OPERATIONAL DESIGN` | Static prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
+| `known_fixes` | 3 | ❌ (opt in via `deep=True`) | `KNOWN-FIXED ISSUES` | See [Known Fixes Context](#known-fixes-context) — the system prompt's KNOWN-FIXED ISSUES cross-check (rule #8) is effectively dormant on a default (non-deep) run |
+| `version` | 3 | ❌ (opt in via `deep=True`) | `RUNNING VERSION` + `RECENT RELEASE NOTES` | Last 5 versions with a `user_summary`, streamed from `fix_history.jsonl` via `fix_history.py` (Issue #702; formerly `RELEASE_NOTES` in `const.py`) |
+| `github` | 4 | ❌ (opt in via `deep=True`) | `GITHUB REPOSITORY` + `RECENT GITHUB ISSUES` | Live open + closed GitHub issues (TTL-cached; trimmed to `number`/`title`/`state`/`labels` before caching — Issue #563); silently omitted on network error |
 
-**Optional focus:** `kwargs.get("focus", "")` is prepended as `=== INVESTIGATION FOCUS (USER-DIRECTED) ===` if non-empty. Never combined with `narration=True` in practice.
+**Optional focus:** `kwargs.get("focus", "")` is prepended as `=== INVESTIGATION FOCUS (USER-DIRECTED) ===` if non-empty. Never combined with `narration=True` in practice. A recognized focus keyword still selects its tag-matched provider subset regardless of `deep`; an unrecognized keyword falls back to the same `priority <= 1` default as an empty focus (Issue #920 — previously fell back to "everything").
 
 ### Thermal Observation Pipeline Context
 
@@ -300,7 +310,6 @@ Splits on `## HEADER` lines. Expected headers and output keys:
 
 | Claude header | Output key |
 |---|---|
-| `## INVESTIGATION SUMMARY` | `"summary"` |
 | `## INCONGRUITIES FOUND` | `"incongruities"` |
 | `## DATA QUALITY ISSUES` | `"data_quality"` |
 | `## SYSTEM ERRORS / WARNINGS` | `"errors_warnings"` |
@@ -316,7 +325,6 @@ Splits on `## HEADER` lines. Expected headers and output keys:
 
 ```python
 {
-    "summary": str,
     "incongruities": str,
     "data_quality": str,
     "errors_warnings": str,
@@ -326,6 +334,20 @@ Splits on `## HEADER` lines. Expected headers and output keys:
     "full_text": str,  # always populated; holds complete raw Claude response
 }
 ```
+
+**Activity Summary (Issue #920):** the LLM no longer produces a summary/overview
+section — the old `## INVESTIGATION SUMMARY` header and `"summary"` key were removed
+because that section conflated a plain activity account with investigative synthesis.
+Both `api.py` Investigate handlers (streaming and non-streaming) now inject a separate
+`"activity_summary"` key into the result's `data` dict after `parse_investigation_response()`/
+`investigation_fallback()` returns, via `build_activity_summary_narrative()`
+(`ai_skills_context.py`) — a deterministic, code-generated, chronologically-ordered
+plain-English account built from the same row data as `build_event_timeline_table()`
+(the Activity Record's table). It is never LLM-authored, applies to both the AI-success
+and no-AI-fallback paths identically (fallback no longer has its own separate
+`"summary"` roll-up), and is not part of the generic `AISkillRegistry`
+`context_builder`/`response_parser` contract — it's spliced in at the `api.py` call site
+as an investigator-specific concern.
 
 ### Fallback
 

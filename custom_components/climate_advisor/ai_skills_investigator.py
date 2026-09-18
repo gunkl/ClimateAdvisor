@@ -126,10 +126,7 @@ SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it
  do not repeat content already stated in a prior section.\
  A one-line cross-reference ("see Hypotheses above") is acceptable;\
  copying or paraphrasing the same analysis verbatim is not.
-- INVESTIGATION SUMMARY: 3â€"5 sentence overview of the most significant finding and whether\
- action is required. No analysis detail, no hypothesis reasoning, no action items.
-- INCONGRUITIES FOUND: Specific data mismatches or contradictions only. Do NOT re-explain\
- anything already stated in Summary.
+- INCONGRUITIES FOUND: Specific data mismatches or contradictions only.
 - DATA QUALITY ISSUES: Missing data, sensor gaps, stale readings, unreliable values only.\
  Do NOT repeat incongruities.
 - SYSTEM ERRORS / WARNINGS: Real captured log records (SYSTEM LOG RECORDS section) verbatim\
@@ -141,12 +138,10 @@ SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it
 - ASSUMPTIONS & CONFIDENCE: List assumptions and confidence level only.\
  Do NOT repeat findings or recommendations.
 
-Return your investigation using these exact section headers (## prefix, exact capitalisation):
-
-## INVESTIGATION SUMMARY
-3â€"5 sentence overview of the most important finding, leading with what the occupant\
- experienced or would experience. If nothing is wrong, say so plainly â€" do not fabricate\
- issues.
+Return your investigation using these exact section headers (## prefix, exact capitalisation).\
+ Do not write an "## INVESTIGATION SUMMARY" or any other overview section before\
+ INCONGRUITIES FOUND â€" a deterministic Activity Summary (built separately, not by you)\
+ already precedes your output and covers what happened; start directly with the analysis.
 
 ## INCONGRUITIES FOUND
 List every place where two data sources contradict each other. Lead each with the\
@@ -194,7 +189,8 @@ async def async_build_investigator_context(
     registry = get_provider_registry()
     focus: str = kwargs.get("focus", "")
     narration: bool = bool(kwargs.get("narration", False))
-    providers = registry.select(focus, narration=narration)
+    deep: bool = bool(kwargs.get("deep", False))
+    providers = registry.select(focus, narration=narration, deep=deep)
 
     sections: list[str] = ["=== Climate Advisor Investigator Context ===", ""]
 
@@ -233,7 +229,6 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
     always preserved in the 'full_text' key.
     """
     sections: dict[str, Any] = {
-        "summary": "",
         "incongruities": "",
         "data_quality": "",
         "errors_warnings": "",
@@ -244,7 +239,6 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
     }
 
     _header_map = {
-        "INVESTIGATION SUMMARY": "summary",
         "INCONGRUITIES FOUND": "incongruities",
         "DATA QUALITY ISSUES": "data_quality",
         "SYSTEM ERRORS / WARNINGS": "errors_warnings",
@@ -296,7 +290,6 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     errors_parts: list[str] = []
     incongruity_parts: list[str] = []
     data_quality_parts: list[str] = []
-    summary_parts: list[str] = []
 
     # --- Event log: scan for error/warning entries ---
     try:
@@ -517,24 +510,14 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     except Exception:
         _LOGGER.warning("investigator fallback: failed to scan repeated setpoint rejections")
 
-    # --- Build summary ---
-    total_issues = len(errors_parts) + len(incongruity_parts) + len(data_quality_parts)
-    if total_issues == 0:
-        summary_parts.append(
-            "Fallback scan found no obvious incongruities, data quality issues, or system errors."
-            " AI analysis was unavailable — a full investigation requires the Claude API."
-        )
-    else:
-        summary_parts.append(
-            f"Fallback scan (no AI) found {total_issues} potential issue(s):"
-            f" {len(errors_parts)} error/warning event(s),"
-            f" {len(incongruity_parts)} incongruity(ies),"
-            f" {len(data_quality_parts)} data quality issue(s)."
-            f" AI analysis was unavailable for deep cross-source verification."
-        )
+    # Issue #920: the old "Fallback scan found N issues..." roll-up (summary_parts) was
+    # dropped — that information is redundant with the incongruities/data_quality/
+    # errors_warnings fields below (which list the actual items) and with the
+    # "hypotheses" field's own AI-unavailable notice. The Activity Summary shown to the
+    # user is now the deterministic build_activity_summary_narrative() output, injected
+    # by the caller (api.py) for both the AI-success and this fallback path alike.
 
     return {
-        "summary": "\n".join(summary_parts),
         "incongruities": "\n".join(incongruity_parts) if incongruity_parts else "None detected.",
         "data_quality": "\n".join(data_quality_parts) if data_quality_parts else "None detected.",
         "errors_warnings": (

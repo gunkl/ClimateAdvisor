@@ -14,7 +14,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from . import log_capture, zone_registry
-from .ai_skills_context import build_event_timeline_table
+from .ai_skills_context import build_activity_summary_narrative, build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
     API_AI_STATUS,
@@ -61,6 +61,7 @@ from .const import (
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
     DOMAIN,
+    EVENT_LOG_CAP,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     TEMP_SOURCE_CLIMATE_FALLBACK,
@@ -972,12 +973,16 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
             from homeassistant.util import dt as dt_util
 
             event_log = list(getattr(coordinator, "_event_log", []) or [])
+            # Issue #920: this is a display-only endpoint with no LLM in its path, so
+            # it doesn't need the LLM-facing 200-row token-budget cap — use the real
+            # storage ceiling instead of an artificial display limit.
             table = build_event_timeline_table(
                 event_log,
                 coordinator.config or {},
                 hours,
                 dt_util.now(),
                 newest_first=True,
+                limit=EVENT_LOG_CAP,
             )
 
             cutoff_iso = (dt_util.now() - timedelta(hours=hours)).isoformat()
@@ -1018,10 +1023,16 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 body = {}
 
             focus: str = str(body.get("focus", ""))
+            # Issue #920: clamp to 168h (7 days) — the event log's own retention
+            # ceiling (EVENT_LOG_MAX_AGE_HOURS), not the old 720h/30-day value that
+            # silently did nothing beyond 7 days since the data was never retained.
             try:
-                hours: int = max(1, min(int(body.get("hours", 24)), 720))
+                hours: int = max(1, min(int(body.get("hours", 24)), 168))
             except (ValueError, TypeError):
                 hours = 24
+            deep: bool = bool(body.get("deep", False))
+
+            from homeassistant.util import dt as dt_util  # noqa: PLC0415
 
             if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
                 return self.json_message("AI features are not enabled", status_code=403)
@@ -1063,6 +1074,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                     coordinator.claude_client,
                     focus=focus,
                     hours=hours,
+                    deep=deep,
                 ):
                     await stream_resp.write(("data: " + json.dumps(event) + "\n\n").encode())
                     await stream_resp.drain()
@@ -1082,6 +1094,15 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                             "truncated": event.get("truncated", False),
                             "truncated_empty": event.get("truncated_empty", False),
                         }
+                        # Issue #920: deterministic Activity Summary, not LLM-authored —
+                        # single source of truth for both this path and the non-streaming
+                        # path below, and for the AI-success and fallback cases alike.
+                        final_result["data"]["activity_summary"] = build_activity_summary_narrative(
+                            list(getattr(coordinator, "_event_log", []) or []),
+                            coordinator.config or {},
+                            hours,
+                            dt_util.now(),
+                        )
                         if final_result["truncated_empty"]:
                             # Issue #563 follow-on: distinct from ordinary truncation — the
                             # model produced zero visible answer text despite consuming the
@@ -1116,9 +1137,17 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 coordinator.claude_client,
                 focus=focus,
                 hours=hours,
+                deep=deep,
             )
 
             if result.get("success") or result.get("source") == "fallback":
+                # Issue #920: deterministic Activity Summary — see streaming path above.
+                result.setdefault("data", {})["activity_summary"] = build_activity_summary_narrative(
+                    list(getattr(coordinator, "_event_log", []) or []),
+                    coordinator.config or {},
+                    hours,
+                    dt_util.now(),
+                )
                 if result.get("truncated_empty"):
                     _LOGGER.warning(
                         "Investigation report produced zero visible output despite "

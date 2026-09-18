@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.45] — 2026-09-18
+
+- Feat #920: AI Investigator reports now open with a plain-English "Activity Summary" of what actually happened, instead of a jargon-heavy AI-written overview — and a default "Investigate" run is now faster and quieter, pulling in only current-state and recent-activity data unless you check the new "Deep investigation" box for the full scan (config, known fixes, version history, GitHub issues). The Activity Record tab can now show a full week of events instead of stopping at 200.
+
 ## [0.7.44] — 2026-09-18
 
 - Fix #918: comfort under/over-temp incident alerts no longer use a stale indoor reading left over from before your sleep/wake schedule switches sensors. Right around wake-up or bedtime, the incident detector could compare an already up-to-date comfort target against an indoor temperature reading from up to 30 minutes earlier — sometimes still reflecting the bedroom sensor used overnight even after the house had already warmed back up — producing a false or stale comfort alert.

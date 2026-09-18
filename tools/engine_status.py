@@ -71,6 +71,10 @@ def build_engine_status(cache: dict) -> dict:
     k_solar = _engine("k_solar", None)
     solar_phase = _engine("solar_phase_offset_h", None)
     k_vent_window = _engine("k_vent_window", None)
+    # Keep in sync with learning.py::LearningEngine.get_engine_status() — this CLI tool
+    # independently reimplements that shape (can't import custom_components/, which pulls
+    # in homeassistant) and previously missed this same key (Issue #929).
+    k_vent_fan = _engine("k_vent_fan", None)
 
     # HVAC engines (heat + cool)
     k_heat = cache.get("k_active_heat")
@@ -84,7 +88,9 @@ def build_engine_status(cache: dict) -> dict:
     }
 
     # ODE version: v3 if any extended params are present
-    has_v3 = any(cache.get(k) is not None for k in ("k_solar", "k_vent", "k_vent_window", "solar_phase_offset_h"))
+    has_v3 = any(
+        cache.get(k) is not None for k in ("k_solar", "k_vent", "k_vent_window", "k_vent_fan", "solar_phase_offset_h")
+    )
     ode_version = "v3" if has_v3 else "basic"
 
     # Physics eligible: k_passive present and confidence > "none"
@@ -102,6 +108,7 @@ def build_engine_status(cache: dict) -> dict:
         "k_solar": k_solar,
         "solar_phase_offset_h": solar_phase,
         "k_vent_window": k_vent_window,
+        "k_vent_fan": k_vent_fan,
         "k_active_hvac": k_active_hvac,
         "ode_version": ode_version,
         "physics_eligible": physics_eligible,
@@ -137,6 +144,7 @@ def print_engine_status(status: dict) -> None:
     _row("k_solar", status["k_solar"], " °F/hr")
     _row("solar_phase_offset", status["solar_phase_offset_h"], "h")
     _row("k_vent_window", status["k_vent_window"], " hr⁻¹")
+    _row("k_vent_fan", status["k_vent_fan"], " hr⁻¹")
 
     hvac = status["k_active_hvac"]
     if hvac.get("active"):

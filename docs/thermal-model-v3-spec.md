@@ -857,10 +857,11 @@ A chart_log window is eligible for a phase observation only when all six conditi
         "active": bool,
         "value": float | None,
     },
-    # "k_vent_fan" is not yet exposed via get_engine_status() — it is available on
-    # get_thermal_model()'s output dict but this dashboard-facing engine list has not
-    # been extended for it (display-only field, no forecast-eligibility implication;
-    # see the forecast-ODE scope boundary note under k_vent/fan_only_decay retirement).
+    "k_vent_fan": {
+        "active": bool,
+        "value": float | None,  # display-only — not wired into forecast/nat-vent timing;
+        # see the forecast-ODE scope boundary note under k_vent/fan_only_decay retirement.
+    },
     "k_active_hvac": {
         "active": bool,  # True when k_active_heat or k_active_cool is not None
         "value": {"heat": float | None, "cool": float | None},  # k_active_heat and k_active_cool

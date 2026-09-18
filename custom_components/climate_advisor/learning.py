@@ -1309,6 +1309,7 @@ class LearningEngine:
         k_passive_val = cache.get("k_passive")
         k_solar_val = cache.get("k_solar")
         k_vent_window_val = cache.get("k_vent_window")
+        k_vent_fan_val = cache.get("k_vent_fan")
         k_active_heat = cache.get("k_active_heat")
         k_active_cool = cache.get("k_active_cool")
         phase_offset_val = cache.get("solar_phase_offset_h")
@@ -1351,6 +1352,13 @@ class LearningEngine:
                 "active": k_vent_window_val is not None,
                 "value": k_vent_window_val,
             },
+            # Keep in sync with tools/engine_status.py::build_engine_status() — that CLI
+            # tool independently reimplements this shape (it can't import this module, which
+            # pulls in homeassistant.util) and previously missed this same key (Issue #929).
+            "k_vent_fan": {
+                "active": k_vent_fan_val is not None,
+                "value": k_vent_fan_val,
+            },
             "k_active_hvac": {
                 "active": k_active_heat is not None or k_active_cool is not None,
                 "value": {"heat": k_active_heat, "cool": k_active_cool},
@@ -1358,7 +1366,7 @@ class LearningEngine:
             },
         }
 
-        has_solar = k_solar_val is not None or k_vent_window_val is not None
+        has_solar = k_solar_val is not None or k_vent_window_val is not None or k_vent_fan_val is not None
         status["ode_version"] = "v3" if has_solar else "basic"
 
         physics_eligible = k_passive_val is not None and k_passive_val < 0 and conf_k_passive != "none"

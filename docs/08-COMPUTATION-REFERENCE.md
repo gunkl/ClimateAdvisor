@@ -332,16 +332,26 @@ HVAC heat/cool cycles. Multiple observation types can run concurrently in a
 | `hvac_heat` | hvac_action=heating | k_active_heat, k_passive (via pre-heat buffer) | 10 post-heat |
 | `hvac_cool` | hvac_action=cooling | k_active_cool | 10 post-heat |
 | `passive_decay` | HVAC off, fan off, windows closed, \|ΔT\| ≥ 3°F | k_passive | 30 |
-| `fan_only_decay` | Fan active, HVAC off, windows closed | k_vent | 15 |
-| `ventilated_decay` | Any window open, HVAC off | k_vent_window | 20 |
+| `vent_window_decay` | Window open, fan/WHF off, HVAC off | k_vent_window | 20 |
+| `vent_fan_decay` | Window open, fan/WHF on, HVAC off | k_vent_fan | 20 |
 | `solar_gain` | HVAC off, fan off, windows closed, T_in > T_out, daytime | k_solar | 20 |
+
+> **Issue #587** retired the old `fan_only_decay` type (fan on, windows *closed* →
+> `k_vent`) and split the old `ventilated_decay` type into `vent_window_decay` (window
+> open, fan off) and `vent_fan_decay` (window open AND fan/WHF on). The bare `k_vent`
+> field no longer exists. Both new types share `THERMAL_VENT_MIN_SAMPLES = 20` and
+> `THERMAL_VENT_MIN_SIGNAL_F = 0.3` (`const.py`), driven by a single shared
+> `_VENT_SPLIT_TYPES` table in `coordinator.py` rather than parallel per-type logic.
 
 **HVAC plateau guard**: reduced from 1.0°F to 0.3°F (`THERMAL_HVAC_MIN_DECAY_F`). The 1.0°F
 guard rejected all observations on short-cycling thermostats (avg cycle < 1°F rise).
 
 **ODE (v3)**: `dT/dt = (k_passive + k_vent_eff)*(T_out - T_in) + k_solar*solar_factor + Q_hvac`
-where `k_vent_eff = k_vent` when ventilation is active, `solar_factor` = sinusoidal 0→1→0
+where `k_vent_eff = k_vent_window` when a window is open, `solar_factor` = sinusoidal 0→1→0
 over daylight hours (8–18 local), `Q_hvac = ±k_active` when HVAC is driving toward setpoint.
+`k_vent_fan` is learned and displayed (`get_engine_status()`/`get_thermal_model()`) but is
+**not** wired into this ODE — a deliberate Issue #587 scope boundary, not an oversight; see
+the Engine Visibility section of `docs/thermal-model-v3-spec.md`.
 
 **Confidence grades**: `confidence_k_passive` is graded independently of `confidence_k_hvac`.
 Physics prediction activates when either confidence is > "none", enabling prediction on
@@ -370,14 +380,14 @@ often a sample is appended to each observation's `samples` list:
 | `hvac_heat` / `hvac_cool` active phase | Every poll (no gate) | — |
 | `hvac_heat` / `hvac_cool` post-heat phase | 5 min | `THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S` |
 | `passive_decay` | 5 min | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` |
-| `fan_only_decay` | 2 min | `THERMAL_FAN_SAMPLE_INTERVAL_S` |
-| `ventilated_decay` | 5 min | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` |
+| `vent_window_decay` | 5 min | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` |
+| `vent_fan_decay` | 5 min | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` |
 | `solar_gain` | 5 min | `THERMAL_SOLAR_SAMPLE_INTERVAL_S` |
 
 The gate timestamp is stored as `"last_sample_time"` in the observation dict. HVAC
 active-phase sampling is ungated — fast HVAC dynamics benefit from maximum resolution.
-`fan_only_decay` uses a 2-minute interval because fan-assisted heat transfer is faster
-than pure passive drift.
+`THERMAL_FAN_SAMPLE_INTERVAL_S` (the old 2-minute gate for `fan_only_decay`) was retired
+in Issue #587 — both vent-split types now use the same 5-minute gate as `passive_decay`.
 
 **Convergence**: A 6-hour overnight passive window at 5-min decimation yields ~72 samples
 — vs. 720 noise-dominated samples at poll rate. The 30-sample minimum for `passive_decay`
@@ -394,7 +404,7 @@ since the last rolling commit), `_commit_rolling_window_obs()` fires:
 2. For `passive_decay` and `solar_gain`: requires total indoor ΔT ≥
    `THERMAL_ROLLING_MIN_DELTA_T_F (0.2°F)`. This guards against noise-fitting on
    near-flat data in short windows (< 10 samples).
-3. For `fan_only_decay` and `ventilated_decay`: the ΔT guard is skipped
+3. For `vent_window_decay` and `vent_fan_decay`: the ΔT guard is skipped
    (`skip_delta_guard=True`) because the signal guarantee is the indoor–outdoor
    differential (already checked by the observation's trigger condition), not the
    temperature trend.
@@ -408,7 +418,7 @@ reaches 5% accuracy in ~4 nights (α = 0.05) vs. ~60 nights before.
 
 #### 5e-iii. Wall-Clock Abandon Timeout (Issue #122 H4)
 
-`ventilated_decay` and `fan_only_decay` abandon after `THERMAL_DECAY_MAX_WINDOW_MINUTES
+`vent_window_decay` and `vent_fan_decay` abandon after `THERMAL_DECAY_MAX_WINDOW_MINUTES
 (60 min)` if rolling commit has not fired and the signal has not met the minimum ΔT
 threshold. Abandon reason logged: `"max_window_elapsed_low_signal"`. This prevents
 stale near-equilibrium observations from persisting when a window is left open or the
@@ -417,27 +427,29 @@ fan is running with indoor and outdoor temps nearly equal.
 `passive_decay` and `solar_gain` do not have this timeout — rolling commits bound their
 window length naturally.
 
-#### 5e-iv. `_update_thermal_model_cache()` — E6 Parameter Routing Fix (Issue #122)
+#### 5e-iv. `_update_thermal_model_cache()` — E6 Parameter Routing Fix (Issue #122; obs types renamed in #587)
 
 Each committed observation updates the EWMA cache via `learning._update_thermal_model_cache()`.
-The `hvac_mode` field in the observation dict determines which cache field is updated:
+The observation type determines which cache field is updated:
 
-| `hvac_mode` | Updates cache field | Count field |
+| Obs type | Updates cache field | Count field |
 |---|---|---|
-| `"heat"` | `k_active_heat`, `k_passive` | `observation_count_heat` |
-| `"cool"` | `k_active_cool`, `k_passive` | `observation_count_cool` |
-| `"passive"` | `k_passive` only | `observation_count_passive` |
-| `"fan_only"` | `k_vent` (from obs `k_passive` field) | `observation_count_fan_only` |
-| `"ventilated"` | `k_vent_window` (from obs `k_passive` field); also `k_solar` when 2-param OLS fires (see §5e-v) | `observation_count_vent` |
-| `"solar"` | `k_solar` (from obs `k_solar` field) | `observation_count_solar` |
+| `hvac_heat` | `k_active_heat`, `k_passive` | `observation_count_heat` |
+| `hvac_cool` | `k_active_cool`, `k_passive` | `observation_count_cool` |
+| `passive_decay` | `k_passive` only | `observation_count_passive` |
+| `vent_window_decay` | `k_vent_window`; also `k_solar` when 2-param OLS fires (see §5e-v) | `observation_count_vent_window` |
+| `vent_fan_decay` | `k_vent_fan` | `observation_count_vent_fan` |
+| `solar_gain` | `k_solar` (from obs `k_solar` field) | `observation_count_solar` |
 
-**E6 fix**: Before Issue #122, the `elif mode == "passive"` branch incorrectly wrote
-`k_p` to `cache["k_vent"]`. The fix removes that line — passive observations no longer
-contaminate the ventilation parameter. Only `fan_only` observations update `k_vent`.
+**E6 fix** (historical, Issue #122): Before Issue #122, the passive-observation branch
+incorrectly wrote its rate to the ventilation parameter (`cache["k_vent"]`, the field
+Issue #587 later retired). The fix removed that line — passive observations no longer
+contaminate the ventilation parameter. Only ventilation-typed observations update their
+own `k_vent_window`/`k_vent_fan` field.
 
-#### 5e-v. Adaptive 2-Param Ventilated OLS (Issue #126)
+#### 5e-v. Adaptive 2-Param Ventilated OLS (Issue #126; `vent_window_decay` only)
 
-`ventilated_decay` observations optionally upgrade from 1-parameter OLS (solving only
+`vent_window_decay` observations optionally upgrade from 1-parameter OLS (solving only
 `k_vent_window`) to a 2-parameter joint solve (`k_env_vent` + `k_solar`) when solar
 conditions during the window provide enough variation to separate the two effects.
 
@@ -469,7 +481,7 @@ removed). `k_solar` in the EWMA cache is updated separately via the same EWMA me
 result for `k_vent_window` is used and `k_solar` is not updated from this observation.
 
 **`solar_factor` in samples:** From Issue #126, `solar_factor` is recorded in each
-`ventilated_decay` sample dict at collection time (not computed at commit time). Old
+`vent_window_decay` sample dict at collection time (not computed at commit time). Old
 sample dicts without a `solar_factor` key are treated as `0.0` — the 1-param fallback
 fires because `sf_range` will be 0.0 < 0.30.
 
@@ -478,7 +490,7 @@ fires because `sf_range` will be 0.0 < 0.30.
 **Why adaptive (not a separate obs type):** Ventilated windows are often long-duration
 open events. Splitting into separate obs types would require two concurrent windows that
 start and stop on the same physical event, complicating the observation lifecycle.
-Upgrading the existing `ventilated_decay` observation at commit time keeps the pipeline
+Upgrading the existing `vent_window_decay` observation at commit time keeps the pipeline
 simple — the 2-param path is a quality improvement, not a new signal collection mechanism.
 
 **Thermal mass lag:** The clock-based `solar_factor` (sinusoidal, peaks at solar noon) is
@@ -2792,14 +2804,15 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `THERMAL_K_ACTIVE_HEAT_MAX` | `15.0` | °F/hr | Maximum credible HVAC heating contribution |
 | `THERMAL_K_ACTIVE_COOL_MIN` | `-15.0` | °F/hr | Maximum credible HVAC cooling contribution (magnitude) |
 | `THERMAL_K_ACTIVE_COOL_MAX` | `-0.5` | °F/hr | Minimum credible HVAC cooling contribution (magnitude) |
-| `THERMAL_DECAY_MAX_WINDOW_MINUTES` | `60` | minutes | Wall-clock limit before `ventilated_decay` / `fan_only_decay` abandon (H4) |
+| `THERMAL_DECAY_MAX_WINDOW_MINUTES` | `60` | minutes | Wall-clock limit before `vent_window_decay` / `vent_fan_decay` abandon (H4) |
 | `THERMAL_ROLLING_WINDOW_MINUTES` | `30` | minutes | Rolling commit+restart interval for all four non-HVAC decay types (H2) |
 | `THERMAL_ROLLING_MIN_DELTA_T_F` | `0.2` | °F | Minimum total indoor ΔT to commit a short rolling window (H2 ΔT guard) |
-| `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` | `300` | seconds (5 min) | Sample gate for `passive_decay` and `ventilated_decay` (H1) |
-| `THERMAL_FAN_SAMPLE_INTERVAL_S` | `120` | seconds (2 min) | Sample gate for `fan_only_decay` — faster than passive dynamics (H1) |
+| `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` | `300` | seconds (5 min) | Sample gate for `passive_decay`, `vent_window_decay`, and `vent_fan_decay` (H1) |
+| `THERMAL_VENT_MIN_SAMPLES` | `20` | observations | Min committed samples for `vent_window_decay` / `vent_fan_decay` to populate `k_vent_window` / `k_vent_fan` (Issue #587) |
+| `THERMAL_VENT_MIN_SIGNAL_F` | `0.3` | °F | Min \|T_indoor − T_outdoor\| for `vent_window_decay` / `vent_fan_decay` commit (Issue #587) |
 | `THERMAL_SOLAR_SAMPLE_INTERVAL_S` | `300` | seconds (5 min) | Sample gate for `solar_gain` (H1) |
 | `THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S` | `300` | seconds (5 min) | Sample gate for HVAC post-heat phase — passive dynamics (H1) |
-| `THERMAL_SOLAR_FACTOR_MIN_RANGE` | `0.30` | — | Minimum solar_factor range (max−min) across ventilated_decay samples to trigger 2-param OLS (Issue #126) |
+| `THERMAL_SOLAR_FACTOR_MIN_RANGE` | `0.30` | — | Minimum solar_factor range (max−min) across vent_window_decay samples to trigger 2-param OLS (Issue #126) |
 
 **User-facing config keys** (set via config flow, stored in the config entry):
 
@@ -3443,7 +3456,7 @@ learning_health: {
     }
     for obs_type in [
         "hvac_heat", "hvac_cool", "passive_decay",
-        "fan_only_decay", "ventilated_decay", "solar_gain"
+        "vent_window_decay", "vent_fan_decay", "solar_gain"
     ]
 }
 ```
@@ -3486,8 +3499,8 @@ obs_type            attempts  committed  rejections  last rejection
 passive_decay       12        3          9           too_few_samples (n=3/5)
 hvac_heat           8         5          3           ols_bad_fit (R²=0.08/0.20)
 hvac_cool           6         4          2           abandoned
-fan_only_decay      2         0          2           too_few_samples (n=2/5)
-ventilated_decay    0         0          0           —
+vent_window_decay   2         0          2           too_few_samples (n=2/5)
+vent_fan_decay      0         0          0           —
 solar_gain          1         0          1           small_delta (ΔT=0.1°F/0.2°F)
 ```
 
@@ -3497,9 +3510,9 @@ solar_gain          1         0          1           small_delta (ΔT=0.1°F/0.2
 Current Observations
 --------------------
 obs_type            status      elapsed   samples  last_smp  indoor           outdoor   delta
-ventilated_decay    monitoring  164.3 min 6        2.1 min   71.8-72.1°F      69.0°F    0.3°F
+vent_window_decay    monitoring  164.3 min 6        2.1 min   71.8-72.1°F      69.0°F    0.3°F
 
-(Rejection log entries: ventilated_decay=5)
+(Rejection log entries: vent_window_decay=5)
 ```
 
 If the debug-state endpoint is unreachable or returns no `thermal_pipeline` key, the tool prints a warning and skips Section 2 — it does not abort.
@@ -3537,9 +3550,9 @@ Issue #125 adds structured log lines at key points in the observation lifecycle.
 When indoor temperature is stable (HVAC holding setpoint, mild outdoor conditions), a sequence like this is normal and expected:
 
 ```
-Thermal rolling window: obs_type=ventilated_decay n=6 elapsed=5.0min indoor=[72.0..72.0] (ΔT=0.00°F) outdoor=69.0
-Thermal event commit failed (ventilated_decay): k_passive rejected (R²=0.000, n=6, indoor_ΔT=0.00°F) code=ols_bad_fit
-Thermal obs abandoned [type=ventilated_decay reason=ols_bad_fit n=6/4 dt=0.00°F/? elapsed=35m]
+Thermal rolling window: obs_type=vent_window_decay n=6 elapsed=5.0min indoor=[72.0..72.0] (ΔT=0.00°F) outdoor=69.0
+Thermal event commit failed (vent_window_decay): k_passive rejected (R²=0.000, n=6, indoor_ΔT=0.00°F) code=ols_bad_fit
+Thermal obs abandoned [type=vent_window_decay reason=ols_bad_fit n=6/4 dt=0.00°F/? elapsed=35m]
 ```
 
 `R²=0.000` with `indoor_ΔT=0.00°F` means the indoor temperature was effectively flat — there was no temperature excursion for OLS to fit. This is **not a bug**. The learning engine correctly refuses to extract a thermal decay rate from flat data; fitting a slope to a flat line would produce a meaningless or unstable k_passive. This condition occurs whenever indoor and outdoor temperatures are within 2–3°F of each other, or when HVAC is actively cycling to maintain a stable setpoint. Resolution: wait for a natural temperature excursion — a warm afternoon, a morning pre-heat, or an overnight cooldown — to provide the ≥ 0.2°F indoor ΔT the quality gate requires.
@@ -3555,7 +3568,7 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
   "thermal_pipeline": {
     "pending": [
       {
-        "obs_type": "ventilated_decay",
+        "obs_type": "vent_window_decay",
         "status": "monitoring",
         "elapsed_minutes": 164.3,
         "sample_count": 6,
@@ -3566,7 +3579,7 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
       }
     ],
     "rejection_log_counts": {
-      "ventilated_decay": 5
+      "vent_window_decay": 5
     }
   }
 }
@@ -3577,7 +3590,7 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 | Field | Type | Description |
 |---|---|---|
 | `pending` | `list` | One entry per obs_type currently in `_pending_observations`. Empty list when no observations are active. |
-| `pending[].obs_type` | `str` | Observation type key (e.g., `"passive_decay"`, `"ventilated_decay"`) |
+| `pending[].obs_type` | `str` | Observation type key (e.g., `"passive_decay"`, `"vent_window_decay"`) |
 | `pending[].status` | `str` | Raw `status` field from the pending observation dict (e.g., `"monitoring"`) |
 | `pending[].elapsed_minutes` | `float \| null` | Minutes since observation started; `null` if `start_time` is absent or unparseable |
 | `pending[].sample_count` | `int` | Number of samples accumulated so far |

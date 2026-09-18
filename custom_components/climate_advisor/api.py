@@ -14,7 +14,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from . import log_capture, zone_registry
-from .ai_skills_context import build_activity_summary_narrative, build_event_timeline_table
+from .ai_skills_context import build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
     API_AI_STATUS,
@@ -1032,8 +1032,6 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 hours = 24
             deep: bool = bool(body.get("deep", False))
 
-            from homeassistant.util import dt as dt_util  # noqa: PLC0415
-
             if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
                 return self.json_message("AI features are not enabled", status_code=403)
 
@@ -1094,15 +1092,13 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                             "truncated": event.get("truncated", False),
                             "truncated_empty": event.get("truncated_empty", False),
                         }
-                        # Issue #920: deterministic Activity Summary, not LLM-authored —
-                        # single source of truth for both this path and the non-streaming
-                        # path below, and for the AI-success and fallback cases alike.
-                        final_result["data"]["activity_summary"] = build_activity_summary_narrative(
-                            list(getattr(coordinator, "_event_log", []) or []),
-                            coordinator.config or {},
-                            hours,
-                            dt_util.now(),
-                        )
+                        # Issue #925: activity_summary now arrives already populated in
+                        # event["data"] — it's an ordinary parsed LLM section (see
+                        # ai_skills_investigator.py's ACTIVITY SUMMARY prompt section)
+                        # or, on the fallback path, set directly by investigation_fallback().
+                        # No separate post-parse injection needed any more; this also
+                        # structurally fixes the old bug where the live SSE stream never
+                        # saw the enrichment that only the persisted copy received.
                         if final_result["truncated_empty"]:
                             # Issue #563 follow-on: distinct from ordinary truncation — the
                             # model produced zero visible answer text despite consuming the
@@ -1141,13 +1137,8 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
             )
 
             if result.get("success") or result.get("source") == "fallback":
-                # Issue #920: deterministic Activity Summary — see streaming path above.
-                result.setdefault("data", {})["activity_summary"] = build_activity_summary_narrative(
-                    list(getattr(coordinator, "_event_log", []) or []),
-                    coordinator.config or {},
-                    hours,
-                    dt_util.now(),
-                )
+                # Issue #925: activity_summary already arrives populated in result["data"]
+                # — see streaming path above.
                 if result.get("truncated_empty"):
                     _LOGGER.warning(
                         "Investigation report produced zero visible output despite "

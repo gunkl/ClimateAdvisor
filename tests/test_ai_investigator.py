@@ -45,6 +45,7 @@ from custom_components.climate_advisor.const import INVESTIGATION_REPORT_HISTORY
 # ---------------------------------------------------------------------------
 
 _EXPECTED_PARSE_KEYS = {
+    "activity_summary",
     "incongruities",
     "data_quality",
     "errors_warnings",
@@ -55,6 +56,7 @@ _EXPECTED_PARSE_KEYS = {
 }
 
 _EXPECTED_FALLBACK_KEYS = {
+    "activity_summary",
     "incongruities",
     "data_quality",
     "errors_warnings",
@@ -310,6 +312,71 @@ class TestParseInvestigationResponse:
 
 
 # ---------------------------------------------------------------------------
+# Group 1b: ACTIVITY SUMMARY header + drift guardrail (Issue #925)
+# ---------------------------------------------------------------------------
+
+
+class TestActivitySummaryParsing:
+    """Issue #925: ## ACTIVITY SUMMARY is restored as an LLM-authored, recognised
+    header, and parse_investigation_response() runs a post-parse drift guardrail
+    over its content (detection/logging only, never a rewrite or rejection)."""
+
+    def test_activity_summary_header_recognised(self):
+        raw = (
+            "## ACTIVITY SUMMARY\n"
+            "10:53 AM – 10:58 AM: Automation restarted after an update and classified "
+            "today as warm.\n"
+            "\n"
+            "## HYPOTHESES\n"
+            "1. A real hypothesis.\n"
+        )
+        result = parse_investigation_response(raw)
+
+        assert "Automation restarted" in result["activity_summary"]
+        assert "real hypothesis" in result["hypotheses"]
+
+    def test_compliant_activity_summary_does_not_warn(self, caplog):
+        raw = (
+            "## ACTIVITY SUMMARY\n"
+            "10:53 AM – 10:58 AM: Automation restarted after an update and classified "
+            "today as warm.\n"
+            "12:31 PM: You turned on the whole-house fan by remote for 1 hour.\n"
+        )
+        with caplog.at_level("WARNING"):
+            parse_investigation_response(raw)
+
+        assert not any("drift" in rec.message.lower() for rec in caplog.records)
+
+    def test_no_notable_activity_sentinel_does_not_warn(self, caplog):
+        raw = "## ACTIVITY SUMMARY\nNo notable activity in the analyzed window.\n"
+        with caplog.at_level("WARNING"):
+            parse_investigation_response(raw)
+
+        assert not any("drift" in rec.message.lower() for rec in caplog.records)
+
+    def test_banned_jargon_substring_triggers_drift_warning(self, caplog):
+        raw = "## ACTIVITY SUMMARY\n10:53 AM: Comfort band applied (setpoint: 72°F Cool).\n"
+        with caplog.at_level("WARNING"):
+            parse_investigation_response(raw)
+
+        assert any("drift" in rec.message.lower() for rec in caplog.records)
+
+    def test_raw_event_type_name_triggers_drift_warning(self, caplog):
+        raw = "## ACTIVITY SUMMARY\n10:53 AM: classification_applied fired for the warm day type.\n"
+        with caplog.at_level("WARNING"):
+            parse_investigation_response(raw)
+
+        assert any("drift" in rec.message.lower() for rec in caplog.records)
+
+    def test_missing_leading_time_triggers_drift_warning(self, caplog):
+        raw = "## ACTIVITY SUMMARY\nAutomation restarted after an update.\n"
+        with caplog.at_level("WARNING"):
+            parse_investigation_response(raw)
+
+        assert any("drift" in rec.message.lower() for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # Group 2: investigation_fallback
 # ---------------------------------------------------------------------------
 
@@ -415,17 +482,29 @@ class TestInvestigationFallback:
 
         assert "99" in result["data_quality"] or "unusually high" in result["data_quality"]
 
-    def test_fallback_has_no_summary_key(self):
-        """Issue #920: the fallback's own "Fallback scan found N issues..." roll-up
-        was removed -- that information was redundant with errors_warnings/
-        incongruities/data_quality (which list the actual items) and with
-        hypotheses' own AI-unavailable notice. The deterministic Activity Summary
-        shown to the user is now injected by the caller (api.py), not this function."""
+    def test_fallback_activity_summary_populated_without_claude(self):
+        """Issue #925: investigation_fallback() populates "activity_summary" via
+        build_activity_summary_narrative() -- a deterministic renderer over
+        session-grouped facts, never calling Claude. The old "Fallback scan found
+        N issues..." roll-up (Issue #920) stays removed; that count was redundant
+        with errors_warnings/incongruities/data_quality (which list the actual
+        items) and with hypotheses' own AI-unavailable notice."""
+        now = datetime.datetime.now(datetime.UTC)
+        event_log = [{"type": "fan_activated", "time": now.isoformat(), "reason": "natural ventilation"}]
+        coord = _make_coordinator(event_log=event_log)
+
+        result = investigation_fallback(coord)
+
+        assert "activity_summary" in result
+        assert result["activity_summary"]
+        assert "event(s)" in result["activity_summary"]
+
+    def test_fallback_activity_summary_empty_log_says_no_activity(self):
         coord = _make_coordinator()
 
         result = investigation_fallback(coord)
 
-        assert "summary" not in result
+        assert result["activity_summary"] == "No activity recorded in the analyzed window."
 
     def test_fallback_hypotheses_states_ai_unavailable(self):
         """The AI-unavailable signal is still communicated, just via "hypotheses"

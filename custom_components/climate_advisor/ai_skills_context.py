@@ -21,7 +21,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from homeassistant.util import dt as dt_util
 
@@ -1551,22 +1551,36 @@ def _event_source_label(event_type: str, data: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_event_time(raw_time: Any) -> datetime.datetime | None:
+    """Parse a raw event-log timestamp into a local, timezone-aware datetime.
+
+    Single source of truth for timestamp parsing (Issue #925) -- shared by
+    `_fmt_time()` (display string) and `_render_timeline_events()` (real datetime,
+    needed for gap-based session grouping in `_group_timeline_sessions()`). Returns
+    None if `raw_time` is missing or unparseable.
+    """
+    if raw_time is None:
+        return None
+    if isinstance(raw_time, datetime.datetime):
+        dt = raw_time
+    else:
+        try:
+            dt = datetime.datetime.fromisoformat(str(raw_time))
+        except (ValueError, TypeError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return dt_util.as_local(dt)
+
+
 def _fmt_time(raw_time: Any) -> str:
     """Format a raw timestamp from the event log as HH:MM (local)."""
     if raw_time is None:
         return "??:??"
-    if isinstance(raw_time, datetime.datetime):
-        dt = raw_time
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.UTC)
-        return dt_util.as_local(dt).strftime("%H:%M")
-    try:
-        dt = datetime.datetime.fromisoformat(str(raw_time))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.UTC)
-        return dt_util.as_local(dt).strftime("%H:%M")
-    except (ValueError, TypeError):
+    parsed = _parse_event_time(raw_time)
+    if parsed is None:
         return str(raw_time)
+    return parsed.strftime("%H:%M")
 
 
 def _humanize_type(event_type: str) -> str:
@@ -2740,6 +2754,108 @@ def _maybe_prepend_whf_warning(table: str, config: dict[str, Any]) -> str:
     return table
 
 
+class _RenderedEvent(NamedTuple):
+    """One rendered (but not yet grouped) event-log entry (Issue #925).
+
+    `dt` is the real parsed timestamp (may be None if unparseable) -- the field
+    `_fmt_time()`-only rows never carried, needed for gap-based session boundaries.
+    """
+
+    dt: datetime.datetime | None
+    time_str: str
+    event_type: str
+    ev_text: str
+    settings_text: str
+    source: str
+    indoor: str
+    outdoor: str
+
+
+def _render_timeline_events(
+    raw_event_log: list[Any],
+    config: dict[str, Any],
+    hours: float,
+    now: datetime.datetime,
+    limit: int = 200,
+) -> tuple[list[_RenderedEvent], bool]:
+    """Filter and render each in-window event log entry individually (Issue #925).
+
+    One `_RenderedEvent` per raw entry, in chronological order, with NO grouping
+    applied yet. Shared by `_build_timeline_rows()` (which applies consecutive-
+    same-type collapsing on top, for the markdown table) and
+    `_group_timeline_sessions()` (which applies gap-based grouping across any
+    event type, for the Activity Summary) — this keeps the renderer dispatch
+    (`EVENT_RENDERERS`/`_default_renderer`) and per-event field extraction in one
+    place regardless of which grouping strategy consumes it.
+
+    Events are filtered to the requested `hours` window FIRST, then capped to the
+    most recent `limit` (Issue #432) — capping the raw log to its last N entries
+    before filtering would silently drop older-but-still-in-window events whenever
+    recent event volume exceeds the limit.
+    """
+    unit: str = config.get("temp_unit", "fahrenheit")
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.UTC)
+
+    filtered, limited = filter_events_by_window(raw_event_log, hours, now, limit=limit)
+    if not filtered:
+        return [], limited
+
+    rendered: list[_RenderedEvent] = []
+
+    # Fan ownership tracker: updated per-event to detect when nat_vent_fan_off fires
+    # while the user is still running the fan manually (misleading if shown as CA fan-off).
+    _fan_ca_owns = False
+    _fan_user_owns = False
+
+    for entry in filtered:
+        event_type = str(entry.get("type", "unknown"))
+        if event_type in _REPORT_HIDDEN_EVENT_TYPES:
+            # Issue #913: intentionally hidden from the report (still present in
+            # raw_event_log, untouched, for coordinator-side diagnostic consumers).
+            continue
+        payload = {k: v for k, v in entry.items() if k not in ("time", "type")}
+        time_str = _fmt_time(entry.get("time"))
+        event_dt = _parse_event_time(entry.get("time"))
+
+        # Update fan ownership state before rendering
+        if event_type in ("nat_vent_fan_on", "fan_activated"):
+            _fan_ca_owns = True
+            _fan_user_owns = False
+        elif event_type == "fan_manual_override" and str(payload.get("fan_after", "")).strip() == "on":
+            _fan_user_owns = True
+            _fan_ca_owns = False
+        elif event_type == "fan_cancel":
+            _fan_user_owns = False
+        elif event_type in ("nat_vent_fan_off", "fan_deactivated"):
+            _fan_ca_owns = False
+
+        renderer = EVENT_RENDERERS.get(event_type)
+        try:
+            if renderer is not None:
+                ev_text, settings_text = renderer(payload, unit)
+            else:
+                ev_text, settings_text = _default_renderer(event_type, payload, unit)
+            # When nat_vent_fan_off fires while the user owns the fan, annotate the label
+            # so the developer knows the physical fan may still be running under user control.
+            if event_type == "nat_vent_fan_off" and _fan_user_owns:
+                ev_text = ev_text + " [NOTE: fan may still be running -- user-controlled]"
+        except Exception:
+            _LOGGER.warning("activity_report: renderer raised for event type %r -- using fallback", event_type)
+            ev_text = _humanize_type(event_type)
+            settings_text = ""
+
+        source = _event_source_label(event_type, payload) or "sensor"
+        indoor_cell = _fmt_temp_cell(_first_temp(entry, "indoor_f", "indoor_temp", "indoor"), unit)
+        outdoor_cell = _fmt_temp_cell(_first_temp(entry, "outdoor_f", "outdoor_temp", "outdoor"), unit)
+
+        rendered.append(
+            _RenderedEvent(event_dt, time_str, event_type, ev_text, settings_text, source, indoor_cell, outdoor_cell)
+        )
+
+    return rendered, limited
+
+
 def _build_timeline_rows(
     raw_event_log: list[Any],
     config: dict[str, Any],
@@ -2747,35 +2863,20 @@ def _build_timeline_rows(
     now: datetime.datetime,
     limit: int = 200,
 ) -> tuple[list[tuple[str, str, str, str, str, str]], bool]:
-    """Filter, render, and deduplicate the event log into timeline rows.
+    """Render and deduplicate the event log into timeline rows.
 
     Shared row-building core for `build_event_timeline_table()` (markdown table,
-    Activity Record + LLM context) and `build_activity_summary_narrative()`
-    (plain-English narrative, Issue #920) — both are thin formatters over the same
-    rows so the event-type catalog and dedup logic are never re-implemented.
+    Activity Record + LLM context) — a thin consecutive-same-type collapse pass
+    over `_render_timeline_events()`'s output.
 
     Returns (rows, limited) where each row is
     (time_str, event_text, settings_text, source, indoor, outdoor), in chronological
     order, and `limited` is True if the window contained more than `limit` events.
-
-    Events are filtered to the requested `hours` window FIRST, then capped to the
-    most recent `limit` for rendering (Issue #432) — capping the raw log to its last
-    N entries before filtering would silently drop older-but-still-in-window
-    events whenever recent event volume exceeds the limit.
     """
-    unit: str = config.get("temp_unit", "fahrenheit")
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=datetime.UTC)
-
-    # ---- filter within window (Issue #432: filter FIRST, then apply the row
-    # display budget — filtering a raw last-N slice instead would silently drop
-    # older-but-still-in-window events whenever recent volume exceeds the limit) ----
-    filtered, limited = filter_events_by_window(raw_event_log, hours, now, limit=limit)
-
-    if not filtered:
+    rendered, limited = _render_timeline_events(raw_event_log, config, hours, now, limit=limit)
+    if not rendered:
         return [], limited
 
-    # ---- render & deduplicate ----
     rows: list[
         tuple[str, str, str, str, str, str]
     ] = []  # (time_str, event_text, settings_text, source, indoor, outdoor)
@@ -2818,76 +2919,145 @@ def _build_timeline_rows(
         run_type = None
         run_count = 0
 
-    # Fan ownership tracker: updated per-event to detect when nat_vent_fan_off fires
-    # while the user is still running the fan manually (misleading if shown as CA fan-off).
-    _fan_ca_owns = False
-    _fan_user_owns = False
-
-    for entry in filtered:
-        event_type = str(entry.get("type", "unknown"))
-        if event_type in _REPORT_HIDDEN_EVENT_TYPES:
-            # Issue #913: intentionally hidden from the report (still present in
-            # raw_event_log, untouched, for coordinator-side diagnostic consumers).
-            continue
-        payload = {k: v for k, v in entry.items() if k not in ("time", "type")}
-        time_str = _fmt_time(entry.get("time"))
-
-        # Update fan ownership state before rendering
-        if event_type in ("nat_vent_fan_on", "fan_activated"):
-            _fan_ca_owns = True
-            _fan_user_owns = False
-        elif event_type == "fan_manual_override" and str(payload.get("fan_after", "")).strip() == "on":
-            _fan_user_owns = True
-            _fan_ca_owns = False
-        elif event_type == "fan_cancel":
-            _fan_user_owns = False
-        elif event_type in ("nat_vent_fan_off", "fan_deactivated"):
-            _fan_ca_owns = False
-
-        renderer = EVENT_RENDERERS.get(event_type)
-        try:
-            if renderer is not None:
-                ev_text, settings_text = renderer(payload, unit)
-            else:
-                ev_text, settings_text = _default_renderer(event_type, payload, unit)
-            # When nat_vent_fan_off fires while the user owns the fan, annotate the label
-            # so the developer knows the physical fan may still be running under user control.
-            if event_type == "nat_vent_fan_off" and _fan_user_owns:
-                ev_text = ev_text + " [NOTE: fan may still be running -- user-controlled]"
-        except Exception:
-            _LOGGER.warning("activity_report: renderer raised for event type %r -- using fallback", event_type)
-            ev_text = _humanize_type(event_type)
-            settings_text = ""
-
-        source = _event_source_label(event_type, payload) or "sensor"
-        indoor_cell = _fmt_temp_cell(_first_temp(entry, "indoor_f", "indoor_temp", "indoor"), unit)
-        outdoor_cell = _fmt_temp_cell(_first_temp(entry, "outdoor_f", "outdoor_temp", "outdoor"), unit)
-
+    for ev in rendered:
+        event_type = ev.event_type
         # Flush run when type changes or type is not deduplicated
         if event_type in _NO_DEDUP or event_type != run_type:
             _flush_run()
             if event_type in _NO_DEDUP:
-                rows.append((time_str, ev_text, settings_text, source, indoor_cell, outdoor_cell))
+                rows.append((ev.time_str, ev.ev_text, ev.settings_text, ev.source, ev.indoor, ev.outdoor))
             else:
                 # Start a new run; temps are from the first event in the run
                 run_type = event_type
                 run_count = 1
-                run_first_time = time_str
-                run_last_time = time_str
-                run_ev_text = ev_text
-                run_settings = settings_text
-                run_source = source
-                run_indoor = indoor_cell
-                run_outdoor = outdoor_cell
+                run_first_time = ev.time_str
+                run_last_time = ev.time_str
+                run_ev_text = ev.ev_text
+                run_settings = ev.settings_text
+                run_source = ev.source
+                run_indoor = ev.indoor
+                run_outdoor = ev.outdoor
         else:
             # Continue run -- update last time and settings (last setpoint wins); temps stay from first event
             run_count += 1
-            run_last_time = time_str
-            if settings_text:
-                run_settings = settings_text
+            run_last_time = ev.time_str
+            if ev.settings_text:
+                run_settings = ev.settings_text
 
     _flush_run()
     return rows, limited
+
+
+_SESSION_GAP_MINUTES = 25  # gap-bounded session boundary threshold (Issue #925)
+
+
+class _TimelineSession(NamedTuple):
+    """One gap-bounded group of activity, the deterministic input for the
+    LLM-authored Activity Summary (Issue #925)."""
+
+    start_time_str: str
+    end_time_str: str
+    indoor_start: str
+    indoor_end: str
+    outdoor_start: str
+    outdoor_end: str
+    event_lines: list[str]  # humanized event text, in chronological order
+    event_count: int
+
+
+def _group_timeline_sessions(
+    raw_event_log: list[Any],
+    config: dict[str, Any],
+    hours: float,
+    now: datetime.datetime,
+    limit: int = 200,
+    gap_minutes: int = _SESSION_GAP_MINUTES,
+) -> tuple[list[_TimelineSession], bool]:
+    """Group rendered timeline events into gap-bounded sessions (Issue #925).
+
+    A new session starts whenever the gap since the previous event exceeds
+    `gap_minutes` of quiet — this absorbs a tightly-clustered burst of different
+    event types (e.g. a comfort-band change, a fan cycle, and a reclassification
+    all within one minute) into a single unit, unlike `_build_timeline_rows()`'s
+    consecutive-SAME-TYPE-only collapsing. Each session carries only `event_lines`
+    (the renderer's already-fairly-plain `ev_text` per event — never `settings_text`,
+    which is the most jargon-dense field, e.g. "setpoint: 72°F Cool (64°F Heat)") plus
+    session-level start/end time and temps, as the bounded, fact-only input an LLM
+    prompt can be constrained to summarize without inventing new information.
+
+    An event with no parseable timestamp never starts a new session on its own (it
+    can't be gap-compared) — it's folded into whatever session is currently open, or
+    starts the first session if none is open yet.
+    """
+    rendered, limited = _render_timeline_events(raw_event_log, config, hours, now, limit=limit)
+    if not rendered:
+        return [], limited
+
+    sessions: list[_TimelineSession] = []
+    current: list[_RenderedEvent] = []
+    gap = datetime.timedelta(minutes=gap_minutes)
+
+    def _flush_session() -> None:
+        if not current:
+            return
+        indoor_vals = [e.indoor for e in current if e.indoor and e.indoor != "—"]
+        outdoor_vals = [e.outdoor for e in current if e.outdoor and e.outdoor != "—"]
+        sessions.append(
+            _TimelineSession(
+                start_time_str=current[0].time_str,
+                end_time_str=current[-1].time_str,
+                indoor_start=indoor_vals[0] if indoor_vals else "—",
+                indoor_end=indoor_vals[-1] if indoor_vals else "—",
+                outdoor_start=outdoor_vals[0] if outdoor_vals else "—",
+                outdoor_end=outdoor_vals[-1] if outdoor_vals else "—",
+                event_lines=[e.ev_text for e in current],
+                event_count=len(current),
+            )
+        )
+
+    last_dt: datetime.datetime | None = None
+    for ev in rendered:
+        if current and ev.dt is not None and last_dt is not None and (ev.dt - last_dt) > gap:
+            _flush_session()
+            current = []
+        current.append(ev)
+        if ev.dt is not None:
+            last_dt = ev.dt
+    _flush_session()
+
+    return sessions, limited
+
+
+async def build_activity_sessions_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
+    """Build the ACTIVITY SESSIONS section: the LLM's sole input for ACTIVITY SUMMARY
+    (Issue #925). Deliberately separate from ACTIVITY TIMELINE (the raw, technical
+    table used for the rest of the report's investigative sections) — this section
+    contains only pre-grouped, fact-bounded session data, so the model has nothing
+    jargon-dense to copy from when writing the summary.
+    """
+    hours = float(kwargs.get("hours", 24))
+    hours = max(1.0, min(hours, 168.0))
+    raw_event_log = list(getattr(coordinator, "_event_log", []) or [])
+    config = getattr(coordinator, "config", {}) or {}
+    sessions, _limited = _group_timeline_sessions(raw_event_log, config, hours, dt_util.now())
+
+    if not sessions:
+        return "=== ACTIVITY SESSIONS (for Activity Summary only) ===\n  No activity in this window.\n"
+
+    lines = [f"=== ACTIVITY SESSIONS (for Activity Summary only, last {hours:g}h) ==="]
+    for i, session in enumerate(sessions, start=1):
+        time_range = (
+            f"{session.start_time_str}-{session.end_time_str}"
+            if session.start_time_str != session.end_time_str
+            else session.start_time_str
+        )
+        lines.append(
+            f"SESSION {i}: {time_range} (indoor {session.indoor_start}->{session.indoor_end}, "
+            f"outdoor {session.outdoor_start}->{session.outdoor_end})"
+        )
+        for ev_text in session.event_lines:
+            lines.append(f"  - {ev_text}")
+    return "\n".join(lines) + "\n"
 
 
 def build_event_timeline_table(
@@ -2943,28 +3113,32 @@ def build_activity_summary_narrative(
     hours: float,
     now: datetime.datetime,
 ) -> str:
-    """Build a deterministic, plain-English, chronological account of the event log.
+    """Build a small, deliberately plain deterministic Activity Summary — the
+    no-AI fallback's "activity_summary" (Issue #925).
 
-    Issue #920: replaces the old LLM-authored "Investigation Summary" section, which
-    conflated a plain activity account with investigative synthesis. This is purely
-    code-generated from the same rows `build_event_timeline_table()` renders — no LLM
-    call, so it can't hallucinate, and it's used for both the AI-success and
-    fallback-no-AI investigation paths (single source of truth for "what happened").
-
-    Returns one bullet line per row, e.g.
-    "- 2:14 PM: Comfort band applied (72°F cool / 64°F heat)".
+    Issue #920 originally made this the primary (non-LLM) Activity Summary
+    implementation; Issue #925 moved the primary, polished version to an
+    LLM-authored `## ACTIVITY SUMMARY` section (see `_SYSTEM_PROMPT` in
+    `ai_skills_investigator.py`), fed by `_group_timeline_sessions()`'s structured
+    facts. This function now exists only for `investigation_fallback()` (no Claude
+    available) so `activity_summary` is always populated on both paths without
+    calling Claude from the no-AI path or duplicating the LLM's phrasing logic.
+    Terse by design — not meant to read as polished prose, just present and
+    jargon-free — e.g. "10:53-10:58: 6 event(s)."
     """
-    rows, limited = _build_timeline_rows(raw_event_log, config, hours, now, limit=200)
+    sessions, limited = _group_timeline_sessions(raw_event_log, config, hours, now)
 
-    if not rows:
+    if not sessions:
         return "No activity recorded in the analyzed window."
 
     lines: list[str] = []
-    for time_str, event_text, settings_text, _source, _indoor, _outdoor in rows:
-        entry = f"- {time_str}: {event_text}"
-        if settings_text:
-            entry += f" ({settings_text})"
-        lines.append(entry)
+    for session in sessions:
+        time_range = (
+            f"{session.start_time_str}-{session.end_time_str}"
+            if session.start_time_str != session.end_time_str
+            else session.start_time_str
+        )
+        lines.append(f"- {time_range}: {session.event_count} event(s).")
 
     narrative = "\n".join(lines)
     if limited:
@@ -3259,6 +3433,14 @@ _PROVIDER_REGISTRY.register(
         tags=frozenset({"events", "system"}),
         priority=1,
         builder=build_activity_timeline_context,
+    )
+)
+_PROVIDER_REGISTRY.register(
+    ContextProvider(
+        name="activity_sessions",
+        tags=frozenset({"events", "system"}),
+        priority=1,
+        builder=build_activity_sessions_context,
     )
 )
 _PROVIDER_REGISTRY.register(

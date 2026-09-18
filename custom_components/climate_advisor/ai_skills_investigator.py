@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -15,6 +16,7 @@ from .ai_skills_context import (
     _AUTOMATION_INTERVALS_SECONDS,
     _build_timing_correlations,
     _fetch_github_issues,
+    build_activity_summary_narrative,
     filter_events_by_window,
 )
 from .ai_skills_context import (
@@ -126,6 +128,8 @@ SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it
  do not repeat content already stated in a prior section.\
  A one-line cross-reference ("see Hypotheses above") is acceptable;\
  copying or paraphrasing the same analysis verbatim is not.
+- ACTIVITY SUMMARY: A plain-English account of what happened, and nothing else â€" no\
+ investigative analysis, no flagged problems, no hypotheses. See its own strict rules below.
 - INCONGRUITIES FOUND: Specific data mismatches or contradictions only.
 - DATA QUALITY ISSUES: Missing data, sensor gaps, stale readings, unreliable values only.\
  Do NOT repeat incongruities.
@@ -138,10 +142,35 @@ SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it
 - ASSUMPTIONS & CONFIDENCE: List assumptions and confidence level only.\
  Do NOT repeat findings or recommendations.
 
-Return your investigation using these exact section headers (## prefix, exact capitalisation).\
- Do not write an "## INVESTIGATION SUMMARY" or any other overview section before\
- INCONGRUITIES FOUND â€" a deterministic Activity Summary (built separately, not by you)\
- already precedes your output and covers what happened; start directly with the analysis.
+Return your investigation using these exact section headers (## prefix, exact capitalisation),\
+ starting with ACTIVITY SUMMARY.
+
+## ACTIVITY SUMMARY
+Using ONLY the facts in the ACTIVITY SESSIONS section (never the raw ACTIVITY TIMELINE\
+ table, never data from any other section), write exactly one line per session in this\
+ exact format:
+<start>â€“<end>: <one plain-English sentence>
+(use a single time, not a range, for a session with only one moment of activity)
+
+Rules â€" violating any of these makes this section unusable, not just imperfect:
+- Do not introduce any fact not present in the supplied ACTIVITY SESSIONS data.
+- Do not use internal/technical terms: no "setpoint:", no "mode: X to Y", no raw\
+ event-type names (e.g. never write "nat_vent_fan_on" or "classification_applied"),\
+ no field names from the supplied data.
+- Write for a homeowner with no technical background â€" describe what happened and,\
+ where the supplied facts make it clear, briefly why (e.g. "because a window was\
+ open"), not the internal mechanism name.
+- One sentence per session. Do not add analysis, causes you are inferring, or\
+ recommendations here â€" those belong in later sections of this report, not this one.
+- If the ACTIVITY SESSIONS section is empty or says there is no activity, write\
+ exactly: "No notable activity in the analyzed window."
+
+Example shape (for calibration only â€" never reuse these exact facts):
+10:53 AM â€“ 10:58 AM: Automation restarted after an update and classified today as\
+ warm. A door/window opened almost immediately, so automation paused itself and left\
+ the AC off â€" expected, since fresh air alone was already holding the house steady.
+12:31 PM: You turned on the whole-house fan by remote for 1 hour; automation backed\
+ off for about an hour so it wouldn't fight the fan.
 
 ## INCONGRUITIES FOUND
 List every place where two data sources contradict each other. Lead each with the\
@@ -221,6 +250,39 @@ async def async_build_investigator_context(
     return "\n".join(sections)
 
 
+# Issue #925: post-generation drift guardrail for the LLM-authored ACTIVITY SUMMARY —
+# detection only, never rewrites or rejects the model's output. Exists so drift is
+# visible in logs and can be iterated on, per explicit project direction.
+_ACTIVITY_SUMMARY_NO_ACTIVITY_TEXT = "No notable activity in the analyzed window."
+_ACTIVITY_SUMMARY_BANNED_SUBSTRINGS = ("setpoint:", "mode:", "fan:", "grace:")
+_ACTIVITY_SUMMARY_SNAKE_CASE_RE = re.compile(r"\b[a-z]+(?:_[a-z]+)+\b")
+_ACTIVITY_SUMMARY_LEADING_TIME_RE = re.compile(r"^\d{1,2}(:\d{2})?\s*(AM|PM|am|pm)?")
+
+
+def _check_activity_summary_drift(text: str) -> None:
+    """Log a WARNING if the LLM's ACTIVITY SUMMARY violates its format/jargon
+    contract. Detection only — see module comment above."""
+    if not text or text.strip() == _ACTIVITY_SUMMARY_NO_ACTIVITY_TEXT:
+        return
+
+    lower = text.lower()
+    banned_hits = sum(1 for term in _ACTIVITY_SUMMARY_BANNED_SUBSTRINGS if term in lower)
+    snake_case_hits = len(_ACTIVITY_SUMMARY_SNAKE_CASE_RE.findall(lower))
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    malformed_lines = [ln for ln in lines if not _ACTIVITY_SUMMARY_LEADING_TIME_RE.match(ln)]
+
+    if banned_hits or snake_case_hits or malformed_lines:
+        _LOGGER.warning(
+            "Activity Summary drift detected: %d banned-term hit(s), %d snake_case "
+            "token(s), %d/%d line(s) missing a leading time",
+            banned_hits,
+            snake_case_hits,
+            len(malformed_lines),
+            len(lines),
+        )
+
+
 def parse_investigation_response(raw_text: str) -> dict[str, Any]:
     """Parse a Claude investigation response into a section dict.
 
@@ -229,6 +291,7 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
     always preserved in the 'full_text' key.
     """
     sections: dict[str, Any] = {
+        "activity_summary": "",
         "incongruities": "",
         "data_quality": "",
         "errors_warnings": "",
@@ -239,6 +302,7 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
     }
 
     _header_map = {
+        "ACTIVITY SUMMARY": "activity_summary",
         "INCONGRUITIES FOUND": "incongruities",
         "DATA QUALITY ISSUES": "data_quality",
         "SYSTEM ERRORS / WARNINGS": "errors_warnings",
@@ -277,6 +341,9 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
 
     # Always restore full_text â€" _flush() cannot overwrite it because it is not in _header_map
     sections["full_text"] = raw_text
+
+    _check_activity_summary_drift(sections["activity_summary"])
+
     return sections
 
 
@@ -513,11 +580,25 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     # Issue #920: the old "Fallback scan found N issues..." roll-up (summary_parts) was
     # dropped — that information is redundant with the incongruities/data_quality/
     # errors_warnings fields below (which list the actual items) and with the
-    # "hypotheses" field's own AI-unavailable notice. The Activity Summary shown to the
-    # user is now the deterministic build_activity_summary_narrative() output, injected
-    # by the caller (api.py) for both the AI-success and this fallback path alike.
+    # "hypotheses" field's own AI-unavailable notice.
+    #
+    # Issue #925: activity_summary is populated here via build_activity_summary_narrative()
+    # — a small, deliberately plain, deterministic renderer over the same session-grouped
+    # facts the LLM-authored ACTIVITY SUMMARY section uses (no AI call), so the key is
+    # always present on both paths without duplicating the LLM's phrasing logic.
+    try:
+        activity_summary = build_activity_summary_narrative(
+            getattr(coordinator, "_event_log", []) or [],
+            getattr(coordinator, "config", {}) or {},
+            float(kwargs.get("hours", 48)),
+            datetime.datetime.now(datetime.UTC),
+        )
+    except Exception:
+        _LOGGER.warning("investigator fallback: failed to build activity summary")
+        activity_summary = "No activity recorded in the analyzed window."
 
     return {
+        "activity_summary": activity_summary,
         "incongruities": "\n".join(incongruity_parts) if incongruity_parts else "None detected.",
         "data_quality": "\n".join(data_quality_parts) if data_quality_parts else "None detected.",
         "errors_warnings": (

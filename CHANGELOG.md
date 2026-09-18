@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.49] — 2026-09-18
+
+- Fix #929: the dashboard Debug tab, REST engine-status API, and AI Investigator now correctly show fan-assisted ventilation learning (k_vent_fan) as active once enough data has been collected, instead of always reporting it as not yet active.
+
 ## [0.7.48] — 2026-09-18
 
 - Fix #925: the AI Investigator's "Activity Summary" now actually renders live as the report streams in — a second, independent section-name list in the frontend was missed by the previous fix, so its content was silently dropped until the next section header arrived. Software-update lines now state the version number (e.g. "updated to version 0.7.48") instead of a vague "a software update", and fan-timer activity now states the timer's duration both when it's set and when it expires, instead of dropping that context.

@@ -565,7 +565,14 @@ class TestEngineStatus:
         status = self._call_engine_status(learning)
 
         # All engines should be inactive
-        for engine_key in ("k_passive", "k_solar", "solar_phase_offset_h", "k_vent_window", "k_active_hvac"):
+        for engine_key in (
+            "k_passive",
+            "k_solar",
+            "solar_phase_offset_h",
+            "k_vent_window",
+            "k_vent_fan",
+            "k_active_hvac",
+        ):
             engine = status.get(engine_key, {})
             assert not engine.get("active", True), (
                 f"Engine {engine_key!r} should be inactive on fresh learning, got active={engine.get('active')}"
@@ -598,6 +605,7 @@ class TestEngineStatus:
             "k_solar",
             "solar_phase_offset_h",
             "k_vent_window",
+            "k_vent_fan",
             "k_active_hvac",
         }
         required_meta_keys = {
@@ -613,6 +621,24 @@ class TestEngineStatus:
 
         for key in required_meta_keys:
             assert key in status, f"Missing meta key {key!r} in get_engine_status() response"
+
+    def test_engine_status_k_vent_fan_active_when_cached(self):
+        """get_engine_status()["k_vent_fan"] reports active=True once the cache has a value.
+
+        Regression test for Issue #929: get_engine_status() previously omitted the
+        k_vent_fan key entirely, so the dashboard Debug tab and AI investigator context
+        always reported "(not yet active)" regardless of how much fan-ventilation data
+        had been learned.
+        """
+        learning = _make_learning()
+        if learning._state.thermal_model_cache is None:
+            learning._state.thermal_model_cache = {}
+        learning._state.thermal_model_cache["k_vent_fan"] = -0.1745
+
+        status = self._call_engine_status(learning)
+        engine = status.get("k_vent_fan", {})
+        assert engine.get("active") is True, f"k_vent_fan should be active once cached, got {engine}"
+        assert engine.get("value") == -0.1745
 
     def test_engine_status_k_active_hvac_value_shape(self):
         """get_engine_status()["k_active_hvac"]["value"] is a dict with "heat" and "cool" keys.

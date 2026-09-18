@@ -747,49 +747,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # ever violated (e.g. hass.data was reset without HA's internal
     # panel/view registries also being reset).
     if not hass.data.get(_PANEL_HASS_DATA_KEY):
-        try:
-            # Register REST API views for the dashboard panel
-            for view_cls in API_VIEWS:
-                hass.http.register_view(view_cls())
+        # Wrapped in zone_scope() so the warning below (and any future log line
+        # added to this block) attributes to the zone whose async_setup_entry()
+        # actually ran it, instead of falling back to "unknown zone" — the
+        # coordinator for this zone is already in hass.data[DOMAIN] as of the
+        # assignment above, so its zone_label is fully resolvable here.
+        with log_capture.zone_scope(coordinator.zone_label):
+            try:
+                # Register REST API views for the dashboard panel
+                for view_cls in API_VIEWS:
+                    hass.http.register_view(view_cls())
 
-            # Register dashboard panel (iframe serving frontend/index.html)
-            frontend_path = Path(__file__).parent / "frontend"
-            from homeassistant.components.http import StaticPathConfig
+                # Register dashboard panel (iframe serving frontend/index.html)
+                frontend_path = Path(__file__).parent / "frontend"
+                from homeassistant.components.http import StaticPathConfig
 
-            await hass.http.async_register_static_paths(
-                [StaticPathConfig(PANEL_URL, str(frontend_path), cache_headers=False)]
-            )
-            import hashlib
+                await hass.http.async_register_static_paths(
+                    [StaticPathConfig(PANEL_URL, str(frontend_path), cache_headers=False)]
+                )
+                import hashlib
 
-            from homeassistant.components.frontend import async_register_built_in_panel
+                from homeassistant.components.frontend import async_register_built_in_panel
 
-            _panel_bytes = await hass.async_add_executor_job((frontend_path / "index.html").read_bytes)
-            _panel_hash = hashlib.md5(_panel_bytes).hexdigest()[:8]
-            async_register_built_in_panel(
-                hass,
-                "iframe",
-                sidebar_title="Climate Advisor",
-                sidebar_icon="mdi:thermostat",
-                frontend_url_path=PANEL_FRONTEND_PATH,
-                require_admin=False,
-                config={"url": f"{PANEL_URL}/index.html?v={_panel_hash}"},
-            )
-        except Exception as err:  # noqa: BLE001 — see comment above: any failure here
-            # means the shared panel/views are already registered by another
-            # zone (or something HA-internal we can't predict without PR3's
-            # unrun empirical spike) — treated as expected, not fatal, so a
-            # second zone's setup still completes successfully.
-            _LOGGER.warning(
-                "Panel registration skipped: already registered by another zone entry_id=%s reason=%s",
-                entry.entry_id,
-                err,
-            )
-        finally:
-            # Set unconditionally (success or handled failure): either this
-            # zone just registered the shared resources, or we've determined
-            # they're already registered elsewhere — either way, no later
-            # zone's setup should attempt this again.
-            hass.data[_PANEL_HASS_DATA_KEY] = True
+                _panel_bytes = await hass.async_add_executor_job((frontend_path / "index.html").read_bytes)
+                _panel_hash = hashlib.md5(_panel_bytes).hexdigest()[:8]
+                async_register_built_in_panel(
+                    hass,
+                    "iframe",
+                    sidebar_title="Climate Advisor",
+                    sidebar_icon="mdi:thermostat",
+                    frontend_url_path=PANEL_FRONTEND_PATH,
+                    require_admin=False,
+                    config={"url": f"{PANEL_URL}/index.html?v={_panel_hash}"},
+                )
+            except Exception as err:  # noqa: BLE001 — see comment above: any failure here
+                # means the shared panel/views are already registered by another
+                # zone (or something HA-internal we can't predict without PR3's
+                # unrun empirical spike) — treated as expected, not fatal, so a
+                # second zone's setup still completes successfully.
+                _LOGGER.warning(
+                    "Panel registration skipped: already registered by another zone entry_id=%s reason=%s",
+                    entry.entry_id,
+                    err,
+                )
+            finally:
+                # Set unconditionally (success or handled failure): either this
+                # zone just registered the shared resources, or we've determined
+                # they're already registered elsewhere — either way, no later
+                # zone's setup should attempt this again.
+                hass.data[_PANEL_HASS_DATA_KEY] = True
 
     _LOGGER.info("Climate Advisor v%s loaded successfully", VERSION)
     return True

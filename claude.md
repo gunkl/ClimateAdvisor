@@ -39,6 +39,16 @@ Skipping to code without completing steps 1–3 is a process violation. The Coor
 
 **Root cause of this rule:** Explore agents went directly to source code (Issue #149) without reading the Tier 3 spec or fetching live data first. The spec at `docs/ai-skills-spec.md` and `docs/thermal-model-v3-spec.md` answers most structure questions without opening a `.py` file. Live data (ha_logs, learning_db) provides ground-truth values that make hypotheses falsifiable before code is read.
 
+### Symmetry/Mirror Check (CRITICAL — before closing any bug fix)
+
+This codebase is built from paired lifecycle mechanisms — activate/deactivate, open/close, pause/resume, acquire/release — usually funneled through a single choke-point method per direction (e.g. `_end_nat_vent_session()` for nat-vent exit, `_apply_nat_vent_fsm_state_after_activation()` for nat-vent entry). A bug found and fixed on one side of a pair is not closed until the opposite side has been explicitly checked for the same defect shape.
+
+**Rule:** whenever a fix's root cause is a narrow mechanical pattern (an awaited async command's result not being checked/respected, a flag written unconditionally where a guard is needed, etc.), grep for and inspect the logically opposite code path before considering the session done. If the same defect exists there:
+- File a tracking issue immediately, or fix it in-scope if small.
+- Call it out explicitly and separately in the session's closing summary — never bury it as a deferred aside inside a findings table or prose paragraph.
+
+**Root cause of this rule:** Issue #931 (a whole-house-fan session getting stranded active because its exit path didn't check whether the fan-stop command actually executed) surfaced its own exact mirror during the same session's verification pass — the entry path (`_apply_nat_vent_fsm_state_after_activation()`) had the identical gap on activation. It was written up as "deferred, out of scope" instead of triggering an issue or an in-scope fix, and the user had to catch this and push back before it was escalated (2026-09-19, Issue #934 follow-up investigation). A blast-radius recheck at that point also found the first pass had undercounted both the write sites (5 found, 6 actual — one bypassed the choke point entirely) and the read/consumer sites (17 found in 3 files, 25+ actual across 12 files) — reinforcing that a recheck limited to "the obviously related files" is not sufficient; grep the raw symbol across the whole package.
+
 ## Skills
 
 The following custom skills are available to enhance your workflow:

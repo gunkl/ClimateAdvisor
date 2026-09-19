@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.51] — 2026-09-19
+
+- Fix #934: the Activity Report will no longer show a "switched to active cooling" entry for a whole-house-fan-stop command that was actually still pending (deferred by the 5-minute anti-cycling cooldown) — it now only logs the switch once the fan command actually executes, or stays quiet if it already reported the same brief delay a moment earlier.
+
 ## [0.7.50] — 2026-09-19
 
 - Fix #931: the whole-house fan can no longer get stuck running for hours past when it should have stopped. Previously, if the fan's stop command was briefly delayed by the 5-minute anti-cycling safety cooldown, the system could mark the pause as done anyway and stop retrying — one night this let the fan keep pulling in cold outside air for 2.5 extra hours, dropping the bedroom to 65.1°F, almost a full degree below the overnight floor. The system now keeps retrying the stop command on every check until it actually succeeds.

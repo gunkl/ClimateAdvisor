@@ -73,7 +73,7 @@
 | `DORMANT` | Issue #247's 3-condition dormancy test: `outdoor <= indoor` AND `natural_vent_active` AND `indoor <= ceiling_threshold` | DEBUG log only |
 | `NO_BREACH_PREDICTED` | Predicted curve never crosses `comfort_cool (+ bridge tolerance)` | DEBUG log only |
 | `STANDING_BY` | Breach predicted, but `hours_to_breach > lead_min / 60` | INFO breach log, then DEBUG standing-by log |
-| `ESCALATE` | Breach predicted within lead time | INFO breach log, INFO escalation log, deactivates fan if nat-vent was active, sets HVAC to `cool` + `comfort_cool`, emits `nat_vent_ceiling_escalation` (if fan deactivated) and `ceiling_guard_fired` |
+| `ESCALATE` | Breach predicted within lead time | INFO breach log, INFO escalation log, deactivates fan if nat-vent was active, sets HVAC to `cool` + `comfort_cool`, emits `nat_vent_ceiling_escalation` (if fan deactivated and the deactivation wasn't a `RATE_LIMITED_DUP` no-op — Issue #934) and `ceiling_guard_fired` |
 
 `ceiling_threshold` is a caller-resolved input (`AutomationEngine._ceiling_threshold()`), not re-derived by this module — see `ode_ceiling_guard.py`'s own module docstring five-whys for why.
 

@@ -880,7 +880,7 @@ The ODE ceiling guard's dormancy check (condition 3, above) treats `ceiling_thre
 
 **Test coverage (Issue #392):** `tests/test_nat_vent_activation.py`, `tests/test_fan_control.py`, `tests/test_whole_house_fan_hvac_suppression.py` — exact function names pending as of this doc pass; see those files directly for current coverage of archetype-aware ceiling behavior.
 
-**On escalation the guard clears nat-vent** (Issue #218 part 2): if `_natural_vent_active` is true when the guard fires, it deactivates the fan, sets `_natural_vent_active = False`, and emits `nat_vent_ceiling_escalation` before switching to `cool` — so free cooling does not fight the compressor.
+**On escalation the guard clears nat-vent** (Issue #218 part 2): if `_natural_vent_active` is true when the guard fires, it deactivates the fan, sets `_natural_vent_active = False` (via `_end_nat_vent_session()`, gated on the fan command's actual result — see Issue #931 note above), and emits `nat_vent_ceiling_escalation` before switching to `cool` — so free cooling does not fight the compressor. As of Issue #934, that event emission is itself gated on the `_deactivate_fan()` result: it is skipped when the result is `FanCommandResult.RATE_LIMITED_DUP` (the fan-stop command was deferred by the 300s anti-cycling floor and never actually executed — already reported once by the deferral itself), matching the away-ceiling exit sites' identical gate (§ above, "sole writer of the session flags"). A `RATE_LIMITED_NEW` result (the first report of a new deferral window) still emits the event, same as those sibling sites.
 
 #### Guard conditions
 

@@ -9257,7 +9257,12 @@ class AutomationEngine:
             # _end_nat_vent_session() (previously cleared unconditionally with the
             # result never even captured).
             self._end_nat_vent_session(_ceiling_escalation_result)
-            if self._emit_event_callback:
+            # Issue #934: mirror the away-ceiling sibling gates (lines ~4839,
+            # ~5231) — a RATE_LIMITED_DUP result means the fan-stop command
+            # never actually executed (already reported once by the deferral
+            # itself), so don't also emit a ceiling-escalation event claiming
+            # it happened.
+            if self._emit_event_callback and _ceiling_escalation_result is not FanCommandResult.RATE_LIMITED_DUP:
                 self._emit_event_callback(
                     "nat_vent_ceiling_escalation",
                     {

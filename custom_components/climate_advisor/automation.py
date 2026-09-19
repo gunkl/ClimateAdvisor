@@ -2206,15 +2206,20 @@ class AutomationEngine:
         placed wins, unconditionally, no matter what mechanism is currently protecting the
         losing device.
         """
-        self._natural_vent_active = False
-        self._nat_vent_soft_start = False
-        await self._deactivate_fan(
+        result = await self._deactivate_fan(
             reason=f"manual override to {mode} — ending free cooling",
             restore_hvac=False,
             release_suppression=True,
             emit_event=False,
             bypass_absolute_override=True,
         )
+        # Issue #931: flags clear only once this result is known (see
+        # _end_nat_vent_session()) — previously cleared unconditionally before this
+        # call, which is what the caller at start_override_confirmation() used to also
+        # do synchronously for the fire-and-forget dispatch case (see that call site's
+        # updated comment for why the "observe it ended within the same tick" property
+        # is no longer guaranteed there).
+        self._end_nat_vent_session(result)
         if self._emit_event_callback:
             payload = {
                 "indoor_temp": indoor_temp,
@@ -2273,13 +2278,18 @@ class AutomationEngine:
                 "Manual override to %s detected while WHF owns HVAC — ending free cooling session immediately",
                 detected_mode,
             )
-            # Set synchronously (not inside the scheduled task below) so any code that reads
-            # these flags immediately after this call — still within the same tick — observes
-            # the session as already standing down. hass.async_create_task() defers the
-            # coroutine's body to the next event loop iteration; it does not run any of it
-            # synchronously the way a direct `await` would.
-            self._natural_vent_active = False
-            self._nat_vent_soft_start = False
+            # Issue #931: previously cleared _natural_vent_active/_nat_vent_soft_start
+            # synchronously here (before the scheduled task below even runs) so any code
+            # reading these flags within the same tick would observe the session as
+            # already standing down. That unconditionally cleared the flags before the
+            # paired _deactivate_fan() call's result was known — if it came back
+            # RATE_LIMITED_NEW/RATE_LIMITED_DUP, the fan could be left physically running
+            # with the one retry mechanism (nat_vent_temperature_check()) silently
+            # disarmed. The flags are now cleared only inside
+            # _stand_down_whf_for_override_conflict() itself, once the real result is
+            # known (_end_nat_vent_session()) — same-tick observers no longer see the
+            # session as ended until the scheduled task actually runs on the next event
+            # loop iteration.
             self.hass.async_create_task(
                 self._stand_down_whf_for_override_conflict(
                     mode=detected_mode,
@@ -3124,6 +3134,11 @@ class AutomationEngine:
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
             # blowdown state. Skip if nat-vent is active — clobbering fan_mode=on
             # while nat-vent is running silently stops cooling (Issue #134).
+            # Issue #931 note: _natural_vent_active can now read True for slightly
+            # longer than before (it only clears once a rate-limited exit's deactivate
+            # command actually executes, not the instant the exit is decided) — this
+            # guard is unaffected either way, since _deactivate_fan() unconditionally
+            # re-commands fan_mode=auto itself once the real command does go through.
             if mode == "off" and not self._natural_vent_active:
                 _fan_cfg = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
                 if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH):
@@ -4741,22 +4756,21 @@ class AutomationEngine:
                     # set_outdoor_exit_time kwarg to pass, same as the AWAY_CEILING branch
                     # below).
                     _vent_floor = exit_decision.vent_floor
-                    self._natural_vent_active = False
-                    # Issue #697: this bypass branch (like the AWAY_CEILING branch below)
-                    # never cleared _nat_vent_soft_start alongside _natural_vent_active —
-                    # the one gap among all real "_natural_vent_active = False" sites,
-                    # confirmed via a fresh grep of every site during Issue #821's
-                    # investigation. Matches every other site's own convention.
-                    self._nat_vent_soft_start = False
                     self._nat_vent_outdoor_exit_time = dt_util.now()
                     # Issue #821 (Design §4): exiting nat-vent counts as "cooling family
                     # was active until just now" — arm the family-switch lockout's dwell
                     # clock at this handoff so a heat call cannot fire in the same/next
                     # cycle purely from momentary post-exit indoor readings.
                     self._arm_comfort_family("cooling", dt_util.now())
-                    await self._deactivate_fan(
+                    _comfort_floor_result = await self._deactivate_fan(
                         reason=(f"natural vent exit: indoor {indoor:.1f}°F ≤ comfort floor {_vent_floor:.1f}°F")
                     )
+                    # Issue #931: flags clear only once the result above is known — see
+                    # _end_nat_vent_session(). Issue #697's fix (both flags cleared
+                    # together, matching every other site) still applies; only the
+                    # ordering relative to the deactivate call, and the result check,
+                    # changed.
+                    self._end_nat_vent_session(_comfort_floor_result)
                     _LOGGER.info(
                         "Natural vent exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F — restoring %s",
                         indoor,
@@ -4798,8 +4812,6 @@ class AutomationEngine:
                         indoor,
                         comfort_cool,
                     )
-                    self._natural_vent_active = False
-                    self._nat_vent_soft_start = False
                     # Issue #757 Phase 6 Step 5 fix: arms the same reactivation-lockout
                     # timer every other exit reason already arms (via _exit_nat_vent()'s
                     # set_outdoor_exit_time — this branch bypasses that choke point, so
@@ -4816,6 +4828,9 @@ class AutomationEngine:
                     self._nat_vent_outdoor_exit_time = dt_util.now()
                     self._arm_comfort_family("cooling", dt_util.now())  # Issue #821 Design §4
                     _away_ceiling_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
+                    # Issue #931: flags clear only once the result above is known — see
+                    # _end_nat_vent_session().
+                    self._end_nat_vent_session(_away_ceiling_result)
                     # Do NOT pause -- just let away setback handle HVAC
                     # Issue #649: skip emitting a duplicate report for a repeat block within
                     # an already-reported deferral window (same reasoning as _exit_nat_vent()'s
@@ -5201,8 +5216,6 @@ class AutomationEngine:
                         current_temp,
                         comfort_cool,
                     )
-                    self._natural_vent_active = False
-                    self._nat_vent_soft_start = False
                     # Issue #757 Phase 6 Step 5 fix: see check_natural_vent_conditions()'s
                     # matching AWAY_CEILING branch for the full incident this closes —
                     # arms the same reactivation lockout every other exit reason already
@@ -5210,6 +5223,11 @@ class AutomationEngine:
                     self._nat_vent_outdoor_exit_time = dt_util.now()
                     self._arm_comfort_family("cooling", dt_util.now())  # Issue #821 Design §4
                     _away_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode) via temp_check")
+                    # Issue #931: flags clear only once the result above is known — see
+                    # _end_nat_vent_session() (this site already captured the result for
+                    # its event-emission check below, but previously never used it to gate
+                    # the flag clear itself).
+                    self._end_nat_vent_session(_away_result)
                     if self._emit_event_callback and _away_result is not FanCommandResult.RATE_LIMITED_DUP:
                         self._emit_event_callback(
                             "nat_vent_away_ceiling_exit",
@@ -7060,9 +7078,11 @@ class AutomationEngine:
             # No sleep target available — deactivate fan/economizer unless nat-vent/WHF owns it.
             if _gate != ScheduledBandGate.DEFER_NAT_VENT:
                 if self._fan_active and not _fan_was_overridden:
-                    await self._deactivate_fan(reason="bedtime — no classification")
-                    self._natural_vent_active = False
-                    self._nat_vent_soft_start = False
+                    _no_class_result = await self._deactivate_fan(reason="bedtime — no classification")
+                    # Issue #931: was an unconditional clear — now routed through the
+                    # shared sole writer so a rate-limited/deferred command doesn't
+                    # strand the fan running with the retry mechanism disarmed.
+                    self._end_nat_vent_session(_no_class_result)
                 if self._economizer_active:
                     await self._deactivate_economizer(outdoor_temp=0)
             return
@@ -7087,9 +7107,11 @@ class AutomationEngine:
             _LOGGER.info("Bedtime: nat-vent/WHF session active — leaving fan alone")
         else:
             if self._fan_active and not _fan_was_overridden:
-                await self._deactivate_fan(reason="bedtime — nat-vent not active")
-                self._natural_vent_active = False
-                self._nat_vent_soft_start = False
+                _not_active_result = await self._deactivate_fan(reason="bedtime — nat-vent not active")
+                # Issue #931: was an unconditional clear — now routed through the
+                # shared sole writer so a rate-limited/deferred command doesn't
+                # strand the fan running with the retry mechanism disarmed.
+                self._end_nat_vent_session(_not_active_result)
             if self._economizer_active:
                 await self._deactivate_economizer(outdoor_temp=0)
 
@@ -7550,6 +7572,39 @@ class AutomationEngine:
         self._fan_active = True  # let _deactivate_fan see an owned fan (override-only case)
         return await self._deactivate_fan(reason=reason, bypass_absolute_override=True, emit_event=emit_event)
 
+    def _end_nat_vent_session(self, result: FanCommandResult) -> None:
+        """Clear nat-vent session bookkeeping only once the paired fan command actually ran.
+
+        The sole place ``_natural_vent_active``/``_nat_vent_soft_start`` are cleared in
+        connection with a fan-stop command — every call site that used to hand-write
+        this pair of assignments now calls this instead (Issue #931, found while
+        investigating a live 2.5h WHF overshoot, and while tracing why the same pattern
+        was hand-duplicated at 9 separate sites in this file, most without a result
+        check at all. 8 of those 9 were genuinely buggy and are now migrated here; the
+        9th — the fan-reconcile "no fan running" site — clears the flag to match
+        reality with no command in flight to race with, a different situation, and is
+        deliberately left alone).
+        ``RATE_LIMITED_NEW``/``RATE_LIMITED_DUP`` means the command never actually
+        reached the fan — clearing the flags anyway strands a physically-running fan
+        with nothing left to retry stopping it, since ``nat_vent_temperature_check()``
+        opens with ``if not self._natural_vent_active: return``.
+        """
+        if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+            # Issue #931: this is the one diagnostic line that would confirm or refute a
+            # recurrence of the exact incident this fixes — must not be filtered out of
+            # production logs at the default level. INFO for a fresh deferral (worth a
+            # human noticing), DEBUG for a repeat of an already-reported deferral within
+            # the same window — same split already used by _fan_toggle_rate_limited()'s
+            # own DEFER_NEW/DEFER_DUPLICATE logging for the identical reason (Issue #649).
+            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+            _log(
+                "Nat-vent session preserved — fan command deferred: result=%s retry=next_tick",
+                result.name,
+            )
+            return
+        self._natural_vent_active = False
+        self._nat_vent_soft_start = False
+
     async def _exit_nat_vent(
         self,
         *,
@@ -7596,8 +7651,9 @@ class AutomationEngine:
         Returns:
             The ``FanCommandResult`` from the underlying ``_deactivate_fan()`` call.
         """
-        self._natural_vent_active = False
-        self._nat_vent_soft_start = False
+        # Issue #931: flags are no longer cleared here, unconditionally, before the
+        # deactivate command's result is known — see _end_nat_vent_session(), called
+        # below in each branch once `result` is actually available.
         # Issue #821 (Design §4): the primary nat-vent-exit choke point — arms the
         # family-switch lockout's dwell clock for every call site that routes through
         # here (11 of the raw sites; the 3 bypass branches that call
@@ -7630,6 +7686,7 @@ class AutomationEngine:
             result = await self._deactivate_fan(
                 reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
             )
+            self._end_nat_vent_session(result)
             state = self.hass.states.get(self.climate_entity)
             self._pre_pause_mode = state.state if state and state.state != "off" else None
             # Write-shape divergence fix (found while scoping #637 Step 3): this branch
@@ -7662,6 +7719,7 @@ class AutomationEngine:
             )
         else:
             result = await self._deactivate_fan(reason=reason, emit_event=False)
+            self._end_nat_vent_session(result)
             # Issue #821 follow-up (project owner's own fix, confirmed by reading
             # _deactivate_fan()'s restore branches directly): _deactivate_fan() above
             # restores via self._set_hvac_mode(self._pre_fan_hvac_mode, ...) — a blind
@@ -9188,15 +9246,17 @@ class AutomationEngine:
             _k_active_cool,
         )
         if self._natural_vent_active:
-            await self._deactivate_fan(
+            _ceiling_escalation_result = await self._deactivate_fan(
                 reason=(
                     f"ceiling guard override — indoor {_indoor_cg:.1f}°F approaching"
                     f" comfort_cool {_comfort_cool_cg:.1f}°F, breach predicted in"
                     f" {_hours_to_breach:.1f}h — switching to active cooling"
                 )
             )
-            self._natural_vent_active = False
-            self._nat_vent_soft_start = False
+            # Issue #931: flags clear only once the result above is known — see
+            # _end_nat_vent_session() (previously cleared unconditionally with the
+            # result never even captured).
+            self._end_nat_vent_session(_ceiling_escalation_result)
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "nat_vent_ceiling_escalation",

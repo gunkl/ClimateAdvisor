@@ -8080,10 +8080,23 @@ class AutomationEngine:
             FanCommandResult.RATE_LIMITED_NEW,
             FanCommandResult.RATE_LIMITED_DUP,
         ):
-            _LOGGER.warning(
+            # Issue #935 verification finding: OVERRIDDEN is a genuine anomaly (worth
+            # a WARNING), but RATE_LIMITED_NEW/DUP is routine anti-cycling behavior
+            # that can repeat every tick for up to 5 minutes — same INFO/DEBUG split
+            # already used by _activate_fan()'s own DEFER_NEW/DEFER_DUPLICATE logging
+            # (#649) and _end_nat_vent_session() (#931), for the same reason: a
+            # per-tick WARNING here would be log noise that dilutes the genuinely
+            # anomalous OVERRIDDEN signal.
+            if activation_result is FanCommandResult.OVERRIDDEN:
+                _log = _LOGGER.warning
+            elif activation_result is FanCommandResult.RATE_LIMITED_NEW:
+                _log = _LOGGER.info
+            else:
+                _log = _LOGGER.debug
+            _log(
                 "Nat-vent FSM state application skipped: fan command was %s"
                 " during activation — applying INACTIVE instead of stale %s decision",
-                activation_result,
+                activation_result.name,
                 to_state,
             )
             self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)

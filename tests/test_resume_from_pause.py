@@ -787,6 +787,85 @@ class TestGraceExpiryRecheckFsmAuthoritative:
 
 
 # ---------------------------------------------------------------------------
+# TestRePauseActivationRateLimitGuard (Issue #935)
+# ---------------------------------------------------------------------------
+
+
+class TestRePauseActivationRateLimitGuard:
+    """Issue #935: _re_pause_for_open_sensor()'s reactivation branch previously
+    hand-set ``self._natural_vent_active = True`` unconditionally right after
+    ``await self._activate_fan(...)``, bypassing the
+    _apply_nat_vent_fsm_state_after_activation() choke point that the other 5
+    production call sites already use. When the fan-ON command was rate-limited
+    (Issue #641's cooldown deferring it) or overridden mid-await, this site
+    still claimed nat-vent was active — the mirror-image gap to #931's exit-side
+    fix. Same scaffold as TestGraceExpiryRecheckFsmAuthoritative above, with
+    ``_activate_fan`` stubbed to return a non-EXECUTED result to simulate the
+    real command never reaching the fan."""
+
+    def _make_engine_for_reactivation(self) -> AutomationEngine:
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 300,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            }
+        )
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = True
+        engine._paused_entity = "binary_sensor.stale_from_prior_pause"
+        engine._paused_since = datetime.now()
+        engine._last_outdoor_temp = 65.0
+        climate_state = MagicMock()
+        climate_state.state = "off"
+        climate_state.attributes.get.return_value = 78.0
+        engine.hass.states.get.return_value = climate_state
+        engine._hourly_forecast_temps = []
+        engine._natvent_fsm_authoritative = True
+        return engine
+
+    def test_rate_limited_activation_does_not_claim_natural_vent_active(self):
+        """Conditions favor reactivation (outdoor 65°F < indoor 78°F), but the
+        fan-ON command is deferred by the rate limiter. _natural_vent_active must
+        stay False so the idle-open re-evaluation loop retries on its own next
+        cycle instead of believing a session is already running."""
+        from custom_components.climate_advisor.automation import FanCommandResult
+
+        engine = self._make_engine_for_reactivation()
+        engine._activate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_NEW)
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is False
+
+    def test_overridden_activation_does_not_claim_natural_vent_active(self):
+        """Same guard, OVERRIDDEN branch: a manual override wins the race during
+        the await window, so the stale pre-await reactivation decision must not
+        be applied."""
+        from custom_components.climate_advisor.automation import FanCommandResult
+
+        engine = self._make_engine_for_reactivation()
+        engine._activate_fan = AsyncMock(return_value=FanCommandResult.OVERRIDDEN)
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is False
+
+    def test_executed_activation_still_claims_natural_vent_active(self):
+        """Control: when the command actually executes, behavior is unchanged
+        from before this fix — proves the guard doesn't suppress the normal
+        case."""
+        from custom_components.climate_advisor.automation import FanCommandResult
+
+        engine = self._make_engine_for_reactivation()
+        engine._activate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+
+
+# ---------------------------------------------------------------------------
 # TestResumedFromPauseFlag
 # ---------------------------------------------------------------------------
 

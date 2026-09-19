@@ -6802,8 +6802,16 @@ class AutomationEngine:
                     f"grace expired — nat-vent: outdoor {outdoor:.1f}°F < indoor {indoor:.1f}°F,"
                     f" outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
                 )
-                await self._activate_fan(reason=nat_vent_reason)
-                self._natural_vent_active = True
+                # Issue #935: routed through _apply_nat_vent_fsm_state_after_activation()
+                # rather than hand-setting _natural_vent_active directly — a rate-limited
+                # or overridden command must not be reported as an active session. This
+                # site's own _fsm_result.to_state == ACTIVE_FULL_GATE is exactly what
+                # _reactivates was computed from above, so ACTIVE_FULL_GATE is the
+                # correct to_state to pass here.
+                _activation_result = await self._activate_fan(reason=nat_vent_reason)
+                self._apply_nat_vent_fsm_state_after_activation(
+                    NatVentLifecycleState.ACTIVE_FULL_GATE, _activation_result
+                )
                 # Issue #829: this fan run is CA reactivating on its own initiative right
                 # after a grace expiry, with the monitored sensor still open — not a fresh
                 # user action. Mark provenance so that whenever this run eventually turns
@@ -8032,9 +8040,10 @@ class AutomationEngine:
         self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
     ) -> None:
         """Apply an FSM decision computed BEFORE an ``await self._activate_fan(...)``
-        call, guarding against the Issue #706 Bug F race.
+        call, guarding against the Issue #706 Bug F race and the Issue #935
+        rate-limit race.
 
-        All 5 production call sites for ``_apply_nat_vent_fsm_state()`` share the
+        All production call sites for ``_apply_nat_vent_fsm_state()`` share the
         same shape: compute a ``to_state`` decision, then ``await
         self._activate_fan(...)`` — a real event-loop yield point — under
         ``_decision_lock``/``_decision_pass``, then apply that pre-await decision.
@@ -8045,15 +8054,49 @@ class AutomationEngine:
         returns ``FanCommandResult.OVERRIDDEN`` — the definitive, race-free signal
         that the pre-await ``to_state`` is now stale. In that case, apply
         ``INACTIVE`` instead of the stale decision so ``_natural_vent_active`` never
-        disagrees with the fact the real command was rejected. Every other
-        ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``,
-        ``RATE_LIMITED_NEW``/``DUP``, ``DISABLED``) means no override intervened
-        mid-await, so the pre-await ``to_state`` is still correct to apply.
+        disagrees with the fact the real command was rejected.
+
+        Issue #935: ``FanCommandResult.RATE_LIMITED_NEW``/``RATE_LIMITED_DUP`` mean
+        the same thing for this purpose — the Issue #641 rate limiter deferred the
+        real fan-ON command (by up to 5 minutes) instead of issuing it now. Applying
+        the pre-await ``to_state`` (an ACTIVE_* state) in that case makes
+        ``_natural_vent_active`` claim a session is running when the fan was never
+        actually told to turn on, leaving the home unprotected while the system's own
+        status says cooling is active. This is the mirror-image of Issue #931's
+        ``_end_nat_vent_session()`` fix — but with OPPOSITE correct behavior: on exit
+        (#931), preserving the active session lets the existing per-tick retry loop
+        (``nat_vent_temperature_check()``) keep checking on its own next cycle. On
+        entry (#935), applying INACTIVE here is what lets the existing idle-open
+        re-evaluation loop (gated on ``not self._natural_vent_active``) naturally
+        retry on its own next cycle — the two directions need opposite fallback
+        states, do not copy #931's "preserve active" pattern onto this method.
+
+        Every other ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``,
+        ``DISABLED``) means no override intervened mid-await and no command was
+        deferred, so the pre-await ``to_state`` is still correct to apply.
         """
-        if activation_result is FanCommandResult.OVERRIDDEN:
-            _LOGGER.warning(
-                "Nat-vent FSM state application skipped: fan override became active"
+        if activation_result in (
+            FanCommandResult.OVERRIDDEN,
+            FanCommandResult.RATE_LIMITED_NEW,
+            FanCommandResult.RATE_LIMITED_DUP,
+        ):
+            # Issue #935 verification finding: OVERRIDDEN is a genuine anomaly (worth
+            # a WARNING), but RATE_LIMITED_NEW/DUP is routine anti-cycling behavior
+            # that can repeat every tick for up to 5 minutes — same INFO/DEBUG split
+            # already used by _activate_fan()'s own DEFER_NEW/DEFER_DUPLICATE logging
+            # (#649) and _end_nat_vent_session() (#931), for the same reason: a
+            # per-tick WARNING here would be log noise that dilutes the genuinely
+            # anomalous OVERRIDDEN signal.
+            if activation_result is FanCommandResult.OVERRIDDEN:
+                _log = _LOGGER.warning
+            elif activation_result is FanCommandResult.RATE_LIMITED_NEW:
+                _log = _LOGGER.info
+            else:
+                _log = _LOGGER.debug
+            _log(
+                "Nat-vent FSM state application skipped: fan command was %s"
                 " during activation — applying INACTIVE instead of stale %s decision",
+                activation_result.name,
                 to_state,
             )
             self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)

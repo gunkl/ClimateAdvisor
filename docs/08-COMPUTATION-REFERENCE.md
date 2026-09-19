@@ -2956,6 +2956,30 @@ def _end_nat_vent_session(self, result: FanCommandResult) -> None:
 
 Each caller captures the `FanCommandResult` from its own `_deactivate_fan()` call and passes it to `_end_nat_vent_session()` immediately after the command resolves — never before. A rate-limited/deferred result leaves the session flags untouched, so `nat_vent_temperature_check()` keeps evaluating (and retrying the stop) on every subsequent tick instead of going silent; only a real, executed stop actually ends the session. A grep-based test guard (`tests/test_end_nat_vent_session.py::TestEndNatVentSessionIsSoleWriter`) asserts exactly 3 raw `self._natural_vent_active = False` assignments remain in `automation.py`: the one inside `_end_nat_vent_session()` itself, the fan-reconcile "no fan running" site (clears the flag to match reality — no command is in flight to race with, a different situation from this bug), and `_clear_fan_flags_and_start_grace()`'s `preserve_nat_vent_session` gate (a general-purpose reset helper whose callers explicitly decide whether to preserve the session, not tied to one command's result). A future call site hand-writing a 4th raw assignment fails this test instead of silently reintroducing the bug.
 
+**`_apply_nat_vent_fsm_state_after_activation()` — entry-side mirror of `_end_nat_vent_session()`, opposite fallback state (Issue #706 Bug F, widened by Issue #935):** All 6 production call sites that compute a nat-vent FSM `to_state` decision, then `await self._activate_fan(...)` — a real event-loop yield point — under `_decision_lock`/`_decision_pass`, apply that pre-await decision through this one choke point rather than writing `_natural_vent_active`/`_nat_vent_soft_start` directly. `_activate_fan()`'s returned `FanCommandResult` decides whether the pre-await `to_state` is still trustworthy:
+
+```python
+def _apply_nat_vent_fsm_state_after_activation(
+    self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
+) -> None:
+    if activation_result in (
+        FanCommandResult.OVERRIDDEN,
+        FanCommandResult.RATE_LIMITED_NEW,
+        FanCommandResult.RATE_LIMITED_DUP,
+    ):
+        self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)
+    else:
+        self._apply_nat_vent_fsm_state(to_state)
+```
+
+`OVERRIDDEN` (Bug F, Issue #706) means a manual override arrived during the await and rejected the real command — the pre-await decision is definitively stale. `RATE_LIMITED_NEW`/`RATE_LIMITED_DUP` (Issue #935) mean the Issue #641 anti-cycling floor deferred the fan-ON command by up to 5 minutes instead of issuing it now — the command never reached the fan either. In both cases `INACTIVE` is applied instead of the stale `ACTIVE_FULL_GATE`/`ACTIVE_SOFT_START` decision.
+
+This is the **mirror image of `_end_nat_vent_session()` above, with the opposite correct fallback state** — do not copy that method's "preserve on rate-limit" pattern here:
+- **Exit side (`_end_nat_vent_session()`, #931):** a rate-limited *stop* command means the fan is still physically running, so the session flags must stay **active** — `nat_vent_temperature_check()`'s per-tick retry loop (gated on `if not self._natural_vent_active: return`) needs the flag True to keep trying to stop it.
+- **Entry side (`_apply_nat_vent_fsm_state_after_activation()`, #935):** a rate-limited *start* command means the fan was never actually told to turn on, so the session flags must go **inactive** — the idle-open re-evaluation loop (`handle_door_window_open()`'s idle-open re-entry, `check_natural_vent_conditions()`'s comfort-ceiling re-entry, both gated on `not self._natural_vent_active`) needs the flag False to retry activation on its own next cycle. Applying the stale `ACTIVE_*` state instead left the status page claiming nat-vent was running while the fan command was still pending, with nothing left to retry it once the cooldown cleared.
+
+Before Issue #935, a 6th call site (`_re_pause_for_open_sensor()`'s grace-expiry reactivation branch) hand-wrote `self._natural_vent_active = True` directly after its own `await self._activate_fan(...)`, bypassing this choke point entirely — the same class of gap Issue #931 fixed on the exit side for 8 hand-rolled sites. It is now routed through `_apply_nat_vent_fsm_state_after_activation()` like the other 5 sites.
+
 **Manual-override-conflict standdown timing changed too:** `_stand_down_whf_for_override_conflict()` (Issue #714/#748 — see "Structural WHF/AC Mutual Exclusion" below) now also calls `_end_nat_vent_session()` with its own `_deactivate_fan()` result, rather than clearing the flags itself unconditionally. Its fire-and-forget caller — `start_override_confirmation()`'s WHF-conflict branch, which dispatches the standdown via `self.hass.async_create_task(...)` rather than awaiting it inline — previously cleared `_natural_vent_active`/`_nat_vent_soft_start` synchronously at the dispatch site, before the scheduled task had even run, so same-tick code reading those flags would observe the session as already ended even though the fan-stop command hadn't been issued yet. That synchronous clear is gone: the flags now only change once `_stand_down_whf_for_override_conflict()`'s own dispatched task actually executes and resolves a real fan-command result, on a later event-loop iteration — not within the same tick as the dispatch. The other call sites — the `MANUAL_OVERRIDE_CONFLICT` bypass branches inside `check_natural_vent_conditions()` and `nat_vent_temperature_check()`, both of which `await` `_stand_down_whf_for_override_conflict()` directly rather than dispatching it — are unaffected by this timing change: they already ran the standdown inline, and now simply gain the same rate-limit-aware flag clear as every other site.
 
 ### Re-activation from Pause

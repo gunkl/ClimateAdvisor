@@ -986,16 +986,23 @@ class TestManualOverrideEndsNatVentImmediately:
         engine.hass.states.get = MagicMock(return_value=state_mock)
         return engine
 
-    def test_override_detection_clears_nat_vent_flag_synchronously(self):
-        """_natural_vent_active must flip False the instant the override is detected
-        — before the scheduled fan-off task has even run — mirroring how
-        _exit_nat_vent() itself clears the flag synchronously ahead of its own await."""
+    def test_override_detection_schedules_standdown_without_clearing_flag_early(self):
+        """Issue #931: _natural_vent_active must NOT flip False synchronously here
+        anymore — only once the scheduled stand-down task actually runs
+        _deactivate_fan() and its result is known does the flag clear (see
+        _end_nat_vent_session(), the sole writer). Previously this cleared the flag
+        unconditionally before the fan command even ran, which — if the underlying
+        _deactivate_fan() call came back RATE_LIMITED_NEW/RATE_LIMITED_DUP — could
+        strand a physically-running fan with the one retry mechanism
+        (nat_vent_temperature_check()) silently disarmed. See
+        test_override_detection_turns_off_the_fan_without_restoring_stale_mode below
+        for the flag actually clearing once the task runs."""
         engine = self._engine_with_active_nat_vent()
         engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
 
         engine.handle_manual_override(source="normal", old_mode="off", new_mode="cool")
 
-        assert engine._natural_vent_active is False
+        assert engine._natural_vent_active is True
         engine.hass.async_create_task.assert_called_once()
 
     def test_override_detection_turns_off_the_fan_without_restoring_stale_mode(self):
@@ -1023,6 +1030,11 @@ class TestManualOverrideEndsNatVentImmediately:
             f" mode. Got: {hvac_mode_calls}"
         )
         assert engine._pre_fan_hvac_mode is None, "Suppression snapshot must be released, not left stranded"
+        # Issue #931: the flag only clears once the scheduled task's own
+        # _deactivate_fan() call resolves — confirms _end_nat_vent_session() is
+        # reached (with a real, non-rate-limited result) once the task actually runs,
+        # completing the deferred half of the previously-synchronous clear.
+        assert engine._natural_vent_active is False
 
     def test_no_action_when_whf_not_currently_owning_hvac(self):
         """A mode change with no active WHF suppression session must not touch

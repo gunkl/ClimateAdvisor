@@ -1,0 +1,80 @@
+{
+  "name": "issue_935_natvent_activation_rate_limited_retry",
+  "description": "Occupant-first framing: a second window opens 30s after nat-vent finished a clean exit on a first window, with outdoor/indoor conditions still favorable for free cooling. The fan-ON command this should trigger is deferred by the 300s anti-cycling cooldown (the same physical fan was just commanded off 30s earlier). Before the Issue #935 fix, the engine believed nat-vent was already running and free-cooling the home at this instant -- the status page would say 'active' while the WHF was still physically off and nothing was scheduled to ever actually turn it on, since the entry retry loop is itself gated on 'not already active'. After the fix, the engine correctly stays idle until the cooldown clears, then the existing idle-open re-evaluation loop retries on its own next cycle and the fan genuinely turns on.",
+  "source": "issue",
+  "issue": 935,
+  "notes": [
+    "Deliberately avoids the Issue #696/#699 reactivation lockout mechanism entirely, to isolate the fan-toggle rate limiter (Issue #641) as the only thing under test. The first nat-vent session exits via Priority 1 (all monitored sensors closed, _exit_nat_vent()'s restore branch) -- the one exit reason that does NOT arm the 300s reactivation lockout (set_outdoor_exit_time=True is only passed by outdoor-reversal exits). So when window_b opens 30s later, nat_vent_fsm's PAUSED_REACTIVATION_LOCKOUT branch never engages -- the FSM decides ACTIVE_FULL_GATE immediately, and the only thing standing between that decision and a real fan command is the toggle rate limiter.",
+    "The first activation (window_a, 15:00:02) is held open for 310s before closing -- comfortably past the 300s rate-limit floor -- so the CLOSE-triggered restore deactivate at 15:05:12 executes for real (FanCommandResult.EXECUTED), not rate-limited itself. This keeps the scenario's only rate-limited command the one under test (window_b's activation attempt), rather than conflating with the Issue #931 exit-side mechanism.",
+    "window_b opens only 30s after that real deactivate (15:05:12 -> 15:05:42) -- well inside the 300s floor -- so its own _activate_fan() call is genuinely deferred (RATE_LIMITED_NEW), not a scenario artifact.",
+    "Indoor/outdoor readings are held constant (76F/68F) across the whole scenario -- outdoor(68) < indoor(76) - hysteresis(1), indoor(76) > comfort_heat(68), outdoor(68) <= threshold(77) -- so every activation attempt is decided purely by the rate limiter/lockout, never by a temperature swing.",
+    "Final temp_update at 15:10:12 lands exactly 300s after the 15:05:12 toggle -- the rate-limit floor has cleared, and this tick's check_natural_vent_conditions() idle-open re-entry (window_b is still open, _natural_vent_active is correctly False post-fix) is what performs the retry the fix depends on.",
+    "automation_grace_seconds is deliberately set to 5 (far below the default 300s): the Priority-1 exit that closes window_a always starts a normal 'resume to classified state' automation grace period, independent of this fix. With the default 300s duration that grace period is still running when window_b opens 30s later, which routes window_b's re-evaluation through _re_pause_for_open_sensor() (Part B's own call site) once that ORIGINAL grace timer expires at the 300s mark -- coincidentally papering over a stuck pre-fix _natural_vent_active, since Part B's grace-expiry retry doesn't gate on that flag at all. An earlier draft of this scenario used the 300s default and PASSED on both pre-fix and post-fix code for exactly that reason (confirmed via git stash -- see below). Shortening the automation grace to 5s lets it expire and clear cleanly (all sensors closed at that point) well before window_b ever opens, so window_b's attempt reaches handle_door_window_open() with no grace active -- isolating Part A's guard and the plain idle-open re-entry loop as the only mechanism able to recover.",
+    "Only ONE assertion, at the scenario's final timestamp, deliberately: the harness's engine_state-based assertion types (nat_vent_still_active/nat_vent_not_active/fan_not_active/nat_vent_fan_preserved) all read result.engine_state's FINAL snapshot regardless of an assertion's own `at` field (see outcomes.py's check_assertion docstring) -- there is no point-in-time engine-state snapshot mechanism in this harness. nat_vent_fan_preserved (_natural_vent_active=True AND _fan_active=True, both read from the final snapshot) is the one existing assertion type that discriminates pre/post-fix correctly in a single final check.",
+    "Verified empirically via `git stash push -- custom_components/climate_advisor/automation.py` (reverting to the pre-#935 code, immediately before this fix's commit) then re-running `python tools/simulate.py --pending -v -s issue_935_natvent_activation_rate_limited_retry` with INFO logging enabled, then `git stash pop` to restore the fix. Pre-fix: the 15:05:42 attempt logs 'Fan toggle deferred: rate limit (30s...)' (RATE_LIMITED_NEW) exactly as expected, but -- because pre-fix code applies the pre-await ACTIVE_FULL_GATE decision for any non-OVERRIDDEN result -- _natural_vent_active flips True immediately, which permanently blocks check_natural_vent_conditions()'s idle-open re-entry gate; the 15:10:12 tick produces no further 'Fan toggle deferred'/'5-minute floor expired'/'Activated fan' log lines at all, and the assertion FAILS (actual='natural_ventilation', i.e. only the misleading decision label, not the composite flag check). Post-fix (fix restored): the same 15:05:42 deferral is followed by the new WARNING log ('Nat-vent FSM state application skipped: fan command was FanCommandResult.RATE_LIMITED_NEW... applying INACTIVE'), then at 15:10:12 the idle-open loop re-decides ACTIVE_FULL_GATE on its own (reason string 'nat-vent re-engaged: ...', confirming it's genuinely the idle-open path and not Part B), logs '5-minute floor expired -- applying deferred activation', and the assertion PASSES."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "automation_grace_seconds": 5,
+    "door_window_sensors": ["binary_sensor.window_a", "binary_sensor.window_b"]
+  },
+  "events": [
+    {
+      "time": "2026-08-25T15:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Warm-day classification, HVAC off -- nat-vent is the primary control mechanism."
+    },
+    {
+      "time": "2026-08-25T15:00:01",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "Baseline: favorable for nat-vent the whole scenario (outdoor 68F < indoor 76F - 1F hysteresis, indoor > 68F floor, outdoor <= 77F threshold)."
+    },
+    {
+      "time": "2026-08-25T15:00:02",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window_a",
+      "note": "Window A opens. Conditions favorable -> handle_door_window_open() activates nat-vent for real (FanCommandResult.EXECUTED). This is the reference toggle the 300s window below is NOT measured from -- that's the close below."
+    },
+    {
+      "time": "2026-08-25T15:05:12",
+      "type": "sensor_close",
+      "entity": "binary_sensor.window_a",
+      "note": "310s later, window A closes -- the only monitored sensor, so handle_all_doors_windows_closed() fires the Priority 1 exit. Well past the 300s floor since the 15:00:02 activation, so this restore deactivate executes for real (EXECUTED) -- _fan_active=False, _natural_vent_active=False, and (Priority 1 is not an outdoor-reversal exit) the reactivation lockout is NOT armed. This is the real toggle command the rate-limit window below IS measured from."
+    },
+    {
+      "time": "2026-08-25T15:05:42",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window_b",
+      "note": "A DIFFERENT window opens just 30s after the 15:05:12 deactivate. Conditions are still favorable and the reactivation lockout was never armed, so nat_vent_fsm decides ACTIVE_FULL_GATE immediately -- but the fan was toggled only 30s ago (well under the 300s floor), so _activate_fan() returns RATE_LIMITED_NEW instead of executing."
+    },
+    {
+      "time": "2026-08-25T15:10:12",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "300s after the 15:05:12 toggle -- the rate-limit floor has cleared. This tick's unconditional check_natural_vent_conditions() call reaches the idle-open re-entry branch (window_b is still open, _natural_vent_active correctly False), re-decides ACTIVE_FULL_GATE, and this time _activate_fan() actually executes."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-25T15:10:12",
+      "expect": "nat_vent_fan_preserved",
+      "reason": "Checks the FINAL engine state (this scenario's own last event) for BOTH _natural_vent_active=True and _fan_active=True together -- the only way to tell a genuine successful retry apart from the bug. Before the Issue #935 fix, the 15:05:42 rate-limited attempt at window_b would have applied ACTIVE_FULL_GATE anyway, setting _natural_vent_active=True immediately even though the real command never reached the fan (_fan_active stays False). That stale True then permanently blocks check_natural_vent_conditions()'s idle-open re-entry gate (`if not (_actively_paused or self._natural_vent_active): ...`) from ever running again -- so the 15:10:12 retry tick would do nothing, leaving _fan_active stuck False forever while _natural_vent_active wrongly claims True: this assertion fails on that exact desync. After the fix, _natural_vent_active correctly stays False through the rate-limited window, the idle-open gate runs again at 15:10:12, and this time the real command executes -- both flags end up True together, and the assertion passes."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A nat-vent entry attempt that gets deferred by the 300s fan-toggle rate limiter no longer causes the engine to believe free cooling is already running; the idle-open re-evaluation loop correctly retries once the cooldown clears and the fan genuinely turns on."
+  }
+}

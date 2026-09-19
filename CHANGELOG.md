@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.52] — 2026-09-19
+
+- Fix #935: the system can no longer believe the whole-house fan is running and free-cooling the home when the "turn on" command was actually still pending (deferred by the 5-minute anti-cycling cooldown). Previously this could leave the home warming up unprotected for an extended stretch while the system's own status said cooling was active. The system now only marks a nat-vent session active once the fan command actually goes through, which lets its existing retry logic try again on the next cycle.
+
 ## [0.7.51] — 2026-09-19
 
 - Fix #934: the Activity Report will no longer show a "switched to active cooling" entry for a whole-house-fan-stop command that was actually still pending (deferred by the 5-minute anti-cycling cooldown) — it now only logs the switch once the fan command actually executes, or stays quiet if it already reported the same brief delay a moment earlier.

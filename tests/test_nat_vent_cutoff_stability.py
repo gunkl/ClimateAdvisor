@@ -11,9 +11,12 @@ the wording shown to the occupant on the briefing/status cards.
 
 ``_stabilize_nat_vent_cutoff_reason()`` fixes this by requiring a *new* reason
 to read consistently for ``NAT_VENT_CUTOFF_REASON_SUSTAIN_S`` (90s) before it's
-accepted, via the shared ``confirmed_transition.py`` primitive. Every other key
-in the raw plan dict (``comfort_floor_crossing_time``, ``ceiling_breach_time``,
-etc.) must pass through fresh every cycle regardless — freezing those too would
+accepted, via the shared ``confirmed_transition.py`` primitive. ``evening_open_time``
+is held alongside ``nat_vent_cutoff``/``nat_vent_cutoff_reason`` as one coherent
+display pair (Issue #940 — previously it passed through fresh while the cutoff
+stayed held/stale, which could invert their order in the rendered briefing). Every
+OTHER key in the raw plan dict (``comfort_floor_crossing_time``, ``ceiling_breach_time``,
+etc.) must still pass through fresh every cycle regardless — freezing those too would
 silently stall ``ode_floor_guard.py``'s safety-relevant heating-escalation
 input.
 
@@ -152,16 +155,19 @@ class TestAppearDisappearNoSustainRequired:
 
 class TestKnifeEdgeFlipNotYetConfirmed:
     """The critical blast-radius assertions: while a reason flip is unconfirmed,
-    ONLY nat_vent_cutoff/nat_vent_cutoff_reason are held back — every other key
-    passes through fresh from the raw/new plan."""
+    nat_vent_cutoff/nat_vent_cutoff_reason/evening_open_time are held back together
+    as one coherent display pair (Issue #940) — every OTHER key still passes through
+    fresh from the raw/new plan."""
 
     def test_flip_moments_later_holds_old_cutoff_but_passes_through_other_fields(self):
         old_cutoff = _T0
+        old_evening_open = _T0 + timedelta(minutes=500)
         previous = _plan(
             "comfort_floor",
             old_cutoff,
             comfort_floor_crossing_time=_T0,
             ceiling_breach_time=None,
+            evening_open_time=old_evening_open,
         )
         coord = _make_coord(nat_vent_plan=previous)
 
@@ -184,20 +190,50 @@ class TestKnifeEdgeFlipNotYetConfirmed:
         with patch(_DT_PATCH_TARGET, return_value=later):
             result = coord._stabilize_nat_vent_cutoff_reason(raw)
 
-        # Cutoff/reason held at the OLD confirmed values.
+        # Cutoff/reason/evening_open_time held at the OLD confirmed values, together.
         assert result["nat_vent_cutoff_reason"] == "comfort_floor"
         assert result["nat_vent_cutoff"] == old_cutoff
+        assert result["evening_open_time"] == old_evening_open
 
         # Every other key passes through fresh from raw_plan, unchanged.
         assert result["comfort_floor_crossing_time"] == new_floor_crossing
         assert result["ceiling_breach_time"] == new_ceiling_breach
         assert result["precool_start_time"] == new_precool_start
         assert result["any_nat_vent_window"] is False
-        assert result["evening_open_time"] == _T0 + timedelta(minutes=300)
 
         # Candidate state now tracks the not-yet-confirmed new reason.
         assert coord._nat_vent_cutoff_reason_candidate == "outdoor_rise"
         assert coord._nat_vent_cutoff_reason_candidate_since == later
+
+    def test_flip_moments_later_prevents_stale_cutoff_fresh_reopen_inversion(self):
+        """Issue #940 regression: previously, evening_open_time passed through fresh
+        while nat_vent_cutoff stayed held/stale, so a held cutoff later in the day than
+        a fresh evening_open_time produced a briefing that told the occupant to reopen
+        windows before the close time it had just displayed. Confirm the held plan can
+        no longer produce that inversion."""
+        old_cutoff = _T0 + timedelta(minutes=600)  # late, stale held close time
+        old_evening_open = _T0 + timedelta(minutes=650)  # correctly paired with old_cutoff
+        previous = _plan("comfort_floor", old_cutoff, evening_open_time=old_evening_open)
+        coord = _make_coord(nat_vent_plan=previous)
+
+        # Fresh computation now sees an outdoor_rise cutoff much earlier in the day,
+        # with an evening_open_time that would be EARLIER than the still-held old_cutoff
+        # if it were allowed through unheld.
+        raw = _plan(
+            "outdoor_rise",
+            _T0 + timedelta(minutes=45),
+            evening_open_time=_T0 + timedelta(minutes=300),
+        )
+
+        later = _T0 + timedelta(seconds=5)
+        with patch(_DT_PATCH_TARGET, return_value=later):
+            result = coord._stabilize_nat_vent_cutoff_reason(raw)
+
+        # Held cutoff and held evening_open_time must remain a coherent pair —
+        # evening_open_time is never allowed to be <= the (held) nat_vent_cutoff.
+        assert result["nat_vent_cutoff"] == old_cutoff
+        assert result["evening_open_time"] == old_evening_open
+        assert result["evening_open_time"] > result["nat_vent_cutoff"]
 
 
 class TestReasonHeldPendingDoesNotAffectOtherFields:

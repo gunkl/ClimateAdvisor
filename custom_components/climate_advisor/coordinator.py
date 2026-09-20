@@ -4714,15 +4714,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         automatically stabilizes that boundary too, since both flow through this one
         cached dict.
 
-        Known internal-coherence quirk while a flip is held: ``recovery_time``/
-        ``nat_vent_recovers`` are derived from *this cycle's raw* cutoff/reason
-        (``compute_nat_vent_plan()``'s own ``outdoor_rise``-only gating), so for up to
-        the sustain window they can momentarily pair with the held (not-yet-accepted)
-        ``nat_vent_cutoff_reason`` in a way that doesn't quite match — e.g. a held
-        ``outdoor_rise`` reason displayed alongside a ``nat_vent_recovers=False`` that
-        raw only computed because it currently sees ``comfort_floor``. This only affects
-        the display-side "reopens at X" sentence for at most ``NAT_VENT_CUTOFF_REASON_
-        SUSTAIN_S`` seconds, never a safety path, so it's accepted rather than fixed.
+        Issue #940 fix: ``evening_open_time`` (Issue #876 rename of ``recovery_time``/
+        ``nat_vent_recovers``) is now held alongside ``nat_vent_cutoff``/
+        ``nat_vent_cutoff_reason`` below, not passed through raw. Previously it was
+        derived from *this cycle's raw* cutoff/reason while the held (not-yet-accepted)
+        cutoff stayed stale — the two could actually disagree in order (a held cutoff
+        later in the day than a fresh, unheld ``evening_open_time``), which
+        ``briefing.py``'s ``_warm_day_plan()``/``_mild_day_plan()`` rendered without any
+        pairing check, producing a "reopen" sentence that read as happening before its
+        own paired "close" sentence. This was previously accepted as cosmetic; it was
+        not — holding ``evening_open_time`` with the pair closes the reachable ordering
+        violation for every day type, not just display-layer defenses in briefing.py.
 
         Acceptance latency is bounded by recompute cadence, not strictly by the sustain
         duration: ``is_confirmed()`` is only evaluated when a recompute actually
@@ -4777,11 +4779,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._nat_vent_cutoff_reason_candidate_since = None
             return raw_plan
 
-        # Not yet confirmed — hold the previously-confirmed cutoff/reason, but let
-        # every other field through fresh (see safety-relevant rationale above).
+        # Not yet confirmed — hold the previously-confirmed cutoff/reason/evening_open_time
+        # as one coherent display pair (Issue #940), but let every other field through
+        # fresh (see safety-relevant rationale above — comfort_floor_crossing_time must
+        # never lag for ode_floor_guard.py).
         held_plan = dict(raw_plan)
         held_plan["nat_vent_cutoff"] = previous_plan.get("nat_vent_cutoff")
         held_plan["nat_vent_cutoff_reason"] = previous_reason
+        held_plan["evening_open_time"] = previous_plan.get("evening_open_time")
         return held_plan
 
     def _target_band_lower_upper_now(self) -> tuple[float | None, float | None]:

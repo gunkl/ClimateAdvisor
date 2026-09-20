@@ -2355,6 +2355,40 @@ class TestMildDayPlanFloorWording:
         text = "\n".join(lines)
         assert "trap the warmth" in text
 
+    def test_reopen_before_close_is_suppressed_not_rendered_out_of_order(self):
+        """Issue #940 mirror of TestWarmDayPlanReopenWording's equivalent —
+        _mild_day_plan() also had no resolve_window_pair() guard. A stale/held
+        cutoff paired with a fresh, earlier evening_open_time must not render a
+        reopen sentence before its own close sentence."""
+        c = _make_classification("mild", today_high=68, today_low=50)
+        cutoff = datetime(2026, 5, 11, 18, 0, 0, tzinfo=UTC)
+        bad_reopen = datetime(2026, 5, 11, 17, 0, 0, tzinfo=UTC)  # earlier than cutoff
+        mild_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "ceiling_breach_time": None,
+            "evening_open_time": bad_reopen,
+        }
+        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        text = "\n".join(lines)
+        assert "Reopen windows" not in text
+
+    def test_reopen_spanning_midnight_still_renders(self):
+        """Companion case: a legitimate overnight reopen must still render —
+        proves the new guard didn't regress cross-midnight handling for Mild."""
+        c = _make_classification("mild", today_high=68, today_low=50)
+        cutoff = datetime(2026, 5, 11, 20, 0, 0, tzinfo=UTC)
+        overnight_reopen = datetime(2026, 5, 12, 1, 0, 0, tzinfo=UTC)
+        mild_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "ceiling_breach_time": None,
+            "evening_open_time": overnight_reopen,
+        }
+        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        text = "\n".join(lines)
+        assert "evening air cools back down" in text
+
 
 class TestWarmDayPlanReopenWording:
     """Issue #788 (reopened — the original fix here only rebranded the reopen
@@ -2409,6 +2443,43 @@ class TestWarmDayPlanReopenWording:
             "nat_vent_cutoff_reason": "outdoor_rise",
             "ceiling_breach_time": None,
             "evening_open_time": recovery,
+        }
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        text = "\n".join(lines)
+        assert "evening air cools back down" in text
+
+    def test_reopen_before_close_is_suppressed_not_rendered_out_of_order(self):
+        """Issue #940: previously _warm_day_plan() had no resolve_window_pair()
+        guard at all (only Hot's paths were routed through it, despite PR #879
+        claiming Warm/Mild too) — a stale/held cutoff paired with a fresh,
+        earlier evening_open_time rendered a reopen sentence before its own
+        close sentence. The guard must suppress the reopen sentence entirely
+        rather than ever render it out of order."""
+        c = _make_classification("warm", today_high=80, today_low=60)
+        cutoff = datetime(2026, 5, 11, 18, 0, 0, tzinfo=UTC)
+        bad_reopen = datetime(2026, 5, 11, 17, 0, 0, tzinfo=UTC)  # earlier than cutoff
+        warm_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "ceiling_breach_time": None,
+            "evening_open_time": bad_reopen,
+        }
+        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        text = "\n".join(lines)
+        assert "Reopen windows" not in text
+
+    def test_reopen_spanning_midnight_still_renders(self):
+        """Companion to the case above: a legitimate overnight reopen (close 8 PM,
+        reopen 1 AM the next day) must still render — proves the new guard call
+        didn't regress the #878-followup cross-midnight datetime comparison."""
+        c = _make_classification("warm", today_high=80, today_low=60)
+        cutoff = datetime(2026, 5, 11, 20, 0, 0, tzinfo=UTC)
+        overnight_reopen = datetime(2026, 5, 12, 1, 0, 0, tzinfo=UTC)
+        warm_events = {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "ceiling_breach_time": None,
+            "evening_open_time": overnight_reopen,
         }
         lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
         text = "\n".join(lines)

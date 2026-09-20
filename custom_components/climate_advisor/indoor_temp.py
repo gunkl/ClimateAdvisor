@@ -53,6 +53,23 @@ _LOGGER = logging.getLogger(__name__)
 MIN_PLAUSIBLE_INDOOR_F: float = 40.0
 MAX_PLAUSIBLE_INDOOR_F: float = 110.0
 
+# Issue #949: consecutive-miss counter for the sleep-sensor severity escalation in
+# ``resolve_indoor_temp_with_provenance()`` below. This module is a stateless free
+# function (no class instance to hold state on, unlike the coordinator's own analogous
+# ``_hourly_interp_unavailable_streak`` pattern in coordinator.py's
+# ``_get_outdoor_temp()``/``_get_hourly_forecast_data()``), and it's called from two
+# call sites with different cadences (coordinator.py's ~30-min update cycle, and
+# AutomationEngine's own periodic checks) — a module-level dict keyed by entity_id is
+# the closest equivalent: it persists across calls for the life of the process (reset
+# on restart, same as the coordinator's own in-memory streak) without requiring a
+# signature change to either of the ~45 existing ``resolve_indoor_temp_f()`` call sites.
+# Because the two callers' cadences differ and aren't reliably knowable from inside this
+# function, the log messages below report the consecutive-miss count only, not an
+# elapsed-minutes estimate — inventing one from an assumed cadence would just be a new
+# way to be wrong.
+_SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD = 2
+_sleep_sensor_miss_streaks: dict[str, int] = {}
+
 
 class IndoorTempReading(NamedTuple):
     """Result of resolving indoor temperature, with provenance.
@@ -158,16 +175,45 @@ def resolve_indoor_temp_with_provenance(
             if val_f is not None:
                 val_f = _check_plausible(val_f, sleep_indoor_temp_entity)
         if val_f is not None:
+            _prior_streak = _sleep_sensor_miss_streaks.get(sleep_indoor_temp_entity, 0)
+            if _prior_streak > 0:
+                # Recovery: reset the streak and log a one-shot line at the severity the
+                # outage actually reached — INFO if it never escalated past the
+                # threshold, WARNING if it did. This is the piece that was previously
+                # invisible: today's per-cycle "Using sleep indoor sensor..." INFO line
+                # below fires identically on a healthy cycle and on the first cycle
+                # after a long outage, so nothing ever marked the recovery itself.
+                _sleep_sensor_miss_streaks[sleep_indoor_temp_entity] = 0
+                _recovery_log = (
+                    _LOGGER.warning if _prior_streak > _SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD else _LOGGER.info
+                )
+                _recovery_log(
+                    "Sleep sensor available again after %d consecutive miss%s — resumed use entity=%s",
+                    _prior_streak,
+                    "" if _prior_streak == 1 else "es",
+                    sleep_indoor_temp_entity,
+                )
             _LOGGER.info(
                 "Using sleep indoor sensor entity=%s value=%.1f°F",
                 sleep_indoor_temp_entity,
                 val_f,
             )
             return IndoorTempReading(val_f, sleep_indoor_temp_entity, primary_val)
-        _LOGGER.warning(
-            "Sleep sensor unavailable, falling back to primary indoor sensor entity=%s",
-            sleep_indoor_temp_entity,
-        )
+        _streak = _sleep_sensor_miss_streaks.get(sleep_indoor_temp_entity, 0) + 1
+        _sleep_sensor_miss_streaks[sleep_indoor_temp_entity] = _streak
+        if _streak <= _SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD:
+            _LOGGER.info(
+                "Sleep sensor unavailable (%d/%d) — falling back to primary indoor sensor entity=%s",
+                _streak,
+                _SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD,
+                sleep_indoor_temp_entity,
+            )
+        else:
+            _LOGGER.warning(
+                "Sleep sensor unavailable for %d consecutive checks — falling back to primary indoor sensor entity=%s",
+                _streak,
+                sleep_indoor_temp_entity,
+            )
 
     return IndoorTempReading(primary_val, primary_entity, primary_val)
 

@@ -1,0 +1,77 @@
+{
+  "name": "issue_949_reconcile_no_fan_branch_emits_fan_deactivated",
+  "description": "reconcile_fan_on_startup()'s 'no-fan' branch (thermostat_fan_running=False, reached by ha_restart/backstop_30min/thermostat_state_change/post_grace_expiry) must emit a fan_deactivated event when it finds a real CA-owned fan session has physically ended -- before Issue #949's fix, this branch set self._fan_active=False immediately before calling _deactivate_fan(), which tripped _deactivate_fan()'s own idempotency guard (early-return ALREADY_IN_STATE) every single time, so the real transition never reached the fan_deactivated emission further down that function. Production evidence: 27 fan_activated events and zero fan_deactivated/nat_vent_fan_off/off-shaped events in one post-deploy overnight window, despite the physical WHF visibly duty-cycling on/off every ~10-15 minutes (Issue #949 investigation).",
+  "source": "production-symptom",
+  "issue": 949,
+  "notes": [
+    "Reproduces the exact defect shape identified during regression-origin archaeology: engine._fan_active must be True on entry to the no-fan branch (a real, previously-adopted CA fan session ending), not already False -- the existing #405 golden/unit coverage (tests/test_fan_control.py::TestReconcileFanOnStartup) only ever exercised this branch starting from _fan_active=False, which is exactly why the guard-defeats-itself bug (introduced by commit c79d4910, Fix #405, 2026-07-03) went undetected for 2.5+ months.",
+    "Event 1 adopts a physically-running, nat-vent-eligible fan as CA-owned (decision=adopt-on, same as reconcile-adopts-running-fan-as-nat-vent.json) so _fan_active/_natural_vent_active are both real and True going into event 2 -- not scenario-injected directly, so this exercises the actual production sequence (adopt, then later discover it stopped).",
+    "Event 2 is spaced 2 minutes after event 1 -- deliberately NOT 30 minutes as an earlier draft of this scenario had it. The adopted session's own 5-minute self-rescheduling thermostatic backstop (_start_fan_thermo_backstop(), armed by the adopt-on branch) independently stops the fan on its own tick well before 30 minutes elapse under these indoor/outdoor values, which meant a 30-minute gap let an UNRELATED mechanism deactivate the fan first -- _fan_active was already False by the time event 2 fired, so the scenario passed for the wrong reason (any _fan_active value produces the same _deactivate_fan() outcome once the fix stopped forcing _fan_active=True unconditionally, since a real off-transition and 'nothing was ever on' both reach _deactivate_fan(), just via different guard outcomes). Caught this by re-running the scenario after Craftsman's second revision (deleting the flag write entirely instead of forcing True) and seeing it fail: the earlier 30-minute version was accidentally testing the wrong thing. 2 minutes keeps the second reconcile inside the 5-minute backstop window (so the adoption is still genuinely active) while staying safely past the Issue #733 recent-fan-command guard's 30-second window.",
+    "The 'expect': 'unknown:fan_deactivated' assertion uses check_assertion's documented fallback to production_outcome_at() rather than a new outcomes.py custom assertion type -- fan_activated/fan_deactivated are both intentionally left in _map_event_to_outcome's generic unknown:<type> catch-all (confirmed by reading outcomes.py: neither has a dedicated mapping, and reconcile_adopted_fan/reconcile_turned_off_fan already scan event_log directly for their own specific cases instead of relying on this fallback) -- this is purely additive against existing, documented harness behavior, no sim_harness code changed.",
+    "This scenario would fail (assertion 3 would see 'unknown:fan_activated' or an earlier decision instead of 'unknown:fan_deactivated', since no fan_deactivated event would exist in event_log at all) if Issue #949's fix were reverted -- verified by inspecting the pre-fix code path directly (self._fan_active=False sets immediately before the guarded call), not just by assumption.",
+    "Three-exercise protocol (per CLAUDE.md): (a) scenario effectiveness -- fails without the fix, per above; (b) docs/production alignment -- docs/08-COMPUTATION-REFERENCE.md's fan reconcile section and this scenario now agree the no-fan branch always emits an observable off-event; (c) occupant outcome -- none directly (this is an observability-only fix; HVAC/fan physical behavior is unchanged), but without it the Activity Report and AI investigator silently under-report every fan-off transition reached via this branch, defeating the developer's ability to diagnose real fan behavior using the tooling this project's CLAUDE.md mandates (ha_logs.py / learning_db.py / Activity Report) for exactly this class of investigation."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: HVAC off. Coordinator runs classification before any reconcile call."
+    },
+    {
+      "time": "2026-07-10T06:01:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 74.0,
+      "outdoor_f": 65.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": true,
+      "note": "WHF already physically running, a sensor is open, outdoor 65F < indoor 74F -- nat-vent eligible. Adopted as CA-owned (decision=adopt-on): _fan_active=True, _natural_vent_active=True. This is the real prior state the no-fan branch below must correctly transition out of."
+    },
+    {
+      "time": "2026-07-10T06:03:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 71.0,
+      "outdoor_f": 66.0,
+      "thermostat_fan_running": false,
+      "any_sensor_open": true,
+      "note": "2 minutes later (still inside the 5-minute thermostatic backstop window, so the adoption above is still genuinely active -- not independently stopped by an unrelated mechanism): the WHF has physically cycled off (duty-cycling), matching the real production symptom -- thermostat_fan_running now reads False while CA's own _fan_active/_natural_vent_active are still True from the adoption above. reconcile_fan_on_startup() must reach the no-fan branch, correctly detect this as a real off-transition, and emit fan_deactivated."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Mild-day classification applied: hvac_mode=off."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "reconcile_adopted_fan",
+      "reason": "Fan physically running + sensor open + nat-vent conditions favorable -- adopted as CA-owned nat-vent (decision=adopt-on), establishing the real _fan_active=True/_natural_vent_active=True precondition the no-fan branch must transition out of at 06:03."
+    },
+    {
+      "at": "2026-07-10T06:03:00",
+      "expect": "unknown:fan_deactivated",
+      "reason": "Issue #949 fix: the no-fan branch no longer forces self._fan_active to any value before calling _deactivate_fan() -- it leaves the real, already-True flag from the adoption above untouched, so _deactivate_fan()'s idempotency guard correctly sees a genuinely-active fan and does NOT trip, and the real fan_deactivated event is emitted through the normal (non-early-return) path. Before the fix, self._fan_active=False was force-set immediately before the same call regardless of the real prior state, the guard tripped every time, and no fan_deactivated (or any off-shaped) event was ever recorded from this call site -- exactly the production gap (27 fan_activated / 0 fan_deactivated events overnight) this issue investigated. (An intermediate revision of the fix instead force-set _fan_active=True unconditionally, which also made this assertion pass, but for the wrong reason -- it also fired fan_deactivated on ordinary restarts where nothing was ever active, see docs/Issue #949 PR discussion. The final fix leaves the flag alone entirely, which is why this scenario's timing had to change to keep the fan genuinely active at 06:03 -- see the notes above.)"
+    },
+    {
+      "at": "2026-07-10T06:03:00",
+      "expect": "nat_vent_not_active",
+      "reason": "Confirms the no-fan branch also actually cleared _natural_vent_active (state correctness), not just that an event was emitted (observability) -- the two are set by adjacent lines in the same branch and both must hold."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "reconcile_fan_on_startup()'s no-fan branch now emits fan_deactivated for a real fan-on-to-off transition, closing the Issue #949 Activity Report visibility gap",
+    "observed_behavior": "no-fan branch: self._fan_active is left untouched (still True from the real adoption) going into _deactivate_fan(), so the guard doesn't trip, fan_deactivated is emitted, and _fan_active/_natural_vent_active both end False",
+    "expected_behavior": "Every real CA-owned fan-off transition reconcile_fan_on_startup() detects must be recorded as an observable event, matching this project's Observability Requirements (CLAUDE.md) -- silent state clearing with no event is exactly the defect Issue #949 found in production. This must hold without introducing a spurious event on an ordinary restart where nothing was ever active (see test_no_fan_and_nothing_stranded_is_a_true_noop in tests/test_fan_control.py for that companion guarantee at the unit level)."
+  }
+}

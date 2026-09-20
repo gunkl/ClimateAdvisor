@@ -349,7 +349,11 @@ def fetch_logs(
         remote_cmd += f" | tail -n {lines}"
 
     cmd = ssh_args(config) + [ssh_target(config), remote_cmd]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    # Issue #949: Windows defaults subprocess text decoding to cp1252, which raises
+    # UnicodeDecodeError once enough real HA log content is pulled to include a
+    # non-cp1252 byte (reproduces reliably above --lines 30000). Force UTF-8 and
+    # replace undecodable bytes instead of crashing.
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
 
     if result.returncode != 0 and not result.stdout.strip():
         stderr = result.stderr.strip()

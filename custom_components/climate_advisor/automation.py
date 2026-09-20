@@ -6050,7 +6050,30 @@ class AutomationEngine:
             # flips True (the FSM branch would apply only the fan-side quarter of this
             # reconcile decision), a correctness regression waiting for a future phase.
             # Stays a direct write.
-            self._fan_active = False
+            #
+            # Issue #949: this used to unconditionally set _fan_active = False here,
+            # which meant the _deactivate_fan() call immediately below always tripped its
+            # own idempotency guard (_fan_active already reads False -> ALREADY_IN_STATE
+            # early return), so the real fan_deactivated event emission further down that
+            # function could never fire from this call site — every physical fan-off this
+            # branch correctly detected went completely unrecorded in the Activity Report.
+            # The fix is NOT to force this flag to True either (that produced a spurious
+            # fan_deactivated event on every ordinary restart where the fan was never
+            # running, breaking test_no_fan_and_nothing_stranded_is_a_true_noop's "must
+            # not issue a spurious HVAC write or Activity Log event on every ordinary
+            # restart" invariant). Instead, simply don't write this flag at all — let
+            # _deactivate_fan() see whatever _fan_active already holds:
+            #   - A real CA-tracked session was active and the physical fan has now gone
+            #     off -> _fan_active is already True -> the guard doesn't trip -> normal
+            #     path runs -> fan_deactivated fires correctly (fixes the reported gap).
+            #   - Nothing was ever active (ordinary restart, the common case) ->
+            #     _fan_active is already False -> the guard correctly no-ops, exactly as
+            #     before -> no spurious event.
+            # Verified _deactivate_fan()'s _pre_fan_hvac_mode release/restore logic is
+            # identical on both its early-return and normal paths regardless of which one
+            # runs (both guard on `release_suppression and self._pre_fan_hvac_mode is not
+            # None`, and only write a restored mode when `restore_hvac` is True) — so this
+            # branch's stranded-HVAC-suppression release still works correctly either way.
             self._fan_on_since = None
             self._natural_vent_active = False
             self._nat_vent_soft_start = False

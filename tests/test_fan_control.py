@@ -3057,7 +3057,20 @@ class TestReconcileFanOnStartup:
 
     def test_no_fan_when_thermostat_fan_not_running(self):
         """thermostat fan off → decision no-fan; stale flags cleared, deactivate called to
-        release any stranded HVAC suppression (Issue #405)."""
+        release any stranded HVAC suppression (Issue #405).
+
+        Issue #949: the no-fan branch no longer writes self._fan_active at all (an
+        earlier version of the fix forced it to True immediately before calling
+        _deactivate_fan(), but that produced a spurious fan_deactivated event on
+        every ordinary restart where the fan was never running — see
+        test_no_fan_and_nothing_stranded_is_a_true_noop). _deactivate_fan is mocked
+        in this fixture and never touches _fan_active either, so engine._fan_active
+        reads True here simply because the fixture set it to True (as stale) before
+        the call and nothing in this test's path changes it. The full real-method
+        round trip for a genuine fan-on-to-off transition (ending at
+        _fan_active=False, fan_deactivated emitted) is covered by
+        test_no_fan_branch_real_off_transition_emits_fan_deactivated below.
+        """
         engine = self._engine()
         engine._fan_active = True  # stale
 
@@ -3069,7 +3082,7 @@ class TestReconcileFanOnStartup:
 
         engine._deactivate_fan.assert_awaited_once()
         assert engine._deactivate_fan.call_args.kwargs.get("restore_hvac") is True
-        assert engine._fan_active is False
+        assert engine._fan_active is True  # set True by the branch itself; see docstring (Issue #949)
         assert engine._natural_vent_active is False
 
     def test_stranded_hvac_suppression_released_when_fan_confirmed_off(self):
@@ -3093,6 +3106,74 @@ class TestReconcileFanOnStartup:
         engine._set_hvac_mode.assert_awaited_once()
         assert engine._set_hvac_mode.call_args.args[0] == "cool"
         assert engine._pre_fan_hvac_mode is None
+
+    def test_no_fan_branch_real_off_transition_emits_fan_deactivated(self):
+        """Issue #949 regression test: a REAL fan-on-to-off transition reaching the
+        no-fan branch (engine._fan_active=True on entry, matching the actual physical
+        session this branch exists to close out) must emit a fan_deactivated event.
+
+        Before the Issue #949 fix, this branch set self._fan_active = False immediately
+        before calling _deactivate_fan() — which trips _deactivate_fan()'s own
+        idempotency guard (`if not self._fan_active: return ALREADY_IN_STATE`)
+        unconditionally, since the guard reads exactly the flag this branch had just
+        set. The real fan_deactivated emission lives further down _deactivate_fan(),
+        past that guard, so it could never fire from this call site — every real
+        physical fan-off reconcile_fan_on_startup() correctly detected went completely
+        unrecorded in the Activity Report (confirmed live: 27 fan_activated events vs.
+        zero fan_deactivated/off-shaped events in one overnight production window).
+
+        This is exactly the test shape missing from Issue #405's own regression tests
+        (test_stranded_hvac_suppression_released_when_fan_confirmed_off and its
+        siblings all start with engine._fan_active already False, sidestepping this
+        exact ordering bug; test_no_fan_when_thermostat_fan_not_running starts with
+        _fan_active=True but mocks _deactivate_fan entirely, so it never exercises the
+        guard or real event emission at all) — added here as the regression-origin
+        trace's identified gap, not a duplicate of existing coverage.
+        """
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # real method
+        engine._emit_event_callback = MagicMock()
+        engine._fan_active = True  # real prior CA-owned session, not a stale/default flag
+        engine._natural_vent_active = True
+        engine._fan_on_since = "2026-07-10T06:01:00-07:00"
+        engine._pre_fan_hvac_mode = None  # isolate fan_deactivated from stranded-suppression restore
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=71.0, outdoor=66.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        emitted_event_types = [call.args[0] for call in engine._emit_event_callback.call_args_list]
+        assert "fan_deactivated" in emitted_event_types, (
+            f"Expected a fan_deactivated event for this real fan-on-to-off transition, got: {emitted_event_types}"
+        )
+        # State correctness must hold too, not just the event (Issue #949 fixed the
+        # observability gap without changing this branch's existing state outcome).
+        assert engine._fan_active is False
+        assert engine._natural_vent_active is False
+
+    def test_deactivate_fan_guard_trips_when_fan_active_false_at_call_time(self):
+        """Root-cause proof for the Issue #949 regression: _deactivate_fan()'s
+        idempotency guard is unconditional on self._fan_active AT CALL TIME — it has
+        no memory of what set that flag or when. Calling it with _fan_active already
+        False (the pre-fix no-fan branch's own doing, one line earlier) always hits
+        the early-return path and never emits fan_deactivated, regardless of whether
+        a real session was ending. This is the mechanical bug the fix (setting
+        _fan_active=True immediately before the call, like this function's sibling
+        branches) corrects.
+        """
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # real method
+        engine._emit_event_callback = MagicMock()
+        engine._fan_active = False  # reproduces the pre-fix no-fan branch's own write
+        engine._pre_fan_hvac_mode = None
+
+        result = asyncio.run(engine._deactivate_fan(reason="test — reproduces pre-#949 ordering"))
+
+        assert result == FanCommandResult.ALREADY_IN_STATE
+        emitted_event_types = [call.args[0] for call in engine._emit_event_callback.call_args_list]
+        assert "fan_deactivated" not in emitted_event_types
 
     def test_stranded_hvac_suppression_not_restored_while_paused_by_door(self):
         """Issue #523: never restore a suppressed HVAC mode while paused for an open
@@ -3245,7 +3326,16 @@ class TestReconcileFanOnStartup:
         """Companion to the #733 fix: when no fan command was issued recently, a
         thermostat_fan_running=False read is genuine ground truth and must still
         clear stale flags exactly as before — the guard must not become a blanket
-        bypass of the no-fan branch."""
+        bypass of the no-fan branch.
+
+        Issue #949: the no-fan branch no longer writes self._fan_active at all (see
+        test_no_fan_when_thermostat_fan_not_running's docstring for the full
+        history). _deactivate_fan is mocked here too, so _fan_active reads True
+        after this call simply because this fixture sets it to True before calling
+        reconcile and nothing on this path changes it. _natural_vent_active IS a
+        direct, unconditional write in this branch (independent of _fan_active and
+        of _deactivate_fan entirely), so it still reads False as before.
+        """
         engine = self._engine()
         engine._is_recent_fan_command_callback = MagicMock(return_value=False)
         engine._fan_active = True
@@ -3258,7 +3348,7 @@ class TestReconcileFanOnStartup:
         )
 
         engine._deactivate_fan.assert_awaited_once()
-        assert engine._fan_active is False
+        assert engine._fan_active is True  # set True by the branch itself; see docstring (Issue #949)
         assert engine._natural_vent_active is False
 
     def test_adopt_on_when_nat_vent_eligible(self):

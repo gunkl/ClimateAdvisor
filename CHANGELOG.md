@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.56] — 2026-09-20
+
+- Fix #949: the Activity Report now correctly shows the whole-house fan turning off, not just on; a briefly-unavailable bedroom sensor no longer logs identically to a real persistent outage.
+
 ## [0.7.55] — 2026-09-20
 
 - Fix #948: Morning briefing no longer claims HVAC warmed the house when thermal mass alone did it, and no longer suggests reopening windows at a nonsensical time (e.g. noon labeled "evening") from a false pre-peak forecast reading.

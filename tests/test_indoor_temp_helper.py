@@ -484,6 +484,136 @@ class TestSleepSensorOverrideDirect:
         assert abs(result.primary_value - 71.6) < 0.01  # 22C -> 71.6F
 
 
+class TestSleepSensorMissSeverityEscalation:
+    """Issue #949: resolve_indoor_temp_with_provenance()'s sleep-sensor severity model.
+
+    Before the fix, every unavailable cycle logged a WARNING (no dedup, no streak
+    tracking), so a one-cycle blip (HA restart) and a genuine hours-long outage were
+    indistinguishable in the log, and nothing ever marked recovery. The fix tracks a
+    per-entity consecutive-miss streak (module-level ``_sleep_sensor_miss_streaks``
+    dict in indoor_temp.py): misses 1-2 log INFO, miss 3+ escalates to WARNING with
+    the retry count, and recovery logs at the severity the outage actually reached
+    (INFO if it never escalated, WARNING if it did) — the recovery line is the piece
+    that was completely invisible before this fix for anything that reached WARNING.
+
+    ``_sleep_sensor_miss_streaks`` is process-lifetime module state keyed by
+    entity_id, not scoped per test — every test here must reset the streak for its
+    own entity_id before running (and uses a dedicated entity_id, distinct from the
+    one other test classes in this file reuse) so cross-test pollution can't produce
+    a false pass/fail.
+    """
+
+    ENTITY_ID = "sensor.issue_949_sleep_severity_test"
+
+    def setup_method(self, _method):
+        # Reset this test's entity's streak before every test — module-level dict
+        # persists across tests in the same process (see class docstring).
+        from custom_components.climate_advisor import indoor_temp as _indoor_temp_mod
+
+        _indoor_temp_mod._sleep_sensor_miss_streaks.pop(self.ENTITY_ID, None)
+
+    def _resolve(self, hass):
+        return resolve_indoor_temp_with_provenance(
+            hass=hass,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            unit="fahrenheit",
+            indoor_temp_entity=None,
+            climate_entity="climate.thermostat",
+            in_sleep_window=True,
+            sleep_indoor_temp_entity=self.ENTITY_ID,
+        )
+
+    def _unavailable_hass(self):
+        return _hass_with_entities({"climate.thermostat": _make_state("heat", {"current_temperature": 70})})
+
+    def _available_hass(self, sleep_value="65"):
+        return _hass_with_entities(
+            {
+                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
+                self.ENTITY_ID: _make_state(sleep_value),
+            }
+        )
+
+    def test_misses_one_and_two_log_info_not_warning(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
+            self._resolve(self._unavailable_hass())  # miss 1
+            self._resolve(self._unavailable_hass())  # miss 2
+
+        assert len(caplog.records) == 2
+        assert all(r.levelno == logging.INFO for r in caplog.records), (
+            f"Expected both of the first two misses to log at INFO, got levels: {[r.levelname for r in caplog.records]}"
+        )
+        assert "unavailable (1/2)" in caplog.records[0].message
+        assert "unavailable (2/2)" in caplog.records[1].message
+
+    def test_third_consecutive_miss_escalates_to_warning_with_retry_count(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
+            self._resolve(self._unavailable_hass())  # miss 1 — INFO
+            self._resolve(self._unavailable_hass())  # miss 2 — INFO
+            self._resolve(self._unavailable_hass())  # miss 3 — escalates to WARNING
+
+        assert caplog.records[-1].levelno == logging.WARNING
+        assert "3 consecutive checks" in caplog.records[-1].message
+
+    def test_recovery_after_never_escalating_logs_info(self, caplog):
+        """Recovery after only 1-2 misses (never reached WARNING) must log the
+        recovery itself at INFO — matching the severity the outage actually reached."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
+            self._resolve(self._unavailable_hass())  # miss 1 — INFO
+            caplog.clear()
+            self._resolve(self._available_hass())  # recovery
+
+        recovery_records = [r for r in caplog.records if "available again" in r.message]
+        assert len(recovery_records) == 1, f"Expected exactly one recovery line, got: {caplog.records}"
+        assert recovery_records[0].levelno == logging.INFO
+        assert "1 consecutive miss" in recovery_records[0].message
+
+    def test_recovery_after_escalation_logs_warning(self, caplog):
+        """Recovery after crossing the WARNING threshold must log the recovery at
+        WARNING too — this is the line that was completely invisible before Issue
+        #949's fix (a WARNING-worthy outage recovering with zero trace in the log)."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
+            self._resolve(self._unavailable_hass())  # miss 1 — INFO
+            self._resolve(self._unavailable_hass())  # miss 2 — INFO
+            self._resolve(self._unavailable_hass())  # miss 3 — WARNING (escalated)
+            caplog.clear()
+            self._resolve(self._available_hass())  # recovery
+
+        recovery_records = [r for r in caplog.records if "available again" in r.message]
+        assert len(recovery_records) == 1, f"Expected exactly one recovery line, got: {caplog.records}"
+        assert recovery_records[0].levelno == logging.WARNING
+        assert "3 consecutive misses" in recovery_records[0].message
+
+    def test_streak_resets_after_recovery_so_a_later_outage_restarts_at_one(self):
+        """A fresh outage after a full recovery must restart the streak at 1, not
+        continue accumulating from the prior (resolved) outage."""
+        from custom_components.climate_advisor import indoor_temp as _indoor_temp_mod
+
+        self._resolve(self._unavailable_hass())  # miss 1
+        self._resolve(self._unavailable_hass())  # miss 2
+        self._resolve(self._unavailable_hass())  # miss 3 — escalated
+        self._resolve(self._available_hass())  # recovery — streak resets to 0
+        assert _indoor_temp_mod._sleep_sensor_miss_streaks[self.ENTITY_ID] == 0
+
+        self._resolve(self._unavailable_hass())  # a new outage's miss 1
+        assert _indoor_temp_mod._sleep_sensor_miss_streaks[self.ENTITY_ID] == 1
+
+    def test_healthy_cycle_success_line_unaffected(self):
+        """The existing per-cycle 'Using sleep indoor sensor...' INFO line on a
+        healthy cycle (no prior miss) must be unchanged by this fix."""
+        result = self._resolve(self._available_hass())
+        assert result.value == 65.0
+        assert result.source_entity == self.ENTITY_ID
+
+
 class TestSleepSensorOverrideBothCallPaths:
     """The sleep-window swap must behave identically through both real bound methods,
     with deterministic 'now' so the sleep-window check doesn't depend on wall-clock

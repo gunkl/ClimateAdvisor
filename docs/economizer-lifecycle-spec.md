@@ -14,6 +14,8 @@
 | How was this spec's accuracy verified? | Differential replay via `economizer_fsm_authoritative_compare.py` proved zero divergence against the full 90-scenario corpus during Phase 5. The comparator was deleted in Phase 6 once the legacy branch was removed. (See [Verification](#verification).) | [Verification](#verification) |
 | When did the economizer FSM become sole authority? | Phase 6 (Issues #757–#770) permanently deleted the legacy two-phase branch, the `_economizer_fsm_authoritative` flag itself, and the shadow-engine infrastructure, once the flag had run permanently `True` in production for weeks with zero corpus divergence (Phase 5, Issue #746). `economizer_fsm.transition()` is now the sole, unconditional decision path — there is no flag left to toggle and no second code path left to diverge from. | [§ FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer) |
 | What happened to the live shadow-engine comparison for economizer? | It existed only during the migration and was permanently deleted in Phase 6. The `economizer_mirror` diagnostic axis (and the entire shadow-engine infrastructure) was removed once all 4 FSMs had proved reliable in production use — there is no live shadow comparison running today. | [§ FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer) |
+| Can the economizer claim it activated the fan when the fan-ON command was actually rate-limited or overridden mid-await? | Before Issue #936, yes — `_apply_economizer_fsm_state(result.to_state)` was called before the `await self._activate_fan(...)` resolved, so a deferred/overridden command still left `_economizer_active=True`. Fixed by `_apply_economizer_fsm_state_after_activation()`, the direct mirror of nat-vent's `_apply_nat_vent_fsm_state_after_activation()` (Issue #935). | [Rate-Limit / Override Symmetry (Issue #936)](#rate-limit--override-symmetry-issue-936-mirrors-931935) |
+| Can the economizer strand itself "active" when the fan-OFF command on deactivation was rate-limited? | Before Issue #936, yes — `_deactivate_economizer()` cleared `_economizer_active`/`_economizer_phase` unconditionally before the fan-stop command's result was known. Fixed to gate the flag-clear on `FanCommandResult`, the direct mirror of nat-vent's `_end_nat_vent_session()` (Issue #931). | [Rate-Limit / Override Symmetry (Issue #936)](#rate-limit--override-symmetry-issue-936-mirrors-931935) |
 
 ## Scope
 
@@ -50,17 +52,67 @@
 
 Fan activation/deactivation and INFO logging only fire when the resolved phase actually **changes** (`EconomizerTransition.changed`) — matches legacy's own `if self._economizer_phase != "...":` guards exactly, avoiding a redundant `_activate_fan()` call (and its own rate-limit/logging side effects) every 30-min tick a session merely continues in the same phase.
 
+**As of Issue #936, `_apply_economizer_fsm_state(result.to_state)` is no longer called directly from `_check_window_cooling_opportunity_fsm()` for the MAINTAIN/COOL_DOWN activation branches.** Each branch first `await`s `self._activate_fan(...)`, captures the returned `FanCommandResult`, and applies the FSM state through `_apply_economizer_fsm_state_after_activation(result.to_state, activation_result)` instead — see [Rate-Limit / Override Symmetry (Issue #936)](#rate-limit--override-symmetry-issue-936-mirrors-931935) below. The `INACTIVE`-via-deactivation and defer-on-nat-vent-active rows in the transition table above are unaffected — those paths don't await a fan command between deciding the state and applying it.
+
+## Rate-Limit / Override Symmetry (Issue #936, mirrors #931/#935)
+
+Nat-vent's lifecycle went through the identical defect shape twice, on its two opposite sides (`docs/nat-vent-lifecycle-spec.md` §17 in `08-COMPUTATION-REFERENCE.md`, "Natural Ventilation"):
+
+- **Exit side (`_end_nat_vent_session()`, Issue #931):** clearing the session flags before confirming the fan-stop command actually executed left a physically-running fan with nothing left to retry stopping it, if the Issue #641 5-minute anti-cycling floor deferred the command.
+- **Entry side (`_apply_nat_vent_fsm_state_after_activation()`, Issue #935/#706 Bug F):** applying the pre-await FSM decision after an `await self._activate_fan(...)` that got rate-limited or overridden left the status claiming a session was active when the fan was never actually told to turn on.
+
+Issue #936 found and fixed the same two gaps on the economizer's own activate/deactivate pair, independently discovered while investigating the economizer specifically (not copy-pasted from the nat-vent fix without re-verifying the economizer's own call shape first):
+
+**Activation (mirrors #935 — `_apply_economizer_fsm_state_after_activation()`):**
+
+```python
+def _apply_economizer_fsm_state_after_activation(
+    self, to_state: EconomizerLifecycleState, activation_result: FanCommandResult
+) -> None:
+    if activation_result in (
+        FanCommandResult.OVERRIDDEN,
+        FanCommandResult.RATE_LIMITED_NEW,
+        FanCommandResult.RATE_LIMITED_DUP,
+    ):
+        self._apply_economizer_fsm_state(EconomizerLifecycleState.INACTIVE)
+    else:
+        self._apply_economizer_fsm_state(to_state)
+```
+
+Both `_check_window_cooling_opportunity_fsm()` branches (`MAINTAIN` and `COOL_DOWN`) now call `await self._activate_fan(...)`, capture the result, and route the FSM-state write through this method instead of applying `result.to_state` before the await. Same fallback direction as nat-vent's entry-side mirror: a deferred or overridden fan-ON command means the fan was never actually told to turn on, so the correct state is `INACTIVE`, not the stale pre-await decision — this lets the FSM's own eligibility re-check retry activation on the next tick instead of the status page silently claiming ventilation is running.
+
+**Deactivation (mirrors #931 — the gated flag-clear in `_deactivate_economizer()`):**
+
+```python
+async def _deactivate_economizer(self, outdoor_temp: float) -> None:
+    unit = self.config.get("temp_unit", "fahrenheit")
+    c = self._current_classification
+    result = await self._deactivate_fan(reason="economizer off — fan no longer needed")
+    if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+        pass  # command never reached the fan — leave the session active for retry
+    else:
+        self._economizer_active = False
+        self._economizer_phase = "inactive"
+    ...  # HVAC-resume block runs unconditionally either way
+```
+
+Same fallback direction as nat-vent's exit-side mirror: a rate-limited fan-stop command means the fan is still physically running, so the session flags must stay active — `_check_window_cooling_opportunity_fsm()` derives its `current_state` input from these same flags on its next tick, so clearing them early would leave nothing to retry the stop. The HVAC-resume block (re-arming `cool` mode from the current classification, when applicable) runs unconditionally regardless of the fan result — the same asymmetry `_exit_nat_vent()` already has on its own sensors-closed branch (HVAC always resumes; only the fan-session bookkeeping is gated).
+
+**Log-level split, same convention as #931/#935's own follow-up fix (Issue #935 follow-up):** `OVERRIDDEN` is a genuine anomaly (WARNING); `RATE_LIMITED_NEW` (a fresh deferral) is routine anti-cycling behavior worth noting once (INFO); `RATE_LIMITED_DUP` (a repeat hit within an already-reported deferral window) is per-tick noise (DEBUG) — this is the same three-way split `_apply_nat_vent_fsm_state_after_activation()` and `_end_nat_vent_session()`'s callers use, not a new logging policy invented for the economizer.
+
 ## Invariants
 
 - `_economizer_active` and `_economizer_phase` are always set together (never independently) by every real write site (`_apply_economizer_fsm_state()`, `_deactivate_economizer()`) — confirmed by direct code reading before choosing the single-enum (not composed multi-axis) lifecycle-state shape.
 - The economizer never overrides nat-vent; nat-vent taking over is always a same-tick defer, never a forced deactivation.
 - `_check_window_cooling_opportunity_fsm()` is now the sole implementation of `check_window_cooling_opportunity()` — there is no legacy branch left for it to diverge from. (During the Phase 5 migration, a full-corpus differential comparator enforced zero-divergence between the FSM branch and the legacy branch before the legacy branch was permanently deleted in Phase 6 — see [Verification](#verification).)
+- **(Issue #936)** `_economizer_active`/`_economizer_phase` never claim a state the paired fan command didn't actually reach: activation only applies `result.to_state` when `_activate_fan()`'s result is not `OVERRIDDEN`/`RATE_LIMITED_NEW`/`RATE_LIMITED_DUP` (else `INACTIVE`); deactivation only clears the flags when `_deactivate_fan()`'s result is not `RATE_LIMITED_NEW`/`RATE_LIMITED_DUP` (else the flags are left active for retry). See [Rate-Limit / Override Symmetry](#rate-limit--override-symmetry-issue-936-mirrors-931935).
 
 ## Verification
 
 - **Unit tests** (pure logic, no HA stubs): `tests/test_economizer_gate.py` (eligibility/phase-selection math), `tests/test_economizer_lifecycle.py` (state derivation), `tests/test_economizer_fsm.py` (transition wiring — short-circuit ordering, changed/unchanged, direction_ok exposure).
 - **Flag ownership**: `tests/test_fsm_flag_ownership.py`'s AST-based registry confirms `_apply_economizer_fsm_state()` is the sole `_apply_*_fsm_state()`-shaped writer of `_economizer_active`/`_economizer_phase`.
 - **End-to-end behavior**: `tests/test_economizer.py` exercises the two-phase economizer through the public `check_window_cooling_opportunity()` entry point and passes against today's FSM-only implementation.
+- **Rate-limit/override symmetry (Issue #936)**: `_apply_economizer_fsm_state_after_activation()`'s three-way branch (OVERRIDDEN/RATE_LIMITED_NEW/RATE_LIMITED_DUP → INACTIVE, else the real `to_state`) plus its two-tick retry is covered by `tests/test_economizer_activation_rate_limit_guard.py`. `_deactivate_economizer()`'s gated flag-clear, the no-op-tick regression pin, and the COOL_DOWN→MAINTAIN-with-fan-already-active guard are covered by `tests/test_economizer.py::TestEconomizerDeactivationRateLimitGuard`/`TestEconomizerUnchangedTickNoFlagWrite`/`TestEconomizerMaintainTransitionFanAlreadyActive`. End-to-end regression coverage: `tools/simulations/pending/issue_936_economizer_deactivation_rate_limited.json` (verified via revert-test to actually fail against pre-fix code). Mirrors the equivalent nat-vent coverage (`tests/test_nat_vent_activation_rate_limit_guard.py`, `tests/test_end_nat_vent_session.py`).
 - **Historical (Phase 5, no longer present)**: a decision-equivalence comparator (`economizer_fsm_authoritative_compare.py`) flipped `_economizer_fsm_authoritative` True on every engine constructed during a scenario replay and asserted a byte-identical `event_log`/`action_log` against the untouched legacy baseline across all 90 golden+pending scenarios (zero divergence, zero allowlist), plus a positive control proving it could detect an injected regression. A combined-flip variant (`combined_fsm_authoritative_compare.py`) did the same across all 7 `*_fsm_authoritative` flags at once (Issue #746). Both comparator tools and their tests (`tests/test_economizer_fsm_authoritative_compare.py`, `tests/test_combined_fsm_authoritative_compare.py`) were deleted in Phase 6 once the legacy branches they compared against were removed — confirmed absent from `tools/sim_harness/` and `tests/` (only stale `.pyc` bytecode remains).
 
 ## Code Reference
@@ -73,5 +125,7 @@ Fan activation/deactivation and INFO logging only fire when the resolved phase a
 | `AutomationEngine.economizer_lifecycle_state` | `automation.py` | Read-only property view of current session state. |
 | `AutomationEngine._build_economizer_fsm_inputs(...)` | `automation.py` | Builds `EconomizerFsmInputs` from live engine state + call parameters. |
 | `AutomationEngine._apply_economizer_fsm_state(state)` | `automation.py` | Writes `_economizer_active`/`_economizer_phase` from a transition result. |
-| `AutomationEngine._check_window_cooling_opportunity_fsm(...)` | `automation.py` | FSM-authoritative shell — same side effects (fan/HVAC/logging) as the legacy branch, driven by `transition()`'s result. |
+| `AutomationEngine._check_window_cooling_opportunity_fsm(...)` | `automation.py` | FSM-authoritative shell — same side effects (fan/HVAC/logging) as the legacy branch, driven by `transition()`'s result. Since Issue #936, applies its FSM-state write via `_apply_economizer_fsm_state_after_activation()` rather than directly, for both the MAINTAIN and COOL_DOWN branches. |
 | `AutomationEngine.check_window_cooling_opportunity(...)` | `automation.py` | Public entry point; always delegates to `_check_window_cooling_opportunity_fsm()` — the legacy two-phase body it used to dispatch to alongside was permanently deleted in Phase 6 (Issue #757). |
+| `AutomationEngine._apply_economizer_fsm_state_after_activation(to_state, activation_result)` | `automation.py` | Issue #936 — activation-side gate: applies `to_state` only when the paired `_activate_fan()` result wasn't `OVERRIDDEN`/`RATE_LIMITED_NEW`/`RATE_LIMITED_DUP` (else `INACTIVE`). Direct mirror of `AutomationEngine._apply_nat_vent_fsm_state_after_activation()` (Issue #935). |
+| `AutomationEngine._deactivate_economizer(outdoor_temp)` | `automation.py` | Issue #936 — deactivation-side gate: clears `_economizer_active`/`_economizer_phase` only when the paired `_deactivate_fan()` result wasn't `RATE_LIMITED_NEW`/`RATE_LIMITED_DUP`; HVAC-resume runs unconditionally. Direct mirror of `AutomationEngine._end_nat_vent_session()` (Issue #931). |

@@ -710,6 +710,85 @@ class TestFanEventRenderers:
         assert st == "fan: off"
 
 
+class TestNatVentFanCyclingRenderersDeferredMarker:
+    """Issue #936: nat_vent_fan_on/nat_vent_fan_off/nat_vent_ceiling_escalation must
+    surface a fan_mode_change override (set by the cycler/ceiling-escalation call
+    sites when the Issue #641 rate limiter deferred the real fan command) instead of
+    always claiming the default state-transition text -- and must still fall back to
+    that default text when no override is present (the vast majority of events)."""
+
+    def test_nat_vent_fan_on_uses_fan_mode_change_override(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_on"](
+            {
+                "indoor_temp": 72.0,
+                "on_threshold": 70.0,
+                "fan_device": "whf",
+                "fan_mode_change": "deferred (5-min floor, applies 14:05:00)",
+            },
+            "fahrenheit",
+        )
+        assert "Nat-vent fan on" in ev
+        assert st == "deferred (5-min floor, applies 14:05:00)"
+
+    def test_nat_vent_fan_on_falls_back_without_override(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_on"](
+            {"indoor_temp": 72.0, "on_threshold": 70.0, "fan_device": "whf"}, "fahrenheit"
+        )
+        assert "Nat-vent fan on" in ev
+        assert st == "whf: auto->on"
+
+    def test_nat_vent_fan_off_uses_fan_mode_change_override(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_off"](
+            {
+                "indoor_temp": 68.0,
+                "off_threshold": 70.0,
+                "fan_device": "whf",
+                "fan_mode_change": "deferred (5-min floor)",
+            },
+            "fahrenheit",
+        )
+        assert "Nat-vent fan off" in ev
+        assert st == "deferred (5-min floor)"
+
+    def test_nat_vent_fan_off_falls_back_without_override(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_off"](
+            {"indoor_temp": 68.0, "off_threshold": 70.0, "fan_device": "whf"}, "fahrenheit"
+        )
+        assert "Nat-vent fan off" in ev
+        assert st == "whf: on->auto"
+
+    def test_nat_vent_ceiling_escalation_notes_deferred_marker(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
+            {
+                "indoor": 78.0,
+                "comfort_cool": 74.0,
+                "hours_to_breach": 1.5,
+                "lead_min": 30,
+                "k_active_cool": 0.5,
+                "fan_mode_change": "deferred (5-min floor, applies 14:05:00)",
+            },
+            "fahrenheit",
+        )
+        assert "Nat-vent escalated to AC" in ev
+        assert "mode: off->cool" in st
+        assert "fan: deferred (5-min floor, applies 14:05:00)" in st
+
+    def test_nat_vent_ceiling_escalation_no_marker_without_deferral(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
+            {
+                "indoor": 78.0,
+                "comfort_cool": 74.0,
+                "hours_to_breach": 1.5,
+                "lead_min": 30,
+                "k_active_cool": 0.5,
+            },
+            "fahrenheit",
+        )
+        assert "Nat-vent escalated to AC" in ev
+        assert "mode: off->cool" in st
+        assert "fan:" not in st
+
+
 class TestGraceStartedRendering:
     """Issue #341: grace_started trigger field renders as human-readable Settings cell."""
 

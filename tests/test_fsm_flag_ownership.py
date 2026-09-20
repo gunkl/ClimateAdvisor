@@ -46,7 +46,17 @@ AUTOMATION_PY = Path(__file__).parent.parent / "custom_components" / "climate_ad
 # method family this test polices — matches _apply_door_window_fsm_state,
 # _apply_override_grace_fsm_state, _apply_nat_vent_fsm_state, and any future
 # sibling automatically, without needing this test file edited when one is added.
-_APPLY_METHOD_PATTERN = re.compile(r"^_apply_.*_fsm_state$")
+#
+# Issue #936 follow-up: widened to also match the "_after_activation" variants
+# (_apply_nat_vent_fsm_state_after_activation from #935,
+# _apply_economizer_fsm_state_after_activation from #936) — previously these were
+# NOT matched by this pattern at all, so any flag write they might ever gain (today
+# both are pure delegators that call the plain _apply_*_fsm_state() method instead
+# of writing flags directly, so this widening finds zero violations right now) would
+# have shipped completely unpoliced by this test. Registered here so a future direct
+# flag write from either method is caught immediately, same as every other
+# _apply_*_fsm_state() method.
+_APPLY_METHOD_PATTERN = re.compile(r"^_apply_.*_fsm_state(_after_activation)?$")
 
 # Flag -> the method name(s) permitted to write it via `self.<flag> = ...` from
 # inside one of the _apply_*_fsm_state() methods above. Every flag these three FSMs

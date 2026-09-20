@@ -17,11 +17,13 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
+    CONF_FAN_MODE,
     DAY_TYPE_HOT,
     DAY_TYPE_WARM,
+    FAN_MODE_HVAC,
 )
 
 # ---------------------------------------------------------------------------
@@ -569,6 +571,183 @@ class TestEconomizerDeactivation:
         assert result is False
         assert engine._economizer_active is False
         assert engine._economizer_phase == "inactive"
+
+
+# ---------------------------------------------------------------------------
+# Issue #936: _deactivate_economizer() rate-limit gating (mirrors #931's
+# _end_nat_vent_session() fix on the economizer side).
+# ---------------------------------------------------------------------------
+
+
+class TestEconomizerDeactivationRateLimitGuard:
+    """Occupant-first framing: without this fix, a rate-limited fan-off command
+    (deferred up to 5 minutes by the Issue #641 anti-cycling limiter) would make
+    the engine believe the economizer session ended while the fan/AC-suppression
+    is still physically in whatever state it was in -- with nothing left to retry
+    turning it off, since check_window_cooling_opportunity() derives its FSM
+    current_state from these same _economizer_active/_economizer_phase flags on
+    its next tick. _deactivate_economizer() now only clears those flags once the
+    paired fan-off command actually reached the fan.
+    """
+
+    def test_rate_limited_new_preserves_session(self):
+        engine = _make_automation_engine()
+        engine._economizer_active = True
+        engine._economizer_phase = "cool-down"
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_NEW)
+
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+
+        assert engine._economizer_active is True
+        assert engine._economizer_phase == "cool-down"
+
+    def test_rate_limited_dup_preserves_session(self):
+        engine = _make_automation_engine()
+        engine._economizer_active = True
+        engine._economizer_phase = "maintain"
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_DUP)
+
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+
+        assert engine._economizer_active is True
+        assert engine._economizer_phase == "maintain"
+
+    def test_executed_clears_session(self):
+        """Control: a real fan-off command (EXECUTED) still clears the session
+        normally -- proves the guard doesn't just always preserve state."""
+        engine = _make_automation_engine()
+        engine._economizer_active = True
+        engine._economizer_phase = "cool-down"
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
+
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+
+        assert engine._economizer_active is False
+        assert engine._economizer_phase == "inactive"
+
+    def test_already_in_state_clears_session(self):
+        """Control: fan already off (ALREADY_IN_STATE) also clears the session --
+        not just EXECUTED is treated as "the command reached the fan"."""
+        engine = _make_automation_engine()
+        engine._economizer_active = True
+        engine._economizer_phase = "maintain"
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.ALREADY_IN_STATE)
+
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+
+        assert engine._economizer_active is False
+        assert engine._economizer_phase == "inactive"
+
+    def test_retry_clears_session_once_rate_limit_clears(self):
+        """First tick: deferred, session preserved. Second tick (simulating the
+        retry once the rate-limit floor clears): a real EXECUTED result now
+        clears the flags -- proves the retry actually happens on a later tick
+        rather than the session getting stuck active forever."""
+        engine = _make_automation_engine()
+        engine._economizer_active = True
+        engine._economizer_phase = "cool-down"
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_NEW)
+
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+        assert engine._economizer_active is True, "first tick must preserve the session"
+        assert engine._economizer_phase == "cool-down"
+
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+
+        assert engine._economizer_active is False
+        assert engine._economizer_phase == "inactive"
+
+    def test_hvac_resume_runs_unconditionally_regardless_of_fan_result(self):
+        """The HVAC-resume block runs every time, independent of whether the fan
+        command was rate-limited -- mirrors _exit_nat_vent()'s sensors-closed
+        branch, which always resumes HVAC independent of the fan command's
+        outcome; only the session bookkeeping flags are gated."""
+        engine = _make_automation_engine()
+        engine._economizer_active = True
+        engine._economizer_phase = "cool-down"
+        engine._current_classification = _make_hot_classification()
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_NEW)
+
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+
+        mode_calls = _get_hvac_mode_calls(engine)
+        assert any(c[0][2]["hvac_mode"] == "cool" for c in mode_calls), (
+            "HVAC resume must run even when the fan-off command was rate-limited"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #936 verification note #2: regression pin for the no-op tick.
+# ---------------------------------------------------------------------------
+
+
+class TestEconomizerUnchangedTickNoFlagWrite:
+    """When the FSM decides to stay in the same phase (EconomizerTransition.changed
+    is False), _check_window_cooling_opportunity_fsm() must not write
+    _economizer_active/_economizer_phase at all. This pins the removal of the old
+    unconditional pre-await `self._apply_economizer_fsm_state(result.to_state)` call
+    that used to run before the `if not result.changed: return True` guard."""
+
+    def test_no_op_tick_does_not_call_apply_fsm_state(self):
+        engine = _make_automation_engine()
+        engine._current_classification = _make_hot_classification()
+        engine._economizer_active = True
+        engine._economizer_phase = "cool-down"
+        engine._apply_economizer_fsm_state = MagicMock()
+        engine._apply_economizer_fsm_state_after_activation = MagicMock()
+
+        result = asyncio.run(
+            engine.check_window_cooling_opportunity(
+                outdoor_temp=73.0,
+                indoor_temp=78.0,  # still above comfort -> stays in cool-down, no-op tick
+                windows_physically_open=True,
+                current_hour=18,
+            )
+        )
+
+        assert result is True
+        engine._apply_economizer_fsm_state.assert_not_called()
+        engine._apply_economizer_fsm_state_after_activation.assert_not_called()
+        # Flags are untouched, exactly as they started
+        assert engine._economizer_active is True
+        assert engine._economizer_phase == "cool-down"
+        engine.hass.services.async_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #936 verification note #3: COOL_DOWN->MAINTAIN with the fan already
+# active must never accidentally fall back to INACTIVE.
+# ---------------------------------------------------------------------------
+
+
+class TestEconomizerMaintainTransitionFanAlreadyActive:
+    """The stranded-fan bug shape WOULD have occurred here if the INACTIVE
+    fallback in _apply_economizer_fsm_state_after_activation() were reachable
+    when the fan is already running during a COOL_DOWN->MAINTAIN transition.
+    _activate_fan()'s own idempotency guard returns ALREADY_IN_STATE (not a
+    rate-limit/override outcome) when the fan is already active, so the real
+    to_state (MAINTAIN) must still be applied -- this locks that down."""
+
+    def test_already_active_fan_applies_real_maintain_state(self):
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._current_classification = _make_hot_classification()
+        engine._economizer_active = True
+        engine._economizer_phase = "cool-down"
+        engine._fan_active = True  # fan already running from the cool-down phase
+
+        result = asyncio.run(
+            engine.check_window_cooling_opportunity(
+                outdoor_temp=72.0,
+                indoor_temp=74.0,  # now at/below comfort -> maintain
+                windows_physically_open=True,
+                current_hour=19,
+            )
+        )
+
+        assert result is True
+        assert engine._economizer_active is True
+        assert engine._economizer_phase == "maintain"
 
 
 # ---------------------------------------------------------------------------

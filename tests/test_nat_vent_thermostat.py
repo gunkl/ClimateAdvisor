@@ -21,7 +21,7 @@ import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.const import (
     CONF_FAN_MODE,
     FAN_MODE_DISABLED,
@@ -797,3 +797,114 @@ class TestReconcileFanOnStartupSleepAwareFloor:
         ae._exit_nat_vent.assert_called_once()
         event_names = [e[0] for e in emitted]
         assert "nat_vent_reconcile_exit" in event_names, f"Expected nat_vent_reconcile_exit event; got: {event_names}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #936: cycler emission gating on a rate-limited fan command.
+# ---------------------------------------------------------------------------
+#
+# Occupant-first framing: nat_vent_temperature_check()'s cycling-off/cycling-on
+# branches previously always emitted nat_vent_fan_off/nat_vent_fan_on regardless of
+# whether the paired _deactivate_fan()/_activate_fan() command actually reached the
+# fan. When the Issue #641 anti-cycling rate limiter deferred that command (up to 5
+# minutes), the Activity Report would claim the fan changed state when it physically
+# didn't -- misleading the occupant about what's actually happening in their home. A
+# duplicate deferral within the same window (RATE_LIMITED_DUP) is also routine noise
+# that shouldn't spam a fresh event row every tick.
+
+
+class TestNatVentCyclingEmissionGating:
+    def test_cycling_off_rate_limited_dup_suppresses_event(self):
+        """RATE_LIMITED_DUP -- a repeat deferral report within the same window --
+        must not emit a fresh nat_vent_fan_off event at all."""
+        ae = _make_sleep_engine(indoor_f=65.0, sleep_heat=65.0, hysteresis=1.0, fan_active=True)
+        ae._deactivate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_DUP)
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
+            asyncio.run(ae.nat_vent_temperature_check(65.0, outdoor=ae._last_outdoor_temp))
+
+        ae._deactivate_fan.assert_called_once()
+        assert "nat_vent_fan_off" not in [e[0] for e in emitted], (
+            f"RATE_LIMITED_DUP must not emit a duplicate nat_vent_fan_off event; got: {emitted}"
+        )
+
+    def test_cycling_off_rate_limited_new_emits_event_with_deferred_marker(self):
+        """RATE_LIMITED_NEW -- the first deferral -- still emits nat_vent_fan_off (so the
+        occupant sees SOMETHING happened) but its payload carries a fan_mode_change
+        'deferred' marker instead of silently implying the fan actually turned off."""
+        ae = _make_sleep_engine(indoor_f=65.0, sleep_heat=65.0, hysteresis=1.0, fan_active=True)
+        ae._deactivate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_NEW)
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
+            asyncio.run(ae.nat_vent_temperature_check(65.0, outdoor=ae._last_outdoor_temp))
+
+        off_events = [e for e in emitted if e[0] == "nat_vent_fan_off"]
+        assert len(off_events) == 1, f"Expected exactly one nat_vent_fan_off event; got: {emitted}"
+        assert "deferred" in str(off_events[0][1].get("fan_mode_change", "")), (
+            f"RATE_LIMITED_NEW must carry a 'deferred' fan_mode_change marker; got: {off_events[0][1]}"
+        )
+
+    def test_cycling_off_executed_emits_event_without_deferred_marker(self):
+        """Control: a real EXECUTED command still emits the event, with no
+        fan_mode_change override -- the guard doesn't suppress/mark the normal case."""
+        ae = _make_sleep_engine(indoor_f=65.0, sleep_heat=65.0, hysteresis=1.0, fan_active=True)
+        ae._deactivate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
+            asyncio.run(ae.nat_vent_temperature_check(65.0, outdoor=ae._last_outdoor_temp))
+
+        off_events = [e for e in emitted if e[0] == "nat_vent_fan_off"]
+        assert len(off_events) == 1
+        assert "fan_mode_change" not in off_events[0][1]
+
+    def test_cycling_on_rate_limited_dup_suppresses_event(self):
+        """Mirror on the fan-ON side: RATE_LIMITED_DUP suppresses nat_vent_fan_on."""
+        ae = _make_sleep_engine(indoor_f=67.0, sleep_heat=65.0, hysteresis=1.0, fan_active=False, outdoor_f=60.0)
+        ae._activate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_DUP)
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
+            asyncio.run(ae.nat_vent_temperature_check(67.0, outdoor=ae._last_outdoor_temp))
+
+        ae._activate_fan.assert_called_once()
+        assert "nat_vent_fan_on" not in [e[0] for e in emitted], (
+            f"RATE_LIMITED_DUP must not emit a duplicate nat_vent_fan_on event; got: {emitted}"
+        )
+
+    def test_cycling_on_rate_limited_new_emits_event_with_deferred_marker(self):
+        """Mirror on the fan-ON side: RATE_LIMITED_NEW emits nat_vent_fan_on with a
+        deferred fan_mode_change marker."""
+        ae = _make_sleep_engine(indoor_f=67.0, sleep_heat=65.0, hysteresis=1.0, fan_active=False, outdoor_f=60.0)
+        ae._activate_fan = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_NEW)
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
+            asyncio.run(ae.nat_vent_temperature_check(67.0, outdoor=ae._last_outdoor_temp))
+
+        on_events = [e for e in emitted if e[0] == "nat_vent_fan_on"]
+        assert len(on_events) == 1, f"Expected exactly one nat_vent_fan_on event; got: {emitted}"
+        assert "deferred" in str(on_events[0][1].get("fan_mode_change", "")), (
+            f"RATE_LIMITED_NEW must carry a 'deferred' fan_mode_change marker; got: {on_events[0][1]}"
+        )
+
+    def test_cycling_on_executed_emits_event_without_deferred_marker(self):
+        """Control: a real EXECUTED command still emits the event normally."""
+        ae = _make_sleep_engine(indoor_f=67.0, sleep_heat=65.0, hysteresis=1.0, fan_active=False, outdoor_f=60.0)
+        ae._activate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
+            asyncio.run(ae.nat_vent_temperature_check(67.0, outdoor=ae._last_outdoor_temp))
+
+        on_events = [e for e in emitted if e[0] == "nat_vent_fan_on"]
+        assert len(on_events) == 1
+        assert "fan_mode_change" not in on_events[0][1]

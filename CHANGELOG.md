@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.53] — 2026-09-19
+
+- Fix #936: the Activity Report and dashboard status no longer claim a nat-vent or economizer fan command happened immediately when it was actually deferred by the 5-minute anti-cycling limiter — covering the nat-vent cycler, away-mode ceiling exit, AC-escalation, and both economizer activation and deactivation.
+
 ## [0.7.52] — 2026-09-19
 
 - Fix #935: the system can no longer believe the whole-house fan is running and free-cooling the home when the "turn on" command was actually still pending (deferred by the 5-minute anti-cycling cooldown). Previously this could leave the home warming up unprotected for an extended stretch while the system's own status said cooling was active. The system now only marks a nat-vent session active once the fan command actually goes through, which lets its existing retry logic try again on the next cycle.

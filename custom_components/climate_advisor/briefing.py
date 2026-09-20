@@ -736,6 +736,16 @@ def _warm_day_plan(
     _ceiling_breach = _events["ceiling_breach_time"] if _events else None
     _evening_open_time = _events.get("evening_open_time") if _events else None
 
+    # Issue #940: close/reopen pairing was never checked here (only Hot's paths were
+    # guarded by #878/#879, despite the PR claiming Warm/Mild too) \u2014 called purely as a
+    # pass/fail signal since resolve_window_pair() returns bare `time` objects and
+    # _evening_open_time is compared as a `datetime` below (line ~844); neither side has
+    # a static fallback in scope here, so both static_* args are None.
+    if _nat_vent_cutoff is not None and _evening_open_time is not None:
+        _, _pair_open_check = resolve_window_pair(_nat_vent_cutoff, None, _evening_open_time, None)
+        if _pair_open_check is None:
+            _evening_open_time = None
+
     # Issue #876: the morning OPEN time is intentionally dropped from this sentence \u2014
     # it carries no useful information (windows day starts, full stop). Only the
     # dynamically-computed close time matters here.
@@ -936,6 +946,14 @@ def _mild_day_plan(
     # nat_vent_plan.py's compute_nat_vent_plan() docstring for why comfort_floor
     # cutoffs never populate this).
     _evening_open_time = mild_events.get("evening_open_time") if mild_events else None
+    # Issue #940: same pairing gap as _warm_day_plan() — use the raw dynamic
+    # _mild_cutoff here (not the resolve_with_fallback()-resolved _close_time above),
+    # since mixing an already-resolved static-fallback close against a raw dynamic
+    # open would misrepresent which side is "dynamic" for the cross-midnight check.
+    if _mild_cutoff is not None and _evening_open_time is not None:
+        _, _pair_open_check = resolve_window_pair(_mild_cutoff, None, _evening_open_time, None)
+        if _pair_open_check is None:
+            _evening_open_time = None
     if _evening_open_time is not None:
         rec_t = _evening_open_time.strftime(_FMT_HOUR)
         lines.append("")

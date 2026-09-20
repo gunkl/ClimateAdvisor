@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.53] — 2026-09-19
+
+- Fix #940: on a Warm or Mild day, the daily briefing could tell you to reopen your windows before the time it told you to close them — nonsense text that undermined trust in the briefing's other guidance. This also closes the underlying mechanism that produced it, which affected all day types, not just Warm/Mild. Also corrects the fix_history record for Issue #878, which had incorrectly claimed this was already fixed for all three day types.
+
 ## [0.7.52] — 2026-09-19
 
 - Fix #935: the system can no longer believe the whole-house fan is running and free-cooling the home when the "turn on" command was actually still pending (deferred by the 5-minute anti-cycling cooldown). Previously this could leave the home warming up unprotected for an extended stretch while the system's own status said cooling was active. The system now only marks a nat-vent session active once the fan command actually goes through, which lets its existing retry logic try again on the next cycle.

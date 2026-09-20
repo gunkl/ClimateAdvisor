@@ -313,17 +313,29 @@ class TestWalkForwardRegimeReentry:
         """Exit via OUTDOOR_RISE, then outdoor cools back down enough to satisfy
         decide_nat_vent_gate() at a later hour -> session re-activates. This is real
         predicted behavior (the same hysteresis-aware thresholds the live engine uses),
-        not flicker."""
+        not flicker -- but only once a GENUINE ceiling breach has actually occurred
+        that day (Issue #948).
+
+        Corrected for Issue #948: the original fixture had outdoor recover to 65F
+        immediately after the OUTDOOR_RISE exit (peaking at only 71F, never anywhere
+        near comfort_cool=76) and asserted reactivation there -- that was the exact
+        spurious pre-peak-dip reopen Issue #948 fixed, not "real predicted behavior".
+        This fixture now inserts a genuine ceiling-breach hour (outdoor 90F >
+        comfort_cool 76F) between the exit and the recovery, so the test still
+        covers "reactivation after an exit", just after a real "got too hot" event
+        has actually happened first.
+        """
         mod = _mod()
-        ts1, ts2, ts3 = _ts(12), _ts(13), _ts(14)
+        ts1, ts2, ts_breach, ts_recover = _ts(12), _ts(13), _ts(14), _ts(15)
         day_modes = {date(2026, 7, 13): "off"}
-        band = _band([(ts1, 68.0, 76.0), (ts2, 68.0, 76.0), (ts3, 68.0, 76.0)])
-        predicted_indoor = _series([(ts1, 70.0), (ts2, 70.0), (ts3, 74.0)])
+        band = _band([(ts1, 68.0, 76.0), (ts2, 68.0, 76.0), (ts_breach, 68.0, 76.0), (ts_recover, 68.0, 76.0)])
+        predicted_indoor = _series([(ts1, 70.0), (ts2, 70.0), (ts_breach, 74.0), (ts_recover, 74.0)])
         forecast_outdoor = _series(
             [
                 (ts1, 60.0),  # active, safe
                 (ts2, 71.0),  # outdoor >= indoor -> OUTDOOR_RISE exit
-                (ts3, 65.0),  # outdoor(65) < indoor(74)-hyst(1)=73, indoor>68, outdoor<79 -> gate True
+                (ts_breach, 90.0),  # genuine ceiling breach (90 > comfort_cool 76) -- stays inactive (too hot)
+                (ts_recover, 65.0),  # outdoor(65) < indoor(74)-hyst(1)=73, indoor>68, outdoor<79 -> gate True
             ]
         )
 
@@ -342,7 +354,8 @@ class TestWalkForwardRegimeReentry:
         )
         assert result[ts1]["nat_vent_active"] is True
         assert result[ts2]["nat_vent_active"] is False
-        assert result[ts3]["nat_vent_active"] is True
+        assert result[ts_breach]["nat_vent_active"] is False
+        assert result[ts_recover]["nat_vent_active"] is True
 
 
 class TestWalkForwardRegimeDayModeBoundary:
@@ -550,6 +563,96 @@ class TestWalkForwardRegimeHotDayNatVent:
         assert plan_result["evening_open_time"].isoformat().startswith("2026-09-08T23:00:00"), (
             f"compute_nat_vent_plan() reopened at {plan_result['evening_open_time']}, expected 23:00 -- "
             "must match _walk_forward_regime()'s own reopen hour asserted above"
+        )
+
+    def test_cross_check_agrees_on_pre_peak_dip_not_spurious_early_reopen(self) -> None:
+        """Issue #948 (Root Cause 2): _walk_forward_regime()'s hourly
+        decide_nat_vent_gate() reactivation check has no concept of "has today's
+        ceiling already been breached before this hour" -- the exact same missing
+        guard as compute_nat_vent_plan()'s evening_open_time (see
+        test_nat_vent_plan_single_source.py's TestEveningOpenTimeRequiresGenuinePeakBreach).
+        Both are independent reimplementations of "has it cooled back down enough
+        to reopen", and both currently reopen on a pre-peak dip that occurs well
+        before the day's real ceiling breach.
+
+        Curve (single Hot/"cool"-mode day, comfort_cool=76, real indoor curve
+        pinned to a LOW 70F "overnight" value -- the low bar the close condition
+        exploits, per the plan's Root Cause 2 writeup):
+          09:00 outdoor=71 -- session starts active (initial_session_active=True)
+                              and immediately exits: OUTDOOR_RISE (71 >= indoor 70).
+                              This is "the close" -- note outdoor(71) is nowhere
+                              near comfort_cool(76) yet.
+          10:00 outdoor=65 -- pre-peak dip. The gate's reactivation check on a
+                              "cool" day compares against comfort_cool (76), not
+                              the real 70F indoor curve (Issue #878-followup's own
+                              DRY substitution) -- 65 < 76-1=75, so the gate fires
+                              here. This is the SPURIOUS reactivation: outdoor has
+                              never actually exceeded comfort_cool anywhere yet.
+          13:00 outdoor=90 -- the day's GENUINE ceiling breach (90 > comfort_cool 76).
+          14:00 outdoor=85 -- still hot, stays inactive.
+          18:00 outdoor=60 -- genuine post-peak decline -- the correct reopen hour,
+                              now that a real breach has actually occurred.
+
+        Both the current buggy _walk_forward_regime() and the current buggy
+        compute_nat_vent_plan() agree with EACH OTHER at 10:00 (the spurious pre-
+        peak dip) -- mutual agreement alone does not prove correctness, which is
+        exactly why this test asserts against the objectively correct reopen hour
+        (18:00), not just cross-agreement. This FAILS against current code on both
+        sides: _walk_forward_regime() reactivates at 10:00, and
+        compute_nat_vent_plan()'s evening_open_time also lands at 10:00.
+        """
+        from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan
+
+        mod = _mod()
+        config = dict(_BASE_CONFIG)
+        config["comfort_cool"] = 76.0
+        config["natural_vent_delta"] = 3.0
+        config["nat_vent_hysteresis_f"] = 1.0
+
+        ts_close, ts_dip, ts_breach, ts_still_hot, ts_reopen = (
+            _ts(9),
+            _ts(10),
+            _ts(13),
+            _ts(14),
+            _ts(18),
+        )
+        day_modes = {date(2026, 7, 13): "cool"}
+        band = _band([(ts, 68.0, 76.0) for ts in (ts_close, ts_dip, ts_breach, ts_still_hot, ts_reopen)])
+        # Real indoor curve pinned low (70F) -- the "low overnight indoor" the close
+        # condition exploits; the gate's own reactivation check substitutes
+        # comfort_cool for a "cool" day regardless of this curve (see
+        # _walk_forward_regime()'s docstring), which is exactly what lets the close
+        # and the reactivation check disagree about what "hot enough" means.
+        predicted_indoor = _series(
+            [(ts_close, 70.0), (ts_dip, 70.0), (ts_breach, 70.0), (ts_still_hot, 70.0), (ts_reopen, 70.0)]
+        )
+        forecast_outdoor = _series(
+            [(ts_close, 71.0), (ts_dip, 65.0), (ts_breach, 90.0), (ts_still_hot, 85.0), (ts_reopen, 60.0)]
+        )
+
+        walk_result = mod._walk_forward_regime(
+            day_modes, predicted_indoor, forecast_outdoor, band, config, "home", None, False, None, None, True
+        )
+        walk_reopen_ts = next((ts for ts, r in walk_result.items() if r["nat_vent_active"]), None)
+        assert walk_reopen_ts == ts_reopen, (
+            f"_walk_forward_regime() reactivated at {walk_reopen_ts}, expected the genuine post-breach"
+            f" reopen at {ts_reopen} -- {ts_dip} is the pre-peak-dip bug (Issue #948): outdoor never"
+            " actually exceeded comfort_cool (76) by that hour, so reopening there has no real"
+            " 'got too hot' event behind it."
+        )
+
+        plan_result = compute_nat_vent_plan(
+            predicted_indoor,
+            forecast_outdoor,
+            comfort_cool=76.0,
+            window_open_time=None,
+        )
+        assert plan_result["nat_vent_cutoff"] is not None
+        assert plan_result["evening_open_time"] is not None
+        assert plan_result["evening_open_time"].isoformat().startswith(ts_reopen), (
+            f"compute_nat_vent_plan() reopened at {plan_result['evening_open_time']}, expected"
+            f" {ts_reopen} -- must match _walk_forward_regime()'s own (corrected) reopen hour"
+            " asserted above, not the pre-peak dip at 10:00."
         )
 
 

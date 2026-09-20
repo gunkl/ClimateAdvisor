@@ -672,7 +672,16 @@ class TestBriefingNotificationSplit:
         coord.automation_engine = MagicMock()
         coord.automation_engine._grace_active = False
         coord.automation_engine._last_resume_source = None
+        coord.automation_engine._manual_override_active = False
+        coord.automation_engine.is_paused_by_door = False
         coord.automation_engine.apply_classification = AsyncMock()
+
+        # Issue #948: _build_briefing_text() now calls get_hvac_runtime_today()
+        # directly (real coordinator method, computed live from hvac_action
+        # transitions) — `coord` here is a bare MagicMock, not a real coordinator
+        # instance, so it needs an explicit numeric stub rather than falling
+        # through to a MagicMock child attribute.
+        coord.get_hvac_runtime_today = MagicMock(return_value=0.0)
 
         # Mock learning engine
         coord.learning = MagicMock()
@@ -1321,7 +1330,14 @@ class TestBriefingRegeneration:
         coord.automation_engine = MagicMock()
         coord.automation_engine._grace_active = False
         coord.automation_engine._last_resume_source = None
+        coord.automation_engine._manual_override_active = False
+        coord.automation_engine.is_paused_by_door = False
         coord.automation_engine.apply_classification = AsyncMock()
+
+        # Issue #948: _build_briefing_text() now calls get_hvac_runtime_today()
+        # directly — see the identical stub/comment in
+        # TestBriefingNotificationSplit._make_coordinator_stub() above.
+        coord.get_hvac_runtime_today = MagicMock(return_value=0.0)
 
         coord.learning = MagicMock()
         coord.learning.generate_suggestions.return_value = []

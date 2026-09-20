@@ -14,6 +14,7 @@ import pytest
 from custom_components.climate_advisor.briefing import (
     _generate_tldr_table,
     _grace_period_section,
+    _leaving_home_section,
     _mild_day_plan,
     _warm_day_plan,
     generate_briefing,
@@ -696,6 +697,49 @@ class TestLeavingHomeSectionOccupancy:
         result = _generate(c, occupancy_mode="home")
         low = result.lower()
         assert "head out" in low or "leave" in low
+
+
+class TestLeavingHomeSectionAutomationOverrideGuard:
+    """Issue #948 (Root Cause 1, third site): _leaving_home_section()'s away+cool/
+    away+heat branches unconditionally claim "I've applied setback temperatures..."/
+    "I've dropped to X..." regardless of whether automation is actually enabled,
+    running, and not manually overridden or paused. Unlike the Mild/Warm overnight-
+    heat sites (which need get_hvac_runtime_today()), this claim needs whatever
+    automation-enabled/override/pause signal _compute_automation_status() already
+    reads (automation_engine enabled flag / _manual_override_active / pause state)
+    -- if automation is disabled, overridden, or paused, the setback was never
+    actually commanded, and asserting it was is the same false "I did X" defect
+    shape as the other two Root Cause 1 sites.
+
+    _leaving_home_section() doesn't accept `automation_overridden` yet -- every
+    test below raises TypeError against current code. That's the expected TDD
+    failure for this slice; the Craftsman lane adds the parameter and the guarded
+    hedged phrasing next.
+    """
+
+    def test_away_cool_normal_automation_keeps_applied_claim(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        lines = _leaving_home_section(c, SETBACK_HEAT, SETBACK_COOL, occupancy_mode="away", automation_overridden=False)
+        text = "\n".join(lines)
+        assert "I've applied setback" in text
+
+    def test_away_cool_overridden_automation_uses_hedged_phrasing(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        lines = _leaving_home_section(c, SETBACK_HEAT, SETBACK_COOL, occupancy_mode="away", automation_overridden=True)
+        text = "\n".join(lines)
+        assert "I've applied setback" not in text
+
+    def test_away_heat_normal_automation_keeps_dropped_claim(self):
+        c = _make_classification("cool", today_high=55, today_low=35)
+        lines = _leaving_home_section(c, SETBACK_HEAT, SETBACK_COOL, occupancy_mode="away", automation_overridden=False)
+        text = "\n".join(lines)
+        assert "I've dropped to" in text
+
+    def test_away_heat_overridden_automation_uses_hedged_phrasing(self):
+        c = _make_classification("cool", today_high=55, today_low=35)
+        lines = _leaving_home_section(c, SETBACK_HEAT, SETBACK_COOL, occupancy_mode="away", automation_overridden=True)
+        text = "\n".join(lines)
+        assert "I've dropped to" not in text
 
 
 class TestTldrTableOccupancy:
@@ -2388,6 +2432,71 @@ class TestMildDayPlanFloorWording:
         lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
         text = "\n".join(lines)
         assert "evening air cools back down" in text
+
+
+class TestMildDayPlanOvernightHeatWording:
+    """Issue #948 (Root Cause 1): _mild_day_plan() unconditionally opens with
+    "I warmed to X before sunrise -- now HVAC is off", regardless of whether heat
+    ever actually ran overnight. A house can coast at comfort_heat through thermal
+    mass alone with zero HVAC runtime -- the reported bug was exactly this case,
+    where the user confirmed no heat was ever commanded. The fix gates the "I
+    warmed" claim on a real runtime signal (get_hvac_runtime_today(), threaded in
+    via the plan's `overnight_heat_engaged` parameter).
+
+    _mild_day_plan() doesn't accept `overnight_heat_engaged` yet -- both tests
+    below raise TypeError against current code. That's the expected TDD failure
+    for this slice; the Craftsman lane adds the parameter and the neutral-wording
+    branch next.
+    """
+
+    def test_heat_engaged_keeps_i_warmed_wording(self):
+        c = _make_classification("mild", today_high=68, today_low=48)
+        lines = _mild_day_plan(
+            c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=None, overnight_heat_engaged=True
+        )
+        text = "\n".join(lines)
+        assert "I warmed to" in text
+
+    def test_no_overnight_heat_uses_neutral_wording(self):
+        c = _make_classification("mild", today_high=68, today_low=48)
+        lines = _mild_day_plan(
+            c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=None, overnight_heat_engaged=False
+        )
+        text = "\n".join(lines)
+        assert "I warmed" not in text
+
+
+class TestWarmDayPlanOvernightHeatWording:
+    """Issue #948 (Root Cause 1): _warm_day_plan()'s "HVAC is off this morning."
+    sentence is asserted purely from classifier/window state (windows_recommended
+    False), with zero check on whether HVAC actually ran. Same
+    `overnight_heat_engaged` signal as _mild_day_plan() above -- when heat DID
+    engage overnight, claiming "HVAC is off this morning" is the same false
+    present-tense claim shape.
+
+    Uses today_low=75 (above DEFAULT_COMFORT_COOL(74) - ECONOMIZER_TEMP_DELTA(3)
+    = 71) so classifier.py leaves windows_recommended False and _warm_day_plan()
+    reaches the "HVAC is off this morning." branch rather than the windows-open one.
+
+    _warm_day_plan() doesn't accept `overnight_heat_engaged` yet -- both tests
+    below raise TypeError against current code, the expected TDD failure here.
+    """
+
+    def test_no_overnight_heat_keeps_hvac_off_wording(self):
+        c = _make_classification("warm", today_high=80, today_low=75)
+        lines = _warm_day_plan(
+            c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=None, overnight_heat_engaged=False
+        )
+        text = "\n".join(lines)
+        assert "HVAC is off this morning." in text
+
+    def test_overnight_heat_engaged_drops_hvac_off_claim(self):
+        c = _make_classification("warm", today_high=80, today_low=75)
+        lines = _warm_day_plan(
+            c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=None, overnight_heat_engaged=True
+        )
+        text = "\n".join(lines)
+        assert "HVAC is off this morning." not in text
 
 
 class TestWarmDayPlanReopenWording:

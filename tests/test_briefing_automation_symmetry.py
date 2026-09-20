@@ -301,6 +301,14 @@ class TestBriefingStalenessOnCutoffDrift:
         # outdoor-temp sanity check threaded into _warm_day_plan()/_mild_day_plan().
         # A bare object.__new__() instance has no DataUpdateCoordinator.data yet.
         coord.data = {}
+        # Issue #948: _build_briefing_text() now calls the real
+        # get_hvac_runtime_today() -> _runtime_today_for_mode("heat"), which reads
+        # self._today_record and self._hvac_on_since directly — neither exists on
+        # this bare object.__new__() instance since __init__ never ran. Set the
+        # minimal state the real method needs (no session in progress, no today
+        # record yet) rather than weakening the production code.
+        coord._today_record = None
+        coord._hvac_on_since = None
 
         # Live plan has since moved: outdoor_rise/11AM. No day_type or today_high
         # change — this is the crux of the reported bug.

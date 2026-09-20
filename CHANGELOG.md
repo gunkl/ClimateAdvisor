@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.55] — 2026-09-20
+
+- Fix #948: Morning briefing no longer claims HVAC warmed the house when thermal mass alone did it, and no longer suggests reopening windows at a nonsensical time (e.g. noon labeled "evening") from a false pre-peak forecast reading.
+
 ## [0.7.54] — 2026-09-19
 
 - Fix #940: on a Warm or Mild day, the daily briefing could tell you to reopen your windows before the time it told you to close them — nonsense text that undermined trust in the briefing's other guidance. This also closes the underlying mechanism that produced it, which affected all day types, not just Warm/Mild. Also corrects the fix_history record for Issue #878, which had incorrectly claimed this was already fixed for all three day types.

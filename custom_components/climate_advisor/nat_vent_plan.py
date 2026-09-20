@@ -50,6 +50,32 @@ def _nat_vent_reopen_reached(outdoor_temp: float, indoor_temp: float) -> bool:
     return outdoor_temp <= indoor_temp - _NAT_VENT_CUTOFF_MARGIN_F
 
 
+def nat_vent_ceiling_breach_reached(outdoor_temp: float, comfort_cool: float) -> bool:
+    """Has outdoor genuinely gotten hot enough that a later cooldown is a real
+    "reopen" event, not an ordinary pre-peak wobble? (Issue #948.)
+
+    Deliberately reuses ``_nat_vent_cutoff_reached()``'s exact margin-based
+    comparator (``outdoor >= comfort_cool - _NAT_VENT_CUTOFF_MARGIN_F``) rather than
+    a bare ``outdoor > comfort_cool``. A strict-ceiling requirement was tried first
+    and rejected: it correctly excluded the reported Mild-day bug (outdoor peaking
+    at 72°F against comfort_cool values of 74-78°F — nowhere close to any of them),
+    but it also nulled out Issue #788's own regression-guard scenario, whose
+    "reopen still populates for an outdoor_rise cutoff" test peaks outdoor at 74°F
+    against a 75°F comfort_cool — a genuine, legitimate close/reopen pair that never
+    literally touches the ceiling. Both cases are within the same 1°F margin that
+    already governs the morning close decision (``_nat_vent_cutoff_reached()``), so
+    reusing that exact predicate against ``comfort_cool`` instead of ``indoor``
+    separates them correctly: #788's peak (74) clears ``comfort_cool - margin``
+    (74), the Mild-day bug's peak (72) does not clear any of its three day types'
+    equivalent thresholds (73/74/77). This function is public (not this module's
+    usual leading-underscore convention) because ``coordinator.py``'s
+    ``_walk_forward_regime()`` must apply the identical definition for its own
+    ``ceiling_breached_today`` reactivation guard — the same paired-fix requirement
+    Issue #948's Root Cause 2 established for the reopen-time computation itself.
+    """
+    return _nat_vent_cutoff_reached(outdoor_temp, comfort_cool)
+
+
 def resolve_with_fallback(dynamic: datetime | None, static: time | None) -> time | None:
     """Single source of truth for "use the ODE-dynamic time if available, else fall
     back to the static configured hour" (Issue #876).
@@ -315,6 +341,31 @@ def compute_nat_vent_plan(
           that exact case). A future comfort_floor-specific "safe to reopen" event
           would need its own predicate (outdoor warming back toward indoor, the
           opposite direction) — out of scope here.
+
+          Issue #948: the "outdoor_rise" scan above had no requirement that outdoor
+          actually got genuinely hot at any point before reopening — on a Mild/Warm
+          day, ``nat_vent_cutoff`` fires against the much lower overnight-indoor-
+          derived margin (``_nat_vent_cutoff_reached()``, not ``comfort_cool``), so
+          outdoor can dip back down (a normal pre-peak wobble, hours before the
+          day's real peak) and trivially satisfy ``_nat_vent_reopen_reached()``
+          against ``comfort_cool`` — reopening on a dip that was never actually hot.
+          There is no genuine "got too hot, will cool down later" event to narrate
+          unless outdoor genuinely approached the ceiling first. The scan is now
+          bounded to start no earlier than the later of ``nat_vent_cutoff`` and the
+          outdoor-side ceiling-breach timestamp, found via
+          ``nat_vent_ceiling_breach_reached()`` (the same margin-based comparator as
+          ``_nat_vent_cutoff_reached()``, applied against ``comfort_cool`` instead of
+          ``indoor`` — see that function's docstring for why a bare
+          ``outdoor > comfort_cool`` is wrong here: it also rejects Issue #788's own
+          legitimate sub-ceiling close/reopen), found via the same
+          ``find_temperature_crossing()`` idiom as ``outdoor_crossing``/
+          ``ceiling_breach_time``/``any_nat_vent_window`` above — no fourth hand-rolled
+          loop. If outdoor never comes within that margin of ``comfort_cool``
+          anywhere in the forecast window, ``evening_open_time`` stays ``None`` —
+          reporting a reopen time with no real peak behind it is exactly the "reopen
+          windows at noon" bug this fixed (the reported Mild-day briefing's outdoor
+          curve peaked at 72°F, never within 1°F of any of the three day types'
+          comfort_cool values).
       nat_vent_cutoff_already_reached: bool — Issue #878-followup: True when
           ``nat_vent_cutoff`` equals the *first* timestamp the scan could possibly
           have examined (the first entry in ``predicted_indoor`` with a matching
@@ -443,23 +494,37 @@ def compute_nat_vent_plan(
     # (see the field's docstring above for why generalizing this to comfort_floor
     # cutoffs would reproduce the exact bug #788 fixed).
     if result["nat_vent_cutoff"] is not None and result["nat_vent_cutoff_reason"] == "outdoor_rise":
-        # Issue #878-followup: compare outdoor against comfort_cool (the stable
-        # comfort ceiling), NOT the per-timestamp predicted_indoor value. Overnight,
-        # predicted_indoor tracks whatever the pre-cool banking feature currently
-        # wants the thermostat to target (e.g. ramping toward 70°F ahead of a hotter
-        # following day) — comparing reactivation eligibility against that banked
-        # value let an unrelated feature silently delay/suppress a genuine nat-vent
-        # opportunity (live incident: reopen computed as 2 AM against a banked ~69°F
-        # curve, when outdoor had already dropped below the real 74°F comfort ceiling
-        # by 23:00). predicted_indoor is still passed to find_temperature_crossing()
-        # to determine which timestamps have a matching pair in both curves — only
-        # the compared *value* changes.
-        result["evening_open_time"] = find_temperature_crossing(
-            predicted_indoor,
-            predicted_outdoor,
-            lambda _ts, o, _i: _nat_vent_reopen_reached(o, comfort_cool),
-            after=result["nat_vent_cutoff"],
+        # Issue #948: an "outdoor_rise" cutoff alone doesn't mean outdoor ever got
+        # genuinely hot — it fires against the low overnight-indoor margin, not
+        # comfort_cool. Find the first genuine ceiling breach (same
+        # find_temperature_crossing() idiom as outdoor_crossing/ceiling_breach_time/
+        # any_nat_vent_window above — no fourth hand-rolled loop) so the reopen scan
+        # can be bounded to start no earlier than it.
+        outdoor_ceiling_breach_time = find_temperature_crossing(
+            predicted_indoor, predicted_outdoor, lambda _ts, o, _i: nat_vent_ceiling_breach_reached(o, comfort_cool)
         )
+        if outdoor_ceiling_breach_time is not None:
+            reopen_scan_after = max(result["nat_vent_cutoff"], outdoor_ceiling_breach_time)
+            # Issue #878-followup: compare outdoor against comfort_cool (the stable
+            # comfort ceiling), NOT the per-timestamp predicted_indoor value. Overnight,
+            # predicted_indoor tracks whatever the pre-cool banking feature currently
+            # wants the thermostat to target (e.g. ramping toward 70°F ahead of a hotter
+            # following day) — comparing reactivation eligibility against that banked
+            # value let an unrelated feature silently delay/suppress a genuine nat-vent
+            # opportunity (live incident: reopen computed as 2 AM against a banked ~69°F
+            # curve, when outdoor had already dropped below the real 74°F comfort ceiling
+            # by 23:00). predicted_indoor is still passed to find_temperature_crossing()
+            # to determine which timestamps have a matching pair in both curves — only
+            # the compared *value* changes.
+            result["evening_open_time"] = find_temperature_crossing(
+                predicted_indoor,
+                predicted_outdoor,
+                lambda _ts, o, _i: _nat_vent_reopen_reached(o, comfort_cool),
+                after=reopen_scan_after,
+            )
+        # else: outdoor never genuinely breached comfort_cool anywhere in the
+        # forecast window — there is no "got too hot, will cool down later" event
+        # to narrate, so evening_open_time stays None (Issue #948).
 
     _LOGGER.debug(
         "NatVentPlan: nat_vent_cutoff=%s (%s, already_reached=%s), ceiling_breach=%s, precool_start=%s,"

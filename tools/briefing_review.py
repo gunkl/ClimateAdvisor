@@ -118,20 +118,26 @@ def _scenario_matrix() -> list[tuple[str, dict]]:
 
     # Issue #518's reported case: warm/windows day, ceiling breach + recovery predicted,
     # adaptive thermal model confident (so the footer-suppression fix is exercised).
+    # Issue #948: this is also a Root Cause 1 site ("HVAC is off this morning." claim) —
+    # rendered under BOTH overnight_heat_engaged values so this script actually
+    # demonstrates the fix (a run that only hits the unsafe default would silently
+    # never show the "heater ran a bit overnight" alternative wording).
     c = _make_classification("warm", today_high=81, today_low=60)
     indoor = _curve([68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 78, 77, 76])
     outdoor = _curve([60, 63, 66, 69, 72, 75, 78, 80, 82, 83, 82, 79, 76, 73])
-    scenarios.append(
-        (
-            "warm_windows_day_breach_and_recovery",
-            dict(
-                classification=c,
-                predicted_indoor_future=indoor,
-                predicted_outdoor_future=outdoor,
-                adaptive_thermal_active=True,
-            ),
+    for _heat_engaged in (False, True):
+        scenarios.append(
+            (
+                f"warm_windows_day_breach_and_recovery__overnight_heat_engaged_{_heat_engaged}",
+                dict(
+                    classification=c,
+                    predicted_indoor_future=indoor,
+                    predicted_outdoor_future=outdoor,
+                    adaptive_thermal_active=True,
+                    overnight_heat_engaged=_heat_engaged,
+                ),
+            )
         )
-    )
 
     # Warm day, no ODE data at all — pure fallback path (classifier constants only).
     scenarios.append(
@@ -140,6 +146,24 @@ def _scenario_matrix() -> list[tuple[str, dict]]:
             dict(classification=_make_classification("warm", today_high=80, today_low=60)),
         )
     )
+
+    # Issue #948: the breach/recovery and no-forecast-data warm scenarios above are
+    # both windows_recommended=True, so they never reach the "HVAC is off this
+    # morning." branch _warm_day_plan() actually gates on overnight_heat_engaged —
+    # rendering them under both values would silently demonstrate nothing. This
+    # scenario uses today_low=75 (matching tests/test_briefing.py's
+    # TestWarmDayPlanOvernightHeatWording fixture) so classifier.py leaves
+    # windows_recommended False and the plan reaches that branch.
+    for _heat_engaged in (False, True):
+        scenarios.append(
+            (
+                f"warm_off_day_no_windows_recommended__overnight_heat_engaged_{_heat_engaged}",
+                dict(
+                    classification=_make_classification("warm", today_high=80, today_low=75),
+                    overnight_heat_engaged=_heat_engaged,
+                ),
+            )
+        )
 
     # Warm day, ceiling breach predicted but no recovery before end of curve.
     c2 = _make_classification("warm", today_high=84, today_low=64)
@@ -172,15 +196,49 @@ def _scenario_matrix() -> list[tuple[str, dict]]:
     )
 
     # Mild day, HVAC off, no setback — mirrors the warm/off footer-suppression case.
-    scenarios.append(
-        (
-            "mild_off_day_adaptive_model_present",
-            dict(
-                classification=_make_classification("mild", today_high=68, today_low=48),
-                adaptive_thermal_active=True,
-            ),
+    # Issue #948: this is the ORIGINAL reported bug site ("I warmed to X before
+    # sunrise" claim). Rendered under BOTH overnight_heat_engaged values so this
+    # script proves the fix — without this, the script's unsafe default
+    # (overnight_heat_engaged=False, matching "don't assert what you can't verify")
+    # would only ever exercise the already-neutral wording and never re-demonstrate
+    # the original bug text is now conditional rather than gone entirely.
+    for _heat_engaged in (False, True):
+        scenarios.append(
+            (
+                f"mild_off_day_adaptive_model_present__overnight_heat_engaged_{_heat_engaged}",
+                dict(
+                    classification=_make_classification("mild", today_high=68, today_low=48),
+                    adaptive_thermal_active=True,
+                    overnight_heat_engaged=_heat_engaged,
+                ),
+            )
         )
-    )
+
+    # Issue #948 (Root Cause 1, third site): away-mode leaving_home_section's
+    # "I've applied setback..."/"I've dropped to X..." claims, rendered under BOTH
+    # automation_overridden values so the hedged phrasing is actually demonstrated
+    # (not just the unconditional-claim default).
+    for _overridden in (False, True):
+        scenarios.append(
+            (
+                f"away_cool_leaving_home__automation_overridden_{_overridden}",
+                dict(
+                    classification=_make_classification("hot", today_high=95, today_low=72),
+                    occupancy_mode="away",
+                    automation_overridden=_overridden,
+                ),
+            )
+        )
+        scenarios.append(
+            (
+                f"away_heat_leaving_home__automation_overridden_{_overridden}",
+                dict(
+                    classification=_make_classification("cool", today_high=55, today_low=35),
+                    occupancy_mode="away",
+                    automation_overridden=_overridden,
+                ),
+            )
+        )
 
     return scenarios
 

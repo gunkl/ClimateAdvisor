@@ -79,6 +79,8 @@ def generate_briefing(
     nat_vent_plan: dict | None = None,
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
+    overnight_heat_engaged: bool = False,
+    automation_overridden: bool = False,
 ) -> str:
     """Generate the daily climate briefing message.
 
@@ -120,6 +122,24 @@ def generate_briefing(
             to ``outdoor_rise`` phrasing instead of asserting a stale claim. Omitted
             (None), the sanity check cannot rule anything out and the reason is trusted
             as computed (unchanged prior behavior).
+        overnight_heat_engaged: Issue #948 (Root Cause 1) — real runtime signal
+            (``coordinator.get_hvac_runtime_today() > 0``) gating the MILD-day "I
+            warmed to X before sunrise" claim and the WARM-day "HVAC is off this
+            morning." claim, so neither is asserted unless heat actually ran
+            overnight. Threaded identically into both ``_mild_day_plan()`` and
+            ``_warm_day_plan()``. Default False (assume no evidence of overnight
+            heat — the "don't assert what you can't verify" thesis this whole fix
+            is built on) for callers that don't pass it; at this default,
+            ``_mild_day_plan()`` renders the neutral wording (not "I warmed to X"),
+            and ``_warm_day_plan()`` keeps its unchanged "HVAC is off this
+            morning." wording.
+        automation_overridden: Issue #948 (Root Cause 1, third site) — whether
+            automation is disabled, manually overridden, or paused (the same
+            signal ``_compute_automation_status()`` reads). Gates
+            ``_leaving_home_section()``'s away+cool/away+heat "I've applied
+            setback..."/"I've dropped to X..." claims so they aren't asserted
+            when the setback was never actually commanded. Default False for
+            callers that don't pass it.
 
     Returns:
         Formatted briefing string suitable for email or notification.
@@ -282,6 +302,7 @@ def generate_briefing(
                 pre_cool_target=bedtime_setback_cool,
                 current_indoor_temp=current_indoor_temp,
                 current_outdoor_temp=current_outdoor_temp,
+                overnight_heat_engaged=overnight_heat_engaged,
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
@@ -295,6 +316,7 @@ def generate_briefing(
                 mild_events=mild_events,
                 current_indoor_temp=current_indoor_temp,
                 current_outdoor_temp=current_outdoor_temp,
+                overnight_heat_engaged=overnight_heat_engaged,
             )
         )
     elif c.day_type == DAY_TYPE_COOL:
@@ -326,7 +348,14 @@ def generate_briefing(
 
     lines.append("")
     lines.extend(
-        _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode=occupancy_mode, temp_unit=temp_unit)
+        _leaving_home_section(
+            c,
+            setback_heat,
+            setback_cool,
+            occupancy_mode=occupancy_mode,
+            temp_unit=temp_unit,
+            automation_overridden=automation_overridden,
+        )
     )
     lines.append("")
     lines.extend(_fresh_air_section(c, comfort_heat, comfort_cool, debounce_seconds, temp_unit=temp_unit))
@@ -709,6 +738,7 @@ def _warm_day_plan(
     warm_events: dict | None = None,
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
+    overnight_heat_engaged: bool = False,
 ) -> list[str]:
     """Conversational plan for warm days (75-85\u00b0F).
 
@@ -727,6 +757,15 @@ def _warm_day_plan(
     (``free_cooling_direction_ok()``, the same #428 guard) confirms the reason still
     holds \u2014 if outdoor has already risen above indoor by render time, the sentence
     falls back to ``outdoor_rise`` phrasing instead of asserting a stale claim.
+
+    Issue #948 (Root Cause 1): the "HVAC is off this morning." sentence used to
+    be asserted purely from classifier/window state (windows_recommended
+    False), with no check on whether HVAC actually ran overnight — the same
+    false present-tense claim shape as ``_mild_day_plan()``'s "I warmed"
+    opening. ``overnight_heat_engaged`` (same real-runtime signal) gates it:
+    when heat DID engage overnight, a brief factual alternative replaces the
+    claim instead. Default False preserves prior behavior for callers that
+    don't pass the signal.
     """
     lines = []
 
@@ -793,6 +832,8 @@ def _warm_day_plan(
                 "Windows are open to catch the cool morning air \u2014"
                 " cross-ventilation keeps things comfortable without the AC."
             )
+    elif overnight_heat_engaged:
+        lines.append("The heater ran a bit overnight before settling — HVAC's off now.")
     else:
         lines.append("HVAC is off this morning.")
 
@@ -868,6 +909,7 @@ def _mild_day_plan(
     mild_events: dict | None = None,
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
+    overnight_heat_engaged: bool = True,
 ) -> list[str]:
     """Conversational plan for mild days (60-74\u00b0F).
 
@@ -878,12 +920,27 @@ def _mild_day_plan(
     the same ``describe_nat_vent_cutoff_reason()`` helper and the same #430 live
     sanity check as ``_warm_day_plan()``, so the two day types (and the "Next
     Automation" card) can't disagree about what a given reason means.
+
+    Issue #948 (Root Cause 1): the opening line used to unconditionally claim
+    "I warmed to X before sunrise" regardless of whether heat ever actually ran
+    \u2014 a house that coasts at comfort_heat purely on thermal mass has zero HVAC
+    runtime, making that claim false. ``overnight_heat_engaged`` (real runtime
+    signal, ``coordinator.get_hvac_runtime_today() > 0``) gates which opening
+    line renders. Default True preserves prior behavior for callers that don't
+    pass the signal (e.g. direct/standalone calls, older tests).
     """
-    lines = [
-        f"A day where the house practically takes care of itself. I warmed to"
-        f" {format_temp(comfort_heat, temp_unit)} before sunrise \u2014 now HVAC is off and the weather"
-        f" does the rest.",
-    ]
+    if overnight_heat_engaged:
+        lines = [
+            f"A day where the house practically takes care of itself. I warmed to"
+            f" {format_temp(comfort_heat, temp_unit)} before sunrise \u2014 now HVAC is off and the weather"
+            f" does the rest.",
+        ]
+    else:
+        lines = [
+            f"A day where the house practically takes care of itself \u2014 it held at or above"
+            f" {format_temp(comfort_heat, temp_unit)} on its own overnight, so HVAC stayed off"
+            f" and the weather did the rest.",
+        ]
 
     if c.windows_recommended and c.window_open_time:
         # Issue #876: the morning OPEN time is intentionally dropped from this
@@ -1024,7 +1081,12 @@ def _cold_day_plan(
 
 
 def _leaving_home_section(
-    c, setback_heat, setback_cool, occupancy_mode: str = "home", temp_unit: str = FAHRENHEIT
+    c,
+    setback_heat,
+    setback_cool,
+    occupancy_mode: str = "home",
+    temp_unit: str = FAHRENHEIT,
+    automation_overridden: bool = False,
 ) -> list[str]:
     """Conversational section about what happens when they leave.
 
@@ -1034,6 +1096,16 @@ def _leaving_home_section(
         setback_cool: Cooling setback temperature.
         occupancy_mode: Current occupancy state — "home", "away", "guest", or "vacation".
         temp_unit: Display unit — "fahrenheit" or "celsius".
+        automation_overridden: Issue #948 (Root Cause 1, third site) — whether
+            automation is disabled, manually overridden, or paused (the same
+            signal ``_compute_automation_status()`` already reads). The
+            away+cool/away+heat branches below used to unconditionally claim
+            "I've applied setback temperatures..."/"I've dropped to X..." even
+            though a disabled/overridden/paused automation never actually
+            commanded that setback. When True, a hedged phrasing is used
+            instead that doesn't claim the setback was actually applied.
+            Default False preserves prior behavior for callers that don't
+            pass the signal.
     """
     if occupancy_mode == "vacation":
         return [
@@ -1048,6 +1120,12 @@ def _leaving_home_section(
         ]
     elif occupancy_mode == "away":
         if c.hvac_mode == "cool":
+            if automation_overridden:
+                return [
+                    f"You're currently away \u2014 setback should be in effect"
+                    f" (target {format_temp(setback_cool, temp_unit)}). Comfort will be restored"
+                    f" when you return \u2014 give it 20 to 30 minutes to feel normal again.",
+                ]
             return [
                 f"You're currently away. I've applied setback temperatures,"
                 f" letting the house drift up to {format_temp(setback_cool, temp_unit)} to save"
@@ -1055,6 +1133,13 @@ def _leaving_home_section(
                 f" 20 to 30 minutes to feel normal again.",
             ]
         elif c.hvac_mode == "heat":
+            if automation_overridden:
+                return [
+                    f"You're currently away \u2014 setback should be in effect"
+                    f" (target {format_temp(setback_heat, temp_unit)}). Comfort will be restored"
+                    f" when you return \u2014 should take 20 to 30 minutes depending on how"
+                    f" long you've been gone.",
+                ]
             return [
                 f"You're currently away. I've dropped to {format_temp(setback_heat, temp_unit)}"
                 f" to save energy. Comfort will be restored when you return \u2014"

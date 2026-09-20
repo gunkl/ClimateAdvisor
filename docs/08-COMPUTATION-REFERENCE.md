@@ -1505,6 +1505,7 @@ don't re-diagnose from zero):
 | #878-followup (D) | "Open 2:00 AM+" shown when outdoor had already dropped well below the comfort ceiling by ~9-11 PM — the app's own stated reopen condition was satisfied hours before it acted | `evening_open_time`'s reopen predicate compared outdoor against the live `predicted_indoor` curve, which an unrelated feature (pre-cool banking ahead of a hotter following day) can pull well below `comfort_cool` overnight — reactivation eligibility was accidentally answering "has outdoor caught up with tonight's banking depth" instead of "is it cool enough to skip the AC" |
 | #878-followup (C) | "(<77°F)" shown next to the reopen time, implying that number gated reopening | The close-side `threshold` constant (`comfort_cool + ECONOMIZER_TEMP_DELTA`) was reused verbatim in the open-side text at five call sites because it was the nearest value in scope — no code path has ever actually gated reopening on that number |
 | #878-followup (E) | The chart's `predicted_activity`/"windows recommended" indicator never showed a nat-vent window on any Hot day, contradicting the briefing | `_walk_forward_regime()` (built for Issue #802) hard-coded `nat_vent_active=False` for every hour of any day whose mode wasn't `"off"` — it was scoped to Warm/Mild days only and never extended when Hot's own intraday close/reopen cycle (#876) was added elsewhere |
+| #948 | Two paired defects on a Mild (72°F) day: (1) briefing claimed "I warmed to 68°F before sunrise — now HVAC is off" when thermal mass alone held the temperature (no heat ever ran), and a sibling unconditional claim in `_warm_day_plan()`'s "HVAC is off this morning."; (2) "Reopen windows around 12:00 PM when the evening air cools back down" — a noon reopen mislabeled "evening" | (1) The day-type sentences asserted a past-tense HVAC action purely from classifier/window state, with no check against a real runtime signal — fixed by gating on `coordinator.get_hvac_runtime_today() > 0` (threaded through `_build_briefing_text()` as `overnight_heat_engaged`); `_leaving_home_section()`'s away+cool/away+heat "I've applied setback..."/"I've dropped to X..." claims had the identical shape and were gated on a separate `automation_overridden` signal (disabled/manual-override/paused — the same inputs `_compute_automation_status()` reads). (2) `evening_open_time`'s reopen scan had no requirement that outdoor's peak actually exceeded `comfort_cool` before treating a dip as "safe to reopen" — a pre-peak forecast dip satisfied the reopen predicate at the very next forecast grid point, hours before the real peak. Fixed via a new margin-based `nat_vent_ceiling_breach_reached()` predicate (reuses the existing `_NAT_VENT_CUTOFF_MARGIN_F` against `comfort_cool` instead of `indoor`), applied via `find_temperature_crossing()` to bound the scan, and — per this section's own **structural fix, not another patch** rule — applied identically to `_walk_forward_regime()` so the chart and briefing text can't newly disagree on the reopen hour |
 
 **Structural fix, not another patch:** every fix before #878 added a test that
 reproduces *that* incident's exact reported numbers — proving the specific fix works,
@@ -1517,6 +1518,19 @@ that only reproduces that one incident's numbers.** The matrix tests the *shape*
 this bug (an ordering relationship) independent of which day type or which specific
 hour triggered it; a numbers-only regression test cannot catch a sibling occurrence in
 a different code path.
+
+**#948's ceiling-breach guard was validated against #788's own regression guard:**
+`nat_vent_ceiling_breach_reached()` uses a strict `outdoor >= comfort_cool - margin`
+comparator rather than a bare `outdoor > comfort_cool` check specifically so it does
+not regress Issue #788's case — a legitimate reopen following a *sub-ceiling* close
+(a comfort-floor-triggered close that never required outdoor to actually cross
+`comfort_cool`) must still be reported. A bare strict-ceiling requirement would have
+rejected that case outright, re-breaking #788 while fixing #948. Both
+`nat_vent_plan.py`'s `evening_open_time` scan and `_walk_forward_regime()`'s
+`ceiling_breached_today` tracking apply the same margin-based predicate for this
+reason — see `nat_vent_ceiling_breach_reached()`'s own docstring for the exact
+comparator and `tests/test_nat_vent_plan_single_source.py`/
+`tests/test_walk_forward_regime.py` for the paired #788/#948 coverage.
 
 **Lesson from #878-followup (A) — vary the date axis, not just the hour axis:** the
 original matrix enumerated {present/absent} × {before/equal/after} combinations of

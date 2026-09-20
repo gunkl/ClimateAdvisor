@@ -98,7 +98,42 @@ governing how a close/open pair is resolved together, the cross-midnight compari
 requirement, and the `nat_vent_cutoff_already_reached` "don't claim a stale future
 time" rule, see [§7a in 08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md#7a-window-timing-invariants--read-before-touching-this-feature-issue-878)
 — read that section, including its prior-incidents table, before changing any
-close/open time wording in `briefing.py`.
+close/open time wording in `briefing.py`. That same section's #948 row also covers
+the `evening_open_time` ceiling-breach guard (a pre-peak forecast dip must not be
+mistaken for a genuine reopen event).
+
+**Evidence-gating for unconditional "I did X" claims (Issue #948):** any sentence
+that asserts, in the present-perfect or simple past tense, that Climate Advisor
+already *performed* an HVAC action ("I warmed to X...", "HVAC is off this
+morning.", "I've applied setback temperatures...") must be backed by a real runtime
+signal, never asserted purely from classifier/window state or day-type alone.
+Two signals currently back these claims:
+- `coordinator.get_hvac_runtime_today()` (real accumulated heat/cool-session
+  minutes from live `hvac_action` transitions) gates `_mild_day_plan()`'s "I
+  warmed... now HVAC is off" sentence and `_warm_day_plan()`'s "HVAC is off this
+  morning." sentence — both threaded into `generate_briefing()` as
+  `overnight_heat_engaged`.
+- The automation-enabled/override/pause signal `_compute_automation_status()`
+  already reads (disabled, `_manual_override_active`, or `is_paused_by_door`) gates
+  `_leaving_home_section()`'s away+cool/away+heat "I've applied setback..."/"I've
+  dropped to X..." sentences, passed in as `automation_overridden`. When true, a
+  hedged phrasing is used instead that doesn't claim the setback was actually
+  commanded.
+
+Before adding any new past-tense automation claim to briefing text, confirm it is
+gated on one of these (or an equivalent real signal) rather than derived solely from
+classification/day-type — this was audited across every day-type plan function
+during #948 and found to be the only defect shape present.
+
+**Known asymmetry, not a live bug (Issue #948):** `_mild_day_plan()`'s
+`overnight_heat_engaged` parameter defaults to `True`, while its sibling
+`_warm_day_plan()`'s defaults to `False`. The single production caller
+(`generate_briefing()`) always passes the value explicitly, so this default never
+takes effect today. It matters only for a future direct caller that omits the
+kwarg — such a caller would silently get `_mild_day_plan()`'s old unverified-claim
+wording while `_warm_day_plan()`'s equivalent caller would silently get the new
+gated wording. Flagged here so a future change to either default is a deliberate
+choice, not an accidental rediscovery of this asymmetry.
 
 ## Coherence Validation (Issue #518)
 

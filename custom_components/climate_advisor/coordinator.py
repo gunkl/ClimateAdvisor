@@ -249,7 +249,12 @@ from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, com
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
-from .nat_vent_plan import compute_nat_vent_plan, resolve_window_pair, resolve_with_fallback
+from .nat_vent_plan import (
+    compute_nat_vent_plan,
+    nat_vent_ceiling_breach_reached,
+    resolve_window_pair,
+    resolve_with_fallback,
+)
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
@@ -4105,6 +4110,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # sanity check in _warm_day_plan()/_mild_day_plan().
             current_indoor_temp=self._get_indoor_temp(),
             current_outdoor_temp=self.data.get(ATTR_OUTDOOR_TEMP) if self.data else None,
+            # Issue #948 (Root Cause 1): real runtime signal gating the MILD-day "I
+            # warmed" / WARM-day "HVAC is off this morning" claims — neither should
+            # be asserted unless heat actually ran overnight (get_hvac_runtime_today()
+            # is already computed live from hvac_action transitions, see its docstring).
+            overnight_heat_engaged=self.get_hvac_runtime_today() > 0,
+            # Issue #948 (Root Cause 1, third site): same enabled/override/pause
+            # signal _compute_automation_status() already reads — when automation is
+            # disabled, manually overridden, or paused, _leaving_home_section()'s
+            # away+cool/away+heat sentences must not claim the setback was actually
+            # commanded.
+            automation_overridden=(
+                not self._automation_enabled
+                or self.automation_engine is None
+                or self.automation_engine._manual_override_active
+                or self.automation_engine.is_paused_by_door
+            ),
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
@@ -12269,6 +12290,24 @@ def _walk_forward_regime(
     session_active = initial_session_active
     current_day: date | None = None
     escalated_to_cool = False
+    # Issue #948: paired fix to compute_nat_vent_plan()'s evening_open_time guard.
+    # outdoor_rise_closed_today tracks whether THIS calendar day has already had an
+    # OUTDOOR_RISE exit (the hourly-walk twin of nat_vent_plan's "outdoor_rise"
+    # nat_vent_cutoff) -- only once that's happened is a later gate activation a
+    # genuine "reopen" rather than the day's first, ordinary morning activation.
+    # ceiling_breached_today tracks whether outdoor has come within
+    # nat_vent_ceiling_breach_reached()'s margin of comfort_cool at any STRICTLY
+    # EARLIER hour today (NOT a bare outdoor > comfort_cool -- see that function's
+    # docstring for why a strict-ceiling requirement is wrong: it also rejects a
+    # legitimate sub-ceiling close/reopen, the Issue #788 case this must stay
+    # symmetric with). A reactivation (gate firing while outdoor_rise_closed_today
+    # is True) is only honored once ceiling_breached_today is also True --
+    # otherwise the gate is reacting to an ordinary pre-peak dip, not a real "got
+    # too hot, now cooling back down" event (the exact spurious pre-peak reopen
+    # this issue reported). Both reset on a fresh calendar day, same as
+    # escalated_to_cool.
+    outdoor_rise_closed_today = False
+    ceiling_breached_today = False
 
     for entry in target_band:
         ts_str = entry.get("ts")
@@ -12285,6 +12324,8 @@ def _walk_forward_regime(
         if day != current_day:
             current_day = day
             escalated_to_cool = False  # a fresh calendar day gets a fresh evaluation
+            outdoor_rise_closed_today = False
+            ceiling_breached_today = False
 
         day_mode = day_modes.get(day, "off")
 
@@ -12333,7 +12374,22 @@ def _walk_forward_regime(
             )
             if exit_decision.reason != NatVentExitReason.NONE:
                 session_active = False
+                if exit_decision.reason == NatVentExitReason.OUTDOOR_RISE:
+                    outdoor_rise_closed_today = True
         elif lower is not None and upper is not None:
+            # Issue #948: once this day has already closed via an OUTDOOR_RISE exit,
+            # a later gate activation is a REACTIVATION ("reopen"), not the day's
+            # first, ordinary morning activation -- and per compute_nat_vent_plan()'s
+            # evening_open_time guard (the briefing-side twin of this exact rule),
+            # a reopen is only genuine once outdoor has actually exceeded
+            # comfort_cool at an earlier hour that same day. Without this, the gate
+            # reacts to an ordinary pre-peak dip (outdoor cooling briefly hours
+            # before the day's real peak) and reopens hours too early -- the same
+            # spurious "reopen at noon" bug reported for the briefing text, just via
+            # this chart's independent hourly walk instead. A day that hasn't closed
+            # yet (outdoor_rise_closed_today is False) is unaffected -- its first
+            # activation is evaluated normally, unchanged.
+            _reactivation_blocked = outdoor_rise_closed_today and not ceiling_breached_today
             # Issue #878-followup: for a "cool"-mode day (Hot), indoor is committed
             # to comfort_cool as its base target. The ODE-predicted indoor curve can
             # dip well below that overnight (pre-cool banking ahead of a hotter
@@ -12345,7 +12401,7 @@ def _walk_forward_regime(
             # target — indoor is the only signal there, so they keep comparing
             # against the real predicted curve, unchanged.
             _gate_indoor = comfort_cool if day_mode == "cool" else indoor
-            session_active = decide_nat_vent_gate(
+            session_active = not _reactivation_blocked and decide_nat_vent_gate(
                 NatVentGateInputs(
                     outdoor=outdoor,
                     indoor=_gate_indoor,
@@ -12359,6 +12415,18 @@ def _walk_forward_regime(
                     aggressive_savings=aggressive_savings,
                 )
             )
+
+        # Issue #948: record a genuine ceiling breach for FUTURE hours' reactivation
+        # check above -- this hour's own decision (step 1) already ran against the
+        # flag's prior value, so this update only ever makes a STRICTLY LATER hour's
+        # reactivation eligible, never this one. Uses nat_vent_ceiling_breach_reached()
+        # (the same margin-based comparator nat_vent_plan.py's evening_open_time now
+        # uses), NOT a bare outdoor > comfort_cool -- a strict-ceiling requirement
+        # would also reject a legitimate sub-ceiling close/reopen pair (see that
+        # function's docstring for the Issue #788 case this must stay symmetric
+        # with) alongside the spurious pre-peak reopen this guard exists to reject.
+        if outdoor is not None and nat_vent_ceiling_breach_reached(outdoor, comfort_cool):
+            ceiling_breached_today = True
 
         # Step 2: ceiling-guard escalation check — only meaningful for an "off"-mode
         # day that might need to proactively commit to AC for the rest of the day.

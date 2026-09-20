@@ -1,0 +1,91 @@
+{
+  "name": "issue_936_economizer_deactivation_rate_limited",
+  "description": "Occupant-first framing: the economizer's window-cooling assist fan is running for real (cool-down phase). Windows close 30 seconds later, so the engine tries to deactivate the economizer -- but the fan was only just turned on 30 seconds ago, so the Issue #641 anti-cycling rate limiter defers the real fan-off command for up to 5 minutes instead of issuing it now. Before the Issue #936 fix, _deactivate_economizer() cleared _economizer_active/_economizer_phase unconditionally regardless of whether the fan-off command actually reached the fan -- the engine would believe the economizer session had ended while the fan (and any HVAC suppression tied to it) was still physically in its prior state, with nothing left to retry turning it off, since check_window_cooling_opportunity() derives its FSM current_state from those same flags on its next tick. After the fix, the session flags stay preserved (matching physical reality: the fan is still on) until the deferred command actually executes.",
+  "source": "issue",
+  "issue": 936,
+  "notes": [
+    "Deliberately combines two blind spots that were each individually untested before Issue #936: the economizer's own fan-assist activate/deactivate calls (Issue #429's golden coverage only exercises unrateLimited transitions) and the Issue #641 fan-toggle rate limiter (previously only exercised on the nat-vent side, e.g. issue_935_natvent_activation_rate_limited_retry.json).",
+    "The first economizer_check (07:00:00) engages cool-down for real: the fan was not previously active, so _activate_fan() executes (FanCommandResult.EXECUTED) and starts the 300s anti-cycling floor from that real toggle.",
+    "The second economizer_check (07:00:30) closes the windows -- economizer_gate.decide_economizer_transition() becomes ineligible (windows_physically_open=False), so the FSM decides INACTIVE and _deactivate_economizer() is called. Only 30s have elapsed since the 07:00:00 real toggle -- well inside the 300s floor -- so _deactivate_fan() returns RATE_LIMITED_NEW rather than executing.",
+    "Three-exercise protocol (CLAUDE.md 'Analysis' section):",
+    "(a) Scenario effectiveness: reverting _deactivate_economizer() to its pre-#936 form (unconditionally clearing _economizer_active/_economizer_phase after calling _deactivate_fan(), without checking the result) makes the field_equals assertion on engine_state._economizer_active FAIL -- it would read False immediately after the rate-limited attempt, even though the fan is still physically on (engine_state._fan_active stays True either way, since _deactivate_fan()'s own rate-limit guard returns before touching that flag).",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's economizer section and this scenario's own description must describe the same gating -- flags clear only once the real fan-off command executes, mirroring _end_nat_vent_session() (#931).",
+    "(c) Occupant experience: without this fix, the dashboard/status page would claim the economizer/fan-assist has stopped while the fan (and any suppressed HVAC mode) is still physically doing what it was doing a moment ago -- a stale, misleading status with no automatic retry to actually stop it, since the FSM's own current_state read is derived from the now-wrongly-cleared flags."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "aggressive_savings": false,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot day: hvac_mode=cool. Economizer eligibility requires this classification."
+    },
+    {
+      "time": "2026-07-10T07:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "hour=7 is in the morning window [6,9). outdoor=72 <= threshold(75+3=78), direction ok (72<78), indoor=78 > comfort_cool=75 -> cool-down phase engages for real, fan turns on (EXECUTED). This is the real toggle the 300s rate-limit floor below is measured from."
+    },
+    {
+      "time": "2026-07-10T07:00:30",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": false,
+      "hour": 7,
+      "note": "30s later, windows close -- the eligibility gate now fails (windows_physically_open=False), so the FSM decides INACTIVE and _deactivate_economizer() runs. Only 30s since the 07:00:00 toggle -- well inside the 300s floor -- so _deactivate_fan() returns RATE_LIMITED_NEW instead of executing. Post-#936 fix: _economizer_active/_economizer_phase stay exactly as they were (cool-down), matching the fan's real physical state."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Hot-day classification applied: hvac_mode=cool."
+    },
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Morning window, indoor 78F > comfort_cool 75F, direction favorable, outdoor within delta -> cool-down phase engages for real (fan assists the band's cooling)."
+    },
+    {
+      "at": "2026-07-10T07:00:30",
+      "expect": "field_equals",
+      "field": "engine_state._economizer_active",
+      "value": true,
+      "reason": "Issue #936: a rate-limited fan-off command (RATE_LIMITED_NEW, 30s after the real toggle -- well inside the 300s anti-cycling floor) must not clear _economizer_active. The engine's own session bookkeeping must keep matching physical reality (the fan is still on) until the deferred command actually executes on a later tick. Checked via the real internal engine_state field rather than an event, since this scenario's ONLY event at this timestamp is the (correctly suppressed) attempt itself -- see economizer_final_phase's own docstring on this same limitation."
+    },
+    {
+      "at": "2026-07-10T07:00:30",
+      "expect": "field_equals",
+      "field": "engine_state._economizer_phase",
+      "value": "cool-down",
+      "reason": "Issue #936: same preservation as _economizer_active above, but for the phase string specifically -- a rate-limited deactivation must not silently downgrade the phase to \"inactive\" while the fan is still actually running the cool-down assist."
+    },
+    {
+      "at": "2026-07-10T07:00:30",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "Control: the fan's own physical-state flag must independently confirm the fan really is still on at this point (unaffected by the rate-limit guard, since _deactivate_fan()'s rate-limit check returns before touching _fan_active at all) -- this is what makes _economizer_active=True the CORRECT answer above rather than a coincidental match with a separately-broken assumption."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A rate-limited economizer deactivation (fan-off command deferred by the Issue #641 anti-cycling limiter) preserves the economizer session bookkeeping instead of prematurely claiming the session ended.",
+    "observed_behavior": "cool-down engages for real at 07:00:00 (fan EXECUTED); at 07:00:30 windows close but the fan-off command is rate-limited (RATE_LIMITED_NEW) -- _economizer_active/_economizer_phase stay preserved as True/\"cool-down\", matching the fan's real physical state (_fan_active=True).",
+    "expected_behavior": "Session bookkeeping flags only clear once the paired fan command actually reaches the fan (Issue #936, mirroring Issue #931's _end_nat_vent_session() fix) -- never desyncing from physical reality just because a command was deferred rather than rejected."
+  }
+}

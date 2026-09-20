@@ -4837,14 +4837,14 @@ class AutomationEngine:
                     # centralized handling — this branch doesn't route through that function,
                     # since away-mode ceiling exit intentionally has no pause/grace machinery).
                     if self._emit_event_callback and _away_ceiling_result is not FanCommandResult.RATE_LIMITED_DUP:
-                        self._emit_event_callback(
-                            "nat_vent_away_ceiling_exit",
-                            {
-                                "indoor": indoor,
-                                "comfort_cool": comfort_cool,
-                                "fan_device": _fan_device_label(self.config),
-                            },
-                        )
+                        _away_ceiling_payload = {
+                            "indoor": indoor,
+                            "comfort_cool": comfort_cool,
+                            "fan_device": _fan_device_label(self.config),
+                        }
+                        if _away_ceiling_result is FanCommandResult.RATE_LIMITED_NEW:
+                            _away_ceiling_payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
+                        self._emit_event_callback("nat_vent_away_ceiling_exit", _away_ceiling_payload)
                     return
 
                 if exit_decision.reason == NatVentExitReason.PROACTIVE_FLOOR:
@@ -5229,15 +5229,15 @@ class AutomationEngine:
                     # the flag clear itself).
                     self._end_nat_vent_session(_away_result)
                     if self._emit_event_callback and _away_result is not FanCommandResult.RATE_LIMITED_DUP:
-                        self._emit_event_callback(
-                            "nat_vent_away_ceiling_exit",
-                            {
-                                "indoor": current_temp,
-                                "comfort_cool": comfort_cool,
-                                "fan_device": _fan_device_label(self.config),
-                                "source": "temp_check",
-                            },
-                        )
+                        _away_temp_check_payload = {
+                            "indoor": current_temp,
+                            "comfort_cool": comfort_cool,
+                            "fan_device": _fan_device_label(self.config),
+                            "source": "temp_check",
+                        }
+                        if _away_result is FanCommandResult.RATE_LIMITED_NEW:
+                            _away_temp_check_payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
+                        self._emit_event_callback("nat_vent_away_ceiling_exit", _away_temp_check_payload)
                     return
 
                 if _exit_reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT:
@@ -5381,17 +5381,23 @@ class AutomationEngine:
                     _fan_device_label(self.config),
                     current_temp,
                 )
-                await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False)
-                if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED and self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_fan_off",
-                        {
-                            "indoor_temp": current_temp,
-                            "off_threshold": off_threshold,
-                            "target": nat_vent_target,
-                            "fan_device": _fan_device_label(self.config),
-                        },
-                    )
+                _cycling_off_result = await self._deactivate_fan(
+                    reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False
+                )
+                if (
+                    self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
+                    and self._emit_event_callback
+                    and _cycling_off_result is not FanCommandResult.RATE_LIMITED_DUP
+                ):
+                    _cycling_off_payload = {
+                        "indoor_temp": current_temp,
+                        "off_threshold": off_threshold,
+                        "target": nat_vent_target,
+                        "fan_device": _fan_device_label(self.config),
+                    }
+                    if _cycling_off_result is FanCommandResult.RATE_LIMITED_NEW:
+                        _cycling_off_payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
+                    self._emit_event_callback("nat_vent_fan_off", _cycling_off_payload)
                 return
 
             if not self._fan_active and _should_be_active:
@@ -5406,18 +5412,22 @@ class AutomationEngine:
                     current_temp,
                     outdoor if outdoor is not None else 0.0,
                 )
-                await self._activate_fan(reason="nat_vent_cycling_on", emit_event=False)
-                if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED and self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_fan_on",
-                        {
-                            "indoor_temp": current_temp,
-                            "outdoor_temp": outdoor,
-                            "on_threshold": on_threshold,
-                            "target": nat_vent_target,
-                            "fan_device": _fan_device_label(self.config),
-                        },
-                    )
+                _cycling_on_result = await self._activate_fan(reason="nat_vent_cycling_on", emit_event=False)
+                if (
+                    self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
+                    and self._emit_event_callback
+                    and _cycling_on_result is not FanCommandResult.RATE_LIMITED_DUP
+                ):
+                    _cycling_on_payload = {
+                        "indoor_temp": current_temp,
+                        "outdoor_temp": outdoor,
+                        "on_threshold": on_threshold,
+                        "target": nat_vent_target,
+                        "fan_device": _fan_device_label(self.config),
+                    }
+                    if _cycling_on_result is FanCommandResult.RATE_LIMITED_NEW:
+                        _cycling_on_payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
+                    self._emit_event_callback("nat_vent_fan_on", _cycling_on_payload)
                 return
 
             if not self._fan_active and not _should_be_active and _outdoor_rise_blocked:
@@ -7613,6 +7623,18 @@ class AutomationEngine:
         self._natural_vent_active = False
         self._nat_vent_soft_start = False
 
+    def _deferred_fan_mode_change_marker(self) -> str:
+        """Issue #936: the "deferred (5-min floor...)" fan_mode_change payload string,
+        shared by every rate-limited-fan-command emission site so the wording can't
+        drift between them (previously duplicated verbatim at 6 call sites).
+        """
+        applies_at = self._fan_rate_limited_until
+        return (
+            f"deferred (5-min floor, applies {applies_at.strftime('%H:%M:%S')})"
+            if isinstance(applies_at, datetime)
+            else "deferred (5-min floor)"
+        )
+
     async def _exit_nat_vent(
         self,
         *,
@@ -7755,12 +7777,7 @@ class AutomationEngine:
         if event_type and self._emit_event_callback and result is not FanCommandResult.RATE_LIMITED_DUP:
             payload = dict(event_payload or {})
             if result is FanCommandResult.RATE_LIMITED_NEW:
-                applies_at = self._fan_rate_limited_until
-                payload["fan_mode_change"] = (
-                    f"deferred (5-min floor, applies {applies_at.strftime('%H:%M:%S')})"
-                    if isinstance(applies_at, datetime)
-                    else "deferred (5-min floor)"
-                )
+                payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
             # EXECUTED / ALREADY_IN_STATE / OVERRIDDEN / DISABLED: payload's own
             # fan_mode_change (if any) is left exactly as the caller built it — matches
             # pre-#649 behavior for every outcome that isn't a fresh deferral.
@@ -9306,17 +9323,17 @@ class AutomationEngine:
             # itself), so don't also emit a ceiling-escalation event claiming
             # it happened.
             if self._emit_event_callback and _ceiling_escalation_result is not FanCommandResult.RATE_LIMITED_DUP:
-                self._emit_event_callback(
-                    "nat_vent_ceiling_escalation",
-                    {
-                        "indoor": _indoor_cg,
-                        "outdoor": _outdoor,
-                        "comfort_cool": _comfort_cool_cg,
-                        "hours_to_breach": round(_hours_to_breach, 2),
-                        "lead_min": round(_lead_min),
-                        "k_active_cool": _k_active_cool,
-                    },
-                )
+                _ceiling_escalation_payload = {
+                    "indoor": _indoor_cg,
+                    "outdoor": _outdoor,
+                    "comfort_cool": _comfort_cool_cg,
+                    "hours_to_breach": round(_hours_to_breach, 2),
+                    "lead_min": round(_lead_min),
+                    "k_active_cool": _k_active_cool,
+                }
+                if _ceiling_escalation_result is FanCommandResult.RATE_LIMITED_NEW:
+                    _ceiling_escalation_payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
+                self._emit_event_callback("nat_vent_ceiling_escalation", _ceiling_escalation_payload)
         _cs_cg = self.hass.states.get(self.climate_entity)
         _old_mode_cg = _cs_cg.state if _cs_cg else None
         _old_setpoint_raw_cg = _cs_cg.attributes.get("temperature") if _cs_cg else None
@@ -11219,6 +11236,60 @@ class AutomationEngine:
         self._economizer_active = state != EconomizerLifecycleState.INACTIVE
         self._economizer_phase = state.value
 
+    def _apply_economizer_fsm_state_after_activation(
+        self, to_state: EconomizerLifecycleState, activation_result: FanCommandResult
+    ) -> None:
+        """Apply an FSM decision computed BEFORE an ``await self._activate_fan(...)``
+        call, guarding against the same Issue #935 rate-limit race this mirrors on
+        the nat-vent side (Issue #936).
+
+        ``_check_window_cooling_opportunity_fsm()`` computes ``result.to_state``
+        (MAINTAIN or COOL_DOWN) from the FSM, then awaits ``self._activate_fan(...)``
+        — a real event-loop yield point — before this method used to be called.
+        If the fan-ON command is rate-limited (Issue #641 deferred it up to 5
+        minutes) or overridden by a concurrent manual action, applying the
+        pre-await ``to_state`` anyway makes ``_economizer_active``/
+        ``_economizer_phase`` claim ventilation is running when the fan was never
+        actually told to turn on — and because ``_apply_economizer_fsm_state()``
+        would already have written that ``to_state``, the FSM's own
+        ``current_state`` on the next tick reads back as matching ``result.to_state``
+        again, so ``result.changed`` comes back ``False`` and ``_activate_fan()``
+        is never retried. This is the direct mirror of Issue #935's
+        ``_apply_nat_vent_fsm_state_after_activation()`` fix, same fallback
+        direction: on entry, applying INACTIVE here is what lets the FSM's own
+        eligibility re-check naturally retry activation on its own next cycle.
+
+        Every other ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``,
+        ``DISABLED``, ``SUPPRESSED``) means no override intervened mid-await and
+        no command was deferred, so the pre-await ``to_state`` is still correct
+        to apply.
+        """
+        if activation_result in (
+            FanCommandResult.OVERRIDDEN,
+            FanCommandResult.RATE_LIMITED_NEW,
+            FanCommandResult.RATE_LIMITED_DUP,
+        ):
+            # Same WARNING(anomaly)/INFO(fresh)/DEBUG(repeat) split as
+            # _apply_nat_vent_fsm_state_after_activation() (#935) and
+            # _end_nat_vent_session() (#931) — RATE_LIMITED_NEW/DUP is routine
+            # anti-cycling behavior that can repeat every tick for up to 5
+            # minutes, while OVERRIDDEN is a genuine anomaly worth a WARNING.
+            if activation_result is FanCommandResult.OVERRIDDEN:
+                _log = _LOGGER.warning
+            elif activation_result is FanCommandResult.RATE_LIMITED_NEW:
+                _log = _LOGGER.info
+            else:
+                _log = _LOGGER.debug
+            _log(
+                "Economizer FSM state application skipped: fan command was %s"
+                " during activation — applying INACTIVE instead of stale %s decision",
+                activation_result.name,
+                to_state,
+            )
+            self._apply_economizer_fsm_state(EconomizerLifecycleState.INACTIVE)
+        else:
+            self._apply_economizer_fsm_state(to_state)
+
     async def _check_window_cooling_opportunity_fsm(
         self,
         outdoor_temp: float,
@@ -11273,13 +11344,12 @@ class AutomationEngine:
                 await self._deactivate_economizer(outdoor_temp)
             return False
 
-        self._apply_economizer_fsm_state(result.to_state)
-
         if not result.changed:
             return True
 
         if result.to_state == EconomizerLifecycleState.MAINTAIN:
-            await self._activate_fan(reason="economizer maintain — fan assists ventilation")
+            activation_result = await self._activate_fan(reason="economizer maintain — fan assists ventilation")
+            self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result)
             if aggressive_savings:
                 _LOGGER.info(
                     "Economizer (savings): ventilation only, outdoor=%s, band stays armed",
@@ -11291,13 +11361,14 @@ class AutomationEngine:
                     format_temp(indoor_temp if indoor_temp is not None else 0, unit),
                 )
         else:  # COOL_DOWN
-            await self._activate_fan(
+            activation_result = await self._activate_fan(
                 reason=(
                     f"economizer cool-down — fan assists the band's cooling: indoor"
                     f" {format_temp(indoor_temp, unit)} > comfort {format_temp(comfort_cool, unit)},"
                     f" outdoor {format_temp(outdoor_temp, unit)} assisting"
                 )
             )
+            self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result)
             _LOGGER.info(
                 "Economizer phase=cool-down: indoor=%s, outdoor=%s — band holds comfort_cool=%s, fan assists",
                 format_temp(indoor_temp, unit),
@@ -11341,12 +11412,35 @@ class AutomationEngine:
         )
 
     async def _deactivate_economizer(self, outdoor_temp: float) -> None:
-        """Deactivate economizer and resume normal AC operation."""
+        """Deactivate economizer and resume normal AC operation.
+
+        Issue #936: mirrors ``_end_nat_vent_session()``'s (#931) gating pattern —
+        only clear ``_economizer_active``/``_economizer_phase`` once the paired
+        fan-off command actually ran. ``RATE_LIMITED_NEW``/``RATE_LIMITED_DUP``
+        mean the Issue #641 rate limiter deferred the real command (by up to 5
+        minutes) instead of issuing it now; clearing the flags anyway would leave
+        a physically-running fan with nothing left to retry stopping it, since
+        ``_check_window_cooling_opportunity_fsm()`` derives ``current_state`` from
+        these same flags on its next tick. The HVAC-resume block below stays
+        unconditional regardless of the fan result — same as ``_exit_nat_vent()``'s
+        own sensors-closed branch, which always resumes HVAC independent of the
+        fan command's outcome; only the session bookkeeping flags are gated.
+        """
         unit = self.config.get("temp_unit", "fahrenheit")
         c = self._current_classification
-        self._economizer_active = False
-        self._economizer_phase = "inactive"
-        await self._deactivate_fan(reason="economizer off — fan no longer needed")
+        result = await self._deactivate_fan(reason="economizer off — fan no longer needed")
+        if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+            # Same INFO(fresh)/DEBUG(repeat) split as _end_nat_vent_session() (#931)
+            # and _apply_nat_vent_fsm_state_after_activation() (#935) — this can repeat
+            # every tick for up to 5 minutes and must not be per-tick log noise.
+            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+            _log(
+                "Economizer session preserved — fan-off command deferred: result=%s retry=next_tick",
+                result.name,
+            )
+        else:
+            self._economizer_active = False
+            self._economizer_phase = "inactive"
         if c and c.hvac_mode == "cool":
             await self._set_hvac_mode(
                 "cool",

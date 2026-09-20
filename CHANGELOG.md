@@ -3,9 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.7.53] — 2026-09-19
+## [0.7.54] — 2026-09-19
 
 - Fix #940: on a Warm or Mild day, the daily briefing could tell you to reopen your windows before the time it told you to close them — nonsense text that undermined trust in the briefing's other guidance. This also closes the underlying mechanism that produced it, which affected all day types, not just Warm/Mild. Also corrects the fix_history record for Issue #878, which had incorrectly claimed this was already fixed for all three day types.
+
+## [0.7.53] — 2026-09-19
+
+- Fix #936: the Activity Report and dashboard status no longer claim a nat-vent or economizer fan command happened immediately when it was actually deferred by the 5-minute anti-cycling limiter — covering the nat-vent cycler, away-mode ceiling exit, AC-escalation, and both economizer activation and deactivation.
 
 ## [0.7.52] — 2026-09-19
 

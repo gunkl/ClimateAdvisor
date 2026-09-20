@@ -1911,7 +1911,11 @@ def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
             label = (
                 f"Nat-vent fan on -- indoor {format_temp(float(indoor), unit)} >= {format_temp(float(on_thr), unit)}"
             )
-    settings = f"{fan_device}: auto->on"
+    # Issue #936: fan_mode_change, when present, overrides the default "device:
+    # auto->on" claim -- set by the nat-vent cycling call site to a "deferred (...)"
+    # description when the Issue #641 rate limiter blocked the toggle, mirroring
+    # _render_fan_activated()'s same override pattern.
+    settings = p.get("fan_mode_change") or f"{fan_device}: auto->on"
     if outdoor is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings = f"{settings}, outdoor {format_temp(float(outdoor), unit)}"
@@ -1928,7 +1932,10 @@ def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[str, str]:
             label = (
                 f"Nat-vent fan off -- indoor {format_temp(float(indoor), unit)} <= {format_temp(float(off_thr), unit)}"
             )
-    return label, f"{fan_device}: on->auto"
+    # Issue #936: fan_mode_change, when present, overrides the default "device:
+    # on->auto" claim -- mirrors _render_nat_vent_fan_on()/_render_fan_deactivated()'s
+    # same override pattern for a deferred (rate-limited) fan-stop command.
+    return label, p.get("fan_mode_change") or f"{fan_device}: on->auto"
 
 
 def _render_fan_activated(p: dict, unit: str) -> tuple[str, str]:
@@ -2228,6 +2235,13 @@ def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
     if k_cool is not None:
         with contextlib.suppress(TypeError, ValueError):
             parts.append(f"k_cool={float(k_cool):.3f}")
+    # Issue #936: fan_mode_change, when present, notes a deferred (rate-limited)
+    # fan-stop command instead of silently implying the "mode: off->cool" switch
+    # happened cleanly -- mirrors _render_nat_vent_away_ceiling_exit()'s/
+    # _render_nat_vent_predicted_floor_exit()'s same fan_mode_change read.
+    fan_change = p.get("fan_mode_change", "")
+    if fan_change:
+        parts.append(f"fan: {fan_change}")
     return label, ", ".join(parts)
 
 

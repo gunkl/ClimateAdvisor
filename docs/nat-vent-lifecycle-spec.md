@@ -280,6 +280,12 @@ types; `_render_fan_activated`/`_render_fan_deactivated` gained a small
 `fan_mode_change`-override fallback since, unlike their nat-vent-specific siblings,
 they previously hardcoded the state-transition text unconditionally).
 
+### Mirrored onto the economizer's activate/deactivate pair (Issue #936)
+
+`_end_nat_vent_session()` (Issue #931, gates the session-flag clear on the fan-stop command's `FanCommandResult`) and `_apply_nat_vent_fsm_state_after_activation()` (Issue #935/#706 Bug F, gates the post-await FSM-state write on the fan-start command's `FanCommandResult`) are both documented in full, including the exact code and the opposite-fallback-state reasoning that distinguishes them, in `docs/08-COMPUTATION-REFERENCE.md` §17 ("`_end_nat_vent_session()`" and "`_apply_nat_vent_fsm_state_after_activation()`" subsections).
+
+The economizer (`_economizer_active`/`_economizer_phase`, `automation.py`) had the identical two gaps on its own activate/deactivate pair — `_check_window_cooling_opportunity_fsm()` wrote the FSM's pre-await `to_state` directly instead of gating on the `_activate_fan()` result, and `_deactivate_economizer()` cleared its flags before confirming `_deactivate_fan()`'s result. Both were independently found (while investigating the economizer specifically, not assumed-and-copied from the nat-vent fix) and fixed by `_apply_economizer_fsm_state_after_activation()` and a gated `_deactivate_economizer()`, following this spec's own pattern exactly — same fallback-state direction per side, same INFO/DEBUG/WARNING log-level split. Full writeup: [`economizer-lifecycle-spec.md`'s Rate-Limit / Override Symmetry section](economizer-lifecycle-spec.md#rate-limit--override-symmetry-issue-936-mirrors-931935).
+
 ### Finding: three independent 300-second constants, not one shared value (Issue #787)
 
 While investigating an overnight fan-cycling incident, a Five Whys pass traced two

@@ -1,0 +1,101 @@
+{
+  "name": "issue_952_adopt_on_stale_read_deferred",
+  "description": "reconcile_fan_on_startup()'s thermostat_fan_running=True branch must defer (not re-adopt) when a fan command was issued in the last 30s -- CA's own nat_vent_temperature_check() cycling-off deactivation triggers a coordinator refresh that re-invokes this reconcile with a thermostat_fan_running=True read that hasn't caught up yet for dual-entity WHF setups, and before Issue #952's fix that stale read wrongly re-armed _fan_active=True moments after CA's own deactivation, causing continuous WHF dashboard flapping.",
+  "source": "production-symptom",
+  "issue": 952,
+  "notes": [
+    "Occupant impact (three-exercise protocol, point (c), stated first per CLAUDE.md occupant-first framing): the person living in the home sees the WHF dashboard card and Activity Report flap between active/inactive every reconcile tick for a single continuous nat-vent duty-cycle-off, even though the physical fan genuinely turned off once and stayed off -- misleading status display and a noisy, duplicated Activity Report entry for what was one real event, not two.",
+    "This is the mirror-image guard of Issue #733 (733_restart_reconcile_clobbers_fresh_nat_vent.json): #733 covers the thermostat_fan_running=False branch wrongly clobbering a just-issued fan-ON command (adopt-on -> stale-off-read -> forced off); #952 covers the thermostat_fan_running=True branch wrongly clobbering a just-issued fan-OFF command (cycling-off -> stale-on-read -> forced back on/re-adopted). Same underlying race (a state-change listener re-invoking reconcile before a dual-entity WHF's physical read has caught up to CA's own command), same fix mechanism (_is_recent_fan_command_callback(threshold_seconds=30.0)), opposite direction. Confirms the symmetry/mirror check (CLAUDE.md) was already applied when #952 was scoped -- the Craftsman's fix reuses the exact #733 guard rather than reimplementing it, per the fix's own inline comment at automation.py ~line 6125.",
+    "(a) Scenario effectiveness: if the Issue #952 guard block (automation.py, the 'Issue #952' comment at ~line 6117, specifically the self._is_recent_fan_command_callback(threshold_seconds=30.0) check and early return) were removed, the second reconcile_fan_on_startup event below would fall through to the adopt-on branch and re-arm _fan_active=True/_natural_vent_active would remain True via an adoption rather than via untouched session continuity -- the fan_not_active final assertion would FAIL (engine._fan_active would read True again, re-adopted 15s after CA's own cycling-off). Verified by reading the guarded code path directly (not assumed): the adopt-on branch below the guard unconditionally sets self._fan_active = True when nat_vent_eligible, with no check of whether a very-recent CA command already decided otherwise.",
+    "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's fan reconcile section documents the #733 stale-read guard for the thermostat_fan_running=False branch; this scenario extends that same documented mechanism to the thermostat_fan_running=True branch per the Issue #952 PR, keeping doc and code in agreement on both directions of the guard.",
+    "(c) User outcome: see occupant impact note above -- this scenario protects against the dashboard-flapping/duplicate-Activity-Report-entry regression, not a physical HVAC/fan control defect (the fan's actual physical behavior is correct either way; only CA's own bookkeeping was wrong before the fix).",
+    "Uses fan_state_feedback left at its default (true/dual-entity) rather than #733's fan_state_feedback=false (command-only) -- #733 needed the command-only archetype specifically because its guard covers the thermostat-attribute fallback, which is only reached in that archetype. #952's guard instead covers the direct physical-WHF-entity read used by fan_state_feedback=true archetypes, which is exactly where the dual-entity feedback-lag race in the Issue #952 report occurs.",
+    "Schema note / limitation found while authoring this scenario (corrected after an initial run failed unexpectedly): `use_coordinator: true` is REQUIRED here, not merely a nice-to-have. `self._is_recent_fan_command_callback` -- the exact field the Issue #952 guard checks -- is only ever wired via `EngineCallbacks(is_recent_fan_command=self._is_recent_fan_command, ...)` inside the real `ClimateAdvisorCoordinator` (coordinator.py:855); a bare `AutomationEngine` constructed without a coordinator (as issue_949's and reconcile-adopts-running-fan-as-nat-vent.json's scenarios both correctly use, since neither of THEIR code paths reads that callback) leaves it at its `None` default (automation.py:1206), and the guard's `if self._is_recent_fan_command_callback and ...` short-circuits to False unconditionally -- so a bare-engine version of this scenario would silently never exercise the guard at all and could pass identically whether the Issue #952 fix is present or fully reverted (a false-positive scenario, not a legitimate skip). Confirmed by first authoring this scenario without `use_coordinator`, watching the second reconcile call incorrectly leave `_fan_active=True` at the end despite no adopt-on event appearing in the decision timeline (the flag was actually never real-False to begin with in that run once a `sensor_open` dispatch quirk was also fixed -- see below), tracing it to this exact wiring gap by reading coordinator.py:855 and automation.py:1206/6132 directly, then adding `use_coordinator: true` (matching #733's own scenario, which needs the same callback for its sibling guard) -- after which the scenario passes for the right reason. This is also why every reconcile-adjacent scenario that needs a recency-guard assertion (#733, this one) uses `use_coordinator: true` while #949's and the plain adopt-only scenario do not: those two never touch a recency-guarded branch.",
+    "Second schema quirk found and fixed during authoring: the harness's `sensor_open` event only respects its `seed`/`seed_fresh` flags (silent state-only, no listener dispatch) when `use_coordinator: true` is set (run_production.py's `sensor_open` handler branches on `coordinator is not None`) -- in bare-engine mode it always calls `engine.handle_door_window_open()` directly regardless of `seed`, which this scenario's first draft (before `use_coordinator` was added) tripped over: opening the sensor before indoor/outdoor temps were established produced a spurious real `paused` decision from `handle_door_window_open()` itself. Adding `use_coordinator: true` (needed anyway per the point above) also fixed this for free, since the seeded sensor now sets raw state silently as intended -- confirmed via re-run, no `paused` decision appears in the corrected timeline.",
+    "Third correctness point specific to `fan_mode: whole_house_fan`: a real, non-seed-fresh monitored sensor must actually be open in `door_window_sensors`/fake_hass state for the adopted session to survive `nat_vent_temperature_check()`'s own `_any_monitored_sensor_open()` force-close guard (automation.py ~line 5131) when it runs on its self-rescheduling 5-minute thermostatic backstop between this scenario's explicit events -- the reconcile event's `any_sensor_open` field is only consulted by reconcile's own eligibility computation, it does not create real HA sensor state for other call sites to observe. Missing this in the first draft caused the session to be force-closed by an intervening automatic backstop tick before the scenario's own timeline reached the intended assertions.",
+    "15-second spacing (not 733/949's other spacings) is deliberate: it must land inside the 30s _is_recent_fan_command_callback window (unlike #949's 2-minute spacing, which was deliberately OUTSIDE any recency guard and instead relied on the 5-minute thermostatic backstop still being active) while being long enough to be a distinct, realistic coordinator-refresh-driven re-invocation rather than the exact same tick."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "use_coordinator": true,
+  "events": [
+    {
+      "time": "2026-09-10T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm afternoon: HVAC off, nat-vent expected to carry comfort."
+    },
+    {
+      "time": "2026-09-10T14:00:30",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "seed": true,
+      "note": "A real monitored sensor must actually be open for the session to survive the self-rescheduling 5-minute thermostatic backstop's own _any_monitored_sensor_open() re-check (nat_vent_temperature_check()'s force-close guard, automation.py ~line 5131) -- the reconcile event's any_sensor_open=true parameter below only affects the reconcile eligibility computation itself, it does not create real sensor state. Seeded (not a live transition) matching the same technique 733_restart_reconcile_clobbers_fresh_nat_vent.json uses."
+    },
+    {
+      "time": "2026-09-10T14:01:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": true,
+      "note": "WHF already physically running, sensor open, outdoor 65F < indoor 73F (comfort_cool=75, midpoint=71.5). Nat-vent eligible -- adopted as CA-owned (decision=adopt-on): _fan_active=True, _natural_vent_active=True. Establishes the real, active session the cycling-off deactivation below must operate on."
+    },
+    {
+      "time": "2026-09-10T14:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 70.0,
+      "note": "Indoor cooled to 70F, below off_threshold=70.5F (midpoint 71.5 - hysteresis 1.0). Real production cycling-off decision: _deactivate_fan(reason='nat_vent_cycling_off', restore_hvac=False, emit_event=False) runs, setting _fan_active=False and engine._fan_command_time=14:30:00. Session (_natural_vent_active) stays active by design -- only the fan cycles off, matching nat_vent_thermostat_cycling.json's documented cycling behavior."
+    },
+    {
+      "time": "2026-09-10T14:30:15",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 70.0,
+      "outdoor_f": 65.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": true,
+      "note": "15s later (inside the 30s _is_recent_fan_command_callback window armed by the cycling-off deactivation above): a coordinator-refresh-triggered reconcile fires with thermostat_fan_running=True -- the dual-entity WHF's physical state hasn't caught up to CA's own just-issued off command yet. Issue #952 fix: the guard sees a fan command in the last 30s and defers -- returns immediately without touching _fan_active/_natural_vent_active, instead of falling into the adopt-on branch and re-arming the fan CA had just turned off."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-10T14:00:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied: hvac_mode=off."
+    },
+    {
+      "at": "2026-09-10T14:01:00",
+      "expect": "reconcile_adopted_fan",
+      "reason": "Fan physically running + sensor open + nat-vent conditions favorable -- adopted as CA-owned nat-vent (decision=adopt-on), establishing the real active session the cycling-off deactivation must act on."
+    },
+    {
+      "at": "2026-09-10T14:30:00",
+      "expect": "nat_vent_fan_off",
+      "reason": "Indoor reached off_threshold=70.5F -- real nat-vent cycling-off decision fires, deactivating the fan (session remains active) and arming engine._fan_command_time, which is what the Issue #952 guard checks 15s later."
+    },
+    {
+      "at": "2026-09-10T14:30:15",
+      "expect": "nat_vent_still_active",
+      "reason": "The stale-read reconcile at 14:30:15 must defer (Issue #952 guard) rather than acting on thermostat_fan_running=True -- _natural_vent_active is untouched by the deferred call, so it still reads True from the still-open cycling session established above (proving the guard did not run the no-fan/exit-adjacent branch by mistake either)."
+    },
+    {
+      "at": "2026-09-10T14:30:15",
+      "expect": "fan_not_active",
+      "reason": "Final engine state: _fan_active must still read False after the deferred reconcile call -- if the Issue #952 guard were absent or reverted, the adopt-on branch below it would unconditionally set _fan_active=True from the stale thermostat_fan_running=True read, re-arming a fan CA had genuinely just turned off 15 seconds earlier and causing the dashboard-flapping symptom this issue reports."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "reconcile_fan_on_startup()'s thermostat_fan_running=True branch defers to CA's own just-issued fan-off command instead of re-adopting a stale physical read, closing the Issue #952 WHF dashboard-flapping defect.",
+    "observed_behavior": "cycling-off deactivation sets _fan_active=False and arms the 30s recency guard; the immediately-following stale-read reconcile sees the recent command and returns early, leaving _fan_active=False and _natural_vent_active=True untouched.",
+    "expected_behavior": "A reconcile call racing CA's own very-recent fan command must never re-decide state based on a physical read that predates that command settling -- matching the existing, symmetric Issue #733 guarantee for the opposite (thermostat_fan_running=False vs. a just-issued fan-ON command) direction."
+  }
+}

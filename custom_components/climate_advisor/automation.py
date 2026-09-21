@@ -6114,6 +6114,31 @@ class AutomationEngine:
             )
             return
 
+        # Issue #952: thermostat_fan_running=True here can be a stale read racing CA's own
+        # _deactivate_fan() call from nat_vent_temperature_check() moments earlier in the
+        # same tick — for dual-entity WHF setups the physical entity hasn't reported the
+        # new off state back to HA yet by the time the resulting state-change listener
+        # re-invokes this reconcile. Without this guard, the adopt-on branch below wrongly
+        # re-arms _fan_active=True (undoing CA's own just-issued deactivation) and the
+        # turn-off branch would redundantly re-issue the same command it already just
+        # sent — either way this tick must defer to the fresher-than-this-read decision.
+        # Same guard, same threshold, and same rationale as the sibling #733 guard above
+        # (~line 6020) for the thermostat_fan_running=False case — that guard defers only
+        # the no-fan branch; this one defers both branches gated on nat_vent_eligible,
+        # since both read the same possibly-stale thermostat_fan_running=True value. The
+        # next reconcile invocation (backstop_30min/thermostat_state_change/
+        # post_grace_expiry all fire again on their own) re-evaluates with a presumably-
+        # settled read.
+        if self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0):
+            _LOGGER.info(
+                "Fan reconcile: thermostat_fan_running=True but a fan command was issued"
+                " in the last 30s — deferring to that fresh command instead of this stale"
+                " physical read (archetype=%s, trigger=%s)",
+                archetype,
+                trigger,
+            )
+            return
+
         # Evaluate nat-vent eligibility
         # Issue #417: folded into the shared _nat_vent_may_reactivate() gate instead of a
         # 5th hand-rolled copy — this hand-rolled version was also missing the sleep-aware

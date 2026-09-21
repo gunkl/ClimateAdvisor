@@ -19,6 +19,8 @@ import re
 import sys
 from unittest.mock import patch
 
+import pytest
+
 # ── HA module stubs ──────────────────────────────────────────────────────────
 if "homeassistant" not in sys.modules:
     from tools.sim_harness.ha_stubs import install_ha_stubs
@@ -28,6 +30,7 @@ if "homeassistant" not in sys.modules:
 # Patch dt_util.as_local to be identity so _fmt_time comparisons use real datetimes
 # rather than MagicMock objects (same pattern as test_coordinator.py).
 import custom_components.climate_advisor.ai_skills_context as _act_mod  # noqa: E402
+import custom_components.climate_advisor.automation as _auto_mod  # noqa: E402
 
 _REAL_NOW = datetime.datetime(2026, 6, 17, 14, 0, 0, tzinfo=datetime.UTC)
 
@@ -209,8 +212,10 @@ class TestBuildEventTimelineTable:
         assert "x18" in table or "x17" in table or "x16" in table, (
             f"#330: 18 identical nat_vent_fan_on events must be deduplicated. Table:\n{table}"
         )
-        # Settings cell must NOT be empty after dedup (last event's settings survive)
-        assert "fan: auto->on" in table, f"#330: Settings cell must survive dedup collapse. Table:\n{table}"
+        # Settings cell must NOT be empty after dedup (last event's settings survive).
+        # Issue #957: fallback corrected from "auto->on" (HVAC-fan-only phrasing) to
+        # "off->on" (generic -- no fan_device in this synthetic payload).
+        assert "fan: off->on" in table, f"#330: Settings cell must survive dedup collapse. Table:\n{table}"
 
     def test_no_dedup_types_each_get_own_row(self):
         """Types in _NO_DEDUP (e.g. comfort_band_applied) each get their own row.
@@ -648,20 +653,27 @@ class TestFanEventRenderers:
     """Issue #331 follow-up: fan_activated / fan_deactivated / fan_running_untracked / cleared."""
 
     def test_fan_activated_shows_trigger(self):
-        """Issue #392 Fix 2: settings cell uses the archetype-specific fan_device label."""
+        """Issue #392 Fix 2: settings cell uses the archetype-specific fan_device label.
+
+        Issue #957: HVAC fan mode genuinely has an auto/on distinction (no "off" state),
+        so "auto->on" is correct here -- unlike WHF below.
+        """
         ev, st = _act_mod.EVENT_RENDERERS["fan_activated"](
             {"reason": "min_runtime_cycle", "fan_device": "hvac_fan"}, "fahrenheit"
         )
         assert "Fan activated" in ev and "min_runtime_cycle" in ev
-        assert st == "hvac_fan: off->on"
+        assert st == "HVAC fan: auto->on"
 
     def test_fan_activated_shows_trigger_whf(self):
-        """Issue #392 Fix 2: whole-house-fan archetype renders 'whf', not the generic 'fan'."""
+        """Issue #392 Fix 2: whole-house-fan archetype renders 'WHF', not the generic 'fan'.
+
+        Issue #957: a WHF has no "auto" state -- it's a binary on/off relay.
+        """
         ev, st = _act_mod.EVENT_RENDERERS["fan_activated"](
             {"reason": "natural ventilation", "fan_device": "whf"}, "fahrenheit"
         )
         assert "Fan activated" in ev and "natural ventilation" in ev
-        assert st == "whf: off->on"
+        assert st == "WHF: off->on"
 
     def test_fan_activated_no_fan_device_falls_back(self):
         """No fan_device in payload (legacy/pre-#392 event) -> generic 'fan' label, no crash."""
@@ -670,20 +682,26 @@ class TestFanEventRenderers:
         assert st == "fan: off->on"
 
     def test_fan_deactivated_shows_trigger(self):
-        """Issue #392 Fix 2: settings cell uses the archetype-specific fan_device label."""
+        """Issue #392 Fix 2: settings cell uses the archetype-specific fan_device label.
+
+        Issue #957: HVAC fan mode genuinely has an auto/on distinction (no "off" state).
+        """
         ev, st = _act_mod.EVENT_RENDERERS["fan_deactivated"](
             {"reason": "economizer off -- fan no longer needed", "fan_device": "hvac_fan"}, "fahrenheit"
         )
         assert "Fan deactivated" in ev and "economizer off" in ev
-        assert st == "hvac_fan: on->off"
+        assert st == "HVAC fan: on->auto"
 
     def test_fan_deactivated_shows_trigger_whf(self):
-        """Issue #392 Fix 2: whole-house-fan archetype renders 'whf', not the generic 'fan'."""
+        """Issue #392 Fix 2: whole-house-fan archetype renders 'WHF', not the generic 'fan'.
+
+        Issue #957: a WHF has no "auto" state -- it's a binary on/off relay.
+        """
         ev, st = _act_mod.EVENT_RENDERERS["fan_deactivated"](
             {"reason": "door/window closed", "fan_device": "whf"}, "fahrenheit"
         )
         assert "Fan deactivated" in ev and "door/window closed" in ev
-        assert st == "whf: on->off"
+        assert st == "WHF: on->off"
 
     def test_fan_deactivated_no_fan_device_falls_back(self):
         """No fan_device in payload (legacy/pre-#392 event) -> generic 'fan' label, no crash."""
@@ -731,11 +749,12 @@ class TestNatVentFanCyclingRenderersDeferredMarker:
         assert st == "deferred (5-min floor, applies 14:05:00)"
 
     def test_nat_vent_fan_on_falls_back_without_override(self):
+        """Issue #957: fallback corrected -- a WHF has no "auto" state."""
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_on"](
             {"indoor_temp": 72.0, "on_threshold": 70.0, "fan_device": "whf"}, "fahrenheit"
         )
         assert "Nat-vent fan on" in ev
-        assert st == "whf: auto->on"
+        assert st == "WHF: off->on"
 
     def test_nat_vent_fan_off_uses_fan_mode_change_override(self):
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_off"](
@@ -751,11 +770,12 @@ class TestNatVentFanCyclingRenderersDeferredMarker:
         assert st == "deferred (5-min floor)"
 
     def test_nat_vent_fan_off_falls_back_without_override(self):
+        """Issue #957: fallback corrected -- a WHF has no "auto" state."""
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_off"](
             {"indoor_temp": 68.0, "off_threshold": 70.0, "fan_device": "whf"}, "fahrenheit"
         )
         assert "Nat-vent fan off" in ev
-        assert st == "whf: on->auto"
+        assert st == "WHF: on->off"
 
     def test_nat_vent_ceiling_escalation_notes_deferred_marker(self):
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
@@ -1601,7 +1621,12 @@ class TestLifecycleScopedNarration:
         assert "2026-06-17T08:00:00" in st
 
     def test_nat_vent_comfort_floor_exit_temp_check_site_has_full_shape(self):
-        """Both call sites now emit fan_mode_change/hvac_mode_restored (Issue #592)."""
+        """Both call sites now emit fan_mode_change/hvac_mode_restored (Issue #592).
+
+        Issue #957: the fan transition now folds into the label (ev), not settings_text
+        (st), so it survives into the session-grouped Activity Summary input (which
+        reads only the label).
+        """
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_comfort_floor_exit"](
             {
                 "indoor_temp": 65.0,
@@ -1614,7 +1639,7 @@ class TestLifecycleScopedNarration:
             "fahrenheit",
         )
         assert "mode: off->heat" in st
-        assert "fan: on->auto" in st
+        assert "on->auto" in ev
 
 
 # ---------------------------------------------------------------------------
@@ -2027,3 +2052,85 @@ class TestUnprotectedGraceStartedHidden:
         # allowlist mechanism -- it must still show up via _default_renderer.
         ev_text, _settings = _act_mod._default_renderer("a_brand_new_never_seen_event_type_913", {}, "fahrenheit")
         assert ev_text, "An unrelated new event type must still get a non-empty default-rendered label"
+
+
+class TestFanTransitionTextIsCorrectAndConsistent:
+    """Issue #957: a whole-house fan (WHF) is a binary on/off relay -- it has no "auto"
+    state. "auto" is only ever correct for FAN_MODE_HVAC's thermostat fan mode. Several
+    event renderers/payloads had hardcoded "on->auto"/"auto->on" even for WHF-mode
+    installs, which is why WHF off transitions read as unrecognizable HVAC-fan jargon
+    instead of a plain "WHF: on->off" -- looking, at a glance, like WHF off was never
+    logged at all. This locks in the corrected, consistent text for every affected
+    renderer, on both directions (on and off), for both fan modes.
+    """
+
+    @pytest.mark.parametrize(
+        ("mode", "activating", "expected"),
+        [
+            (_auto_mod.FAN_MODE_WHOLE_HOUSE, True, "WHF: off->on"),
+            (_auto_mod.FAN_MODE_WHOLE_HOUSE, False, "WHF: on->off"),
+            (_auto_mod.FAN_MODE_HVAC, True, "HVAC fan: auto->on"),
+            (_auto_mod.FAN_MODE_HVAC, False, "HVAC fan: on->auto"),
+            (_auto_mod.FAN_MODE_BOTH, True, "WHF: off->on, HVAC fan: auto->on"),
+            (_auto_mod.FAN_MODE_BOTH, False, "WHF: on->off, HVAC fan: on->auto"),
+            (_auto_mod.FAN_MODE_DISABLED, True, ""),
+        ],
+    )
+    def test_automation_fan_transition_text_choke_point(self, mode, activating, expected):
+        """automation.py::_fan_transition_text() -- the single source of truth every
+        event payload now calls instead of hand-writing its own arrow string."""
+        config = {_auto_mod.CONF_FAN_MODE: mode}
+        assert _auto_mod._fan_transition_text(config, activating=activating) == expected
+
+    @pytest.mark.parametrize(
+        ("fan_device", "activating", "expected"),
+        [
+            ("whf", True, "WHF: off->on"),
+            ("whf", False, "WHF: on->off"),
+            ("hvac_fan", True, "HVAC fan: auto->on"),
+            ("hvac_fan", False, "HVAC fan: on->auto"),
+            ("both", True, "WHF: off->on, HVAC fan: auto->on"),
+            ("both", False, "WHF: on->off, HVAC fan: on->auto"),
+        ],
+    )
+    def test_renderer_fallback_matches_choke_point(self, fan_device, activating, expected):
+        """ai_skills_context.py::_fan_transition_fallback() -- the renderer-side sibling
+        used when a (typically older/legacy) payload lacks fan_mode_change -- must agree
+        with automation.py's choke point exactly."""
+        assert _act_mod._fan_transition_fallback(fan_device, activating=activating) == expected
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "nat_vent_comfort_floor_exit",
+            "nat_vent_predicted_floor_exit",
+            "nat_vent_outdoor_rise_exit",
+            "nat_vent_away_ceiling_exit",
+            "nat_vent_manual_override_exit",
+        ],
+    )
+    def test_exit_events_never_claim_auto_for_whf_and_state_off_in_label(self, event_type):
+        """For a WHF-mode install, none of the five nat-vent exit event types may render
+        "auto" anywhere, and the label itself (not just settings_text) must show the
+        fan actually turned off -- this is what makes WHF off visible in the
+        session-grouped Activity Summary input, which reads only the label."""
+        label, settings = _act_mod.EVENT_RENDERERS[event_type](
+            {
+                "indoor_temp": 65.0,
+                "indoor": 65.0,
+                "comfort_heat": 66.0,
+                "comfort_cool": 74.0,
+                "outdoor": 78.0,
+                "override_mode": "cool",
+                "time_to_floor_hr": 0.1,
+                "fan_device": "whf",
+            },
+            "fahrenheit",
+        )
+        assert "auto" not in (label + settings).lower(), (
+            f"{event_type} must never claim an 'auto' fan state for a WHF-mode install. "
+            f"label={label!r} settings={settings!r}"
+        )
+        assert "WHF: on->off" in label, (
+            f"{event_type} must state the WHF turned off directly in the label. label={label!r}"
+        )

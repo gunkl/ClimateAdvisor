@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.59] — 2026-09-21
+
+- Fix #957: the Activity Report and AI Activity Summary now show whole-house-fan (WHF) on/off transitions as "WHF: off->on"/"WHF: on->off" instead of HVAC-thermostat-fan phrasing ("auto->on"/"on->auto") that a WHF has no concept of — WHF off transitions were always being logged, they just read as unrecognizable jargon.
+
 ## [0.7.58] — 2026-09-20
 
 - Fix #955: a whole-house-fan cycle-off during natural ventilation no longer briefly shows as an external/untracked fan running-then-stopping in the Activity Report.

@@ -537,6 +537,29 @@ def _fan_device_label(config: dict) -> str:
     return "none"
 
 
+def _fan_transition_text(config: dict, *, activating: bool) -> str:
+    """Return the correct Activity Report transition text for this install's fan mode.
+
+    Issue #957: a whole-house fan has no "auto" state -- it's a binary on/off relay.
+    "auto" is only ever correct for FAN_MODE_HVAC (the thermostat's own blower mode).
+    Every event payload that describes a fan transition must go through this single
+    choke point instead of hand-writing its own arrow string, matching the existing
+    `_fan_device_label()` precedent -- hand-written literals had drifted to hardcode
+    "on->auto"/"auto->on" even in FAN_MODE_WHOLE_HOUSE-only code paths (nat-vent),
+    producing HVAC-thermostat-fan phrasing for a device that doesn't have that state.
+    """
+    mode = config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+    whf_clause = "WHF: off->on" if activating else "WHF: on->off"
+    hvac_fan_clause = "HVAC fan: auto->on" if activating else "HVAC fan: on->auto"
+    if mode == FAN_MODE_WHOLE_HOUSE:
+        return whf_clause
+    if mode == FAN_MODE_HVAC:
+        return hvac_fan_clause
+    if mode == FAN_MODE_BOTH:
+        return f"{whf_clause}, {hvac_fan_clause}"
+    return ""
+
+
 def _parse_forecast_dt(dt_str: str | None) -> datetime | None:
     """Parse an ISO 8601 forecast datetime string; return None on failure."""
     if not dt_str:
@@ -2225,6 +2248,7 @@ class AutomationEngine:
                 "indoor_temp": indoor_temp,
                 "override_mode": mode,
                 "fan_device": _fan_device_label(self.config),
+                "fan_mode_change": _fan_transition_text(self.config, activating=False),
             }
             if event_source is not None:
                 payload["source"] = event_source
@@ -4253,7 +4277,7 @@ class AutomationEngine:
                                 "entity": entity_id,
                                 "result": "natural_ventilation",
                                 "hvac_mode_change": f"{_old_mode_nv}→band-armed",
-                                "fan_mode_change": "auto→on",
+                                "fan_mode_change": _fan_transition_text(self.config, activating=True),
                             },
                         )
                     return
@@ -4305,11 +4329,16 @@ class AutomationEngine:
                     {
                         "was_paused": was_paused,
                         "was_nat_vent": was_nat_vent,
-                        # Issue #504: lets the Activity Report show the whf:on->off transition
-                        # on this row — _exit_nat_vent() suppresses _deactivate_fan()'s own
-                        # event (Issue #411) since this event is its "caller emits its own
-                        # specific event" contract, but it never carried the fan device label.
+                        # Issue #504 / Issue #957: lets the Activity Report show the correct
+                        # fan-off transition on this row — _exit_nat_vent() suppresses
+                        # _deactivate_fan()'s own event (Issue #411) since this event is its
+                        # "caller emits its own specific event" contract. fan_mode_change is
+                        # only meaningful when nat-vent was actually active (the fan actually
+                        # changed state here).
                         "fan_device": _fan_device_label(self.config),
+                        "fan_mode_change": (
+                            _fan_transition_text(self.config, activating=False) if was_nat_vent else None
+                        ),
                     },
                 )
 
@@ -4783,7 +4812,7 @@ class AutomationEngine:
                             {
                                 "indoor_temp": indoor,
                                 "comfort_heat": _vent_floor,
-                                "fan_mode_change": "on→auto",
+                                "fan_mode_change": _fan_transition_text(self.config, activating=False),
                                 "fan_device": _fan_device_label(self.config),
                                 "hvac_mode_restored": (
                                     self._current_classification.hvac_mode
@@ -4886,7 +4915,7 @@ class AutomationEngine:
                             "indoor_temp": round(indoor, 1),
                             "comfort_heat": round(comfort_heat_now, 1),
                             "k_passive": round(k_passive, 4),
-                            "fan_mode_change": "on→auto",
+                            "fan_mode_change": _fan_transition_text(self.config, activating=False),
                             "fan_device": _fan_device_label(self.config),
                             "hvac_mode_restored": (
                                 self._current_classification.hvac_mode if self._current_classification else "unknown"
@@ -4915,6 +4944,7 @@ class AutomationEngine:
                             "outdoor": outdoor,
                             "indoor": indoor,
                             "fan_device": _fan_device_label(self.config),
+                            "fan_mode_change": _fan_transition_text(self.config, activating=False),
                         },
                     )
                     return
@@ -4950,6 +4980,7 @@ class AutomationEngine:
                             "outdoor": outdoor,
                             "indoor": indoor,
                             "fan_device": _fan_device_label(self.config),
+                            "fan_mode_change": _fan_transition_text(self.config, activating=False),
                         },
                     )
                     return
@@ -5276,7 +5307,7 @@ class AutomationEngine:
                         "comfort_heat": _floor_for_log,
                         "source": "temp_check",
                         "fan_device": _fan_device_label(self.config),
-                        "fan_mode_change": "on→auto",
+                        "fan_mode_change": _fan_transition_text(self.config, activating=False),
                         "hvac_mode_restored": (
                             self._current_classification.hvac_mode if self._current_classification else "unknown"
                         ),
@@ -5304,7 +5335,7 @@ class AutomationEngine:
                         "comfort_heat": round(_cf_now, 1),
                         "k_passive": round(_k_passive_nvtc, 4) if _k_passive_nvtc is not None else None,
                         "source": "temp_check",
-                        "fan_mode_change": "on→auto",
+                        "fan_mode_change": _fan_transition_text(self.config, activating=False),
                         "fan_device": _fan_device_label(self.config),
                         "hvac_mode_restored": (
                             self._current_classification.hvac_mode if self._current_classification else "unknown"
@@ -5328,6 +5359,7 @@ class AutomationEngine:
                         "indoor": current_temp,
                         "source": "temp_check",
                         "fan_device": _fan_device_label(self.config),
+                        "fan_mode_change": _fan_transition_text(self.config, activating=False),
                     }
                     _set_outdoor_exit_time = True
 
@@ -5611,7 +5643,12 @@ class AutomationEngine:
                 reason=f"nat vent exit (fast loop): {stop_reason}",
                 set_outdoor_exit_time=True,
                 event_type="nat_vent_outdoor_rise_exit",
-                event_payload={"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
+                event_payload={
+                    "outdoor": outdoor,
+                    "indoor": indoor,
+                    "fan_device": _fan_device_label(self.config),
+                    "fan_mode_change": _fan_transition_text(self.config, activating=False),
+                },
             )
             return
 
@@ -5648,6 +5685,7 @@ class AutomationEngine:
                     "outdoor": outdoor,
                     "indoor": indoor,
                     "fan_device": _fan_device_label(self.config),
+                    "fan_mode_change": _fan_transition_text(self.config, activating=False),
                 }
             else:
                 _event_type = "fan_deactivated"
@@ -5710,7 +5748,7 @@ class AutomationEngine:
             _event_payload: dict[str, Any] = {
                 "indoor_temp": indoor,
                 "comfort_heat": vent_floor_ftc,
-                "fan_mode_change": "on→auto",
+                "fan_mode_change": _fan_transition_text(self.config, activating=False),
                 "fan_device": _fan_device_label(self.config),
                 "hvac_mode_restored": (
                     self._current_classification.hvac_mode if self._current_classification else "unknown"

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.58] — 2026-09-20
+
+- Fix #955: a whole-house-fan cycle-off during natural ventilation no longer briefly shows as an external/untracked fan running-then-stopping in the Activity Report.
+
 ## [0.7.57] — 2026-09-21
 
 - Fix #952: the whole-house fan dashboard status no longer flickers between "active" and "active (unconfirmed)" during normal nat-vent cycling, and the Activity Report no longer logs spurious repeat "fan activated" entries for one continuous nat-vent session.

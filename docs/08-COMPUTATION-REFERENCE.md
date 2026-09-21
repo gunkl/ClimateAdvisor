@@ -2207,6 +2207,14 @@ Called from three sites so no WHF-activation path can bypass it:
 2. **`_thermo_backstop_task()`** — the existing 5-minute thermostatic timer, as a backstop for any missed event (worst case).
 3. **`_reconcile_fan_on_startup_locked()`**'s RF-remote-timer restart re-arm branch — checks the `any_sensor_open` parameter it already receives (previously ignored) before re-arming an override across a restart.
 
+#### I. Nat-Vent Mid-Session Cycle-Off Missing the OFF-Direction Guard (Issue #955)
+
+Occupant impact: a legitimate whole-house-fan cycle-off *within* an ongoing nat-vent session (holding indoor temp inside its on/off band — see §C) could briefly show as a fabricated "Fan running (external)" immediately followed by "Fan stopped (external)" in the Activity Report, moments after CA's own `nat_vent_cycling_off` action.
+
+§F (Issue #510) gave `_compute_fan_status()`'s/`_compute_whf_status()`'s `_natural_vent_active` branch a ground-truth physical-state check, returning `"running (untracked)"` unconditionally whenever physical reads on — built to catch a genuinely *stale* session flag, but with no way to distinguish that from "flag correctly still True, mid-cycle-off, physical hasn't caught up to CA's own very recent command yet." §G (Issue #571) added the OFF-direction recency guard for the *sibling* ground-truth-fallback branch (the one that only runs once `_natural_vent_active` is already `False`, i.e. a full session exit) but never extended it to this still-mid-session branch, since a mid-session cycle-off doesn't clear `_natural_vent_active` at all.
+
+**Fix:** `fan_status.py::resolve_untracked_fan_status()` gained an `idle_status` parameter (default `"inactive"`, unchanged for §G's original four call sites) so a caller whose settled state isn't literally `"inactive"` can supply its own. Both nat-vent branches now route through it with `idle_status="nat-vent (session active, fan idle)"`, so a physical reading that hasn't caught up within `_is_recent_fan_command(threshold_seconds=30.0)`'s window settles back to the idle nat-vent state instead of the untracked-fan state. §F's diagnostic `INFO` log ("nat-vent session flag stale but physical state confirms running") is preserved, now firing only when the result is genuinely `"running (untracked)"` — i.e. only for the stale-flag case §F was written for, not during this new grace window.
+
 #### E. Manual Override = Timed, Not Indefinite
 
 With (A) restart clearing `_fan_override_active` and (B) coalesce reconciling the physical state, every post-restart fan-on that CA did not command is fresh — detected as a new manual override by `_async_fan_entity_changed()` or the `fan_mode` block of `_async_thermostat_changed()`, and reclaimed when the grace timer expires. There is no path from a user action to a permanent, unreclaimed override.

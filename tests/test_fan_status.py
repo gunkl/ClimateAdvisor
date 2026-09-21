@@ -11,6 +11,7 @@ from __future__ import annotations
 from custom_components.climate_advisor.fan_status import (
     FAN_STATUS_ACTIVE_VALUES,
     is_ca_fan_running,
+    resolve_untracked_fan_status,
 )
 
 # All seven documented fan-status values (CLAUDE.md "Fan Status Values" table).
@@ -55,3 +56,26 @@ class TestIsCaFanRunning:
         membership testing."""
         for status in _ALL_FAN_STATUS_VALUES:
             assert (status in FAN_STATUS_ACTIVE_VALUES) == is_ca_fan_running(status)
+
+
+class TestResolveUntrackedFanStatus:
+    """Tests for resolve_untracked_fan_status() (Issue #571, widened by #955)."""
+
+    def test_recent_command_defaults_to_inactive(self):
+        assert resolve_untracked_fan_status(recent_fan_command=True) == "inactive"
+
+    def test_not_recent_returns_running_untracked(self):
+        assert resolve_untracked_fan_status(recent_fan_command=False) == "running (untracked)"
+
+    def test_recent_command_with_custom_idle_status(self):
+        """Issue #955: a caller whose settled state isn't literally 'inactive' — e.g. a
+        nat-vent session mid-cycle-off — can supply its own correct fallback."""
+        assert (
+            resolve_untracked_fan_status(recent_fan_command=True, idle_status="nat-vent (session active, fan idle)")
+            == "nat-vent (session active, fan idle)"
+        )
+
+    def test_not_recent_ignores_idle_status(self):
+        """idle_status only applies within the recency window — outside it, the
+        genuinely-untracked value always wins regardless of what idle_status is."""
+        assert resolve_untracked_fan_status(recent_fan_command=False, idle_status="anything") == "running (untracked)"

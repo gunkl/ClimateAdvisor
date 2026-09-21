@@ -21,6 +21,7 @@ from custom_components.climate_advisor.const import (
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_EMAIL_NOTIFY,
+    CONF_FAN_MODE,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_OVERRIDE_CONFIRM_PERIOD,
@@ -29,6 +30,7 @@ from custom_components.climate_advisor.const import (
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    FAN_MODE_WHOLE_HOUSE,
     OCCUPANCY_AWAY,
     OCCUPANCY_VACATION,
 )
@@ -1180,6 +1182,11 @@ class TestSensorOpenedEventPayloadNatVent:
     def test_sensor_opened_nat_vent_includes_hvac_and_fan_mode(self):
         """sensor_opened with nat_vent result → event has hvac_mode_change and fan_mode_change."""
         engine = self._make_engine_for_nat_vent(outdoor_temp=65.0, indoor_temp=72.0)
+        # Issue #957: fan_mode_change is now derived from the configured fan mode
+        # (_fan_transition_text()) rather than a hardcoded "auto→on" -- set a realistic
+        # WHF config so this test exercises the real-world case (a WHF-mode install)
+        # instead of the degenerate "no fan configured" default.
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
 
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
@@ -1196,7 +1203,9 @@ class TestSensorOpenedEventPayloadNatVent:
         # Issue #249 P3: nat-vent no longer turns HVAC off — the comfort band stays armed and only
         # the fan turns on (the compressor self-arbitrates with the open window). Was "→off".
         assert payload["hvac_mode_change"].endswith("→band-armed")
-        assert payload["fan_mode_change"] == "auto→on"
+        # Issue #957: a WHF has no "auto" state -- it's a binary on/off relay. Was "auto→on"
+        # (HVAC-thermostat-fan phrasing, wrong for a WHF-mode install).
+        assert payload["fan_mode_change"] == "WHF: off->on"
 
     def test_sensor_opened_paused_result_has_hvac_mode_change(self):
         """sensor_opened with paused result → event has hvac_mode_change field."""

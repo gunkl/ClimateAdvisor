@@ -1900,6 +1900,26 @@ def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
     return label, ""
 
 
+def _fan_transition_fallback(fan_device: str, *, activating: bool) -> str:
+    """Fallback fan-transition text for a payload that lacks `fan_mode_change`.
+
+    Issue #957: mirrors `automation.py::_fan_transition_text()` -- a whole-house fan has
+    no "auto" state, only a binary on/off relay; "auto" is only correct for the HVAC
+    thermostat's own fan mode. Kept as a small, `fan_device`-string-only helper (rather
+    than threading full config into every renderer) since `fan_device` (from
+    `automation.py::_fan_device_label()`) is already present on nearly every payload.
+    """
+    whf_clause = "WHF: off->on" if activating else "WHF: on->off"
+    hvac_fan_clause = "HVAC fan: auto->on" if activating else "HVAC fan: on->auto"
+    if fan_device == "whf":
+        return whf_clause
+    if fan_device == "hvac_fan":
+        return hvac_fan_clause
+    if fan_device == "both":
+        return f"{whf_clause}, {hvac_fan_clause}"
+    return f"{fan_device}: off->on" if activating else f"{fan_device}: on->off"
+
+
 def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor_temp")
     outdoor = p.get("outdoor_temp")
@@ -1911,11 +1931,12 @@ def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
             label = (
                 f"Nat-vent fan on -- indoor {format_temp(float(indoor), unit)} >= {format_temp(float(on_thr), unit)}"
             )
-    # Issue #936: fan_mode_change, when present, overrides the default "device:
-    # auto->on" claim -- set by the nat-vent cycling call site to a "deferred (...)"
-    # description when the Issue #641 rate limiter blocked the toggle, mirroring
-    # _render_fan_activated()'s same override pattern.
-    settings = p.get("fan_mode_change") or f"{fan_device}: auto->on"
+    # Issue #936: fan_mode_change, when present, overrides the fallback claim -- set by
+    # the nat-vent cycling call site to a "deferred (...)" description when the Issue
+    # #641 rate limiter blocked the toggle, mirroring _render_fan_activated()'s same
+    # override pattern. Issue #957: fallback corrected to not claim an "auto" state a
+    # whole-house fan doesn't have.
+    settings = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=True)
     if outdoor is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings = f"{settings}, outdoor {format_temp(float(outdoor), unit)}"
@@ -1932,21 +1953,23 @@ def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[str, str]:
             label = (
                 f"Nat-vent fan off -- indoor {format_temp(float(indoor), unit)} <= {format_temp(float(off_thr), unit)}"
             )
-    # Issue #936: fan_mode_change, when present, overrides the default "device:
-    # on->auto" claim -- mirrors _render_nat_vent_fan_on()/_render_fan_deactivated()'s
-    # same override pattern for a deferred (rate-limited) fan-stop command.
-    return label, p.get("fan_mode_change") or f"{fan_device}: on->auto"
+    # Issue #936: fan_mode_change, when present, overrides the fallback claim -- mirrors
+    # _render_nat_vent_fan_on()/_render_fan_deactivated()'s same override pattern for a
+    # deferred (rate-limited) fan-stop command. Issue #957: fallback corrected to not
+    # claim an "auto" state a whole-house fan doesn't have.
+    return label, p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=False)
 
 
 def _render_fan_activated(p: dict, unit: str) -> tuple[str, str]:
     reason = str(p.get("reason", "")).strip()
     fan_device = p.get("fan_device", "fan")
     label = f"Fan activated -- {reason}" if reason else "Fan activated"
-    # Issue #649: fan_mode_change, when present, overrides the default "device: off->on"
-    # claim -- set by _exit_nat_vent() to a "deferred (...)" description when the Issue
-    # #641 rate limiter blocked the toggle, so this row doesn't claim a state transition
-    # that hasn't happened yet.
-    settings = p.get("fan_mode_change") or f"{fan_device}: off->on"
+    # Issue #649: fan_mode_change, when present, overrides the fallback claim -- set by
+    # _exit_nat_vent() to a "deferred (...)" description when the Issue #641 rate limiter
+    # blocked the toggle, so this row doesn't claim a state transition that hasn't
+    # happened yet. Issue #957: fallback corrected to not claim an "auto" state a
+    # whole-house fan doesn't have.
+    settings = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=True)
     return label, settings
 
 
@@ -1954,7 +1977,7 @@ def _render_fan_deactivated(p: dict, unit: str) -> tuple[str, str]:
     reason = str(p.get("reason", "")).strip()
     fan_device = p.get("fan_device", "fan")
     label = f"Fan deactivated -- {reason}" if reason else "Fan deactivated"
-    settings = p.get("fan_mode_change") or f"{fan_device}: on->off"
+    settings = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=False)
     return label, settings
 
 
@@ -2086,10 +2109,14 @@ def _render_nat_vent_outdoor_rise_exit(p: dict, unit: str) -> tuple[str, str]:
                 f"Nat-vent exit -- outdoor {format_temp(float(outdoor), unit)}"
                 f" > indoor {format_temp(float(indoor), unit)}"
             )
-    # Issue #649: fan_mode_change is only present when _exit_nat_vent() overrode it to a
-    # "deferred (...)" description (the Issue #641 rate limiter blocked the toggle).
-    fan_change = p.get("fan_mode_change", "")
-    return label, f"fan: {fan_change}" if fan_change else ""
+    # Issue #957: fold the fan transition into the label itself (not only settings_text)
+    # so it survives into the session-grouped Activity Summary input, which reads only
+    # the label (`ev_text`), not settings_text. `fan_mode_change` may instead carry a
+    # "deferred (...)" description (Issue #649) when the Issue #641 rate limiter blocked
+    # the toggle -- always show whatever it says, since this event always ends the fan.
+    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
+    label = f"{label} ({fan_change})"
+    return label, ""
 
 
 def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[str, str]:
@@ -2101,14 +2128,14 @@ def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[str, str]:
             label = (
                 f"Nat-vent exit -- indoor {format_temp(float(indoor), unit)} <= floor {format_temp(float(heat), unit)}"
             )
-    parts = []
+    # Issue #957: fold the fan transition into the label itself so it survives into the
+    # session-grouped Activity Summary input (which reads only the label, not
+    # settings_text) -- this event always ends the fan.
+    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
+    label = f"{label} ({fan_change})"
     hvac_restored = p.get("hvac_mode_restored", "")
-    fan_change = p.get("fan_mode_change", "")
-    if hvac_restored and hvac_restored not in ("unknown", ""):
-        parts.append(f"mode: off->{hvac_restored}")
-    if fan_change:
-        parts.append(f"fan: {fan_change}")
-    return label, ", ".join(parts)
+    settings = f"mode: off->{hvac_restored}" if hvac_restored and hvac_restored not in ("unknown", "") else ""
+    return label, settings
 
 
 def _render_nat_vent_manual_override_exit(p: dict, unit: str) -> tuple[str, str]:
@@ -2120,7 +2147,12 @@ def _render_nat_vent_manual_override_exit(p: dict, unit: str) -> tuple[str, str]
         if indoor is not None:
             with contextlib.suppress(TypeError, ValueError):
                 label += f" (indoor {format_temp(float(indoor), unit)})"
-    return label, "fan: on->auto"
+    # Issue #957: this event always ends the fan -- fold the (now correctly-formatted)
+    # transition into the label so it's visible even in the session-grouped summary
+    # input, instead of the previous hardcoded-wrong "fan: on->auto" (a whole-house fan
+    # has no "auto" state).
+    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
+    return f"{label} ({fan_change})", ""
 
 
 def _render_nat_vent_reconcile_exit(p: dict, unit: str) -> tuple[str, str]:
@@ -2139,8 +2171,10 @@ def _render_nat_vent_away_ceiling_exit(p: dict, unit: str) -> tuple[str, str]:
                 f"Nat-vent exit (away) -- indoor {format_temp(float(indoor), unit)}"
                 f" >= ceiling {format_temp(float(cool), unit)}"
             )
-    fan_change = p.get("fan_mode_change", "")
-    return label, f"fan: {fan_change}" if fan_change else ""
+    # Issue #957: fold the fan transition into the label itself (see the matching comment
+    # in _render_nat_vent_outdoor_rise_exit()) -- this event always ends the fan.
+    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
+    return f"{label} ({fan_change})", ""
 
 
 def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]:
@@ -2149,6 +2183,10 @@ def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]
     if ttf is not None:
         with contextlib.suppress(TypeError, ValueError):
             label = f"Nat-vent proactive exit -- floor in {float(ttf):.2f} hr"
+    # Issue #957: fold the fan transition into the label itself (see the matching
+    # comment in _render_nat_vent_outdoor_rise_exit()) -- this event always ends the fan.
+    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
+    label = f"{label} ({fan_change})"
     parts = []
     indoor = p.get("indoor_temp")
     heat = p.get("comfort_heat")
@@ -2160,11 +2198,8 @@ def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]
         with contextlib.suppress(TypeError, ValueError):
             parts.append(f"k_passive={float(k_passive):.4f}")
     hvac_restored = p.get("hvac_mode_restored", "")
-    fan_change = p.get("fan_mode_change", "")
     if hvac_restored and hvac_restored not in ("unknown", ""):
         parts.append(f"mode: off->{hvac_restored}")
-    if fan_change:
-        parts.append(f"fan: {fan_change}")
     return label, ", ".join(parts)
 
 
@@ -2312,10 +2347,12 @@ def _render_sensor_all_closed(p: dict, unit: str) -> tuple[str, str]:
     was_nat_vent = p.get("was_nat_vent", False)
     fan_device = p.get("fan_device", "fan")
     if was_nat_vent:
-        # Issue #504: the fan really did turn off here (via _exit_nat_vent(), whose own
-        # fan_deactivated event is intentionally suppressed per Issue #411) — show that
-        # transition in Settings instead of leaving it blank.
-        return "All sensors closed -- ending nat-vent", f"{fan_device}: on->off"
+        # Issue #504 / #957: the fan really did turn off here (via _exit_nat_vent(),
+        # whose own fan_deactivated event is intentionally suppressed per Issue #411) —
+        # fold the transition into the label so it's visible even in the session-grouped
+        # summary input, not just settings_text.
+        fan_change = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=False)
+        return f"All sensors closed -- ending nat-vent ({fan_change})", ""
     if was_paused:
         return "All sensors closed -- resuming HVAC", ""
     return "All sensors closed", ""
@@ -2842,7 +2879,19 @@ def _render_timeline_events(
             _fan_ca_owns = False
         elif event_type == "fan_cancel":
             _fan_user_owns = False
-        elif event_type in ("nat_vent_fan_off", "fan_deactivated"):
+        elif event_type in (
+            "nat_vent_fan_off",
+            "fan_deactivated",
+            # Issue #957 mirror-check: these four are also confirmed real fan-off exits
+            # (routed through _exit_nat_vent() -> _deactivate_fan()) — the tracker
+            # previously only cleared on the two types above, leaving it stale (still
+            # True) after any of these fired.
+            "nat_vent_comfort_floor_exit",
+            "nat_vent_predicted_floor_exit",
+            "nat_vent_outdoor_rise_exit",
+            "nat_vent_away_ceiling_exit",
+            "nat_vent_manual_override_exit",
+        ):
             _fan_ca_owns = False
 
         renderer = EVENT_RENDERERS.get(event_type)
@@ -3401,7 +3450,25 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
                 if _own_user:
                     _own_user = False
                     fan_ownership_lines.append(f"  {_ts_str}: Fan ownership cleared (fan_cancel)")
-            elif _etype in ("nat_vent_fan_off", "fan_deactivated") and _own_ca:
+            elif (
+                _etype
+                in (
+                    "nat_vent_fan_off",
+                    "fan_deactivated",
+                    # Issue #957 mirror-check: this loop duplicates
+                    # _render_timeline_events()'s fan-ownership tracker (a separate
+                    # "FAN OWNERSHIP HISTORY" context section fed directly to the AI
+                    # investigator, not routed through EVENT_RENDERERS) and had the
+                    # identical staleness gap — these four are also confirmed real
+                    # fan-off exits.
+                    "nat_vent_comfort_floor_exit",
+                    "nat_vent_predicted_floor_exit",
+                    "nat_vent_outdoor_rise_exit",
+                    "nat_vent_away_ceiling_exit",
+                    "nat_vent_manual_override_exit",
+                )
+                and _own_ca
+            ):
                 _own_ca = False
                 fan_ownership_lines.append(f"  {_ts_str}: CA released fan ({_etype})")
 

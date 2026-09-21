@@ -3394,6 +3394,86 @@ class TestReconcileFanOnStartup:
         assert payload.get("reason"), "fan_activated event must carry a non-empty reason"
         assert "fan_device" in payload
 
+    def test_adopt_on_deferred_when_recent_fan_command(self):
+        """Issue #952: nat_vent_temperature_check() can call _deactivate_fan() and the
+        resulting state-change listener can re-invoke reconcile_fan_on_startup() moments
+        later, in the same tick, before a dual-entity WHF's physical off has propagated
+        back to HA — thermostat_fan_running still reads True. Without this guard the
+        adopt-on branch would wrongly re-arm _fan_active=True, undoing CA's own
+        just-issued deactivation and causing the WHF status to flap
+        active/active(unconfirmed). When a fan command was issued in the last 30s,
+        reconcile must defer instead of adopting."""
+        engine = self._engine()
+        engine._is_recent_fan_command_callback = MagicMock(return_value=True)
+        engine._emit_event_callback = MagicMock()
+        engine._record_action = MagicMock()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+
+        engine._deactivate_fan.assert_not_awaited()
+        engine._record_action.assert_not_called()
+        engine._emit_event_callback.assert_not_called()
+        assert engine._fan_active is False
+        assert engine._natural_vent_active is False
+
+    def test_adopt_on_proceeds_when_no_recent_fan_command(self):
+        """Companion to the #952 guard: when no fan command was issued recently, a
+        thermostat_fan_running=True read is genuine ground truth and adopt-on must
+        still proceed exactly as before — the guard must not become a blanket bypass
+        of the adopt-on branch."""
+        engine = self._engine()
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+
+        assert engine._fan_active is True
+        assert engine._natural_vent_active is True
+        engine._deactivate_fan.assert_not_awaited()
+
+    def test_turn_off_deferred_when_recent_fan_command(self):
+        """Issue #952 mirror: the turn-off branch (fan running but not nat-vent-eligible)
+        reads the exact same possibly-stale thermostat_fan_running=True value as the
+        adopt-on branch, and must defer identically — otherwise a stale read here would
+        redundantly re-issue a turn-off command CA already just sent."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=True)
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+            )
+        )
+
+        engine._deactivate_fan.assert_not_awaited()
+        engine._emit_event_callback.assert_not_called()
+
+    def test_turn_off_proceeds_when_no_recent_fan_command(self):
+        """Companion to the #952 guard: when no fan command was issued recently, the
+        turn-off branch must still proceed exactly as before."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+            )
+        )
+
+        engine._deactivate_fan.assert_awaited()
+        assert engine._natural_vent_active is False
+
     def test_turn_off_when_not_eligible_hvac(self):
         """Fan running, sensors closed (not nat-vent eligible), HVAC-fan archetype → turn off."""
         engine = self._engine(fan_mode=FAN_MODE_HVAC)

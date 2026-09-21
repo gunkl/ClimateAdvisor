@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.57] — 2026-09-21
+
+- Fix #952: the whole-house fan dashboard status no longer flickers between "active" and "active (unconfirmed)" during normal nat-vent cycling, and the Activity Report no longer logs spurious repeat "fan activated" entries for one continuous nat-vent session.
+
 ## [0.7.56] — 2026-09-20
 
 - Fix #949: the Activity Report now correctly shows the whole-house fan turning off, not just on; a briefly-unavailable bedroom sensor no longer logs identically to a real persistent outage.

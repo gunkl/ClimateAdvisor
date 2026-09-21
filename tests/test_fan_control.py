@@ -4336,6 +4336,38 @@ class TestDualFanStatus:
         mock_logger.info.assert_called_once()
         assert "nat-vent session flag stale" in mock_logger.info.call_args[0][0]
 
+    def test_whf_status_nat_vent_cycling_off_recent_command_not_external(self):
+        """Issue #955 regression test: a nat-vent MID-SESSION cycle-off
+        (_natural_vent_active stays True) must not be reported as 'running
+        (untracked)' while CA's own off-command is still propagating to the
+        physical entity — mirrors the session-exit guard from #571. No INFO log
+        should fire either, since this is not a genuinely stale flag."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            natural_vent_active=True,
+            physical_state=True,
+            recent_fan_command=True,
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_whf_status()
+        assert result == "nat-vent (session active, fan idle)"
+        mock_logger.info.assert_not_called()
+
+    def test_compute_fan_status_nat_vent_cycling_off_recent_command_not_external(self):
+        """Issue #955 regression test (same scenario, _compute_fan_status variant)."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            natural_vent_active=True,
+            physical_state=True,
+            recent_fan_command=True,
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_fan_status()
+        assert result == "nat-vent (session active, fan idle)"
+        mock_logger.info.assert_not_called()
+
     def test_hvac_fan_status_nat_vent_idle(self):
         """_compute_hvac_fan_status returns 'nat-vent (session active, fan idle)' when nat-vent active, fan idle."""
         coord = _make_coordinator_for_fan_status(

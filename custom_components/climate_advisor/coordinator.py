@@ -3342,6 +3342,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # job. The ~30-min cadence here (vs. the primary direction's ~10-min 2-tick confirm)
         # is acceptable for this direction: it's an automation-ownership bookkeeping concern,
         # not a display concern (0.1a/0.1b already fix display immediately and independently).
+        #
+        # Issue #955: 0.1b's "resolve to running (untracked)" above was itself unconditional —
+        # a mid-session nat-vent cycle-off (_natural_vent_active stays True) had no OFF-direction
+        # recency guard the way the ground-truth fallback got under #571, so a very recent
+        # CA-issued cycle-off could still misread as externally-owned here for a ~30s window.
+        # Fixed by routing 0.1b's branch through the same resolve_untracked_fan_status() guard.
         # Issue #627: gate this backstop behind the startup-coalescing window, the same
         # idiom every sibling override-detection check in this file already uses (see the
         # "Startup coalescing active — suppressing X detection" log lines below). Without
@@ -9360,6 +9366,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         the physical/thermostat signal may not have caught up yet; without this guard that
         brief propagation window was misread as an externally-owned fan and force-corrected
         by the ``backstop_30min`` reconcile (see that block's comment below).
+
+        Issue #955: the nat-vent branch (0.1b) gained the identical OFF-direction guard —
+        it was left out of #571's scope even though a mid-session nat-vent cycle-off
+        (``_natural_vent_active`` stays True) hits that branch, not the ground-truth
+        fallback, and needs the same propagation grace window.
         """
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -9406,13 +9417,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #510 0.1b: nat-vent session flag can go stale (still "active" between cycles,
         # or after an external change CA hasn't reconciled) while the fan is genuinely running
         # for an unrelated reason — trust confirmed ground truth over the session flag.
+        # Issue #955: also gate this through the same OFF-direction recency guard Issue #571
+        # added to the ground-truth-fallback branch below — a mid-session nat-vent cycle-off
+        # (_natural_vent_active stays True) hits THIS branch, not that one, and a very recent
+        # CA-issued off-command needs the identical propagation grace window here too.
         if ae._natural_vent_active:
             if _physical_on() is True:
-                _LOGGER.info(
-                    "WHF nat-vent session flag stale but physical state confirms running — "
-                    "displaying running (untracked) instead of trusting the session flag"
+                _nv_status = resolve_untracked_fan_status(
+                    recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0),
+                    idle_status="nat-vent (session active, fan idle)",
                 )
-                return "running (untracked)"
+                if _nv_status == "running (untracked)":
+                    _LOGGER.info(
+                        "WHF nat-vent session flag stale but physical state confirms running — "
+                        "displaying running (untracked) instead of trusting the session flag"
+                    )
+                return _nv_status
             return "nat-vent (session active, fan idle)"
         # WHF ground-truth fallback: reads fan_state_entity (Type 2) or fan_entity (Type 1).
         # Catches post-restart and externally-run WHF when CA's internal flags are all clear.
@@ -9468,12 +9488,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else:
                 status = "active"
         elif ae._natural_vent_active:
+            # Issue #955: same OFF-direction recency guard as _compute_fan_status()'s
+            # mirror branch above — a mid-session nat-vent cycle-off stays in this
+            # branch (not the ground-truth fallback below) and needs the identical
+            # propagation grace window.
             if physical_on is True:
-                _LOGGER.info(
-                    "WHF nat-vent session flag stale but physical state confirms running — "
-                    "displaying running (untracked) instead of trusting the session flag"
+                status = resolve_untracked_fan_status(
+                    recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0),
+                    idle_status="nat-vent (session active, fan idle)",
                 )
-                status = "running (untracked)"
+                if status == "running (untracked)":
+                    _LOGGER.info(
+                        "WHF nat-vent session flag stale but physical state confirms running — "
+                        "displaying running (untracked) instead of trusting the session flag"
+                    )
             else:
                 status = "nat-vent (session active, fan idle)"
         elif physical_on is True:

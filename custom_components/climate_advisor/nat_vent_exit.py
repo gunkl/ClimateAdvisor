@@ -59,8 +59,6 @@ class NatVentExitDecision:
 
     reason: NatVentExitReason
     vent_floor: float | None = None
-    time_to_floor_hr: float | None = None
-    comfort_heat_now: float | None = None
 
 
 @dataclass(frozen=True)
@@ -78,8 +76,6 @@ class NatVentExitInputs:
       comfort_cool           -> config comfort_cool
       nat_vent_delta         -> config CONF_NATURAL_VENT_DELTA
       occupancy_mode         -> self._occupancy_mode
-      thermal_confidence     -> (self._thermal_model or {}).get("confidence", "none")
-      k_passive              -> (self._thermal_model or {}).get("k_passive")
       manual_override_active -> self._manual_override_active (Issue #714)
       manual_override_mode   -> self._manual_override_mode (Issue #714)
     """
@@ -93,8 +89,6 @@ class NatVentExitInputs:
     comfort_cool: float
     nat_vent_delta: float
     occupancy_mode: str
-    thermal_confidence: str
-    k_passive: float | None
     manual_override_active: bool
     manual_override_mode: str | None
 

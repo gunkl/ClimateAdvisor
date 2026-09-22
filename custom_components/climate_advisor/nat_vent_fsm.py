@@ -150,8 +150,6 @@ class NatVentFsmInputs:
     fan_mode: str
     aggressive_savings: bool
     occupancy_mode: str
-    thermal_confidence: str
-    k_passive: float | None
     outdoor_today_peak: float | None
     outdoor_sample_count: int
     peak_decline_margin: float
@@ -230,8 +228,6 @@ def _exit_inputs(inputs: NatVentFsmInputs) -> NatVentExitInputs:
         comfort_cool=inputs.comfort_cool,
         nat_vent_delta=inputs.nat_vent_delta,
         occupancy_mode=inputs.occupancy_mode,
-        thermal_confidence=inputs.thermal_confidence,
-        k_passive=inputs.k_passive,
         manual_override_active=inputs.manual_override_active,
         manual_override_mode=inputs.manual_override_mode,
     )

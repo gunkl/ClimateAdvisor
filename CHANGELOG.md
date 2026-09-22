@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.61] — 2026-09-21
+
+- Internal: removed dead exit-chain fields left over from Issue #959's PROACTIVE_FLOOR removal (no occupant-facing behavior change) and corrected a misleading code comment. (#960)
+
 ## [0.7.60] — 2026-09-21
 
 - Fix #959: Whole-house-fan natural-ventilation sessions overnight now cycle near their intended target temperature instead of settling at the bare comfort floor — removed a predictive mechanism that was ending sessions early on a forecast, when the existing reactive cycling and safety checks already handle it correctly.

@@ -31,8 +31,6 @@ def _inputs(
     comfort_cool: float = 76.0,
     nat_vent_delta: float = 3.0,
     occupancy_mode: str = "home",
-    thermal_confidence: str = "none",
-    k_passive: float | None = None,
     manual_override_active: bool = False,
     manual_override_mode: str | None = None,
 ) -> NatVentExitInputs:
@@ -46,8 +44,6 @@ def _inputs(
         comfort_cool=comfort_cool,
         nat_vent_delta=nat_vent_delta,
         occupancy_mode=occupancy_mode,
-        thermal_confidence=thermal_confidence,
-        k_passive=k_passive,
         manual_override_active=manual_override_active,
         manual_override_mode=manual_override_mode,
     )

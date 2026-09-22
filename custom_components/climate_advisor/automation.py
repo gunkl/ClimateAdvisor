@@ -4679,8 +4679,6 @@ class AutomationEngine:
                         comfort_cool,
                     )
 
-                thermal = self._thermal_model or {}
-
                 # Issue #757 Phase 6 Step 5: the soft-start escalation check (skipped
                 # above) is computed here via nat_vent_fsm.transition() instead of the
                 # hand-duplicated inline copy (now removed). The exit-chain decision
@@ -4721,8 +4719,6 @@ class AutomationEngine:
                         comfort_cool=comfort_cool,
                         nat_vent_delta=nat_vent_delta,
                         occupancy_mode=self._occupancy_mode,
-                        thermal_confidence=thermal.get("confidence", "none"),
-                        k_passive=thermal.get("k_passive"),
                         manual_override_active=self._manual_override_active,
                         manual_override_mode=self._manual_override_mode,
                     )
@@ -5155,7 +5151,6 @@ class AutomationEngine:
             # waiting up to 30 min for the slow loop to catch it. The former legacy branch
             # (comfort-floor only, via resolve_hard_exit_floor()/_hard_floor) has been
             # removed.
-            thermal_nvtc = self._thermal_model or {}
             nat_vent_delta_nvtc = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             exit_decision = decide_nat_vent_exit(
                 NatVentExitInputs(
@@ -5168,8 +5163,6 @@ class AutomationEngine:
                     comfort_cool=comfort_cool,
                     nat_vent_delta=nat_vent_delta_nvtc,
                     occupancy_mode=self._occupancy_mode,
-                    thermal_confidence=thermal_nvtc.get("confidence", "none"),
-                    k_passive=thermal_nvtc.get("k_passive"),
                     manual_override_active=self._manual_override_active,
                     manual_override_mode=self._manual_override_mode,
                 )
@@ -7775,9 +7768,10 @@ class AutomationEngine:
             # consulting the shared family resolver. Since nat-vent only ever starts on
             # a cooling day, this almost always restores "cool" — reproducing the
             # original comfort-floor-defense bug through nat-vent's own most common
-            # exit paths (OUTDOOR_RISE/CEILING_THRESHOLD route through this method, not
-            # through check_natural_vent_conditions()'s separate COMFORT_FLOOR branch,
-            # which already gets this right via its own follow-up
+            # exit paths (OUTDOOR_RISE/CEILING_THRESHOLD route through this method, and so
+            # does nat_vent_temperature_check()'s fast-path COMFORT_FLOOR exit — only
+            # check_natural_vent_conditions()'s own slow-loop COMFORT_FLOOR branch avoids
+            # this, since it already gets this right via its own follow-up
             # _set_temperature_for_mode() call). Mirrors the exact pattern already used
             # at the door/window-all-closed restore site and resume_from_pause():
             # restore the old mode first
@@ -7947,7 +7941,6 @@ class AutomationEngine:
         from .nat_vent_fsm import NatVentFsmInputs
 
         comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-        thermal_model = self._thermal_model or {}
         _configured_hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         _hysteresis = hysteresis if hysteresis is not None else _configured_hysteresis
         _paused_by_door = paused_by_door if paused_by_door is not None else bool(self._paused_by_door)
@@ -7985,8 +7978,6 @@ class AutomationEngine:
             fan_mode=str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             occupancy_mode=self._occupancy_mode,
-            thermal_confidence=thermal_model.get("confidence", "none"),
-            k_passive=thermal_model.get("k_passive"),
             outdoor_today_peak=self._outdoor_temp_today_peak,
             outdoor_sample_count=self._outdoor_temp_today_sample_count,
             peak_decline_margin=PEAK_DECLINE_MARGIN_F,

@@ -12394,8 +12394,6 @@ def _walk_forward_regime(
                     comfort_cool=comfort_cool,
                     nat_vent_delta=nat_vent_delta,
                     occupancy_mode=occupancy_mode,
-                    thermal_confidence=confidence_k_passive,
-                    k_passive=k_passive,
                     manual_override_active=manual_override_active,
                     manual_override_mode=manual_override_mode,
                 )

@@ -173,7 +173,6 @@ _TIMING_AUTO_EVENT_TYPES: frozenset[str] = frozenset(
         "nat_vent_ended",
         "nat_vent_ceiling_escalation",
         "nat_vent_comfort_floor_exit",
-        "nat_vent_predicted_floor_exit",
         "nat_vent_outdoor_rise_exit",
         "nat_vent_away_ceiling_exit",
         "ceiling_guard_fired",
@@ -2177,32 +2176,6 @@ def _render_nat_vent_away_ceiling_exit(p: dict, unit: str) -> tuple[str, str]:
     return f"{label} ({fan_change})", ""
 
 
-def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]:
-    ttf = p.get("time_to_floor_hr")
-    label = "Nat-vent proactive exit -- floor predicted"
-    if ttf is not None:
-        with contextlib.suppress(TypeError, ValueError):
-            label = f"Nat-vent proactive exit -- floor in {float(ttf):.2f} hr"
-    # Issue #957: fold the fan transition into the label itself (see the matching
-    # comment in _render_nat_vent_outdoor_rise_exit()) -- this event always ends the fan.
-    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
-    label = f"{label} ({fan_change})"
-    parts = []
-    indoor = p.get("indoor_temp")
-    heat = p.get("comfort_heat")
-    if indoor is not None and heat is not None:
-        with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"{format_temp(float(indoor), unit)} -> floor {format_temp(float(heat), unit)}")
-    k_passive = p.get("k_passive")
-    if k_passive is not None:
-        with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"k_passive={float(k_passive):.4f}")
-    hvac_restored = p.get("hvac_mode_restored", "")
-    if hvac_restored and hvac_restored not in ("unknown", ""):
-        parts.append(f"mode: off->{hvac_restored}")
-    return label, ", ".join(parts)
-
-
 def _render_nat_vent_soft_start_entered(p: dict, unit: str) -> tuple[str, str]:
     outdoor = p.get("outdoor")
     indoor = p.get("indoor")
@@ -2272,8 +2245,8 @@ def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
             parts.append(f"k_cool={float(k_cool):.3f}")
     # Issue #936: fan_mode_change, when present, notes a deferred (rate-limited)
     # fan-stop command instead of silently implying the "mode: off->cool" switch
-    # happened cleanly -- mirrors _render_nat_vent_away_ceiling_exit()'s/
-    # _render_nat_vent_predicted_floor_exit()'s same fan_mode_change read.
+    # happened cleanly -- mirrors _render_nat_vent_away_ceiling_exit()'s
+    # same fan_mode_change read.
     fan_change = p.get("fan_mode_change", "")
     if fan_change:
         parts.append(f"fan: {fan_change}")
@@ -2691,7 +2664,6 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
     "nat_vent_soft_start_entered": _render_nat_vent_soft_start_entered,
     "nat_vent_reactivated_while_paused": _render_nat_vent_reactivated_while_paused,
-    "nat_vent_predicted_floor_exit": _render_nat_vent_predicted_floor_exit,
     "nat_vent_ceiling_escalation": _render_nat_vent_ceiling_escalation,
     "nat_vent_ac_assist_armed": _render_nat_vent_ac_assist_armed,
     "nat_vent_sleep_ceiling_reached": _render_nat_vent_sleep_ceiling_reached,
@@ -2887,7 +2859,6 @@ def _render_timeline_events(
             # previously only cleared on the two types above, leaving it stale (still
             # True) after any of these fired.
             "nat_vent_comfort_floor_exit",
-            "nat_vent_predicted_floor_exit",
             "nat_vent_outdoor_rise_exit",
             "nat_vent_away_ceiling_exit",
             "nat_vent_manual_override_exit",
@@ -3462,7 +3433,6 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
                     # identical staleness gap — these four are also confirmed real
                     # fan-off exits.
                     "nat_vent_comfort_floor_exit",
-                    "nat_vent_predicted_floor_exit",
                     "nat_vent_outdoor_rise_exit",
                     "nat_vent_away_ceiling_exit",
                     "nat_vent_manual_override_exit",

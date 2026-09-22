@@ -26,10 +26,11 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
-    CONF_SLEEP_HEAT,
     FAN_MODE_WHOLE_HOUSE,
     MIN_VIABLE_NAT_VENT_HOURS,
     NAT_VENT_REACTIVATION_LOCKOUT_S,
+    OCCUPANCY_AWAY,
+    OCCUPANCY_HOME,
 )
 from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason
 
@@ -399,6 +400,37 @@ class TestNatVentOutdoorRiseExit:
         # Directional exit event, not threshold exit
         rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
         assert len(rise_events) == 1
+
+    def test_outdoor_rise_exit_never_pairs_active_true_with_paused_true(self):
+        """Chained consistency check (Issue #411, originally proven via the now-removed
+        PROACTIVE_FLOOR exit reason — Issue #959 retargets it at OUTDOOR_RISE since the
+        invariant it protects, "never both _natural_vent_active and _paused_by_door True
+        at once", is exit-reason-agnostic): after an outdoor-rise exit with the sensor
+        open, the engine must never be left in the contradictory state where
+        _natural_vent_active and _paused_by_door are both True — that pairing is exactly
+        the internally-inconsistent narrative #411 reported (one mechanism says "still
+        venting", the other says "paused"). A single choke point (_exit_nat_vent) makes
+        this structurally impossible rather than a per-callsite convention.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=72.0, nat_vent_delta=3.0, indoor_f=74.0)
+        engine._natural_vent_active = True
+        engine._paused_by_door = False
+        engine._last_outdoor_temp = 74.5  # just above indoor -> outdoor-rise exit
+        engine._sensor_check_callback = lambda: True  # monitored sensor still open
+        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
+
+        _now = datetime(2026, 4, 20, 20, 0, 0)
+        _arm_sustained_exit(engine, NatVentExitReason.OUTDOOR_RISE, _now)
+        with patch(_DT_NOW_PATH, return_value=_now):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        # Never both True — and never restoring an active HVAC mode while paused.
+        assert not (engine._natural_vent_active and engine._paused_by_door)
+        assert engine._paused_by_door is True
+        assert engine._natural_vent_active is False
+        # _pre_pause_mode reflects the climate entity's state at exit time (mocked "cool"
+        # in _make_engine), not None and not silently dropped by the handoff.
+        assert engine._pre_pause_mode == "cool"
 
 
 # ---------------------------------------------------------------------------
@@ -986,233 +1018,7 @@ class TestThermalFloorImminentSkip:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 proactive floor exit — thermal model predicts imminent floor crossing
-# ---------------------------------------------------------------------------
-
-
-class TestProactiveFloorExit:
-    """Phase 2 proactive floor exit: thermal model predicts imminent floor crossing."""
-
-    def _make_active_nat_vent_engine(
-        self,
-        indoor_f: float = 71.0,
-        outdoor_f: float = 65.0,
-        k_passive: float = -0.5,
-        confidence: str = "medium",
-        comfort_heat: float = 70.0,
-    ) -> AutomationEngine:
-        engine = _make_engine(comfort_heat=comfort_heat, comfort_cool=72.0, nat_vent_delta=3.0, indoor_f=indoor_f)
-        engine._last_outdoor_temp = outdoor_f
-        engine._natural_vent_active = True
-        engine._paused_by_door = False
-        engine._fan_override_active = False
-        engine._thermal_model = {"confidence": confidence, "k_passive": k_passive}
-        engine._hourly_forecast_temps = []
-        # Issue #821: pre-arm as an already-sustained PROACTIVE_FLOOR candidate. Safe
-        # for every test using this factory, including the ones where the floor isn't
-        # actually imminent — decide_nat_vent_exit() returns NONE for those regardless
-        # of this pre-armed state, which _confirm_nat_vent_exit() then clears.
-        _arm_sustained_exit(engine, NatVentExitReason.PROACTIVE_FLOOR, datetime(2026, 4, 20, 10, 0, 0))
-        return engine
-
-    def test_proactive_exit_when_floor_imminent(self):
-        """Nat vent active, floor predicted < 1 hr -> deactivate fan, restore HVAC.
-
-        indoor=70.5, outdoor=65, k=-0.5
-        passive_rate = -0.5 * (70.5 - 65) = -2.75 F/hr
-        time_to_floor = (70.5 - 70.0) / 2.75 = 0.18 hr < 1.0 -> proactive exit
-        """
-        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
-        engine._deactivate_fan = AsyncMock()
-        events: list[tuple] = []
-        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
-
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
-            asyncio.run(engine.check_natural_vent_conditions())
-
-        assert not engine._natural_vent_active
-        assert any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
-        # The activity log's fan-deactivated reason must state the WHY with real numbers —
-        # current indoor temp and the comfort_heat threshold it's predicted to reach, not
-        # just a bare "floor in X hr" with no indication of which floor.
-        engine._deactivate_fan.assert_awaited_once()
-        reason = engine._deactivate_fan.call_args.kwargs.get("reason") or engine._deactivate_fan.call_args.args[0]
-        assert "70.5" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
-        assert "70.0" in reason, f"reason must state the comfort_heat threshold; got: {reason!r}"
-
-    def test_proactive_exit_with_sensor_open_pauses_not_restores(self):
-        """Issue #411: proactive floor exit with a monitored sensor still open must PAUSE
-        via _exit_nat_vent()'s sensor-open branch, not restore HVAC into an open window.
-
-        Before the fix, Phase 2 unconditionally called _set_hvac_mode(c.hvac_mode) /
-        _set_temperature_for_mode() regardless of sensor state — a sensor-blind restore.
-        After the fix, all four exit paths route through _exit_nat_vent(), which checks
-        _sensor_check_callback() before deciding restore-vs-pause.
-        """
-        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
-        engine._sensor_check_callback = lambda: True  # a monitored door/window is still open
-        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
-        # Real _deactivate_fan/_set_hvac_mode would issue HA service calls; let them run
-        # against the mocked hass so we can assert on the actual calls made.
-        set_hvac_mode_spy = AsyncMock(wraps=engine._set_hvac_mode)
-        engine._set_hvac_mode = set_hvac_mode_spy
-
-        events: list[tuple] = []
-        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
-
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
-            asyncio.run(engine.check_natural_vent_conditions())
-
-        assert engine._natural_vent_active is False
-        assert engine._paused_by_door is True, (
-            "sensor still open at proactive exit must pause, not restore HVAC into an open window"
-        )
-        # The classification's HVAC mode ("cool") must NOT have been sensor-blindly applied —
-        # this was the exact double-restore bug: Phase 2 used to call _set_hvac_mode(c.hvac_mode)
-        # on top of _deactivate_fan()'s own restore, regardless of sensor state.
-        set_hvac_mode_spy.assert_not_awaited()
-        assert engine._pre_pause_mode is not None, "_exit_nat_vent()'s sensor-open branch must capture _pre_pause_mode"
-
-    def test_proactive_exit_with_sensor_closed_deactivates_and_starts_grace(self):
-        """Issue #411: proactive floor exit with sensor closed must deactivate the fan
-        AND start a grace period via _exit_nat_vent()'s sensor-closed branch — not pause.
-        """
-        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
-        engine._sensor_check_callback = lambda: False  # sensors all closed
-        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
-        engine._deactivate_fan = AsyncMock()
-        engine._start_grace_period = MagicMock()
-
-        events: list[tuple] = []
-        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
-
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
-            asyncio.run(engine.check_natural_vent_conditions())
-
-        assert engine._natural_vent_active is False
-        assert engine._paused_by_door is False, "sensors closed must not enter the pause state"
-        engine._deactivate_fan.assert_awaited_once()
-        engine._start_grace_period.assert_called_once()
-        call_args = engine._start_grace_period.call_args
-        assert call_args[0][0] == "automation"
-        assert call_args.kwargs.get("trigger") == "nat_vent_exit_resume"
-
-    def test_proactive_exit_never_pairs_active_true_with_paused_true(self):
-        """Chained consistency check (Issue #411): after a proactive floor exit with the
-        sensor open, the engine must never be left in the contradictory state where
-        _natural_vent_active and _paused_by_door are both True — that pairing is exactly
-        the internally-inconsistent narrative #411 reported (one mechanism says "still
-        venting", the other says "paused"). A single choke point (_exit_nat_vent) makes
-        this structurally impossible rather than a per-callsite convention.
-        """
-        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
-        engine._sensor_check_callback = lambda: True
-        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
-
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
-            asyncio.run(engine.check_natural_vent_conditions())
-
-        # Never both True — and never restoring an active HVAC mode while paused.
-        assert not (engine._natural_vent_active and engine._paused_by_door)
-        assert engine._paused_by_door is True
-        assert engine._natural_vent_active is False
-        # _pre_pause_mode reflects the climate entity's state at exit time (mocked "cool"
-        # in _make_engine), not None and not silently dropped by the handoff.
-        assert engine._pre_pause_mode == "cool"
-
-    def test_no_proactive_exit_when_floor_distant(self):
-        """Floor predicted > 1 hr -> stays in nat vent.
-
-        indoor=73, outdoor=65, k=-0.05
-        passive_rate = -0.05 * (73 - 65) = -0.4 F/hr
-        time_to_floor = (73 - 70) / 0.4 = 7.5 hr > 1.0 -> no exit
-        """
-        engine = self._make_active_nat_vent_engine(indoor_f=73.0, outdoor_f=65.0, k_passive=-0.05)
-        events: list[tuple] = []
-        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
-
-        asyncio.run(engine.check_natural_vent_conditions())
-
-        assert engine._natural_vent_active
-        assert not any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
-
-    def test_proactive_exit_emits_event_with_payload(self):
-        """Verify nat_vent_predicted_floor_exit event has correct time_to_floor_hr."""
-        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
-        events: list[tuple] = []
-        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
-
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
-            asyncio.run(engine.check_natural_vent_conditions())
-
-        floor_events = [e for e in events if e[0] == "nat_vent_predicted_floor_exit"]
-        assert len(floor_events) == 1
-        assert "time_to_floor_hr" in floor_events[0][1]
-        assert floor_events[0][1]["time_to_floor_hr"] < MIN_VIABLE_NAT_VENT_HOURS
-        assert "fan_device" in floor_events[0][1], "Issue #402: exit events must identify the fan mechanism"
-
-    def test_proactive_exit_uses_sleep_aware_floor_not_daytime_floor(self):
-        """Issue #427: during the sleep window, Phase 2 must use the same sleep-aware
-        floor as Priority-1/reconcile (_nat_vent_reactivation_floor), not the flat
-        daytime comfort_heat.
-
-        sleep_heat=60, comfort_heat=70 (deliberately far apart to make the divergence
-        unambiguous), hysteresis=1, indoor=68, outdoor=65, k=-0.1
-        passive_rate = -0.1 * (68 - 65) = -0.3 F/hr
-
-        Old buggy behavior (flat daytime comfort_heat=70):
-            time_to_floor = (68 - 70) / 0.3 = -6.67 hr -> negative, always < 1.0 -> wrongly exits
-
-        Correct behavior (sleep-aware floor=60 during sleep window):
-            time_to_floor = (68 - 60) / 0.3 = 26.67 hr -> nowhere near the floor -> stays active
-
-        Priority-1's hard floor (sleep_heat - hysteresis = 59) also does not fire since
-        indoor 68 > 59, isolating this test to the Phase 2 code path.
-        """
-        engine = self._make_active_nat_vent_engine(indoor_f=68.0, outdoor_f=65.0, k_passive=-0.1, comfort_heat=70.0)
-        engine.config["sleep_time"] = "09:00"
-        engine.config["wake_time"] = "11:00"  # 10:00 test clock falls inside this window
-        engine.config[CONF_SLEEP_HEAT] = 60.0
-        engine._deactivate_fan = AsyncMock()
-        events: list[tuple] = []
-        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
-
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
-            asyncio.run(engine.check_natural_vent_conditions())
-
-        assert engine._natural_vent_active, "session must survive — floor is 6+ hours away, not breached"
-        assert not any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
-        engine._deactivate_fan.assert_not_awaited()
-
-    def test_proactive_exit_skips_when_floor_already_breached(self):
-        """Issue #427: a negative time_to_floor means the floor is already at/below
-        current indoor — that's not a *prediction*, so Phase 2 must not fire (and must
-        not emit the nonsensical "floor in -X hr" text). That situation belongs to the
-        Priority-1 hard exit or in-session thermostatic cycling, not this block.
-
-        sleep_time/wake_time configured so the fixed test clock (10:00) is in-window;
-        sleep_heat=66, hysteresis=1 -> Priority-1 hard floor = 65 (does not fire, indoor
-        65.5 > 65) while Phase 2's floor (sleep_heat=66, no hysteresis) is already at/above
-        indoor 65.5, giving a negative time_to_floor that must be guarded out.
-        """
-        engine = self._make_active_nat_vent_engine(indoor_f=65.5, outdoor_f=60.0, k_passive=-0.2, comfort_heat=70.0)
-        engine.config["sleep_time"] = "09:00"
-        engine.config["wake_time"] = "11:00"
-        engine.config[CONF_SLEEP_HEAT] = 66.0
-        engine._deactivate_fan = AsyncMock()
-        events: list[tuple] = []
-        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
-
-        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
-            asyncio.run(engine.check_natural_vent_conditions())
-
-        assert engine._natural_vent_active, "Phase 2 must not exit on an already-negative time_to_floor"
-        assert not any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
-        engine._deactivate_fan.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# Issue #641 — WHF fast-cycling: proactive-floor / ceiling-threshold exits must
+# Issue #641 — WHF fast-cycling: away-ceiling / ceiling-threshold exits must
 # arm the reactivation lockout when they hand off into a sensor-open pause,
 # otherwise the very next tick's instant reactivation gate immediately undoes
 # the exit, producing a repeating on/off flip-flop (occupant impact: the WHF
@@ -1221,22 +1027,31 @@ class TestProactiveFloorExit:
 
 
 class TestIssue641ExitReactivationFlipFlop:
-    """Permanent regression coverage for the exact incident sequence: an exit that
-    hands off into `_paused_by_door=True` must be immediately followed by a
-    reactivation attempt at the SAME clock time remaining blocked, not flipping
-    straight back on. Proven load-bearing (not incidentally passing) by first
-    confirming the sensor-open exit still pauses as expected, matching
-    TestProactiveFloorExit's existing sensor-open coverage."""
+    """Permanent regression coverage for the exact incident sequence: an exit must be
+    immediately followed by a reactivation attempt at the SAME clock time remaining
+    blocked, not flipping straight back on.
+
+    Issue #959: the AWAY_CEILING/OUTDOOR_RISE/CEILING_THRESHOLD-triggered tests below
+    were originally proved via the now-removed PROACTIVE_FLOOR exit reason, which
+    handed off into `_paused_by_door=True` via `_exit_nat_vent()`'s sensor-open branch
+    (matching TestNatVentOutdoorRiseExit's sensor-open coverage). AWAY_CEILING does
+    NOT go through that choke point and deliberately never sets `_paused_by_door`
+    (automation.py's own comment at the AWAY_CEILING branch: "Do NOT pause -- just let
+    away setback handle HVAC") — it arms `_nat_vent_outdoor_exit_time` directly
+    instead, which is the actual mechanism this test targets. AWAY_CEILING had no
+    dedicated "arms the reactivation lockout" coverage anywhere else in the suite
+    (COMFORT_FLOOR, OUTDOOR_RISE, and CEILING_THRESHOLD each already have one — see
+    test_fan_control.py:2063, test_fan_control.py:2525/2592, and this class's own
+    test_ceiling_threshold_exit_pauses_and_arms_lockout)."""
 
     def _make_active_nat_vent_engine(
         self,
         indoor_f: float = 71.0,
         outdoor_f: float = 65.0,
-        k_passive: float = -0.5,
-        confidence: str = "medium",
         comfort_heat: float = 70.0,
         comfort_cool: float = 72.0,
         nat_vent_delta: float = 3.0,
+        occupancy_mode: str = OCCUPANCY_AWAY,
     ) -> AutomationEngine:
         engine = _make_engine(
             comfort_heat=comfort_heat, comfort_cool=comfort_cool, nat_vent_delta=nat_vent_delta, indoor_f=indoor_f
@@ -1245,70 +1060,78 @@ class TestIssue641ExitReactivationFlipFlop:
         engine._natural_vent_active = True
         engine._paused_by_door = False
         engine._fan_override_active = False
-        engine._thermal_model = {"confidence": confidence, "k_passive": k_passive}
+        engine._occupancy_mode = occupancy_mode
+        engine._thermal_model = {"confidence": "none", "k_passive": None}
         engine._hourly_forecast_temps = []
         engine._sensor_check_callback = lambda: True  # monitored sensor still open, per the reported incident
         return engine
 
-    def test_proactive_floor_exit_arms_lockout_and_blocks_immediate_reactivation(self):
-        """Reproduces the reported incident's own numbers: indoor 69F, outdoor 58.6F,
-        k_passive=-0.0977 -> time_to_floor ~0.98hr, comfort_heat=68F. The exit tick and
-        the very next reactivation-check tick both run at the SAME timestamp (worst
-        case — production ticks can land seconds apart, not just minutes), matching how
-        tight the real incident's log timestamps were.
+    def test_away_ceiling_exit_arms_lockout_and_blocks_immediate_reactivation(self):
+        """Issue #959: retargeted from the now-removed PROACTIVE_FLOOR exit reason at
+        AWAY_CEILING, which had no dedicated "arms the reactivation lockout" coverage
+        anywhere else in the suite (see class docstring). indoor=74F == comfort_cool=74F
+        while away -> AWAY_CEILING fires. The exit tick and the very next
+        reactivation-check tick both run at the SAME timestamp (worst case — production
+        ticks can land seconds apart, not just minutes), matching the original #641
+        incident's own tight log timestamps.
+
+        Unlike the other three exit reasons in this class, AWAY_CEILING never sets
+        `_paused_by_door` (see class docstring) — its own reactivation-lockout
+        protection is instead observable as `_natural_vent_active` staying False on
+        the immediate re-check, via the idle-open reactivation gate's
+        `is_reactivation_locked_out()` check (automation.py's Issue #757 Phase 6 Step 5
+        comment on the AWAY_CEILING branch). That is what this test asserts.
         """
         engine = self._make_active_nat_vent_engine(
-            indoor_f=69.0, outdoor_f=58.6, k_passive=-0.0977, comfort_heat=68.0, comfort_cool=74.0
+            indoor_f=74.0, outdoor_f=65.0, comfort_heat=68.0, comfort_cool=74.0, occupancy_mode=OCCUPANCY_AWAY
         )
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
         now = datetime(2026, 8, 15, 6, 36, 0)
 
-        _arm_sustained_exit(engine, NatVentExitReason.PROACTIVE_FLOOR, now)
+        _arm_sustained_exit(engine, NatVentExitReason.AWAY_CEILING, now)
         with patch(_DT_NOW_PATH, return_value=now):
             asyncio.run(engine.check_natural_vent_conditions())
 
-        # Sanity: this really is the proactive-floor exit, matching the incident's own log line.
-        assert any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
+        # Sanity: this really is the away-ceiling exit.
+        assert any(e[0] == "nat_vent_away_ceiling_exit" for e in events)
         assert engine._natural_vent_active is False
-        assert engine._paused_by_door is True
+        assert engine._paused_by_door is False, "AWAY_CEILING deliberately never pauses — see class docstring"
         assert engine._nat_vent_outdoor_exit_time == now, (
-            "Issue #641: proactive-floor exit must arm the reactivation lockout "
-            "(_nat_vent_outdoor_exit_time) when it hands off into a sensor-open pause — "
-            "without this, nothing stops the very next tick from reactivating immediately"
+            "Issue #641: away-ceiling exit must arm the reactivation lockout "
+            "(_nat_vent_outdoor_exit_time) directly — without this, nothing stops the "
+            "very next tick's idle-open reactivation gate from reactivating immediately"
         )
 
         # Same instant reactivation attempt the real incident's next log line shows
         # ("Fan activated -- natural vent activated..."). Indoor/outdoor unchanged,
         # same clock tick — before the fix this reactivated every single time.
+        events.clear()
         with patch(_DT_NOW_PATH, return_value=now):
             asyncio.run(engine.check_natural_vent_conditions())
 
         assert engine._natural_vent_active is False, (
-            "reactivation must be blocked by the lockout immediately after a proactive-floor exit"
+            "reactivation must be blocked by the lockout immediately after an away-ceiling exit"
         )
-        assert engine._paused_by_door is True
+        assert not events, "the idle-open reactivation gate must not fire while locked out"
 
-    def test_proactive_floor_exit_reactivates_normally_once_lockout_expires(self):
+    def test_away_ceiling_exit_reactivates_normally_once_lockout_expires(self):
         """Control case: the lockout is temporary, not permanent — once
         NAT_VENT_REACTIVATION_LOCKOUT_S has elapsed, reactivation proceeds normally
         if conditions still warrant it (matching TestReactivationLockout's existing
         outdoor-rise-exit control case)."""
         engine = self._make_active_nat_vent_engine(
-            indoor_f=69.0, outdoor_f=58.6, k_passive=-0.0977, comfort_heat=68.0, comfort_cool=74.0
+            indoor_f=74.0, outdoor_f=65.0, comfort_heat=68.0, comfort_cool=74.0, occupancy_mode=OCCUPANCY_AWAY
         )
         exit_time = datetime(2026, 8, 15, 6, 36, 0)
-        _arm_sustained_exit(engine, NatVentExitReason.PROACTIVE_FLOOR, exit_time)
+        _arm_sustained_exit(engine, NatVentExitReason.AWAY_CEILING, exit_time)
         with patch(_DT_NOW_PATH, return_value=exit_time):
             asyncio.run(engine.check_natural_vent_conditions())
         assert engine._natural_vent_active is False
 
-        # Indoor recovers above the daytime reactivation floor by the time the lockout
-        # expires, so the reactivation isn't itself blocked by anything except the
-        # lockout. Issue #775: this site's floor is now (comfort_heat+comfort_cool)/2
-        # - hysteresis = (68+74)/2-1 = 70, so 69 (the pre-#775 value) would now be
-        # blocked by the floor itself, defeating this test's purpose of isolating the
-        # lockout — 71 stays clear of the floor.
+        # Indoor recovers below the away ceiling (comfort_cool=74) by the time the
+        # lockout expires, so the reactivation isn't itself blocked by anything except
+        # the lockout — 71 stays clear of both the away ceiling and the comfort floor.
         _set_engine_indoor(engine, 71.0)
         late = exit_time + timedelta(seconds=NAT_VENT_REACTIVATION_LOCKOUT_S + 1)
         with patch(_DT_NOW_PATH, return_value=late):
@@ -1320,19 +1143,26 @@ class TestIssue641ExitReactivationFlipFlop:
     def test_ceiling_threshold_exit_pauses_and_arms_lockout(self):
         """Sibling gap found in the same audit: CEILING_THRESHOLD exit
         (outdoor > comfort_cool + nat_vent_delta) has the identical structural gap as
-        the proactive-floor exit — it also hands off into _exit_nat_vent() and must
+        the away-ceiling exit — it also hands off into _exit_nat_vent() and must
         arm the same lockout when the sensor is still open. threshold = 72 + 3 = 75;
         outdoor=75.5 triggers the exit (outdoor-rise doesn't fire first since
         outdoor(75.5) < indoor(76) is false... actually outdoor > indoor too, so
         outdoor-rise wins priority — use indoor=76.5 so outdoor(75.5) < indoor and
         only the ceiling check fires).
+
+        occupancy_mode explicitly "home" here (overriding this class's away-mode
+        default) — indoor(76.5) >= comfort_cool(72) would otherwise trigger
+        AWAY_CEILING first, since it's checked earlier in the priority chain than
+        CEILING_THRESHOLD, defeating this test's isolation purpose.
         """
         engine = self._make_active_nat_vent_engine(
-            indoor_f=76.5, outdoor_f=75.5, comfort_heat=68.0, comfort_cool=72.0, nat_vent_delta=3.0
+            indoor_f=76.5,
+            outdoor_f=75.5,
+            comfort_heat=68.0,
+            comfort_cool=72.0,
+            nat_vent_delta=3.0,
+            occupancy_mode=OCCUPANCY_HOME,
         )
-        # No thermal model confidence -> proactive-floor check is skipped, isolating
-        # this test to the ceiling-threshold exit specifically.
-        engine._thermal_model = {"confidence": "none", "k_passive": None}
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
         now = datetime(2026, 8, 15, 14, 0, 0)
@@ -1345,7 +1175,7 @@ class TestIssue641ExitReactivationFlipFlop:
         assert engine._paused_by_door is True
         assert engine._nat_vent_outdoor_exit_time == now, (
             "Issue #641: ceiling-threshold exit must arm the same reactivation lockout as "
-            "proactive-floor and outdoor-rise — outdoor hovering near the threshold can "
+            "away-ceiling and outdoor-rise — outdoor hovering near the threshold can "
             "flip-flop identically without it"
         )
 

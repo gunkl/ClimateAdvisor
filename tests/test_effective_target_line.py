@@ -262,7 +262,7 @@ class TestComputeEffectiveTargetForward:
         assert fn([], [], {}, 1.0, self._config()) == []
 
     # --- Assumption Audit #5: graceful degradation when the fan_active proxy could
-    # disagree with the real gate (e.g. AWAY_CEILING/PROACTIVE_FLOOR/MANUAL_OVERRIDE_CONFLICT
+    # disagree with the real gate (e.g. AWAY_CEILING/CEILING_THRESHOLD/MANUAL_OVERRIDE_CONFLICT
     # exit reasons the proxy doesn't model) ---
 
     def test_fan_active_true_but_band_bounds_missing_falls_back_to_tier3_not_crash(self) -> None:

@@ -1,5 +1,12 @@
 """Negative control for Issue #821 Scenario E (Verification BLOCKING #2).
 
+Rewritten for Issue #959 (PROACTIVE_FLOOR removal): the scenario JSON this test
+loads now uses CEILING_THRESHOLD as its flicker vehicle instead of the deleted
+PROACTIVE_FLOOR mechanism. The gate under test here -- _confirm_nat_vent_exit_candidate(),
+the generic sustain-confirmation clock -- is unchanged and unaffected by #959; it gates
+all 4 non-exempt NatVentExitReason values identically, so this negative control's
+proof is unaffected by which reason the JSON scenario uses to flicker it.
+
 Verification (Opus, independent review) found sustain-confirmation provably
 decorative: patching `_confirm_nat_vent_exit_candidate()` to `return True` immediately
 (the exact pre-#821 instantaneous-commit behavior) and rerunning the full suite
@@ -11,7 +18,7 @@ This file loads the real scenario E JSON
 (``tools/simulations/pending/issue_821_scenario_e_sustain_confirmation_noise_rejection.json``)
 and runs it through the real production harness twice:
 
-1. Normally — confirming nat-vent survives two flickers of the PROACTIVE_FLOOR exit
+1. Normally — confirming nat-vent survives two flickers of the CEILING_THRESHOLD exit
    condition, matching the JSON scenario's own assertions (also covered by
    ``python tools/simulate.py --pending``).
 2. With ``AutomationEngine._confirm_nat_vent_exit_candidate()`` patched to commit
@@ -54,7 +61,7 @@ def _load_scenario() -> dict:
 
 def test_scenario_e_survives_noise_with_sustain_confirmation_present():
     """Sanity check mirroring the JSON scenario's own assertions — nat-vent is still
-    active at the end of the scenario (both flickers of the PROACTIVE_FLOOR condition
+    active at the end of the scenario (both flickers of the CEILING_THRESHOLD condition
     were rejected as unsustained noise)."""
     scenario = _load_scenario()
     result = run_production_scenario(scenario)
@@ -80,7 +87,7 @@ def test_negative_control_without_sustain_confirmation_the_noise_commits_the_exi
 
     assert result.engine_state.get("_natural_vent_active") is False, (
         "Negative control: with sustain-confirmation disabled, the very first noisy "
-        "PROACTIVE_FLOOR flicker at 08:10:00 must commit the exit immediately (the exact "
+        "CEILING_THRESHOLD flicker at 08:10:00 must commit the exit immediately (the exact "
         "pre-Issue #821 instantaneous-commit bug) — if this assertion fails, either the "
         "patch didn't actually disable the mechanism, or scenario E doesn't exercise it. "
         f"final engine_state: {result.engine_state}"

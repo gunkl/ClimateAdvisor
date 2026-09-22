@@ -92,5 +92,4 @@ class TestRenderSensorAllClosedFanDevice:
     def test_nat_vent_prefix_returns_automation(self):
         """nat_vent_* prefix → 'automation'."""
         assert _event_source_label("nat_vent_comfort_floor_exit", {}) == "automation"
-        assert _event_source_label("nat_vent_predicted_floor_exit", {}) == "automation"
         assert _event_source_label("nat_vent_outdoor_rise_exit", {}) == "automation"

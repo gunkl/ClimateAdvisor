@@ -1524,22 +1524,6 @@ class TestLifecycleScopedNarration:
         assert "outdoor" in st
         assert "68" in st
 
-    def test_nat_vent_predicted_floor_exit_shows_raw_inputs(self):
-        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_predicted_floor_exit"](
-            {
-                "time_to_floor_hr": 0.5,
-                "indoor_temp": 68.0,
-                "comfort_heat": 66.0,
-                "k_passive": -0.15,
-                "fan_mode_change": "on->auto",
-                "hvac_mode_restored": "heat",
-            },
-            "fahrenheit",
-        )
-        assert "68" in st
-        assert "66" in st
-        assert "k_passive=-0.1500" in st
-
     def test_nat_vent_floor_imminent_skip_shows_raw_inputs(self):
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_floor_imminent_skip"](
             {"time_to_floor_hr": 0.3, "indoor_temp": 67.0, "comfort_heat": 66.0, "k_passive": -0.2},
@@ -2103,14 +2087,13 @@ class TestFanTransitionTextIsCorrectAndConsistent:
         "event_type",
         [
             "nat_vent_comfort_floor_exit",
-            "nat_vent_predicted_floor_exit",
             "nat_vent_outdoor_rise_exit",
             "nat_vent_away_ceiling_exit",
             "nat_vent_manual_override_exit",
         ],
     )
     def test_exit_events_never_claim_auto_for_whf_and_state_off_in_label(self, event_type):
-        """For a WHF-mode install, none of the five nat-vent exit event types may render
+        """For a WHF-mode install, none of the four nat-vent exit event types may render
         "auto" anywhere, and the label itself (not just settings_text) must show the
         fan actually turned off -- this is what makes WHF off visible in the
         session-grouped Activity Summary input, which reads only the label."""

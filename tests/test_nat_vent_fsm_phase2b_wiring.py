@@ -347,9 +347,10 @@ class TestSite3PausedReactivation:
             assert engine._paused_by_door is False, f"authoritative={authoritative}"
 
     def test_authoritative_lockout_blocks_reactivation(self):
-        """Issue #641: a proactive-floor exit arms a 300s reactivation lockout via
-        _nat_vent_outdoor_exit_time. Both paths must stay paused through the very
-        next tick even though the instantaneous gate would otherwise clear."""
+        """Issue #641: a lockout-arming nat-vent exit (e.g. CEILING_THRESHOLD) arms a
+        300s reactivation lockout via _nat_vent_outdoor_exit_time. Both paths must
+        stay paused through the very next tick even though the instantaneous gate
+        would otherwise clear."""
         for authoritative in (True, False):
             engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=69.0, authoritative=authoritative)
             self._arm_paused(engine, outdoor=58.6, exit_time=_NOW - timedelta(seconds=5))

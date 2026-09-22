@@ -481,7 +481,6 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
         _NAT_VENT_TRANSITION_TYPES = {
             "nat_vent_comfort_floor_exit",
             "nat_vent_away_ceiling_exit",
-            "nat_vent_predicted_floor_exit",
             "nat_vent_outdoor_rise_exit",
             "fan_activated",
             "fan_deactivated",

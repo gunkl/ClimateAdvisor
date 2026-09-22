@@ -60,15 +60,10 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "which never consults the paused-reactivation lockout at all"
     ),
     ("check_natural_vent_conditions", 1): (
-        "arms lockout — Issue #641 (PROACTIVE_FLOOR): a predictive time-to-floor check "
-        "computed independently of the instant reactivation gate; almost always still "
-        "satisfied on the very next tick without this lockout (the reported incident)"
-    ),
-    ("check_natural_vent_conditions", 2): (
         "arms lockout — original outdoor-rise exit (Issue #115/#411), the lockout mechanism's "
         "first and originally-only use case"
     ),
-    ("check_natural_vent_conditions", 3): (
+    ("check_natural_vent_conditions", 2): (
         "arms lockout — Issue #641 (CEILING_THRESHOLD): outdoor hovering near "
         "comfort_cool + nat_vent_delta can cross the boundary tick-to-tick from sensor/weather "
         "noise, flip-flopping against the reactivation gate's own outdoor < threshold check"
@@ -79,13 +74,13 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "takes the sensors-closed grace-period branch, lockout never consulted"
     ),
     ("nat_vent_temperature_check", 2): (
-        "exempted: this ordinal is ONE shared _exit_nat_vent() call site serving all 4 of "
-        "this function's exit reasons (COMFORT_FLOOR/PROACTIVE_FLOOR/OUTDOOR_RISE/"
-        "CEILING_THRESHOLD) via a per-branch local (`_set_outdoor_exit_time`), not a literal "
+        "exempted: this ordinal is ONE shared _exit_nat_vent() call site serving all 3 of "
+        "this function's exit reasons (COMFORT_FLOOR/OUTDOOR_RISE/CEILING_THRESHOLD) via a "
+        "per-branch local (`_set_outdoor_exit_time`), not a literal "
         "at the call site — so `_find_calls_with_lockout_flag()`'s literal-True check "
-        "structurally cannot confirm arming here for ANY of the 4 reasons, not just this one "
-        "(verified by direct reading, not by this positive control). 3 of the 4 branches "
-        "(PROACTIVE_FLOOR/OUTDOOR_RISE/CEILING_THRESHOLD) already set that local True. Issue "
+        "structurally cannot confirm arming here for ANY of the 3 reasons, not just this one "
+        "(verified by direct reading, not by this positive control). 2 of the 3 branches "
+        "(OUTDOOR_RISE/CEILING_THRESHOLD) already set that local True. Issue "
         "#696: COMFORT_FLOOR (previously the one holdout, on the now-disproven claim that "
         "exit and re-entry check the same quantity at a fixed reading and so can't both be "
         "satisfied by the same indoor temperature — false once indoor drifts across the floor "

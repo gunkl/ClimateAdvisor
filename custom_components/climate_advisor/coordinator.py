@@ -8862,7 +8862,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._event_log = _prune_event_log(self._event_log, _now)
 
         # #437 follow-up: detect a genuine nat-vent True->False exit transition (any of
-        # the 6 real exit paths — comfort-floor, away-ceiling, predicted-floor,
+        # the 5 real exit paths — comfort-floor, away-ceiling,
         # outdoor-rise, reconcile, or all-sensors-closed — this deliberately does NOT
         # enumerate event-type strings, which would silently miss a future exit path)
         # and pull a pending pre-cool trigger earlier if it's still on the stale

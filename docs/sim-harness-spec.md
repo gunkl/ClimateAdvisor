@@ -328,7 +328,7 @@ These event types have no clean production entry point and are silently skipped 
 
 **`target_temp` enrichment:** Production emits a decision event (`classification_applied`, `bedtime_setback`, etc.) and the setpoint via a separate `climate.set_temperature` action at the same virtual-clock instant. `_temps_by_timestamp()` builds a map from naive-ISO timestamp to setpoint, and `production_decisions()` fills `target_temp` on each decision from this map.
 
-**Unmapped production-only events** (`UNMAPPED_PRODUCTION_EVENTS`): `warm_day_state_confirmed`, `nat_vent_away_ceiling_exit`, `nat_vent_ceiling_escalation`, `nat_vent_forecast_skip`, `nat_vent_floor_imminent_skip`, `nat_vent_predicted_floor_exit`, `grace_started`, `incident_detected`. These are silently skipped by `_map_event_to_outcome()`.
+**Unmapped production-only events** (`UNMAPPED_PRODUCTION_EVENTS`): `warm_day_state_confirmed`, `nat_vent_away_ceiling_exit`, `nat_vent_ceiling_escalation`, `nat_vent_forecast_skip`, `nat_vent_floor_imminent_skip`, `grace_started`, `incident_detected`. These are silently skipped by `_map_event_to_outcome()`. (`nat_vent_predicted_floor_exit` — the PROACTIVE_FLOOR event — was in this list until Issue #959, which deleted the mechanism that emitted it; do not re-add it unless the event type returns.)
 
 ### Assertion Surface
 

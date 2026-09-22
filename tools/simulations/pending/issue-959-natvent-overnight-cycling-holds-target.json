@@ -1,0 +1,120 @@
+{
+  "name": "issue-959-natvent-overnight-cycling-holds-target",
+  "description": "New golden (Issue #959 occupant-outcome follow-up, not a rewrite of an existing scenario): proves that with PROACTIVE_FLOOR removed, an extended overnight nat-vent session cycles the fan on/off around nat_vent_target (the bang-bang cycling aim point from nat_vent_cycling.compute_nat_vent_target()) rather than being chased down toward the bare comfort/sleep floor -- the exact occupant-facing regression the old predictive-exit mechanism used to cause (previously, sessions got predictively exited early and only reactivated once indoor dropped back near the bare floor, producing a lower, pinned cycling pattern than intended). Runs a full ~8.25-hour overnight session through 3.5 complete bang-bang cycles, with indoor drifting between the cycling ladder's own off_threshold (66F) and on_threshold (68F) -- never approaching the 65F hard exit floor.",
+  "source": "new-scenario",
+  "issue": 959,
+  "notes": [
+    "Harness limitation (read tools/sim_harness/outcomes.py's check_assertion() directly): nat_vent_still_active / fan_not_active / field_equals all read the FINAL engine_state regardless of the assertion's own 'at' timestamp -- there is no time-indexed engine_state snapshot capability in this harness version. This scenario's mechanically-checked assertions are therefore limited to (a) the initial activation event (a real, time-indexed decision-log entry) and (b) the session's state at the very end of the full multi-cycle run. The intermediate cycle-by-cycle trajectory is scripted to match compute_nat_vent_target()'s real formula (verifiable by a human reviewer against nat_vent_cycling.py) but is not independently re-verified by the harness at each individual cycle boundary -- flagged here rather than overstated. Consider a follow-up issue to add a time-indexed engine-state snapshot capability to outcomes.py/run_production.py if stronger per-cycle coverage is wanted.",
+    "Values: sleep_heat=66F, hysteresis=1F (nat_vent_hysteresis_f) are freshly chosen round numbers for this scenario, not carried over from an existing golden/pending scenario. compute_nat_vent_target() sleep-window formula: target=sleep_heat+hysteresis=67F; off_threshold=66F; on_threshold=68F. resolve_hard_exit_floor() sleep-window hard floor = sleep_heat-hysteresis = 65F -- indoor never goes below 66F in this scenario, a full 1F margin above the hard floor, by design.",
+    "No thermal_model supplied (confidence defaults to 'none') -- this scenario is about the cycling ladder's own on/off thresholds, not any ODE/thermal-model-driven prediction; omitting it keeps handle_door_window_open's unrelated thermal-model floor-imminence pre-activation guard out of play.",
+    "outdoor is held at a fixed 58-60F throughout, always well below both indoor (66-72F) and the 77F ceiling threshold (comfort_cool 76 + nat_vent_delta 3) -- this keeps OUTDOOR_RISE and CEILING_THRESHOLD out of play entirely, isolating the cycling-ladder behavior this scenario targets from the exit-chain mechanisms the issue_821/issue_931 rewrites already cover separately.",
+    "Three-exercise protocol (CLAUDE.md Sec.10): (a) Scenario effectiveness: if decide_nat_vent_cycling() were reverted to use a stale/flat threshold (e.g. the old daytime midpoint formula instead of the sleep-aware target during the sleep window), the fan would cycle around a different setpoint than 66-68F -- the scripted indoor trajectory here assumes 66/68 crossings. This scenario cannot mechanically detect every such failure mode given the harness limitation noted above (only final state is checked) -- what it DOES mechanically prove: the session survives the full night without any of the exit reasons firing, even though indoor gets to within 1F of the hard floor on 4 separate occasions across the 3.5 cycles. (b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's nat-vent cycling section should reference this scenario as the overnight-holds-near-target regression reference once promoted. (c) User outcome if this regresses: the occupant's bedroom would swing lower overnight than intended (toward the bare floor) before the fan cycles back on, the exact discomfort/inefficiency pattern PROACTIVE_FLOOR's removal (#959) was meant to fix at the source.",
+    "Recommend running python tools/simulate.py --pending -v against this scenario before promotion to golden/, and treating the harness-limitation note above as a real, disclosed caveat rather than a resolved gap."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "sleep_heat": 66,
+    "sleep_time": "22:00",
+    "wake_time": "06:30",
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "thermal_model": {
+    "confidence": "none"
+  },
+  "events": [
+    {
+      "time": "2026-02-10T21:55:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Evening classification: warm day, hvac_mode=off."
+    },
+    {
+      "time": "2026-02-10T22:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 58.0,
+      "note": "Sleep window begins (sleep_time=22:00). indoor=72F, well above the sleep-window on_threshold (68F)."
+    },
+    {
+      "time": "2026-02-10T22:00:01",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens. Sleep-aware reactivation floor = sleep_heat(66F). indoor(72)>66, outdoor(58)<72, outdoor(58)<77 threshold -- nat-vent activates, WHF turns on."
+    },
+    {
+      "time": "2026-02-10T23:30:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 58.0,
+      "note": "Cycle 1 down-leg complete: indoor has drifted from 72F to exactly the off_threshold (66F) over 1.5h. Cycling decision: fan_hardware_active=True and indoor<=off_threshold(66) -- fan cycles OFF. Session remains active (this is thermostatic cycling, not a session exit)."
+    },
+    {
+      "time": "2026-02-11T01:00:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 58.5,
+      "note": "Cycle 1 up-leg complete: with the fan off, indoor passively warms from 66F back to the on_threshold (68F) over 1.5h. Cycling decision: fan_hardware_active=False and indoor>=on_threshold(68), outdoor(58.5)<indoor(68) so no outdoor-rise block -- fan cycles back ON."
+    },
+    {
+      "time": "2026-02-11T02:30:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 58.0,
+      "note": "Cycle 2 down-leg: indoor back to 66F -- fan cycles OFF again."
+    },
+    {
+      "time": "2026-02-11T04:00:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 58.5,
+      "note": "Cycle 2 up-leg: indoor back to 68F -- fan cycles back ON."
+    },
+    {
+      "time": "2026-02-11T05:30:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 58.0,
+      "note": "Cycle 3 down-leg: indoor back to 66F -- fan cycles OFF."
+    },
+    {
+      "time": "2026-02-11T06:15:00",
+      "type": "temp_update",
+      "indoor_f": 67.5,
+      "outdoor_f": 58.5,
+      "note": "Final reading, still within the sleep window (wake_time=06:30): indoor has only warmed to 67.5F, short of the 68F on_threshold -- fan remains off, session remains active. Across the whole night, indoor stayed within [66, 72]F -- never within 1F of the 65F hard exit floor except by the deliberate 66F cycling touchpoints, and never triggered a session-ending exit."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-02-10T22:00:01",
+      "expect": "natural_ventilation",
+      "reason": "Initial activation at the start of the overnight session."
+    },
+    {
+      "at": "2026-02-11T06:15:00",
+      "expect": "nat_vent_still_active",
+      "reason": "After 3.5 complete bang-bang cycles spanning ~8.25 hours, the session is still the SAME continuous session -- no comfort-floor or other exit ever fired, even though indoor touched the cycling ladder's off_threshold (66F, only 1F above the 65F hard floor) four separate times."
+    },
+    {
+      "at": "2026-02-11T06:15:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": false,
+      "reason": "Final reading (67.5F) is below the on_threshold (68F), so the fan should still be in its most recent OFF state from the 05:30 cycle-down -- confirms the engine's cycling decision correctly reflects the last threshold crossing, not a stale or drifted state."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "An extended overnight nat-vent session cycles the fan on/off around the intended sleep-window target (66-68F band around nat_vent_target=67F) for multiple consecutive hours without ever being torn down or drifting toward the bare 65F hard floor -- the occupant-facing outcome PROACTIVE_FLOOR's removal (Issue #959) restores, now proven with a positive, extended-duration scenario rather than only the absence of the deleted mechanism.",
+    "observed_behavior": "natural_ventilation at 22:00:01 -> 3.5 complete bang-bang cycles between 66F and 68F over ~8.25 hours -> session remains active and fan correctly OFF at the final 06:15:00 reading (67.5F, below on_threshold).",
+    "expected_behavior": "decide_nat_vent_cycling() (nat_vent_cycling.py) governs fan hardware on/off state around compute_nat_vent_target()'s sleep-aware target throughout an active session; the session itself (_natural_vent_active) is untouched by this thermostatic cycling and only ends via decide_nat_vent_exit()'s distinct exit reasons, none of which should fire from normal overnight cycling within the intended band."
+  }
+}

@@ -279,9 +279,19 @@ readings:
   classification, today's entry overridden by the live classification) decides
   `heat`/`cool`/`off` per calendar day. Only `off` days walk nat-vent at all.
 - **Inner walk — hour by hour on an `off` day**: `nat_vent_gate.decide_nat_vent_gate()`
-  (entry) / `nat_vent_exit.decide_nat_vent_exit()` (the real 6-reason exit chain —
-  `MANUAL_OVERRIDE_CONFLICT`, `COMFORT_FLOOR`, `AWAY_CEILING`, `PROACTIVE_FLOOR`,
-  `OUTDOOR_RISE`, `CEILING_THRESHOLD`) resolve `session_active` for that hour first.
+  (entry) / `nat_vent_exit.decide_nat_vent_exit()` (the real exit chain — as of Issue
+  #959, 5 reasons: `MANUAL_OVERRIDE_CONFLICT`, `COMFORT_FLOOR`, `AWAY_CEILING`,
+  `OUTDOOR_RISE`, `CEILING_THRESHOLD`; the chain previously also included a
+  `PROACTIVE_FLOOR` predictive-exit reason, deleted in Issue #959) resolve
+  `session_active` for that hour first. **This is a real behavioral change to the
+  scheduler's forecast/day-ahead output, not just a code cleanup**: `PROACTIVE_FLOOR`
+  used to end walked-forward nat-vent sessions early (before an indoor/outdoor
+  crossing) whenever the forecast walk predicted an imminent comfort-floor crossing;
+  with it removed, the forward walk now keeps `session_active=True` for longer on
+  nights it previously ended early, so the predicted indoor curve and chart Target
+  Band for those hours will differ from pre-#959 output — this matches the real
+  engine's post-#959 behavior of holding closer to the cycling target overnight
+  instead of settling at the bare comfort floor.
 - **Mid-day escalation — `ode_ceiling_guard.decide_ode_ceiling_guard()`**: using that
   same hour's just-resolved `session_active` as its `natural_vent_active` input (its
   `DORMANT` outcome specifically depends on it — the coupling is load-bearing, not

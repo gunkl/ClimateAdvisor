@@ -136,3 +136,18 @@ already disambiguated `_deactivate_fan()` calls. `test_real_outcomes_never_inclu
 was renamed/narrowed to `test_real_outcomes_never_include_stop_deactivate` since
 `STOP_COOLED_TO_FLOOR` is now correctly counted as a real, observed outcome (it always
 was one — it just wasn't visible before). Golden JSON content: untouched.
+
+## Update (Issue #959): pending scenario E's trigger vehicle changed, sustain-confirmation itself unchanged
+
+`tools/simulations/pending/issue_821_scenario_e_sustain_confirmation_noise_rejection.json`
+(not one of the 5 golden scenarios analyzed above, but the same `NAT_VENT_EXIT_SUSTAIN_S`
+mechanism this file documents) originally used the `PROACTIVE_FLOOR` exit reason as its
+flicker-trigger vehicle — an instantaneous single-tick predictive-floor crossing that
+sustain-confirmation was expected to defer. Issue #959 deleted `PROACTIVE_FLOOR` from
+`nat_vent_exit.py` entirely (see `docs/nat-vent-lifecycle-spec.md` and
+`docs/08-COMPUTATION-REFERENCE.md` for the removal writeup), so the scenario was rewritten
+to use `CEILING_THRESHOLD` as its trigger vehicle instead — a different exit reason that
+exercises the identical sustain-confirmation noise-rejection behavior this scenario exists
+to prove. `NAT_VENT_EXIT_SUSTAIN_S` (90s) and the rest of the sustain-confirmation mechanism
+described throughout this file are unaffected; only the JSON scenario's choice of which
+exit condition to flicker changed.

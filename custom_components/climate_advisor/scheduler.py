@@ -359,7 +359,7 @@ def resolve_tou_away_vacation_phase(
     **The rate used for `required_delta` is deliberately NOT `k_active_cool`/`k_active_heat`
     (the HVAC's own active-conditioning rate) — it's `k_passive * (indoor - outdoor)`**, the
     same passive-envelope-decay formula already used at ``automation.py``'s nat-vent floor-
-    imminence guard and ``nat_vent_exit.py``'s proactive-floor exit. "How far will the house
+    imminence guard (Guard 2, `nat_vent_floor_imminent_skip`). "How far will the house
     drift on its own while the HVAC sits idle during the TOU window" is a passive-envelope
     question, not a question about how fast the HVAC can move the temperature while running
     — `k_active_*` remains correct for the lead-time calculation below (that phase genuinely

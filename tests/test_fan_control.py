@@ -2101,7 +2101,7 @@ class TestExitNatVentRestoreConsultsResolver:
     self._pre_fan_hvac_mode (whatever mode was active BEFORE nat-vent started),
     never consulting the shared family resolver — reproducing the original
     comfort-floor-defense bug through nat-vent's own most common exit path
-    (PROACTIVE_FLOOR/OUTDOOR_RISE/CEILING_THRESHOLD/window-close all route through
+    (OUTDOOR_RISE/CEILING_THRESHOLD/window-close all route through
     _exit_nat_vent(), unlike check_natural_vent_conditions()'s separate
     COMFORT_FLOOR branch, which already called _set_temperature_for_mode() on its
     own). The fix adds a follow-up _set_temperature_for_mode() call right after

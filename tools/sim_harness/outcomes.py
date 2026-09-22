@@ -94,8 +94,6 @@ FINDINGS — no legacy outcome equivalent:
                                activating nat-vent.  Not in legacy simulator.
   nat_vent_floor_imminent_skip — production-only; ODE predicts floor breach
                                before nat-vent would help.  Not in legacy.
-  nat_vent_predicted_floor_exit — production-only; ODE predicts floor exit.
-                               Not in legacy simulator.
   grace_started              — internal lifecycle event; no legacy decision.
   incident_detected          — diagnostic / telemetry only; not a behavior
                                decision in the legacy simulator.
@@ -129,7 +127,6 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         "nat_vent_ceiling_escalation",
         "nat_vent_forecast_skip",
         "nat_vent_floor_imminent_skip",
-        "nat_vent_predicted_floor_exit",
         "grace_started",
         # Issue #672: emitted from the exact same _start_grace_period() call site as
         # "grace_started" above, moments later — same "always fires last, shadows the

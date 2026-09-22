@@ -176,32 +176,6 @@ class TestWalkForwardRegimeExitReasons:
         assert result[ts1]["nat_vent_active"] is True
         assert result[ts2]["nat_vent_active"] is False
 
-    def test_proactive_floor_exit_with_confident_thermal_model(self) -> None:
-        mod = _mod()
-        ts1 = _ts(12)
-        day_modes = {date(2026, 7, 13): "off"}
-        band = _band([(ts1, 68.0, 76.0)])
-        predicted_indoor = _series([(ts1, 70.0)])
-        forecast_outdoor = _series([(ts1, 60.0)])
-        # k_passive=-2.0, indoor-outdoor=10 -> passive_rate=-20F/hr -> time_to_floor
-        # = (70-68)/20 = 0.1hr < 1.0hr -> PROACTIVE_FLOOR fires immediately.
-        thermal_model = {"k_passive": -2.0, "confidence_k_passive": "high"}
-
-        result = mod._walk_forward_regime(
-            day_modes,
-            predicted_indoor,
-            forecast_outdoor,
-            band,
-            _BASE_CONFIG,
-            "home",
-            thermal_model,
-            False,
-            None,
-            None,
-            True,
-        )
-        assert result[ts1]["nat_vent_active"] is False
-
     def test_outdoor_rise_exit(self) -> None:
         mod = _mod()
         ts1, ts2 = _ts(12), _ts(13)
@@ -274,38 +248,6 @@ class TestWalkForwardRegimeExitReasons:
             True,
         )
         assert result[ts1]["nat_vent_active"] is False
-
-
-class TestWalkForwardRegimeThermalConfidenceNone:
-    def test_proactive_floor_never_fires_without_confidence_no_crash(self) -> None:
-        """Assumption Audit #3: with thermal_confidence == 'none' (or no thermal_model at
-        all), PROACTIVE_FLOOR must gracefully never fire — session stays active through
-        conditions that would otherwise trigger it, and nothing raises."""
-        mod = _mod()
-        ts1, ts2, ts3 = _ts(12), _ts(13), _ts(14)
-        day_modes = {date(2026, 7, 13): "off"}
-        band = _band([(ts1, 68.0, 76.0), (ts2, 68.0, 76.0), (ts3, 68.0, 76.0)])
-        # Same shape as the PROACTIVE_FLOOR test above (would fire if confident), but with
-        # no thermal_model — comfort floor / away / outdoor-rise / ceiling all also safe.
-        predicted_indoor = _series([(ts1, 70.0), (ts2, 70.0), (ts3, 70.0)])
-        forecast_outdoor = _series([(ts1, 60.0), (ts2, 60.0), (ts3, 60.0)])
-
-        result = mod._walk_forward_regime(
-            day_modes,
-            predicted_indoor,
-            forecast_outdoor,
-            band,
-            _BASE_CONFIG,
-            "home",
-            None,  # no thermal model
-            False,
-            None,
-            None,
-            True,
-        )
-        assert result[ts1]["nat_vent_active"] is True
-        assert result[ts2]["nat_vent_active"] is True
-        assert result[ts3]["nat_vent_active"] is True
 
 
 class TestWalkForwardRegimeReentry:

@@ -334,8 +334,8 @@
     "issue": 411
   },
   "issue-427-natvent-sleep-floor-churn": {
-    "sha256": "a7b0f85a177be3507a7e361307344a0390e937c52be4af3852b8b08bc5cb958d",
-    "signed": "2026-07-12",
+    "sha256": "e28b0c626f9261fd3d52cca63463388da4b45076785418a24180c4dfae8a2fda",
+    "signed": "2026-09-21",
     "issue": 427
   },
   "issue-481-sleep-band-no-false-undertemp-incident": {

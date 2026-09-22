@@ -166,67 +166,6 @@ class TestAwayCeilingExit:
         assert decision.reason == NatVentExitReason.NONE
 
 
-class TestProactiveFloorExit:
-    def test_fires_when_prediction_inside_threshold(self) -> None:
-        # indoor=72, comfort_heat_now=70 (awake, no sleep) -> 2F to floor.
-        # k_passive=-1.0, outdoor=65 -> passive_rate = -1.0*(72-65) = -7 F/hr.
-        # time_to_floor = 2/7 = 0.2857 hr < 1.0 -> fires.
-        decision = decide_nat_vent_exit(
-            _inputs(
-                indoor=72.0,
-                outdoor=65.0,
-                comfort_heat_raw=70.0,
-                thermal_confidence="high",
-                k_passive=-1.0,
-            )
-        )
-        assert decision.reason == NatVentExitReason.PROACTIVE_FLOOR
-        assert decision.comfort_heat_now == 70.0
-        assert decision.time_to_floor_hr is not None
-        assert round(decision.time_to_floor_hr, 4) == round(2 / 7, 4)
-
-    def test_no_fire_when_confidence_low(self) -> None:
-        decision = decide_nat_vent_exit(
-            _inputs(indoor=72.0, outdoor=65.0, comfort_heat_raw=70.0, thermal_confidence="low", k_passive=-1.0)
-        )
-        assert decision.reason == NatVentExitReason.NONE
-
-    def test_no_fire_when_k_passive_positive(self) -> None:
-        decision = decide_nat_vent_exit(
-            _inputs(indoor=72.0, outdoor=65.0, comfort_heat_raw=70.0, thermal_confidence="high", k_passive=0.5)
-        )
-        assert decision.reason == NatVentExitReason.NONE
-
-    def test_no_fire_when_time_to_floor_beyond_threshold(self) -> None:
-        # indoor=90, floor=70 -> 20F to floor; k_passive=-0.5, outdoor=65 ->
-        # passive_rate = -0.5*(90-65)=-12.5 F/hr; time=20/12.5=1.6hr >= 1.0 -> no fire.
-        decision = decide_nat_vent_exit(
-            _inputs(indoor=90.0, outdoor=65.0, comfort_heat_raw=70.0, thermal_confidence="high", k_passive=-0.5)
-        )
-        assert decision.reason == NatVentExitReason.NONE
-
-    def test_no_fire_when_outdoor_not_below_indoor(self) -> None:
-        decision = decide_nat_vent_exit(
-            _inputs(indoor=72.0, outdoor=73.0, comfort_heat_raw=70.0, thermal_confidence="high", k_passive=-1.0)
-        )
-        # Falls through to outdoor-rise exit instead (outdoor > indoor).
-        assert decision.reason == NatVentExitReason.OUTDOOR_RISE
-
-    def test_takes_priority_over_outdoor_rise(self) -> None:
-        decision = decide_nat_vent_exit(
-            _inputs(
-                indoor=72.0,
-                outdoor=65.0,
-                comfort_heat_raw=70.0,
-                comfort_cool=76.0,
-                nat_vent_delta=3.0,
-                thermal_confidence="high",
-                k_passive=-1.0,
-            )
-        )
-        assert decision.reason == NatVentExitReason.PROACTIVE_FLOOR
-
-
 class TestOutdoorRiseExit:
     def test_fires_when_outdoor_exceeds_indoor(self) -> None:
         decision = decide_nat_vent_exit(_inputs(indoor=74.0, outdoor=74.5))

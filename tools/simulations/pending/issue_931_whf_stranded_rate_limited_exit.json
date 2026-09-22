@@ -1,17 +1,17 @@
 {
   "name": "issue_931_whf_stranded_rate_limited_exit",
-  "description": "Reproduces the reported 2.5h WHF overshoot incident: a nat-vent PROACTIVE_FLOOR exit (the same slow-loop-only, ODE-predicted exit reason the real incident traced to) fires within the 300s post-toggle rate-limit window (the pause command gets deferred, not executed), and indoor does NOT rebound afterward -- it keeps drifting down while the fan keeps pulling in cold outside air, exactly as it did overnight in the real incident. Before the Issue #931 fix, the two nat-vent session flags cleared unconditionally the instant the exit was DECIDED, not when the deactivate command actually ran -- so the one retry mechanism (nat_vent_temperature_check(), which opens with `if not self._natural_vent_active: return`) silently disarmed itself, and the fan was left running with nothing left to ever retry stopping it. After the fix (_end_nat_vent_session(), the sole writer), a RATE_LIMITED_NEW/RATE_LIMITED_DUP result leaves the session flags set, so the fast-loop retry keeps re-attempting on every subsequent tick until the 300s window clears and the real command finally goes through.",
+  "description": "Reproduces the reported 2.5h WHF overshoot incident: a nat-vent CEILING_THRESHOLD exit fires within the 300s post-toggle rate-limit window (the pause command gets deferred, not executed), and the fan keeps running through the deferral. Before the Issue #931 fix, the two nat-vent session flags cleared unconditionally the instant the exit was DECIDED, not when the deactivate command actually ran -- so the one retry mechanism (nat_vent_temperature_check(), which opens with `if not self._natural_vent_active: return`) silently disarmed itself, and the fan was left running with nothing left to ever retry stopping it. After the fix (_end_nat_vent_session(), the sole writer), a RATE_LIMITED_NEW/RATE_LIMITED_DUP result leaves the session flags set, so the fast-loop retry keeps re-attempting on every subsequent tick until the 300s window clears and the real command finally goes through. Rewritten for Issue #959 (PROACTIVE_FLOOR removal) -- the original version used PROACTIVE_FLOOR as the isolating exit vehicle; this version uses CEILING_THRESHOLD, which required moving from the real incident's own pre-dawn timing to a setting where an outdoor-too-warm exit is physically plausible (see disclosed timing-realism note below).",
   "source": "production_incident",
   "issue": 931,
   "notes": [
-    "Set overnight (in the configured sleep window) to match the real incident, which happened around 04:00-06:30 local. sleep_heat=66F matches the real incident's own overnight floor.",
-    "Deliberately uses PROACTIVE_FLOOR (the ODE time-to-floor prediction), not COMFORT_FLOOR/the cycling-off threshold -- two earlier drafts of this scenario passed even on PRE-FIX code for two different reasons, each masking the bug being tested: (1) a COMFORT_FLOOR draft also independently tripped fan_thermostat_check()'s own un-gated Check 2 (STOP_COOLED_TO_FLOOR, fan_thermostat_decision.py) -- a completely separate mechanism (Issues #327/#402) that isn't implicated in the real incident; (2) a daytime draft with indoor in the high 60s also independently tripped nat_vent_temperature_check()'s own thermostat-style CYCLING-off branch (indoor <= nat_vent_target - hysteresis), a session-preserving temporary fan-off unrelated to the session-ending exit chain this fix touches. This final version keeps indoor above BOTH the overnight cycling-off threshold (sleep_heat = 66F exactly) and the hard comfort-floor exit (sleep_heat - hysteresis = 65F) for the entire scenario -- PROACTIVE_FLOOR is the only mechanism that can end the session here, because it fires on a PREDICTED future breach while indoor is still above every reactive threshold.",
-    "comfort_cool=74F, hysteresis=1F (default), natural_vent_delta=3.0F (default), k_passive=-0.0977 (same k_passive already used by the golden issue-641 scenario) -- deliberately NOT the real incident's own exact outdoor readings (58F/56.6F); this exercises the mechanism (rate-limited exit + no rebound) generically, per the Issue #931 plan's Test Coverage Design section 2.",
-    "Window opens at nat-vent activation and is never closed in this scenario -- matches the real incident's own precondition (a monitored sensor open all night) and puts the exit through _exit_nat_vent()'s sensor-still-open PAUSE branch, not the sensors-closed restore branch.",
-    "The fan-toggle rate limiter (Issue #641, FAN_MIN_TOGGLE_INTERVAL_S=300s) keys off the LAST REAL fan command -- here, the activation itself at 02:00:02. The PROACTIVE_FLOOR exit is confirmed (after the 90s NAT_VENT_EXIT_SUSTAIN_S sustain gate) at 02:01:38, ~96s after that activation -- well inside the 300s window, so the first deactivate attempt is genuinely rate-limited, not a scenario artifact.",
-    "Indoor keeps drifting DOWN (67.0 -> 66.9 -> 66.8 -> 66.7F) and outdoor keeps drifting down with it (55.0 -> 54.8 -> 54.6 -> 54.4F) across every tick, mirroring the real incident's own key differentiator: the 5 healthy cycles that same night self-healed only because indoor happened to tick back up a few minutes after each deferral and re-armed the (buggy) flag by accident -- that never happened for the cycle that stranded the fan for 2.5h, because outdoor kept falling and the still-running fan kept pulling in that cold air, suppressing the rebound that would have rescued it.",
-    "Final tick at 02:05:08 is just past the 300s window from the 02:00:02 activation toggle (306s elapsed) -- the real command should finally go through here, every time, once the fix keeps the session flags (and therefore the retry) alive across the deferred window.",
-    "fan_not_active reads final engine state (_fan_active), not a decision-log string -- the assertion is on the observable OUTCOME (did the fan actually stop) per the plan's explicit design, not on which internal exit-reason branch handled it. Verified against both directions: this scenario PASSES on the fixed code and FAILS (fan still active at 02:05:08) when automation.py's Issue #931 changes are reverted (git stash of just that file) -- confirming it actually exercises the regression, not just the mechanism's happy path."
+    "Issue #959 disposition and disclosed compromise: the real incident happened ~04:00-06:30 (cold pre-dawn), which naturally fits a PREDICTIVE floor-crossing concern (PROACTIVE_FLOOR, now removed) but does not naturally fit CEILING_THRESHOLD ('outdoor got too warm'). This rewrite moves the scenario to 02:00 with outdoor already elevated (70F baseline, rising to 78F) to make a ceiling-threshold crossing physically plausible -- this is an explicit, disclosed realism tradeoff, not a byte-for-byte replay of the original incident's physical setting. The mechanism under test (rate-limited exit + session-flag survival + fast-loop retry) is identical; only the physical trigger and ambient temperatures differ from both the real incident and the original PROACTIVE_FLOOR-based scenario.",
+    "Isolation property preserved: indoor is held at 79.4-80F throughout, far above both the overnight cycling-off threshold (sleep_heat=66F) and the hard comfort-floor exit (sleep_heat-hysteresis=65F) -- exactly the isolation the original scenario's own notes required (two earlier COMFORT_FLOOR/cycling-off drafts each independently tripped an unrelated mechanism, masking the bug under test). CEILING_THRESHOLD is the only mechanism that can end the session here, since indoor never approaches either reactive floor.",
+    "Priority-order constraint: OUTDOOR_RISE is checked before CEILING_THRESHOLD in decide_nat_vent_exit() and fires on outdoor >= indoor. Indoor is kept at 79.4-80F, always above outdoor (77.2-78F), so OUTDOOR_RISE never preempts CEILING_THRESHOLD.",
+    "comfort_cool=74F, hysteresis=1F (default), natural_vent_delta=3.0F (default) -- so the ceiling threshold is comfort_cool+natural_vent_delta=77F.",
+    "Window opens at nat-vent activation and is never closed in this scenario -- puts the exit through _exit_nat_vent()'s sensor-still-open PAUSE branch, not the sensors-closed restore branch, matching the original scenario's own precondition.",
+    "The fan-toggle rate limiter (Issue #641, FAN_MIN_TOGGLE_INTERVAL_S=300s) keys off the LAST REAL fan command -- here, the activation itself at 02:00:02. The CEILING_THRESHOLD exit is confirmed (after the 90s NAT_VENT_EXIT_SUSTAIN_S sustain gate) at 02:01:38, ~96s after that activation -- well inside the 300s window, so the first deactivate attempt is genuinely rate-limited, not a scenario artifact.",
+    "Final tick at 02:05:08 is 306s past the 02:00:02 activation toggle -- past the 300s rate-limit window -- so the real command should finally go through here, confirming the fix keeps the session flags (and therefore the retry) alive across the deferred window.",
+    "fan_not_active reads final engine state (_fan_active), not a decision-log string -- the assertion is on the observable OUTCOME (did the fan actually stop), not on which internal exit-reason branch handled it."
   ],
   "config": {
     "comfort_heat": 68,
@@ -26,69 +26,68 @@
     "fan_entity": "fan.whole_house"
   },
   "thermal_model": {
-    "confidence": "medium",
-    "k_passive": -0.0977
+    "confidence": "none"
   },
   "events": [
     {
       "time": "2026-08-15T02:00:00",
       "type": "temp_update",
-      "indoor_f": 72.0,
-      "outdoor_f": 55.0,
-      "note": "Baseline: indoor 72F, outdoor 55F -- favorable for nat-vent, well above the overnight 66F sleep floor."
+      "indoor_f": 80.0,
+      "outdoor_f": 70.0,
+      "note": "Baseline: indoor 80F, outdoor 70F -- favorable for nat-vent (outdoor below indoor, below the 77F ceiling threshold)."
     },
     {
       "time": "2026-08-15T02:00:01",
       "type": "classification",
-      "day_type": "warm",
-      "hvac_mode": "off",
+      "day_type": "hot",
+      "hvac_mode": "cool",
       "windows_recommended": true,
-      "note": "Warm-day classification with HVAC off -- nat-vent is the primary control mechanism overnight."
+      "note": "Hot-day classification, HVAC in cool mode -- nat-vent free-cools ahead of the AC needing to run."
     },
     {
       "time": "2026-08-15T02:00:02",
       "type": "sensor_open",
       "entity": "binary_sensor.bedroom_window",
-      "note": "Window opens. outdoor(55) < indoor(72) - hysteresis(1), indoor(72) > sleep-aware comfort floor, outdoor(55) < threshold(77) -- nat-vent activates, WHF turns on. This real fan-ON command is what the 300s rate-limit window below is measured from."
+      "note": "Window opens. outdoor(70) < indoor(80), indoor(80) > comfort_heat(68), outdoor(70) < threshold(77) -- nat-vent activates, WHF turns on. This real fan-ON command is what the 300s rate-limit window below is measured from."
     },
     {
       "time": "2026-08-15T02:00:03",
       "type": "temp_update",
-      "indoor_f": 67.0,
-      "outdoor_f": 55.0,
-      "note": "time_to_floor = (67-66) / (0.0977*(67-55)) = 0.85hr < 1.0hr MIN_VIABLE_NAT_VENT_HOURS -- PROACTIVE_FLOOR candidate registers, but the 90s sustain-confirmation gate (NAT_VENT_EXIT_SUSTAIN_S) hasn't elapsed yet, so no exit action is taken on this tick. Indoor (67F) is still above the 66F overnight cycling-off threshold (sleep_heat) and the 65F hard comfort-floor -- neither the session-preserving cycling branch nor fan_thermostat_check()'s independent Check 2 can trip."
+      "indoor_f": 80.0,
+      "outdoor_f": 78.0,
+      "note": "outdoor jumps to 78F, above the 77F ceiling threshold (still below indoor(80), so OUTDOOR_RISE does not preempt). CEILING_THRESHOLD candidate registers, but the 90s sustain-confirmation gate hasn't elapsed yet, so no exit action is taken on this tick."
     },
     {
       "time": "2026-08-15T02:01:38",
       "type": "temp_update",
-      "indoor_f": 66.9,
-      "outdoor_f": 54.8,
-      "note": "95s after the candidate first registered -- sustain-confirmation gate satisfied. time_to_floor = (66.9-66)/(0.0977*(66.9-54.8)) = 0.76hr < 1.0hr -- still PROACTIVE_FLOOR. Exit fires via nat_vent_temperature_check() -> _exit_nat_vent() -> sensor still open -> pause branch -> _deactivate_fan(). Only 96s since the 02:00:02 activation toggle (well under the 300s floor) -- the command is deferred (RATE_LIMITED_NEW), not executed. Window still open -> _exit_nat_vent() pauses rather than restoring HVAC. Indoor (66.9F) still above both the 66F cycling-off threshold and the 65F hard floor."
+      "indoor_f": 79.8,
+      "outdoor_f": 78.0,
+      "note": "95s after the candidate first registered -- sustain-confirmation gate satisfied. Exit fires via nat_vent_temperature_check() -> _exit_nat_vent() -> sensor still open -> pause branch -> _deactivate_fan(). Only 96s since the 02:00:02 activation toggle (well under the 300s floor) -- the command is deferred (RATE_LIMITED_NEW), not executed. Window still open -> _exit_nat_vent() pauses rather than restoring HVAC. Indoor (79.8F) still far above both the 66F cycling-off threshold and the 65F hard floor."
     },
     {
       "time": "2026-08-15T02:02:33",
       "type": "temp_update",
-      "indoor_f": 66.8,
-      "outdoor_f": 54.6,
-      "note": "Indoor continues drifting DOWN, not rebounding -- the fan is still physically running and pulling in cold outside air, same as the real incident. 151s since the activation toggle -- still inside the 300s window, so a retry here is deferred again. Before the fix: the session flag was already cleared at the first attempt, so nat_vent_temperature_check() returns immediately and never even reaches this retry. Indoor (66.8F) still above both thresholds."
+      "indoor_f": 79.6,
+      "outdoor_f": 77.5,
+      "note": "151s since the activation toggle -- still inside the 300s window, so a retry here is deferred again. Before the fix: the session flag was already cleared at the first attempt, so nat_vent_temperature_check() returns immediately and never even reaches this retry. Indoor (79.6F) still far above both thresholds."
     },
     {
       "time": "2026-08-15T02:05:08",
       "type": "temp_update",
-      "indoor_f": 66.7,
-      "outdoor_f": 54.4,
-      "note": "306s since the 02:00:02 activation toggle -- past the 300s rate-limit floor. With the session flag correctly kept alive by every prior deferred attempt, this retry's deactivate command finally goes through for real, and the fan actually stops. Indoor (66.7F) is still above both the 66F cycling threshold and the 65F hard floor -- confirming it's the nat-vent exit chain, not either of the two other independent stop mechanisms, that stops the fan here."
+      "indoor_f": 79.4,
+      "outdoor_f": 77.2,
+      "note": "306s since the 02:00:02 activation toggle -- past the 300s rate-limit floor. With the session flag correctly kept alive by every prior deferred attempt, this retry's deactivate command finally goes through for real, and the fan actually stops. Indoor (79.4F) is still far above both the 66F cycling threshold and the 65F hard floor -- confirming it's the nat-vent exit chain, not either of the two other independent stop mechanisms, that stops the fan here."
     }
   ],
   "assertions": [
     {
       "at": "2026-08-15T02:05:08",
       "expect": "fan_not_active",
-      "reason": "The fan must have actually stopped by the first re-evaluation tick past the 300s rate-limit window, even though indoor never rebounded -- and stayed above both the overnight cycling-off threshold and the hard comfort floor the entire time, ruling out either of the two other independent fan-stop mechanisms as an alternate explanation. Before the Issue #931 fix, the session flag cleared at the very first (rate-limited, never-executed) attempt at 02:01:38, silently disarming nat_vent_temperature_check()'s own retry guard -- the fan would still be running here, exactly as it ran for 2.5h in the real incident."
+      "reason": "The fan must have actually stopped by the first re-evaluation tick past the 300s rate-limit window, even though indoor stayed far above both the overnight cycling-off threshold and the hard comfort floor the entire time, ruling out either of the two other independent fan-stop mechanisms as an alternate explanation. Before the Issue #931 fix, the session flag cleared at the very first (rate-limited, never-executed) attempt at 02:01:38, silently disarming nat_vent_temperature_check()'s own retry guard -- the fan would still be running here, exactly as it ran for 2.5h in the real incident."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "A nat-vent PROACTIVE_FLOOR exit that gets deferred by the 300s fan-toggle rate limiter, with indoor never rebounding above the floor afterward, is still retried on every subsequent tick and the fan actually stops once the rate-limit window clears -- the WHF overshoot incident this issue reported, closed at its root cause (_end_nat_vent_session(), the sole writer of the nat-vent session flags in connection with a fan command)."
+    "summary": "A nat-vent CEILING_THRESHOLD exit that gets deferred by the 300s fan-toggle rate limiter is still retried on every subsequent tick and the fan actually stops once the rate-limit window clears -- the WHF overshoot incident this issue reported, closed at its root cause (_end_nat_vent_session(), the sole writer of the nat-vent session flags in connection with a fan command), now reproduced via CEILING_THRESHOLD since the original PROACTIVE_FLOOR vehicle was removed in Issue #959."
   }
 }

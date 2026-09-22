@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.59"
+VERSION = "0.7.60"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -315,8 +315,9 @@ DEFAULT_NAT_VENT_SOFT_START_ENABLED = True
 # day "declining" — mirrors NAT_VENT_HYSTERESIS_F's role as a noise-margin buffer.
 PEAK_DECLINE_MARGIN_F = 1.0
 
-# Minimum viable nat vent window — skip activation (or exit proactively) if thermal
-# model predicts indoor will hit comfort_heat floor within this many hours.
+# Minimum viable nat vent window — skip activation if thermal model predicts indoor
+# will hit comfort_heat floor within this many hours (Guard 2, `nat_vent_floor_imminent_skip`
+# in automation.py). The matching predictive-exit branch was removed in Issue #959.
 MIN_VIABLE_NAT_VENT_HOURS = 1.0
 
 # Issue #821: sustain-confirmation windows for confirmed_transition.py's shared

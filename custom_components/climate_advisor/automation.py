@@ -4657,9 +4657,9 @@ class AutomationEngine:
             # ``self._nat_vent_soft_start:`` block below (formerly gated on
             # ``_natvent_fsm_authoritative`` too) for the surviving single path.
 
-            # Issue #608 (Block 5 Phase 2): the 5-check priority-ordered exit chain
-            # (comfort-floor, away-ceiling, proactive-floor, outdoor-rise,
-            # ceiling-threshold) previously inline here now lives in
+            # Issue #608 (Block 5 Phase 2): the 4-check priority-ordered exit chain
+            # (comfort-floor, away-ceiling, outdoor-rise, ceiling-threshold)
+            # previously inline here now lives in
             # nat_vent_exit.decide_nat_vent_exit() — same conditions, same
             # priority order, differentially validated (tests/test_nat_vent_exit.py
             # + unchanged golden/pending assertions on these exact exit events).
@@ -4876,54 +4876,6 @@ class AutomationEngine:
                         self._emit_event_callback("nat_vent_away_ceiling_exit", _away_ceiling_payload)
                     return
 
-                if exit_decision.reason == NatVentExitReason.PROACTIVE_FLOOR:
-                    time_to_floor = exit_decision.time_to_floor_hr
-                    comfort_heat_now = exit_decision.comfort_heat_now
-                    k_passive = thermal.get("k_passive")
-                    _LOGGER.info(
-                        "Natural vent proactive exit: floor predicted in %.2f hr"
-                        " < %.1f hr threshold — exiting nat-vent session",
-                        time_to_floor,
-                        MIN_VIABLE_NAT_VENT_HOURS,
-                    )
-                    # Issue #641: set_outdoor_exit_time=True — without this, a monitored
-                    # sensor left open hands this exit straight into the _paused_by_door
-                    # reactivation block below with no lockout armed. Since the instant
-                    # reactivation gate (outdoor < indoor - hysteresis) is a *different,
-                    # non-predictive* condition than this exit's own time-to-floor
-                    # prediction, indoor/outdoor barely move tick-to-tick, so the gate is
-                    # almost always still satisfied on the very next tick — guaranteeing
-                    # immediate reactivation, another proactive exit, and a repeating
-                    # on/off flip-flop (the WHF fast-cycling incident). Arming the same
-                    # lockout the outdoor-rise exit already uses closes this gap.
-                    #
-                    # Issue #649: event emission moved into _exit_nat_vent() itself (via
-                    # event_type/event_payload) instead of firing here unconditionally —
-                    # centralizes the "was this actually executed or deferred by the #641
-                    # rate limiter" check in one place instead of repeating it at every
-                    # exit-reason branch.
-                    await self._exit_nat_vent(
-                        reason=(
-                            f"nat-vent proactive floor exit: indoor {indoor:.1f}°F"
-                            f" predicted to reach comfort_heat {comfort_heat_now:.1f}°F"
-                            f" in {time_to_floor:.2f}h"
-                        ),
-                        set_outdoor_exit_time=True,
-                        event_type="nat_vent_predicted_floor_exit",
-                        event_payload={
-                            "time_to_floor_hr": round(time_to_floor, 2),
-                            "indoor_temp": round(indoor, 1),
-                            "comfort_heat": round(comfort_heat_now, 1),
-                            "k_passive": round(k_passive, 4),
-                            "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                            "fan_device": _fan_device_label(self.config),
-                            "hvac_mode_restored": (
-                                self._current_classification.hvac_mode if self._current_classification else "unknown"
-                            ),
-                        },
-                    )
-                    return
-
                 if exit_decision.reason == NatVentExitReason.OUTDOOR_RISE:
                     _LOGGER.info(
                         "Natural vent exit: outdoor %.1f°F >= indoor %.1f°F — airflow reversed",
@@ -4932,8 +4884,8 @@ class AutomationEngine:
                     )
                     # set_outdoor_exit_time=True: the original exit reason this lockout was
                     # built for (Issue #115/#411). Issue #641 later extended the same
-                    # treatment to PROACTIVE_FLOOR and CEILING_THRESHOLD above/below, once
-                    # both were found to hand off into the identical paused-reactivation race.
+                    # treatment to CEILING_THRESHOLD below, once it was found to hand off
+                    # into the identical paused-reactivation race.
                     # Issue #690: boundary is now non-strict (>=, via is_outdoor_rise_exit()) —
                     # this text is user-visible on the Debug tab via _last_action_reason.
                     await self._exit_nat_vent(
@@ -4959,13 +4911,13 @@ class AutomationEngine:
                         outdoor,
                         threshold,
                     )
-                    # Issue #641: same lockout gap and same fix as the proactive-floor exit
+                    # Issue #641: same lockout gap and same fix as the outdoor-rise exit
                     # above — the reactivation gate's own ceiling_ok = outdoor < threshold
                     # check is the exact complementary boundary, so outdoor hovering near
                     # threshold can flip-flop this exit against reactivation identically.
-                    # Issue #666: event_type was missing here — every sibling exit branch in
-                    # this function (OUTDOOR_RISE above, PROACTIVE_FLOOR before it) and
-                    # fan_thermostat_check()'s own equivalent outdoor-exit branch all pass
+                    # Issue #666: event_type was missing here — the sibling exit branch in
+                    # this function (OUTDOOR_RISE above) and fan_thermostat_check()'s own
+                    # equivalent outdoor-exit branch all pass
                     # "nat_vent_outdoor_rise_exit" (added project-wide by Issue #649, add1b8f
                     # — this call site was the one sibling it missed). event_type is kept
                     # here for the general event_log/notification machinery even though the
@@ -5196,10 +5148,10 @@ class AutomationEngine:
             on_threshold = nat_vent_target + hysteresis
 
             # Issue #757 Phase 6 Step 5: the fast per-tick hard-exit check calls
-            # decide_nat_vent_exit() — the SAME 5-check priority chain (comfort-floor,
-            # away-ceiling, proactive-floor, outdoor-rise, ceiling-threshold)
+            # decide_nat_vent_exit() — the SAME 4-check priority chain (comfort-floor,
+            # away-ceiling, outdoor-rise, ceiling-threshold)
             # check_natural_vent_conditions()'s slow loop already uses. A session can end
-            # via any of the 5 reasons within this fast loop's own tick cadence, instead of
+            # via any of the 4 reasons within this fast loop's own tick cadence, instead of
             # waiting up to 30 min for the slow loop to catch it. The former legacy branch
             # (comfort-floor only, via resolve_hard_exit_floor()/_hard_floor) has been
             # removed.
@@ -5230,7 +5182,7 @@ class AutomationEngine:
                 exit_decision = NatVentExitDecision(reason=NatVentExitReason.NONE)
             _exit_reason = exit_decision.reason
 
-            # Hard floor (or any of the 5 exit reasons) takes priority over cycling. Sleep
+            # Hard floor (or any of the 4 exit reasons) takes priority over cycling. Sleep
             # window: _hard_floor = sleep_heat - hysteresis (one step below cycling-off
             # threshold), allowing the fan to cycle off gracefully at sleep_heat before the
             # session terminates. Daytime: _hard_floor = comfort_heat (unchanged behaviour).
@@ -5289,11 +5241,11 @@ class AutomationEngine:
                     )
                     return
 
-                # Remaining 4 reasons all route through the canonical _exit_nat_vent() choke
+                # Remaining 3 reasons all route through the canonical _exit_nat_vent() choke
                 # point (Issue #418), same as their slow-loop siblings — event_type/payload
                 # shape and set_outdoor_exit_time match check_natural_vent_conditions()'s own
-                # branches exactly (Issue #641 lockout-arming included for the 3 reasons that
-                # can hand off into a sensor-still-open pause).
+                # branches exactly (Issue #641 lockout-arming included for all of them, since
+                # each can hand off into a sensor-still-open pause).
                 if _exit_reason == NatVentExitReason.COMFORT_FLOOR:
                     _floor_for_log = (
                         exit_decision.vent_floor
@@ -5320,27 +5272,6 @@ class AutomationEngine:
                     # real 68->69F rise over 5 real minutes triggered this exact gap on
                     # 2026-08-23), so this exit needs the same anti-flap protection as the
                     # other three exit reasons below.
-                    _set_outdoor_exit_time = True
-                elif _exit_reason == NatVentExitReason.PROACTIVE_FLOOR:
-                    _ttf = (exit_decision.time_to_floor_hr if exit_decision is not None else None) or 0.0
-                    _cf_now = (exit_decision.comfort_heat_now if exit_decision is not None else None) or _hard_floor
-                    _log_detail = (
-                        f"floor predicted in {_ttf:.2f}h — indoor {current_temp:.1f}°F -> comfort_heat {_cf_now:.1f}°F"
-                    )
-                    _event_type = "nat_vent_predicted_floor_exit"
-                    _k_passive_nvtc = thermal_nvtc.get("k_passive")
-                    _payload = {
-                        "time_to_floor_hr": round(_ttf, 2),
-                        "indoor_temp": round(current_temp, 1),
-                        "comfort_heat": round(_cf_now, 1),
-                        "k_passive": round(_k_passive_nvtc, 4) if _k_passive_nvtc is not None else None,
-                        "source": "temp_check",
-                        "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                        "fan_device": _fan_device_label(self.config),
-                        "hvac_mode_restored": (
-                            self._current_classification.hvac_mode if self._current_classification else "unknown"
-                        ),
-                    }
                     _set_outdoor_exit_time = True
                 else:
                     # OUTDOOR_RISE / CEILING_THRESHOLD — both mapped to the same
@@ -5577,7 +5508,7 @@ class AutomationEngine:
 
         # Issue #821: this tick-level check's outcomes (STOP_VIA_NAT_VENT_EXIT/
         # STOP_DEACTIVATE/STOP_COOLED_TO_FLOOR) are deliberately NOT sustain-confirmed,
-        # unlike decide_nat_vent_exit()'s 5 exit reasons (nat_vent_exit.py). This is a
+        # unlike decide_nat_vent_exit()'s 4 exit reasons (nat_vent_exit.py). This is a
         # reasoned design boundary, not an oversight: fan_thermostat_check() exists
         # specifically for rapid response to prevent real overshoot (Issue #327's
         # airflow-reversal stop, Issue #402's overcooling stop) — delaying it 90s would
@@ -5586,12 +5517,14 @@ class AutomationEngine:
         # (`_exit_nat_vent()`'s `set_outdoor_exit_time=True`) every sustain-confirmed
         # exit reason also uses, so re-entry is still debounced even though the exit
         # itself is instantaneous. It also wasn't implicated in the reported live
-        # incident that motivated Issue #821 — that traced to PROACTIVE_FLOOR, a
-        # slow-loop-only exit reason this method never evaluates. Confirmed by the
-        # project owner after independently reproducing a gating attempt here (it broke
-        # 6 additional locked golden scenarios) and tracing this method's own history
-        # and lockout coverage directly. See docs/08-COMPUTATION-REFERENCE.md §6f for
-        # the full rationale.
+        # incident that motivated Issue #821 — that incident's investigation was
+        # inconclusive (the raw disk log for the window had already rotated out of
+        # retention; see docs/issue-821-golden-scenario-review-notes.md) and the
+        # slow-loop-only predictive exit reason it initially suspected has since been
+        # removed entirely (Issue #959). Confirmed by the project owner after
+        # independently reproducing a gating attempt here (it broke 6 additional locked
+        # golden scenarios) and tracing this method's own history and lockout coverage
+        # directly. See docs/08-COMPUTATION-REFERENCE.md §6f for the full rationale.
 
         if outcome is FanThermostatOutcome.KEEP:
             _LOGGER.debug(
@@ -7731,28 +7664,27 @@ class AutomationEngine:
     ) -> FanCommandResult:
         """Single choke point for ending a nat-vent session (Issue #411).
 
-        Unifies the handoff previously hand-rolled at 4 separate call sites (Phase 2
-        proactive floor exit, the reactive hard-floor exit, the outdoor-reversal exit,
-        and the outdoor-too-warm exit) so every path checks the monitored sensor state
-        before deciding whether to restore HVAC or pause, instead of each site
-        re-deciding independently. Away-mode ceiling exit is intentionally NOT routed
-        through this function — it is a different concept with no pause/grace state
-        machine.
+        Unifies the handoff previously hand-rolled at 3 separate call sites (the
+        reactive hard-floor exit, the outdoor-reversal exit, and the outdoor-too-warm
+        exit) so every path checks the monitored sensor state before deciding whether
+        to restore HVAC or pause, instead of each site re-deciding independently.
+        Away-mode ceiling exit is intentionally NOT routed through this function — it
+        is a different concept with no pause/grace state machine.
 
         Args:
             reason: Human-readable reason passed through to ``_deactivate_fan``.
             set_outdoor_exit_time: Records ``_nat_vent_outdoor_exit_time`` for the
                 paused-by-door reactivation lockout. Originally only the outdoor-reversal
                 exit passed True (Issue #411); Issue #641 extended this to the
-                proactive-floor and ceiling-threshold exits too, after both were found to
-                exhibit the identical flip-flop against the instant reactivation gate
-                whenever they hand off into a sensor-still-open pause. Any exit reason
-                that can route through this pause branch should arm the lockout unless
-                it's independently proven immune to immediate re-satisfaction by the
-                instant gate (comfort-floor and away-ceiling exits don't route through
-                this function at all, so they're exempt by construction, not by omission).
+                ceiling-threshold exit too, after it was found to exhibit the identical
+                flip-flop against the instant reactivation gate whenever it hands off
+                into a sensor-still-open pause. Any exit reason that can route through
+                this pause branch should arm the lockout unless it's independently
+                proven immune to immediate re-satisfaction by the instant gate
+                (comfort-floor and away-ceiling exits don't route through this function
+                at all, so they're exempt by construction, not by omission).
             event_type: Issue #649 — the caller's own specific Activity Report event type
-                (e.g. ``nat_vent_predicted_floor_exit``). Centralizing emission here (instead
+                (e.g. ``nat_vent_comfort_floor_exit``). Centralizing emission here (instead
                 of each of the 7+ call sites emitting before calling this method, as before
                 #649) lets the payload accurately reflect whether the underlying fan command
                 actually executed or was deferred by the Issue #641 rate limiter, in exactly
@@ -7779,8 +7711,8 @@ class AutomationEngine:
             self._nat_vent_outdoor_exit_time = dt_util.now()
         sensor_open = self._any_monitored_sensor_open()
         # emit_event=False on both branches: the caller's own specific exit event
-        # (nat_vent_predicted_floor_exit, nat_vent_comfort_floor_exit,
-        # nat_vent_outdoor_rise_exit, etc.) is emitted below, by this method, once the
+        # (nat_vent_comfort_floor_exit, nat_vent_outdoor_rise_exit, etc.) is emitted
+        # below, by this method, once the
         # real outcome is known (Issue #649) — letting _deactivate_fan() also emit a
         # generic fan_deactivated event here would land at the same timestamp and shadow
         # the specific event in outcome-ordering consumers (Issue #411 — found during
@@ -7843,11 +7775,12 @@ class AutomationEngine:
             # consulting the shared family resolver. Since nat-vent only ever starts on
             # a cooling day, this almost always restores "cool" — reproducing the
             # original comfort-floor-defense bug through nat-vent's own most common
-            # exit path (PROACTIVE_FLOOR routes through this method, not through
-            # check_natural_vent_conditions()'s separate COMFORT_FLOOR branch, which
-            # already gets this right via its own follow-up _set_temperature_for_mode()
-            # call). Mirrors the exact pattern already used at the door/window-all-
-            # closed restore site and resume_from_pause(): restore the old mode first
+            # exit paths (OUTDOOR_RISE/CEILING_THRESHOLD route through this method, not
+            # through check_natural_vent_conditions()'s separate COMFORT_FLOOR branch,
+            # which already gets this right via its own follow-up
+            # _set_temperature_for_mode() call). Mirrors the exact pattern already used
+            # at the door/window-all-closed restore site and resume_from_pause():
+            # restore the old mode first
             # (already done, above, by _deactivate_fan()), then call
             # _set_temperature_for_mode() so the resolver can correct it if conditions
             # (e.g. indoor now below comfort_heat) call for a different family.
@@ -10295,9 +10228,9 @@ class AutomationEngine:
         Defense-in-depth: independent of any specific root cause, protects the physical
         WHF/HVAC-fan relay from rapid cycling regardless of which upstream decision logic
         produced the reversal (the WHF fast-cycling incident that motivated this — a
-        proactive-floor exit immediately followed by reactivation — is fixed at its own
-        root cause elsewhere, but this backstop holds even if a different, future gap
-        produces the same physical symptom).
+        proactive-floor exit immediately followed by reactivation — no longer occurs,
+        since the predictive exit itself was removed in Issue #959, but this backstop
+        holds even if a different, future gap produces the same physical symptom).
 
         Only ever compares against ``self._fan_toggle_command_time`` — stamped
         exclusively by ``_activate_fan``/``_deactivate_fan``'s own command sites, not

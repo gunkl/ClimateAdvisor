@@ -273,7 +273,6 @@ from .temperature import (
     format_temp,
     free_cooling_direction_ok,
     from_fahrenheit,
-    read_state_temp_f,
     to_fahrenheit,
 )
 
@@ -1227,6 +1226,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._unsub_listeners.append(
                 async_track_state_change_event(
                     self.hass, _indoor_temp_entity, self._zone_scoped_sync(_async_indoor_temp_changed)
+                )
+            )
+
+        # Sleep-window indoor sensor (Issue #964): when sleep_indoor_temp_entity is
+        # configured, _get_indoor_temp() swaps to it during the sleep window — but
+        # without a listener of its own, nothing wakes the per-tick reactive checks
+        # when THAT sensor changes; they'd only fire on the hallway/climate-entity's
+        # own tick cadence (via _async_thermostat_changed below), which can plateau
+        # for long stretches while the sleep sensor keeps drifting. Same rationale as
+        # the _indoor_temp_entity listener above, applied to the sleep-window source.
+        # Gated on in_sleep_window so a bedroom-sensor tick outside the sleep window
+        # (when it isn't authoritative) doesn't trigger pointless re-checks.
+        _sleep_indoor_entity = self.config.get("sleep_indoor_temp_entity")
+        if _sleep_indoor_entity:
+            self._unsub_listeners.append(
+                async_track_state_change_event(
+                    self.hass,
+                    _sleep_indoor_entity,
+                    self._zone_scoped(self._on_sleep_indoor_temp_changed),
                 )
             )
 
@@ -5193,6 +5211,55 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Startup coalescing active — suppressing %s", description)
         return True
 
+    async def _async_run_temp_reactive_checks(self) -> None:
+        """Single choke point for indoor-temp-reactive checks (Issue #964).
+
+        Resolves indoor once via self._get_indoor_temp() — the sleep-aware resolver
+        that swaps to sleep_indoor_temp_entity during the sleep window — and reuses
+        that one value for all three per-tick reactive checks (nat-vent cycling, the
+        thermostatic fan backstop, and the comfort-family FSM), replacing three
+        independent reads that previously disagreed on source: two of them read the
+        raw climate-entity attribute directly instead of the resolved value.
+
+        Two callers: _async_thermostat_changed() (fires on hallway/climate-entity
+        ticks) and _async_sleep_indoor_temp_changed() (fires on sleep sensor ticks,
+        registered only when sleep_indoor_temp_entity is configured) — see
+        async_setup() listener registration. Both need the identical set of checks
+        run against whichever source is currently authoritative, so this is shared
+        rather than duplicated per listener.
+        """
+        indoor = self._get_indoor_temp()
+        if indoor is None:
+            return
+        if self.automation_engine._natural_vent_active:
+            await self.automation_engine.nat_vent_temperature_check(indoor, outdoor=self._last_outdoor_temp)
+        if self.automation_engine._fan_active or self.automation_engine._natural_vent_active:
+            await self.automation_engine.fan_thermostat_check(
+                indoor=indoor,
+                outdoor=self._last_outdoor_temp,
+                trigger="tick",
+            )
+        await self.automation_engine.comfort_family_temperature_check(
+            indoor, predicted_indoor=self._last_predicted_indoor
+        )
+
+    async def _on_sleep_indoor_temp_changed(self, event: Event) -> None:
+        """Listener for ``sleep_indoor_temp_entity`` state changes (Issue #964).
+
+        Registered only when a sleep-window indoor sensor is configured (see
+        ``async_setup()``) — a plain async listener, same shape as
+        ``_async_thermostat_changed()``, which ``async_track_state_change_event``
+        awaits directly (no ``@callback`` needed; that's only required for a
+        synchronous listener). Gated on ``_in_sleep_window()`` so a bedroom-sensor
+        tick outside the sleep window — when it isn't the authoritative source and
+        ``_get_indoor_temp()`` would resolve to the primary/hallway sensor anyway —
+        doesn't trigger a pointless re-check; the hallway listener
+        (``_async_thermostat_changed``) already covers that case.
+        """
+        if not _in_sleep_window(dt_util.now(), self.config):
+            return
+        await self._async_run_temp_reactive_checks()
+
     async def _async_thermostat_changed(self, event: Event) -> None:
         """Track thermostat changes for learning (detect manual overrides)."""
         new_state = event.data.get("new_state")
@@ -5204,54 +5271,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._suppress_during_startup_coalescing(f"thermostat override detection for {new_state.state}"):
             return
 
-        # Bug 3 (Issue #321): Per-temperature-tick nat-vent cycling re-evaluation.
-        # Fires on every thermostat state event (including attribute-only changes) when
-        # a nat-vent session is active so the fan cycles before the hard comfort-floor exit.
-        # Issue #903: read via read_state_temp_f() so a Celsius-configured install's raw
-        # current_temperature attribute is converted to internal Fahrenheit before being
-        # compared against comfort_heat/comfort_cool/nat_vent_target (all internal-°F) —
-        # the other two nat_vent_temperature_check() call sites already do this correctly
-        # via _get_indoor_temp(). Raw attrs are still used for the "did it change" check,
-        # which is unit-agnostic (equality, not comparison against an internal-°F value).
-        unit = self.config.get("temp_unit", "fahrenheit")
+        # Bug 3 (Issue #321) / Issue #327 / Issue #858, consolidated by Issue #964:
+        # per-temperature-tick re-evaluation of nat-vent cycling, thermostatic fan
+        # backstop, and comfort-family FSM. All three used to independently decide
+        # whether to fire off the same "did current_temperature change" dirty-check,
+        # but only fan_thermostat_check() resolved the actual value through the
+        # sleep-aware _get_indoor_temp() (which swaps to sleep_indoor_temp_entity
+        # during the sleep window) — nat_vent_temperature_check() and
+        # comfort_family_temperature_check() each read the raw climate-entity
+        # attribute directly, so on any install with a sleep sensor configured they
+        # were making sleep-window decisions against the hallway thermostat's
+        # reading instead of the bedroom's. Raw attrs are still used here ONLY for
+        # the "did it change" check, which is unit-agnostic (equality, not a
+        # comparison against an internal-°F value) — the resolved value used by all
+        # three checks now comes from the single _async_run_temp_reactive_checks()
+        # choke point instead.
         _new_temp_attr = new_state.attributes.get("current_temperature")
         _old_temp_attr = old_state.attributes.get("current_temperature")
-        if (
-            _new_temp_attr is not None
-            and _new_temp_attr != _old_temp_attr
-            and self.automation_engine._natural_vent_active
-        ):
-            _new_temp_f = read_state_temp_f(new_state, "current_temperature", unit)
-            if _new_temp_f is not None:
-                await self.automation_engine.nat_vent_temperature_check(_new_temp_f, outdoor=self._last_outdoor_temp)
-
-        # Issue #327: Thermostatic fan re-evaluation on every indoor temp tick.
-        # Fires whenever the thermostat reports a new current_temperature and a CA fan is running
-        # (nat-vent OR regular fan-only).  The engine method is idempotent; calling it here when
-        # nat_vent_temperature_check already ran above is safe — they target different exit paths.
-        if (
-            _new_temp_attr is not None
-            and _new_temp_attr != _old_temp_attr
-            and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active)
-        ):
-            await self.automation_engine.fan_thermostat_check(
-                indoor=self._get_indoor_temp(),
-                outdoor=self._last_outdoor_temp,
-                trigger="tick",
-            )
-
-        # Issue #858: comfort-family FSM re-evaluation on every indoor temp tick.
-        # Previously only re-evaluated on the ~30-minute apply_classification()
-        # cycle (nat-vent and fan control above already had this reactivity;
-        # the comfort-family defense did not) — a confirmed live incident
-        # showed indoor falling 6°F below the comfort floor before the
-        # scheduled cycle caught up. The engine method itself gates on whether
-        # a breach is plausible against the last-applied band, so this call is
-        # cheap on every other tick.
         if _new_temp_attr is not None and _new_temp_attr != _old_temp_attr:
-            await self.automation_engine.comfort_family_temperature_check(
-                float(_new_temp_attr), predicted_indoor=self._last_predicted_indoor
-            )
+            await self._async_run_temp_reactive_checks()
 
         # Expected-state confirmation suppression: if thermostat is confirming an automation
         # command (same mode, within 2 minutes), this is not a user override.

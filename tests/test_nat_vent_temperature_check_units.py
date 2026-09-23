@@ -1,31 +1,23 @@
-"""Regression test for Issue #903 Bug 2: coordinator.py's
-``_async_thermostat_changed()`` nat-vent temperature-check call site
-(coordinator.py ~4994-5003).
+"""Regression test for coordinator.py's ``_async_thermostat_changed()`` per-tick
+reactive-check call site (coordinator.py's ``_async_run_temp_reactive_checks()``).
 
-Prior to this fix, the raw ``current_temperature`` attribute off the thermostat
-state was passed straight into ``nat_vent_temperature_check()`` without going
-through the ``to_fahrenheit()`` conversion boundary:
+History: Issue #903 fixed a bug where the raw ``current_temperature`` attribute off
+the thermostat state was passed straight into ``nat_vent_temperature_check()``
+without unit conversion, via a dedicated ``read_state_temp_f()`` call inline in
+``_async_thermostat_changed()``. Issue #964 replaced that per-call-site read (and two
+sibling reads with the identical shape feeding ``fan_thermostat_check()`` and
+``comfort_family_temperature_check()``) with a single choke point,
+``_async_run_temp_reactive_checks()``, that resolves indoor temperature exactly once
+via ``self._get_indoor_temp()`` — the sleep-aware resolver that already handles unit
+conversion (covered directly by ``test_indoor_temp_helper.py``) and additionally
+swaps to ``sleep_indoor_temp_entity`` during the sleep window, which the old
+raw-attribute read never did.
 
-    _new_temp_attr = new_state.attributes.get("current_temperature")
-    ...
-    await self.automation_engine.nat_vent_temperature_check(
-        float(_new_temp_attr), outdoor=self._last_outdoor_temp
-    )
-
-``nat_vent_temperature_check()``'s contract (and its downstream comparisons
-against ``comfort_heat``/``comfort_cool``/``nat_vent_target``) is internal
-Fahrenheit — confirmed via the other two call sites of the same function
-(automation.py), which both resolve indoor temp through ``_get_indoor_temp()``
-first. On a Celsius-configured install, a raw ``20.0`` (68°F) reading would be
-handed to the check as if it were already ``20.0°F`` — a 48°F error that could
-leave nat-vent running well past the real comfort floor, or fail to cycle the
-fan at the correct indoor temperature.
-
-The fix routes the read through ``temperature.read_state_temp_f()`` (the new
-Issue #903 shared conversion helper) before calling
-``nat_vent_temperature_check()``. This test asserts the value the coordinator
-actually passes downstream is the converted internal-Fahrenheit value, not the
-raw Celsius number.
+This file now asserts the coupling that matters post-#964: whatever
+``self._get_indoor_temp()`` resolves to is what reaches all three reactive checks,
+independent of the raw ``current_temperature`` attribute's own value — the raw
+attribute is used ONLY as the "did something change" dirty-check gate, never as the
+decision value itself.
 """
 
 from __future__ import annotations
@@ -72,16 +64,23 @@ def _make_thermostat_event(old_state: MagicMock, new_state: MagicMock) -> MagicM
     return event
 
 
-def _make_coord(*, temp_unit: str) -> MagicMock:
-    """Coordinator stub with the real _async_thermostat_changed bound (Issue #903).
+def _make_coord(*, temp_unit: str, resolved_indoor: float = 72.0) -> MagicMock:
+    """Coordinator stub with the real _async_thermostat_changed +
+    _async_run_temp_reactive_checks bound (Issue #964).
 
     Mirrors the established object.__new__() + types.MethodType partial-
     instantiation pattern from test_fan_command_guard.py's ``_make_coord``.
     old_state.state == new_state.state throughout this test module so every
     mode-change/override-detection branch in the (very long) production
-    method is skipped — only the nat-vent temperature-check block (which
-    fires on any current_temperature tick regardless of mode change) is
-    exercised.
+    method is skipped — only the per-tick reactive-check block (which fires
+    on any current_temperature tick regardless of mode change) is exercised.
+
+    ``_get_indoor_temp`` is stubbed to return ``resolved_indoor`` — a fixed,
+    caller-controlled value standing in for whatever the real sleep-aware
+    resolver would produce, so these tests can assert the coupling
+    (resolved value reaches the checks) without re-testing the resolver's
+    own unit-conversion/sleep-sensor-swap logic, which test_indoor_temp_helper.py
+    already covers directly.
     """
     ClimateAdvisorCoordinator = _get_coordinator_class()
     coord = object.__new__(ClimateAdvisorCoordinator)
@@ -129,7 +128,7 @@ def _make_coord(*, temp_unit: str) -> MagicMock:
     coord._start_hvac_observation = AsyncMock()
     coord._end_hvac_active_phase = MagicMock()
     coord._abandon_observation = AsyncMock()
-    coord._get_indoor_temp = MagicMock(return_value=72.0)
+    coord._get_indoor_temp = MagicMock(return_value=resolved_indoor)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)
     coord._last_outdoor_temp = 65.0
     coord._last_predicted_indoor = None
@@ -139,22 +138,33 @@ def _make_coord(*, temp_unit: str) -> MagicMock:
     coord._startup_coalesce_active = False
 
     coord._async_thermostat_changed = types.MethodType(ClimateAdvisorCoordinator._async_thermostat_changed, coord)
+    coord._async_run_temp_reactive_checks = types.MethodType(
+        ClimateAdvisorCoordinator._async_run_temp_reactive_checks, coord
+    )
     coord._is_recent_hvac_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_hvac_command, coord)
     coord._is_recent_temp_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_temp_command, coord)
     coord._is_recent_fan_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_fan_command, coord)
     return coord
 
 
-class TestNatVentTemperatureCheckUnitConversion:
-    """coordinator.py's nat-vent check call site must convert to internal °F."""
+class TestNatVentTemperatureCheckUsesResolvedIndoor:
+    """coordinator.py's per-tick reactive checks must use self._get_indoor_temp()'s
+    resolved value, never the raw current_temperature attribute directly."""
 
-    def test_celsius_current_temperature_converted_before_nat_vent_check(self):
-        """A raw 20.0°C current_temperature must reach nat_vent_temperature_check()
-        as 68.0°F, not as a bare 20.0 misread as Fahrenheit."""
-        coord = _make_coord(temp_unit="celsius")
+    def test_resolved_value_reaches_nat_vent_check_not_raw_attribute(self):
+        """The value passed to nat_vent_temperature_check() must be whatever
+        _get_indoor_temp() resolves to — even when that differs from the raw
+        current_temperature attribute on the triggering state-change event
+        (exactly what happens on a sleep-sensor-configured install, where the
+        hallway thermostat's attribute triggers the tick but the resolver swaps
+        to the bedroom sensor's value)."""
+        coord = _make_coord(temp_unit="fahrenheit", resolved_indoor=66.0)
 
-        old_state = _make_state(hvac_mode="cool", current_temperature=19.0)
-        new_state = _make_state(hvac_mode="cool", current_temperature=20.0)
+        # Raw attribute reads 69°F (e.g. the hallway thermostat) — deliberately
+        # different from the resolved value (66°F, e.g. the bedroom sensor) to
+        # prove the raw number never leaks into the decision.
+        old_state = _make_state(hvac_mode="cool", current_temperature=68.0)
+        new_state = _make_state(hvac_mode="cool", current_temperature=69.0)
         event = _make_thermostat_event(old_state, new_state)
 
         asyncio.run(coord._async_thermostat_changed(event))
@@ -162,55 +172,76 @@ class TestNatVentTemperatureCheckUnitConversion:
         coord.automation_engine.nat_vent_temperature_check.assert_awaited_once()
         call_args = coord.automation_engine.nat_vent_temperature_check.call_args
         passed_temp = call_args[0][0]
-        assert passed_temp == pytest.approx(68.0), (
-            f"Expected 20.0°C converted to 68.0°F, got {passed_temp} "
-            "(Issue #903: raw Celsius attribute was passed through unconverted)"
+        assert passed_temp == pytest.approx(66.0), (
+            f"Expected the resolved indoor value (66.0) to reach nat_vent_temperature_check(), "
+            f"got {passed_temp} (Issue #964: raw attribute must never be used as the decision value)"
         )
         assert call_args[1]["outdoor"] == pytest.approx(65.0)
 
-    def test_fahrenheit_current_temperature_passed_through_unchanged(self):
-        """Fahrenheit-configured installs are unaffected — a raw 68.0°F reading
-        still reaches nat_vent_temperature_check() as 68.0°F (identity passthrough)."""
-        coord = _make_coord(temp_unit="fahrenheit")
+    def test_resolved_value_reaches_fan_and_comfort_family_checks_too(self):
+        """The same resolved value must reach fan_thermostat_check() and
+        comfort_family_temperature_check() — the two sibling checks Issue #964
+        consolidated into the same choke point as the nat-vent check."""
+        coord = _make_coord(temp_unit="fahrenheit", resolved_indoor=66.0)
+        coord.automation_engine._fan_active = True
 
-        old_state = _make_state(hvac_mode="cool", current_temperature=67.0)
-        new_state = _make_state(hvac_mode="cool", current_temperature=68.0)
+        old_state = _make_state(hvac_mode="cool", current_temperature=68.0)
+        new_state = _make_state(hvac_mode="cool", current_temperature=69.0)
         event = _make_thermostat_event(old_state, new_state)
 
         asyncio.run(coord._async_thermostat_changed(event))
 
-        coord.automation_engine.nat_vent_temperature_check.assert_awaited_once()
-        passed_temp = coord.automation_engine.nat_vent_temperature_check.call_args[0][0]
-        assert passed_temp == pytest.approx(68.0)
+        coord.automation_engine.fan_thermostat_check.assert_awaited_once()
+        assert coord.automation_engine.fan_thermostat_check.call_args[1]["indoor"] == pytest.approx(66.0)
 
-    def test_no_crash_and_no_check_when_current_temperature_missing(self):
-        """current_temperature attribute absent (e.g. thermostat momentarily
-        unavailable) → read_state_temp_f() returns None → the check is skipped
-        gracefully rather than crashing, consistent with this codebase's
-        graceful-degradation pattern. The outer gate (`_new_temp_attr is not
-        None`) already skips the sibling fan_thermostat_check/
-        comfort_family_temperature_check calls in this same case, so nothing
-        downstream sees a missing reading either."""
-        coord = _make_coord(temp_unit="celsius")
+        coord.automation_engine.comfort_family_temperature_check.assert_awaited_once()
+        comfort_call_args = coord.automation_engine.comfort_family_temperature_check.call_args
+        assert comfort_call_args[0][0] == pytest.approx(66.0)
 
-        old_state = _make_state(hvac_mode="cool", current_temperature=19.0)
-        new_state = _make_state(hvac_mode="cool", current_temperature=19.0)
-        del new_state.attributes["current_temperature"]
+    def test_no_crash_and_no_check_when_resolved_indoor_missing(self):
+        """_get_indoor_temp() returning None (e.g. every source unavailable) must
+        skip all three checks gracefully rather than crashing, consistent with
+        this codebase's graceful-degradation pattern."""
+        coord = _make_coord(temp_unit="fahrenheit", resolved_indoor=None)
+        coord.automation_engine._fan_active = True
+
+        old_state = _make_state(hvac_mode="cool", current_temperature=68.0)
+        new_state = _make_state(hvac_mode="cool", current_temperature=69.0)
         event = _make_thermostat_event(old_state, new_state)
 
         # Must not raise.
         asyncio.run(coord._async_thermostat_changed(event))
 
         coord.automation_engine.nat_vent_temperature_check.assert_not_awaited()
+        coord.automation_engine.fan_thermostat_check.assert_not_awaited()
+        coord.automation_engine.comfort_family_temperature_check.assert_not_awaited()
+
+    def test_no_check_when_current_temperature_attribute_missing(self):
+        """current_temperature attribute absent on the triggering event (e.g.
+        thermostat momentarily unavailable) → the dirty-check gate skips the
+        whole reactive-check call, exactly as before Issue #964 — this is the
+        one place the raw attribute still legitimately matters (as a trigger
+        gate, not a decision value)."""
+        coord = _make_coord(temp_unit="fahrenheit")
+
+        old_state = _make_state(hvac_mode="cool", current_temperature=68.0)
+        new_state = _make_state(hvac_mode="cool", current_temperature=68.0)
+        del new_state.attributes["current_temperature"]
+        event = _make_thermostat_event(old_state, new_state)
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.nat_vent_temperature_check.assert_not_awaited()
 
     def test_not_called_when_nat_vent_inactive(self):
-        """No nat-vent session active → check is not invoked at all (unchanged
-        behavior — this test just guards against a regression in the outer gate)."""
-        coord = _make_coord(temp_unit="celsius")
+        """No nat-vent session active → nat-vent check is not invoked at all
+        (unchanged behavior — this test just guards against a regression in the
+        outer gate)."""
+        coord = _make_coord(temp_unit="fahrenheit")
         coord.automation_engine._natural_vent_active = False
 
-        old_state = _make_state(hvac_mode="cool", current_temperature=19.0)
-        new_state = _make_state(hvac_mode="cool", current_temperature=20.0)
+        old_state = _make_state(hvac_mode="cool", current_temperature=68.0)
+        new_state = _make_state(hvac_mode="cool", current_temperature=69.0)
         event = _make_thermostat_event(old_state, new_state)
 
         asyncio.run(coord._async_thermostat_changed(event))

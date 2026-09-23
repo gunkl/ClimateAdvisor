@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.62] — 2026-09-22
+
+- Fix #964: on installs with a separate bedroom/sleep-window indoor sensor configured, overnight nat-vent fan cycling now reacts to and reads from that sensor correctly, instead of intermittently using the hallway thermostat's reading.
+
 ## [0.7.61] — 2026-09-21
 
 - Internal: removed dead exit-chain fields left over from Issue #959's PROACTIVE_FLOOR removal (no occupant-facing behavior change) and corrected a misleading code comment. (#960)

@@ -985,6 +985,22 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
                 limit=EVENT_LOG_CAP,
             )
 
+            # Issue #973: append the compact diagnostic footer so this view carries the
+            # same "what does the thermostat actually report + CA version" context the
+            # AI Investigator and raw log download already got in #968 — flows through
+            # automatically to on-screen display, Copy, Download .md, and the GitHub
+            # issue body, since all four reuse this same table string on the frontend.
+            try:
+                from .diagnostic_snapshot import (  # noqa: PLC0415
+                    build_diagnostic_snapshot,
+                    render_diagnostic_snapshot_compact,
+                )
+
+                footer = render_diagnostic_snapshot_compact(build_diagnostic_snapshot(hass, coordinator))
+                table = table + "\n\n" + footer
+            except Exception:
+                _LOGGER.warning("activity_record: diagnostic footer failed — skipping", exc_info=True)
+
             cutoff_iso = (dt_util.now() - timedelta(hours=hours)).isoformat()
             oldest_stored = _oldest_event_time(event_log)
             is_truncated = bool(oldest_stored) and oldest_stored > cutoff_iso

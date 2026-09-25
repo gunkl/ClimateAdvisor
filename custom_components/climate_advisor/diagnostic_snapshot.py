@@ -93,3 +93,37 @@ def render_diagnostic_snapshot_text(snapshot: dict[str, Any]) -> str:
             lines.append(f"    {key}: {fan_attrs[key]!r}")
 
     return "\n".join(lines) + "\n"
+
+
+def render_diagnostic_snapshot_compact(snapshot: dict[str, Any]) -> str:
+    """Render a single-line, human-readable diagnostic footer (Issue #973).
+
+    Compact counterpart to `render_diagnostic_snapshot_text()` for surfaces the
+    occupant reads directly (Activity Record) rather than the AI's raw context —
+    picks the handful of attributes triage actually needs (hvac_mode, fan_mode,
+    hvac_action, temperature_unit) instead of dumping every attribute the entity
+    exposes.
+    """
+    parts = [f"CA v{snapshot.get('version')}"]
+
+    climate = snapshot.get("climate_entity") or {}
+    climate_id = climate.get("entity_id")
+    if climate_id:
+        attrs = climate.get("attributes") or {}
+        detail = " ".join(
+            f"{key}={attrs[key]}"
+            for key in ("fan_mode", "hvac_action", "temperature_unit")
+            if attrs.get(key) not in (None, "")
+        )
+        climate_part = f"{climate_id} hvac_mode={climate.get('state')}"
+        if detail:
+            climate_part += f" {detail}"
+        parts.append(climate_part)
+    else:
+        parts.append("climate entity: not configured")
+
+    fan = snapshot.get("fan_entity")
+    if fan is not None:
+        parts.append(f"{fan.get('entity_id')} state={fan.get('state')}")
+
+    return "**System:** " + " · ".join(parts)

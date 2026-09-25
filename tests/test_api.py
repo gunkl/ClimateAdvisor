@@ -1135,6 +1135,22 @@ class TestEventLogAndActivityRecordTruncationSignal:
         assert body["is_truncated"] is False
         assert body["oldest_available"] is None
 
+    def test_activity_record_table_includes_diagnostic_footer(self):
+        """Issue #973: the Activity Record table must carry the same compact
+        version/entity-attribute footer the AI Investigator and raw log download
+        already got in #968 — it flows through to Copy/Download/GitHub-issue-body
+        automatically since the frontend reuses this same table string."""
+        from datetime import datetime
+
+        from custom_components.climate_advisor.api import ClimateAdvisorActivityRecordView
+
+        now = datetime(2026, 7, 21, 14, 0, 0)
+        coordinator = self._make_coordinator([{"time": "2026-07-21T10:00:00", "type": "setpoint_applied"}])
+
+        body = self._get(ClimateAdvisorActivityRecordView, coordinator, now, hours="12")
+
+        assert "**System:** CA v" in body["table"]
+
 
 class TestIssue911ZoneScopedHandlers:
     """Issue #911: REST view handlers must run their body inside

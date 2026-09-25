@@ -164,6 +164,12 @@ def build_headless_engine(
     )
     attrs = {
         "fan_mode": "auto",
+        # Issue #968: fan_mode_resolver reads the entity's real fan_modes list to pick
+        # a valid on/off value — default to the legacy on/auto vocabulary so existing
+        # scenarios keep their prior fan-activation behavior unchanged. A scenario that
+        # wants to exercise a named-speed-only thermostat (Issue #893) sets
+        # config["thermostat_fan_modes"], mirroring thermostat_hvac_modes above.
+        "fan_modes": merged_config.get("thermostat_fan_modes", ["auto", "on"]),
         "hvac_modes": _default_hvac_modes,
         "supported_features": _default_features,
     }

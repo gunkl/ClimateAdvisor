@@ -1208,6 +1208,16 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
             oldest_stored = _oldest_event_time(coordinator._event_log)
             is_truncated = bool(oldest_stored) and oldest_stored > cutoff
 
+            # Issue #968: always include the diagnostic snapshot (entity attributes + CA
+            # version) so a downloaded log bundle is self-contained for triage without a
+            # separate manual round-trip to ask what the thermostat reports.
+            try:
+                from .diagnostic_snapshot import build_diagnostic_snapshot  # noqa: PLC0415
+
+                diagnostics = build_diagnostic_snapshot(hass, coordinator)
+            except Exception:
+                diagnostics = None
+
             return self.json(
                 {
                     "events": events,
@@ -1215,6 +1225,7 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
                     "hours": hours,
                     "is_truncated": is_truncated,
                     "oldest_available": oldest_stored,
+                    "diagnostics": diagnostics,
                 }
             )
 

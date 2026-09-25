@@ -66,6 +66,13 @@ def _make_automation_engine(config_overrides: dict | None = None) -> AutomationE
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+    # Issue #968: fan_mode_resolver reads the real fan_modes list from the climate
+    # entity to pick a valid on/off value — default to the pre-#968 "on"/"auto"
+    # vocabulary so every test that doesn't explicitly override hass.states.get
+    # keeps its old, literal "on"/"auto" service-call assertions unchanged.
+    _default_thermostat_state = MagicMock()
+    _default_thermostat_state.attributes = {"fan_modes": ["auto", "on"]}
+    hass.states.get.return_value = _default_thermostat_state
 
     config = {
         "comfort_heat": 70,
@@ -174,6 +181,51 @@ class TestActivateFan:
         assert calls[0][0][2]["fan_mode"] == "on"
         assert calls[0][0][2]["entity_id"] == "climate.thermostat"
 
+    def test_activate_hvac_fan_named_speed_vocabulary(self):
+        """Issue #893/#968: a thermostat with no literal 'on' (fan_modes=[auto,low,medium,
+        high]) must get the highest named speed tier commanded, not a hardcoded 'on' the
+        entity would silently reject. This is the scenario that produced #893's repeating
+        grace-period churn — this test would FAIL if the fan_mode_resolver fix were
+        reverted (the old code unconditionally sent 'on', not 'high')."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        named_speed_state = MagicMock()
+        named_speed_state.attributes = {"fan_modes": ["auto", "low", "medium", "high"]}
+        engine.hass.states.get = MagicMock(return_value=named_speed_state)
+
+        asyncio.run(engine._activate_fan(reason="test"))
+
+        calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(calls) == 1
+        assert calls[0][0][2]["fan_mode"] == "high"
+
+    def test_deactivate_hvac_fan_named_speed_vocabulary(self):
+        """Off-direction mirror of the above: must resolve to 'auto', not a hardcoded
+        value the entity's real fan_modes list may not contain."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = True
+        named_speed_state = MagicMock()
+        named_speed_state.attributes = {"fan_modes": ["auto", "low", "medium", "high"]}
+        engine.hass.states.get = MagicMock(return_value=named_speed_state)
+
+        asyncio.run(engine._deactivate_fan(reason="test"))
+
+        calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(calls) == 1
+        assert calls[0][0][2]["fan_mode"] == "auto"
+
+    def test_activate_hvac_fan_no_valid_value_skips_command(self):
+        """Issue #968: when fan_modes has no 'on' and no named speed tier at all, CA must
+        skip the command (and log an error) rather than send an arbitrary/invalid value."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        empty_state = MagicMock()
+        empty_state.attributes = {"fan_modes": []}
+        engine.hass.states.get = MagicMock(return_value=empty_state)
+
+        asyncio.run(engine._activate_fan(reason="test"))
+
+        calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(calls) == 0
+
     def test_activate_both_fans(self):
         """fan_mode=both → calls fan.turn_on, suppresses HVAC, then sets fan_mode 'on'.
 
@@ -225,9 +277,13 @@ class TestActivateFan:
 
 
 def _thermostat_state(mode: str):
-    """Minimal state stub with just the `.state` attribute the guard reads."""
+    """Minimal state stub with the `.state` attribute the guard reads, plus a
+    default fan_modes list (Issue #968) so fan_mode_resolver resolves "on"/"auto"
+    exactly as it did before the fan_mode vocabulary fix.
+    """
     state = MagicMock()
     state.state = mode
+    state.attributes = {"fan_modes": ["auto", "on"]}
     return state
 
 
@@ -1918,7 +1974,7 @@ def _make_nat_vent_engine(indoor_temp: float) -> AutomationEngine:
     engine._nat_vent_exit_candidate_since = datetime(2026, 3, 19, 14, 0, 0)
 
     mock_cs = MagicMock()
-    mock_cs.attributes = {"current_temperature": indoor_temp}
+    mock_cs.attributes = {"current_temperature": indoor_temp, "fan_modes": ["auto", "on"]}
     mock_cs.state = "off"
     engine.hass.states.get.return_value = mock_cs
 
@@ -2317,7 +2373,7 @@ def _make_grace_nat_vent_engine(indoor_temp: float, grace_active: bool = True) -
     engine._last_outdoor_temp = 65.0  # cool enough for nat-vent (< comfort_cool + delta)
 
     mock_cs = MagicMock()
-    mock_cs.attributes = {"current_temperature": indoor_temp}
+    mock_cs.attributes = {"current_temperature": indoor_temp, "fan_modes": ["auto", "on"]}
     mock_cs.state = "off"
     engine.hass.states.get.return_value = mock_cs
 

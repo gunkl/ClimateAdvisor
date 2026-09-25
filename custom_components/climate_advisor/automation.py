@@ -175,6 +175,7 @@ from .fan_lifecycle import (
     WhfHvacOwnership,
     derive_fan_lifecycle_state,
 )
+from .fan_mode_resolver import resolve_fan_mode_command
 from .fan_thermostat_decision import (
     FanThermostatInputs,
     FanThermostatOutcome,
@@ -3170,15 +3171,24 @@ class AutomationEngine:
                     # suppresses the cloud-thermostat echo that arrives >30 s later
                     # (Issue #277 Fix A1).
                     self._fan_command_time = dt_util.now()
-                    try:
-                        await self.hass.services.async_call(
-                            "climate",
-                            "set_fan_mode",
-                            {"entity_id": self.climate_entity, "fan_mode": "auto"},
+                    _cs_off = self.hass.states.get(self.climate_entity)
+                    _fan_modes_off = list(_cs_off.attributes.get("fan_modes") or []) if _cs_off else []
+                    _off_value = resolve_fan_mode_command(_fan_modes_off, "off")
+                    if _off_value is None:
+                        _LOGGER.debug(
+                            "No safe off/auto fan_mode found in entity's fan_modes=%s — skipping assert",
+                            _fan_modes_off,
                         )
-                        _LOGGER.debug("Asserted fan_mode=auto alongside hvac_mode=off")
-                    except Exception:
-                        _LOGGER.debug("Could not assert fan_mode=auto — non-critical", exc_info=True)
+                    else:
+                        try:
+                            await self.hass.services.async_call(
+                                "climate",
+                                "set_fan_mode",
+                                {"entity_id": self.climate_entity, "fan_mode": _off_value},
+                            )
+                            _LOGGER.debug("Asserted fan_mode=%s alongside hvac_mode=off", _off_value)
+                        except Exception:
+                            _LOGGER.debug("Could not assert fan_mode=%s — non-critical", _off_value, exc_info=True)
         except Exception as err:
             # Issue #805: this is the single write point for hvac_mode (Fix 1b) — an
             # invalid/removed climate_entity must not raise uncaught here, which would
@@ -10473,13 +10483,22 @@ class AutomationEngine:
                             "this is intentional (economizer maintain phase); "
                             "most thermostats support fan circulation independent of heating/cooling"
                         )
-                    await self.hass.services.async_call(
-                        "climate",
-                        "set_fan_mode",
-                        {"entity_id": self.climate_entity, "fan_mode": "on"},
-                    )
-                    _activated_hvac = True
-                    _LOGGER.info("Activated HVAC fan — %s role=%s", reason, self.role)
+                    _fan_modes_on = list(hvac_state.attributes.get("fan_modes") or []) if hvac_state else []
+                    _on_value = resolve_fan_mode_command(_fan_modes_on, "on")
+                    if _on_value is None:
+                        _LOGGER.error(
+                            "Cannot activate HVAC fan — entity's fan_modes=%s has no 'on' value or "
+                            "named speed tier (Issue #893) — skipping command",
+                            _fan_modes_on,
+                        )
+                    else:
+                        await self.hass.services.async_call(
+                            "climate",
+                            "set_fan_mode",
+                            {"entity_id": self.climate_entity, "fan_mode": _on_value},
+                        )
+                        _activated_hvac = True
+                        _LOGGER.info("Activated HVAC fan (fan_mode=%s) — %s role=%s", _on_value, reason, self.role)
 
             if not _activated_whf and not _activated_hvac:
                 # Nothing was actually turned on this call — the only way to reach
@@ -11120,12 +11139,21 @@ class AutomationEngine:
                         )
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_fan_mode",
-                    {"entity_id": self.climate_entity, "fan_mode": "auto"},
-                )
-                _LOGGER.info("Deactivated HVAC fan — %s role=%s", reason, self.role)
+                _cs_deact = self.hass.states.get(self.climate_entity)
+                _fan_modes_deact = list(_cs_deact.attributes.get("fan_modes") or []) if _cs_deact else []
+                _deact_value = resolve_fan_mode_command(_fan_modes_deact, "off")
+                if _deact_value is None:
+                    _LOGGER.debug(
+                        "No safe off/auto fan_mode found in entity's fan_modes=%s — skipping deactivate command",
+                        _fan_modes_deact,
+                    )
+                else:
+                    await self.hass.services.async_call(
+                        "climate",
+                        "set_fan_mode",
+                        {"entity_id": self.climate_entity, "fan_mode": _deact_value},
+                    )
+                    _LOGGER.info("Deactivated HVAC fan (fan_mode=%s) — %s role=%s", _deact_value, reason, self.role)
 
             # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state() —
             # see _activate_fan()'s matching comment (raw hardware-deactivation write; the

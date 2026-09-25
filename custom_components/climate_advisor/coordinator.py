@@ -244,6 +244,7 @@ from .fan_status import (
     parse_remote_timer_event,
     resolve_untracked_fan_status,
 )
+from .hvac_action import is_hvac_action_active, is_hvac_compressor_active
 from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import run_invariant_checks
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, compute_k_passive_endpoint
@@ -3245,7 +3246,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # If HA restarts mid-HVAC-session, no transition fires and thermal obs are skipped.
         if (
             _cs is not None
-            and str(hvac_action).lower() in {"heating", "cooling"}
+            and is_hvac_compressor_active(hvac_action)
             and self._hvac_on_since is None
             and not self._startup_hvac_initialized
         ):
@@ -3276,8 +3277,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # (heating/cooling/fan) while hvac_mode is "off".  This surfaces the contradiction
         # in the investigator event log so it is not invisible outside the AI narrative.
         # Suppress when Climate Advisor itself activated fan-only mode (natural ventilation).
-        _active_hvac_actions = {"heating", "cooling", "fan"}
-        if hvac_mode == "off" and str(hvac_action).lower() in _active_hvac_actions:
+        if hvac_mode == "off" and is_hvac_action_active(hvac_action):
             # Suppress when CA's own fan activity explains the reading (Issue #458 —
             # is_ca_fan_running() is the single source of truth for this, consolidating
             # what was a separate ad hoc flag check here). _natural_vent_active is kept
@@ -3423,7 +3423,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _cs_bst = self.hass.states.get(self.config.get("climate_entity", ""))
             _bst_fan_mode = str(_cs_bst.attributes.get("fan_mode", "")) if _cs_bst else ""
             _bst_hvac_action = str(_cs_bst.attributes.get("hvac_action", "")).lower() if _cs_bst else ""
-            if _bst_hvac_action not in ("heating", "cooling"):
+            if not is_hvac_compressor_active(_bst_hvac_action):
                 await self.automation_engine.reconcile_fan_on_startup(
                     indoor=self._get_indoor_temp(),
                     outdoor=self._last_outdoor_temp,
@@ -5528,13 +5528,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # HVAC runtime tracking via hvac_action (preferred) or mode
         new_action = new_state.attributes.get("hvac_action", "").lower()
         old_action = old_state.attributes.get("hvac_action", "").lower()
-        running_actions = {"heating", "cooling"}
 
-        if old_action in running_actions or new_action in running_actions:
+        if is_hvac_compressor_active(old_action) or is_hvac_compressor_active(new_action):
             # At least one side shows active heating/cooling — hvac_action is providing a
             # meaningful signal, prefer it for precise on/off edge detection.
-            was_running = old_action in running_actions
-            is_running = new_action in running_actions
+            was_running = is_hvac_compressor_active(old_action)
+            is_running = is_hvac_compressor_active(new_action)
         else:
             # hvac_action gives no heating/cooling signal (both are "fan", "idle", or absent).
             # Some thermostats report hvac_action="fan" persistently (even when off/idle),
@@ -5590,7 +5589,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.hass.async_create_task(self._async_save_state())
         elif was_running and is_running and old_action != new_action:
             # heat_cool mode: hvac_action switched heating↔cooling mid-session
-            if old_action in running_actions and new_action in running_actions:
+            if is_hvac_compressor_active(old_action) and is_hvac_compressor_active(new_action):
                 _LOGGER.info(
                     "heat_cool mid-session switch %s → %s: abandoning current event",
                     old_action,
@@ -5661,7 +5660,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # normal post-compressor blower phase, not an out-of-band fan appearance — never let
             # the reconcile below force HVAC off because of it (2026-08-10 incident: this exact
             # transition force-cancelled AC that had started cooling 5 minutes earlier).
-            _recent_hvac_session_ended_618 = old_action in ("cooling", "heating")
+            _recent_hvac_session_ended_618 = is_hvac_compressor_active(old_action)
             _thermostat_fan_running_347 = self._derive_thermostat_fan_running_for_reconcile(
                 fan_mode_attr=_new_fan_mode_347,
                 hvac_action_attr=new_action,
@@ -5692,9 +5691,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Chart_log: event-driven write when hvac_action transitions in/out of heating/cooling.
         # 30-minute polling can miss short cycles entirely — this captures the start and end
         # edge of every real heating/cooling event regardless of when the next poll fires.
-        _chart_active_actions = {"heating", "cooling"}
-        _was_chart_active = old_action in _chart_active_actions
-        _is_chart_active = new_action in _chart_active_actions
+        _was_chart_active = is_hvac_compressor_active(old_action)
+        _is_chart_active = is_hvac_compressor_active(new_action)
         if _was_chart_active != _is_chart_active:
             with contextlib.suppress(Exception):
                 _LOGGER.debug(
@@ -5735,7 +5733,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # accumulate enough samples for OLS.
         # Guard: only sample if HVAC is still actively heating/cooling (same phase),
         # and at least 60 seconds have elapsed since the last sample to avoid flooding.
-        if new_action in ("heating", "cooling") and old_action == new_action:
+        if is_hvac_compressor_active(new_action) and old_action == new_action:
             _active_obs_type = OBS_TYPE_HVAC_HEAT if new_action == "heating" else OBS_TYPE_HVAC_COOL
             self._ensure_pending_observations()
             _active_obs = self._pending_observations.get(_active_obs_type)
@@ -6602,7 +6600,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             hvac_action,
             archetype_fan_running,
         )
-        if archetype_fan_running and hvac_action not in ("heating", "cooling"):
+        if archetype_fan_running and not is_hvac_compressor_active(hvac_action):
             await ae.reconcile_fan_on_startup(
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
@@ -7172,7 +7170,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Also check live HVAC action from thermostat
         _cs = self.hass.states.get(self.config["climate_entity"])
         _hvac_action_str = _cs.attributes.get("hvac_action", "").lower() if _cs else ""
-        _is_heating_cooling = _hvac_action_str in ("heating", "cooling")
+        _is_heating_cooling = is_hvac_compressor_active(_hvac_action_str)
         _fan_active = ae._fan_active or ae._natural_vent_active
         _sensor_open = self._any_sensor_open()
 

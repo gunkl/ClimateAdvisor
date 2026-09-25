@@ -56,6 +56,7 @@ from .const import (
 )
 from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
+from .hvac_action import is_hvac_action_active
 from .temperature import format_temp, format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
@@ -3265,8 +3266,7 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
             current_temp = climate_state.attributes.get("current_temperature", "unknown")
 
     state_flags: list[str] = []
-    active_actions = {"heating", "cooling", "fan"}
-    if hvac_mode == "off" and str(hvac_action).lower() in active_actions:
+    if hvac_mode == "off" and is_hvac_action_active(hvac_action):
         ca_fan_running = is_ca_fan_running(fan_status)
         if not (str(hvac_action).lower() == "fan" and ca_fan_running):
             state_flags.append(

@@ -29,8 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .const import FAN_MODE_BOTH, FAN_MODE_WHOLE_HOUSE
-
-_ACTIVE_HVAC_ACTIONS = {"heating", "cooling"}
+from .hvac_action import is_hvac_compressor_active
 
 
 @dataclass(frozen=True)
@@ -69,7 +68,7 @@ def check_ac_whf_mutex(
         return None
     if hvac_action is None:
         return None
-    if str(hvac_action).lower() not in _ACTIVE_HVAC_ACTIONS:
+    if not is_hvac_compressor_active(hvac_action):
         return None
     return InvariantViolation(
         name="ac_whf_mutex",

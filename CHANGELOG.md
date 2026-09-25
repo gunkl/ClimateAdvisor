@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.64] — 2026-09-25
+
+- Fix #968: fan control now works correctly on thermostats without a literal on/off fan setting (e.g. auto/low/medium/high speeds) — this was causing repeated false "fan running without permission" log churn. Every activity report and log download now includes your thermostat's live settings and the app version, so support requests no longer need a manual back-and-forth to find out what your thermostat reports.
+
 ## [0.7.63] — 2026-09-25
 
 - Fix #970: The Status card's "using sleep sensor" note no longer claims the sensor is in the bedroom when it may not be.

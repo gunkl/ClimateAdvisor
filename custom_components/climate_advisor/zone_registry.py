@@ -132,6 +132,34 @@ def list_zones(hass: HomeAssistant) -> list[dict[str, str]]:
     ]
 
 
+def resolve_zone_display_name(hass: HomeAssistant, entry_id: str | None) -> str | None:
+    """Resolve an entry_id to its human-readable zone title, for display only.
+
+    Issue #976: the AI Investigator report was rendering the raw ``zone_label``
+    (``coordinator.zone_label`` — always the config-entry ``entry_id``, an opaque ULID)
+    directly to the user, e.g. ``(zone=01KM12CQSGFV91EPEJXSHZ5Y1K)``, instead of the
+    human-readable zone name (``entry.title``, Gap 7) the dashboard's own zone selector
+    already shows. Falls back to the raw ``entry_id`` when the entry can no longer be
+    resolved (removed, reloading, or a lightweight test/harness ``hass`` with no
+    ``config_entries``) — the same value callers already saw before this helper existed,
+    so nothing regresses.
+
+    Never use this for identity/scoping comparisons — titles are not guaranteed unique
+    across zones (see ``config_flow.py``'s ``_suggest_zone_name()`` docstring: "No
+    uniqueness check against sibling zone names is performed"), unlike ``entry_id``,
+    which is (this is exactly why ``coordinator.zone_label`` itself stays entry_id-based
+    — see its own docstring). Returns ``entry_id`` unchanged (including ``None``) when
+    it is falsy.
+    """
+    if not entry_id:
+        return entry_id
+    try:
+        entry = hass.config_entries.async_get_entry(entry_id)
+    except AttributeError:
+        return entry_id
+    return entry.title if entry is not None and entry.title else entry_id
+
+
 def default_briefing_notifications_enabled(hass: HomeAssistant, entry_id: str | None = None) -> bool:
     """Whether a zone should default to being the one that sends daily briefing notifications.
 

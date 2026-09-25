@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.67] — 2026-09-25
+
+- Fix #976: The AI Investigator's log report now shows a zone's actual name (e.g. "Zone 1") instead of its internal ID (e.g. "01KM12CQSGFV91EPEJXSHZ5Y1K") when labeling which zone a warning came from.
+
 ## [0.7.66] — 2026-09-25
 
 - Internal: consolidated 12 independent hand-rolled copies of the `hvac_action` active-value check (across `coordinator.py`, `automation.py`, `ai_skills_context.py`, and `invariant_watchdog.py`) into a single shared `hvac_action.py` module, following the existing `fan_status.py` pattern. No occupant-facing behavior change — confirmed via full test suite and all golden simulation scenarios. (#969)

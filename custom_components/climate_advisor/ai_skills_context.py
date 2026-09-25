@@ -29,7 +29,7 @@ from homeassistant.util import dt as dt_util
 if TYPE_CHECKING:
     pass
 
-from . import log_capture
+from . import log_capture, zone_registry
 from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_CONTACT_STATUS,
@@ -1125,15 +1125,23 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
         # untagged ("unknown zone") record — drop records confidently
         # attributed to a *different* zone.
         zone_filtered_records = [r for r in recent_records if r.get("zone") in (this_zone_label, None)]
+        # Issue #976: this_zone_label/record["zone"] stay entry_id-keyed for the filtering
+        # above (identity, must be unique) — resolve_zone_display_name() is used only for
+        # what a human actually reads, never for the comparison above it.
+        display_zone_label = zone_registry.resolve_zone_display_name(hass, this_zone_label)
         event_section_lines += [
             f"=== SYSTEM LOG RECORDS (WARNING+, last {hours}h, {len(zone_filtered_records)} records, "
-            f"zone={this_zone_label or 'unknown'}) ===",
+            f"zone={display_zone_label or 'unknown'}) ===",
         ]
         if zone_filtered_records:
             for r in zone_filtered_records:
                 local_time = _fmt_time(r.get("time"))
                 record_zone = r.get("zone")
-                zone_tag = record_zone if record_zone is not None else "unknown zone"
+                zone_tag = (
+                    zone_registry.resolve_zone_display_name(hass, record_zone)
+                    if record_zone is not None
+                    else "unknown zone"
+                )
                 event_section_lines.append(
                     f"  {local_time} {r['level']} [{r['logger_name']}] (zone={zone_tag}) {r['message']}"
                 )

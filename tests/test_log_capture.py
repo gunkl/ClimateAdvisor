@@ -331,6 +331,35 @@ def test_ai_skills_context_filters_to_investigated_zone():
     assert "zone b warning" not in report
 
 
+def test_ai_skills_context_displays_zone_title_not_raw_entry_id():
+    """Issue #976: the rendered report's '(zone=...)' tag and header must show the
+    zone's human-readable entry.title, not the raw entry_id — while the underlying
+    filtering (which records belong to which zone) stays entry_id-keyed and
+    unaffected, per test_ai_skills_context_filters_to_investigated_zone above."""
+    import asyncio as _asyncio
+    from unittest.mock import MagicMock
+
+    from custom_components.climate_advisor import ai_skills_context
+
+    entry = MagicMock()
+    entry.title = "Living Room"
+    hass = SimpleNamespace(data={}, config_entries=SimpleNamespace(async_get_entry=lambda entry_id: entry))
+    install(hass)
+    logger = logging.getLogger("custom_components.climate_advisor.test_zone_title_display")
+    try:
+        with zone_scope("01KM12CQSGFV91EPEJXSHZ5Y1K"):
+            logger.warning("door/window open — pausing")
+
+        coordinator = SimpleNamespace(zone_label="01KM12CQSGFV91EPEJXSHZ5Y1K", _event_log=[])
+        report = _asyncio.run(ai_skills_context.build_event_log_context(hass, coordinator, hours=24))
+    finally:
+        uninstall(hass)
+
+    assert "(zone=Living Room)" in report  # per-record line
+    assert "zone=Living Room) ===" in report  # header line
+    assert "01KM12CQSGFV91EPEJXSHZ5Y1K" not in report
+
+
 # --- Issue #911: coordinator._zone_scoped/_zone_scoped_sync registration wrapper ----
 
 

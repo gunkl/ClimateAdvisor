@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.65] — 2026-09-25
+
+- Fix #973: the Activity Record report (and its Copy/Download/GitHub-issue-body actions) now shows a short line with your Climate Advisor version and your thermostat's current settings, the same info already added to other reports last release.
+
 ## [0.7.64] — 2026-09-25
 
 - Fix #968: fan control now works correctly on thermostats without a literal on/off fan setting (e.g. auto/low/medium/high speeds) — this was causing repeated false "fan running without permission" log churn. Every activity report and log download now includes your thermostat's live settings and the app version, so support requests no longer need a manual back-and-forth to find out what your thermostat reports.

@@ -96,10 +96,12 @@ def _make_engine(
     # are not met (pause requires pre_pause_mode != "off").
     climate_state = MagicMock()
     climate_state.state = "cool"
-    climate_state.attributes = {}
+    # Issue #968: fan_mode_resolver reads fan_modes to pick a valid on/off value —
+    # default to the legacy on/auto vocabulary so existing assertions are unaffected.
+    climate_state.attributes = {"fan_modes": ["auto", "on"]}
 
     if indoor_f is not None:
-        climate_state.attributes = {"current_temperature": indoor_f}
+        climate_state.attributes = {"current_temperature": indoor_f, "fan_modes": ["auto", "on"]}
 
     hass.states = MagicMock()
     hass.states.get = MagicMock(return_value=climate_state)
@@ -742,6 +744,8 @@ class TestFanTurnedOffClearsNatVent:
 
         hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
         hass.states = MagicMock()
+        # Issue #968: default fan_modes so fan_mode_resolver resolves "on"/"auto" as before.
+        hass.states.get.return_value.attributes = {"fan_modes": ["auto", "on"]}
 
         config = {
             "comfort_heat": 70.0,
@@ -1349,7 +1353,7 @@ class TestPostFanVerify:
         # Thermostat reports 71.9°F — drifted 1.9°F away from commanded 70.0°F
         climate_state = MagicMock()
         climate_state.state = "cool"
-        climate_state.attributes = {"current_temperature": 72.0, "temperature": 71.9}
+        climate_state.attributes = {"current_temperature": 72.0, "temperature": 71.9, "fan_modes": ["auto", "on"]}
         engine.hass.states.get = MagicMock(return_value=climate_state)
 
         # Capture _set_temperature calls
@@ -1395,7 +1399,7 @@ class TestPostFanVerify:
 
         climate_state = MagicMock()
         climate_state.state = "cool"
-        climate_state.attributes = {"temperature": 71.9}
+        climate_state.attributes = {"temperature": 71.9, "fan_modes": ["auto", "on"]}
         engine.hass.states.get = MagicMock(return_value=climate_state)
 
         engine._set_temperature = AsyncMock()
@@ -1424,7 +1428,7 @@ class TestPostFanVerify:
 
         climate_state = MagicMock()
         climate_state.state = "cool"
-        climate_state.attributes = {"temperature": 71.9}
+        climate_state.attributes = {"temperature": 71.9, "fan_modes": ["auto", "on"]}
         engine.hass.states.get = MagicMock(return_value=climate_state)
 
         engine._set_temperature = AsyncMock()
@@ -1451,7 +1455,7 @@ class TestPostFanVerify:
         # Thermostat reports 70.4°F — within 0.6°F tolerance
         climate_state = MagicMock()
         climate_state.state = "cool"
-        climate_state.attributes = {"temperature": 70.4}
+        climate_state.attributes = {"temperature": 70.4, "fan_modes": ["auto", "on"]}
         engine.hass.states.get = MagicMock(return_value=climate_state)
 
         engine._set_temperature = AsyncMock()
@@ -1486,7 +1490,7 @@ class TestPostFanVerify:
         # Thermostat correctly reports ~21.1°C, matching the commanded 70.0°F within tolerance.
         climate_state = MagicMock()
         climate_state.state = "cool"
-        climate_state.attributes = {"current_temperature": 21.1, "temperature": 21.1}
+        climate_state.attributes = {"current_temperature": 21.1, "temperature": 21.1, "fan_modes": ["auto", "on"]}
         engine.hass.states.get = MagicMock(return_value=climate_state)
 
         engine._set_temperature = AsyncMock()
@@ -1530,7 +1534,7 @@ class TestPostFanVerify:
         # Thermostat reports 18.0°C (~64.4°F) — genuinely drifted from the 70.0°F target.
         climate_state = MagicMock()
         climate_state.state = "cool"
-        climate_state.attributes = {"current_temperature": 18.0, "temperature": 18.0}
+        climate_state.attributes = {"current_temperature": 18.0, "temperature": 18.0, "fan_modes": ["auto", "on"]}
         engine.hass.states.get = MagicMock(return_value=climate_state)
 
         engine._set_temperature = AsyncMock()

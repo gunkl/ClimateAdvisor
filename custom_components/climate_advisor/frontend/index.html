@@ -3328,8 +3328,11 @@
   }
 
   async function downloadFullLogs() {
-    const hoursEl = document.getElementById('report-time-window');
-    const hours = hoursEl ? parseInt(hoursEl.value, 10) || 24 : 24;
+    // Issue #968: a download is a deliberate diagnostic export, not the casual on-screen
+    // report view — default to the full retained window (168h/7d) rather than inheriting
+    // the on-screen dropdown's recent-activity-oriented default, so a download never
+    // silently discards most of what's retained.
+    const hours = 168;
     try {
       const [logData, investigationData] = await Promise.allSettled([
         apiFetch('event_log?hours=' + hours),
@@ -3362,12 +3365,13 @@
     if (btn) { btn.textContent = 'Downloading...'; btn.disabled = true; }
     try {
       const [logData, investigationData] = await Promise.allSettled([
-        apiFetch('event_log?hours=24'),
+        apiFetch('event_log?hours=168'),
         apiFetch('investigation_reports'),
       ]);
       const bundle = {
         downloaded_at: new Date().toISOString(),
         events: logData.status === 'fulfilled' ? (logData.value.events || []) : [],
+        diagnostics: logData.status === 'fulfilled' ? (logData.value.diagnostics || null) : null,
       };
       if (investigationData.status === 'fulfilled') {
         bundle.investigation_reports = investigationData.value;

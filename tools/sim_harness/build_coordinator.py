@@ -157,6 +157,8 @@ def build_headless_coordinator(
     )
     attrs = {
         "fan_mode": "auto",
+        # Issue #968: see build_engine.py's identical default for the rationale.
+        "fan_modes": ["auto", "on"],
         "hvac_modes": _default_hvac_modes,
         "supported_features": _default_features,
     }

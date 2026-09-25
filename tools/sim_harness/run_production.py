@@ -229,7 +229,8 @@ def _inject_indoor_temp(
         state_str = existing.state
     else:
         # No existing entity yet — create with "off" state to match SimState default
-        attrs = {"current_temperature": indoor_f, "fan_mode": "auto"}
+        # Issue #968: fan_modes default matches build_engine.py's rationale.
+        attrs = {"current_temperature": indoor_f, "fan_mode": "auto", "fan_modes": ["auto", "on"]}
         state_str = "off"
     if dispatch:
         fake_hass.states.async_set(climate_entity, state_str, attrs)

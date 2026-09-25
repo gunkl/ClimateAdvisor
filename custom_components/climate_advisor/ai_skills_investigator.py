@@ -257,6 +257,16 @@ async def async_build_investigator_context(
             )
             sections.append(f"=== {provider.name.upper()} ===\n  unavailable\n")
 
+    # Issue #968: always append a diagnostic footer (entity attributes + CA version) so
+    # triage never again needs a manual "can you tell me what your thermostat reports"
+    # round-trip (the exact pattern that stalled #893/#894's diagnosis).
+    try:
+        from .diagnostic_snapshot import build_diagnostic_snapshot, render_diagnostic_snapshot_text  # noqa: PLC0415
+
+        sections.append(render_diagnostic_snapshot_text(build_diagnostic_snapshot(hass, coordinator)))
+    except Exception:
+        _LOGGER.warning("investigator: diagnostic snapshot footer failed — skipping", exc_info=True)
+
     return "\n".join(sections)
 
 

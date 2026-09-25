@@ -237,6 +237,7 @@ from .const import (
     VERSION,
 )
 from .entity_health import run_entity_health_sweep
+from .fan_mode_resolver import is_thermostat_fan_physically_active
 from .fan_status import (
     is_ca_fan_running,
     parse_remote_speed_event,
@@ -2858,6 +2859,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
             if self._first_run:
                 self._first_run = False
+                # Issue #968: CA's setpoint-writing code (temperature.py) assumes the
+                # configured climate entity reports Fahrenheit. Validate that assumption
+                # once at startup rather than silently writing wrong-unit setpoints if a
+                # non-Fahrenheit thermostat is ever configured — error-only, no
+                # auto-conversion (matches "never leave HVAC in a bad state": refusing and
+                # telling the user beats silently guessing at a unit conversion).
+                _unit_climate_id = self.config.get("climate_entity", "")
+                _unit_cs = self.hass.states.get(_unit_climate_id) if _unit_climate_id else None
+                if _unit_cs is not None:
+                    _reported_unit = _unit_cs.attributes.get("temperature_unit")
+                    if _reported_unit is not None and str(_reported_unit).upper() not in ("°F", "F", "FAHRENHEIT"):
+                        _LOGGER.error(
+                            "Climate entity %s reports temperature_unit=%s but Climate Advisor "
+                            "assumes Fahrenheit — setpoints written by CA will be wrong until "
+                            "this is resolved",
+                            _unit_climate_id,
+                            _reported_unit,
+                        )
                 # Recover v3 pending_observations that survived restart
                 _pending_obs = self.learning._state.pending_observations
                 if isinstance(_pending_obs, dict):
@@ -3178,6 +3197,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _cs = self.hass.states.get(_climate_entity_id) if _climate_entity_id else None
         hvac_action = _cs.attributes.get("hvac_action", "") if _cs else ""
         hvac_mode = _cs.state if _cs else ""
+        # Issue #968: CA never commands heat_cool (no write call site does), so this is
+        # visibility only, not an error — CA's comfort-band/classification logic doesn't
+        # actively drive a dual-setpoint band, and this is useful diagnostic context when
+        # the entity's live mode is externally set to heat_cool (e.g. by the user or
+        # another automation). Rate-limited like other state-observation logs in this file.
+        if (
+            hvac_mode == "heat_cool"
+            and self.automation_engine
+            and not self.automation_engine._recent_duplicate(
+                "heat_cool_mode_observed", (hvac_mode,), window_seconds=3600
+            )
+        ):
+            _LOGGER.info(
+                "Thermostat is in heat_cool mode — CA does not actively drive a dual-setpoint "
+                "band and will not participate until the mode changes"
+            )
         # Issue #835: track last-heating/last-cooling timestamps for the
         # hvac_fan_restrict_mode guard in _activate_fan() — the only per-cycle
         # ground-truth read of hvac_action, so this piggybacks on it rather than
@@ -5758,9 +5793,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _b2_new_fan_mode = new_state.attributes.get("fan_mode")
         _fan_cancel_in_this_event = (
             _b2_old_fan_mode is not None
-            and _b2_old_fan_mode == "on"
             and _b2_new_fan_mode is not None
-            and _b2_new_fan_mode != "on"
+            and is_thermostat_fan_physically_active(_b2_old_fan_mode, "")
+            and not is_thermostat_fan_physically_active(_b2_new_fan_mode, "")
         )
 
         _setpoint_override_detected = False
@@ -6824,7 +6859,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             separate follow-up issue; do not treat this as a full BOTH-archetype fix.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        thermostat_signal = fan_mode_attr == "on" or hvac_action_attr == "fan"
+        thermostat_signal = is_thermostat_fan_physically_active(fan_mode_attr, hvac_action_attr)
         if fan_mode == FAN_MODE_HVAC:
             return thermostat_signal
         if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -9484,7 +9519,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if cs is not None:
                 thermostat_fan_mode = cs.attributes.get("fan_mode", "")
                 thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
-                if thermostat_fan_mode == "on" or thermostat_hvac_action == "fan":
+                if is_thermostat_fan_physically_active(thermostat_fan_mode, thermostat_hvac_action):
                     return resolve_untracked_fan_status(
                         recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0)
                     )
@@ -9599,7 +9634,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 else:
                     thermostat_fan_mode = cs.attributes.get("fan_mode", "")
                     thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
-                    _thermostat_on_cache.append(thermostat_fan_mode == "on" or thermostat_hvac_action == "fan")
+                    _thermostat_on_cache.append(
+                        is_thermostat_fan_physically_active(thermostat_fan_mode, thermostat_hvac_action)
+                    )
             return _thermostat_on_cache[0]
 
         if ae._fan_override_active:

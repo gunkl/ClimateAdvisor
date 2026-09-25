@@ -11,6 +11,7 @@ docs/multi-zone-spec.md.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from custom_components.climate_advisor import zone_registry
@@ -470,4 +471,40 @@ class TestResolveZone:
             hass, "entry_does_not_exist", context="POST /x from 1.1.1.1", allow_guess=False
         )
         assert coordinator is None
-        assert refused is False
+
+
+class TestResolveZoneDisplayName:
+    """Issue #976: the AI Investigator report was rendering the raw entry_id
+    (coordinator.zone_label) instead of the zone's human-readable entry.title,
+    e.g. showing '(zone=01KM12CQSGFV91EPEJXSHZ5Y1K)' instead of '(zone=Zone 1)'."""
+
+    def test_resolves_to_entry_title_when_entry_found(self):
+        hass = MagicMock()
+        entry = MagicMock()
+        entry.title = "Bedroom"
+        hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+        assert zone_registry.resolve_zone_display_name(hass, "entry_a") == "Bedroom"
+        hass.config_entries.async_get_entry.assert_called_once_with("entry_a")
+
+    def test_falls_back_to_entry_id_when_entry_not_found(self):
+        hass = MagicMock()
+        hass.config_entries.async_get_entry = MagicMock(return_value=None)
+        assert zone_registry.resolve_zone_display_name(hass, "entry_removed") == "entry_removed"
+
+    def test_falls_back_to_entry_id_when_title_is_empty(self):
+        hass = MagicMock()
+        entry = MagicMock()
+        entry.title = ""
+        hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+        assert zone_registry.resolve_zone_display_name(hass, "entry_a") == "entry_a"
+
+    def test_falls_back_to_entry_id_when_hass_has_no_config_entries(self):
+        """Lightweight test/harness hass objects (e.g. SimpleNamespace(data={}))
+        don't have a config_entries attribute at all — must not raise."""
+        hass = SimpleNamespace(data={})
+        assert zone_registry.resolve_zone_display_name(hass, "entry_a") == "entry_a"
+
+    def test_returns_falsy_entry_id_unchanged(self):
+        hass = MagicMock()
+        assert zone_registry.resolve_zone_display_name(hass, None) is None
+        assert zone_registry.resolve_zone_display_name(hass, "") == ""

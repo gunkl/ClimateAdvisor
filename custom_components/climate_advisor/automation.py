@@ -187,6 +187,7 @@ from .fan_toggle_rate_limit import (
     FanToggleRateLimitOutcome,
     decide_fan_toggle_rate_limit,
 )
+from .hvac_action import is_hvac_compressor_active
 from .indoor_temp import resolve_indoor_temp_f
 from .lifecycle_dispatcher import LifecycleDispatcher
 from .lifecycle_events import LifecycleEvent, LifecycleEventType
@@ -4448,7 +4449,7 @@ class AutomationEngine:
                 _hvac_off_244 = (
                     _hvac_state_244 is None
                     or getattr(_hvac_state_244, "state", "off") == "off"
-                    or _hvac_action_244 in ("", "off", "idle")
+                    or not is_hvac_compressor_active(_hvac_action_244)
                 )
                 # Issue #504: re-read of #244 confirmed it was about a sensor open ALL DAY
                 # never getting re-evaluated once outdoor cools later — not about reacting

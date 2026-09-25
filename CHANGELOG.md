@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.66] — 2026-09-25
+
+- Internal: consolidated 12 independent hand-rolled copies of the `hvac_action` active-value check (across `coordinator.py`, `automation.py`, `ai_skills_context.py`, and `invariant_watchdog.py`) into a single shared `hvac_action.py` module, following the existing `fan_status.py` pattern. No occupant-facing behavior change — confirmed via full test suite and all golden simulation scenarios. (#969)
+
 ## [0.7.65] — 2026-09-25
 
 - Fix #973: the Activity Record report (and its Copy/Download/GitHub-issue-body actions) now shows a short line with your Climate Advisor version and your thermostat's current settings, the same info already added to other reports last release.

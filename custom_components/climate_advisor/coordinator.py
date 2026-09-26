@@ -3091,6 +3091,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "[coalesce-diag] skipping apply_classification() [regular cycle path] —"
                     " _do_startup_coalesce() already applied classification this cycle (Issue #591)"
                 )
+            elif not self._should_run_regular_cycle_apply_classification():
+                _LOGGER.debug(
+                    "[coalesce-diag] skipping apply_classification() [regular cycle path] —"
+                    " startup coalescing active, deferring to _do_startup_coalesce() (Issue #978)"
+                )
             else:
                 _LOGGER.debug("[coalesce-diag] before apply_classification() [regular cycle path]")
                 await self.automation_engine.apply_classification(
@@ -6832,6 +6837,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return bool(self._today_record) and not self._suppress_during_startup_coalescing(
             "check_window_cooling_opportunity (regular cycle)"
         )
+
+    def _should_run_regular_cycle_apply_classification(self) -> bool:
+        """Whether the regular-cycle ``apply_classification()`` call should fire now.
+
+        Issue #978: third instance of the same bug class as #627/#670 above — a regular-cycle
+        call with no ``_startup_coalesce_active`` gate, racing the purpose-built startup-
+        reconciliation mechanism (``_do_startup_coalesce()``, #321/#327), which re-derives
+        ``_paused_by_door`` from live sensor state 5 minutes after restart. Confirmed live: a
+        restart clears ``_paused_by_door`` (clean slate, #263/#327); a regular cycle fired
+        ~90s later and reached ``apply_classification()`` unguarded, while a monitored window
+        was genuinely still open during a planned window-open period (so
+        ``_sync_paused_by_door_with_live_sensors()``'s planned-window exemption declined to
+        re-latch the flag). With no gate here, that cycle reached ``_apply_comfort_band()``'s
+        choke-point guard (#629) — which correctly refused to arm, but noisily, 3+ minutes
+        before ``_do_startup_coalesce()`` would have quietly reached the same outcome.
+        ``_coalesce_already_classified`` (the existing guard at this call site, #591) only
+        covers the narrower case of the coalesce path having already classified *this exact
+        cycle* — it does nothing for the cycles before the coalesce timer fires at all.
+        """
+        return not self._suppress_during_startup_coalescing("apply_classification (regular cycle)")
 
     def _derive_thermostat_fan_running_for_reconcile(self, *, fan_mode_attr: str, hvac_action_attr: str) -> bool:
         """Archetype-aware 'is a fan running' signal for reconcile_fan_on_startup() (Issue #423).

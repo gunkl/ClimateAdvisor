@@ -611,6 +611,9 @@ class TestRegularCycleCoalesceGating:
         coord._should_run_regular_cycle_window_cooling_check = types.MethodType(
             mod.ClimateAdvisorCoordinator._should_run_regular_cycle_window_cooling_check, coord
         )
+        coord._should_run_regular_cycle_apply_classification = types.MethodType(
+            mod.ClimateAdvisorCoordinator._should_run_regular_cycle_apply_classification, coord
+        )
         coord._suppress_during_startup_coalescing = types.MethodType(
             mod.ClimateAdvisorCoordinator._suppress_during_startup_coalescing, coord
         )
@@ -655,3 +658,18 @@ class TestRegularCycleCoalesceGating:
     def test_window_cooling_check_never_fires_with_no_today_record_regardless_of_window(self):
         coord = self._make_coord(startup_coalesce_active=False, any_sensor_open=False, today_record=None)
         assert coord._should_run_regular_cycle_window_cooling_check() is False
+
+    def test_apply_classification_suppressed_during_startup_coalescing_window(self):
+        """REGRESSION GUARD (Issue #978): third instance of the same bug class. A restart
+        clears _paused_by_door (clean slate, #263/#327); the regular-cycle
+        apply_classification() call must not reach _apply_comfort_band()'s choke-point
+        guard unguarded before _do_startup_coalesce() has had its 5-minute window to
+        re-derive the pause from live sensor state — confirmed live: it fired ~90s after
+        restart and produced a spurious WARNING/re-pause during a scheduled window-open
+        period."""
+        coord = self._make_coord(startup_coalesce_active=True, any_sensor_open=True, today_record=_make_today_record())
+        assert coord._should_run_regular_cycle_apply_classification() is False
+
+    def test_apply_classification_fires_once_coalescing_window_closes(self):
+        coord = self._make_coord(startup_coalesce_active=False, any_sensor_open=True, today_record=_make_today_record())
+        assert coord._should_run_regular_cycle_apply_classification() is True

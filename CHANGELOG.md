@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.68] — 2026-09-25
+
+- Fix #978: after a restart, the door/window pause status now correctly waits for the normal 5-minute startup check instead of occasionally firing an extra warning and re-pause a minute or two early.
+
 ## [0.7.67] — 2026-09-25
 
 - Fix #976: The AI Investigator's log report now shows a zone's actual name (e.g. "Zone 1") instead of its internal ID (e.g. "01KM12CQSGFV91EPEJXSHZ5Y1K") when labeling which zone a warning came from.

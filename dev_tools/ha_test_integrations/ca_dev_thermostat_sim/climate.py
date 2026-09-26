@@ -61,6 +61,55 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _decide_compressor_state(
+    *,
+    mode: str | None,
+    current_temp: float,
+    target_temp: float | None,
+    deadband: float | None,
+    compressor_on: bool,
+    last_on_ts: datetime | None,
+    last_off_ts: datetime | None,
+    min_run_seconds: float,
+    min_off_seconds: float,
+    now: datetime,
+) -> tuple[bool, datetime | None, datetime | None]:
+    """Pure compressor on/off deadband + dwell-timer decision.
+
+    Extracted from _async_tick() so it can be hand-verified in test_compressor_state.py
+    without importing this module (which requires the `homeassistant` package — see
+    test_sim_math.py's module docstring for why that's not available in this repo/venv).
+
+    Returns (new_compressor_on, new_last_on_ts, new_last_off_ts). Callers are
+    responsible for resetting compressor_on/last_on_ts/last_off_ts to
+    (False, None, None) whenever hvac_mode actually changes (see
+    SimulatedThermostat._reset_compressor_state()) — this function only evaluates
+    one mode's thresholds and has no way to detect a mode change on its own.
+    """
+    if mode is None:
+        return False, last_on_ts, last_off_ts
+    if target_temp is None or deadband is None:
+        return compressor_on, last_on_ts, last_off_ts
+
+    if not compressor_on:
+        wants_on = (mode == "heat" and current_temp <= target_temp - deadband) or (
+            mode == "cool" and current_temp >= target_temp + deadband
+        )
+        can_turn_on = last_off_ts is None or (now - last_off_ts).total_seconds() >= min_off_seconds
+        if wants_on and can_turn_on:
+            return True, now, last_off_ts
+        return compressor_on, last_on_ts, last_off_ts
+
+    wants_off = (mode == "heat" and current_temp >= target_temp + deadband) or (
+        mode == "cool" and current_temp <= target_temp - deadband
+    )
+    can_turn_off = last_on_ts is None or (now - last_on_ts).total_seconds() >= min_run_seconds
+    if wants_off and can_turn_off:
+        return False, last_on_ts, now
+    return compressor_on, last_on_ts, last_off_ts
+
+
 try:
     # The real Climate Advisor ODE step — imported, not reimplemented, so this
     # simulator tracks production physics automatically. See module docstring.
@@ -290,8 +339,24 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             "min_off_seconds": self._min_off_seconds,
         }
 
+    def _reset_compressor_state(self) -> None:
+        """Clear compressor on/off + dwell-timer state (Issue #970-adjacent fix).
+
+        Called whenever hvac_mode actually changes. Heat and cool have independent
+        deadbands and dwell timers; without this reset, a direct heat<->cool switch
+        (CA's automation never routes through OFF) carries the old mode's
+        compressor-on flag and _last_on_ts/_last_off_ts into the new mode's state
+        machine in _async_tick(), letting the new mode skip its own turn-on deadband
+        check entirely and compute min_run/min_off against the wrong mode's clock.
+        """
+        self._compressor_on = False
+        self._last_on_ts = None
+        self._last_off_ts = None
+
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set a new HVAC mode."""
+        if hvac_mode != self._hvac_mode:
+            self._reset_compressor_state()
         self._hvac_mode = hvac_mode
         self.async_write_ha_state()
 
@@ -333,6 +398,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
                     self._hvac_mode.value,
                     new_mode.value,
                 )
+                self._reset_compressor_state()
             self._hvac_mode = new_mode
 
         temperature = kwargs.get("temperature")
@@ -398,44 +464,39 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # Compressor on/off state machine: deadband thresholds decide when the
         # compressor *wants* to change state; min_run/min_off dwell timers can delay
         # that change (equipment short-cycle protection), same as real HVAC hardware.
-        # See docs/dev-thermostat-sim-hysteresis (plan) for the full design.
-        if mode is None:
-            self._compressor_on = False
-        elif self._target_temp is not None:
-            if not self._compressor_on:
-                wants_on = (mode == "heat" and self._current_temp <= self._target_temp - deadband) or (
-                    mode == "cool" and self._current_temp >= self._target_temp + deadband
-                )
-                can_turn_on = (
-                    self._last_off_ts is None or (now - self._last_off_ts).total_seconds() >= self._min_off_seconds
-                )
-                if wants_on and can_turn_on:
-                    self._compressor_on = True
-                    self._last_on_ts = now
-                    _LOGGER.info(
-                        "CA Dev Thermostat Sim %s: compressor ON (%s, indoor=%.1f target=%.1f)",
-                        self.entity_id,
-                        mode,
-                        self._current_temp,
-                        self._target_temp,
-                    )
-            else:
-                wants_off = (mode == "heat" and self._current_temp >= self._target_temp + deadband) or (
-                    mode == "cool" and self._current_temp <= self._target_temp - deadband
-                )
-                can_turn_off = (
-                    self._last_on_ts is None or (now - self._last_on_ts).total_seconds() >= self._min_run_seconds
-                )
-                if wants_off and can_turn_off:
-                    self._compressor_on = False
-                    self._last_off_ts = now
-                    _LOGGER.info(
-                        "CA Dev Thermostat Sim %s: compressor OFF (%s, indoor=%.1f target=%.1f)",
-                        self.entity_id,
-                        mode,
-                        self._current_temp,
-                        self._target_temp,
-                    )
+        # Mode-change resets (heat<->cool losing stale compressor/dwell state) are
+        # handled at the call sites that change self._hvac_mode — see
+        # _reset_compressor_state(). This function only evaluates one mode's own
+        # thresholds against whatever state it's handed.
+        was_on = self._compressor_on
+        self._compressor_on, self._last_on_ts, self._last_off_ts = _decide_compressor_state(
+            mode=mode,
+            current_temp=self._current_temp,
+            target_temp=self._target_temp,
+            deadband=deadband,
+            compressor_on=self._compressor_on,
+            last_on_ts=self._last_on_ts,
+            last_off_ts=self._last_off_ts,
+            min_run_seconds=self._min_run_seconds,
+            min_off_seconds=self._min_off_seconds,
+            now=now,
+        )
+        if self._compressor_on and not was_on:
+            _LOGGER.info(
+                "CA Dev Thermostat Sim %s: compressor ON (%s, indoor=%.1f target=%.1f)",
+                self.entity_id,
+                mode,
+                self._current_temp,
+                self._target_temp,
+            )
+        elif was_on and not self._compressor_on:
+            _LOGGER.info(
+                "CA Dev Thermostat Sim %s: compressor OFF (%s, indoor=%.1f target=%.1f)",
+                self.entity_id,
+                mode,
+                self._current_temp,
+                self._target_temp,
+            )
 
         self._actively_driving = self._compressor_on
         k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if self._compressor_on else None

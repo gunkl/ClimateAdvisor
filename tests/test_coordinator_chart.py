@@ -193,8 +193,15 @@ class TestChartHvacActionConsistency:
     "heat" and "cool" produce invisible segments in the chart (no color mapping).
     """
 
-    def _make_coord_with_thermostat(self, *, hvac_action, hvac_mode, fan_mode="auto"):
-        """Build a coordinator stub with a thermostat returning given attributes."""
+    def _make_coord_with_thermostat(self, *, hvac_action, hvac_mode, fan_mode="auto", ca_fan_status=None):
+        """Build a coordinator stub with a thermostat returning given attributes.
+
+        `ca_fan_status`, when given (Issue #982), sets up `automation_engine` and stubs
+        `_compute_fan_status()` to return it — models CA's own fan-only ventilation session
+        already explaining a `hvac_action=fan` reading. Omitted (default None) leaves
+        `automation_engine` unset, exactly as the pre-#982 fixture did, so existing tests are
+        unaffected.
+        """
         ClimateAdvisorCoordinator = _get_coordinator_class()
         coord = object.__new__(ClimateAdvisorCoordinator)
 
@@ -211,6 +218,10 @@ class TestChartHvacActionConsistency:
         hass.states.get = MagicMock(return_value=mock_state)
         coord.hass = hass
         coord.config = {"climate_entity": "climate.thermostat"}
+
+        if ca_fan_status is not None:
+            coord.automation_engine = MagicMock()
+            coord._compute_fan_status = MagicMock(return_value=ca_fan_status)
 
         coord._read_chart_hvac_action = types.MethodType(ClimateAdvisorCoordinator._read_chart_hvac_action, coord)
         return coord
@@ -251,6 +262,43 @@ class TestChartHvacActionConsistency:
         coord = self._make_coord_with_thermostat(hvac_action="fan", hvac_mode="heat", fan_mode="on")
         result = coord._read_chart_hvac_action()
         assert result == "fan", f"Expected 'fan' for fan_mode=on (continuous circulation), got {result!r}"
+
+    def test_ca_owned_ventilation_not_remapped_to_cooling(self):
+        """Issue #982: FAN_MODE_HVAC min_runtime_cycle ventilation (compressor off) must not
+        be mislabeled as an AC cooling period just because fan_mode reads 'auto' on a
+        thermostat that never reflects CA's own commanded fan state."""
+        coord = self._make_coord_with_thermostat(
+            hvac_action="fan", hvac_mode="cool", fan_mode="auto", ca_fan_status="active"
+        )
+        result = coord._read_chart_hvac_action()
+        assert result == "fan", f"Expected 'fan' when CA's own ventilation explains it, got {result!r}"
+
+    def test_ca_owned_ventilation_not_remapped_to_heating(self):
+        """Mirror of the cooling case above — same guard, heat side."""
+        coord = self._make_coord_with_thermostat(
+            hvac_action="fan", hvac_mode="heat", fan_mode="auto", ca_fan_status="active"
+        )
+        result = coord._read_chart_hvac_action()
+        assert result == "fan", f"Expected 'fan' when CA's own ventilation explains it, got {result!r}"
+
+    def test_ca_owned_ventilation_guard_respects_untracked_and_override_statuses(self):
+        """The guard must use is_ca_fan_running()'s full active-set, not just 'active' —
+        manual-override and untracked-but-real fan runs are equally CA-explainable."""
+        for status in ("running (manual override)", "running (untracked)", "active (unconfirmed)"):
+            coord = self._make_coord_with_thermostat(
+                hvac_action="fan", hvac_mode="cool", fan_mode="auto", ca_fan_status=status
+            )
+            result = coord._read_chart_hvac_action()
+            assert result == "fan", f"status={status!r}: expected 'fan', got {result!r}"
+
+    def test_genuine_compressor_blower_lag_still_remapped(self):
+        """Regression safety: when CA's fan status is NOT active (the original Issue #109
+        blower-lag case — CA isn't the one running the fan), the remap must still fire."""
+        coord = self._make_coord_with_thermostat(
+            hvac_action="fan", hvac_mode="cool", fan_mode="auto", ca_fan_status="inactive"
+        )
+        result = coord._read_chart_hvac_action()
+        assert result == "cooling", f"Expected 'cooling' (#109 case preserved), got {result!r}"
 
 
 # ---------------------------------------------------------------------------

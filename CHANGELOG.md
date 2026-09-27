@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.69] — 2026-09-27
+
+- Fix #982: when Climate Advisor runs your thermostat's own fan for scheduled ventilation (compressor off), the temperature chart no longer shows that window as an AC cooling/heating period — it now shows correctly on the Vent line instead.
+
 ## [0.7.68] — 2026-09-25
 
 - Fix #978: after a restart, the door/window pause status now correctly waits for the normal 5-minute startup check instead of occasionally firing an extra warning and re-pause a minute or two early.

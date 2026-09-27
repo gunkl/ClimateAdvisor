@@ -1,0 +1,55 @@
+{
+  "name": "reconcile-adopts-hvac-fan-circulation",
+  "description": "HA restart / startup coalesce finds a plain HVAC-fan (FAN_MODE_HVAC) physically running with no sensor open and nat-vent conditions unfavorable -- reconcile_fan_on_startup() must silently adopt it as ordinary circulation, NOT narrate it as a nat-vent session ending (Issue #984, fixing the phantom grace-period loop reported in Issue #893).",
+  "source": "synthetic",
+  "issue": 984,
+  "notes": [
+    "Companion to the existing reconcile-turns-off-unwarranted-fan.json golden, which is scoped to fan_mode=whole_house_fan and must remain unaffected by this fix -- that scenario is the proof this new archetype branch does not regress the WHF-side turn-off behavior.",
+    "Before Issue #984's fix, this exact input (FAN_MODE_HVAC, thermostat_fan_running=true, any_sensor_open=false) fell into the same unconditional 'turn it off' branch as a WHF fan, emitting nat_vent_reconcile_exit and starting a 5-minute grace period on every ordinary blower/min-runtime cycle -- pure Activity Report noise with no real nat-vent session to end.",
+    "Uses the new reconcile_adopted_circulation custom assertion type added to outcomes.py for this closure -- reads final engine_state (_fan_active=True, _natural_vent_active=False, _grace_active=False) and confirms no nat_vent_reconcile_exit event was emitted, since this branch deliberately produces neither a fan_activated nor a nat_vent_reconcile_exit event."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan",
+    "fan_entity": "climate.thermostat"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: HVAC off."
+    },
+    {
+      "time": "2026-07-10T06:01:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 74.0,
+      "outdoor_f": 80.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": false,
+      "note": "Fan physically running (thermostat's own blower / min-runtime cycle), no sensor open, unfavorable direction (outdoor 80F > indoor 74F) -- nat-vent NOT eligible. Unlike a WHF/BOTH fan, FAN_MODE_HVAC has no exterior-airflow requirement, so this must be adopted as ordinary circulation (decision=adopt-circulation), not treated as an unwarranted nat-vent session."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Mild-day classification applied: hvac_mode=off."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "reconcile_adopted_circulation",
+      "reason": "FAN_MODE_HVAC fan found running without nat-vent warrant is silently adopted as CA-tracked circulation (_fan_active=True) -- no nat_vent_reconcile_exit event, no _natural_vent_active, no grace period. This is the fix for Issue #893/#984's phantom 'natural ventilation ended' + 5-minute grace-period loop on ordinary HVAC-fan cycling."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "reconcile_fan_on_startup() adopts a physically-running FAN_MODE_HVAC fan as ordinary circulation instead of misreading it as an aborted nat-vent session, closing Issue #984's phantom grace-period loop",
+    "observed_behavior": "adopt-circulation: _fan_active set True, no nat_vent_reconcile_exit emitted, no grace period started",
+    "expected_behavior": "Per Issue #984: FAN_MODE_HVAC has no separate physical-exterior-airflow requirement (it's the thermostat's own blower, not an exhaust fan), so a running HVAC-fan with no nat-vent warrant is legitimate circulation, not an unwarranted session that must be exited"
+  }
+}

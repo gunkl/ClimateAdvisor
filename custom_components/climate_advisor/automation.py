@@ -539,6 +539,28 @@ def _fan_device_label(config: dict) -> str:
     return "none"
 
 
+def _fan_archetype_requires_open_sensor(fan_mode: str) -> bool:
+    """Return whether this fan archetype's only legitimate reason to run is nat-vent.
+
+    True for FAN_MODE_WHOLE_HOUSE/FAN_MODE_BOTH: a whole-house exhaust fan pulls
+    outside air in, so it needs an open monitored sensor to make physical sense —
+    running it against a sealed building has no cooling benefit and can
+    depressurize the home (Issue #561/#134).
+
+    False for FAN_MODE_HVAC: the thermostat's own blower circulates indoor air only,
+    has no separate physical-exterior-airflow requirement, and can legitimately run
+    for reasons unrelated to nat-vent eligibility (e.g. fan_min_runtime_per_hour's
+    circulation scheduler, or the thermostat's own blower during an active
+    heat/cool cycle) — Issue #984.
+
+    Shared by nat_vent_temperature_check() (automation.py, Issue #561/#134's
+    original site) and _reconcile_fan_on_startup_locked()'s unwarranted-fan branch
+    (Issue #984) so the archetype grouping is defined once, not reimplemented per
+    call site.
+    """
+    return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+
+
 def _fan_transition_text(config: dict, *, activating: bool) -> str:
     """Return the correct Activity Report transition text for this install's fan mode.
 
@@ -5118,7 +5140,7 @@ class AutomationEngine:
             # blower, not an exhaust fan) and its reactivation paths are intentionally
             # allowed to re-engage without an open sensor (Issue #134's grace/ceiling path).
             _fan_mode_nvtc = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-            if _fan_mode_nvtc in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not self._any_monitored_sensor_open():
+            if _fan_archetype_requires_open_sensor(_fan_mode_nvtc) and not self._any_monitored_sensor_open():
                 _LOGGER.warning(
                     "Nat-vent session force-closed: _natural_vent_active was True but no"
                     " monitored sensor is open — ending session instead of cycling fan",
@@ -6238,8 +6260,22 @@ class AutomationEngine:
                         "fan_device": _fan_device_label(self.config),
                     },
                 )
-        else:
+        elif _fan_archetype_requires_open_sensor(fan_mode) or any_sensor_open:
             # Fan running but nat-vent not warranted — turn it off
+            #
+            # Scoped to FAN_MODE_WHOLE_HOUSE/FAN_MODE_BOTH always, AND FAN_MODE_HVAC
+            # whenever a monitored sensor is genuinely open (Issue #984 regression fix,
+            # caught by issue_790_reconcile_startup_bypasses_lockout): a WHF/BOTH fan
+            # running without nat-vent warrant is a real problem — it fights the
+            # compressor and has no other legitimate reason to run. FAN_MODE_HVAC
+            # normally falls through to the silent-adopt branch below (see
+            # _fan_archetype_requires_open_sensor()'s docstring), but when a real
+            # door/window sensor is open, CA's door/window-pause mechanism must still
+            # engage regardless of fan archetype — this is NOT the "ordinary
+            # circulation, nothing to do with windows" case #984 targets (that case is
+            # sensors-closed, ordinary blower cycling). The original #984 fix exempted
+            # every "not eligible" case for FAN_MODE_HVAC, which incorrectly bypassed
+            # the reactivation lockout for a genuinely-open-window state.
             decision = "turn-off"
             _LOGGER.info(
                 "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s",
@@ -6304,6 +6340,40 @@ class AutomationEngine:
             # fire sub-minute. Without this, a turn-off issued from THIS call site left
             # no lockout timer for a subsequent reconcile call to check.
             await self._exit_nat_vent(reason=_turn_off_reason, set_outdoor_exit_time=True)
+        else:
+            # Issue #984: FAN_MODE_HVAC, not nat_vent_eligible, AND no monitored sensor
+            # open — this is ordinary HVAC-fan circulation (fan_min_runtime_per_hour's
+            # own min_runtime_cycle scheduler, or the thermostat's own blower running
+            # alongside an active heat/cool cycle), neither of which ever required
+            # nat-vent eligibility to be legitimate, and neither of which has anything
+            # to do with an open window. FAN_MODE_HVAC has no separate
+            # physical-exterior-airflow requirement (it's the thermostat's own blower,
+            # not an exhaust fan) — see _fan_archetype_requires_open_sensor()'s
+            # docstring. If a sensor IS open, the elif branch above handles it instead
+            # (door/window-pause mechanism must still engage).
+            #
+            # Silently adopt the running fan as CA-tracked (so a later real off is
+            # still detected as fan_deactivated) without narrating it as a nat-vent
+            # session ending: do NOT set _natural_vent_active, do NOT call
+            # _exit_nat_vent(), do NOT emit nat_vent_reconcile_exit, do NOT start a
+            # grace period. Before this fix, every ordinary blower cycle on a plain
+            # HVAC-fan configuration was misread as an aborted natural-ventilation
+            # session, spamming the Activity Report with a phantom "natural
+            # ventilation ended" narration and a 5-minute grace period, forever, on a
+            # system that never actually ran natural ventilation in that window
+            # (Issue #893/#984).
+            decision = "adopt-circulation"
+            self._fan_active = True
+            if self._fan_on_since is None:
+                self._fan_on_since = dt_util.now().isoformat()
+            _LOGGER.info(
+                "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s"
+                " — ordinary HVAC-fan circulation, adopting silently (no nat-vent narration)",
+                thermostat_fan_running,
+                nat_vent_eligible,
+                decision,
+                archetype,
+            )
 
     async def handle_manual_override_during_pause(
         self,

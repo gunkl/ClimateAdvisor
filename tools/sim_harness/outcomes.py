@@ -752,6 +752,29 @@ def check_assertion(
                 return "reconcile_turned_off_fan"
         return False
 
+    # --- reconcile_adopted_circulation (Issue #984) ---
+    # FAN_MODE_HVAC's silent-adopt branch in _reconcile_fan_on_startup_locked(): a plain
+    # HVAC-fan configuration found running but not nat-vent-eligible is adopted as
+    # CA-tracked (_fan_active=True) WITHOUT being narrated as a nat-vent session ending —
+    # it never emits nat_vent_reconcile_exit, never sets _natural_vent_active, and never
+    # starts a grace period. Neither reconcile_adopted_fan (requires a fan_activated event
+    # this branch deliberately does not emit) nor reconcile_turned_off_fan (requires the
+    # nat_vent_reconcile_exit event this branch deliberately avoids) fits, so this reads
+    # final engine_state directly, same pattern as fan_not_active/paused_by_door above, plus
+    # a negative scan of event_log for the exit event this fix must NOT produce. Purely
+    # additive — no pre-#984 scenario can reference this string.
+    if expect == "reconcile_adopted_circulation":
+        if engine_state.get("_fan_active") is not True:
+            return False
+        if engine_state.get("_natural_vent_active") is not False:
+            return False
+        if engine_state.get("_grace_active"):
+            return False
+        for ev_type, _ev_payload, _ev_ts in result.event_log:
+            if ev_type == "nat_vent_reconcile_exit":
+                return False
+        return "reconcile_adopted_circulation"
+
     # --- economizer_final_phase (Step 1 blind-spot closure) ---
     # Some economizer phase transitions (e.g. cool-down -> maintain while the fan is
     # ALREADY on) do not emit a fresh fan_activated event — _activate_fan()'s own

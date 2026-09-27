@@ -718,7 +718,11 @@ class TestReconcileFanOnStartupSleepAwareFloor:
     band that caused the observed ~5min overnight flapping.
     """
 
-    def _make_reconcile_engine(self) -> AutomationEngine:
+    def _make_reconcile_engine(self, fan_mode: str = FAN_MODE_WHOLE_HOUSE) -> AutomationEngine:
+        # Issue #984: defaults to FAN_MODE_WHOLE_HOUSE rather than FAN_MODE_HVAC — the
+        # turn-off/_exit_nat_vent()-routing behavior these tests exercise is now scoped to
+        # WHF/BOTH archetypes only. FAN_MODE_HVAC's daytime-ineligible case silently adopts
+        # instead (see test_daytime_ineligible_hvac_archetype_adopts_silently below).
         ae = _make_automation_engine(
             {
                 "comfort_heat": 68.0,
@@ -727,7 +731,7 @@ class TestReconcileFanOnStartupSleepAwareFloor:
                 "sleep_time": "20:30",
                 "wake_time": "06:30",
                 "nat_vent_hysteresis_f": 1.0,
-                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MODE: fan_mode,
             }
         )
         ae._fan_active = False
@@ -794,6 +798,67 @@ class TestReconcileFanOnStartupSleepAwareFloor:
         assert ae._fan_active is True, (
             "_fan_active must be True before _exit_nat_vent() so its internal deactivate is not a no-op"
         )
+        ae._exit_nat_vent.assert_called_once()
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_reconcile_exit" in event_names, f"Expected nat_vent_reconcile_exit event; got: {event_names}"
+
+    def test_daytime_ineligible_hvac_archetype_adopts_silently(self):
+        """Issue #984 mirror: the same daytime-ineligible indoor=67F reading used by
+        test_indoor_between_sleep_floor_and_daytime_floor_is_ineligible_in_daytime and
+        test_turn_off_branch_routes_through_exit_nat_vent_with_specific_event above must
+        NOT route through _exit_nat_vent() for a FAN_MODE_HVAC archetype WHEN no sensor
+        is open — HVAC-fan circulation has no separate physical-exterior-airflow
+        requirement, so it silently adopts instead of being treated as an unwarranted
+        nat-vent session.
+
+        Issue #984 regression fix (caught by Toolsmith validation against
+        issue_790_reconcile_startup_bypasses_lockout): any_sensor_open=False here,
+        not True as originally written. A genuinely open monitored sensor must still
+        route through the turn-off/_exit_nat_vent() path regardless of fan archetype
+        (see test_hvac_archetype_with_open_sensor_still_turns_off below) — the
+        FAN_MODE_HVAC silent-adopt exemption is scoped to "no sensor open, ordinary
+        circulation" only, not to every ineligible case."""
+        ae = self._make_reconcile_engine(fan_mode=FAN_MODE_HVAC)
+        ae._emit_event_callback = MagicMock()
+
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
+            asyncio.run(
+                ae.reconcile_fan_on_startup(
+                    indoor=67.0,
+                    outdoor=59.0,
+                    thermostat_fan_running=True,
+                    any_sensor_open=False,
+                )
+            )
+
+        ae._exit_nat_vent.assert_not_called()
+        ae._emit_event_callback.assert_not_called()
+        assert ae._fan_active is True
+        assert ae._natural_vent_active is False
+
+    def test_hvac_archetype_with_open_sensor_still_turns_off(self):
+        """Issue #984 regression fix: a FAN_MODE_HVAC fan running and NOT nat-vent
+        eligible, but with a monitored sensor genuinely open, must still route through
+        the turn-off/_exit_nat_vent() path — a real open door/window is not "ordinary
+        circulation" regardless of fan archetype. CA's door/window-pause mechanism
+        (and its reactivation lockout) must engage the same way it would for a
+        WHOLE_HOUSE/BOTH fan. This is the exact shape of
+        issue_790_reconcile_startup_bypasses_lockout, which caught the original #984
+        fix's over-broad exemption."""
+        ae = self._make_reconcile_engine(fan_mode=FAN_MODE_HVAC)
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
+            asyncio.run(
+                ae.reconcile_fan_on_startup(
+                    indoor=67.0,
+                    outdoor=59.0,
+                    thermostat_fan_running=True,
+                    any_sensor_open=True,
+                )
+            )
+
         ae._exit_nat_vent.assert_called_once()
         event_names = [e[0] for e in emitted]
         assert "nat_vent_reconcile_exit" in event_names, f"Expected nat_vent_reconcile_exit event; got: {event_names}"

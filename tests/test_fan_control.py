@@ -3517,8 +3517,11 @@ class TestReconcileFanOnStartup:
 
     def test_turn_off_proceeds_when_no_recent_fan_command(self):
         """Companion to the #952 guard: when no fan command was issued recently, the
-        turn-off branch must still proceed exactly as before."""
-        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        turn-off branch must still proceed exactly as before. Uses FAN_MODE_WHOLE_HOUSE
+        (default) — the recent-command guard fires before the archetype branch and is
+        archetype-agnostic; FAN_MODE_HVAC would now hit Issue #984's silent-adopt branch
+        instead, which is covered separately by test_adopt_circulation_when_not_eligible_hvac."""
+        engine = self._engine()
         engine._is_recent_fan_command_callback = MagicMock(return_value=False)
 
         asyncio.run(
@@ -3530,9 +3533,12 @@ class TestReconcileFanOnStartup:
         engine._deactivate_fan.assert_awaited()
         assert engine._natural_vent_active is False
 
-    def test_turn_off_when_not_eligible_hvac(self):
-        """Fan running, sensors closed (not nat-vent eligible), HVAC-fan archetype → turn off."""
-        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+    def test_turn_off_when_not_eligible_whole_house(self):
+        """Fan running, sensors closed (not nat-vent eligible), WHF archetype → turn off.
+        WHF/BOTH's only legitimate reason to run is nat-vent (it pulls outside air in), so
+        this branch is unchanged by Issue #984 — see
+        test_adopt_circulation_when_not_eligible_hvac for the archetype that changed."""
+        engine = self._engine()
 
         asyncio.run(
             engine.reconcile_fan_on_startup(
@@ -3541,6 +3547,28 @@ class TestReconcileFanOnStartup:
         )
 
         engine._deactivate_fan.assert_awaited()
+        assert engine._natural_vent_active is False
+
+    def test_adopt_circulation_when_not_eligible_hvac(self):
+        """Issue #984: fan running, sensors closed (not nat-vent eligible), HVAC-fan
+        archetype → silently adopt as ordinary circulation, NOT turn off. FAN_MODE_HVAC
+        has no separate physical-exterior-airflow requirement (it's the thermostat's own
+        blower, not an exhaust fan) — before this fix, every ordinary blower/min-runtime
+        cycle on a plain HVAC-fan config was misread as an aborted nat-vent session,
+        spamming the Activity Report with a phantom 'natural ventilation ended' + grace
+        period (Issue #893)."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+            )
+        )
+
+        engine._deactivate_fan.assert_not_awaited()
+        engine._emit_event_callback.assert_not_called()
+        assert engine._fan_active is True
         assert engine._natural_vent_active is False
 
     def test_turn_off_when_outdoor_warmer_whole_house(self):
@@ -3559,8 +3587,11 @@ class TestReconcileFanOnStartup:
         """Issue #446: reconcile_fan_on_startup() is called from 4 different sites with no
         rate limit — a fan that keeps re-appearing as unwarranted (e.g. a thermostat's own
         circulation schedule) previously triggered a full correction on every single call.
-        Two calls within the 5-minute cooldown must only correct once."""
-        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        Two calls within the 5-minute cooldown must only correct once. Uses FAN_MODE_WHOLE_HOUSE
+        (default) — the cooldown lives on the turn-off branch, which since Issue #984 is
+        scoped to WHF/BOTH archetypes only; FAN_MODE_HVAC now silently adopts instead of
+        correcting at all, so it no longer exercises this cooldown path."""
+        engine = self._engine()
 
         with patch(
             "custom_components.climate_advisor.automation.dt_util.now",
@@ -3587,8 +3618,9 @@ class TestReconcileFanOnStartup:
 
     def test_unwarranted_fan_correction_fires_again_after_cooldown(self):
         """Not a permanent suppression — a genuinely persistent stray fan must still get
-        corrected again once the cooldown window elapses."""
-        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        corrected again once the cooldown window elapses. Uses FAN_MODE_WHOLE_HOUSE
+        (default) — see test_unwarranted_fan_correction_suppressed_within_cooldown for why."""
+        engine = self._engine()
 
         with patch(
             "custom_components.climate_advisor.automation.dt_util.now",
@@ -3615,10 +3647,11 @@ class TestReconcileFanOnStartup:
 
     def test_suppressed_correction_is_logged_not_silent(self, caplog):
         """A persistently-stray fan must stay visible in logs even while suppressed —
-        never silently dropped."""
+        never silently dropped. Uses FAN_MODE_WHOLE_HOUSE (default) — see
+        test_unwarranted_fan_correction_suppressed_within_cooldown for why."""
         import logging
 
-        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        engine = self._engine()
 
         with patch(
             "custom_components.climate_advisor.automation.dt_util.now",

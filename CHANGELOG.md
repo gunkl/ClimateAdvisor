@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.70] — 2026-09-27
+
+- Fix #984: HVAC-fan-only setups no longer get a phantom "natural ventilation ended" log entry and 5-minute grace period on every ordinary blower cycle.
+
 ## [0.7.69] — 2026-09-27
 
 - Fix #982: when Climate Advisor runs your thermostat's own fan for scheduled ventilation (compressor off), the temperature chart no longer shows that window as an AC cooling/heating period — it now shows correctly on the Vent line instead.

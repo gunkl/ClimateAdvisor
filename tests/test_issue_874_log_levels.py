@@ -154,6 +154,38 @@ def _make_coordinator_for_whf_status(
     return coord
 
 
+def _make_coordinator_for_hvac_fan_status(
+    fan_active=False,
+    fan_override_active=False,
+    natural_vent_active=False,
+    climate_fan_mode="auto",
+    climate_hvac_action="",
+    recent_fan_command=False,
+):
+    """Issue #988: HVAC-fan-mode mirror of _make_coordinator_for_whf_status() above."""
+    from custom_components.climate_advisor.const import FAN_MODE_HVAC
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    coord = object.__new__(ClimateAdvisorCoordinator)
+    hass = MagicMock()
+    cs = MagicMock()
+    cs.attributes = {"fan_mode": climate_fan_mode, "hvac_action": climate_hvac_action}
+    hass.states.get.return_value = cs
+    coord.hass = hass
+    coord.config = {"climate_entity": "climate.thermostat"}
+
+    ae = MagicMock()
+    ae.config = {CONF_FAN_MODE: FAN_MODE_HVAC}
+    ae._fan_active = fan_active
+    ae._fan_override_active = fan_override_active
+    ae._natural_vent_active = natural_vent_active
+    coord.automation_engine = ae
+
+    coord._is_recent_fan_command = MagicMock(return_value=recent_fan_command)
+    coord._compute_hvac_fan_status = ClimateAdvisorCoordinator._compute_hvac_fan_status.__get__(coord)
+    return coord
+
+
 # ---------------------------------------------------------------------------
 # Fix 1 — Guard-block warnings -> INFO
 # ---------------------------------------------------------------------------
@@ -373,3 +405,66 @@ class TestFix5WhfStatusWarningDedup:
             with patch.object(_coord_mod.dt_util, "now", return_value=now + timedelta(seconds=61)):
                 coord._compute_whf_status()
         assert mock_logger.warning.call_count == 2
+
+
+class TestFix988HvacFanStatusWarningDedup:
+    """Issue #988: HVAC-fan-mode mirror of TestFix5WhfStatusWarningDedup above —
+    _compute_hvac_fan_status()'s stale-flag warning never had this dedup at all."""
+
+    def test_repeated_reads_within_cycle_warn_only_once(self):
+        from custom_components.climate_advisor import coordinator as _coord_mod
+
+        coord = _make_coordinator_for_hvac_fan_status(
+            fan_active=True,
+            climate_fan_mode="auto",
+            recent_fan_command=False,
+        )
+        now = datetime(2026, 9, 7, 12, 0, 0)
+        with (
+            patch.object(_coord_mod.dt_util, "now", return_value=now),
+            patch.object(_coord_mod, "_LOGGER") as mock_logger,
+        ):
+            for _ in range(6):
+                result = coord._compute_hvac_fan_status()
+        assert result == "inactive"
+        assert mock_logger.warning.call_count == 1
+
+    def test_new_occurrence_after_window_warns_again(self):
+        from custom_components.climate_advisor import coordinator as _coord_mod
+
+        coord = _make_coordinator_for_hvac_fan_status(
+            fan_active=True,
+            climate_fan_mode="auto",
+            recent_fan_command=False,
+        )
+        now = datetime(2026, 9, 7, 12, 0, 0)
+        with patch.object(_coord_mod, "_LOGGER") as mock_logger:
+            with patch.object(_coord_mod.dt_util, "now", return_value=now):
+                coord._compute_hvac_fan_status()
+            with patch.object(_coord_mod.dt_util, "now", return_value=now + timedelta(seconds=61)):
+                coord._compute_hvac_fan_status()
+        assert mock_logger.warning.call_count == 2
+
+    def test_dedup_field_is_independent_of_whf_field(self):
+        """FAN_MODE_BOTH can have both a stale WHF flag and a stale HVAC flag live at the
+        same time -- logging one must not suppress logging the other (own field, not shared)."""
+        from custom_components.climate_advisor import coordinator as _coord_mod
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+        coord = _make_coordinator_for_hvac_fan_status(
+            fan_active=True,
+            climate_fan_mode="auto",
+            recent_fan_command=False,
+        )
+        # Simulate a WHF stale-flag warning already having fired this cycle.
+        coord._whf_stale_flag_warned_at = datetime(2026, 9, 7, 12, 0, 0)
+        coord._get_fan_physical_state = MagicMock(return_value=False)
+        coord._compute_whf_status = ClimateAdvisorCoordinator._compute_whf_status.__get__(coord)
+
+        now = datetime(2026, 9, 7, 12, 0, 5)
+        with (
+            patch.object(_coord_mod.dt_util, "now", return_value=now),
+            patch.object(_coord_mod, "_LOGGER") as mock_logger,
+        ):
+            coord._compute_hvac_fan_status()
+        assert mock_logger.warning.call_count == 1

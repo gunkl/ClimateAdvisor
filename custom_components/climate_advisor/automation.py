@@ -175,7 +175,7 @@ from .fan_lifecycle import (
     WhfHvacOwnership,
     derive_fan_lifecycle_state,
 )
-from .fan_mode_resolver import resolve_fan_mode_command
+from .fan_mode_resolver import is_thermostat_fan_physically_active, resolve_fan_mode_command
 from .fan_thermostat_decision import (
     FanThermostatInputs,
     FanThermostatOutcome,
@@ -10735,12 +10735,17 @@ class AutomationEngine:
         physical state and corrected it — `_compute_fan_status()`/`_compute_whf_status()`
         already do this comparison, but only to render "active (unconfirmed)" in the UI.
 
-        Only applies to FAN_MODE_WHOLE_HOUSE/FAN_MODE_BOTH with fan_state_feedback enabled —
-        those are the only archetypes with an independent physical ground-truth read
-        (`_get_fan_physical_state_callback`). FAN_MODE_HVAC has no separate physical entity to
-        drift from (the thermostat's own attributes ARE the fan) and command-only mode
-        (`_get_fan_physical_state_callback()` returns None) has no ground truth to compare
-        against — both are no-ops here by construction.
+        Applies to FAN_MODE_WHOLE_HOUSE/FAN_MODE_BOTH with fan_state_feedback enabled (ground
+        truth from `_get_fan_physical_state_callback`) and, as of Issue #988, FAN_MODE_HVAC
+        (ground truth from the thermostat's own `fan_mode`/`hvac_action` attributes — the same
+        live read `_compute_hvac_fan_status()`'s stale-flag warning already uses, just now also
+        driving a real correction instead of only a log line). `FAN_MODE_BOTH` deliberately
+        keeps its existing WHF-only ground truth unchanged here — it has two independent
+        physical fan mechanisms sharing one `_fan_active` flag, a pre-existing, separately
+        tracked limitation (see `_derive_thermostat_fan_running_for_reconcile()`'s docstring);
+        resolving that is out of scope for this fix. Command-only mode for WHF
+        (`_get_fan_physical_state_callback()` returns None) still has no ground truth to
+        compare against and remains a no-op.
 
         Guards against two false-positive sources:
         - Recent CA command echo/lag: skip if a fan command was issued in the last 30s
@@ -10763,18 +10768,31 @@ class AutomationEngine:
         recent_fan_command = bool(
             self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0)
         )
-        physical_state_available = bool(self._get_fan_physical_state_callback)
+        # Issue #988: FAN_MODE_HVAC has no separate physical-state callback (there's no
+        # second entity to poll) — its "ground truth is available" condition is simply
+        # "the climate entity resolves", checked inline below rather than via this callback.
+        physical_state_available = bool(self._get_fan_physical_state_callback) or fan_mode == FAN_MODE_HVAC
         # Mirrors the original code's laziness: only actually read live physical state
         # once every cheaper guard (fan active, applicable archetype, no recent CA
         # command echo) has already passed — avoids an unnecessary state read otherwise.
         physical_on = None
-        if (
-            self._fan_active
-            and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
-            and not recent_fan_command
-            and physical_state_available
-        ):
-            physical_on = self._get_fan_physical_state_callback()
+        _applicable_archetype = fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_HVAC, FAN_MODE_BOTH)
+        if self._fan_active and _applicable_archetype and not recent_fan_command:
+            if fan_mode == FAN_MODE_HVAC:
+                # Same live read _compute_hvac_fan_status()'s _thermostat_fan_on() closure and
+                # _derive_thermostat_fan_running_for_reconcile() already use — reuse, not a
+                # fourth copy of this attribute read.
+                _cs_drift = self.hass.states.get(self.climate_entity)
+                physical_on = (
+                    is_thermostat_fan_physically_active(
+                        _cs_drift.attributes.get("fan_mode", ""),
+                        str(_cs_drift.attributes.get("hvac_action", "")).lower(),
+                    )
+                    if _cs_drift is not None
+                    else None
+                )
+            elif physical_state_available:
+                physical_on = self._get_fan_physical_state_callback()
 
         # Issue #446 instrumentation: log the raw inputs on EVERY tick, not just on confirmed
         # drift, so a future recurrence has real evidence instead of inference. `physical_on`
@@ -10874,33 +10892,42 @@ class AutomationEngine:
                 self._release_whf_and_reclassify(
                     reason="physical-drift correction found the nat-vent session's sensors closed"
                 )
-            # Issue #449: the control entity's own HA-reported state can silently stay
-            # stuck "on" (a one-way transmitter has no feedback of its own) even though
-            # ground truth has just confirmed the fan is physically off — reconcile it now
-            # so the very next reactivation attempt (nat_vent_temperature_check()'s
-            # immediate same-tick re-fire, when the session was preserved above)
-            # starts from a control entity that genuinely reads "off".
-            #
-            # Issue #482: this off-command must set the same _fan_command_pending/
-            # _fan_command_time bookkeeping every other command site sets, so
-            # _async_fan_entity_changed() (coordinator.py) can suppress the resulting
-            # state-change event as CA-initiated instead of misclassifying it as manual
-            # (which would start a spurious grace period). The bookkeeping is stamped
-            # HERE, synchronously, before the task is scheduled — not inside the task body
-            # — so there is no window where the entity-changed listener could observe a
-            # stale/unset _fan_command_pending before the task actually runs.
-            self._fan_command_time = dt_util.now()
-            self._fan_command_pending = True
+            if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+                # Issue #449: the control entity's own HA-reported state can silently stay
+                # stuck "on" (a one-way transmitter has no feedback of its own) even though
+                # ground truth has just confirmed the fan is physically off — reconcile it now
+                # so the very next reactivation attempt (nat_vent_temperature_check()'s
+                # immediate same-tick re-fire, when the session was preserved above)
+                # starts from a control entity that genuinely reads "off".
+                #
+                # Issue #482: this off-command must set the same _fan_command_pending/
+                # _fan_command_time bookkeeping every other command site sets, so
+                # _async_fan_entity_changed() (coordinator.py) can suppress the resulting
+                # state-change event as CA-initiated instead of misclassifying it as manual
+                # (which would start a spurious grace period). The bookkeeping is stamped
+                # HERE, synchronously, before the task is scheduled — not inside the task body
+                # — so there is no window where the entity-changed listener could observe a
+                # stale/unset _fan_command_pending before the task actually runs.
+                self._fan_command_time = dt_util.now()
+                self._fan_command_pending = True
 
-            async def _do_drift_reconciliation_off_command() -> None:
-                try:
-                    await self._command_whf_control_entity(
-                        False, reason="physical-state drift confirmed over 2 backstop ticks"
-                    )
-                finally:
-                    self._fan_command_pending = False
+                async def _do_drift_reconciliation_off_command() -> None:
+                    try:
+                        await self._command_whf_control_entity(
+                            False, reason="physical-state drift confirmed over 2 backstop ticks"
+                        )
+                    finally:
+                        self._fan_command_pending = False
 
-            self.hass.async_create_task(_do_drift_reconciliation_off_command())
+                self.hass.async_create_task(_do_drift_reconciliation_off_command())
+            # Issue #988: FAN_MODE_HVAC deliberately sends no hardware command here, unlike
+            # WHF above. The ground truth this branch just confirmed drift against IS the
+            # climate entity's own fan_mode/hvac_action attributes — the same entity a
+            # set_fan_mode write would target — so there is no separate control entity whose
+            # state could be lingering stale (Issue #449's rationale for WHF does not apply).
+            # The flag-clear above (_clear_fan_flags_and_start_grace()) is the entire
+            # correction needed; a redundant "turn off" write to an entity already confirmed
+            # off adds a real hardware call with no correctness benefit.
 
         # Real writes above already own _fan_active for the CORRECT outcome (via
         # _clear_fan_flags_and_start_grace()) and leave it untouched otherwise; this

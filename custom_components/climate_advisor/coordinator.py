@@ -708,6 +708,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # so the same real drift condition logs at most once per 60s regardless of which
         # function (or how many times either function) is called per update cycle.
         self._whf_stale_flag_warned_at: datetime | None = None
+        # Issue #988: dedup window for the HVAC-fan-mode sibling of the warning above
+        # ("HVAC fan _fan_active=True but thermostat reports fan off"). Kept as its own field,
+        # not shared with _whf_stale_flag_warned_at, because FAN_MODE_BOTH can have both
+        # conditions live at the same time and one must not suppress logging the other.
+        self._hvac_fan_stale_flag_warned_at: datetime | None = None
         # Issue #817: the single per-cycle nat-vent window/cutoff computation — briefing
         # text, the TLDR table, and the Next Automation/Next User Action cards all read
         # this instead of independently recomputing it, so they can never disagree.
@@ -9678,6 +9683,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         thermostat fan_mode/hvac_action ground truth via a memoized closure so it's computed
         at most once per call, shared between the ON-direction guard and the OFF-direction
         fallback below.
+
+        Issue #988: brought three more siblings-had-it-first gaps into parity with
+        _compute_whf_status()/_compute_fan_status() — the stale-flag WARNING now dedupes on
+        the same 60s window as Issue #874's WHF fix (own field, not shared, since FAN_MODE_BOTH
+        can have both conditions live at once), and the override-active/nat-vent-idle branches
+        now consult _thermostat_fan_on() the same way their WHF counterparts consult
+        _physical_on() (Issue #510), instead of trusting a possibly-stale flag unconditionally.
         """
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -9703,17 +9715,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if ae._fan_override_active:
             if ae._fan_active:
                 return "running (manual override)"
+            # _fan_active=False: check ground truth to distinguish
+            # "user is running it" from "user turned it on then off" (Issue #988,
+            # mirroring _compute_whf_status()'s equivalent branch).
+            if _thermostat_fan_on() is True:
+                return "running (manual override)"
             return "off (manual override)"
         if ae._fan_active:
             if _thermostat_fan_on() is False:
                 if self._is_recent_fan_command(threshold_seconds=30.0):
                     return "active (unconfirmed)"
-                _LOGGER.warning(
-                    "HVAC fan _fan_active=True but thermostat reports fan off — possible stale flag after manual stop"
-                )
+                _hvac_stale_now = dt_util.now()
+                _hvac_stale_last = getattr(self, "_hvac_fan_stale_flag_warned_at", None)
+                if _hvac_stale_last is None or (_hvac_stale_now - _hvac_stale_last).total_seconds() >= 60:
+                    _LOGGER.warning(
+                        "HVAC fan _fan_active=True but thermostat reports fan off — possible"
+                        " stale flag after manual stop"
+                    )
+                    self._hvac_fan_stale_flag_warned_at = _hvac_stale_now
                 return "inactive"
             return "active"
+        # Issue #988: nat-vent session flag can go stale the same way WHF's can (Issue #510
+        # 0.1b) — trust confirmed ground truth over the session flag here too.
         if ae._natural_vent_active:
+            if _thermostat_fan_on() is True:
+                _nv_status = resolve_untracked_fan_status(
+                    recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0),
+                    idle_status="nat-vent (session active, fan idle)",
+                )
+                if _nv_status == "running (untracked)":
+                    _LOGGER.info(
+                        "HVAC fan nat-vent session flag stale but thermostat confirms running — "
+                        "displaying running (untracked) instead of trusting the session flag"
+                    )
+                return _nv_status
             return "nat-vent (session active, fan idle)"
         if _thermostat_fan_on() is True:
             return resolve_untracked_fan_status(recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0))

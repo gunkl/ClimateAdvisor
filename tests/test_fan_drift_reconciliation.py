@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from custom_components.climate_advisor.fan_drift_reconciliation import (
     FAN_MODE_BOTH,
+    FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
     FanDriftInputs,
     FanDriftOutcome,
@@ -36,11 +37,19 @@ def test_reset_when_fan_not_active():
     assert tick == 0
 
 
-def test_noop_for_hvac_mode_archetype():
-    """FAN_MODE_HVAC (not WHF/BOTH) has no separate physical entity — no-op, tick unchanged."""
-    outcome, tick = decide_fan_drift_reconciliation(_inputs(fan_mode="hvac_fan", tick_count=1))
-    assert outcome == FanDriftOutcome.NOOP
-    assert tick == 1
+def test_hvac_mode_archetype_reaches_physical_check():
+    """Issue #988: FAN_MODE_HVAC is now a valid archetype for this check — its ground
+    truth is the thermostat's own attributes (read by the caller in automation.py, not by
+    this pure function), so a confirmed disagreement corrects the same as WHF/BOTH."""
+    outcome, tick = decide_fan_drift_reconciliation(_inputs(fan_mode=FAN_MODE_HVAC, tick_count=1))
+    assert outcome == FanDriftOutcome.CORRECT
+    assert tick == 0
+
+
+def test_hvac_mode_archetype_agrees_resets():
+    outcome, tick = decide_fan_drift_reconciliation(_inputs(fan_mode=FAN_MODE_HVAC, physical_on=True, tick_count=1))
+    assert outcome == FanDriftOutcome.RESET
+    assert tick == 0
 
 
 def test_noop_for_both_archetype_reaches_physical_check():

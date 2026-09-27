@@ -2829,10 +2829,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Chart log: emit classification_change event when day type changes
             if prev_type is not None and prev_type != self._current_classification.day_type:
                 with contextlib.suppress(Exception):
-                    _chart_hvac_cc = self._read_chart_hvac_action()
                     # Issue #510 0.4: compute once, reuse below — avoids duplicate
                     # _compute_fan_status() calls (and duplicate WARNING logs) for the same instant.
                     _fan_status_cc = self._compute_fan_status() if self.automation_engine else "disabled"
+                    _chart_hvac_cc = self._read_chart_hvac_action(_fan_status_cc)
                     _LOGGER.debug(
                         "chart_log append: event=classification_change hvac=%r fan=%s",
                         _chart_hvac_cc,
@@ -3606,17 +3606,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _pred_indoor_val = _archived_pred
             elif self._last_predicted_indoor:
                 _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
-            _chart_hvac_poll = self._read_chart_hvac_action()
+            # Issue #982: compute once, reuse below — same "compute once" pattern as the
+            # classification_change site (Issue #510 0.4), avoids 3 separate
+            # _compute_fan_status() calls (and duplicate WARNING logs) for the same instant.
+            _fan_status_poll = self._compute_fan_status() if self.automation_engine else "disabled"
+            _chart_hvac_poll = self._read_chart_hvac_action(_fan_status_poll)
             _setpoint_f = self._read_chart_setpoint()
             _LOGGER.debug(
                 "chart_log append: event=30min_poll hvac=%r fan=%s",
                 _chart_hvac_poll,
-                self._fan_is_running(),
+                self._fan_is_running(_fan_status_poll),
             )
             _band_lower_poll, _band_upper_poll = self._target_band_lower_upper_now()
             self._chart_log.append(
                 hvac=_chart_hvac_poll,
-                fan=self._fan_is_running(),
+                fan=self._fan_is_running(_fan_status_poll),
                 indoor=indoor_temp,
                 outdoor=outdoor_temp,
                 windows_open=self._any_sensor_open(),
@@ -3626,7 +3630,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pred_outdoor=_pred_outdoor_val,
                 pred_indoor=_pred_indoor_val,
                 setpoint=_setpoint_f,
-                fan_running=self._fan_physically_running(),
+                fan_running=self._fan_physically_running(_fan_status_poll),
                 nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
                 lower=_band_lower_poll,
                 upper=_band_upper_poll,
@@ -9345,13 +9349,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Return first-written ODE prediction for this 30-min slot (None on cache miss)."""
         return self._pred_archive.get(self._pred_archive_key(now_dt))
 
-    def _read_chart_hvac_action(self) -> str:
+    def _read_chart_hvac_action(self, _fan_status: str | None = None) -> str:
         """Return the thermostat's current hvac_action string for chart logging.
 
         Applies the #109 fan→heating/cooling remap: only remaps when fan_mode is
         auto (fan is part of the HVAC cycle). When fan_mode=on, the fan is
         circulating independently — hvac_action="fan" does NOT imply active
         heating or cooling.
+
+        Issue #982: also skips the remap whenever CA's own fan control already
+        explains the "fan" reading (``is_ca_fan_running()``) — e.g. FAN_MODE_HVAC
+        deliberate ventilation cycling on a thermostat whose fan_mode attribute
+        never reflects CA's commanded state. Without this, CA's own scheduled
+        ventilation (compressor off) was mislabeled as an AC cooling/heating period.
+        Accepts an optional pre-computed fan status string (same convention as
+        _fan_is_running()/_fan_physically_running()) so a caller that already
+        invoked _compute_fan_status() this cycle avoids a duplicate recomputation.
 
         Returns "" if the climate entity is unavailable.
         """
@@ -9364,7 +9377,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hvac_mode = cs.state.lower()
         fan_mode = str(cs.attributes.get("fan_mode", "")).lower()
         fan_is_auto = not fan_mode or fan_mode.startswith("auto")
-        if hvac_action == "fan" and fan_is_auto:
+        _ca_explains_fan = False
+        if hvac_action == "fan" and fan_is_auto and getattr(self, "automation_engine", None) is not None:
+            status = _fan_status if _fan_status is not None else self._compute_fan_status()
+            _ca_explains_fan = is_ca_fan_running(status)
+        if hvac_action == "fan" and fan_is_auto and not _ca_explains_fan:
             if hvac_mode == "heat":
                 _LOGGER.debug("chart_hvac_action: remapping fan→heating (fan_mode=%s)", fan_mode or "empty")
                 return "heating"

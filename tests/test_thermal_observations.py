@@ -1293,6 +1293,65 @@ class TestSampleDecimation:
     # OBS_TYPE_HVAC_HEAT post-phase samples — covered by test_hvac_active_not_decimated
     # and the passive/fan interval tests above.
 
+    def test_post_heat_abandons_with_fan_activated_when_ca_fan_active(self):
+        """Issue #986: mirrors passive_decay/solar_gain's existing 'fan_activated'
+        abandon guard, extended to the HVAC post-heat decay-sampling path, which had
+        no such guard. A CA fan-only cycle overlapping an already-real (hvac_action-
+        confirmed) post-heat window would otherwise silently contaminate the sample
+        with fan-driven temperature movement instead of real passive decay."""
+        coord = _make_obs_coord(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0, fan_active=True)
+        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = {
+            "obs_type": OBS_TYPE_HVAC_HEAT,
+            "obs_id": "test-hvac-post-heat-fan",
+            "start_time": _FAKE_NOW.isoformat(),
+            "active_start": _FAKE_NOW.isoformat(),
+            "status": "monitoring",
+            "_phase": "post_heat",
+            "active_samples": [],
+            "post_heat_samples": [],
+            "peak_indoor_f": None,
+            "flags_at_start": {},
+            "schema_version": 1,
+        }
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+            coord._sample_all_observations()
+
+        coord._abandon_observation.assert_any_call(OBS_TYPE_HVAC_HEAT, "fan_activated")
+        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
+        post_heat_samples = obs_after.get("post_heat_samples", []) if obs_after else []
+        assert len(post_heat_samples) == 0, (
+            "no sample should be appended to post_heat_samples once fan interference is detected"
+        )
+
+    def test_post_heat_samples_normally_without_fan_interference_regression_guard(self):
+        """Regression guard: post-heat sampling must be unaffected when CA's fan is
+        not running — the new guard must not fire for ordinary post-heat decay."""
+        coord = _make_obs_coord(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0, fan_active=False)
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = {
+            "obs_type": OBS_TYPE_HVAC_HEAT,
+            "obs_id": "test-hvac-post-heat-no-fan",
+            "start_time": _FAKE_NOW.isoformat(),
+            "active_start": _FAKE_NOW.isoformat(),
+            "status": "monitoring",
+            "_phase": "post_heat",
+            "active_samples": [],
+            "post_heat_samples": [],
+            "peak_indoor_f": None,
+            "flags_at_start": {},
+            "schema_version": 1,
+        }
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+            coord._sample_all_observations()
+
+        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
+        assert obs_after is not None, "observation should not have been abandoned"
+        assert len(obs_after.get("post_heat_samples", [])) == 1, (
+            "post_heat_samples should append normally when there is no fan interference"
+        )
+
     def test_interval_constants_have_expected_values(self):
         """Confirm constant values match the plan spec."""
         assert THERMAL_PASSIVE_SAMPLE_INTERVAL_S == 300, (

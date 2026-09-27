@@ -86,10 +86,12 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     ae._fan_command_pending = False
     ae._fan_override_active = False
     ae._fan_active = False
+    ae._natural_vent_active = False
     ae._temp_command_pending = False
     ae.handle_manual_override_during_pause = AsyncMock()
     ae.handle_manual_override = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
+    ae.reconcile_fan_on_startup = AsyncMock()
     coord.automation_engine = ae
 
     from custom_components.climate_advisor.classifier import DayClassification
@@ -122,6 +124,7 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord._today_record = DailyRecord(date="2026-04-08", day_type="warm", trend_direction="stable")
     coord._async_save_state = AsyncMock()
     coord._is_recent_hvac_command = MagicMock(return_value=False)
+    coord._is_recent_fan_command = MagicMock(return_value=False)
     coord._emit_event = MagicMock()
     coord._hvac_on_since = hvac_on_since
     # Issue #912: new instance attrs read via getattr() by _runtime_today_for_mode()/
@@ -137,6 +140,7 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord._abandon_observation = AsyncMock()
     coord._get_indoor_temp = MagicMock(return_value=72.0)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)
+    coord._last_outdoor_temp = 65.0
     coord._any_sensor_open = MagicMock(return_value=False)
     coord._cancel_all_debounce_timers = MagicMock()
     coord._chart_log = MagicMock()
@@ -415,6 +419,90 @@ class TestThermalSessionDetectionReal:
         assert coord._hvac_session_mode == "fan_only"
         assert coord._thermostat_fan_only_on_since == datetime(2026, 4, 8, 10, 0, 0)
         assert coord._hvac_on_since is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #986 — CA's own fan-only ventilation must not be misread as a real
+# heat/cool session by the state-based fallback
+# ---------------------------------------------------------------------------
+#
+# Occupant framing: the user configured CA to run their thermostat's fan on its
+# own hourly schedule (compressor off). Because hvac_action stayed "fan" the
+# whole time while hvac_mode read "cool", the state-based fallback above (Fix
+# 1a/1b, which exists so thermostats with an unreliable hvac_action still get
+# real session detection) also fired for CA's own known ventilation — opening
+# a fake OBS_TYPE_HVAC_COOL observation with no real cooling signature to
+# measure, and starting the runtime timer for time the compressor never ran.
+# That produced the exact reported symptom: hvac_runtime_minutes logged, zero
+# thermal observations kept. These tests pin the fix: when CA's own fan control
+# already explains the "fan" reading (ae._fan_active / ae._natural_vent_active —
+# the same ground-truth flags the passive_decay/solar_gain observation guards
+# already key off), the state-based fallback must not resolve it to a running
+# heat/cool session — while a thermostat whose hvac_action is genuinely just
+# unreliable (CA's fan is NOT what's running) still gets the original Fix
+# 1a/1b behavior unchanged.
+
+
+class TestIssue986CAFanNotMisreadAsHvacSession:
+    def test_ca_fan_active_suppresses_false_cool_session(self):
+        """hvac_action='fan' + state='cool', but CA's own fan control explains the
+        reading — must NOT start an HVAC observation or runtime timer."""
+        coord = _make_thermostat_coord()
+        coord.automation_engine._fan_active = True
+        old = _make_state("off", hvac_action="")
+        new = _make_state("cool", hvac_action="fan")
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord._start_hvac_observation.assert_not_called()
+        assert coord._hvac_session_mode is None
+        assert coord._hvac_on_since is None
+
+    def test_ca_fan_active_suppresses_false_heat_session(self):
+        """Mirror of the cool case above — heat mode must be protected identically."""
+        coord = _make_thermostat_coord()
+        coord.automation_engine._natural_vent_active = True
+        old = _make_state("off", hvac_action="")
+        new = _make_state("heat", hvac_action="fan")
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord._start_hvac_observation.assert_not_called()
+        assert coord._hvac_session_mode is None
+        assert coord._hvac_on_since is None
+
+    def test_ca_fan_inactive_still_starts_real_session_regression_guard(self):
+        """Regression guard: when CA's fan is NOT explaining the reading (e.g. a
+        thermostat whose hvac_action is simply unreliable), the existing state-based
+        fallback must still start a real session — unchanged from before this fix."""
+        coord = _make_thermostat_coord()
+        old = _make_state("off", hvac_action="")
+        new = _make_state("cool", hvac_action="fan")
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord._start_hvac_observation.assert_called_once_with("cool")
+
+    def test_ca_fan_active_does_not_affect_real_compressor_confirmed_transition(self):
+        """Regression guard: a genuine hvac_action='cooling' transition must start a
+        real session regardless of CA's fan status — this fix only touches the
+        state-based fallback branch, never the hvac_action-confirmed branch."""
+        coord = _make_thermostat_coord()
+        coord.automation_engine._fan_active = True
+        old = _make_state("off", hvac_action="")
+        new = _make_state("cool", hvac_action="cooling")
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord._start_hvac_observation.assert_called_once_with("cool")
 
 
 # ---------------------------------------------------------------------------

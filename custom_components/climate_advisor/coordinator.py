@@ -5053,7 +5053,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._today_record.hvac_runtime_minutes > 30.0 and self._today_record.thermal_session_count == 0:
                 _LOGGER.warning(
                     "Thermal learning watchdog: %.1f min HVAC runtime today but zero thermal"
-                    " observations recorded — check HA logs for 'Thermal obs skipped' entries",
+                    " observations recorded — check HA logs for 'Thermal obs abandoned' entries",
                     self._today_record.hvac_runtime_minutes,
                 )
                 self._emit_event(
@@ -5551,6 +5551,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             idle_modes = {"off", "unavailable", "unknown", ""}
             was_running = old_state.state not in idle_modes
             is_running = new_state.state not in idle_modes
+            # Issue #986: this state-based fallback can't tell "hvac_mode is cool/heat and
+            # the compressor just hasn't confirmed yet" apart from "CA's own fan-only
+            # ventilation is running while hvac_mode happens to read cool/heat" — the
+            # thermostat's mode selection alone doesn't mean the compressor ever ran. CA
+            # already knows with certainty when IT turned the fan on (via _fan_active /
+            # _natural_vent_active — the same ground-truth flags the passive_decay/
+            # solar_gain observation guards already key off, coordinator.py ~7203) — no
+            # heuristic detection is needed for CA's own commanded fan activity. Don't let
+            # this fallback treat it as a real heat/cool session starting (it would
+            # otherwise open a fake OBS_TYPE_HVAC_COOL/HEAT observation and start the
+            # runtime timer for ventilation CA itself knows isn't compressor activity).
+            if is_running and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active):
+                is_running = False
 
         _LOGGER.info(
             "_async_thermostat_changed: hvac action=%s was_running=%s is_running=%s",
@@ -7150,6 +7163,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     if indoor and (cur_peak is None or indoor > cur_peak):
                         obs["peak_indoor_f"] = indoor
                 else:  # post_heat
+                    # Issue #986: mirror the fan-interference guard passive_decay/solar_gain
+                    # already have (below, "fan_activated") — a CA fan-only cycle overlapping
+                    # the post-heat decay window would otherwise silently contaminate the
+                    # plateau-guard delta and the eventual decay-rate fit with fan-driven
+                    # temperature movement.
+                    if ae._fan_active or ae._natural_vent_active:
+                        self._abandon_observation(obs_type, "fan_activated")
+                        continue
                     samples = obs["post_heat_samples"]
                     if len(samples) < THERMAL_MAX_POST_HEAT_SAMPLES:
                         samples.append(sample)

@@ -117,6 +117,7 @@ def _make_thermostat_coord_stub(**ae_overrides):
     ae._manual_override_mode = None
     ae._fan_command_pending = False
     ae._fan_override_active = False
+    ae._fan_active = False
     ae._temp_command_pending = False
     ae._temp_command_time = None
     ae._last_commanded_hvac_mode = None

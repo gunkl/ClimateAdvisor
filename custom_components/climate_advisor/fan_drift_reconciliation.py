@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
+FAN_MODE_HVAC = "hvac_fan"
 FAN_MODE_BOTH = "both"
 
 _DRIFT_CONFIRM_TICKS = 2
@@ -40,8 +41,10 @@ class FanDriftInputs:
       fan_mode                 -> config CONF_FAN_MODE
       recent_fan_command       -> self._is_recent_fan_command_callback(threshold_seconds=30.0)
       physical_state_available -> whether self._get_fan_physical_state_callback is set
-      physical_on              -> self._get_fan_physical_state_callback() — None means
-                                   command-only mode (no ground truth to compare against)
+      physical_on              -> self._get_fan_physical_state_callback() for WHOLE_HOUSE/BOTH,
+                                   or the thermostat-attribute ground truth (Issue #988) for
+                                   FAN_MODE_HVAC — None means no ground truth is available to
+                                   compare against (command-only mode, or unresolvable entity)
       tick_count                -> self._fan_drift_tick_count (persisted across backstop ticks)
     """
 
@@ -63,7 +66,7 @@ def decide_fan_drift_reconciliation(inputs: FanDriftInputs) -> tuple[FanDriftOut
     if not inputs.fan_active:
         return FanDriftOutcome.RESET, 0
 
-    if inputs.fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+    if inputs.fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_HVAC, FAN_MODE_BOTH):
         return FanDriftOutcome.NOOP, inputs.tick_count
 
     if inputs.recent_fan_command:

@@ -2858,7 +2858,15 @@ class TestThermoBackstopTask:
 class TestReconcileFanPhysicalDrift:
     """_reconcile_fan_physical_drift() — self-corrects a stale _fan_active (Issue #423)."""
 
-    def _engine(self, fan_mode=FAN_MODE_WHOLE_HOUSE, physical_state=False, recent_command=False, sensor_open=True):
+    def _engine(
+        self,
+        fan_mode=FAN_MODE_WHOLE_HOUSE,
+        physical_state=False,
+        recent_command=False,
+        sensor_open=True,
+        climate_fan_mode="auto",
+        climate_hvac_action="",
+    ):
         engine = _make_automation_engine({CONF_FAN_MODE: fan_mode})
         engine._get_fan_physical_state_callback = MagicMock(return_value=physical_state)
         engine._is_recent_fan_command_callback = MagicMock(return_value=recent_command)
@@ -2867,6 +2875,11 @@ class TestReconcileFanPhysicalDrift:
         # physical-state hiccup (the scenario this whole class is about) — sensor_open=False
         # is exercised by its own dedicated test below.
         engine._sensor_check_callback = MagicMock(return_value=sensor_open)
+        # Issue #988: FAN_MODE_HVAC's ground truth is read directly from the climate entity's
+        # own attributes, not the WHF physical-state callback above.
+        _cs = MagicMock()
+        _cs.attributes = {"fan_mode": climate_fan_mode, "hvac_action": climate_hvac_action}
+        engine.hass.states.get = MagicMock(return_value=_cs)
         return engine
 
     def test_noop_when_fan_not_active(self):
@@ -2879,16 +2892,74 @@ class TestReconcileFanPhysicalDrift:
         engine._clear_fan_flags_and_start_grace.assert_not_called()
         engine._get_fan_physical_state_callback.assert_not_called()
 
-    def test_noop_for_hvac_mode(self):
-        """FAN_MODE_HVAC has no separate physical entity to drift from — no-op regardless
-        of the (irrelevant) physical-state mock."""
-        engine = self._engine(fan_mode=FAN_MODE_HVAC, physical_state=False)
+    def test_noop_for_hvac_mode_when_thermostat_agrees(self):
+        """Issue #988: FAN_MODE_HVAC now participates in drift reconciliation, but a
+        thermostat that agrees the fan is running produces no correction."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC, climate_fan_mode="on")
         engine._fan_active = True
 
         engine._reconcile_fan_physical_drift()
 
-        engine._get_fan_physical_state_callback.assert_not_called()
         engine._clear_fan_flags_and_start_grace.assert_not_called()
+        assert engine._fan_drift_tick_count == 0
+
+    def test_hvac_mode_second_consecutive_drift_tick_corrects(self):
+        """Issue #988: mirrors test_second_consecutive_drift_tick_corrects for FAN_MODE_HVAC —
+        two consecutive ticks of the thermostat's own attributes disagreeing with _fan_active
+        self-correct, without sending a redundant hardware command (the ground truth just
+        confirmed the same entity a command would target is already off)."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC, climate_fan_mode="auto")
+        engine._fan_active = True
+        engine._natural_vent_active = True
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_called_once_with(
+            reason="physical-state drift confirmed over 2 backstop ticks",
+            trigger_label="physical_drift_correction",
+            preserve_nat_vent_session=True,
+            source="automation",
+        )
+        assert engine._fan_drift_tick_count == 0
+        engine.hass.async_create_task.assert_not_called()
+
+    def test_hvac_mode_first_drift_tick_does_not_correct(self):
+        """First tick of disagreement only logs — does not correct yet (2-tick guard),
+        same as the WHF archetype."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC, climate_fan_mode="auto")
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+        assert engine._fan_drift_tick_count == 1
+
+    def test_hvac_mode_noop_on_recent_ca_command_echo(self):
+        """A CA fan command was issued in the last 30s — skip, matches the WHF guard."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC, climate_fan_mode="auto", recent_command=True)
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+        assert engine._fan_drift_tick_count == 0
+
+    def test_both_mode_ground_truth_stays_whf_only(self):
+        """Issue #988 scope note: FAN_MODE_BOTH must keep sourcing drift ground truth from
+        the WHF physical-state callback, not the thermostat's attributes — BOTH's
+        two-mechanisms-one-flag gap is out of scope for this fix. A thermostat confirming
+        the HVAC blower is running must not mask a genuinely stuck WHF-side flag."""
+        engine = self._engine(fan_mode=FAN_MODE_BOTH, physical_state=False, climate_fan_mode="on")
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()
+
+        # physical_state (WHF callback) says off both ticks -> still corrects, driven by the
+        # WHF signal, even though the thermostat attributes (climate_fan_mode="on") disagree.
+        engine._clear_fan_flags_and_start_grace.assert_called_once()
+        engine._get_fan_physical_state_callback.assert_called()
 
     def test_noop_when_physical_state_agrees(self):
         """_fan_active=True and physical state confirms on — no drift, no correction."""
@@ -4531,8 +4602,37 @@ class TestDualFanStatus:
             fan_mode=FAN_MODE_HVAC,
             fan_override_active=True,
             fan_active=False,
+            climate_fan_mode="auto",
         )
         assert coord._compute_hvac_fan_status() == "off (manual override)"
+
+    def test_hvac_fan_status_override_running_ground_truth_confirms(self):
+        """Issue #988: mirrors test_whf_status_override_running -- override active,
+        CA's own fan_active=False, but the thermostat itself confirms the fan is running.
+        Must report 'running (manual override)', not trust the stale False flag."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_override_active=True,
+            fan_active=False,
+            climate_fan_mode="on",
+        )
+        assert coord._compute_hvac_fan_status() == "running (manual override)"
+
+    def test_hvac_fan_status_nat_vent_idle_ground_truth_confirms_running(self):
+        """Issue #988: mirrors test_whf_status_nat_vent_cycling_off_runs_ground_truth_fallback --
+        nat-vent session flag is stale but the thermostat confirms the fan is genuinely
+        running; must report 'running (untracked)', not the stale idle label."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            natural_vent_active=True,
+            climate_fan_mode="on",
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_hvac_fan_status()
+        assert result == "running (untracked)"
+        mock_logger.info.assert_called_once()
+        assert "nat-vent session flag stale" in mock_logger.info.call_args[0][0]
 
     def test_whf_status_inactive(self):
         """_compute_whf_status returns 'inactive' when all flags clear and physical off."""

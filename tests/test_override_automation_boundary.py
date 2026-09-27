@@ -139,6 +139,7 @@ def _make_thermostat_coord_stub(
     ae._temp_command_pending = temp_command_pending
     ae._manual_override_active = False
     ae._fan_override_active = False
+    ae._fan_active = False
     ae._natural_vent_active = False
     ae._override_confirm_pending = False
     ae.handle_manual_override_during_pause = AsyncMock()
@@ -161,7 +162,8 @@ def _make_thermostat_coord_stub(
     coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()
     coord._start_hvac_observation = AsyncMock()
-    coord._end_hvac_active_phase = AsyncMock()
+    # _end_hvac_active_phase is called synchronously (not awaited) — MagicMock, not AsyncMock.
+    coord._end_hvac_active_phase = MagicMock()
     coord._abandon_observation = AsyncMock()
     coord._get_indoor_temp = MagicMock(return_value=72.0)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)

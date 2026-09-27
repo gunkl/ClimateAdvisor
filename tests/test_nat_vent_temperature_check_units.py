@@ -122,6 +122,11 @@ def _make_coord(*, temp_unit: str, resolved_indoor: float = 72.0) -> MagicMock:
     coord._async_save_state = AsyncMock()
     coord._emit_event = MagicMock()
     coord._hvac_on_since = None
+    # Issue #912: new instance attrs read via getattr()/direct access by
+    # _flush_runtime_for_mode()/_glide_hvac_session_mode() — object.__new__() skips
+    # __init__, so partial-instantiation stubs must set these explicitly.
+    coord._hvac_session_mode = None
+    coord._thermostat_fan_only_on_since = None
     coord._pending_thermal_event = None
     coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()

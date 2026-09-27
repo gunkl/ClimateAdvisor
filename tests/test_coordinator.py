@@ -1736,6 +1736,46 @@ class TestBriefingRegeneration:
         emitted_event_names = [call.args[0] for call in coord._emit_event.call_args_list]
         assert "thermal_learning_no_observations" in emitted_event_names
 
+    def test_end_of_day_watchdog_points_to_real_log_string(self, caplog):
+        """Issue #986: the watchdog previously told the user to search HA logs for
+        'Thermal obs skipped' — a string never emitted anywhere in the codebase.
+        The real per-observation-discard line is `_abandon_observation()`'s "Thermal
+        obs abandoned [...]" — the watchdog must point at that instead, or anyone
+        following its own advice searches for a phrase that will never match."""
+        import logging
+        import types
+
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+        from custom_components.climate_advisor.learning import DailyRecord
+
+        coord = self._make_coord()
+        coord._today_record = DailyRecord(
+            date="2026-04-05",
+            day_type="cold",
+            trend_direction="stable",
+            hvac_runtime_minutes=45.0,
+            thermostat_fan_only_runtime_minutes=0.0,
+            thermal_session_count=0,
+        )
+        coord._hvac_session_mode = None
+        coord._hvac_on_since = None
+        coord._thermostat_fan_only_on_since = None
+        coord._last_violation_check = None
+        coord._outdoor_temp_history = []
+        coord._indoor_temp_history = []
+        coord._hourly_forecast_temps = []
+        coord._emit_event = MagicMock()
+
+        coord._async_end_of_day = types.MethodType(ClimateAdvisorCoordinator._async_end_of_day, coord)
+
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(coord._async_end_of_day(MagicMock()))
+
+        watchdog_records = [r for r in caplog.records if "Thermal learning watchdog" in r.message]
+        assert len(watchdog_records) == 1, f"Expected one watchdog warning, got: {caplog.text}"
+        assert "Thermal obs abandoned" in watchdog_records[0].message
+        assert "Thermal obs skipped" not in watchdog_records[0].message
+
 
 # ---------------------------------------------------------------------------
 # TestStateContradictionEvent — Fix 2: state_contradiction_warning event bridge

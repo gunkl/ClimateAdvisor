@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.71] — 2026-09-27
+
+- Fix #986: fixed a bug where Climate Advisor's own scheduled fan-only ventilation could be misread as real AC/heat runtime by the thermal-learning model, opening a fake observation and inflating the reported HVAC runtime with no real cooling/heating behind it. Also corrected the thermal-learning watchdog's log message, which pointed to a log line that was never actually written.
+
 ## [0.7.70] — 2026-09-27
 
 - Fix #984: HVAC-fan-only setups no longer get a phantom "natural ventilation ended" log entry and 5-minute grace period on every ordinary blower cycle.

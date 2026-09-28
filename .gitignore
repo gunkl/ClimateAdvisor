@@ -21,6 +21,11 @@ id_rsa
 id_ed25519
 id_ecdsa
 
+# ESPHome device configs — contain api/ota encryption keys and wifi credentials,
+# and are unrelated to the Climate Advisor integration itself. Scratch working
+# copies only; never commit.
+/esphome-configs/
+
 # Real chart_log / telemetry samples pulled locally for replay/debugging — home data,
 # never a committed test fixture (see tools/sim_harness/chart_log_driver.py)
 scratch_chart_log.json

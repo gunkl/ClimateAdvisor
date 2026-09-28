@@ -7,10 +7,9 @@ or an AI assistant along with "rebuild this device using [stack of choice], sati
 requirement below" — it should work even if the display hardware, touch controller, or
 firmware framework (ESPHome/LVGL today) are swapped out entirely.
 
-This document intentionally does **not** include the current YAML configuration, its exact
-widget layout/coordinates, or any secrets (API keys, WiFi credentials). Those live only in
-the device's own config file under `esphome-configs/`, which is gitignored and must never be
-committed or reproduced here.
+This document intentionally does **not** include the current YAML configuration itself — that
+file is specific to this physical unit and is kept out of version control, not reproduced
+here.
 
 ---
 
@@ -227,10 +226,9 @@ transform before suspecting the graphics layer or a specific widget.
 
 ## 6. Security / operational constraints (non-negotiable)
 
-- **The device's live configuration file (containing API encryption keys, WiFi credentials,
-  and any other secrets) must never be committed to git or reproduced in this or any other
-  tracked document.** The current build enforces this by gitignoring the whole
-  `esphome-configs/` directory.
+- **The device's live configuration file is unit-specific and is never committed to git or
+  reproduced in this or any other tracked document.** The current build enforces this
+  structurally, not just by convention.
 - No AI-attribution lines in any commits or PRs touching this repo, consistent with the rest
   of the project's git workflow rules.
 
@@ -264,10 +262,10 @@ transform before suspecting the graphics layer or a specific widget.
 Everything below is detailed enough to recreate nearly the entire current build — every
 pin, timer, screen, widget, and piece of control logic — without being literal YAML, so it
 stays usable even if the target framework/library is not ESPHome+LVGL. Tables and pseudocode
-describe structure and behavior; adapt the syntax to whatever stack is chosen. No credentials,
-WiFi details, or real Home Assistant entity IDs appear anywhere below — entity references use
-generic placeholders (`<domain>.<placeholder_name>`) that describe the *role* an entity must
-fill, not any real identifier from the live system.
+describe structure and behavior; adapt the syntax to whatever stack is chosen. Home Assistant
+entity references use generic placeholders (`<domain>.<placeholder_name>`) that describe the
+*role* an entity must fill, since real entity identifiers are specific to this live system
+rather than to the device design itself.
 
 ### A.1 Peripheral / pin map (reference build)
 
@@ -522,5 +520,4 @@ the very first flash — not added later once something is already suspected to 
   be a soft target for arbitrary firmware pushes.
 - **Encrypted control-plane API.** Whatever protocol carries commands/state to the HA-equivalent
   controller must be encrypted, not sent in the clear on the local network.
-- These are capability requirements, not credentials to document — the actual keys live only in
-  the device's own gitignored config (§6).
+- These are capability requirements, not something to document with real values — see §6.

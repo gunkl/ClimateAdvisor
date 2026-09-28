@@ -76,6 +76,7 @@ from .const import (
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
     ATTR_LEARNING_SUGGESTIONS,
+    ATTR_NAT_VENT_TARGET_TEMP,
     ATTR_NEXT_ACTION,
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
@@ -3519,6 +3520,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
+
+        # Issue #993: live nat-vent target temperature. Nat-vent is unconditionally a
+        # cooling-direction mechanism (its gate requires outdoor temp below indoor
+        # temp — see nat_vent_gate.py/nat_vent_fsm.py), so this always reads the
+        # target-band UPPER edge, never branches on classification.hvac_mode (hvac_mode
+        # is "off" during WARM/MILD day types where nat-vent is the *primary*
+        # mechanism — gating on hvac_mode would make this go unavailable during real
+        # active sessions; see automation.py's warning comment near the nat-vent gate).
+        # Reuses this cycle's already-cached target-band schedule via
+        # _target_band_lower_upper_now() (resolved above by
+        # _resolve_target_band_schedule()) — never re-derived from static config.
+        # NOT to be confused with _nat_vent_target_now(), which is a static
+        # comfort_heat/comfort_cool-derived WHF cycling midpoint — this value is the
+        # dynamic target-band edge.
+        _nat_vent_target_temp = None
+        if self.automation_engine and self.automation_engine.natural_vent_active:
+            _, _nat_vent_target_temp = self._target_band_lower_upper_now()
+
         result = {
             ATTR_DAY_TYPE: c.day_type if c else "unknown",
             ATTR_TREND: c.trend_direction if c else "unknown",
@@ -3567,6 +3586,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
             ATTR_INDOOR_TEMP: _indoor_temp,
+            ATTR_NAT_VENT_TARGET_TEMP: _nat_vent_target_temp,
             "sleep_indoor_sensor_active": _sleep_indoor_sensor_active,
             ATTR_OUTDOOR_TEMP: _outdoor_temp,
             ATTR_FORECAST_HIGH: c.today_high if c else None,

@@ -38,6 +38,7 @@ from .const import (
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
     ATTR_LEARNING_SUGGESTIONS,
+    ATTR_NAT_VENT_TARGET_TEMP,
     ATTR_NEXT_ACTION,
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
@@ -83,6 +84,7 @@ async def async_setup_entry(
         ClimateAdvisorOutdoorTempSensor(coordinator, entry),
         ClimateAdvisorForecastHighSensor(coordinator, entry),
         ClimateAdvisorForecastLowSensor(coordinator, entry),
+        ClimateAdvisorNatVentTargetTempSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -435,6 +437,31 @@ class ClimateAdvisorOutdoorTempSensor(ClimateAdvisorBaseSensor):
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the outdoor temperature sensor."""
         super().__init__(coordinator, entry, ATTR_OUTDOOR_TEMP, "Outdoor Temperature", "mdi:thermometer-lines")
+
+
+class ClimateAdvisorNatVentTargetTempSensor(ClimateAdvisorBaseSensor):
+    """Live nat-vent target temperature — the target-band upper edge Climate Advisor
+    is currently aiming for via natural ventilation, or unavailable (None) when
+    nat-vent is not active right now (Issue #993).
+
+    Sourced from the coordinator's already-computed per-cycle target-band schedule
+    (never re-derived from static config here) — see
+    coordinator._async_update_data_impl()'s ATTR_NAT_VENT_TARGET_TEMP computation.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the nat-vent target temperature sensor."""
+        super().__init__(
+            coordinator,
+            entry,
+            ATTR_NAT_VENT_TARGET_TEMP,
+            "Nat-Vent Target Temperature",
+            "mdi:window-open-variant",
+        )
 
 
 class ClimateAdvisorForecastHighSensor(ClimateAdvisorBaseSensor):

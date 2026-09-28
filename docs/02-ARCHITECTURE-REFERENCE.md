@@ -252,6 +252,7 @@ Both are rendered in the dashboard as a stepped purple/magenta line: solid past,
 | `sensor.climate_advisor_status` | active/inactive | — |
 | `sensor.climate_advisor_occupancy_mode` | home/away/vacation/guest | occupancy_entity_states (raw toggle states) |
 | `sensor.climate_advisor_ai_status` | active/inactive/error/disabled/circuit_open | last_request_time, error_count, total_requests, model_in_use, circuit_breaker, monthly_cost_estimate, auto_requests_today, manual_requests_today |
+| `sensor.climate_advisor_nat_vent_target_temp` | Live natural-ventilation target temperature (°F) — the `upper` edge of this cycle's dynamic target-band schedule, read via `_target_band_lower_upper_now()`. `None`/unavailable whenever `automation_engine.natural_vent_active` is `False`. Not to be confused with `_nat_vent_target_now()` (a separate, static `comfort_heat`/`comfort_cool`-derived WHF cycling midpoint) — see §5d in the Computation Reference. | — |
 
 ## Services Registered
 

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.73] — 2026-09-28
+
+- Feat #993: added a sensor showing the temperature Climate Advisor is actively targeting during natural ventilation, so external displays and automations can show the real live target instead of a stale HVAC setpoint.
+
 ## [0.7.72] — 2026-09-27
 
 - Fix #988: HVAC-fan-only installs now get the same stale-flag self-healing and accurate manual-override/nat-vent display that whole-house-fan installs already had — a stuck internal fan flag on an HVAC-fan-only config no longer requires a restart or a thermostat state-change event to clear itself, and the dashboard's HVAC Fan card no longer shows a stale value during a manual override or mid-nat-vent-session.

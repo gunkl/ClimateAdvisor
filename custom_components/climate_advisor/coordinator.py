@@ -61,6 +61,8 @@ from .const import (
     ATTR_COMPLIANCE_SCORE,
     ATTR_CONTACT_STATUS,
     ATTR_DAY_TYPE,
+    ATTR_EFFECTIVE_TARGET_SOURCE,
+    ATTR_EFFECTIVE_TARGET_TEMP,
     ATTR_FAN_OVERRIDE_SINCE,
     ATTR_FAN_RUNNING,
     ATTR_FAN_RUNTIME,
@@ -3538,6 +3540,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self.automation_engine and self.automation_engine.natural_vent_active:
             _, _nat_vent_target_temp = self._target_band_lower_upper_now()
 
+        # Issue #998: always-populated "what is the house aiming for right now"
+        # value — see _compute_effective_target_now()'s docstring for the 3-tier
+        # priority (HVAC setpoint -> fan cycling target -> passive comfort-band
+        # edge). _fan_status_uc is already computed above for the HVAC-off/
+        # hvac_action contradiction check — reused here rather than recomputed.
+        _effective_target_temp, _effective_target_source = self._compute_effective_target_now(
+            hvac_mode=hvac_mode,
+            target_temp=_target_temp,
+            fan_status=_fan_status_uc,
+        )
+
         result = {
             ATTR_DAY_TYPE: c.day_type if c else "unknown",
             ATTR_TREND: c.trend_direction if c else "unknown",
@@ -3587,6 +3600,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
             ATTR_INDOOR_TEMP: _indoor_temp,
             ATTR_NAT_VENT_TARGET_TEMP: _nat_vent_target_temp,
+            ATTR_EFFECTIVE_TARGET_TEMP: _effective_target_temp,
+            ATTR_EFFECTIVE_TARGET_SOURCE: _effective_target_source,
             "sleep_indoor_sensor_active": _sleep_indoor_sensor_active,
             ATTR_OUTDOOR_TEMP: _outdoor_temp,
             ATTR_FORECAST_HIGH: c.today_high if c else None,
@@ -4944,6 +4959,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         chosen = best[1] if best is not None else schedule[0]
         return chosen.get("lower"), chosen.get("upper")
 
+    def _fan_cycling_target_now(self) -> float:
+        """This cycle's real nat-vent-style thermostatic cycling target — the same
+        number ``automation.py``'s live ``nat_vent_temperature_check()`` cycles the
+        fan around — computed unconditionally (Issue #998), independent of whether
+        a formal nat-vent *session* is open. ``_nat_vent_target_now()`` below wraps
+        this with the ``_natural_vent_active`` gate its own (chart-only) contract
+        requires; ``_compute_effective_target_now()`` calls this directly for any
+        physically-running fan mechanism (a manual override or untracked run
+        included), since the cycling formula itself doesn't care why the fan is on.
+        """
+        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+        in_sleep_window = _in_sleep_window(dt_util.now(), self.config)
+        return compute_nat_vent_target(
+            sleep_heat=sleep_heat,
+            in_sleep_window=in_sleep_window,
+            comfort_heat_raw=comfort_heat,
+            comfort_cool=comfort_cool,
+            hysteresis=hysteresis,
+        )
+
     def _nat_vent_target_now(self) -> float | None:
         """This cycle's real nat-vent thermostatic cycling target, or None if nat-vent is
         not currently active (Phase 3a, chart target-line).
@@ -4957,18 +4995,48 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         if not (self.automation_engine and self.automation_engine._natural_vent_active):
             return None
-        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
-        in_sleep_window = _in_sleep_window(dt_util.now(), self.config)
-        return compute_nat_vent_target(
-            sleep_heat=sleep_heat,
-            in_sleep_window=in_sleep_window,
-            comfort_heat_raw=comfort_heat,
-            comfort_cool=comfort_cool,
-            hysteresis=hysteresis,
-        )
+        return self._fan_cycling_target_now()
+
+    def _compute_effective_target_now(
+        self,
+        *,
+        hvac_mode: str | None,
+        target_temp: float | None,
+        fan_status: str,
+    ) -> tuple[float | None, str | None]:
+        """Issue #998: whatever temperature the house is actually being steered
+        toward right now, regardless of which mechanism is doing the steering.
+
+        Unlike ``_nat_vent_target_now()`` (which is chart-only and goes ``None``
+        the moment there's no formal nat-vent *session*), this is meant to always
+        have an answer during normal operation. Priority:
+
+        1. HVAC actively driving (mode not "off", a real commanded setpoint is
+           present) — the thermostat's own setpoint.
+        2. A CA-relevant fan mechanism is physically running — ground-truth aware
+           via ``fan_status.is_ca_fan_running()``, the existing single source of
+           truth for this exact distinction (covers a real nat-vent session, a
+           manual RF-remote override, or an untracked-but-real run) — the
+           nat-vent-style cycling target (``_fan_cycling_target_now()``), the same
+           number the fan is actually cycling around regardless of *why* it's on.
+        3. Otherwise (nothing actively running — windows open or closed, idle) —
+           the passive comfort-band edge from ``_resolve_active_comfort_band()``
+           (the same resolver already used for incident detection and ``api.py``'s
+           ``ca_target_heat``/``ca_target_cool`` fields), matching the day's active
+           direction (heat → floor, else → ceiling) — what the house is
+           structurally trying to stay within even with nothing running.
+
+        Returns ``(value, source)`` where ``source`` is ``"hvac"``, ``"whf"``, or
+        ``"passive"`` — lets a display pick the right label/color without
+        re-deriving this same priority logic.
+        """
+        if hvac_mode not in (None, "", "off") and target_temp is not None:
+            return target_temp, "hvac"
+        if is_ca_fan_running(fan_status):
+            return self._fan_cycling_target_now(), "whf"
+        _lower, _upper = self._resolve_active_comfort_band()
+        _heat_direction = bool(self._current_classification and self._current_classification.hvac_mode == "heat")
+        return (_lower if _heat_direction else _upper), "passive"
 
     def _maybe_schedule_pre_cool(self) -> None:
         """Schedule the overnight pre-cool trigger if tonight is eligible and not yet scheduled."""

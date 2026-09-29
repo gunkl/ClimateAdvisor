@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.74"
+VERSION = "0.7.75"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -483,6 +483,16 @@ ATTR_CONTACT_STATUS = "contact_status"
 # automation engine is currently aiming for via natural ventilation, or None when
 # nat-vent is not active. See coordinator._async_update_data_impl() for computation.
 ATTR_NAT_VENT_TARGET_TEMP = "nat_vent_target_temp"
+# Issue #998: always-populated "what is the house actually aiming for right now"
+# value, regardless of which mechanism (HVAC, WHF/fan, or a passive comfort band
+# with nothing running) is responsible — unlike ATTR_NAT_VENT_TARGET_TEMP above,
+# never None during normal operation. See
+# coordinator._compute_effective_target_now() for the 3-tier priority.
+ATTR_EFFECTIVE_TARGET_TEMP = "effective_target_temp"
+# Companion field: which of the 3 tiers produced ATTR_EFFECTIVE_TARGET_TEMP —
+# "hvac" | "whf" | "passive". Lets a display pick the right label/color without
+# re-deriving the same priority logic.
+ATTR_EFFECTIVE_TARGET_SOURCE = "effective_target_source"
 
 # Revisit delay — follow-up check after any HVAC action (seconds)
 # Issue #787: independently duplicated with NAT_VENT_REACTIVATION_LOCKOUT_S/FAN_MIN_TOGGLE_INTERVAL_S

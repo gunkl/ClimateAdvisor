@@ -25,6 +25,8 @@ from .const import (
     ATTR_COMPLIANCE_SCORE,
     ATTR_CONTACT_STATUS,
     ATTR_DAY_TYPE,
+    ATTR_EFFECTIVE_TARGET_SOURCE,
+    ATTR_EFFECTIVE_TARGET_TEMP,
     ATTR_FAN_OVERRIDE_SINCE,
     ATTR_FAN_RUNNING,
     ATTR_FAN_RUNTIME,
@@ -85,6 +87,8 @@ async def async_setup_entry(
         ClimateAdvisorForecastHighSensor(coordinator, entry),
         ClimateAdvisorForecastLowSensor(coordinator, entry),
         ClimateAdvisorNatVentTargetTempSensor(coordinator, entry),
+        ClimateAdvisorEffectiveTargetTempSensor(coordinator, entry),
+        ClimateAdvisorEffectiveTargetSourceSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -461,6 +465,50 @@ class ClimateAdvisorNatVentTargetTempSensor(ClimateAdvisorBaseSensor):
             ATTR_NAT_VENT_TARGET_TEMP,
             "Nat-Vent Target Temperature",
             "mdi:window-open-variant",
+        )
+
+
+class ClimateAdvisorEffectiveTargetTempSensor(ClimateAdvisorBaseSensor):
+    """Always-populated "what is the house aiming for right now" temperature
+    (Issue #998), regardless of which mechanism is responsible.
+
+    Unlike ClimateAdvisorNatVentTargetTempSensor above (which goes unavailable
+    the moment there's no formal nat-vent session), this never goes unavailable
+    during normal operation — see coordinator._compute_effective_target_now()'s
+    docstring for the 3-tier priority (HVAC setpoint -> fan cycling target ->
+    passive comfort-band edge). Pair with ClimateAdvisorEffectiveTargetSourceSensor
+    below to know which tier produced this value.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the effective target temperature sensor."""
+        super().__init__(
+            coordinator,
+            entry,
+            ATTR_EFFECTIVE_TARGET_TEMP,
+            "Target Temperature",
+            "mdi:thermostat",
+        )
+
+
+class ClimateAdvisorEffectiveTargetSourceSensor(ClimateAdvisorBaseSensor):
+    """Which mechanism produced ClimateAdvisorEffectiveTargetTempSensor's value
+    (Issue #998) — "hvac", "whf", or "passive". Lets a display pick the right
+    label/color without re-deriving the priority logic itself.
+    """
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the effective target source sensor."""
+        super().__init__(
+            coordinator,
+            entry,
+            ATTR_EFFECTIVE_TARGET_SOURCE,
+            "Target Source",
+            "mdi:target",
         )
 
 

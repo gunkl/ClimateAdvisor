@@ -1,0 +1,105 @@
+{
+  "name": "issue_1006_fan_off_grace_survives_restart",
+  "description": "Issue #1006: a user turning the whole-house fan off, arming a multi-hour manual fan_off grace, must have that grace survive an HA restart landing minutes later — not be silently wiped by the Issue #282/#263/#327 clean-slate restart policy and immediately re-activated once startup coalescing completes.",
+  "source": "live",
+  "issue": 1006,
+  "notes": [
+    "Occupant impact: the user physically turns the whole-house fan off at bedtime, expecting quiet for the configured 3-hour cooldown. A routine Climate Advisor deploy/restart lands a few minutes later, coincidental timing unrelated to the fan. Without this fix, the restart silently discards the 3-hour decision and, once the standard 5-minute startup-coalescing window completes, natural-ventilation logic turns the fan back on with zero memory the user ever touched it -- confirmed live on 2026-09-28 (22:26:52 fan-off, 22:30:50 restart, 22:35:50 fan reactivated).",
+    "Fix, part 1 (automation.py, Issue #1006): AutomationEngine.restore_state() still clean-slates grace/override state exactly as before (Issue #282/#263/#327 unchanged), but a new _maybe_restore_fan_off_grace() runs immediately afterward and re-arms the grace ONLY when the persisted last_resume_source=='manual' AND last_grace_trigger=='fan_off' AND the persisted grace_end_time is still in the future -- computing the REMAINING duration and calling the existing _start_grace_period() wrapper (reusing the duration_override mechanism Issue #677 already built for RF-remote-timer restart re-arm) so _grace_active is genuinely set, not just timer bookkeeping.",
+    "Fix, part 2 (automation.py, Issue #1006, found via THIS scenario during authoring): part 1 alone was insufficient for the exact reported incident, where a monitored window sensor was already open before the restart. _do_startup_coalesce() unconditionally calls handle_door_window_open() for any already-open sensor at restart, and that method's pre-existing Issue #655 'real-gate bypass' lets favorable nat-vent conditions override ANY active grace, regardless of trigger -- so even with _grace_active correctly restored by part 1, this second path would still reactivate the fan. Fixed by excluding the fan_off trigger from that bypass (matching Issue #620's precedent, which already gave the sibling _idle_open path in check_natural_vent_conditions() unconditional grace respect) -- a fan_off grace's contract ('the user just stopped this, leave it stopped') has no conditions-based exception, unlike an HVAC-override grace, which is what Issue #655's bypass was actually designed for. Running this scenario with only part 1 applied (temporarily reverting part 2 during authoring) reproduced the exact live incident even with the grace correctly re-armed -- confirming part 2 is load-bearing, not optional hardening.",
+    "(a) Scenario effectiveness: without the fix, _maybe_restore_fan_off_grace() doesn't exist and restore_state() leaves _grace_active=False after the clean-slate reset -- the fan_not_active assertion at 22:34:00 (4 minutes after the real restart, well inside the original 3-hour window) would still pass by coincidence (nat-vent hasn't reactivated yet), but the field_equals assertions immediately after restart proving _grace_active/_last_grace_trigger were actively RE-ARMED (not merely never-cleared) would fail outright -- there is no code path that could produce grace_active=True post-restart without the fix. This is the same effectiveness shape Issue #677's own restart-resume scenario uses: assert the re-arm happened, not just that the bad outcome didn't happen yet.",
+    "(b) Two-way alignment (single engine, Issue #236): docs/grace-periods-spec.md's Fan-Off Grace Restart Persistence (Issue #1006) section and automation.py's restore_state()/_maybe_restore_fan_off_grace() docstrings were updated in the same change as this scenario -- all three describe the identical fan_off-only, duration_override-reuse mechanism.",
+    "(c) User outcome if this scenario's assertions fail in the future: a user turning the whole-house fan off before a deploy would again have that decision silently discarded, with the fan turning itself back on minutes later -- the exact regression this fix closes, confirmed live on the reporting install."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "manual_grace_seconds": 10800
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-09-28T22:20:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seeds a real prior 'off' state for fan.whf so the next transition to 'on' below is a genuine change (mirrors issue_677's identical seeding rationale)."
+    },
+    {
+      "time": "2026-09-28T22:20:05",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Warm night, HVAC off, windows recommended -- realistic conditions for the whole-house fan to already be running nat-vent before the user turns it off below."
+    },
+    {
+      "time": "2026-09-28T22:20:10",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 63.0,
+      "note": "Outdoor cooler than indoor throughout -- sustained nat-vent-favorable conditions (delta=9 > natural_vent_delta=3), with enough headroom above comfort_heat=68 that the fan's own thermostatic cycling-off backstop does not intervene before the user's manual-off event below (kept under 2 minutes later, well inside the first 5-minute backstop tick)."
+    },
+    {
+      "time": "2026-09-28T22:20:15",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "A whole-house fan physically requires an open window to draw fresh air through -- stays open for the whole scenario."
+    },
+    {
+      "time": "2026-09-28T22:20:20",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "Nat-vent has the fan running before the user's manual off below -- matches the live incident's prior state."
+    },
+    {
+      "time": "2026-09-28T22:22:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "The user physically turns the whole-house fan off, 1m40s after it started (before the first 5-minute thermostatic backstop tick, so this is unambiguously the user's action, not CA's own cycling-off decision). Real on_fan_turned_off() fires, clears fan flags, and starts a manual grace period via _clear_fan_flags_and_start_grace(trigger_label='fan_off') -- _start_grace_period('manual', trigger='fan_off') with the configured manual_grace_seconds=10800 (3h), ending at 2026-09-29T01:22:00."
+    },
+    {
+      "time": "2026-09-28T22:26:00",
+      "type": "simulate_restart",
+      "note": "Models an HA restart 4 minutes into the 3-hour fan-off grace (matches the live incident's ~4-minute gap). engine.restore_state(engine.get_serializable_state()) clean-slates _grace_active/_manual_override_active/_fan_override_active exactly as before this fix, but the persisted grace_end_time/last_grace_trigger='fan_off'/last_resume_source='manual' snapshot (taken just before restart, ~2h56m of grace remaining) is now available for _maybe_restore_fan_off_grace() to act on."
+    },
+    {
+      "time": "2026-09-28T22:26:01",
+      "type": "startup_coalesce",
+      "note": "Real coordinator._do_startup_coalesce() entry point. With the Issue #1006 fix, restore_state() (called moments earlier, inside simulate_restart) has already re-armed the fan_off grace with ~10,559s (2h55m59s) remaining before this coalesce step even runs -- so nat-vent's re-evaluation here must see grace_active=True and NOT reactivate the fan, unlike the live pre-fix incident where the standard startup-coalescing window's own natural 5-minute close (not modeled directly here, since the grace's real remaining duration is far longer) was what let nat-vent reactivate with no memory of the user's action."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-28T22:26:05",
+      "expect": "field_equals",
+      "field": "engine_state._grace_active",
+      "value": true,
+      "reason": "The fan_off grace must be genuinely re-armed (_grace_active=True) -- not merely un-cleared bookkeeping. This is the assertion an earlier, incorrect draft of this fix's design would have failed: it called _start_grace_period_action() directly, which deliberately never writes _grace_active (only the _start_grace_period() wrapper's FSM dispatch does). Note: field_equals reads engine_state as a snapshot taken after ALL events in this scenario finish processing (tools/sim_harness/run_production.py's own docstring), not a true point-in-time read at the 'at' timestamp -- this field holds True at scenario-end (01:00:00, still inside the 3h grace) so it validates correctly regardless. The trigger-label/protects-override mechanistic details this field_equals check originally also tried to assert were dropped from THIS scenario for exactly that reason (they can legitimately be overwritten by later, unrelated, correct pause/resume cycling before scenario-end) -- they are already covered with true point-in-time precision by tests/test_state_persistence.py::TestAutomationRestoreState::test_restore_fan_off_grace_across_restart, which calls AutomationEngine.restore_state() directly."
+    },
+    {
+      "at": "2026-09-28T23:26:00",
+      "expect": "fan_not_active",
+      "reason": "One hour into the restored grace (well inside the original 3-hour window, and well past the live incident's ~5-minute pre-fix reactivation point), the fan must still be off -- proving the restored grace is actually suppressing nat-vent reactivation for its real remaining duration, not just momentarily true at the restart instant."
+    },
+    {
+      "at": "2026-09-29T01:00:00",
+      "expect": "fan_not_active",
+      "reason": "Just under 22 minutes before the original grace end time (2026-09-29T01:22:00) -- the fan must still be off. Nat-vent conditions remain favorable throughout this scenario, so this is proof the grace is the only thing preventing reactivation, not incidental conditions."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After the Issue #1006 fix, an HA restart landing minutes into an active fan_off manual grace no longer causes the grace to be silently discarded -- restore_state() re-arms it with the correct remaining duration immediately after the clean-slate reset, so startup coalescing (and every subsequent cycle for the rest of the grace's real remaining duration) correctly sees an active, override-unprotected grace and does not reactivate the fan.",
+    "observed_behavior": "_grace_active=True at scenario-end. The fan remains off through at least 2026-09-29T01:00:00, inside the original 3-hour grace window, despite outdoor conditions remaining favorable for natural ventilation the entire time -- both via the direct fan-off-grace check in _maybe_restore_fan_off_grace() AND via handle_door_window_open()'s Issue #655 real-gate bypass now excluding fan_off grace (the already-open window sensor at restart, reconciled through _do_startup_coalesce(), would otherwise still have reactivated nat-vent through that second path even with the grace correctly restored).",
+    "expected_behavior": "A fan_off manual grace with meaningful remaining duration at restart time must be re-armed for that remaining duration, not silently discarded by the restart's clean-slate reset -- and every code path that could reactivate the fan through an active fan_off grace (not just the grace-expiry timer) must respect it."
+  }
+}

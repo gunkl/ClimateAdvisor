@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.78] — 2026-09-29
+
+- Fix #1006: turning off the whole-house fan now stays honored across a Climate Advisor restart/deploy that happens to land during the 3-hour cooldown — the fan no longer silently turns itself back on a few minutes later with no memory of your action.
+
 ## [0.7.77] — 2026-09-29
 
 - Fix #1001: removed two sensors made redundant by the unified target-temperature sensor (Issue #998) — the nat-vent-only target sensor and the "target source" sensor. If you have automations or a dashboard referencing `sensor.climate_advisor_nat_vent_target_temp` or `sensor.climate_advisor_target_source`, switch them to `sensor.climate_advisor_target_temperature`, which is always populated regardless of which mechanism (HVAC, whole-house fan, or passive) is active.

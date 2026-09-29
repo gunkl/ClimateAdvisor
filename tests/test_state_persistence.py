@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from custom_components.climate_advisor.const import STATE_FILE
 from custom_components.climate_advisor.learning import DailyRecord
 from custom_components.climate_advisor.state import STATE_VERSION, StatePersistence
+
+# Issue #1006: stable clock for fan-off-grace-restore tests (patches dt_util.now in automation.py).
+_STABLE_NOW = datetime(2026, 6, 12, 14, 0, 0)
 
 # ---------------------------------------------------------------------------
 # StatePersistence class tests
@@ -491,7 +495,11 @@ class TestAutomationRestoreState:
     """Test the AutomationEngine.restore_state method."""
 
     def test_restore_paused_state(self):
-        """Pause state is NOT restored on restart (clean slate per Issue #306); grace/override are also clean-slated."""
+        """Pause state is NOT restored on restart (clean slate per Issue #306); grace/override are
+        also clean-slated for this case. (Issue #1006 carves a narrow exception for
+        `last_resume_source="manual"` + `last_grace_trigger="fan_off"` specifically — see
+        test_restore_fan_off_grace_across_restart below. This test's `last_resume_source=
+        "automation"` doesn't qualify, so the clean-slate assertions below still hold.)"""
         from custom_components.climate_advisor.automation import AutomationEngine
 
         engine = AutomationEngine(
@@ -564,7 +572,12 @@ class TestAutomationRestoreState:
         assert engine._pre_pause_mode is None
 
     def test_restore_clean_slates_override_state(self):
-        """Restart always clears manual override state — no carry-over from prior session."""
+        """Restart always clears manual override state — no carry-over from prior session.
+
+        No `last_grace_trigger` key is present here, so Issue #1006's narrow `fan_off`
+        re-arm exception does not apply even though `last_resume_source="manual"` — see
+        test_restore_fan_off_grace_across_restart below for the case that DOES qualify.
+        """
         from custom_components.climate_advisor.automation import AutomationEngine
 
         engine = AutomationEngine(
@@ -600,8 +613,16 @@ class TestAutomationRestoreState:
         assert engine._override_confirm_pending is False
         assert engine._override_confirm_time is None
 
-    def test_get_serializable_state_omits_override_and_grace_keys(self):
-        """get_serializable_state() must not include override/grace keys — they are clean-slated."""
+    def test_get_serializable_state_omits_override_keys(self):
+        """get_serializable_state() must not include override keys — they stay clean-slated.
+
+        Issue #1006: grace TIMING fields (`grace_end_time`/`grace_duration_seconds`/
+        `last_grace_trigger`/`last_resume_source`) are now serialized unconditionally — a narrow
+        exception enabling the `fan_off` restart-persistence re-arm (see
+        test_restore_fan_off_grace_across_restart below). `restore_state()` alone gates whether
+        they're ACTED on; `grace_active` itself (a derived FSM flag, not a timing field) remains
+        omitted, same as override state.
+        """
         from custom_components.climate_advisor.automation import AutomationEngine
 
         engine = AutomationEngine(
@@ -619,11 +640,111 @@ class TestAutomationRestoreState:
         assert "manual_override_mode" not in serialized
         assert "manual_override_time" not in serialized
         assert "grace_active" not in serialized
-        assert "grace_end_time" not in serialized
-        assert "grace_duration_seconds" not in serialized
-        assert "last_resume_source" not in serialized
         assert "override_confirm_pending" not in serialized
         assert "override_confirm_time" not in serialized
+        # Issue #1006: these ARE now serialized (narrow exception, see docstring above).
+        assert serialized["grace_end_time"] is None
+        assert serialized["grace_duration_seconds"] == 0  # int default, not None — see __init__
+        assert serialized["last_grace_trigger"] is None
+        assert serialized["last_resume_source"] is None
+
+    def test_restore_fan_off_grace_across_restart(self):
+        """Issue #1006: a fan_off manual grace with remaining duration survives a restart.
+
+        The exact scenario confirmed live 2026-09-28: user turns WHF off (3h manual grace),
+        restart lands minutes later with hours of grace remaining — the grace must be re-armed
+        with the correct REMAINING duration (not the full original duration), and must be
+        visible via `_grace_active` (not just timer bookkeeping — see the fix-design audit that
+        caught an earlier draft calling the wrong function and leaving `_grace_active` unset).
+        """
+        from custom_components.climate_advisor.automation import AutomationEngine
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=_STABLE_NOW):
+            engine = AutomationEngine(
+                hass=MagicMock(),
+                climate_entity="climate.thermostat",
+                weather_entity="weather.home",
+                door_window_sensors=[],
+                notify_service="notify.mobile",
+                config={},
+            )
+            engine.hass.async_create_task = MagicMock()
+
+            future_end = _STABLE_NOW + timedelta(hours=2, minutes=51)
+            engine.restore_state(
+                {
+                    "grace_end_time": future_end.isoformat(),
+                    "grace_duration_seconds": 10800,
+                    "last_grace_trigger": "fan_off",
+                    "last_resume_source": "manual",
+                }
+            )
+
+        assert engine._grace_active is True
+        assert engine._grace_protects_override is False
+        assert engine._last_resume_source == "manual"
+        assert engine._last_grace_trigger == "fan_off"
+        # Remaining duration (~2h51m = 10260s), not the full original 10800s.
+        assert 10255 <= engine._grace_duration_seconds <= 10260
+
+    def test_restore_fan_off_grace_already_expired_falls_through_to_clean_slate(self):
+        """Issue #1006: a persisted fan_off grace whose end_time is already in the past
+        (elapsed while HA was down) must NOT be re-armed — normal clean slate applies."""
+        from custom_components.climate_advisor.automation import AutomationEngine
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=_STABLE_NOW):
+            engine = AutomationEngine(
+                hass=MagicMock(),
+                climate_entity="climate.thermostat",
+                weather_entity="weather.home",
+                door_window_sensors=[],
+                notify_service="notify.mobile",
+                config={},
+            )
+            engine.hass.async_create_task = MagicMock()
+
+            past_end = _STABLE_NOW - timedelta(minutes=5)
+            engine.restore_state(
+                {
+                    "grace_end_time": past_end.isoformat(),
+                    "grace_duration_seconds": 10800,
+                    "last_grace_trigger": "fan_off",
+                    "last_resume_source": "manual",
+                }
+            )
+
+        assert engine._grace_active is False
+        assert engine._grace_end_time is None
+
+    def test_restore_manual_override_grace_not_restored(self):
+        """Issue #1006: the override-protecting `fan_manual_override` trigger is NOT restored
+        by this narrow exception — restoring its grace timer alone (without the override flag)
+        would collide with coordinator._check_orphaned_grace(). Deferred to a follow-up issue."""
+        from custom_components.climate_advisor.automation import AutomationEngine
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=_STABLE_NOW):
+            engine = AutomationEngine(
+                hass=MagicMock(),
+                climate_entity="climate.thermostat",
+                weather_entity="weather.home",
+                door_window_sensors=[],
+                notify_service="notify.mobile",
+                config={},
+            )
+            engine.hass.async_create_task = MagicMock()
+
+            future_end = _STABLE_NOW + timedelta(hours=1)
+            engine.restore_state(
+                {
+                    "grace_end_time": future_end.isoformat(),
+                    "grace_duration_seconds": 3600,
+                    "last_grace_trigger": "fan_manual_override",
+                    "last_resume_source": "manual",
+                }
+            )
+
+        assert engine._grace_active is False
+        assert engine._grace_end_time is None
 
 
 # ---------------------------------------------------------------------------

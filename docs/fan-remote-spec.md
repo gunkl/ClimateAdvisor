@@ -12,7 +12,7 @@
 | What happens when the user presses a speed button (Issue #519)? | Depends on whether the fan was already running. If the fan was off (or state unknown), it's treated as taking manual control — the SAME override machinery as a timer press. If the fan was ALREADY running, it's treated as a comfort-only speed adjustment — recorded via `handle_fan_speed_observed()`, which does NOT arm grace/HVAC-suppression. | [§ Speed-Press Classification](#speed-press-classification-issue-519) |
 | What happens when one physical interaction touches both speed and timer? | The remote transmits them as separate packets moments apart (not simultaneously) — `coordinator.py` combines them into a short-lived burst and applies ONE decision, not two, once the combining window elapses. | [§ Burst Combining](#burst-combining-issue-519) |
 | Is the timer absolute, or can a safety/comfort condition still turn the fan off? | Fully absolute (log-only) by design decision (2026-07-12). Every existing fan-off decision path is suppressed exactly as it is for any other manual fan override; a WARNING is logged instead of silently dropping the suppressed decision, so the behavior is observable in HA logs. | [§ Suppression Is Absolute](#suppression-is-absolute) |
-| What happens to an active RF timer across an HA restart? | Nothing survives — it is not persisted. This matches CA's existing clean-slate policy for all override/grace state (Issue #327/#282); `restore_state()` resets `_fan_remote_timer_hours` (and, as of Issue #519, `_fan_remote_speed`) to `None` alongside `_fan_override_active`. | [§ Restart Behavior](#restart-behavior) |
+| What happens to an active RF timer across an HA restart? | Nothing survives — it is not persisted. This matches CA's existing clean-slate policy for all override state (Issue #327/#282); `restore_state()` resets `_fan_remote_timer_hours` (and, as of Issue #519, `_fan_remote_speed`) to `None` alongside `_fan_override_active`. **Not the same as a plain `fan_off` grace** (no RF timer involved) — as of Issue #1006, that specific case IS restored with its remaining duration. An RF-remote-timer-linked override is a `fan_manual_override`-triggered grace, which is deliberately excluded from Issue #1006's fix (it's override-protecting — see `docs/grace-periods-spec.md`'s Fan-Off Grace Restart Persistence section for why). | [§ Restart Behavior](#restart-behavior) |
 | What clears an RF-timer-driven override? | The same two paths that clear any manual fan override: (1) the fan physically turns off (detected via `fan_entity`/`fan_state_entity`, routed to `on_fan_turned_off()`), or (2) the grace timer naturally expires (`_on_grace_expired()`). There is no separate "remote timer expired" detection — CA relies on the fan's own physical state. | [§ Clearing](#clearing) |
 | What is out of scope for this feature? | Any code path that actually calls a speed-setting HA service (`fan.set_percentage` or similar) — this feature is detect-and-respect only, not detect-and-set. See [§ Scope](#scope) for the full boundary, including what changed from the original (pre-#519) scope. | [§ Scope](#scope) |
 | Does an RF timer press also suppress HVAC? | Yes, as of Issue #495 — for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` schedules `_suppress_hvac_for_whf()`, the same helper `_activate_fan()` uses. Previously ONLY CA-initiated activation suppressed HVAC; a manual/remote fan-on left the AC armed for the life of the override. As of Issue #519, an override-classified speed press schedules the same suppression; a comfort-only speed observation does not. | [§ HVAC Suppression on Manual/Remote Fan-On](#hvac-suppression-on-manualremote-fan-on) |
@@ -316,7 +316,7 @@ its pre-existing level.
 
 ## Restart Behavior
 
-Consistent with CA's clean-slate policy for override/grace state (Issue #327/#282), an
+Consistent with CA's clean-slate policy for override state (Issue #327/#282), an
 active RF timer does **not** survive an HA restart:
 
 - `_fan_remote_timer_hours` (and, as of Issue #519, `_fan_remote_speed`) are included in
@@ -329,6 +329,13 @@ active RF timer does **not** survive an HA restart:
   — it's cleared implicitly by process restart, with no explicit reset needed.
 - After a restart, `reconcile_fan_on_startup()` (unchanged) decides the fan's disposition
   from physical state, the same as it always has.
+
+**Note (Issue #1006):** the clean-slate block above resets `_grace_active`, but a plain
+`fan_off` grace (no RF timer) may be re-armed immediately afterward by
+`_maybe_restore_fan_off_grace()` if it has remaining duration — see
+`docs/grace-periods-spec.md`'s Fan-Off Grace Restart Persistence section. An RF-timer-linked
+grace (`fan_manual_override` trigger) is NOT affected by this — it remains fully clean-slated,
+same as before.
 
 **Incoming device-originated events are also suppressed during the restart window (Issue
 #491).** The above covers CA's *own* override/grace state resetting cleanly — but the

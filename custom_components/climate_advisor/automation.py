@@ -4076,32 +4076,55 @@ class AutomationEngine:
                 return  # Already paused
 
             if self._grace_active:
-                # Issue #655: this used to short-circuit on a coarse outdoor-only
-                # proxy (outdoor < comfort_cool + nat_vent_delta) instead of the real
-                # 4-variable reactivation gate computed a few lines below — the two
-                # could disagree, letting a "cool enough" outdoor reading fall through
-                # the grace suppression only to still hit a pause moments later when
-                # the real gate (which also needs indoor/comfort_heat) said no. Reuse
-                # the same shared gate here instead of a hand-copied proxy.
-                _outdoor_g = self._last_outdoor_temp
-                _comfort_cool_g = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-                _nat_vent_delta_g = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-                _grace_gate_entered = self._nat_vent_may_reactivate(
-                    outdoor=_outdoor_g,
-                    indoor=self._get_indoor_temp_f(),
-                    comfort_heat=self._nat_vent_reactivation_floor(),
-                    comfort_cool=_comfort_cool_g,
-                    nat_vent_delta=_nat_vent_delta_g,
-                )
-                if not _grace_gate_entered:
+                # Issue #1006: a fan_off grace's entire contract is "the user just stopped
+                # this, leave it stopped regardless of conditions" (see on_fan_turned_off()'s
+                # docstring and docs/grace-periods-spec.md's "Fan-Off Grace" section) — the
+                # same unconditional-respect treatment Issue #620 already gave the sibling
+                # _idle_open path in check_natural_vent_conditions() (`and not
+                # self._grace_active`, no real-gate exception). The Issue #655 real-gate
+                # bypass below was never evaluated against a fan_off grace specifically — it
+                # predates the fan_off grace's own Issue #359 contract being written down —
+                # and is the wrong shape for it: it exists so a genuinely-stale HVAC-override
+                # grace doesn't block a real comfort opportunity, not so a fan the user just
+                # switched off gets switched back on. Confirmed live 2026-09-28/29: this is
+                # the second half of the mechanism that let a restart-coalescing pass
+                # (_do_startup_coalesce() -> this method, for a sensor already open before
+                # the restart) reactivate nat-vent through an Issue #1006-restored fan_off
+                # grace — restoring `_grace_active` alone was not sufficient without this.
+                if self._last_grace_trigger != "fan_off":
+                    # Issue #655: this used to short-circuit on a coarse outdoor-only
+                    # proxy (outdoor < comfort_cool + nat_vent_delta) instead of the real
+                    # 4-variable reactivation gate computed a few lines below — the two
+                    # could disagree, letting a "cool enough" outdoor reading fall through
+                    # the grace suppression only to still hit a pause moments later when
+                    # the real gate (which also needs indoor/comfort_heat) said no. Reuse
+                    # the same shared gate here instead of a hand-copied proxy.
+                    _outdoor_g = self._last_outdoor_temp
+                    _comfort_cool_g = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+                    _nat_vent_delta_g = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+                    _grace_gate_entered = self._nat_vent_may_reactivate(
+                        outdoor=_outdoor_g,
+                        indoor=self._get_indoor_temp_f(),
+                        comfort_heat=self._nat_vent_reactivation_floor(),
+                        comfort_cool=_comfort_cool_g,
+                        nat_vent_delta=_nat_vent_delta_g,
+                    )
+                    if not _grace_gate_entered:
+                        _LOGGER.info(
+                            "Door/window open (%s) but %s grace period active — not pausing",
+                            entity_id,
+                            self._last_resume_source,
+                        )
+                        return
+                    # else: real gate says reactivation is viable — fall through to the
+                    # nat-vent-vs-pause decision below, same as before.
+                else:
                     _LOGGER.info(
-                        "Door/window open (%s) but %s grace period active — not pausing",
+                        "Door/window open (%s) but fan_off grace period active — "
+                        "respecting unconditionally, not evaluating reactivation (Issue #1006)",
                         entity_id,
-                        self._last_resume_source,
                     )
                     return
-                # else: real gate says reactivation is viable — fall through to the
-                # nat-vent-vs-pause decision below, same as before.
 
             if self._is_within_planned_window_period():
                 _LOGGER.info(
@@ -11708,7 +11731,7 @@ class AutomationEngine:
         """Restore automation state from persisted data.
 
         Design decision: HA restart = clean slate for override, grace, pause, AND fan
-        override state (Issue #327).
+        override state (Issue #327), WITH ONE NARROW EXCEPTION (Issue #1006, below).
         - Manual overrides and grace periods are user-interactive; restoring them would
           silently suppress CA automation without the user knowing the system restarted.
         - Pause state (_paused_by_door / _pre_pause_mode) is also cleared: the
@@ -11727,6 +11750,21 @@ class AutomationEngine:
           final decision.
         - _natural_vent_active is NOT persisted and resets to False on restart; the
           reconcile step re-evaluates whether nat-vent conditions still hold.
+
+        Issue #1006 — narrow exception: a ``fan_off`` manual grace (the user physically turned
+        the fan off) with meaningful remaining duration is re-armed after the clean-slate reset
+        below, via ``_maybe_restore_fan_off_grace()``. Confirmed live 2026-09-28: a restart landing
+        ~4 minutes into a 3-hour fan-off grace silently discarded it, and 5 minutes later (the
+        standard startup-coalescing window) nat-vent reactivated the fan with zero memory of the
+        user's action. This follows the same narrow-exception precedent Issue #835/#843 already
+        established in this method for other fields — NOT a reversal of the clean-slate policy.
+        Scoped to `fan_off` only: it is the only grace trigger that never sets
+        `_manual_override_active`/`_fan_override_active` (confirmed via `_GRACE_TRIGGERS_
+        PROTECTING_OVERRIDE`), so restoring it cannot collide with
+        `coordinator._check_orphaned_grace()`, which force-cancels any `_grace_protects_override`
+        grace with no override flag behind it, every update cycle, un-gated by startup coalescing.
+        Other manual triggers (`dashboard_resume`, `fan_manual_override`, `override_confirmed`)
+        are deliberately NOT covered — see `_maybe_restore_fan_off_grace()` docstring.
         """
         # _paused_by_door and _pre_pause_mode are intentionally NOT restored here.
         # __init__ already sets both to their clean defaults (False / None).
@@ -11826,13 +11864,71 @@ class AutomationEngine:
             self._fan_active,
             self._fan_override_active,
         )
+        # Issue #1006: narrow post-clean-slate exception — see restore_state()'s own docstring.
+        self._maybe_restore_fan_off_grace(state)
+
+    def _maybe_restore_fan_off_grace(self, state: dict[str, Any]) -> None:
+        """Re-arm a `fan_off` manual grace with meaningful remaining duration (Issue #1006).
+
+        Called at the end of `restore_state()`, after the clean-slate reset above has already
+        run. Deliberately narrow: re-arms ONLY when the persisted grace was BOTH manual-sourced
+        AND triggered by `fan_off` specifically.
+
+        Why `fan_off` only: it is the one grace trigger confirmed to never set
+        `_manual_override_active`/`_fan_override_active` (see `on_fan_turned_off()` →
+        `_clear_fan_flags_and_start_grace()`), so re-arming just the grace timer here — with no
+        companion override-flag restoration — cannot leave `_grace_active=True` with
+        `_grace_protects_override=True` and no override flag behind it, which
+        `coordinator._check_orphaned_grace()` would force-cancel within one update cycle (it runs
+        every regular cycle with no startup-coalescing gate). The other manual-sourced grace
+        triggers are deliberately NOT restored here:
+        - `fan_manual_override`/`override_confirmed` are override-protecting
+          (`_GRACE_TRIGGERS_PROTECTING_OVERRIDE`) — restoring their grace without also restoring
+          the override flag would hit exactly the orphaned-grace collision described above.
+        - `dashboard_resume` dispatches its own FSM event kind directly via
+          `_start_grace_period_action()` at its real call site (`resume_from_pause()`), bypassing
+          the `_start_grace_period()` wrapper this method reuses — restoring it via the wrapper is
+          not confirmed correct and needs its own verification pass first.
+        Both are tracked as separate follow-up issues, not silently dropped.
+
+        Uses the `duration_override` mechanism already built for Issue #677's RF-remote-timer
+        restart re-arm — same pattern, sourced from persisted JSON instead of a live RF-remote
+        re-announcement.
+        """
+        if state.get("last_resume_source") != "manual" or state.get("last_grace_trigger") != "fan_off":
+            return
+        grace_end_time = state.get("grace_end_time")
+        if not grace_end_time:
+            return
+        try:
+            end_dt = datetime.fromisoformat(grace_end_time)
+        except (TypeError, ValueError):
+            return
+        remaining_seconds = (end_dt - dt_util.now()).total_seconds()
+        if remaining_seconds <= 0:
+            # Grace already elapsed while HA was down — nothing to restore, normal clean slate.
+            return
+        _LOGGER.info(
+            "Fan-off manual grace restored across restart: %.0fs remaining (originally ends %s)",
+            remaining_seconds,
+            grace_end_time,
+        )
+        self._start_grace_period("manual", trigger="fan_off", duration_override=remaining_seconds)
 
     def get_serializable_state(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot of the engine's internal state.
 
-        Override and grace state are intentionally omitted: they are always
-        cleared on restore (clean-slate policy), so saving them provides no
-        benefit and would only clutter the persisted JSON.
+        Override state remains intentionally omitted: it is always cleared on restore
+        (clean-slate policy, Issue #282/#263/#327), so saving it provides no benefit.
+
+        Issue #1006: grace timing fields (``grace_end_time``/``grace_duration_seconds``/
+        ``last_grace_trigger``/``last_resume_source``) ARE now serialized — narrow exception to
+        the clean-slate policy, following the exact precedent already set by Issue #835
+        (``last_hvac_heating_active``/``last_hvac_cooling_active``) and Issue #843
+        (``last_fan_active``/``last_natvent_active``) elsewhere in this class: fields restored
+        because forgetting them caused a real production bug. ``restore_state()`` only ACTS on
+        these fields for the narrow ``fan_off`` trigger (see its docstring) — persisting them
+        unconditionally here is cheap and lets `restore_state()` own the gating logic.
         """
         return {
             "paused_by_door": self._paused_by_door,
@@ -11843,6 +11939,11 @@ class AutomationEngine:
             "last_action_time": self._last_action_time,
             "last_action_reason": self._last_action_reason,
             "fan_active": self._fan_active,
+            # Issue #1006: narrow cross-restart exception for fan_off grace — see docstring.
+            "grace_end_time": self._grace_end_time,
+            "grace_duration_seconds": self._grace_duration_seconds,
+            "last_grace_trigger": self._last_grace_trigger,
+            "last_resume_source": self._last_resume_source,
             "fan_on_since": self._fan_on_since,
             # Issue #835: NOT clean-slate — restored on restart (see restore_state()).
             "last_hvac_heating_active": self._last_hvac_heating_active,

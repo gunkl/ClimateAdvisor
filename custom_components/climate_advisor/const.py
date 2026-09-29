@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.78"
+VERSION = "0.7.79"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1193,6 +1193,10 @@ MIN_THERMAL_SESSION_MINUTES = 5  # ignore sessions shorter than this (was 10; Ec
 MIN_THERMAL_OBSERVATIONS = 5  # min obs before model is trusted
 THERMAL_MODEL_MAX_OBS = 30  # use only most recent N observations
 THERMAL_POST_HEAT_TIMEOUT_MINUTES = 45  # abandon post_heat phase after this long
+THERMAL_FAN_PULSE_GRACE_MINUTES = 3  # Issue #1009: tolerate a brief thermostat blower pulse
+# (e.g. a post-compressor coil-clear cycle) during post_heat without abandoning the
+# observation — only abandon if the live hvac_action/fan_mode read shows the fan still
+# running at or beyond this many minutes (genuinely sustained fan-only contamination).
 THERMAL_STABILIZATION_THRESHOLD_F = 0.3  # |dT| < this over window → stabilized
 THERMAL_STABILIZATION_WINDOW_MINUTES = 5  # window length for stabilization check
 THERMAL_K_PASSIVE_MIN = -0.5  # reject k_passive outside this range (hr⁻¹)

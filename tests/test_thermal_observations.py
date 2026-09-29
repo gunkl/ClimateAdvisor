@@ -97,6 +97,7 @@ def _make_obs_coord(
     indoor_temp: float = 75.0,
     outdoor_temp: float = 55.0,
     hvac_action: str = "idle",
+    fan_mode: str = "auto",
     fan_active: bool = False,
     nat_vent_active: bool = False,
     any_sensor_open: bool = False,
@@ -133,7 +134,7 @@ def _make_obs_coord(
 
     climate_state = MagicMock()
     climate_state.state = "heat" if hvac_action in ("heating",) else "idle"
-    climate_state.attributes = {"hvac_action": hvac_action}
+    climate_state.attributes = {"hvac_action": hvac_action, "fan_mode": fan_mode}
     weather_state = MagicMock()
     weather_state.attributes = {"temperature": outdoor_temp}
 
@@ -1293,17 +1294,10 @@ class TestSampleDecimation:
     # OBS_TYPE_HVAC_HEAT post-phase samples — covered by test_hvac_active_not_decimated
     # and the passive/fan interval tests above.
 
-    def test_post_heat_abandons_with_fan_activated_when_ca_fan_active(self):
-        """Issue #986: mirrors passive_decay/solar_gain's existing 'fan_activated'
-        abandon guard, extended to the HVAC post-heat decay-sampling path, which had
-        no such guard. A CA fan-only cycle overlapping an already-real (hvac_action-
-        confirmed) post-heat window would otherwise silently contaminate the sample
-        with fan-driven temperature movement instead of real passive decay."""
-        coord = _make_obs_coord(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0, fan_active=True)
-        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = {
+    def _make_post_heat_hvac_obs(self, obs_id: str, extra: dict | None = None) -> dict:
+        obs = {
             "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-hvac-post-heat-fan",
+            "obs_id": obs_id,
             "start_time": _FAKE_NOW.isoformat(),
             "active_start": _FAKE_NOW.isoformat(),
             "status": "monitoring",
@@ -1314,6 +1308,17 @@ class TestSampleDecimation:
             "flags_at_start": {},
             "schema_version": 1,
         }
+        if extra:
+            obs.update(extra)
+        return obs
+
+    def test_post_heat_abandons_immediately_for_real_nat_vent_session(self):
+        """A real WHF/nat-vent session overlapping post_heat is long-running and
+        intentional — abandon immediately, unchanged by Issue #1009."""
+        coord = _make_obs_coord(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0, nat_vent_active=True)
+        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-natvent")
+
         dt_mock = _make_dt_mock(_FAKE_NOW)
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
@@ -1321,27 +1326,78 @@ class TestSampleDecimation:
         coord._abandon_observation.assert_any_call(OBS_TYPE_HVAC_HEAT, "fan_activated")
         obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
         post_heat_samples = obs_after.get("post_heat_samples", []) if obs_after else []
-        assert len(post_heat_samples) == 0, (
-            "no sample should be appended to post_heat_samples once fan interference is detected"
+        assert len(post_heat_samples) == 0
+
+    def test_post_heat_tolerates_fresh_thermostat_fan_pulse(self):
+        """Issue #1009: a brief thermostat blower pulse (hvac_action=='fan', e.g. a
+        post-compressor coil-clear cycle) must NOT abandon the observation on first
+        detection — only skip this poll's sample and keep monitoring."""
+        coord = _make_obs_coord(hvac_action="fan", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0)
+        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-fresh-pulse")
+
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+            coord._sample_all_observations()
+
+        coord._abandon_observation.assert_not_called()
+        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
+        assert obs_after is not None, "observation must survive a fresh, brief fan pulse"
+        assert obs_after.get("status") == "monitoring"
+        assert len(obs_after.get("post_heat_samples", [])) == 0, (
+            "no sample should be appended while the fan pulse is live"
+        )
+        assert obs_after.get("_fan_interference_since") == _FAKE_NOW.isoformat()
+
+    def test_post_heat_abandons_once_fan_pulse_exceeds_grace_window(self):
+        """A thermostat fan run that is still going at/beyond
+        THERMAL_FAN_PULSE_GRACE_MINUTES is genuinely sustained contamination —
+        the original Issue #986 protection must still fire."""
+        coord = _make_obs_coord(hvac_action="fan", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0)
+        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
+        _stale_since = datetime(2026, 4, 28, 11, 55, 0, tzinfo=UTC)  # 5 min before _FAKE_NOW
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs(
+            "test-hvac-sustained-pulse", extra={"_fan_interference_since": _stale_since.isoformat()}
+        )
+
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+            coord._sample_all_observations()
+
+        coord._abandon_observation.assert_any_call(OBS_TYPE_HVAC_HEAT, "fan_activated")
+
+    def test_post_heat_does_not_abandon_on_stale_ca_fan_flag_with_idle_ground_truth(self):
+        """Regression test for the exact bug reported in Issue #1009: this reproduces
+        the ORIGINAL (pre-fix) test's scenario — ae._fan_active stale-True while the
+        live thermostat ground truth already reads idle (no fan_mode active, hvac_action
+        not 'fan'). Real-world cause: _fan_active can lag physical reality by up to ~10
+        minutes for FAN_MODE_HVAC (2 backstop ticks, 5 min apart) because the reconcile
+        listener only fires on the fan-ON edge, never on fan-OFF. The guard must trust
+        the live ground truth, not this stale flag, or every ordinary post-compressor
+        blower pulse discards the observation before it collects a single sample."""
+        coord = _make_obs_coord(
+            hvac_action="idle", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0, fan_active=True
+        )
+        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-stale-flag")
+
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+            coord._sample_all_observations()
+
+        coord._abandon_observation.assert_not_called()
+        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
+        assert obs_after is not None
+        assert len(obs_after.get("post_heat_samples", [])) == 1, (
+            "ground truth is idle — sampling should proceed normally despite the stale CA flag"
         )
 
     def test_post_heat_samples_normally_without_fan_interference_regression_guard(self):
-        """Regression guard: post-heat sampling must be unaffected when CA's fan is
-        not running — the new guard must not fire for ordinary post-heat decay."""
+        """Regression guard: post-heat sampling must be unaffected when neither CA's
+        fan flag nor the live thermostat ground truth show any fan activity."""
         coord = _make_obs_coord(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0, fan_active=False)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-hvac-post-heat-no-fan",
-            "start_time": _FAKE_NOW.isoformat(),
-            "active_start": _FAKE_NOW.isoformat(),
-            "status": "monitoring",
-            "_phase": "post_heat",
-            "active_samples": [],
-            "post_heat_samples": [],
-            "peak_indoor_f": None,
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-post-heat-no-fan")
+
         dt_mock = _make_dt_mock(_FAKE_NOW)
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
@@ -1350,6 +1406,29 @@ class TestSampleDecimation:
         assert obs_after is not None, "observation should not have been abandoned"
         assert len(obs_after.get("post_heat_samples", [])) == 1, (
             "post_heat_samples should append normally when there is no fan interference"
+        )
+
+    def test_post_heat_resumes_normally_after_pulse_clears_within_grace(self):
+        """A tolerated pulse that clears before the grace window elapses must let
+        sampling resume normally on the next poll — no stuck state."""
+        coord = _make_obs_coord(hvac_action="idle", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0)
+        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs(
+            "test-hvac-pulse-cleared",
+            extra={"_fan_interference_since": datetime(2026, 4, 28, 11, 59, 0, tzinfo=UTC).isoformat()},
+        )
+
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+            coord._sample_all_observations()
+
+        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
+        assert obs_after is not None
+        assert len(obs_after.get("post_heat_samples", [])) == 1, (
+            "sampling should resume once the live ground truth clears, even if a prior "
+            "poll had started tracking a tolerated pulse"
+        )
+        assert "_fan_interference_since" not in obs_after, (
+            "the interference timestamp must be cleared once the pulse ends"
         )
 
     def test_interval_constants_have_expected_values(self):

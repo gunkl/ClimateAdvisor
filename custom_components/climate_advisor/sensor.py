@@ -14,6 +14,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -52,6 +53,7 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     DOMAIN,
+    VERSION,
 )
 from .coordinator import ClimateAdvisorCoordinator
 from .temperature import FAHRENHEIT, convert_delta
@@ -112,9 +114,17 @@ class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._attr_name = f"Climate Advisor {name}"
+        self._attr_has_entity_name = True
+        self._attr_name = name
         self._attr_icon = icon
         self._key = key
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer="Climate Advisor",
+            model="Zone Controller",
+            sw_version=VERSION,
+        )
 
     @property
     def native_value(self) -> Any:

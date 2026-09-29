@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.76] — 2026-09-28
+
+- Feat #1000: every zone's Climate Advisor entities now group under their own device in Settings → Devices & Services, named after the zone (e.g. "Zone 1", "Simulated 2") — makes it possible to tell at a glance which zone an entity belongs to on multi-zone installs, instead of every zone showing identically-named entities.
+
 ## [0.7.75] — 2026-09-28
 
 - Feat #998: added a sensor showing the temperature the house is actually being aimed at right now, no matter which mechanism (thermostat, whole-house fan, or just the passive comfort band) is responsible — it always has a value instead of going blank whenever HVAC happens to be off.

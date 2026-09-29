@@ -191,6 +191,7 @@ from .const import (
     THERMAL_DUAL_AGREE_REL,
     THERMAL_DUAL_OLS_GOOD,
     THERMAL_DUAL_OLS_OK,
+    THERMAL_FAN_PULSE_GRACE_MINUTES,
     THERMAL_HVAC_MIN_DECAY_F,
     THERMAL_K_PASSIVE_MAX,
     THERMAL_K_PASSIVE_MIN,
@@ -7211,6 +7212,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         now = dt_util.now()
 
+        # Issue #1009: live ground-truth read of the thermostat's own fan state, hoisted
+        # here so both section A's post_heat fan-interference guard and section B's trigger
+        # evaluation (below) share one read instead of two. Reuses the same signal
+        # _reconcile_fan_physical_drift() already trusts for this archetype
+        # (automation.py's FanDriftInputs derivation) rather than the internal
+        # ae._fan_active/_fan_on_since bookkeeping flags, which can lag physical reality by
+        # up to ~10 minutes for FAN_MODE_HVAC (2 backstop ticks, 5 min apart, before
+        # self-correcting) — too slow to gate a timing-sensitive per-poll decision.
+        _cs = self.hass.states.get(self.config["climate_entity"])
+        _hvac_action_str = _cs.attributes.get("hvac_action", "").lower() if _cs else ""
+        _fan_mode_str = _cs.attributes.get("fan_mode", "") if _cs else ""
+        _thermostat_fan_pulse_now = is_thermostat_fan_physically_active(_fan_mode_str, _hvac_action_str)
+
         # A. Sample all active observations
         for obs_type, obs in list(self._pending_observations.items()):
             if obs.get("status") != "monitoring":
@@ -7242,9 +7256,48 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     # the post-heat decay window would otherwise silently contaminate the
                     # plateau-guard delta and the eventual decay-rate fit with fan-driven
                     # temperature movement.
-                    if ae._fan_active or ae._natural_vent_active:
+                    #
+                    # Issue #1009: a real WHF/nat-vent session is long-running and intentional
+                    # — abandon immediately, unchanged. But a bare thermostat-blower pulse
+                    # (e.g. a few-second post-compressor coil-clear cycle, very common right
+                    # at this exact active->post_heat boundary) was being treated identically
+                    # via the stale ae._fan_active flag, discarding every single hvac_cool/heat
+                    # observation on affected thermostats before it ever collected a sample.
+                    # Use the live ground-truth read (_thermostat_fan_pulse_now, hoisted above)
+                    # and tolerate it for up to THERMAL_FAN_PULSE_GRACE_MINUTES — short enough
+                    # that skipping samples during it can't meaningfully bias a decay fit
+                    # measured over tens of minutes, long enough to cover an ordinary purge
+                    # cycle. Only abandon once the live read shows the fan still running at or
+                    # beyond the grace threshold (genuinely sustained contamination, including
+                    # a CA-commanded scheduled circulation run — which also updates this same
+                    # thermostat attribute for this archetype, so ground truth still catches
+                    # it).
+                    if ae._natural_vent_active:
                         self._abandon_observation(obs_type, "fan_activated")
                         continue
+                    if _thermostat_fan_pulse_now:
+                        _since_str = obs.get("_fan_interference_since")
+                        if _since_str:
+                            try:
+                                _since = dt_util.parse_datetime(_since_str) or now
+                            except Exception:
+                                _since = now
+                        else:
+                            _since = now
+                            obs["_fan_interference_since"] = now.isoformat()
+                        _fan_elapsed_s = (now - _since).total_seconds()
+                        if _fan_elapsed_s / 60.0 >= THERMAL_FAN_PULSE_GRACE_MINUTES:
+                            self._abandon_observation(obs_type, "fan_activated")
+                            continue
+                        _LOGGER.info(
+                            "Post-heat fan pulse tolerated: obs_id=%s elapsed=%.1fs grace=%dmin"
+                            " — sample skipped, observation continues",
+                            obs.get("obs_id", "?"),
+                            _fan_elapsed_s,
+                            THERMAL_FAN_PULSE_GRACE_MINUTES,
+                        )
+                        continue
+                    obs.pop("_fan_interference_since", None)
                     samples = obs["post_heat_samples"]
                     if len(samples) < THERMAL_MAX_POST_HEAT_SAMPLES:
                         samples.append(sample)
@@ -7291,9 +7344,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             OBS_TYPE_HVAC_COOL in self._pending_observations
             and self._pending_observations[OBS_TYPE_HVAC_COOL].get("_phase") == "active"
         )
-        # Also check live HVAC action from thermostat
-        _cs = self.hass.states.get(self.config["climate_entity"])
-        _hvac_action_str = _cs.attributes.get("hvac_action", "").lower() if _cs else ""
+        # _cs/_hvac_action_str: live HVAC action from thermostat — already read above,
+        # before section A, and reused here (Issue #1009 dedup).
         _is_heating_cooling = is_hvac_compressor_active(_hvac_action_str)
         _fan_active = ae._fan_active or ae._natural_vent_active
         _sensor_open = self._any_sensor_open()

@@ -208,6 +208,21 @@ When commit conditions are met, `obs["status"] = "stabilized"` is set and `_comm
 
 Post-heat timeout: if `elapsed_post > THERMAL_POST_HEAT_TIMEOUT_MINUTES (45)`, the observation is abandoned.
 
+**Fan-interference guard (`_sample_all_observations`, post_heat phase only):** each poll, before
+appending a post_heat sample:
+- `ae._natural_vent_active` (a real WHF/nat-vent session) → abandon immediately with reason
+  `"fan_activated"`.
+- Otherwise, a live ground-truth read of the thermostat's own attributes —
+  `is_thermostat_fan_physically_active(fan_mode, hvac_action)` — is checked (not the internal
+  `ae._fan_active`/`_fan_on_since` bookkeeping flags, which can lag physical reality by up to
+  ~10 minutes for `FAN_MODE_HVAC`; see Issue #1009). If the live read shows the fan currently
+  running: the elapsed time since `obs["_fan_interference_since"]` (first set the poll this was
+  detected, cleared once the read goes false again) is compared against
+  `THERMAL_FAN_PULSE_GRACE_MINUTES` (3). Under the grace window, the sample for that poll is
+  skipped but the observation stays open (tolerates a brief post-compressor coil-clear/purge
+  pulse). At or beyond the grace window, abandon with `"fan_activated"` (genuinely sustained
+  fan-only contamination — the case this guard was originally added for, Issue #986).
+
 ---
 
 ## OLS Functions

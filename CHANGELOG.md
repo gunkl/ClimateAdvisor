@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.79] — 2026-09-29
+
+- Fix #1009: thermal learning no longer discards every AC/heating cycle's observation just because the thermostat runs its normal brief fan-only pulse right after the compressor stops — CA now tolerates that short pulse instead of treating it as fan contamination.
+
 ## [0.7.78] — 2026-09-29
 
 - Fix #1006: turning off the whole-house fan now stays honored across a Climate Advisor restart/deploy that happens to land during the 3-hour cooldown — the fan no longer silently turns itself back on a few minutes later with no memory of your action.

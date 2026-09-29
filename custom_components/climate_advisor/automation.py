@@ -7796,9 +7796,12 @@ class AutomationEngine:
             # existing pause/grace machinery (_re_pause_for_open_sensor) re-evaluates
             # nat-vent reactivation on the next grace-expiry cycle.
             #
-            # Issue #618: release_suppression=True — this IS the session ending (we already
-            # cleared _natural_vent_active above), even though we're not writing a restored
-            # mode right now. Without this, _pre_fan_hvac_mode stays stranded non-None for as
+            # Issue #618: release_suppression=True — this IS the session ending (though
+            # _natural_vent_active itself isn't cleared until _end_nat_vent_session() runs a
+            # few lines below, after _deactivate_fan() returns — see Issue #996's comment on
+            # _deactivate_fan() for why release_suppression, not this flag, is what a caller
+            # here must signal), even though we're not writing a restored mode right now.
+            # Without this, _pre_fan_hvac_mode stays stranded non-None for as
             # long as the window stays open, and _whf_owns_hvac() keeps reporting the WHF as
             # still owning the thermostat long after the session actually ended — which is
             # exactly what happened in the 2026-08-10 incident: the window later closed and
@@ -11100,15 +11103,24 @@ class AutomationEngine:
                     )
             else:
                 _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
-            # Issue #733: a backstop timer should never outlive _fan_active reading False —
-            # if something cleared _fan_active without going through the full deactivation
-            # path below (e.g. a reconcile branch's direct write), the self-rescheduling
-            # thermostatic backstop armed by the earlier _activate_fan() call is left
-            # running but orphaned, pointing at flags that now say nothing is active. Its
-            # one tick then no-ops (nat_vent_temperature_check exits immediately) and never
-            # reschedules again, silently ending thermostatic oversight for the rest of the
-            # session. Safe no-op when no timer is scheduled.
-            self._cancel_fan_thermo_backstop()
+            # Issue #733 / Issue #996: a backstop timer should never outlive _fan_active
+            # reading False IF the session is truly over — if something cleared _fan_active
+            # without going through the full deactivation path below (e.g. a reconcile
+            # branch's direct write), the self-rescheduling thermostatic backstop armed by
+            # the earlier _activate_fan() call is left running but orphaned. But this branch
+            # is also reachable mid-nat-vent-session (a duplicate/redundant _deactivate_fan()
+            # call landing here while _fan_active is already False from a cycling-off toggle
+            # but the session is still open) — Issue #733's original "never outlive
+            # _fan_active reading False" premise doesn't hold there: nat_vent_temperature_check()
+            # still needs the backstop alive to notice the fan should cycle back on. Gate on
+            # release_suppression (True only when this deactivation genuinely ends WHF's
+            # ownership/session — see this method's own docstring) instead of unconditionally
+            # cancelling. Do NOT change this to read self._natural_vent_active directly —
+            # _exit_nat_vent() calls _deactivate_fan() BEFORE _end_nat_vent_session() clears
+            # that flag, so it is still True at the exact moment a genuine session-end
+            # deactivation reaches this line.
+            if release_suppression:
+                self._cancel_fan_thermo_backstop()
             return FanCommandResult.ALREADY_IN_STATE
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
@@ -11259,8 +11271,17 @@ class AutomationEngine:
             # circular).
             self._fan_active = False
             self._fan_on_since = None
-            # Issue #327: cancel the thermostatic backstop timer when fan deactivates.
-            self._cancel_fan_thermo_backstop()
+            # Issue #327 / Issue #996: only cancel the thermostatic backstop when this
+            # deactivation actually ends WHF's ownership/session (release_suppression=True).
+            # Mid-session nat-vent cycling-off (nat_vent_temperature_check(), restore_hvac=False,
+            # release_suppression left at its restore_hvac-tracking default of False) must leave
+            # the backstop armed — it is the only thing (besides a fragile thermostat
+            # current_temperature state-change listener) that ever re-invokes
+            # nat_vent_temperature_check() to notice the fan should cycle back on. Do NOT
+            # change this to read self._natural_vent_active directly — see the matching
+            # comment on the already-inactive branch above for why that's wrong.
+            if release_suppression:
+                self._cancel_fan_thermo_backstop()
             self._record_action("Fan deactivated", reason)
             if emit_event and self._emit_event_callback:
                 self._emit_event_callback(

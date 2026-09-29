@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.74] — 2026-09-28
+
+- Fix #996: the whole-house fan now reliably turns back on during an active natural-ventilation session, even if the thermostat's temperature sensor stops reporting changes for a while.
+
 ## [0.7.73] — 2026-09-28
 
 - Feat #993: added a sensor showing the temperature Climate Advisor is actively targeting during natural ventilation, so external displays and automations can show the real live target instead of a stale HVAC setpoint.

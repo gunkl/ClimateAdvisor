@@ -550,6 +550,75 @@ class TestDeactivateFan:
         assert result == FanCommandResult.ALREADY_IN_STATE
         assert engine._fan_thermo_cancel is None
 
+    def test_cycling_off_mid_session_does_not_cancel_backstop(self):
+        """Issue #996: nat_vent_temperature_check()'s cycling-off call
+        (restore_hvac=False, release_suppression left at its default) must NOT cancel
+        the backstop — the nat-vent session is still open and expected to resume, and
+        the backstop is the only thing (besides a fragile thermostat state-change
+        listener) that will ever re-invoke nat_vent_temperature_check() to notice the
+        fan should turn back on. Mirrors the real call shape at automation.py's
+        nat_vent_temperature_check() cycling-off branch exactly."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._fan_active = True
+        engine._natural_vent_active = True
+        cancel = MagicMock()
+        engine._fan_thermo_cancel = cancel
+
+        asyncio.run(engine._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False))
+
+        cancel.assert_not_called()
+        assert engine._fan_thermo_cancel is cancel
+
+    def test_genuine_deactivation_cancels_backstop(self):
+        """A plain deactivation (release_suppression defaults to restore_hvac=True) must
+        still cancel the backstop — guards against an inverted conditional."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._fan_active = True
+        cancel = MagicMock()
+        engine._fan_thermo_cancel = cancel
+
+        asyncio.run(engine._deactivate_fan(reason="test"))
+
+        cancel.assert_called_once()
+        assert engine._fan_thermo_cancel is None
+
+    def test_exit_nat_vent_style_release_cancels_backstop(self):
+        """Issue #996 regression guard: _exit_nat_vent()'s sensor-open branch calls
+        _deactivate_fan(restore_hvac=False, release_suppression=True) while
+        _natural_vent_active is STILL True (it only clears afterward, in
+        _end_nat_vent_session()). The backstop must still be cancelled here — proving
+        the fix keys off release_suppression, not _natural_vent_active."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._fan_active = True
+        engine._natural_vent_active = True
+        cancel = MagicMock()
+        engine._fan_thermo_cancel = cancel
+
+        asyncio.run(
+            engine._deactivate_fan(
+                reason="nat-vent exit", restore_hvac=False, release_suppression=True, emit_event=False
+            )
+        )
+
+        cancel.assert_called_once()
+        assert engine._fan_thermo_cancel is None
+
+    def test_already_inactive_mid_nat_vent_session_does_not_cancel_backstop(self):
+        """Issue #996: sibling to test_already_inactive_cancels_orphaned_backstop_timer
+        — a redundant _deactivate_fan() call landing on the already-inactive branch
+        while a nat-vent session is still open (restore_hvac=False, so
+        release_suppression defaults to False) must not cancel the backstop either."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._fan_active = False
+        engine._natural_vent_active = True
+        cancel = MagicMock()
+        engine._fan_thermo_cancel = cancel
+
+        asyncio.run(engine._deactivate_fan(reason="test", restore_hvac=False))
+
+        cancel.assert_not_called()
+        assert engine._fan_thermo_cancel is cancel
+
 
 # ---------------------------------------------------------------------------
 # release_suppression (Issue #618)

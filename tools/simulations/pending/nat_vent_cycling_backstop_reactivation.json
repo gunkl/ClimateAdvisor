@@ -1,0 +1,90 @@
+{
+  "name": "nat_vent_cycling_backstop_reactivation",
+  "description": "Nat-vent fan cycles off mid-session with no further explicit temperature-check event — the 5-minute thermostatic backstop timer (not a new sensor push) must be what notices indoor has risen back above the on-threshold and cycles the fan back on",
+  "source": "synthetic",
+  "issue": 996,
+  "simulator_support": true,
+  "track": "unit",
+  "notes": [
+    "Occupant outcome: on a warm day the occupant opens a window; nat-vent activates and the fan cycles off normally once indoor cools to the off-threshold. In production, the fan's own thermostat can go quiet for a while (a real observed incident — no new current_temperature push for over an hour) with nothing else to notice indoor has drifted back up. Before Issue #996's fix, the backstop timer that exists specifically to catch this was being cancelled the moment the fan cycled off, so the house stayed warm until the occupant intervened manually. This scenario proves the fan comes back on from the backstop alone, with zero new nat_vent_temperature_check events after the cycle-off.",
+    "Scenario effectiveness: if _deactivate_fan()'s Issue #996 fix is reverted (the backstop cancelled unconditionally on every fan-off instead of only when release_suppression is True), the 14:15:00 assertion fails — nothing re-invokes nat_vent_temperature_check() after the 14:06:00 cycle-off, since this scenario deliberately supplies no further explicit nat_vent_temperature_check event and relies entirely on the scheduler's own advance_to() firing the self-rescheduling backstop timer (docs/sim-harness-spec.md: async_call_later is patched on the automation module and driven by advance_to()).",
+    "Two-way alignment: fan_mode=hvac_fan exercises the same _deactivate_fan()/_start_fan_thermo_backstop() code path FAN_MODE_WHOLE_HOUSE uses (both fan modes share one function and one backstop timer per the Issue #996 mirror-check) — this scenario's coverage is not mode-specific.",
+    "User outcome if test fails: the occupant's whole-house fan (or HVAC fan-only mode) could silently stop responding to indoor temperature for as long as the thermostat's own sensor happens to go quiet, exactly as it did in the real production incident this issue documents, requiring the occupant to notice and intervene manually.",
+    "Config note: comfort_heat=68/comfort_cool=74 gives a daytime cycling target of 71 (midpoint), off_threshold=70, on_threshold=72 (hysteresis=1.0, the project default) — matches the exact threshold values confirmed against the real incident's live automation_state (nat_vent_target=67 in that sleep-window case; this scenario uses the simpler daytime midpoint formula instead of the sleep-window formula, which is equally valid coverage of the same backstop-cancellation code path). fan_mode=hvac_fan needs no separate fan_entity, matching bedtime_natvent_continuation.json's precedent.",
+    "Timing note: every real fan toggle in this scenario is spaced >=6 minutes apart deliberately, to stay clear of FAN_MIN_TOGGLE_INTERVAL_S (300s) — the fan's own 5-minute minimum-toggle-interval floor. The backstop timer's fire cadence (also 5 minutes, armed at fan activation and re-armed on every subsequent tick while the nat-vent session is active) lands on the fixed grid 14:05/14:10/14:15 regardless of when the cycle-off happens; the 14:10 tick is a deliberate no-op (indoor hasn't risen yet) so the real reactivation at 14:15 lands safely outside the 5-minute floor measured from the 14:06 cycle-off."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan",
+    "initial_thermostat_mode": "cool"
+  },
+  "events": [
+    {
+      "time": "2026-08-01T13:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Daytime classification — warm day, comfort band armed at [68/74]."
+    },
+    {
+      "time": "2026-08-01T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 69.0,
+      "note": "Indoor 73°F, outdoor 69°F — 4°F cooler than indoor, nat-vent conditions met."
+    },
+    {
+      "time": "2026-08-01T14:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens. Nat-vent activates: outdoor 69°F < indoor 73°F, indoor 73°F > comfort_heat 68°F. _activate_fan() runs here (toggle #1), arming the 5-minute thermostatic backstop timer on the fixed grid 14:05/14:10/14:15/..."
+    },
+    {
+      "time": "2026-08-01T14:06:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 70.0,
+      "note": "Cycling check fires (a real thermostat state-change event, in production) 6 minutes after activation — safely past the 5-minute minimum-toggle floor from toggle #1. Daytime target=71 (midpoint of 68/74), off_threshold=70. Indoor(70) <= off_threshold(70) -> fan cycles off (toggle #2), session stays active (_natural_vent_active=True). Under the Issue #996 fix, this does NOT cancel the backstop timer."
+    },
+    {
+      "time": "2026-08-01T14:12:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 69.0,
+      "note": "Indoor has drifted back up to 72°F (>= on_threshold 72) — injects the value the still-armed backstop will read at its next tick. Deliberately NOT paired with an explicit nat_vent_temperature_check event: this scenario only supplies the raw temperature the way a live sensor would. The intervening 14:10:00 backstop tick (fired automatically by this event's own advance_to()) is a no-op — indoor was still 70°F at that point, below on_threshold."
+    },
+    {
+      "time": "2026-08-01T14:16:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 69.0,
+      "note": "No-op re-injection of the same values — this event's only purpose is to advance the virtual clock past 14:15:00 so scheduler.advance_to() fires the backstop timer's next scheduled tick, which internally calls nat_vent_temperature_check() and should cycle the fan back on (toggle #3, 9 minutes after toggle #2 — clear of the 5-minute floor)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-01T14:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opens with outdoor 69°F < indoor 73°F — nat-vent activates, fan on, backstop timer armed."
+    },
+    {
+      "at": "2026-08-01T14:06:00",
+      "expect": "nat_vent_fan_off",
+      "reason": "Indoor reaches the daytime off_threshold (70°F), 6 minutes after activation (clear of the 5-minute toggle floor). Fan cycles off, session stays active. This must NOT cancel the backstop timer (Issue #996)."
+    },
+    {
+      "at": "2026-08-01T14:15:00",
+      "expect": "nat_vent_fan_on",
+      "reason": "The backstop timer's 14:15:00 tick fires here — with no explicit nat_vent_temperature_check event since the 14:06:00 cycle-off. It reads the already-injected indoor=72°F (>= on_threshold 72°F) and cycles the fan back on, 9 minutes after the last real toggle (clear of the 5-minute floor). Before the Issue #996 fix, the 14:06:00 cycle-off would have cancelled this timer and this assertion would fail."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The whole-house/HVAC fan reliably cycles back on mid-nat-vent-session via the 5-minute thermostatic backstop timer alone, with zero new sensor-driven events after the cycle-off (Issue #996)",
+    "observed_behavior": "sensor_open -> natural_ventilation (14:00) -> nat_vent_temperature_check cycles fan off (14:06, session remains active) -> indoor rises back above on_threshold (14:12, no explicit check event) -> backstop timer fires on its own and cycles the fan back on (14:15)",
+    "expected_behavior": "Occupant opens a window at 14:00; nat-vent activates. The fan cycles off at 14:06 as indoor cools to the target. Indoor drifts back up by 14:12. Even with no further temperature-change events reaching the automation, the self-rescheduling backstop timer notices by 14:15 and turns the fan back on — the house never sits warm and unattended the way it did in the real incident this issue documents."
+  }
+}

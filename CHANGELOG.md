@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.81] — 2026-09-29
+
+- Fix #1012: the Status tab card previously labeled "Compliance" is now labeled "Comfort Score" to match what it actually measures.
+
 ## [0.7.80] — 2026-09-29
 
 - Fix #1007: turning off the whole-house fan (or any other manual grace period) now stays honored — an internal housekeeping check (like the physical-drift-correction backstop) can no longer silently cut your quiet period short and reactivate the fan early.

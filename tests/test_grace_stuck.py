@@ -16,7 +16,7 @@ import importlib
 import sys
 import types
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ── HA module stubs (must happen before importing climate_advisor) ──
 if "homeassistant" not in sys.modules:
@@ -26,10 +26,35 @@ if "homeassistant" not in sys.modules:
 
 _STABLE_NOW = datetime(2026, 6, 12, 14, 0, 0)
 sys.modules["homeassistant.util.dt"].now = lambda: _STABLE_NOW
+sys.modules["homeassistant.util.dt"].parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
 
+from custom_components.climate_advisor import automation as _automation_mod  # noqa: E402
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord  # noqa: E402
+
+# The `sys.modules["homeassistant.util.dt"]` patch above is a no-op for automation.py's
+# own `dt_util` reference: `homeassistant.util` is itself a MagicMock (not a real
+# package), so `from homeassistant.util import dt as dt_util` resolves `.dt` to an
+# auto-generated child MagicMock attribute — shared process-wide across every module that
+# does the same `from homeassistant.util import dt as dt_util` import — rather than the
+# real submodule registered in sys.modules. This went unnoticed because nothing in this
+# file previously exercised a comparison operator (`<`/`>`) on the result — MagicMock's
+# default numeric dunders (`__add__`, `__int__`, etc.) silently degrade to harmless
+# stand-ins, but ordering comparisons raise TypeError.
+#
+# `parse_datetime` is safe to patch with a permanent raw assignment (the established
+# pattern elsewhere, e.g. test_nat_vent_activation.py) — it is a strict correctness
+# improvement over the MagicMock default that nothing relies on returning a fake value.
+# `now`, however, is NOT safe to freeze this way: since the underlying mock is shared
+# process-wide, permanently pinning it to a fixed 2026 timestamp here leaked into
+# unrelated test files collected later in the same run (confirmed: caused spurious
+# failures in tests/test_chart_log.py when the full suite ran). `now` must only be
+# patched per-test via a scoped context manager (`_DT_NOW_PATH` below), exactly like
+# test_nat_vent_activation.py's own `_DT_NOW_PATH` pattern.
+_automation_mod.dt_util.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
+_DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
+_automation_mod.dt_util.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -606,3 +631,105 @@ class TestGraceProtectsOverrideClassification:
         ae._cancel_grace_timers()
 
         assert ae._grace_protects_override is False
+
+
+# ---------------------------------------------------------------------------
+# TestGracePeriodPriorityGuard: Issue #1007 — an automation-sourced grace start
+# must not silently replace an already-active manual grace with real time
+# remaining. Exercises the REAL AutomationEngine._start_grace_period_action().
+#
+# Occupant impact: before this fix, a user turning the WHF off got a promised
+# ~3-hour quiet period (manual grace), but minutes later an internal backstop
+# (physical-drift-correction) silently replaced it with a 5-minute automation
+# grace, reactivating the fan far earlier than the user was told to expect.
+# ---------------------------------------------------------------------------
+
+
+class TestGracePeriodPriorityGuard:
+    def _make_engine(self):
+        ae = _make_automation_engine_stub()
+        ae._start_grace_period_action = types.MethodType(AutomationEngine._start_grace_period_action, ae)
+        ae._start_grace_period = types.MethodType(AutomationEngine._start_grace_period, ae)
+        ae._cancel_grace_timers = types.MethodType(AutomationEngine._cancel_grace_timers, ae)
+        ae._resolve_override_grace_fsm_state = types.MethodType(AutomationEngine._resolve_override_grace_fsm_state, ae)
+        ae._override_grace_fsm_authoritative = False
+        ae.config = {}
+        return ae
+
+    def test_automation_start_suppressed_when_manual_grace_active_with_time_remaining(self):
+        """The reported #1007 shape: manual grace active, 3h remaining; an
+        automation-sourced physical_drift_correction attempt must not replace it."""
+        ae = self._make_engine()
+        ae._grace_active = True
+        ae._last_resume_source = "manual"
+        ae._grace_end_time = "2026-06-12T17:00:00"  # 3h after the patched _STABLE_NOW
+        ae._grace_duration_seconds = 10800
+        ae._last_grace_trigger = "fan_off"
+
+        with patch(_DT_NOW_PATH, return_value=_STABLE_NOW):
+            result = ae._start_grace_period_action("automation", trigger="physical_drift_correction")
+
+        assert result is False
+        # Manual grace state must be completely untouched — no cancel, no overwrite.
+        assert ae._last_resume_source == "manual"
+        assert ae._grace_end_time == "2026-06-12T17:00:00"
+        assert ae._grace_duration_seconds == 10800
+        assert ae._last_grace_trigger == "fan_off"
+
+    def test_manual_grace_start_always_replaces_active_manual_grace(self):
+        """A fresh manual/user action still always wins — unchanged 'latest user
+        action wins' semantics (spec Invariant 6)."""
+        ae = self._make_engine()
+        ae._grace_active = True
+        ae._last_resume_source = "manual"
+        ae._grace_end_time = "2026-06-12T17:00:00"
+
+        with patch(_DT_NOW_PATH, return_value=_STABLE_NOW):
+            result = ae._start_grace_period_action("manual", trigger="dashboard_resume")
+
+        assert result is True
+        assert ae._last_resume_source == "manual"
+        assert ae._last_grace_trigger == "dashboard_resume"
+
+    def test_automation_start_replaces_active_automation_grace(self):
+        """Automation-over-automation replacement (e.g. nat_vent_exit_resume replacing
+        sensor_closed_resume) is unaffected by the new guard — regression check."""
+        ae = self._make_engine()
+        ae._grace_active = True
+        ae._last_resume_source = "automation"
+        ae._grace_end_time = "2026-06-12T14:05:00"
+
+        with patch(_DT_NOW_PATH, return_value=_STABLE_NOW):
+            result = ae._start_grace_period_action("automation", trigger="nat_vent_exit_resume")
+
+        assert result is True
+        assert ae._last_resume_source == "automation"
+        assert ae._last_grace_trigger == "nat_vent_exit_resume"
+
+    def test_automation_start_not_suppressed_when_manual_grace_already_expired(self):
+        """A stale grace_end_time in the past (e.g. the expiry callback was lost) must
+        not block a real automation grace from starting — the guard checks remaining
+        time, not just source."""
+        ae = self._make_engine()
+        ae._grace_active = True
+        ae._last_resume_source = "manual"
+        ae._grace_end_time = "2026-06-12T13:00:00"  # in the past relative to _STABLE_NOW
+
+        with patch(_DT_NOW_PATH, return_value=_STABLE_NOW):
+            result = ae._start_grace_period_action("automation", trigger="physical_drift_correction")
+
+        assert result is True
+        assert ae._last_resume_source == "automation"
+
+    def test_automation_start_proceeds_when_no_grace_active(self):
+        """No grace currently active — automation start proceeds normally."""
+        ae = self._make_engine()
+        ae._grace_active = False
+        ae._last_resume_source = None
+        ae._grace_end_time = None
+
+        with patch(_DT_NOW_PATH, return_value=_STABLE_NOW):
+            result = ae._start_grace_period_action("automation", trigger="sensor_closed_resume")
+
+        assert result is True
+        assert ae._last_resume_source == "automation"

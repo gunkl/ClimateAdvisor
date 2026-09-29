@@ -18,7 +18,12 @@ alongside a 2-way ACTIVE) because that flag is a trigger-keyed membership test
 (Issue #530) carried at grace-start time, not something to re-derive after the fact —
 "which grace am I in" is a single read matching the single-timer-slot invariant
 (``_start_grace_period()`` always cancels any running timer first — no two concurrent
-graces are ever reachable, so ``GraceState`` needs no composite/parallel arm).
+graces are ever reachable, so ``GraceState`` needs no composite/parallel arm). Issue
+#1007: replacement of a running timer is no longer unconditional — an
+automation-sourced start defers to an already-active manual grace with real time
+remaining instead of replacing it — but the single-slot property itself is unchanged:
+exactly one grace (or none) is ever active, the guarded case simply keeps the existing
+one instead of swapping it for a new one.
 
 ``derive_override_grace_lifecycle_state()`` returns a plain
 ``tuple[OverrideConfirmState, GraceState]`` — never a merged Enum. Only a subset of the

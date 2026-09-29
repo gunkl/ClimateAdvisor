@@ -6521,7 +6521,31 @@ class AutomationEngine:
         is disabled (``decide_grace_start()`` returned None) — callers must only proceed
         to write the 2 derived flags (via legacy or the dispatcher) when this is True;
         a disabled grace period must never claim ``_grace_active=True``.
+
+        Issue #1007: an ``source="automation"`` request never replaces an already-active
+        ``source="manual"`` grace with real time remaining — a manual grace represents an
+        explicit, just-made user decision (e.g. "leave the fan off for 3 hours"), while every
+        automation-sourced call site is internal housekeeping (physical-drift-correction,
+        sensor-closed-resume, nat-vent-exit-resume) that should never silently cut a user
+        commitment short. Returns False (same contract as "grace disabled") without touching
+        any grace state — the currently-running manual grace's timer, `_grace_end_time`, and
+        `_last_resume_source` are left completely alone. A `source="manual"` request always
+        proceeds (a fresh user action still wins, unchanged), and an automation request only
+        defers to another already-active *manual* grace — automation-over-automation
+        replacement (e.g. `nat_vent_exit_resume` replacing `sensor_closed_resume`) is
+        unaffected.
         """
+        if source == "automation" and self._grace_active and self._last_resume_source == "manual":
+            _manual_end = dt_util.parse_datetime(self._grace_end_time) if self._grace_end_time else None
+            if _manual_end is not None and dt_util.now() < _manual_end:
+                _remaining_min = int((_manual_end - dt_util.now()).total_seconds() // 60)
+                _LOGGER.warning(
+                    "Grace period start suppressed: manual grace still active (%dm remaining) — trigger=%s not applied",
+                    _remaining_min,
+                    trigger,
+                )
+                return False
+
         self._cancel_grace_timers()
 
         now = dt_util.now()

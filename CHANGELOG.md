@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.80] — 2026-09-29
+
+- Fix #1007: turning off the whole-house fan (or any other manual grace period) now stays honored — an internal housekeeping check (like the physical-drift-correction backstop) can no longer silently cut your quiet period short and reactivate the fan early.
+
 ## [0.7.79] — 2026-09-29
 
 - Fix #1009: thermal learning no longer discards every AC/heating cycle's observation just because the thermostat runs its normal brief fan-only pulse right after the compressor stops — CA now tolerates that short pulse instead of treating it as fan contamination.

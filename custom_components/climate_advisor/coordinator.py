@@ -61,7 +61,6 @@ from .const import (
     ATTR_COMPLIANCE_SCORE,
     ATTR_CONTACT_STATUS,
     ATTR_DAY_TYPE,
-    ATTR_EFFECTIVE_TARGET_SOURCE,
     ATTR_EFFECTIVE_TARGET_TEMP,
     ATTR_FAN_OVERRIDE_SINCE,
     ATTR_FAN_RUNNING,
@@ -78,7 +77,6 @@ from .const import (
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
     ATTR_LEARNING_SUGGESTIONS,
-    ATTR_NAT_VENT_TARGET_TEMP,
     ATTR_NEXT_ACTION,
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
@@ -3523,29 +3521,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
 
-        # Issue #993: live nat-vent target temperature. Nat-vent is unconditionally a
-        # cooling-direction mechanism (its gate requires outdoor temp below indoor
-        # temp — see nat_vent_gate.py/nat_vent_fsm.py), so this always reads the
-        # target-band UPPER edge, never branches on classification.hvac_mode (hvac_mode
-        # is "off" during WARM/MILD day types where nat-vent is the *primary*
-        # mechanism — gating on hvac_mode would make this go unavailable during real
-        # active sessions; see automation.py's warning comment near the nat-vent gate).
-        # Reuses this cycle's already-cached target-band schedule via
-        # _target_band_lower_upper_now() (resolved above by
-        # _resolve_target_band_schedule()) — never re-derived from static config.
-        # NOT to be confused with _nat_vent_target_now(), which is a static
-        # comfort_heat/comfort_cool-derived WHF cycling midpoint — this value is the
-        # dynamic target-band edge.
-        _nat_vent_target_temp = None
-        if self.automation_engine and self.automation_engine.natural_vent_active:
-            _, _nat_vent_target_temp = self._target_band_lower_upper_now()
-
         # Issue #998: always-populated "what is the house aiming for right now"
         # value — see _compute_effective_target_now()'s docstring for the 3-tier
         # priority (HVAC setpoint -> fan cycling target -> passive comfort-band
         # edge). _fan_status_uc is already computed above for the HVAC-off/
         # hvac_action contradiction check — reused here rather than recomputed.
-        _effective_target_temp, _effective_target_source = self._compute_effective_target_now(
+        # The "source" tier ("hvac"/"whf"/"passive") is discarded here — it is
+        # not exposed as a sensor (Issue #1001) and has no other consumer.
+        _effective_target_temp, _ = self._compute_effective_target_now(
             hvac_mode=hvac_mode,
             target_temp=_target_temp,
             fan_status=_fan_status_uc,
@@ -3599,9 +3582,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
             ATTR_INDOOR_TEMP: _indoor_temp,
-            ATTR_NAT_VENT_TARGET_TEMP: _nat_vent_target_temp,
             ATTR_EFFECTIVE_TARGET_TEMP: _effective_target_temp,
-            ATTR_EFFECTIVE_TARGET_SOURCE: _effective_target_source,
             "sleep_indoor_sensor_active": _sleep_indoor_sensor_active,
             ATTR_OUTDOOR_TEMP: _outdoor_temp,
             ATTR_FORECAST_HIGH: c.today_high if c else None,

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.77] — 2026-09-29
+
+- Fix #1001: removed two sensors made redundant by the unified target-temperature sensor (Issue #998) — the nat-vent-only target sensor and the "target source" sensor. If you have automations or a dashboard referencing `sensor.climate_advisor_nat_vent_target_temp` or `sensor.climate_advisor_target_source`, switch them to `sensor.climate_advisor_target_temperature`, which is always populated regardless of which mechanism (HVAC, whole-house fan, or passive) is active.
+
 ## [0.7.76] — 2026-09-28
 
 - Feat #1000: every zone's Climate Advisor entities now group under their own device in Settings → Devices & Services, named after the zone (e.g. "Zone 1", "Simulated 2") — makes it possible to tell at a glance which zone an entity belongs to on multi-zone installs, instead of every zone showing identically-named entities.

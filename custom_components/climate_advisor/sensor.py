@@ -26,7 +26,6 @@ from .const import (
     ATTR_COMPLIANCE_SCORE,
     ATTR_CONTACT_STATUS,
     ATTR_DAY_TYPE,
-    ATTR_EFFECTIVE_TARGET_SOURCE,
     ATTR_EFFECTIVE_TARGET_TEMP,
     ATTR_FAN_OVERRIDE_SINCE,
     ATTR_FAN_RUNNING,
@@ -41,7 +40,6 @@ from .const import (
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
     ATTR_LEARNING_SUGGESTIONS,
-    ATTR_NAT_VENT_TARGET_TEMP,
     ATTR_NEXT_ACTION,
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
@@ -88,9 +86,7 @@ async def async_setup_entry(
         ClimateAdvisorOutdoorTempSensor(coordinator, entry),
         ClimateAdvisorForecastHighSensor(coordinator, entry),
         ClimateAdvisorForecastLowSensor(coordinator, entry),
-        ClimateAdvisorNatVentTargetTempSensor(coordinator, entry),
         ClimateAdvisorEffectiveTargetTempSensor(coordinator, entry),
-        ClimateAdvisorEffectiveTargetSourceSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -453,41 +449,13 @@ class ClimateAdvisorOutdoorTempSensor(ClimateAdvisorBaseSensor):
         super().__init__(coordinator, entry, ATTR_OUTDOOR_TEMP, "Outdoor Temperature", "mdi:thermometer-lines")
 
 
-class ClimateAdvisorNatVentTargetTempSensor(ClimateAdvisorBaseSensor):
-    """Live nat-vent target temperature — the target-band upper edge Climate Advisor
-    is currently aiming for via natural ventilation, or unavailable (None) when
-    nat-vent is not active right now (Issue #993).
-
-    Sourced from the coordinator's already-computed per-cycle target-band schedule
-    (never re-derived from static config here) — see
-    coordinator._async_update_data_impl()'s ATTR_NAT_VENT_TARGET_TEMP computation.
-    """
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
-
-    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
-        """Initialize the nat-vent target temperature sensor."""
-        super().__init__(
-            coordinator,
-            entry,
-            ATTR_NAT_VENT_TARGET_TEMP,
-            "Nat-Vent Target Temperature",
-            "mdi:window-open-variant",
-        )
-
-
 class ClimateAdvisorEffectiveTargetTempSensor(ClimateAdvisorBaseSensor):
     """Always-populated "what is the house aiming for right now" temperature
     (Issue #998), regardless of which mechanism is responsible.
 
-    Unlike ClimateAdvisorNatVentTargetTempSensor above (which goes unavailable
-    the moment there's no formal nat-vent session), this never goes unavailable
-    during normal operation — see coordinator._compute_effective_target_now()'s
-    docstring for the 3-tier priority (HVAC setpoint -> fan cycling target ->
-    passive comfort-band edge). Pair with ClimateAdvisorEffectiveTargetSourceSensor
-    below to know which tier produced this value.
+    Never goes unavailable during normal operation — see
+    coordinator._compute_effective_target_now()'s docstring for the 3-tier
+    priority (HVAC setpoint -> fan cycling target -> passive comfort-band edge).
     """
 
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -502,23 +470,6 @@ class ClimateAdvisorEffectiveTargetTempSensor(ClimateAdvisorBaseSensor):
             ATTR_EFFECTIVE_TARGET_TEMP,
             "Target Temperature",
             "mdi:thermostat",
-        )
-
-
-class ClimateAdvisorEffectiveTargetSourceSensor(ClimateAdvisorBaseSensor):
-    """Which mechanism produced ClimateAdvisorEffectiveTargetTempSensor's value
-    (Issue #998) — "hvac", "whf", or "passive". Lets a display pick the right
-    label/color without re-deriving the priority logic itself.
-    """
-
-    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
-        """Initialize the effective target source sensor."""
-        super().__init__(
-            coordinator,
-            entry,
-            ATTR_EFFECTIVE_TARGET_SOURCE,
-            "Target Source",
-            "mdi:target",
         )
 
 

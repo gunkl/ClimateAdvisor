@@ -139,7 +139,7 @@ class TestPassiveTierFallback:
 
     def test_always_returns_a_value_even_with_nothing_active(self):
         """The core Issue #998 requirement: never None/unavailable during normal
-        operation, unlike ClimateAdvisorNatVentTargetTempSensor."""
+        operation, regardless of which mechanism (or none) is currently active."""
         coord = _make_coordinator(_BASE_CONFIG)
         value, _source = coord._compute_effective_target_now(hvac_mode="off", target_temp=None, fan_status="inactive")
         assert value is not None

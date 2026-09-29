@@ -479,20 +479,11 @@ ATTR_HVAC_RUNTIME_TODAY = "hvac_runtime_today"
 # so it is never blended into a number that implies heat/cool actually ran.
 ATTR_THERMOSTAT_FAN_ONLY_RUNTIME_TODAY = "thermostat_fan_only_runtime_today"
 ATTR_CONTACT_STATUS = "contact_status"
-# Issue #993: live nat-vent target temperature — the target-band upper edge the
-# automation engine is currently aiming for via natural ventilation, or None when
-# nat-vent is not active. See coordinator._async_update_data_impl() for computation.
-ATTR_NAT_VENT_TARGET_TEMP = "nat_vent_target_temp"
 # Issue #998: always-populated "what is the house actually aiming for right now"
 # value, regardless of which mechanism (HVAC, WHF/fan, or a passive comfort band
-# with nothing running) is responsible — unlike ATTR_NAT_VENT_TARGET_TEMP above,
-# never None during normal operation. See
+# with nothing running) is responsible — never None during normal operation. See
 # coordinator._compute_effective_target_now() for the 3-tier priority.
 ATTR_EFFECTIVE_TARGET_TEMP = "effective_target_temp"
-# Companion field: which of the 3 tiers produced ATTR_EFFECTIVE_TARGET_TEMP —
-# "hvac" | "whf" | "passive". Lets a display pick the right label/color without
-# re-deriving the same priority logic.
-ATTR_EFFECTIVE_TARGET_SOURCE = "effective_target_source"
 
 # Revisit delay — follow-up check after any HVAC action (seconds)
 # Issue #787: independently duplicated with NAT_VENT_REACTIVATION_LOCKOUT_S/FAN_MIN_TOGGLE_INTERVAL_S

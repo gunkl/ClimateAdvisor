@@ -1,8 +1,16 @@
 """Tests for grace-restart behavior (Issue #282).
 
-Fix A: async_restore_state must NOT reschedule a grace timer on restart.
+Fix A: the COORDINATOR's async_restore_state() must not itself reschedule a grace timer on
+       restart (the AutomationEngine's own restore_state() owns that decision — see Issue #1006
+       below, which adds a narrow `fan_off`-only exception at the AutomationEngine level; these
+       coordinator-level tests replace the AE with a MagicMock, so they don't exercise that
+       exception and remain valid clean-slate regression guards for the coordinator's own code).
 Fix D: A new mode change during active grace must restart the override
        (clear old override + register new one).
+
+See tests/test_state_persistence.py::TestAutomationRestoreState for the AutomationEngine-level
+restore_state()/get_serializable_state() tests, including Issue #1006's fan_off grace-restore
+coverage.
 
 These are coordinator-level tests that bind the real _async_thermostat_changed
 and async_restore_state methods against a minimal stub coordinator.

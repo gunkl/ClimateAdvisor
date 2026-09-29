@@ -416,14 +416,21 @@ class TestSerializableState:
         assert "manual_override_active" not in serialized
 
     def test_grace_fields_not_in_serializable_state(self):
-        """Grace fields are omitted from get_serializable_state() — clean-slate policy."""
+        """`grace_active` (a derived FSM flag) stays omitted from get_serializable_state().
+
+        Issue #1006: grace TIMING fields (`grace_end_time`/`grace_duration_seconds`/
+        `last_grace_trigger`/`last_resume_source`) are now serialized unconditionally — a narrow
+        exception enabling the `fan_off` restart-persistence re-arm (see
+        tests/test_state_persistence.py::TestAutomationRestoreState). `grace_active` itself
+        remains omitted since it's not a timing field and is always re-derived, not persisted.
+        """
         engine = _make_automation_engine()
 
         serialized = engine.get_serializable_state()
         assert "grace_active" not in serialized
-        assert "grace_end_time" not in serialized
-        assert "grace_duration_seconds" not in serialized
-        assert "last_resume_source" not in serialized
+        assert "grace_end_time" in serialized
+        assert "grace_duration_seconds" in serialized
+        assert "last_resume_source" in serialized
 
 
 # ---------------------------------------------------------------------------

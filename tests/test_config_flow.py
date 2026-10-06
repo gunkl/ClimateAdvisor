@@ -3206,11 +3206,26 @@ class TestUnitStepDefault:
     """Issue #1023: the unit step pre-selects Home Assistant's system unit."""
 
     @staticmethod
-    def _default_of(form) -> str:
-        for marker in form["data_schema"].schema:
-            if getattr(marker, "schema", None) == "temp_unit":
-                return marker.default()
-        raise AssertionError("temp_unit field missing from unit step schema")
+    def _default_of(flow) -> str:
+        """Run the real ``async_step_unit`` and return the ``default`` it gives ``temp_unit``.
+
+        Records the ``vol.Required`` call instead of introspecting the built schema, so it works
+        whether ``voluptuous`` is the real package or the harness's mock (CI has no voluptuous).
+        """
+        import importlib
+
+        mod = importlib.import_module("custom_components.climate_advisor.config_flow")
+        seen: dict = {}
+
+        def _spy(key, **kwargs):
+            seen[key] = kwargs.get("default")
+            return key
+
+        with patch.object(mod.vol, "Required", side_effect=_spy):
+            form = asyncio.run(flow.async_step_unit())
+        assert form["step_id"] == "unit"
+        assert "temp_unit" in seen, "temp_unit field missing from unit step schema"
+        return seen["temp_unit"]
 
     @staticmethod
     def _hass_with_unit(symbol):
@@ -3221,19 +3236,17 @@ class TestUnitStepDefault:
     @pytest.mark.parametrize(("symbol", "expected"), [("°C", "celsius"), ("°F", "fahrenheit")])
     def test_default_follows_ha_system_unit(self, symbol, expected):
         flow = _make_real_config_flow(self._hass_with_unit(symbol))
-        form = asyncio.run(flow.async_step_unit())
-        assert form["step_id"] == "unit"
-        assert self._default_of(form) == expected
+        assert self._default_of(flow) == expected
 
     def test_unrecognised_mock_unit_falls_back_to_fahrenheit(self):
         flow = _make_real_config_flow(MagicMock())
-        assert self._default_of(asyncio.run(flow.async_step_unit())) == "fahrenheit"
+        assert self._default_of(flow) == "fahrenheit"
 
     def test_hass_without_units_falls_back_to_fahrenheit(self):
         from types import SimpleNamespace
 
         flow = _make_real_config_flow(SimpleNamespace(config=None))
-        assert self._default_of(asyncio.run(flow.async_step_unit())) == "fahrenheit"
+        assert self._default_of(flow) == "fahrenheit"
 
     def test_user_can_override_default(self):
         flow = _make_real_config_flow(self._hass_with_unit("°C"))

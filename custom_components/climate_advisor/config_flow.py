@@ -113,7 +113,7 @@ from .const import (
     TEMP_SOURCE_WEATHER_SERVICE,
 )
 from .scheduler import ALL_DAYS, COST_TAG_HIGH, MAX_SCHEDULES, WEEKDAY_ABBREVS, _parse_hhmm
-from .temperature import CELSIUS, FAHRENHEIT, from_fahrenheit, to_fahrenheit
+from .temperature import CELSIUS, FAHRENHEIT, from_fahrenheit, ha_system_unit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -308,7 +308,9 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="unit",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TEMP_UNIT, default=DEFAULT_TEMP_UNIT): selector.SelectSelector(
+                    vol.Required(
+                        CONF_TEMP_UNIT, default=ha_system_unit(self.hass) or DEFAULT_TEMP_UNIT
+                    ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=TEMP_UNIT_OPTIONS,
                             mode=selector.SelectSelectorMode.LIST,

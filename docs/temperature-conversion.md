@@ -7,7 +7,7 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | When converting a temperature *rate* (e.g., k_active_heat in °F/hr) to Celsius for display, which function is correct? | `convert_delta()` or `format_temp_delta()` — these apply scale-only conversion (multiply by 5/9) without the +32/−32 offset. Using `from_fahrenheit()` on a delta is wrong. | [convert_delta and format_temp_delta](#convert_delta-and-format_temp_delta) |
-| How is the user's display unit determined, and what is the fallback? | The unit is a user-selected config flow field (`CONF_TEMP_UNIT`), stored as `"fahrenheit"` or `"celsius"`. The fallback at every read site is `"fahrenheit"` via `config.get("temp_unit", "fahrenheit")`. | [Unit Detection](#unit-detection) |
+| How is the user's display unit determined, and what is the fallback? | The unit is a user-selected config flow field (`CONF_TEMP_UNIT`), stored as `"fahrenheit"` or `"celsius"`. A new install's `unit` step pre-selects Home Assistant's unit system (since 0.7.86, Issue #1023) and the user may still pick either. The fallback at every read site is `"fahrenheit"` via `config.get("temp_unit", "fahrenheit")`. | [Unit Detection](#unit-detection) |
 | What happens when an unknown unit string (e.g., `"kelvin"`) is passed to any conversion function? | All functions treat unknown units as `"fahrenheit"` and return the value unchanged (passthrough). The `UNIT_SYMBOL` dict falls back to `"°F"` for unknown keys. | [Constants and Boundary Values](#constants-and-boundary-values) |
 | Where is the canonical rule that all internal temperatures are stored in Fahrenheit? | Stated in the `temperature.py` module docstring: "All internal temperatures are stored and calculated in Fahrenheit. This module provides the only conversion boundary used throughout the integration." | [Scope](#scope) |
 | Is the hourly forecast list in the provider's unit or internal °F, and how may a new consumer use it? | `_hourly_forecast_temps` is ALWAYS internal °F: `ClimateAdvisorCoordinator._get_hourly_forecast_data()` normalises a copy at the single source, and `_refresh_hourly_forecast()` is the only refresh path. New consumers must treat it as °F and never convert it again. | [Hourly forecast is normalised to internal °F at its source](#hourly-forecast-is-normalised-to-internal-f-at-its-source-issue-1015) |
@@ -20,7 +20,7 @@
 
 **Owns:**
 - The single conversion boundary between internal °F and user-display units
-- Public functions: `from_fahrenheit()`, `to_fahrenheit()`, `convert_delta()`, `format_temp_delta()`, `format_temp()`, `unit_key_from_attr()`, `unit_mismatch()`
+- Public functions: `from_fahrenheit()`, `to_fahrenheit()`, `convert_delta()`, `format_temp_delta()`, `format_temp()`, `unit_key_from_attr()`, `unit_mismatch()`, `ha_system_unit()`
 - Two string constants: `FAHRENHEIT = "fahrenheit"`, `CELSIUS = "celsius"`
 - One dict: `UNIT_SYMBOL` mapping unit strings to display symbols
 
@@ -116,15 +116,15 @@ Affected values: `swing_f`, `k_active_heat` (°F/hr), `k_active_cool` (°F/hr), 
 
 ## Unit Detection
 
-The user's display unit is NOT auto-detected from HA's unit system at runtime. It is:
+The user's display unit is NOT re-detected from HA's unit system at runtime. It is:
 
-1. Selected by the user in the config flow step that shows entity and sensor configuration (`CONF_TEMP_UNIT`, a `SelectSelector` offering `"fahrenheit"` / `"celsius"`)
+1. Selected by the user in the dedicated `unit` step of the setup wizard (`CONF_TEMP_UNIT`, a `SelectSelector` offering `"fahrenheit"` / `"celsius"`). Since 0.7.86 (Issue #1023) a new install's step pre-selects Home Assistant's unit system, read by `temperature.ha_system_unit(hass)` from `hass.config.units.temperature_unit` (returns `"fahrenheit"`, `"celsius"` or `None` when unreadable); when it returns `None` the pre-selection falls back to `DEFAULT_TEMP_UNIT` (`"fahrenheit"`). The user can still choose either unit on the form. Existing entries are untouched and the options flow is unchanged
 2. Stored in the config entry under key `"temp_unit"`
 3. Read at every display site via `coordinator.config.get("temp_unit", "fahrenheit")`
 
 **Default:** `"fahrenheit"` — applies if the key is absent (e.g., fresh install before options flow is run, or config entry predates the field)
 
-**Constant:** `DEFAULT_TEMP_UNIT = "fahrenheit"` in `const.py`
+**Constant:** `DEFAULT_TEMP_UNIT = "fahrenheit"` in `const.py` — the read-site fallback and the setup-wizard pre-selection fallback when `ha_system_unit()` cannot read HA's unit system. The coordinator's `_check_unit_sources()` uses the same `ha_system_unit()` helper to read HA's unit system for its mismatch warning.
 
 This means the unit does not automatically follow if the user changes their HA unit system after setup. They must update the Climate Advisor option explicitly. Since 0.7.85 a mismatch is no longer silent: a Home Assistant install on a different unit system than the configured `temp_unit` (for example a metric install left on the default Fahrenheit) logs the `Temperature unit mismatch with Home Assistant` WARNING. That is intended, because such a setup really does misread every thermostat value, and a `Temperature sensor unit mismatch` WARNING usually fires alongside it since Home Assistant temperature sensors report in the system unit.
 
@@ -174,7 +174,7 @@ Temperature *sensor* entities and Home Assistant's own unit system are checked s
 
 **Why:** Home Assistant converts climate temperatures to its system unit on both the climate entity's state attributes and the `climate.set_temperature` service, while Climate Advisor reads and writes using its own configured `temp_unit`. If the two differ, every thermostat read and setpoint write is off by the C/F factor on any install. Likewise a configured temperature sensor that reports in a different unit than `temp_unit` is misread by `to_fahrenheit(..., config temp_unit)`. Since 0.7.85 both are flagged by log-only WARNINGs; nothing is auto-corrected and there is no UI card or Repairs issue.
 
-**Behaviour:** `ClimateAdvisorCoordinator._check_unit_sources()` runs each update cycle that has a forecast, called right after `_check_climate_unit()`. It uses the helper `temperature.unit_mismatch(attr, configured)`. No entity ids are logged.
+**Behaviour:** `ClimateAdvisorCoordinator._check_unit_sources()` runs each update cycle that has a forecast, called right after `_check_climate_unit()`. It uses the helpers `temperature.unit_mismatch(attr, configured)` and `temperature.ha_system_unit(hass)`. No entity ids are logged.
 
 - **HA system unit (Issue #1021):** one-shot compare of the configured `temp_unit` with `hass.config.units.temperature_unit`. Latched in `_ha_unit_checked` once HA's unit is recognised. WARNING:
   `Temperature unit mismatch with Home Assistant: ha_unit=<unit> configured_unit=<unit> — thermostat readings and setpoints will be misread until corrected`
@@ -204,7 +204,7 @@ The weather entity reports its hourly forecast in the provider's native unit. Be
 | `CELSIUS` | `"celsius"` | `temperature.py` |
 | `UNIT_SYMBOL["fahrenheit"]` | `"°F"` | `temperature.py` |
 | `UNIT_SYMBOL["celsius"]` | `"°C"` | `temperature.py` |
-| `DEFAULT_TEMP_UNIT` | `"fahrenheit"` | `const.py` |
+| `DEFAULT_TEMP_UNIT` | `"fahrenheit"` (read-site fallback; also the setup-wizard pre-selection when `ha_system_unit()` is `None`) | `const.py` |
 | `CONF_TEMP_UNIT` | `"temp_unit"` | `const.py` |
 
 **Unknown unit handling:** Every function treats an unrecognized unit string as `"fahrenheit"` and returns the value unchanged (passthrough). `UNIT_SYMBOL.get(unit, "°F")` ensures unknown units display as `°F` rather than crashing.

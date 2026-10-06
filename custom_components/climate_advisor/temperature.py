@@ -50,6 +50,14 @@ def unit_mismatch(attr: object, configured: str) -> str | None:
     return reported
 
 
+def ha_system_unit(hass: object) -> str | None:
+    """Return Home Assistant's system temperature unit as FAHRENHEIT/CELSIUS (Issue #1023).
+
+    None when ``hass.config.units.temperature_unit`` is unreadable or unrecognised.
+    """
+    return unit_key_from_attr(getattr(getattr(getattr(hass, "config", None), "units", None), "temperature_unit", None))
+
+
 def to_fahrenheit(value: float, unit: str) -> float:
     """Convert a temperature value to the internal Fahrenheit canonical unit.
 

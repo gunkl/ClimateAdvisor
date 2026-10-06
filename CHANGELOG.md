@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.86] — 2026-10-06
+
+- Fix #1023: a new install on a Home Assistant set to Celsius now pre-selects Celsius on the temperature unit step instead of Fahrenheit; existing installs are unchanged.
+
 ## [0.7.85] — 2026-10-06
 
 - Fix #1021: Climate Advisor now logs a warning when its temperature unit setting differs from Home Assistant's unit system (log-only, no change for matching setups).

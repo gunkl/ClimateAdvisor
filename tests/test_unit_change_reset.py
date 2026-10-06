@@ -721,3 +721,25 @@ class TestDiagnosticsChartSummary:
             "outdoor_oldest_ts": None,
             "outdoor_newest_ts": None,
         }
+
+
+class TestHaSystemUnitHelper:
+    """Issue #1023: temperature.ha_system_unit() reads HA's system unit as a unit key."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("°C", "celsius"), ("°F", "fahrenheit"), ("F", "fahrenheit"), ("C", "celsius"), (None, None)],
+    )
+    def test_symbol_table(self, raw, expected):
+        from types import SimpleNamespace
+
+        from custom_components.climate_advisor.temperature import ha_system_unit
+
+        hass = SimpleNamespace(config=SimpleNamespace(units=SimpleNamespace(temperature_unit=raw)))
+        assert ha_system_unit(hass) == expected
+
+    def test_unreadable_hass_returns_none(self):
+        from custom_components.climate_advisor.temperature import ha_system_unit
+
+        assert ha_system_unit(MagicMock()) is None
+        assert ha_system_unit(object()) is None

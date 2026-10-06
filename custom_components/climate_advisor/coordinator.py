@@ -277,6 +277,7 @@ from .temperature import (
     format_temp,
     free_cooling_direction_ok,
     from_fahrenheit,
+    ha_system_unit,
     to_fahrenheit,
     unit_key_from_attr,
     unit_mismatch,
@@ -4012,8 +4013,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         configured = self.config.get("temp_unit", "fahrenheit")
 
         if not getattr(self, "_ha_unit_checked", False):
-            units = getattr(getattr(self.hass, "config", None), "units", None)
-            ha_unit = unit_key_from_attr(getattr(units, "temperature_unit", None))
+            ha_unit = ha_system_unit(self.hass)
             if ha_unit is not None:
                 self._ha_unit_checked = True
                 info["ha_system_unit"] = ha_unit

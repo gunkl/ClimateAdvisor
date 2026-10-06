@@ -3200,3 +3200,61 @@ class TestZoneNamingScheduleStep:
         fetched = hass.config_entries.async_get_entry(entry_id)
         assert fetched is not None
         assert fetched.title == "Bedroom"
+
+
+class TestUnitStepDefault:
+    """Issue #1023: the unit step pre-selects Home Assistant's system unit."""
+
+    @staticmethod
+    def _default_of(flow) -> str:
+        """Run the real ``async_step_unit`` and return the ``default`` it gives ``temp_unit``.
+
+        Records the ``vol.Required`` call instead of introspecting the built schema, so it works
+        whether ``voluptuous`` is the real package or the harness's mock (CI has no voluptuous).
+        """
+        import importlib
+
+        mod = importlib.import_module("custom_components.climate_advisor.config_flow")
+        seen: dict = {}
+
+        def _spy(key, **kwargs):
+            seen[key] = kwargs.get("default")
+            return key
+
+        with patch.object(mod.vol, "Required", side_effect=_spy):
+            form = asyncio.run(flow.async_step_unit())
+        assert form["step_id"] == "unit"
+        assert "temp_unit" in seen, "temp_unit field missing from unit step schema"
+        return seen["temp_unit"]
+
+    @staticmethod
+    def _hass_with_unit(symbol):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(config=SimpleNamespace(units=SimpleNamespace(temperature_unit=symbol)))
+
+    @pytest.mark.parametrize(("symbol", "expected"), [("°C", "celsius"), ("°F", "fahrenheit")])
+    def test_default_follows_ha_system_unit(self, symbol, expected):
+        flow = _make_real_config_flow(self._hass_with_unit(symbol))
+        assert self._default_of(flow) == expected
+
+    def test_unrecognised_mock_unit_falls_back_to_fahrenheit(self):
+        flow = _make_real_config_flow(MagicMock())
+        assert self._default_of(flow) == "fahrenheit"
+
+    def test_hass_without_units_falls_back_to_fahrenheit(self):
+        from types import SimpleNamespace
+
+        flow = _make_real_config_flow(SimpleNamespace(config=None))
+        assert self._default_of(flow) == "fahrenheit"
+
+    def test_user_can_override_default(self):
+        flow = _make_real_config_flow(self._hass_with_unit("°C"))
+        flow.async_step_setpoints = MagicMock(return_value=_coro({"step_id": "setpoints"}))
+        result = asyncio.run(flow.async_step_unit({"temp_unit": "fahrenheit"}))
+        assert flow._data["temp_unit"] == "fahrenheit"
+        assert result["step_id"] == "setpoints"
+
+
+async def _coro(value):
+    return value

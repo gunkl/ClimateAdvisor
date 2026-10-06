@@ -18,6 +18,25 @@ UNIT_SYMBOL: dict[str, str] = {
 }
 
 
+# Derived from UNIT_SYMBOL: each unit's symbol ("°F"), bare letter ("F") and key name
+# ("FAHRENHEIT"), upper-cased for case-insensitive lookup.
+_UNIT_ATTR_ALIASES: dict[str, str] = {
+    alias.upper(): key for key, symbol in UNIT_SYMBOL.items() for alias in (symbol, symbol.lstrip("°"), key)
+}
+
+
+def unit_key_from_attr(attr: object) -> str | None:
+    """Map an entity's ``temperature_unit`` attribute to FAHRENHEIT/CELSIUS.
+
+    Accepts the symbol ("°F"/"°C"), the bare letter ("F"/"C") and the word
+    ("fahrenheit"/"celsius"), case-insensitive and whitespace-tolerant. Returns None for
+    None or anything unrecognised — callers decide what an unrecognised value means.
+    """
+    if attr is None:
+        return None
+    return _UNIT_ATTR_ALIASES.get(str(attr).strip().upper())
+
+
 def to_fahrenheit(value: float, unit: str) -> float:
     """Convert a temperature value to the internal Fahrenheit canonical unit.
 

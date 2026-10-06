@@ -22,8 +22,9 @@ from custom_components.climate_advisor.diagnostics import (
 def _make_coordinator(config: dict) -> MagicMock:
     coordinator = MagicMock()
     coordinator.config = config
-    coordinator._outdoor_temp_history = [1, 2, 3]
-    coordinator._indoor_temp_history = [1, 2]
+    # Real buffers hold (iso_ts, temp) tuples (Issue #1015: summary reads min/max/ts)
+    coordinator._outdoor_temp_history = [("t1", 1.0), ("t2", 2.0), ("t3", 3.0)]
+    coordinator._indoor_temp_history = [("t1", 1.0), ("t2", 2.0)]
     coordinator._briefing_sent_today = True
     coordinator._last_briefing = "Good morning! It's a mild day."
     coordinator.get_debug_state.return_value = {"hvac_mode": "heat"}
@@ -114,7 +115,14 @@ class TestPayloadFields:
         payload = asyncio.run(async_get_diagnostics_payload(hass, entry_a))
 
         assert payload["debug_state"] == {"hvac_mode": "heat"}
-        assert payload["chart_data_summary"] == {"outdoor_points": 3, "indoor_points": 2}
+        assert payload["chart_data_summary"] == {
+            "outdoor_points": 3,
+            "indoor_points": 2,
+            "outdoor_min": 1.0,
+            "outdoor_max": 3.0,
+            "outdoor_oldest_ts": "t1",
+            "outdoor_newest_ts": "t3",
+        }
         assert payload["learning_summary"] == {"score": 0.9}
         assert payload["briefing_state"] == {"sent_today": True, "briefing_length": len(coord_a._last_briefing)}
 

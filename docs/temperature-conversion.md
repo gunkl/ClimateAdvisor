@@ -11,6 +11,9 @@
 | What happens when an unknown unit string (e.g., `"kelvin"`) is passed to any conversion function? | All functions treat unknown units as `"fahrenheit"` and return the value unchanged (passthrough). The `UNIT_SYMBOL` dict falls back to `"°F"` for unknown keys. | [Constants and Boundary Values](#constants-and-boundary-values) |
 | Where is the canonical rule that all internal temperatures are stored in Fahrenheit? | Stated in the `temperature.py` module docstring: "All internal temperatures are stored and calculated in Fahrenheit. This module provides the only conversion boundary used throughout the integration." | [Scope](#scope) |
 | Is the hourly forecast list in the provider's unit or internal °F, and how may a new consumer use it? | `_hourly_forecast_temps` is ALWAYS internal °F: `ClimateAdvisorCoordinator._get_hourly_forecast_data()` normalises a copy at the single source, and `_refresh_hourly_forecast()` is the only refresh path. New consumers must treat it as °F and never convert it again. | [Hourly forecast is normalised to internal °F at its source](#hourly-forecast-is-normalised-to-internal-f-at-its-source-issue-1015) |
+| Does Climate Advisor read the weather provider's temperature unit? | No. CA assumes its configured unit equals the provider's and never reads the provider's unit for conversion. A one-shot WARNING `Weather unit mismatch` (plus debug-state fields `unit_mismatch`/`provider_unit`/`configured_unit`) flags a disagreement. Config values stay canonical °F and are unit-invariant. | [Provider unit must equal the configured unit](#provider-unit-must-equal-the-configured-unit-issue-1015) |
+| What happens to same-day readings when the user changes the unit? | On the next same-day restore the saved `temp_unit` differs from the configured unit, so outdoor/indoor temp history, `pred_archive` and `classification` are discarded (WARNING + `unit_changed` event). Chart-log and learning records written under the wrong unit are not repaired. | [Unit change handling](#unit-change-handling-issue-1015) |
+| Does the climate-entity unit check (Issue #968) honour `temp_unit`? | No. It hardcodes Fahrenheit and ignores `temp_unit`; a tracking issue is being filed. Not fixed by Issue #1015. | [Known limitation: climate-entity unit check](#known-limitation-climate-entity-unit-check-issue-968) |
 
 ## Scope
 
@@ -114,6 +117,39 @@ The user's display unit is NOT auto-detected from HA's unit system at runtime. I
 
 This means the unit does not automatically follow if the user changes their HA unit system after setup. They must update the Climate Advisor option explicitly.
 
+## Provider unit must equal the configured unit (Issue #1015)
+
+Climate Advisor **assumes** the weather provider reports in the same unit as the configured `temp_unit`. It never reads the provider's unit to decide how to convert: `to_fahrenheit(value, config["temp_unit"])` is applied to provider readings using the *configured* unit only. If the two disagree, readings are silently misinterpreted (e.g. a provider's 16.7 °C read as 16.7 °F is really −8.5 °C), and those samples enter the same-day outdoor history, driving `today_low`/`today_high` and the day trend.
+
+Config values (comfort, setback, thresholds) are stored canonical °F (`config_flow.py` converts on entry) and are **unit-invariant**: changing `temp_unit` does not corrupt them.
+
+**Detection (one-shot WARNING):** in `_get_forecast()`, right after the weather entity's attributes are read, the entity's `temperature_unit` attribute is compared with the configured unit (via `temperature.unit_key_from_attr()`, which accepts `°F`/`°C`/`F`/`C`, case-insensitive). On disagreement:
+
+```
+Weather unit mismatch: provider_unit=celsius configured_unit=fahrenheit — readings will be misread until corrected
+```
+
+It fires once per run (`_weather_unit_checked` is set only once the attribute is present, so a late-arriving entity is still checked). No entity ids are logged. `get_debug_state()` (and therefore diagnostics) exposes `unit_mismatch` (bool), `provider_unit` and `configured_unit`. There is no dashboard card or Repairs issue for this (deferred).
+
+## Unit change handling (Issue #1015)
+
+Changing `temp_unit` in the options flow does **not** reload the integration. `_commit_section()` (`config_flow.py`, Issue #573) only writes the config entry and raises a `reload_needed` Repairs issue; the new unit takes effect after the user presses the Repairs "Fix", reloads the integration manually, or Home Assistant restarts. The running coordinator's `config` is fixed for its lifetime, so every state save before that point (periodic saves, and `async_shutdown()` on a reload) still records the **old** unit in the state file's top-level `temp_unit`. On an HA restart `async_shutdown()` is not called (the STOP listener only saves learning diagnostics), so the file holds the last periodic save, also in the old unit (see [state-persistence.md](state-persistence.md#temp_unit-key-and-same-day-restore-rule-issue-1015)). Either way, on the same-day restore that applies the new unit, if the saved unit is a string and differs from the configured unit:
+
+- **Not restored:** `temp_history` (outdoor and indoor), `pred_archive`, `classification` (recomputed on the first cycle).
+- **Kept:** `today_record`, briefing, `automation_state`, occupancy, flags.
+- The persisted pending thermal observations are also discarded. The persisted pending thermal observations (learning `pending_observations`) are discarded too, because an in-progress observation spanning the switch would mix samples read under both units. Other learning data is untouched, and the legacy single `pending_thermal_event` field is not touched.
+- A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False> dropped_pending_observations=<n>`. Event payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification`, `dropped_pending_observations`.
+
+The rule discards on **any** unit change, not only a mismatch. The restore itself converts nothing (history is stored in internal °F); the reason for discarding is that samples taken while the configured unit disagreed with the provider's unit are wrong. The rule cannot tell good samples from bad, so it also drops good pre-switch samples (harmless: the buffers refill on the next polls).
+
+Consequence: once the new unit is applied (Repairs "Fix", manual reload or HA restart), Forecast Low/High and the day trend recover straight away instead of staying wrong until the 23:59 history clear. An already-written morning briefing may keep showing the old wording until the next one (the restored briefing text is not regenerated).
+
+**Known limitations:** chart-log entries and learning/thermal records written while the unit was wrong are **not** repaired (old chart history stays as recorded). A unit change on the same restart as the first upgrade to 0.7.83 is not detected, because the pre-upgrade state file has no `temp_unit` key (missing key means unchanged behaviour).
+
+## Known limitation: climate-entity unit check (Issue #968)
+
+The pre-existing check on the *climate* entity's `temperature_unit` attribute (Issue #968, in the `_first_run` block of the coordinator) hardcodes "CA assumes Fahrenheit" and ignores the configured `temp_unit`. It could false-ERROR on a Celsius install if a thermostat integration exposed that attribute (standard HA climate state attributes do not, so it is likely dormant — unverified). A tracking issue is being filed; it is **not** fixed by Issue #1015.
+
 ## Hourly forecast is normalised to internal °F at its source (Issue #1015)
 
 The weather entity reports its hourly forecast in the provider's native unit. Before 0.7.82 that list was stored and consumed unconverted while every consumer assumed °F, so Celsius installs compared °C forecast values against °F thresholds and predictions (nat-vent forecast-peak guard, the ODE predicted-indoor cache behind the ceiling guard, the nat-vent plan, the Next Automation card, and the chart's Predicted Outdoor/Predicted Indoor).
@@ -146,6 +182,7 @@ The weather entity reports its hourly forecast in the provider's native unit. Be
 3. **All functions are pure and stateless.** No side effects, no logging, no I/O. Safe to call from any context.
 4. **Unknown units never raise.** Passthrough behavior is guaranteed for any non-`"celsius"` input string.
 5. **The hourly forecast list is internal °F.** `_hourly_forecast_temps` is normalised at its single source (`_get_hourly_forecast_data()`) and refreshed only via `_refresh_hourly_forecast()`; no consumer converts it again (Issue #1015). This is a specific instance of invariant 1.
+6. **Provider unit is assumed, not read.** Provider readings are converted using the configured `temp_unit` only; a disagreement is surfaced by the one-shot `Weather unit mismatch` WARNING but never auto-corrected (Issue #1015).
 
 ## Disclosure Path
 

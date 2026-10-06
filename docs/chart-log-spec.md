@@ -15,7 +15,10 @@
 | What two fields were added for the Vent bar (Issue #331), and what do they mean? | `fan_running: bool` — fan is physically on (compressor-class running). `nat_vent_active: bool` — nat-vent session is armed (includes paused-between-cycles). Legacy `fan` field is still emitted for back-compat. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
 | How does the frontend decide the Vent bar color for each entry? | Blue if `fan_running`; green if `nat_vent_active || windows_recommended`; else off. Back-compat: if `fan_running` absent, fall back to legacy `fan` field → blue. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
 | What does the HVAC bar show after Issue #331? | Compressor-only: `heating` (red) / `cooling` (blue). `fan_only` and `off` produce no bar. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
-| How is `pred_outdoor` populated in each chart log entry? | Raw hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()` — no normalisation. `null` when hourly forecast has no entry for the current hour. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
+| How is `pred_outdoor` populated in each chart log entry? | The hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()` from `_hourly_forecast_temps`, which is already normalised to internal °F at its source (Issue #1015). `null` when hourly forecast has no entry for the current hour. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
+| What unit is each temperature field stored in a chart-log entry? | Every temperature field is internal °F regardless of the install's display unit: `indoor`, `outdoor`, `setpoint`, `nat_vent_target`, `lower`, `upper`, `pred_indoor`, and (entries written since 0.7.82) `pred_outdoor`. Entries written before 0.7.82 on Celsius installs hold `pred_outdoor` in the weather provider's native unit. | [Temperature Units and Display Conversion](#temperature-units-and-display-conversion-issue-1015) |
+| Which chart-log fields does `get_chart_data()` convert to the display unit in `state_log`, and which does it leave raw? | It converts exactly the keys in `_CHART_LOG_CONVERTED_TEMP_KEYS` (`pred_outdoor`, `pred_indoor`, `pred_outdoor_avg`, `pred_indoor_avg`, `lower`, `upper`). `indoor`, `outdoor`, `setpoint`, `nat_vent_target` stay raw °F because they are consumed through separately-converted series, and converting them would double-convert `effective_target_history`. | [Temperature Units and Display Conversion](#temperature-units-and-display-conversion-issue-1015) |
+| Why does a Celsius install's historical Predicted Outdoor line still look wrong after the #1015 fix? | Chart-log entries written before the fix hold `pred_outdoor` in the provider's native unit and were deliberately not migrated, so the line stays wrong for windows still containing them until they age out (24h/3d raw views; up to 7/30/365 days for the 7d/30d/1y averages). Entries written after the fix are correct. | [Known limitation: pre-fix history](#known-limitation-pre-fix-history-not-migrated) |
 | How is `pred_indoor` populated in each chart log entry? | Read from `_pred_archive` (first-write-wins prediction archive): the value for time T was written ~4 hours before T arrived, producing a genuine advance prediction. Falls back to `_last_predicted_indoor[0]["temp"]` only during the warmup period (first 4h after HA restart). `null` if both archive and cache are empty, or `pred_outdoor` is null. | [First-Write-Wins Prediction Archive](#first-write-wins-prediction-archive) |
 | What fallback does `_build_future_forecast_outdoor()` use when hourly forecast is empty? | When hourly forecast is empty or yields no future entries and a `classification` is provided, generates a cosine curve using `classification.today_high`/`classification.today_low`. Returns `[]` only if no classification is provided. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
 | What fallback does `_build_predicted_indoor_future()` use when hourly forecast is empty? | When `classification` is provided, synthesises a cosine-based hourly list from `classification.today_high`/`classification.today_low` and proceeds normally. Returns `[]` only if no classification is provided. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
@@ -125,15 +128,41 @@ Entries with unparseable `ts` fields are treated differently in the two prune co
 | `fan` | `bool` | Always | Whether the fan is active (legacy field — still emitted for back-compat with historical entries; see `fan_running` below) |
 | `fan_running` | `bool` | Always (Issue #331+) | Fan is **physically running** — `_compute_fan_status()` ∈ `{"active", "running (manual override)", "running (untracked)"}`. Absent on entries written before Issue #331; frontend falls back to legacy `fan` field when absent. |
 | `nat_vent_active` | `bool` | Always (Issue #331+) | Nat-vent session is **armed** — `automation_engine._natural_vent_active` is `True`. True even when the fan is paused between cycles (session alive, compressor not running). Absent on pre-#331 entries; frontend treats absent as `False`. |
-| `indoor` | `float \| null` | Always | Indoor temperature in the user's configured unit; `null` if unavailable |
-| `outdoor` | `float \| null` | Always | Outdoor temperature; `null` if unavailable |
+| `indoor` | `float \| null` | Always | Indoor temperature in internal °F (regardless of display unit); `null` if unavailable |
+| `outdoor` | `float \| null` | Always | Outdoor temperature in internal °F; `null` if unavailable |
 | `windows_open` | `bool` | Always | Whether any window/door sensor reports open |
 | `windows_recommended` | `bool` | Always | Whether natural ventilation was recommended at this tick |
-| `pred_outdoor` | `float \| null` | Always | Raw hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()`. No normalisation is applied. `null` when the hourly forecast has no entry matching the current hour, or when hourly forecast is unavailable. (Fixed in Issue #132: previously stored a normalised value from `_build_outdoor_curve()`, which caused spikes at classification boundaries.) |
+| `pred_outdoor` | `float \| null` | Always | Hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()` from `self._hourly_forecast_temps`. Since Issue #1015 (0.7.82) that list is normalised to internal °F at its source, so this value is °F on every install; entries written before 0.7.82 on Celsius installs hold the provider's native unit (see [Known limitation](#known-limitation-pre-fix-history-not-migrated)). `null` when the hourly forecast has no entry matching the current hour, or when hourly forecast is unavailable. (Fixed in Issue #132: previously stored a normalised value from `_build_outdoor_curve()`, which caused spikes at classification boundaries.) |
 | `pred_indoor` | `float \| null` | Always | Predicted indoor temperature: read from `_pred_archive` (first-write-wins archive). The archived value for time T was written when T was ~4 hours in the future — i.e., the prediction was made ~4 hours before T arrived. Falls back to `_last_predicted_indoor[0]["temp"]` only during the warmup period (first 4 hours after HA restart). Only written when `pred_outdoor` is non-null; otherwise `null`. See [First-Write-Wins Prediction Archive](#first-write-wins-prediction-archive). |
 | `event` | `str` | Optional | Event marker label (e.g., `"hvac_mode_changed"`, `"windows_opened"`). Present only when `event` argument was non-None. |
 
 **Invariant:** `ts` is always present and always a string. Monotonic non-decrease of `ts` values is the caller's responsibility — the class does not enforce it.
+
+## Temperature Units and Display Conversion (Issue #1015)
+
+**Storage rule:** every temperature field in a chart-log entry is stored in internal °F, independent of the install's `temp_unit`. This includes `indoor`, `outdoor`, `setpoint`, `nat_vent_target`, `lower`, `upper`, `pred_indoor`, and `pred_outdoor` (for entries written since 0.7.82). The hourly/daily bucketing keeps the same units (averages/min/max of °F values).
+
+**Why `pred_outdoor` is °F:** `_hourly_forecast_temps` is normalised to °F at its single source, `_get_hourly_forecast_data()`, and refreshed only through `_refresh_hourly_forecast()` — see [Temperature Conversion](temperature-conversion.md#hourly-forecast-is-normalised-to-internal-f-at-its-source-issue-1015). Before 0.7.82 the list held the provider's native unit, so Celsius installs wrote °C into `pred_outdoor`.
+
+**Read-time conversion in `get_chart_data()`:** `_conv_log_entry()` converts the keys listed in the module constant `_CHART_LOG_CONVERTED_TEMP_KEYS` in `coordinator.py` from °F to the display unit when building `state_log`:
+
+| Converted in `state_log` | Reason |
+|---|---|
+| `pred_outdoor`, `pred_indoor`, `pred_outdoor_avg`, `pred_indoor_avg` | Read by the frontend straight from `state_log` for the past Predicted lines |
+| `lower`, `upper` | Historical Target Band; read straight from `state_log` by the frontend. Not converted before Issue #1015, so Celsius installs drew the past band in °F on a °C axis |
+
+| Left raw °F in `state_log` (deliberately) | Why |
+|---|---|
+| `indoor`, `outdoor` | Read from the raw entries into the `actual_*` series, which are converted separately |
+| `setpoint`, `nat_vent_target` | `_extract_historical_effective_target()` reads them after `_conv_log_entry()` and its result is converted again; converting here would double-convert `effective_target_history` |
+
+The historical-band series built before `_conv_log_entry()` reads raw `lower`/`upper` and converts them once itself, so adding them to the constant does not double-convert it.
+
+**Guard against drift:** `tests/test_chart_celsius.py` structurally requires every temperature field `ChartStateLog.append()` emits to be either in `_CHART_LOG_CONVERTED_TEMP_KEYS` or on the test's explicit allowlist, so a newly added chart-log temperature field fails CI until it is classified.
+
+### Known limitation: pre-fix history not migrated
+
+Chart-log entries written before 0.7.82 on Celsius installs hold `pred_outdoor` in the provider's native unit (°C). They were left as they are — no migration, no change to the persisted file format (so no downgrade hazard). `get_chart_data()` converts them as if they were °F, so on Celsius installs the Predicted Outdoor line for past windows that still contain pre-fix entries stays wrong until they age out: the 24h/3d raw views while the window covers them, and the 7d/30d/1y averages for up to 7/30/365 days. Entries written after the fix display correctly. Historical `pred_indoor` (computed from the raw outdoor input) is likewise not repaired. Fahrenheit installs are unaffected (the normalisation is a passthrough for `"fahrenheit"`).
 
 ## Vent Bar Fields (Issue #331)
 
@@ -374,14 +403,14 @@ This section covers the coordinator-side logic that computes `pred_outdoor` and 
 
 Located in `coordinator.py` inside `_async_update_data()` at the chart log append block.
 
-**`pred_outdoor`** is the raw hourly forecast temperature for the current local hour:
+**`pred_outdoor`** is the hourly forecast temperature (internal °F since Issue #1015) for the current local hour:
 
 ```python
 _pred_outdoor_val = _extract_current_hour_forecast_temp(self._hourly_forecast_temps, now_dt)
 ```
 
 - `_extract_current_hour_forecast_temp()` scans `self._hourly_forecast_temps` for an entry whose local datetime matches today's date and the current local hour.
-- Returns the raw `temperature` field (rounded to 1 decimal), not a normalised value.
+- Returns the `temperature` field (rounded to 1 decimal) as it sits in `_hourly_forecast_temps` — already internal °F (Issue #1015) — with no curve-normalisation or further unit conversion.
 - Returns `None` if hourly forecast is absent or has no entry for the current hour.
 - Uses the same field name and timezone handling as `_build_future_forecast_outdoor()` so past and future predicted outdoor values come from the same data source.
 
@@ -489,7 +518,7 @@ E. **Archive populated but `pred_indoor = indoor` exactly** — potential bug. C
 Used by `get_chart_data()` to build the `forecast_outdoor` time series for the chart (future region only).
 
 - Iterates `hourly_forecast`; for each entry whose local datetime is at or after `now`, appends `{"ts": local_dt.isoformat(), "temp": round(float(temp), 1)}`.
-- Raw forecast temperatures — no normalisation.
+- Forecast temperatures as held in `hourly_forecast` (internal °F; no curve-normalisation). The caller converts the series to the display unit.
 - Covers all available forecast days (typically 2–10+), not just today.
 
 **Fallback (Issue #132):** when `hourly_forecast` is empty or yields no future entries:

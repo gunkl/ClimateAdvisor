@@ -16,6 +16,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
 | How do you decide if a finding in an AI investigator report is a real bug or noise? | Apply the 5-category taxonomy: ACTIONABLE / TIME-DEPENDENT / CONTEXTUAL / NOISE / RESOLVED. Count discrepancies ≤ 1, high abandonment from operational interruptions, and pending-observation speculation are all NOISE. | [§Interpreting AI Investigator Reports — Noise Taxonomy](09-DEBUGGING-GUIDE.md#interpreting-ai-investigator-reports--noise-taxonomy) |
 | How do you diagnose a user-reported "CA keeps overriding my thermostat changes"? | Check the Override Bypass Inventory: 9 known bypasses covering setpoint-only changes (#197), confirm state lost on restart (RC-1 #198), grace timer not restored (RC-2 #199), PATH B short overrides (#200), second override ignored (#201), 30s guard too wide (#202), bedtime/wakeup unconditional clear (BW #204 — fixed), away setback mode mismatch (OA #222 — fixed), and away setback detected as override (OB #221 — fixed). | [§Override Bypass Inventory](09-DEBUGGING-GUIDE.md#override-bypass-inventory) |
+| Forecast Low/High or day trend looks absurd (e.g. outdoor -8 °C on a mild day) — what do I check? | Grep logs for `Weather unit mismatch`, `Temperature unit changed since last run`, and `Observed outdoor extreme overrides forecast`; check the diagnostics `chart_data_summary` outdoor_min/max and the `unit_changed` event. | [§"Forecast Low/High looks wrong"](09-DEBUGGING-GUIDE.md#forecast-lowhigh-looks-wrong-unit-mismatch--unit-change-issue-1015) |
 
 ## Primary Debugging Data Sources
 
@@ -126,6 +127,25 @@ python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status,sensor
 3. Check contact sensors: `sensor.climate_advisor_contact_status` (paused_by_door attribute)
 4. Check occupancy: `sensor.climate_advisor_occupancy_mode`
 5. Review logs: `python3 tools/ha_logs.py --lines 200`
+
+### "Forecast Low/High looks wrong" (unit mismatch / unit change, Issue #1015)
+
+Occupant symptom: Forecast Low/High, the day trend and the bedtime-setback text are wrong (a Celsius home shows an outdoor low around -8 °C on a mild day), and the briefing contradicts itself.
+
+```bash
+python3 tools/ha_logs.py --lines 3000 --filter "unit\|Observed outdoor extreme"
+```
+
+| Log line / signal | Meaning | Action |
+|---|---|---|
+| `Weather unit mismatch: provider_unit=… configured_unit=…` (WARNING, once per run) | The weather entity's `temperature_unit` disagrees with Climate Advisor's configured unit. CA never reads the provider's unit, so readings are misinterpreted. Debug state shows `unit_mismatch: true` plus `provider_unit`/`configured_unit`. | Set the Climate Advisor temperature unit to match the provider (options flow). Wrong samples already in the same-day history are discarded by the reload that applies the change. |
+| `Temperature unit changed since last run: same-day readings discarded` (WARNING, at restore) | The saved state's `temp_unit` differs from the configured unit; temp history, `pred_archive`, `classification` and the persisted pending thermal observations were dropped. Full text: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False> dropped_pending_observations=<n>`. Expected after the user changes the unit. | None; forecast values are correct from the first cycle after the reload. Only an unexpected occurrence needs investigation (who changed the unit?). |
+| `unit_changed` event (persisted event log / Activity Report / diagnostics) | The structured twin of the line above. Payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification`, `dropped_pending_observations`. | Correlate its timestamp with the first wrong value. |
+| `Observed outdoor extreme overrides forecast: kind=<low\|high> observed_ts=<ts> observed_value=<x.x> provider_value=<x.x> delta_f=<x.x>` (WARNING) | Observed history overrode the provider's high/low by more than 20°F (`_OBSERVED_EXTREME_DELTA_F`, values internal °F). Emitted once per distinct (kind, observed_ts) per day (latch cleared at end of day); returned values are unchanged. A legitimate large day/night swing can trigger it once per new extreme sample. | A sample taken in the wrong unit (check for a unit change or mismatch near that ts) or a bad sensor reading. |
+
+**Diagnostics:** the `chart_data_summary` block now includes `outdoor_min`, `outdoor_max`, `outdoor_oldest_ts` and `outdoor_newest_ts` next to the existing point counts, (internal °F, regardless of the configured display unit), so one diagnostics download shows a poisoned same-day sample directly (an `outdoor_min` far below the provider's low is the signature).
+
+**What to expect after changing the unit:** the options flow only writes the new unit and raises a Repairs "reload needed" issue; the unit applies after the Repairs "Fix", a manual reload or an HA restart. Since 0.7.83 that restore discards the same-day readings, so Forecast Low/High and the day trend recover straight away (before it, wrong values persisted until the 23:59 history clear). An already-written morning briefing may keep its old wording until the next one. Avoid switching units just to test. **Not repaired:** chart-log history and learning/thermal records written while the unit was wrong stay as recorded; chart entries fade as they age out. A unit change on the same restart as the first upgrade to 0.7.83 is not detected (the older state file has no `temp_unit`). See [temperature-conversion.md](temperature-conversion.md#provider-unit-must-equal-the-configured-unit-issue-1015) and [state-persistence.md](state-persistence.md#temp_unit-key-and-same-day-restore-rule-issue-1015).
 
 ## Debugging AI Features
 

@@ -32,6 +32,20 @@ from .const import CONFIG_METADATA, DOMAIN, VERSION
 TO_REDACT = {"notify_service"} | {key for key, meta in CONFIG_METADATA.items() if meta.get("sensitive")}
 
 
+def _chart_data_summary(coordinator: Any) -> dict[str, Any]:
+    """Counts plus the outdoor buffer's range/age (Issue #1015) — values only, None-safe when empty."""
+    outdoor = list(coordinator._outdoor_temp_history)
+    values = [t for _, t in outdoor]
+    return {
+        "outdoor_points": len(outdoor),
+        "indoor_points": len(coordinator._indoor_temp_history),
+        "outdoor_min": min(values) if values else None,
+        "outdoor_max": max(values) if values else None,
+        "outdoor_oldest_ts": outdoor[0][0] if outdoor else None,
+        "outdoor_newest_ts": outdoor[-1][0] if outdoor else None,
+    }
+
+
 async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     """Build the shared, redacted diagnostics payload for one config entry."""
     zones = hass.data.get(DOMAIN, {})
@@ -75,10 +89,7 @@ async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry)
         payload.update(
             {
                 "debug_state": coordinator.get_debug_state(),
-                "chart_data_summary": {
-                    "outdoor_points": len(coordinator._outdoor_temp_history),
-                    "indoor_points": len(coordinator._indoor_temp_history),
-                },
+                "chart_data_summary": _chart_data_summary(coordinator),
                 "learning_summary": coordinator.learning.get_compliance_summary(),
                 "config": dict(coordinator.config),
                 "briefing_state": {

@@ -566,6 +566,11 @@ class TestEventRenderersCoverage:
             # "routes to the default renderer". See TestUnprotectedGraceStartedHidden
             # below for the test that locks in the actual hide-the-row behavior.
             "unprotected_grace_started",
+            # Issue #1015: one-off diagnostic marker emitted at restore time when the
+            # temperature unit changed since the last run (payload: from/to/dropped_*
+            # counts). Rare and self-describing; the default renderer's key=value
+            # fallback is sufficient, so no dedicated renderer in ai_skills_context.py.
+            "unit_changed",
         }
     )
 

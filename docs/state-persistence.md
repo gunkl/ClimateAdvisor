@@ -11,6 +11,7 @@
 | What happens when the state file has a mismatched version or is malformed? | `load()` logs a WARNING and returns an empty dict — the coordinator starts fresh rather than attempting partial migration. | [Version Guard](#version-guard) |
 | Where does LearningState (thermal model, records, suggestions) persist, and is that this module's responsibility? | `LearningState` persists to `climate_advisor_learning.json` and is owned entirely by `LearningEngine` in `learning.py`. `state.py` does not touch that file. | [Scope](#scope) |
 | What is STATE_VERSION and when does it change? | Currently `1`. It is compared on load; any mismatch discards the file and starts fresh. It must be incremented whenever the state dict schema changes in a breaking way. | [Version Guard](#version-guard) |
+| What is the `temp_unit` key in the state file and what does it do? | A top-level key (config unit at save time) written by the coordinator's `_build_state_dict`. On same-day restore, a differing string value discards temp history, `pred_archive` and `classification`; a missing key changes nothing. Older loaders ignore it (checks `version` only). | [temp_unit key and same-day restore rule](#temp_unit-key-and-same-day-restore-rule-issue-1015) |
 
 ## Scope
 
@@ -92,6 +93,26 @@ There is no migration path in `state.py`. Any breaking schema change requires bu
 5. `os.replace(tmp_path, state_path)` — atomic rename; original file untouched until this line succeeds
 6. On `OSError` at step 4 or 5: log ERROR, attempt `os.unlink(tmp_path)` (suppressed if that also fails)
 
+### `temp_unit` key and same-day restore rule (Issue #1015)
+
+The schema belongs to the coordinator, but one key has restore-time semantics worth recording here. `_build_state_dict` adds a top-level `"temp_unit"` (the configured unit, `"fahrenheit"` or `"celsius"`, at save time). The options flow does **not** reload the integration (`_commit_section()` only writes the config entry and raises a `reload_needed` Repairs issue, Issue #573); the new unit applies after a Repairs "Fix", a manual reload or an HA restart. The running coordinator's config is fixed for its lifetime and no save path writes a new unit first, so the saved `temp_unit` is always the unit the coordinator was *running with* (the old unit when a change is pending). On a reload `async_shutdown()` saves it; on an HA restart `async_shutdown()` is not called (the STOP listener only saves learning diagnostics), so the file holds the last periodic save, in the same old unit.
+
+On same-day restore (`async_restore_state`), the coordinator computes one boolean `unit_changed` = `saved_unit` is a `str` **and** differs from the current configured unit, and applies it to three restores:
+
+| Section | Restored when unit unchanged | When `unit_changed` |
+|---|---|---|
+| `temp_history` (outdoor + indoor) | yes | **dropped** (may include samples taken while the configured unit disagreed with the provider's) |
+| `pred_archive` | yes | **dropped** |
+| `classification` | yes (bridge until first cycle) | **dropped** (recomputed on first cycle) |
+| learning `pending_observations` | yes | **dropped** (an observation spanning the switch would mix units; other learning data and the legacy `pending_thermal_event` field untouched) |
+| `today_record`, briefing, `automation_state`, occupancy, flags | yes | **kept** |
+
+The restore converts nothing (history is internal °F); the discard rule fires on any unit change and cannot tell bad samples from good, so it also drops good pre-switch samples (harmless; buffers refill on the next polls).
+
+A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False> dropped_pending_observations=<n>`. Event payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification`, `dropped_pending_observations`. A missing or non-string `temp_unit` is a no-op, so existing installs and the first upgrade to 0.7.83 behave as before (a unit change on that same restart is not detected). `STATE_VERSION` is unchanged: the key is additive, the loader checks only `version`, and older code ignores it, so the change is **downgrade-safe**. Not repaired: chart-log entries and learning/thermal records written while the unit was wrong.
+
+See [temperature-conversion.md](temperature-conversion.md#unit-change-handling-issue-1015).
+
 ## Invariants
 
 1. **The original state file is never partially overwritten.** All writes go to a `.tmp` file; only `os.replace()` makes the new content visible.
@@ -100,6 +121,7 @@ There is no migration path in `state.py`. Any breaking schema change requires bu
 4. **Version is always written by `save()`, never by the caller.** The coordinator passes a state dict without a `version` key; `save()` injects it.
 5. **No leftover `.tmp` files after `delete()`.** `delete()` globs for `climate_advisor_state_*.tmp` and removes all matches.
 6. **File permissions are set.** After `os.replace()`, `save()` calls `os.chmod(str(self._path), 0o600)` (guarded by `hasattr(os, "chmod")`, so it's a no-op on platforms without it, e.g. Windows) — satisfying the CLAUDE.md security rule requiring `0o600` on persisted state files. Fixed in Issue #384 (v0.4.53); this section previously described a gap that no longer exists — verified directly against `state.py` during the 2026-09-16 documentation staleness audit.
+7. **Additive coordinator keys do not bump `STATE_VERSION`.** `temp_unit` (Issue #1015) is read defensively (type-checked, missing = no-op) so older and newer code can share one file.
 
 ## Disclosure Path
 

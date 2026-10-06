@@ -18,6 +18,8 @@ to the classifier and briefing.
 | How is weather bias correction applied? | [§ Bias Correction](#bias-correction) |
 | What timezone is used for date comparisons? | [§ Timezone Strategy](#timezone-strategy) |
 | What is the fix history for this function? | [§ Known History](#known-history) |
+| What happens when observed outdoor history overrides the provider's high/low by a lot? | [§ Observed-Extreme Override Warning](#observed-extreme-override-warning) |
+| What if the provider's temperature unit differs from Climate Advisor's? | [§ Provider Unit Assumption](#provider-unit-assumption) |
 
 ## Datetime Format
 
@@ -91,6 +93,20 @@ forecast-vs-actual data) is applied to `tomorrow_high` and `tomorrow_low`:
 Bias is applied to **tomorrow** only, not today. Today's forecast is corrected by the
 observed temperature history guard (`_outdoor_temp_history` max/min override).
 
+## Observed-Extreme Override Warning
+
+Today's high/low returned by `_get_forecast()` are overridden by the observed `_outdoor_temp_history` max/min when history is more extreme than the provider values. Since 0.7.83 (Issue #1015), when the override exceeds `_OBSERVED_EXTREME_DELTA_F` (20°F) a WARNING is logged:
+
+```
+Observed outdoor extreme overrides forecast: kind=<low|high> observed_ts=<ts> observed_value=<x.x> provider_value=<x.x> delta_f=<x.x>
+```
+
+It names the offending history sample (`observed_ts`, `observed_value`), the provider value and the delta. It is emitted once per distinct `(kind, observed_ts)` per day (the latch is cleared in `_async_end_of_day`), and only when the delta exceeds `_OBSERVED_EXTREME_DELTA_F = 20.0` °F. A legitimate large day/night swing can therefore trigger it once per new extreme sample. The sample and provider values in the line are internal °F (the history and the provider high/low are both held in °F at that point). **Returned values are unchanged** — this is observability only. A normal day or a large Fahrenheit swing under 20°F is silent. Typical causes: a unit mismatch/change polluting the history (see below), or a bad sensor reading. Use the sample ts to find the poll that introduced it.
+
+## Provider Unit Assumption
+
+`_get_forecast()` converts provider values using the *configured* `temp_unit`; it never reads the provider's unit for conversion. Right after reading the weather attributes it performs a one-shot check of the entity's `temperature_unit` attribute and logs `Weather unit mismatch: provider_unit=… configured_unit=…` on disagreement. See [temperature-conversion.md](temperature-conversion.md#provider-unit-must-equal-the-configured-unit-issue-1015).
+
 ## Timezone Strategy
 
 Date comparisons use **local calendar date for "now"** and **raw date from the forecast
@@ -126,6 +142,7 @@ and "now" uses the local calendar date the user actually experiences.
 | v0.3.22 (Fix #107) | Changed forecast key from `'time'` to `'datetime'`; added `dt_util.as_local()` for timezone-aware parsing. Blind-index fallback retained. |
 | v0.3.44 (Fix #143) | Replaced loop + fallback block with UTC-date-keyed dict. Removed all blind index assumptions. Switched from `dt_util.as_local()` to `astimezone(UTC)` for entry date extraction — fixes one-day off-by-one for UTC midnight forecast timestamps. Added WARNING logging for missing dates and INFO for matched raw temps. |
 | v0.3.55 (Fix #190) | Replaced UTC-date approach with raw-date + local-now. `dt_util.utcnow()` → `dt_util.now()` for the reference date; `fc_obj.astimezone(UTC).date()` → `fc_obj.date()` for entry bucketing. Fixes evening UTC rollover: in UTC-7 timezones after 5pm, UTC had already rolled to the next day causing tomorrow's forecast to appear as today. |
+| v0.7.83 (Fix #1015) | Added the observed-extreme override WARNING (>20°F) naming the history sample, and the one-shot weather-unit mismatch WARNING. Return values unchanged. |
 
 ### Why the fallback was wrong (Fix #143)
 

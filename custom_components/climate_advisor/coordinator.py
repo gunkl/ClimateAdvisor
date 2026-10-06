@@ -271,6 +271,7 @@ from .scheduler import (
     resolve_tou_phase,
 )
 from .state import StatePersistence
+from .temperature import FAHRENHEIT as _UNIT_FAHRENHEIT
 from .temperature import (
     convert_delta,
     find_temperature_crossing,
@@ -278,9 +279,15 @@ from .temperature import (
     free_cooling_direction_ok,
     from_fahrenheit,
     to_fahrenheit,
+    unit_key_from_attr,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Issue #1015: a provider low/high this far (°F) from the observed outdoor extreme is
+# logged as a WARNING when the observed extreme overrides it (likely a bad sample or a
+# unit mismatch). Observability only — never changes the returned values.
+_OBSERVED_EXTREME_DELTA_F: Final = 20.0
 
 # Degrees below comfort_heat at which outdoor temp is too cold to recommend opening windows.
 # With default comfort_heat=70°F this means outdoor must be ≥ 55°F for windows to be recommended.
@@ -654,6 +661,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Startup safety — first update checks HVAC state before applying classification
         self._first_run: bool = True
+        # Issue #1015: one-shot weather-provider unit check state (see _get_forecast)
+        self._weather_unit_checked: bool = False
+        self._weather_unit_info: dict[str, Any] | None = None
+        # Issue #1015: (kind, observed_ts) pairs already warned about today (cleared at end of day)
+        self._observed_extreme_warned: set[tuple[str, str]] = set()
 
         # State
         self._current_classification: DayClassification | None = None
@@ -1525,8 +1537,57 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Same-day restore
         _LOGGER.info("Restoring same-day state from %s", state.get("last_saved"))
 
+        # Issue #1015: nothing is converted on restore — history is stored in internal °F.
+        # What is wrong are samples taken while the configured unit disagreed with the
+        # weather provider's (e.g. a provider °C value passed through as °F). The rule
+        # discards on ANY unit change, which also drops good samples from before a
+        # switch into the wrong unit (harmless: they refill within a poll cycle).
+        # Decided once here and applied to the reading-derived restores below (and the
+        # persisted pending thermal observations). Missing/non-str => no-op.
+        _saved_unit = state.get("temp_unit")
+        _restore_cfg = getattr(self, "config", None)
+        _current_unit = _restore_cfg.get("temp_unit", "fahrenheit") if _restore_cfg is not None else None
+        unit_changed = isinstance(_saved_unit, str) and isinstance(_current_unit, str) and _saved_unit != _current_unit
+        _unit_change_payload: dict[str, Any] | None = None
+        if unit_changed:
+            _hist_dropped = state.get("temp_history", {})
+            _hist_dropped = _hist_dropped if isinstance(_hist_dropped, dict) else {}
+            _dropped_outdoor = len(_hist_dropped.get("outdoor", []) or [])
+            _dropped_indoor = len(_hist_dropped.get("indoor", []) or [])
+            _raw_arch = state.get("pred_archive")
+            _dropped_arch = len(_raw_arch) if isinstance(_raw_arch, dict) else 0
+            _dropped_cls = bool(state.get("classification"))
+            # Pending thermal observations hold samples taken under the old unit; clear
+            # them before the _first_run block recovers them. Only this dict is touched.
+            _learn_state = getattr(getattr(self, "learning", None), "_state", None)
+            _pending = getattr(_learn_state, "pending_observations", None)
+            _dropped_pending = len(_pending) if isinstance(_pending, dict) else 0
+            if isinstance(_pending, dict):
+                _pending.clear()
+            _LOGGER.warning(
+                "Temperature unit changed since last run: same-day readings discarded "
+                "from=%s to=%s dropped_outdoor=%d dropped_indoor=%d dropped_pred_archive=%d "
+                "dropped_classification=%s dropped_pending_observations=%d",
+                _saved_unit,
+                _current_unit,
+                _dropped_outdoor,
+                _dropped_indoor,
+                _dropped_arch,
+                _dropped_cls,
+                _dropped_pending,
+            )
+            _unit_change_payload = {
+                "from": _saved_unit,
+                "to": _current_unit,
+                "dropped_outdoor": _dropped_outdoor,
+                "dropped_indoor": _dropped_indoor,
+                "dropped_pred_archive": _dropped_arch,
+                "dropped_classification": _dropped_cls,
+                "dropped_pending_observations": _dropped_pending,
+            }
+
         # Classification
-        cls_data = state.get("classification")
+        cls_data = None if unit_changed else state.get("classification")
         if cls_data:
             try:
                 wot = cls_data.get("window_open_time")
@@ -1551,7 +1612,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("Failed to restore classification: %s", err)
 
         # Temperature history
-        temp_hist = state.get("temp_history", {})
+        temp_hist = {} if unit_changed else state.get("temp_history", {})
         self._outdoor_temp_history = [(ts, t) for ts, t in temp_hist.get("outdoor", [])]
         self._indoor_temp_history = [(ts, t) for ts, t in temp_hist.get("indoor", [])]
         # Issue #540: mirror the restored buffer's peak/count immediately, so soft-start's
@@ -1644,7 +1705,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_solar_phase_fit_date = date.fromisoformat(_fit_date_str) if _fit_date_str else None
 
         # Prediction archive — restore only on same-day restores (already gated above)
-        raw_archive = state.get("pred_archive")
+        raw_archive = None if unit_changed else state.get("pred_archive")
         if isinstance(raw_archive, dict):
             restored: dict[int, float] = {}
             for k, v in raw_archive.items():
@@ -1662,6 +1723,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         saved_log = state.get("event_log")
         if isinstance(saved_log, list):
             self._event_log = _prune_event_log(saved_log, dt_util.now())
+
+        # Issue #1015: emitted after the event-log restore above (which replaces the
+        # in-memory buffer) so the event survives into the persisted log.
+        if _unit_change_payload is not None:
+            self._emit_event("unit_changed", _unit_change_payload)
 
         # Restart-cause classification (Issue #403): compare the persisted last-shutdown
         # version against VERSION, and check whether the prior shutdown was clean.
@@ -1736,6 +1802,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return {
             "date": dt_util.now().strftime("%Y-%m-%d"),
             "last_saved": dt_util.now().isoformat(),
+            # Issue #1015: unit the persisted readings are expressed under, so a restore
+            # under a different unit can discard them instead of misreading them.
+            "temp_unit": (getattr(self, "config", None) or {}).get("temp_unit", "fahrenheit"),
             "classification": cls_dict,
             "temp_history": {
                 "outdoor": list(self._outdoor_temp_history),
@@ -2894,7 +2963,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _unit_cs = self.hass.states.get(_unit_climate_id) if _unit_climate_id else None
                 if _unit_cs is not None:
                     _reported_unit = _unit_cs.attributes.get("temperature_unit")
-                    if _reported_unit is not None and str(_reported_unit).upper() not in ("°F", "F", "FAHRENHEIT"):
+                    if _reported_unit is not None and unit_key_from_attr(_reported_unit) != _UNIT_FAHRENHEIT:
                         _LOGGER.error(
                             "Climate entity %s reports temperature_unit=%s but Climate Advisor "
                             "assumes Fahrenheit — setpoints written by CA will be wrong until "
@@ -3919,6 +3988,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         attrs = weather_state.attributes
 
+        # Issue #1015: one-shot check that the weather provider's unit matches CA's
+        # configured unit. CA never converts by the provider's unit, so a mismatch makes
+        # every reading wrong. Latched only once the provider actually reports a unit.
+        if not getattr(self, "_weather_unit_checked", False):
+            _provider_unit = unit_key_from_attr(attrs.get("temperature_unit"))
+            if _provider_unit is not None:
+                self._weather_unit_checked = True
+                _configured_unit = self.config.get("temp_unit", "fahrenheit")
+                _mismatch = _provider_unit != _configured_unit
+                self._weather_unit_info = {
+                    "provider_unit": _provider_unit,
+                    "configured_unit": _configured_unit,
+                    "unit_mismatch": _mismatch,
+                }
+                if _mismatch:
+                    _LOGGER.warning(
+                        "Weather unit mismatch: provider_unit=%s configured_unit=%s — "
+                        "readings will be misread until corrected",
+                        _provider_unit,
+                        _configured_unit,
+                    )
+
         current_outdoor = self._get_outdoor_temp(attrs)
         current_indoor = self._get_indoor_temp()
         # Resolved up front (not at the bottom of this method, where it used to live):
@@ -4038,6 +4129,38 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             observed_temps = [t for _, t in self._outdoor_temp_history]
             observed_high = max(observed_temps)
             observed_low = min(observed_temps)
+            # Issue #1015 observability: name the sample when it overrides the provider
+            # by a physically implausible margin (bad sample / unit mismatch).
+            # Latched per (kind, observed_ts) per day: this runs every cycle, and an
+            # ordinary day's "remaining-period" provider values would otherwise repeat it.
+            _warned = getattr(self, "_observed_extreme_warned", None)
+            if not isinstance(_warned, set):
+                _warned = set()
+                self._observed_extreme_warned = _warned
+            if today_low - observed_low > _OBSERVED_EXTREME_DELTA_F:
+                _low_ts = next(ts for ts, t in self._outdoor_temp_history if t == observed_low)
+                if ("low", _low_ts) not in _warned:
+                    _warned.add(("low", _low_ts))
+                    _LOGGER.warning(
+                        "Observed outdoor extreme overrides forecast: kind=low observed_ts=%s observed_value=%.1f "
+                        "provider_value=%.1f delta_f=%.1f",
+                        _low_ts,
+                        observed_low,
+                        today_low,
+                        today_low - observed_low,
+                    )
+            if observed_high - today_high > _OBSERVED_EXTREME_DELTA_F:
+                _high_ts = next(ts for ts, t in self._outdoor_temp_history if t == observed_high)
+                if ("high", _high_ts) not in _warned:
+                    _warned.add(("high", _high_ts))
+                    _LOGGER.warning(
+                        "Observed outdoor extreme overrides forecast: kind=high observed_ts=%s observed_value=%.1f "
+                        "provider_value=%.1f delta_f=%.1f",
+                        _high_ts,
+                        observed_high,
+                        today_high,
+                        observed_high - today_high,
+                    )
             today_high = max(today_high, observed_high)
             today_low = min(today_low, observed_low)
 
@@ -5206,6 +5329,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_violation_check = None
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
+        self._observed_extreme_warned = set()  # Issue #1015: new day, new warning latch
         self._hourly_forecast_temps.clear()
         # Issue #540: reset the soft-start peak-tracking mirror alongside the buffer it's
         # derived from, so a stale "yesterday's peak" can't leak into the new day before
@@ -10758,6 +10882,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "resumed_from_pause": ae._resumed_from_pause,
             "occupancy_away_timer_pending": self._occupancy_away_timer_cancel is not None,
             "unit": unit,
+            # Issue #1015: weather-provider unit check (None until the provider reports a unit)
+            "unit_mismatch": (getattr(self, "_weather_unit_info", None) or {}).get("unit_mismatch"),
+            "provider_unit": (getattr(self, "_weather_unit_info", None) or {}).get("provider_unit"),
+            "configured_unit": (getattr(self, "_weather_unit_info", None) or {}).get("configured_unit"),
             "thermal_pipeline": self._build_thermal_pipeline_summary(),
             "startup_coalesce_active": self._startup_coalesce_active,
             "startup_coalesce_seconds_remaining": (

@@ -13,7 +13,7 @@
 | Is the hourly forecast list in the provider's unit or internal °F, and how may a new consumer use it? | `_hourly_forecast_temps` is ALWAYS internal °F: `ClimateAdvisorCoordinator._get_hourly_forecast_data()` normalises a copy at the single source, and `_refresh_hourly_forecast()` is the only refresh path. New consumers must treat it as °F and never convert it again. | [Hourly forecast is normalised to internal °F at its source](#hourly-forecast-is-normalised-to-internal-f-at-its-source-issue-1015) |
 | Does Climate Advisor read the weather provider's temperature unit? | No. CA assumes its configured unit equals the provider's and never reads the provider's unit for conversion. A one-shot WARNING `Weather unit mismatch` (plus debug-state fields `unit_mismatch`/`provider_unit`/`configured_unit`) flags a disagreement. Config values stay canonical °F and are unit-invariant. | [Provider unit must equal the configured unit](#provider-unit-must-equal-the-configured-unit-issue-1015) |
 | What happens to same-day readings when the user changes the unit? | On the next same-day restore the saved `temp_unit` differs from the configured unit, so outdoor/indoor temp history, `pred_archive` and `classification` are discarded (WARNING + `unit_changed` event). Chart-log and learning records written under the wrong unit are not repaired. | [Unit change handling](#unit-change-handling-issue-1015) |
-| Does the climate-entity unit check (Issue #968) honour `temp_unit`? | No. It hardcodes Fahrenheit and ignores `temp_unit`; a tracking issue is being filed. Not fixed by Issue #1015. | [Known limitation: climate-entity unit check](#known-limitation-climate-entity-unit-check-issue-968) |
+| Does the climate-entity unit check (Issue #968) honour `temp_unit`? | Yes, since 0.7.84 (Issue #1018). `_check_climate_unit()` compares the entity's `temperature_unit` attribute (if exposed) with the configured `temp_unit` and logs one ERROR on mismatch; it no longer assumes Fahrenheit. Log-only. | [Climate-entity unit check](#climate-entity-unit-check-issue-968-issue-1018) |
 
 ## Scope
 
@@ -146,9 +146,18 @@ Consequence: once the new unit is applied (Repairs "Fix", manual reload or HA re
 
 **Known limitations:** chart-log entries and learning/thermal records written while the unit was wrong are **not** repaired (old chart history stays as recorded). A unit change on the same restart as the first upgrade to 0.7.83 is not detected, because the pre-upgrade state file has no `temp_unit` key (missing key means unchanged behaviour).
 
-## Known limitation: climate-entity unit check (Issue #968)
+## Climate-entity unit check (Issue #968, Issue #1018)
 
-The pre-existing check on the *climate* entity's `temperature_unit` attribute (Issue #968, in the `_first_run` block of the coordinator) hardcodes "CA assumes Fahrenheit" and ignores the configured `temp_unit`. It could false-ERROR on a Celsius install if a thermostat integration exposed that attribute (standard HA climate state attributes do not, so it is likely dormant — unverified). A tracking issue is being filed; it is **not** fixed by Issue #1015.
+**Invariant:** Climate Advisor writes thermostat setpoints via `from_fahrenheit(value, config temp_unit)` and reads thermostat temperatures via `to_fahrenheit(...)`. Home Assistant converts climate temperatures to its own system unit (`hass.config.units`) on both the state attributes and the `set_temperature` service, so the unit that actually matters on the thermostat path is the HA system unit, which the configured `temp_unit` is expected to equal (nothing in CA checks that; tracked in Issue #1021). The `temperature_unit` check below compares an exposed attribute with the configured unit as a best-effort guard; such an attribute may be the device's native unit rather than the converted one, so a mismatch is a prompt to investigate, not proof that readings are wrong.
+
+**Behaviour (since 0.7.84, Issue #1018):** `ClimateAdvisorCoordinator._check_climate_unit()` runs on each update cycle that has a forecast (it is skipped when the weather entity is missing or unavailable) until the climate entity exists and is available, then latches (`_climate_unit_checked`) and never runs again that run. (Before 0.7.84 the Issue #968 check hardcoded "CA assumes Fahrenheit" and could false-ERROR a Celsius install.)
+
+- If the entity exposes a `temperature_unit` attribute whose value, via `temperature.unit_key_from_attr()`, differs from the configured `temp_unit` (an unrecognised value also counts as a mismatch), it logs ONE ERROR:
+  `Climate entity <id> reports temperature_unit=<raw> but Climate Advisor is configured for <configured_unit> — setpoints written by CA will be wrong until this is resolved`
+- If the attribute is absent the check is silent. That is the normal case: HA core `ClimateEntity` does not expose `temperature_unit` in state or capability attributes (verified against home-assistant/core), so the check only matters for custom thermostat integrations that add it.
+- Log-only: no auto-correction. Fahrenheit installs are unchanged.
+
+**Remaining gap:** outdoor/indoor temperature *sensor* entities are converted using the configured unit and are never checked for their own unit (tracked in Issue #1020).
 
 ## Hourly forecast is normalised to internal °F at its source (Issue #1015)
 

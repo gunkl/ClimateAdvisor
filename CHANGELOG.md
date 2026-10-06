@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.84] — 2026-10-06
+
+- Fix #1018: the thermostat-unit check now compares against the unit you configured instead of always assuming Fahrenheit, so a Celsius setup can no longer get a false "assumes Fahrenheit" error (no change for Fahrenheit setups).
+
 ## [0.7.83] — 2026-10-06
 
 - Fix #1015: changing Climate Advisor's temperature unit (for example Celsius to Fahrenheit and back) no longer leaves wrong Forecast Low/High values and day trend on screen until midnight; the same-day readings are discarded when the new unit takes effect, so these recover straight away (an already-written morning briefing may keep showing the old wording until the next one). Climate Advisor now also logs a warning when your weather provider reports in a different unit than Climate Advisor is set to, and when readings from today override the provider's forecast by more than 20°F, to make this kind of problem easy to spot. Chart history and learning data recorded while the unit was wrong are not corrected.

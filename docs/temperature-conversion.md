@@ -14,12 +14,13 @@
 | Does Climate Advisor read the weather provider's temperature unit? | No. CA assumes its configured unit equals the provider's and never reads the provider's unit for conversion. A one-shot WARNING `Weather unit mismatch` (plus debug-state fields `unit_mismatch`/`provider_unit`/`configured_unit`) flags a disagreement. Config values stay canonical °F and are unit-invariant. | [Provider unit must equal the configured unit](#provider-unit-must-equal-the-configured-unit-issue-1015) |
 | What happens to same-day readings when the user changes the unit? | On the next same-day restore the saved `temp_unit` differs from the configured unit, so outdoor/indoor temp history, `pred_archive` and `classification` are discarded (WARNING + `unit_changed` event). Chart-log and learning records written under the wrong unit are not repaired. | [Unit change handling](#unit-change-handling-issue-1015) |
 | Does the climate-entity unit check (Issue #968) honour `temp_unit`? | Yes, since 0.7.84 (Issue #1018). `_check_climate_unit()` compares the entity's `temperature_unit` attribute (if exposed) with the configured `temp_unit` and logs one ERROR on mismatch; it no longer assumes Fahrenheit. Log-only. | [Climate-entity unit check](#climate-entity-unit-check-issue-968-issue-1018) |
+| Does CA check that its unit matches Home Assistant's unit system and its configured temperature sensors' units? | Yes, since 0.7.85 (Issues #1021, #1020). `_check_unit_sources()` logs one WARNING if `temp_unit` differs from HA's system unit (`hass.config.units.temperature_unit`), and one per role (`outdoor_temp`, `indoor_temp`, `sleep_indoor_temp`) if a sensor's `unit_of_measurement` differs. Log-only; debug-state fields `ha_system_unit`, `ha_unit_mismatch`, `sensor_unit_mismatches`. | [Home Assistant unit system and sensor unit checks](#home-assistant-unit-system-and-sensor-unit-checks-issue-1020-issue-1021) |
 
 ## Scope
 
 **Owns:**
 - The single conversion boundary between internal °F and user-display units
-- Four public symbols: `from_fahrenheit()`, `to_fahrenheit()`, `convert_delta()`, `format_temp_delta()`, `format_temp()`
+- Public functions: `from_fahrenheit()`, `to_fahrenheit()`, `convert_delta()`, `format_temp_delta()`, `format_temp()`, `unit_key_from_attr()`, `unit_mismatch()`
 - Two string constants: `FAHRENHEIT = "fahrenheit"`, `CELSIUS = "celsius"`
 - One dict: `UNIT_SYMBOL` mapping unit strings to display symbols
 
@@ -66,6 +67,16 @@ def convert_delta(value_fahrenheit: float, unit: str) -> float:
 def format_temp_delta(delta_fahrenheit: float, unit: str, decimals: int = 0) -> str:
     """Format a temperature delta as a display string, e.g. '5°C'.
     Calls convert_delta() internally."""
+
+
+def unit_key_from_attr(attr: object) -> str | None:
+    """Map an entity's unit attribute ("°F"/"F"/"fahrenheit", etc.) to FAHRENHEIT/CELSIUS, else None.
+    Used by the weather, climate, Home Assistant system-unit and sensor unit checks."""
+
+
+def unit_mismatch(attr: object, configured: str) -> str | None:
+    """Reported unit key when recognised AND different from `configured`; None otherwise.
+    Used by the sensor unit check (Issue #1020)."""
 ```
 
 | Symbol | Caller(s) | Typical use |
@@ -115,7 +126,7 @@ The user's display unit is NOT auto-detected from HA's unit system at runtime. I
 
 **Constant:** `DEFAULT_TEMP_UNIT = "fahrenheit"` in `const.py`
 
-This means the unit does not automatically follow if the user changes their HA unit system after setup. They must update the Climate Advisor option explicitly.
+This means the unit does not automatically follow if the user changes their HA unit system after setup. They must update the Climate Advisor option explicitly. Since 0.7.85 a mismatch is no longer silent: a Home Assistant install on a different unit system than the configured `temp_unit` (for example a metric install left on the default Fahrenheit) logs the `Temperature unit mismatch with Home Assistant` WARNING. That is intended, because such a setup really does misread every thermostat value, and a `Temperature sensor unit mismatch` WARNING usually fires alongside it since Home Assistant temperature sensors report in the system unit.
 
 ## Provider unit must equal the configured unit (Issue #1015)
 
@@ -148,7 +159,7 @@ Consequence: once the new unit is applied (Repairs "Fix", manual reload or HA re
 
 ## Climate-entity unit check (Issue #968, Issue #1018)
 
-**Invariant:** Climate Advisor writes thermostat setpoints via `from_fahrenheit(value, config temp_unit)` and reads thermostat temperatures via `to_fahrenheit(...)`. Home Assistant converts climate temperatures to its own system unit (`hass.config.units`) on both the state attributes and the `set_temperature` service, so the unit that actually matters on the thermostat path is the HA system unit, which the configured `temp_unit` is expected to equal (nothing in CA checks that; tracked in Issue #1021). The `temperature_unit` check below compares an exposed attribute with the configured unit as a best-effort guard; such an attribute may be the device's native unit rather than the converted one, so a mismatch is a prompt to investigate, not proof that readings are wrong.
+**Invariant:** Climate Advisor writes thermostat setpoints via `from_fahrenheit(value, config temp_unit)` and reads thermostat temperatures via `to_fahrenheit(...)`. Home Assistant converts climate temperatures to its own system unit (`hass.config.units`) on both the state attributes and the `set_temperature` service, so the unit that actually matters on the thermostat path is the HA system unit, which the configured `temp_unit` is expected to equal (checked by a one-shot WARNING since 0.7.85, see [Home Assistant unit system and sensor unit checks](#home-assistant-unit-system-and-sensor-unit-checks-issue-1020-issue-1021)). The `temperature_unit` check below compares an exposed attribute with the configured unit as a best-effort guard; such an attribute may be the device's native unit rather than the converted one, so a mismatch is a prompt to investigate, not proof that readings are wrong.
 
 **Behaviour (since 0.7.84, Issue #1018):** `ClimateAdvisorCoordinator._check_climate_unit()` runs on each update cycle that has a forecast (it is skipped when the weather entity is missing or unavailable) until the climate entity exists and is available, then latches (`_climate_unit_checked`) and never runs again that run. (Before 0.7.84 the Issue #968 check hardcoded "CA assumes Fahrenheit" and could false-ERROR a Celsius install.)
 
@@ -157,7 +168,21 @@ Consequence: once the new unit is applied (Repairs "Fix", manual reload or HA re
 - If the attribute is absent the check is silent. That is the normal case: HA core `ClimateEntity` does not expose `temperature_unit` in state or capability attributes (verified against home-assistant/core), so the check only matters for custom thermostat integrations that add it.
 - Log-only: no auto-correction. Fahrenheit installs are unchanged.
 
-**Remaining gap:** outdoor/indoor temperature *sensor* entities are converted using the configured unit and are never checked for their own unit (tracked in Issue #1020).
+Temperature *sensor* entities and Home Assistant's own unit system are checked separately, see [Home Assistant unit system and sensor unit checks](#home-assistant-unit-system-and-sensor-unit-checks-issue-1020-issue-1021).
+
+## Home Assistant unit system and sensor unit checks (Issue #1020, Issue #1021)
+
+**Why:** Home Assistant converts climate temperatures to its system unit on both the climate entity's state attributes and the `climate.set_temperature` service, while Climate Advisor reads and writes using its own configured `temp_unit`. If the two differ, every thermostat read and setpoint write is off by the C/F factor on any install. Likewise a configured temperature sensor that reports in a different unit than `temp_unit` is misread by `to_fahrenheit(..., config temp_unit)`. Since 0.7.85 both are flagged by log-only WARNINGs; nothing is auto-corrected and there is no UI card or Repairs issue.
+
+**Behaviour:** `ClimateAdvisorCoordinator._check_unit_sources()` runs each update cycle that has a forecast, called right after `_check_climate_unit()`. It uses the helper `temperature.unit_mismatch(attr, configured)`. No entity ids are logged.
+
+- **HA system unit (Issue #1021):** one-shot compare of the configured `temp_unit` with `hass.config.units.temperature_unit`. Latched in `_ha_unit_checked` once HA's unit is recognised. WARNING:
+  `Temperature unit mismatch with Home Assistant: ha_unit=<unit> configured_unit=<unit> — thermostat readings and setpoints will be misread until corrected`
+- **Sensor units (Issue #1020):** one-shot per role, latched per role in `_sensor_unit_checked` once the entity is available. Each configured temperature sensor's `unit_of_measurement` is compared with `temp_unit`. Roles: `outdoor_temp` (only when `outdoor_temp_source` is `sensor` or `input_number`), `indoor_temp` (only when `indoor_temp_source` is `sensor` or `input_number`), `sleep_indoor_temp` (whenever configured). WARNING:
+  `Temperature sensor unit mismatch: role=<role> sensor_unit=<unit> configured_unit=<unit> — readings from this sensor will be misread until corrected`
+  The role label is logged, never the entity id. A sensor with no or an unrecognised `unit_of_measurement` is silent (CA cannot know).
+- **Debug state:** `get_debug_state()` (and therefore diagnostics) exposes `ha_system_unit`, `ha_unit_mismatch` and `sensor_unit_mismatches` (dict of role to the sensor's unit, `{}` when none), next to the existing `unit_mismatch`/`provider_unit`/`configured_unit`.
+- Matching setups are unchanged.
 
 ## Hourly forecast is normalised to internal °F at its source (Issue #1015)
 
@@ -192,6 +217,7 @@ The weather entity reports its hourly forecast in the provider's native unit. Be
 4. **Unknown units never raise.** Passthrough behavior is guaranteed for any non-`"celsius"` input string.
 5. **The hourly forecast list is internal °F.** `_hourly_forecast_temps` is normalised at its single source (`_get_hourly_forecast_data()`) and refreshed only via `_refresh_hourly_forecast()`; no consumer converts it again (Issue #1015). This is a specific instance of invariant 1.
 6. **Provider unit is assumed, not read.** Provider readings are converted using the configured `temp_unit` only; a disagreement is surfaced by the one-shot `Weather unit mismatch` WARNING but never auto-corrected (Issue #1015).
+7. **Configured unit == HA system unit == provider/sensor units.** CA assumes all of these agree; a disagreement with HA's system unit or a configured temperature sensor is surfaced by a one-shot WARNING, never auto-corrected (Issues #1020, #1021).
 
 ## Disclosure Path
 

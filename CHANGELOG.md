@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.85] — 2026-10-06
+
+- Fix #1021: Climate Advisor now logs a warning when its temperature unit setting differs from Home Assistant's unit system (log-only, no change for matching setups).
+- Fix #1020: Climate Advisor now logs a warning when a configured temperature sensor (outdoor, indoor or sleep indoor) reports a different unit than Climate Advisor is set to (log-only, no change for matching setups).
+
 ## [0.7.84] — 2026-10-06
 
 - Fix #1018: the thermostat-unit check now compares against the unit you configured instead of always assuming Fahrenheit, so a Celsius setup can no longer get a false "assumes Fahrenheit" error (no change for Fahrenheit setups).

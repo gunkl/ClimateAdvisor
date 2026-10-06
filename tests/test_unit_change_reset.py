@@ -36,6 +36,7 @@ from custom_components.climate_advisor.temperature import (  # noqa: E402
     CELSIUS,
     FAHRENHEIT,
     unit_key_from_attr,
+    unit_mismatch,
 )
 
 _COORD_LOGGER = "custom_components.climate_advisor.coordinator"
@@ -81,8 +82,26 @@ class TestUnitKeyFromAttr:
         assert unit_key_from_attr(raw) == expected
 
 
+class TestUnitMismatch:
+    @pytest.mark.parametrize(
+        ("attr", "configured", "expected"),
+        [
+            ("°F", CELSIUS, FAHRENHEIT),
+            ("°C", FAHRENHEIT, CELSIUS),
+            ("celsius", FAHRENHEIT, CELSIUS),
+            ("°F", FAHRENHEIT, None),
+            ("°C", CELSIUS, None),
+            (None, CELSIUS, None),
+            ("K", CELSIUS, None),
+            ("", FAHRENHEIT, None),
+        ],
+    )
+    def test_table(self, attr, configured, expected):
+        assert unit_mismatch(attr, configured) == expected
+
+
 # ---------------------------------------------------------------------------
-# Existing Issue #968 climate-entity check (placement in the _first_run block)
+# Existing Issue #968 climate-entity check
 # ---------------------------------------------------------------------------
 
 

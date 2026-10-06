@@ -37,6 +37,19 @@ def unit_key_from_attr(attr: object) -> str | None:
     return _UNIT_ATTR_ALIASES.get(str(attr).strip().upper())
 
 
+def unit_mismatch(attr: object, configured: str) -> str | None:
+    """Return the reported unit key when it is recognised and differs from ``configured``.
+
+    ``attr`` is a raw unit attribute (``unit_of_measurement``/``temperature_unit``). Returns
+    FAHRENHEIT/CELSIUS for a recognised unit that differs from ``configured``; None when
+    ``attr`` is None, unrecognised (cannot know) or equal to ``configured``.
+    """
+    reported = unit_key_from_attr(attr)
+    if reported is None or reported == configured:
+        return None
+    return reported
+
+
 def to_fahrenheit(value: float, unit: str) -> float:
     """Convert a temperature value to the internal Fahrenheit canonical unit.
 

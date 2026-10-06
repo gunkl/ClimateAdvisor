@@ -327,6 +327,24 @@ _GRACE_TRIGGER_LABELS: Final[dict[str, str]] = {
 # — the test checks both directions.
 _ONTOLOGY_TIME_EXCEPTIONS: Final[set[str]] = set()
 
+# Issue #1015: chart-log temperature keys that get_chart_data()'s _conv_log_entry() converts
+# from internal Fahrenheit to the display unit when building ``state_log``. These are exactly
+# the keys the frontend reads straight from ``state_log`` (the pred_* overlays and the
+# historical Target Band lower/upper). Deliberately NOT included: ``indoor``/``outdoor`` (read
+# pre-conversion into the actual_* series, which are converted separately) and
+# ``setpoint``/``nat_vent_target`` (consumed by _extract_historical_effective_target() AFTER
+# this conversion and converted again via _conv(e["target"]) -- converting them here would
+# double-convert effective_target_history). tests/test_chart_celsius.py structurally requires
+# every temperature field ChartStateLog.append() emits to be listed here or on its allowlist.
+_CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
+    "pred_outdoor",
+    "pred_indoor",
+    "pred_outdoor_avg",
+    "pred_indoor_avg",
+    "lower",
+    "upper",
+)
+
 
 @dataclass
 class _PendingFanRemoteBurst:
@@ -2811,8 +2829,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("[coalesce-diag] _async_update_data: before _get_forecast()")
         forecast = await self._get_forecast()
         _LOGGER.debug("[coalesce-diag] _async_update_data: after _get_forecast() — forecast=%s", forecast is not None)
-        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
-        self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
+        await self._refresh_hourly_forecast()
         if forecast:
             prev_type = self._current_classification.day_type if self._current_classification else None
             _thresh = {
@@ -3717,10 +3734,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             getattr(self, "_hourly_forecast_temps", None), dt_util.now()
         )
         if interpolated is not None:
-            # Hourly forecast entries report temperature in the weather entity's
-            # native unit, same as weather_attrs["temperature"] below — must go
-            # through the same conversion, not just the live-attribute fallback.
-            interpolated_f = to_fahrenheit(interpolated, unit)
+            # Hourly forecast entries are already normalised to internal °F at the
+            # source by _get_hourly_forecast_data() (Issue #1015) — no conversion here
+            # (converting again would double-convert on Celsius installs).
+            interpolated_f = interpolated
             if method == "edge-nearest":
                 _LOGGER.debug(
                     "Outdoor temp: edge-clamped interpolation (%.1f°F) — now is outside the hourly forecast range",
@@ -3829,7 +3846,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 blocking=True,
                 return_response=True,
             )
-            return response.get(weather_entity, {}).get("forecast", []) if response else []
+            raw = (response.get(weather_entity, {}).get("forecast", []) if response else []) or []
+            # Issue #1015: the provider reports hourly temperatures in the entity's
+            # native unit. Normalise a COPY to internal °F here, at the single source,
+            # so every consumer of _hourly_forecast_temps (ODE cache, nat-vent guard/
+            # plan, Next Automation card, chart) sees °F regardless of install unit.
+            unit = self.config.get("temp_unit", "fahrenheit")
+            normalised: list = []
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    normalised.append(entry)
+                    continue
+                new_entry = dict(entry)
+                for key in ("temperature", "temp"):
+                    value = new_entry.get(key)
+                    if value is None or isinstance(value, bool):
+                        continue
+                    try:
+                        new_entry[key] = to_fahrenheit(float(value), unit)
+                    except (ValueError, TypeError):
+                        continue
+                normalised.append(new_entry)
+            _LOGGER.debug("Hourly forecast normalised: entries=%d unit=%s", len(normalised), unit)
+            return normalised
         except Exception:  # noqa: BLE001
             # Issue #874: this is the stronger, more definitive signal (the underlying
             # service call itself failed/is unsupported) vs. _get_outdoor_temp()'s
@@ -3848,6 +3887,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 weather_entity,
             )
             return []
+
+    async def _refresh_hourly_forecast(self) -> None:
+        """Refetch the (°F-normalised) hourly forecast into the coordinator AND engine copies.
+
+        Single choke point for every refresh site (30-min cycle, briefing, end-of-day)
+        so the engine's copy can never lag the coordinator's (Issue #1016).
+        """
+        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
+        self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
 
     async def _get_forecast(self) -> ForecastSnapshot | None:
         """Pull forecast data from the weather entity."""
@@ -4318,7 +4366,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             else:
                 forecast = await self._get_forecast()
-                self._hourly_forecast_temps = await self._get_hourly_forecast_data()
+                await self._refresh_hourly_forecast()
                 if not forecast:
                     return
 
@@ -5168,8 +5216,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # cycle — otherwise outdoor-temp interpolation has nothing to interpolate
         # against for up to ~30 min after every midnight reset, degrading nightly
         # to the raw (pre-Issue #511) weather attribute with a WARNING each time.
-        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
-        self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
+        await self._refresh_hourly_forecast()
 
         # Reset pre-cool state for the new day
         if self._pre_cool_trigger_cancel is not None:
@@ -10328,6 +10375,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # today's `now`. Pre-fix entries (written before this field existed)
             # come back as {"lower": None, "upper": None} via plain dict.get() —
             # same null-safe shape as _extract_historical_setpoint() already uses.
+            # Issue #1015: this reads `log_entries` BEFORE _conv_log_entry() is applied
+            # (below), so the raw internal-Fahrenheit lower/upper are converted exactly
+            # once here via _conv() -- no double conversion even though lower/upper are
+            # also in _CHART_LOG_CONVERTED_TEMP_KEYS for the state_log output.
             _raw_band = None
             _conv_band = [
                 {"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])}
@@ -10387,7 +10438,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         def _conv_log_entry(e: dict) -> dict:
             e = dict(e)
-            for k in ("pred_outdoor", "pred_indoor", "pred_outdoor_avg", "pred_indoor_avg"):
+            for k in _CHART_LOG_CONVERTED_TEMP_KEYS:
                 if e.get(k) is not None:
                     e[k] = _conv(e[k])
             # Back-compat: old entries written before Issue #331 lack these keys.

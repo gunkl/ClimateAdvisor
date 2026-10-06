@@ -10,6 +10,7 @@
 | How is the user's display unit determined, and what is the fallback? | The unit is a user-selected config flow field (`CONF_TEMP_UNIT`), stored as `"fahrenheit"` or `"celsius"`. The fallback at every read site is `"fahrenheit"` via `config.get("temp_unit", "fahrenheit")`. | [Unit Detection](#unit-detection) |
 | What happens when an unknown unit string (e.g., `"kelvin"`) is passed to any conversion function? | All functions treat unknown units as `"fahrenheit"` and return the value unchanged (passthrough). The `UNIT_SYMBOL` dict falls back to `"°F"` for unknown keys. | [Constants and Boundary Values](#constants-and-boundary-values) |
 | Where is the canonical rule that all internal temperatures are stored in Fahrenheit? | Stated in the `temperature.py` module docstring: "All internal temperatures are stored and calculated in Fahrenheit. This module provides the only conversion boundary used throughout the integration." | [Scope](#scope) |
+| Is the hourly forecast list in the provider's unit or internal °F, and how may a new consumer use it? | `_hourly_forecast_temps` is ALWAYS internal °F: `ClimateAdvisorCoordinator._get_hourly_forecast_data()` normalises a copy at the single source, and `_refresh_hourly_forecast()` is the only refresh path. New consumers must treat it as °F and never convert it again. | [Hourly forecast is normalised to internal °F at its source](#hourly-forecast-is-normalised-to-internal-f-at-its-source-issue-1015) |
 
 ## Scope
 
@@ -67,7 +68,7 @@ def format_temp_delta(delta_fahrenheit: float, unit: str, decimals: int = 0) -> 
 | Symbol | Caller(s) | Typical use |
 |---|---|---|
 | `from_fahrenheit` | `coordinator.py` (many sites), `briefing.py`, `api.py` | Display any stored °F temperature |
-| `to_fahrenheit` | `coordinator.py`, config flow validation | Normalize user-entered Celsius setpoints to internal °F |
+| `to_fahrenheit` | `coordinator.py`, config flow validation | Normalize user-entered Celsius setpoints to internal °F; `_get_hourly_forecast_data()` uses it to normalise the hourly forecast at its source (Issue #1015); `_get_outdoor_temp()` uses it for the sensor path and the `weather_attrs["temperature"]` fallback only |
 | `format_temp` | `coordinator.py`, `briefing.py` | Human-readable temperature strings in briefings and dashboard |
 | `convert_delta` | `coordinator.py` (thermal model display) | Display thermal rates (k_active_heat, swing_f) in correct unit |
 | `format_temp_delta` | `coordinator.py`, `briefing.py` | Human-readable delta strings (e.g., "setback of 5°C") |
@@ -113,6 +114,18 @@ The user's display unit is NOT auto-detected from HA's unit system at runtime. I
 
 This means the unit does not automatically follow if the user changes their HA unit system after setup. They must update the Climate Advisor option explicitly.
 
+## Hourly forecast is normalised to internal °F at its source (Issue #1015)
+
+The weather entity reports its hourly forecast in the provider's native unit. Before 0.7.82 that list was stored and consumed unconverted while every consumer assumed °F, so Celsius installs compared °C forecast values against °F thresholds and predictions (nat-vent forecast-peak guard, the ODE predicted-indoor cache behind the ceiling guard, the nat-vent plan, the Next Automation card, and the chart's Predicted Outdoor/Predicted Indoor).
+
+**Contract:**
+
+- `ClimateAdvisorCoordinator._get_hourly_forecast_data()` returns a **normalised copy** of the service response: each entry's `temperature` (and `temp`, if present) is converted with `to_fahrenheit(float(value), config["temp_unit"])`. `None`, boolean and non-numeric values are left untouched; non-dict entries pass through; the provider's response is never mutated. For `"fahrenheit"` this is a passthrough, so Fahrenheit installs are unchanged.
+- `_hourly_forecast_temps` (coordinator) and `automation_engine._hourly_forecast_temps` are therefore **always internal °F**. Any new consumer must treat the list as °F and must not convert it again.
+- `_refresh_hourly_forecast()` is the **only** refresh path: it refetches into both the coordinator's and the automation engine's copy. The 30-minute cycle (`_async_update_data_impl`), the briefing-time refresh (`_async_send_briefing`) and `_async_end_of_day` all call it (Issue #1016 — the briefing path previously updated only the coordinator's copy).
+- `_get_outdoor_temp()`'s hourly-interpolation branch does **not** convert (the interpolated value is already °F); only its sensor path and the `weather_attrs["temperature"]` fallback convert. Converting the interpolated value again would double-convert on Celsius installs.
+- The chart converts forecast-derived series to the display unit at read time (`get_chart_data()`); see [chart-log-spec.md](chart-log-spec.md#temperature-units-and-display-conversion-issue-1015) for the chart-log field units and the pre-fix-history limitation.
+
 ## Constants and Boundary Values
 
 | Symbol | Value | Location |
@@ -132,6 +145,7 @@ This means the unit does not automatically follow if the user changes their HA u
 2. **`from_fahrenheit` is never called on a delta or rate.** Any such call is a bug. `convert_delta` exists precisely to prevent this.
 3. **All functions are pure and stateless.** No side effects, no logging, no I/O. Safe to call from any context.
 4. **Unknown units never raise.** Passthrough behavior is guaranteed for any non-`"celsius"` input string.
+5. **The hourly forecast list is internal °F.** `_hourly_forecast_temps` is normalised at its single source (`_get_hourly_forecast_data()`) and refreshed only via `_refresh_hourly_forecast()`; no consumer converts it again (Issue #1015). This is a specific instance of invariant 1.
 
 ## Disclosure Path
 

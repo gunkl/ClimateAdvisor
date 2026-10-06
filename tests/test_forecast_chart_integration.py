@@ -122,7 +122,7 @@ def _daily_6day_forecast() -> list[dict]:
     return entries
 
 
-def _make_full_chart_coord(*, daily_forecast_full: list[dict] | None):
+def _make_full_chart_coord(*, daily_forecast_full: list[dict] | None, temp_unit: str = "fahrenheit"):
     """Coordinator stub with get_chart_data() (and the caches/gates the
     regression-guard test needs) bound to the real methods.
 
@@ -140,7 +140,7 @@ def _make_full_chart_coord(*, daily_forecast_full: list[dict] | None):
         "comfort_cool": 76,
         "setback_heat": 60,
         "setback_cool": 80,
-        "temp_unit": "fahrenheit",
+        "temp_unit": temp_unit,
     }
     coord._current_classification = _classification()
     coord._occupancy_mode = "home"

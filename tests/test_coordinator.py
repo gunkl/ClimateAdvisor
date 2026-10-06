@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import importlib
 import sys
+import types
 from datetime import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,6 +43,17 @@ from custom_components.climate_advisor.const import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _bind_refresh_hourly_forecast(coord):
+    """Bind the REAL _refresh_hourly_forecast onto a bare-MagicMock coordinator stub.
+
+    Issue #1015/#1016: the three hourly-forecast refresh sites now go through
+    _refresh_hourly_forecast(); on a MagicMock() coordinator that attribute is not
+    awaitable, so the real helper (which calls the stubbed _get_hourly_forecast_data)
+    is bound instead of weakening any assertion.
+    """
+    coord._refresh_hourly_forecast = types.MethodType(_get_coordinator_class()._refresh_hourly_forecast, coord)
 
 
 def _make_classification(**overrides):
@@ -699,6 +711,7 @@ class TestBriefingNotificationSplit:
         # Mock forecast methods
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
 
         # Stubs for Phase 2 ceiling guard (not under test here)
         coord._get_indoor_temp = MagicMock(return_value=None)
@@ -736,6 +749,37 @@ class TestBriefingNotificationSplit:
         side_effect=_side_effect_generate_briefing,
     )
     @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_briefing_refetch_mirrors_hourly_forecast_to_engine(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """Issue #1016: the briefing's non-reuse branch refreshes the engine's hourly
+        forecast copy too (it used to assign only the coordinator's)."""
+        mock_classify.return_value = _make_classification()
+        coord = self._make_coordinator_stub()
+        known = [{"datetime": "2026-06-01T10:00:00+00:00", "temperature": 70.0}]
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=known)
+        _bind_refresh_hourly_forecast(coord)
+        coord._hourly_forecast_temps = []
+        coord.automation_engine._hourly_forecast_temps = None
+
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        coord._get_hourly_forecast_data.assert_awaited_once()
+        assert coord._hourly_forecast_temps is known
+        assert coord.automation_engine._hourly_forecast_temps is coord._hourly_forecast_temps
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
     def test_push_gets_tldr_email_gets_full(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
         """Push notification receives short TLDR; email receives full briefing."""
         mock_classify.return_value = _make_classification()
@@ -743,6 +787,7 @@ class TestBriefingNotificationSplit:
         coord = self._make_coordinator_stub()
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
         asyncio.run(coord._async_send_briefing(MagicMock()))
 
         calls = coord.hass.services.async_call.call_args_list
@@ -777,6 +822,7 @@ class TestBriefingNotificationSplit:
         coord = self._make_coordinator_stub({"email_briefing": False})
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
         asyncio.run(coord._async_send_briefing(MagicMock()))
 
         calls = coord.hass.services.async_call.call_args_list
@@ -804,6 +850,7 @@ class TestBriefingNotificationSplit:
         coord = self._make_coordinator_stub()
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
         asyncio.run(coord._async_send_briefing(MagicMock()))
 
         assert coord._last_briefing == FULL_BRIEFING
@@ -829,6 +876,7 @@ class TestBriefingNotificationSplit:
         coord._automation_enabled = False
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
         asyncio.run(coord._async_send_briefing(MagicMock()))
 
         coord.hass.services.async_call.assert_not_called()
@@ -854,6 +902,7 @@ class TestBriefingNotificationSplit:
         coord = self._make_coordinator_stub()
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
         asyncio.run(coord._async_send_briefing(MagicMock()))
 
         assert coord._last_briefing_short  # non-empty string
@@ -1347,6 +1396,7 @@ class TestBriefingRegeneration:
         # Issue #511: _async_end_of_day now refetches the hourly forecast immediately
         # after clearing it, to close the midnight interpolation data gap.
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
 
         # Stubs for Phase 2 ceiling guard (not under test here)
         coord._get_indoor_temp = MagicMock(return_value=None)
@@ -1480,6 +1530,7 @@ class TestBriefingRegeneration:
 
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
 
         coord._async_send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
 

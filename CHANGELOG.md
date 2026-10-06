@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.82] — 2026-10-05
+
+- Fix #1015: on Celsius installs the Temperature Forecast chart now shows the past comfort-band and Predicted Outdoor in °C instead of mixing in Fahrenheit numbers, and automation decisions that depend on the weather forecast (natural ventilation, the ceiling guard, the Next Automation card) now compare consistent units. Earlier Predicted Outdoor history recorded before this fix is not corrected and fades out of the chart as it ages.
+- Fix #1016: the daily briefing refresh now keeps the automation's copy of the weather forecast in step with the rest of Climate Advisor, instead of leaving it stale until the next regular update.
+- **Behaviour change (Celsius installs):** natural-ventilation and ceiling decisions and the Next Automation card now use the correct forecast values, so they may start acting (or timing) differently than before. Fahrenheit installs are unchanged.
+
 ## [0.7.81] — 2026-09-29
 
 - Fix #1012: the Status tab card previously labeled "Compliance" is now labeled "Comfort Score" to match what it actually measures.

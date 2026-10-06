@@ -271,7 +271,6 @@ from .scheduler import (
     resolve_tou_phase,
 )
 from .state import StatePersistence
-from .temperature import FAHRENHEIT as _UNIT_FAHRENHEIT
 from .temperature import (
     convert_delta,
     find_temperature_crossing,
@@ -663,6 +662,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._first_run: bool = True
         # Issue #1015: one-shot weather-provider unit check state (see _get_forecast)
         self._weather_unit_checked: bool = False
+        self._climate_unit_checked: bool = False
         self._weather_unit_info: dict[str, Any] | None = None
         # Issue #1015: (kind, observed_ts) pairs already warned about today (cleared at end of day)
         self._observed_extreme_warned: set[tuple[str, str]] = set()
@@ -2950,27 +2950,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         nat_vent_target=self._nat_vent_target_now(),
                     )
 
+            # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
+            self._check_climate_unit()
+
             # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
             if self._first_run:
                 self._first_run = False
-                # Issue #968: CA's setpoint-writing code (temperature.py) assumes the
-                # configured climate entity reports Fahrenheit. Validate that assumption
-                # once at startup rather than silently writing wrong-unit setpoints if a
-                # non-Fahrenheit thermostat is ever configured — error-only, no
-                # auto-conversion (matches "never leave HVAC in a bad state": refusing and
-                # telling the user beats silently guessing at a unit conversion).
-                _unit_climate_id = self.config.get("climate_entity", "")
-                _unit_cs = self.hass.states.get(_unit_climate_id) if _unit_climate_id else None
-                if _unit_cs is not None:
-                    _reported_unit = _unit_cs.attributes.get("temperature_unit")
-                    if _reported_unit is not None and unit_key_from_attr(_reported_unit) != _UNIT_FAHRENHEIT:
-                        _LOGGER.error(
-                            "Climate entity %s reports temperature_unit=%s but Climate Advisor "
-                            "assumes Fahrenheit — setpoints written by CA will be wrong until "
-                            "this is resolved",
-                            _unit_climate_id,
-                            _reported_unit,
-                        )
                 # Recover v3 pending_observations that survived restart
                 _pending_obs = self.learning._state.pending_observations
                 if isinstance(_pending_obs, dict):
@@ -3965,6 +3950,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         self._hourly_forecast_temps = await self._get_hourly_forecast_data()
         self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
+
+    def _check_climate_unit(self) -> None:
+        """Error once if the thermostat's reported unit differs from the configured unit.
+
+        Compares an exposed ``temperature_unit`` attribute with the configured unit
+        (Issues #968/#1018). CA writes setpoints via from_fahrenheit(config temp_unit)
+        and HA converts climate temperatures to its own system unit, so a mismatch is a
+        prompt to investigate, not proof the readings are wrong (the attribute may be
+        the device's native unit). Error-only, no auto-conversion. HA core climate entities normally do not
+        expose ``temperature_unit`` — an absent attribute is the normal case and is
+        silent. Latched only once the entity exists and is available, so a
+        not-yet-ready entity at startup is re-checked on later cycles.
+        """
+        if getattr(self, "_climate_unit_checked", False):
+            return
+        climate_id = self.config.get("climate_entity", "")
+        state = self.hass.states.get(climate_id) if climate_id else None
+        if state is None or state.state in ("unavailable", "unknown"):
+            return
+        self._climate_unit_checked = True
+        raw = state.attributes.get("temperature_unit")
+        if raw is None:
+            return
+        configured = self.config.get("temp_unit", "fahrenheit")
+        if unit_key_from_attr(raw) != configured:
+            _LOGGER.error(
+                "Climate entity %s reports temperature_unit=%s but Climate Advisor is "
+                "configured for %s — setpoints written by CA will be wrong until "
+                "this is resolved",
+                climate_id,
+                raw,
+                configured,
+            )
 
     async def _get_forecast(self) -> ForecastSnapshot | None:
         """Pull forecast data from the weather entity."""

@@ -2,7 +2,8 @@
 
 Covers:
   - unit_key_from_attr() mapping table
-  - the existing Issue #968 climate-entity unit check still errors only for non-Fahrenheit
+  - Issue #968/#1018 climate-entity unit check (_check_climate_unit): errors when the
+    thermostat's reported unit differs from the configured unit; latched once checkable
   - _build_state_dict() persists "temp_unit"
   - async_restore_state(): same-day readings (temp history, pred archive, classification)
     are discarded only when the persisted unit differs from the configured unit, in both
@@ -85,21 +86,113 @@ class TestUnitKeyFromAttr:
 # ---------------------------------------------------------------------------
 
 
-class TestClimateCheckUnchanged:
-    """The #968 check sits inside _async_update_data_impl()'s ``_first_run`` block, which
-    needs the full coordinator (engine, learning, chart log, listeners) to execute and
-    cannot be driven headlessly with a small stub. Its behaviour is therefore pinned by
-    (a) TestUnitKeyFromAttr, which covers every input class it handles (°C/C/celsius ->
-    not Fahrenheit, unrecognised -> None -> not Fahrenheit, °F/F/fahrenheit ->
-    Fahrenheit), and (b) this check that the call site uses that helper and the old
-    inline tuple is gone. No predicate is re-implemented here."""
+def _make_climate_coord(configured: str, state, *, with_latch_attr: bool = True):
+    """Stub coordinator exposing the real _check_climate_unit; ``state`` may be a list
+    of successive states returned by hass.states.get (last one repeats)."""
+    cls = _get_coordinator_class()
+    coord = object.__new__(cls)
+    coord.config = {"climate_entity": "climate.test", "temp_unit": configured}
+    states = list(state) if isinstance(state, list) else [state]
+    calls = {"n": 0}
 
-    def test_call_site_uses_shared_helper(self):
-        import inspect
+    def _get(_eid):
+        s = states[min(calls["n"], len(states) - 1)]
+        calls["n"] += 1
+        return s
 
-        src = inspect.getsource(_get_coordinator_class()._async_update_data_impl)
-        assert "unit_key_from_attr(_reported_unit)" in src
-        assert '("°F", "F", "FAHRENHEIT")' not in src
+    coord.hass = MagicMock()
+    coord.hass.states.get = _get
+    if with_latch_attr:
+        coord._climate_unit_checked = False
+    coord._check = types.MethodType(cls._check_climate_unit, coord)
+    return coord
+
+
+def _cstate(raw="__absent__", state="heat"):
+    s = MagicMock()
+    s.state = state
+    s.attributes = {} if raw == "__absent__" else {"temperature_unit": raw}
+    return s
+
+
+def _climate_errors(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and r.name == _COORD_LOGGER]
+
+
+class TestClimateUnitCheck:
+    """Real _check_climate_unit (Issues #968/#1018): thermostat unit must equal config."""
+
+    @pytest.mark.parametrize(("configured", "raw"), [("celsius", "°C"), ("celsius", "C"), ("fahrenheit", "°F")])
+    def test_matching_unit_silent(self, caplog, configured, raw):
+        coord = _make_climate_coord(configured, _cstate(raw))
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+        assert _climate_errors(caplog) == []
+
+    def test_absent_attribute_silent_and_latches(self, caplog):
+        coord = _make_climate_coord("fahrenheit", _cstate())
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+        assert _climate_errors(caplog) == []
+        assert coord._climate_unit_checked is True
+
+    def test_celsius_config_fahrenheit_thermostat_errors(self, caplog):
+        coord = _make_climate_coord("celsius", _cstate("°F"))
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+        msgs = _climate_errors(caplog)
+        assert len(msgs) == 1
+        assert "°F" in msgs[0]
+        assert "celsius" in msgs[0]
+
+    def test_fahrenheit_config_celsius_thermostat_errors(self, caplog):
+        coord = _make_climate_coord("fahrenheit", _cstate("°C"))
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+        msgs = _climate_errors(caplog)
+        assert len(msgs) == 1
+        assert "°C" in msgs[0]
+        assert "fahrenheit" in msgs[0]
+
+    def test_unrecognised_unit_errors(self, caplog):
+        coord = _make_climate_coord("fahrenheit", _cstate("K"))
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+        assert len(_climate_errors(caplog)) == 1
+
+    def test_missing_entity_does_not_latch_then_checks_when_available(self, caplog):
+        coord = _make_climate_coord("celsius", [None, _cstate("°F")])
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+            assert coord._climate_unit_checked is False
+            assert _climate_errors(caplog) == []
+            coord._check()
+        assert coord._climate_unit_checked is True
+        assert len(_climate_errors(caplog)) == 1
+
+    @pytest.mark.parametrize("st", ["unavailable", "unknown"])
+    def test_unavailable_state_does_not_latch(self, caplog, st):
+        coord = _make_climate_coord("celsius", [_cstate("°F", state=st), _cstate("°F")])
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+            assert coord._climate_unit_checked is False
+            assert _climate_errors(caplog) == []
+            coord._check()
+        assert len(_climate_errors(caplog)) == 1
+
+    def test_latched_second_call_silent(self, caplog):
+        coord = _make_climate_coord("celsius", _cstate("°F"))
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+            coord._check()
+        assert len(_climate_errors(caplog)) == 1
+
+    def test_stub_without_latch_attribute_works(self, caplog):
+        coord = _make_climate_coord("celsius", _cstate("°F"), with_latch_attr=False)
+        assert not hasattr(coord, "_climate_unit_checked")
+        with caplog.at_level(logging.ERROR, logger=_COORD_LOGGER):
+            coord._check()
+        assert len(_climate_errors(caplog)) == 1
 
 
 # ---------------------------------------------------------------------------

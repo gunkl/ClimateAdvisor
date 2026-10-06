@@ -279,9 +279,18 @@ from .temperature import (
     from_fahrenheit,
     to_fahrenheit,
     unit_key_from_attr,
+    unit_mismatch,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Issue #1020: (role label, entity config key, source config key or None). A role with a
+# source key is only checked when that source reads the entity's state (sensor/input_number).
+_SENSOR_UNIT_ROLES: Final = (
+    ("outdoor_temp", "outdoor_temp_entity", "outdoor_temp_source"),
+    ("indoor_temp", "indoor_temp_entity", "indoor_temp_source"),
+    ("sleep_indoor_temp", "sleep_indoor_temp_entity", None),
+)
 
 # Issue #1015: a provider low/high this far (°F) from the observed outdoor extreme is
 # logged as a WARNING when the observed extreme overrides it (likely a bad sample or a
@@ -663,6 +672,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1015: one-shot weather-provider unit check state (see _get_forecast)
         self._weather_unit_checked: bool = False
         self._climate_unit_checked: bool = False
+        self._ha_unit_checked: bool = False  # Issue #1021
+        self._sensor_unit_checked: set[str] = set()  # Issue #1020
+        self._unit_check_info: dict[str, Any] = {}  # Issues #1020/#1021
         self._weather_unit_info: dict[str, Any] | None = None
         # Issue #1015: (kind, observed_ts) pairs already warned about today (cleared at end of day)
         self._observed_extreme_warned: set[tuple[str, str]] = set()
@@ -2952,6 +2964,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
             self._check_climate_unit()
+            # Issues #1020/#1021: validate HA system unit and temperature sensor units (latched).
+            self._check_unit_sources()
 
             # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
             if self._first_run:
@@ -3983,6 +3997,60 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 raw,
                 configured,
             )
+
+    def _check_unit_sources(self) -> None:
+        """Warn once per source when a unit disagrees with the configured ``temp_unit``.
+
+        Issue #1021: Home Assistant's system unit (``hass.config.units.temperature_unit``)
+        vs the configured unit. Issue #1020: the ``unit_of_measurement`` of the configured
+        outdoor/indoor/sleep-indoor sensor entities. Log-only (plus debug-state fields),
+        no auto-conversion, no I/O. A source is latched only once it can actually be
+        checked, so a not-yet-ready entity is re-checked on later cycles. Entity ids are
+        never logged — only the role label.
+        """
+        info = self.__dict__.setdefault("_unit_check_info", {})
+        configured = self.config.get("temp_unit", "fahrenheit")
+
+        if not getattr(self, "_ha_unit_checked", False):
+            units = getattr(getattr(self.hass, "config", None), "units", None)
+            ha_unit = unit_key_from_attr(getattr(units, "temperature_unit", None))
+            if ha_unit is not None:
+                self._ha_unit_checked = True
+                info["ha_system_unit"] = ha_unit
+                info["ha_unit_mismatch"] = ha_unit != configured
+                if ha_unit != configured:
+                    _LOGGER.warning(
+                        "Temperature unit mismatch with Home Assistant: ha_unit=%s configured_unit=%s — "
+                        "thermostat readings and setpoints will be misread until corrected",
+                        ha_unit,
+                        configured,
+                    )
+
+        checked = self.__dict__.setdefault("_sensor_unit_checked", set())
+        for role, entity_key, source_key in _SENSOR_UNIT_ROLES:
+            if role in checked:
+                continue
+            if source_key is not None:
+                default_source = TEMP_SOURCE_WEATHER_SERVICE if role == "outdoor_temp" else TEMP_SOURCE_CLIMATE_FALLBACK
+                if self.config.get(source_key, default_source) not in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+                    continue
+            entity_id = self.config.get(entity_key)
+            if not entity_id:
+                continue
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state in ("unavailable", "unknown"):
+                continue
+            checked.add(role)
+            sensor_unit = unit_mismatch(state.attributes.get("unit_of_measurement"), configured)
+            if sensor_unit is not None:
+                info.setdefault("sensor_unit_mismatches", {})[role] = sensor_unit
+                _LOGGER.warning(
+                    "Temperature sensor unit mismatch: role=%s sensor_unit=%s configured_unit=%s — "
+                    "readings from this sensor will be misread until corrected",
+                    role,
+                    sensor_unit,
+                    configured,
+                )
 
     async def _get_forecast(self) -> ForecastSnapshot | None:
         """Pull forecast data from the weather entity."""
@@ -10904,6 +10972,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "unit_mismatch": (getattr(self, "_weather_unit_info", None) or {}).get("unit_mismatch"),
             "provider_unit": (getattr(self, "_weather_unit_info", None) or {}).get("provider_unit"),
             "configured_unit": (getattr(self, "_weather_unit_info", None) or {}).get("configured_unit"),
+            # Issues #1020/#1021: HA system unit and temperature-sensor unit checks
+            "ha_system_unit": (getattr(self, "_unit_check_info", None) or {}).get("ha_system_unit"),
+            "ha_unit_mismatch": (getattr(self, "_unit_check_info", None) or {}).get("ha_unit_mismatch"),
+            "sensor_unit_mismatches": dict(
+                (getattr(self, "_unit_check_info", None) or {}).get("sensor_unit_mismatches", {})
+            ),
             "thermal_pipeline": self._build_thermal_pipeline_summary(),
             "startup_coalesce_active": self._startup_coalesce_active,
             "startup_coalesce_seconds_remaining": (

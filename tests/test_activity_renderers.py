@@ -2122,3 +2122,75 @@ class TestFanTransitionTextIsCorrectAndConsistent:
         assert "WHF: on->off" in label, (
             f"{event_type} must state the WHF turned off directly in the label. label={label!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1029: grace_cancelled / fan_override_cleared renderers
+# ---------------------------------------------------------------------------
+
+
+class TestGraceCancelledRenderers:
+    def test_grace_cancelled_full_payload(self):
+        label, settings = _act_mod.EVENT_RENDERERS["grace_cancelled"](
+            {
+                "reason": "bedtime",
+                "trigger": "fan_manual_override",
+                "remaining_minutes": 660,
+                "remote_timer_hours": 12.0,
+            },
+            "fahrenheit",
+        )
+        assert label == "Grace period cancelled (bedtime)"
+        assert "fan_manual_override" in settings
+        assert "660 min left" in settings
+        assert "RF timer 12.0h" in settings
+
+    def test_grace_cancelled_known_reason_labels(self):
+        for reason, expected in (
+            ("morning_wakeup", "morning wake-up"),
+            ("user_cancel_override", "user cancelled override"),
+            ("user_cancel_fan_override", "user cancelled fan override"),
+            ("adopted_matching_decision", "adopted"),
+            ("superseded", "replaced"),
+        ):
+            label, _ = _act_mod.EVENT_RENDERERS["grace_cancelled"]({"reason": reason}, "fahrenheit")
+            assert expected in label, (reason, label)
+
+    def test_grace_cancelled_unknown_reason_falls_back(self):
+        label, _ = _act_mod.EVENT_RENDERERS["grace_cancelled"]({"reason": "some_new_reason"}, "fahrenheit")
+        assert "some new reason" in label
+
+    def test_grace_cancelled_tolerates_none_fields(self):
+        label, settings = _act_mod.EVENT_RENDERERS["grace_cancelled"](
+            {"reason": None, "trigger": None, "remaining_minutes": None, "remote_timer_hours": None},
+            "fahrenheit",
+        )
+        assert label
+        assert settings == ""
+        label, settings = _act_mod.EVENT_RENDERERS["grace_cancelled"]({}, "fahrenheit")
+        assert label
+
+    def test_fan_override_cleared_with_and_without_timer(self):
+        label, settings = _act_mod.EVENT_RENDERERS["fan_override_cleared"](
+            {"reason": "morning_wakeup", "remote_timer_hours": 12.0}, "fahrenheit"
+        )
+        assert label == "Fan override cleared (morning wake-up)"
+        assert settings == "RF timer 12.0h"
+        label, settings = _act_mod.EVENT_RENDERERS["fan_override_cleared"](
+            {"reason": "bedtime", "remote_timer_hours": None}, "fahrenheit"
+        )
+        assert label == "Fan override cleared (bedtime)"
+        assert settings == ""
+        label, _ = _act_mod.EVENT_RENDERERS["fan_override_cleared"]({}, "fahrenheit")
+        assert label
+
+    def test_both_events_not_deduplicated(self):
+        assert "grace_cancelled" in _act_mod._NO_DEDUP
+        assert "fan_override_cleared" in _act_mod._NO_DEDUP
+        table = _build_table(
+            [
+                _make_event("grace_cancelled", hours_ago=2, reason="bedtime", source="automation"),
+                _make_event("grace_cancelled", hours_ago=1, reason="superseded", source="automation"),
+            ]
+        )
+        assert table.count("Grace period cancelled") == 2

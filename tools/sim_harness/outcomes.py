@@ -141,6 +141,16 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # cycle and shadows the real outcome (e.g. classification_suppressed_paused)
         # at that same timestamp in production_outcome_at()'s "most recent" lookup.
         "startup_coalesced",
+        # Issue #1029: grace_cancelled / fan_override_cleared are observational. They
+        # record a cancellation decision already made (and already mapped via the
+        # deciding event, e.g. bedtime_setback / morning_wakeup / override_cleared) and
+        # are never an HVAC decision themselves -- same class as grace_started /
+        # unprotected_grace_started above. Left unmapped they would hit the
+        # 'unknown:<type>' catch-all and, under last-decision-wins, shadow the real
+        # outcome (cf. stranded_hvac_suppression_restored). Cannot hide a real failure:
+        # the deciding events still map.
+        "grace_cancelled",
+        "fan_override_cleared",
     }
 )
 

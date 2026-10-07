@@ -484,6 +484,22 @@ def resolve_pre_cool_modifier(classification: DayClassification, config: dict) -
     return None
 
 
+# Natural-expiry clears already have their own Activity Log row (grace_expired / override_adopted),
+# so clear_fan_override() stays silent for them (Issue #1029).
+_FAN_CLEAR_SILENT_REASONS: frozenset[str] = frozenset({"grace_expired", "adopted_matching_decision"})
+
+
+def _override_event_source(reason: str) -> str:
+    """Actor label for an intentional override/grace ending (Issue #1029).
+
+    ``"manual"`` when the occupant asked for it (``user_cancel*`` reasons), else
+    ``"automation"`` (bedtime, morning wake-up, superseded, ...). Used as the explicit
+    ``source`` payload key so the Activity Report does not attribute an automation-initiated
+    clear to the occupant.
+    """
+    return "manual" if reason.startswith("user_cancel") else "automation"
+
+
 def _in_sleep_window(now: datetime, config: dict) -> bool:
     """Return True if ``now`` falls in the configured sleep window (Issue #249).
 
@@ -1479,7 +1495,7 @@ class AutomationEngine:
             self._legacy_clear_confirm_flag()
         self._clear_manual_override_active(reason)
 
-    def _clear_manual_override_active(self, reason: str) -> None:
+    def _clear_manual_override_active(self, reason: str, *, announce_fan: bool = True) -> None:
         """The ``_manual_override_active``-and-below half of ``clear_manual_override()``
         (Issue #664, extracted for reuse). None of these fields are part of the
         override/grace FSM's ``(OverrideConfirmState, GraceState)`` 2-tuple derivation
@@ -1523,7 +1539,7 @@ class AutomationEngine:
             except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real clear
                 _LOGGER.exception("_clear_manual_override_active: lifecycle event emit failed (isolated)")
         self._resumed_from_pause = False
-        self.clear_fan_override()
+        self.clear_fan_override(reason=reason, announce=announce_fan)
 
     def cancel_override(self, reason: str = "user_cancel") -> bool:
         """User/system deliberately ends an override and its grace protection right now (Issue #508).
@@ -1554,10 +1570,11 @@ class AutomationEngine:
 
         if self._override_confirm_pending:
             self._clear_override_confirm_action()
-        self._cancel_grace_timers_action()
+        self._cancel_grace_intentionally(reason)
 
         self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
-        self._clear_manual_override_active(reason)
+        # announce_fan=False: the supplemental fan-only "override_cleared" below already covers it.
+        self._clear_manual_override_active(reason, announce_fan=False)
 
         # clear_manual_override() only emits "override_cleared" when a thermostat-mode override
         # was active (guarded on _manual_override_active); a fan-only override cleared here would
@@ -1984,14 +2001,22 @@ class AutomationEngine:
             origin_state=_clear_origin_state,
         )
 
-    def clear_fan_override(self) -> None:
+    def clear_fan_override(self, reason: str = "unspecified", *, announce: bool = True) -> None:
         """Clear the fan override flag (called at transition points, Issue #327).
 
         Idempotent: no-op if no override is currently active.
         After clearing, restarts the min-runtime cycle that was suspended when the
         override was set.
+
+        Issue #1029: emits ``fan_override_cleared`` (reason, source, remote_timer_hours,
+        active_since) when it actually clears, except for natural ``grace_expired`` (the
+        ``grace_expired`` row already covers it) or when ``announce`` is False (the caller
+        emits its own row).
         """
         if self._fan_override_active:
+            # Issue #1029: capture before the resets below wipe them.
+            _cleared_remote_timer_hours = self._fan_remote_timer_hours
+            _cleared_active_since = self._fan_override_time
             # Issue #731 Phase 5: origin_state captured before this block's writes —
             # routed through _resolve_fan_fsm_state(). Mirrors
             # handle_fan_manual_override()'s group-1 wiring shape.
@@ -2000,7 +2025,8 @@ class AutomationEngine:
             _override_origin_state = self.fan_lifecycle_state
 
             _LOGGER.info(
-                "Fan override: cleared — override active since %s, resuming CA fan control",
+                "Fan override: cleared — reason=%s override active since %s, resuming CA fan control",
+                reason,
                 self._fan_override_time,
             )
             # Issue #829: this override's grace expired while the fan is still physically
@@ -2028,6 +2054,17 @@ class AutomationEngine:
                 kind=FanFsmEventKind.OVERRIDE_CLEARED,
                 origin_state=_override_origin_state,
             )
+
+            if announce and reason not in _FAN_CLEAR_SILENT_REASONS and self._emit_event_callback:
+                self._emit_event_callback(
+                    "fan_override_cleared",
+                    {
+                        "reason": reason,
+                        "source": _override_event_source(reason),
+                        "remote_timer_hours": _cleared_remote_timer_hours,
+                        "active_since": _cleared_active_since,
+                    },
+                )
 
             # Restart the min-runtime cycle that was suspended when override was set
             self.hass.async_create_task(self.start_min_fan_runtime_cycles())
@@ -6546,6 +6583,14 @@ class AutomationEngine:
                 )
                 return False
 
+        # Issue #1029: a new grace replacing a user-relevant one (manual-sourced or
+        # override-protecting) with real time left is an early ending — announce it.
+        # Automation-over-automation housekeeping stays quiet.
+        if self._grace_active and (self._last_resume_source == "manual" or self._grace_protects_override):
+            _sup_end = dt_util.parse_datetime(self._grace_end_time) if self._grace_end_time else None
+            if _sup_end is not None and (_sup_end - dt_util.now()).total_seconds() >= 60:
+                self._cancel_grace_intentionally("superseded", cancel_timers=False)
+
         self._cancel_grace_timers()
 
         now = dt_util.now()
@@ -6878,6 +6923,76 @@ class AutomationEngine:
         self._last_resume_source = None
         self._last_grace_trigger = None
 
+    def _cancel_grace_intentionally(
+        self,
+        reason: str,
+        *,
+        cancel_timers: bool = True,
+        remote_timer_hours: float | None = None,
+    ) -> None:
+        """Cancel (or announce the replacement of) an active grace and make it visible (Issue #1029).
+
+        Snapshots the grace's identity and remaining time BEFORE the timers are cancelled
+        (``_cancel_grace_timers_action()`` wipes ``_grace_end_time``/``_last_resume_source``/
+        ``_last_grace_trigger``), logs, and emits ``grace_cancelled``. With
+        ``cancel_timers=False`` only the log + emit happen (used when a new grace is about
+        to replace this one and the caller cancels the timers itself). No-op beyond the
+        timer cancel when no grace is active. Never calls the override/grace FSM
+        dispatcher — callers keep their own ``_resolve_override_grace_fsm_state()``.
+        """
+        if not self._grace_active:
+            if cancel_timers:
+                self._cancel_grace_timers_action()
+            return
+
+        trigger = self._last_grace_trigger
+        grace_source = self._last_resume_source
+        end_iso = self._grace_end_time
+        protects_override = self._grace_protects_override
+        # Caller-supplied value wins: bedtime/wake-up clear the fan override (and its
+        # RF-timer hours) before this runs, so they pass the pre-clear snapshot in.
+        if remote_timer_hours is None:
+            remote_timer_hours = getattr(self, "_fan_remote_timer_hours", None)
+        if reason == "superseded":
+            # handle_fan_manual_override() overwrites _fan_remote_timer_hours before the new
+            # grace starts, so the live value describes the NEW grace, not the replaced one.
+            remote_timer_hours = None
+        remaining_minutes: int | None = None
+        try:
+            _end = dt_util.parse_datetime(end_iso) if end_iso else None
+            if _end is not None:
+                remaining_minutes = max(0, int((_end - dt_util.now()).total_seconds() // 60))
+        except (TypeError, ValueError):
+            remaining_minutes = None
+
+        if cancel_timers:
+            self._cancel_grace_timers_action()
+
+        _LOGGER.info(
+            "Grace cancelled — reason=%s trigger=%s source=%s remaining_min=%s protects_override=%s"
+            " remote_timer_hours=%s",
+            reason,
+            trigger,
+            grace_source,
+            remaining_minutes,
+            protects_override,
+            remote_timer_hours,
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "grace_cancelled",
+                {
+                    "reason": reason,
+                    "source": _override_event_source(reason),
+                    "trigger": trigger,
+                    "grace_source": grace_source,
+                    "remaining_minutes": remaining_minutes,
+                    "protects_override": protects_override,
+                    "remote_timer_hours": remote_timer_hours,
+                    "grace_end_time": end_iso,
+                },
+            )
+
     def _cancel_grace_timers(self) -> None:
         """Cancel any active grace period timers.
 
@@ -7202,6 +7317,7 @@ class AutomationEngine:
         # just zeroed). Same capture-before-clear pattern already used at :3648 for
         # _manual_override_mode/_manual_override_source.
         _fan_was_overridden = self._fan_override_active
+        _rf_timer_hours_before_clear = self._fan_remote_timer_hours
 
         _LOGGER.info("Bedtime setback: clearing any pending override state before applying sleep setback")
         self.clear_manual_override(reason="bedtime")
@@ -7226,7 +7342,7 @@ class AutomationEngine:
         ):
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-            self._cancel_grace_timers_action()
+            self._cancel_grace_intentionally("bedtime", remote_timer_hours=_rf_timer_hours_before_clear)
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
 
         c = self._current_classification
@@ -7555,6 +7671,7 @@ class AutomationEngine:
         # have looked complete while still doing nothing — same capture-before-clear
         # pattern already used at :3648 and now in handle_bedtime()).
         _fan_was_overridden = self._fan_override_active
+        _rf_timer_hours_before_clear = self._fan_remote_timer_hours
 
         _LOGGER.info("Morning wakeup: clearing any pending override state before restoring comfort")
         self.clear_manual_override(reason="morning_wakeup")
@@ -7579,7 +7696,7 @@ class AutomationEngine:
         ):
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-            self._cancel_grace_timers_action()
+            self._cancel_grace_intentionally("morning_wakeup", remote_timer_hours=_rf_timer_hours_before_clear)
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
 
         # Deactivate fan if still running from overnight — unless the user is overriding it

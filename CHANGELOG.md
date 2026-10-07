@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.87] — 2026-10-07
+
+- Fix #1029: the Activity Log now shows when a grace period or fan override is cancelled early (e.g. by the bedtime or wake-up routine), with the reason and how much time was left.
+
 ## [0.7.86] — 2026-10-06
 
 - Fix #1023: a new install on a Home Assistant set to Celsius now pre-selects Celsius on the temperature unit step instead of Fahrenheit; existing installs are unchanged.

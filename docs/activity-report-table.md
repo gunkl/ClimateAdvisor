@@ -14,7 +14,7 @@ unchanged by that move, only the module and calling mechanism changed._
 | How is the per-event table built — LLM or Python? | Deterministically in Python by `build_event_timeline_table()` in `ai_skills_context.py` (moved from `ai_skills_activity.py`, Issue #563). Not LLM-generated. The AI writes the other narrative sections of the merged investigator skill's output. | [Overview](#overview) |
 | What do the Event, Settings, Indoor, and Outdoor columns mean? | Event = what happened. Settings = the concrete HVAC action (setpoint, mode, fan state). Indoor/Outdoor = ambient temperatures at event emit time, sourced from coordinator.data; `—` for events recorded before Issue #352. | [Overview](#overview) |
 | How does `_format_band_setpoint` render a setpoint? | Active edge first (the live thermostat setpoint), other edge in parens as the monitored bound: `setpoint: 72°F Cool (64°F Heat)`. | [Setpoint Convention](#setpoint-convention) |
-| What is the full set of event types the table must handle? | 41 registered types across 6 groups: band/setpoint-program, setpoint/mode delta, override lifecycle, nat-vent/fan, skip/advisory, system/diagnostic. | [Event Catalog](#event-catalog) |
+| What is the full set of event types the table must handle? | 54 catalog rows across 6 groups: band/setpoint-program, setpoint/mode delta, override lifecycle, nat-vent/fan, skip/advisory, system/diagnostic. | [Event Catalog](#event-catalog) |
 | What happens when an unrecognised event type appears? | `_default_renderer` fires: humanized type name + `reason` field as Event; generic field extraction as Settings. Never blank, never crashes. | [Default Renderer](#default-renderer) |
 | How does the table handle many consecutive band rows of the same type? | Consecutive same-type rows collapse to `{name} ×N ({start}–{end})` while preserving the shared Settings cell. | [Dedup Contract](#dedup-contract) |
 | How do I add or change an event renderer? | Four steps: emit with structured fields, add/update `EVENT_RENDERERS` entry, add catalog row here, add unit test. | [Runbook: Adding or Changing a Renderer](#runbook-adding-or-changing-a-renderer) |
@@ -94,7 +94,7 @@ the user's configured unit (°F or °C).
 One row per emitted event type. Emitters are `automation.py` (via
 `_emit_event_callback`) and `coordinator.py` (via `_emit_event`).
 
-Grouped by functional area. 36 registered types total.
+Grouped by functional area. 54 catalog rows (52 + `grace_cancelled` / `fan_override_cleared`, Issue #1029; a few event types, e.g. `unprotected_grace_started`, are catalogued but hidden or default-rendered).
 
 ### Band / Setpoint-Program
 
@@ -130,6 +130,8 @@ These events signal a mode or setpoint change triggered by automation logic.
 | `override_self_resolved` | `automation.py` inner callback (PATH B) | `detected_mode`, `current_mode` | "Override self-resolved (transient)" | blank |
 | `grace_started` | `automation.py` `_start_grace_period` | `source`, `duration_seconds`, `trigger` | "Grace period started — {source}" | `duration: {duration_seconds//60} min, trigger: {trigger}` |
 | `grace_expired` | `automation.py` `_on_grace_expired` | `source`, `re_paused` | "Grace period expired — {source}" | `re-paused: yes` if `re_paused` else `resuming normal control` |
+| `grace_cancelled` | `automation.py` `_cancel_grace_intentionally` (Issue #1029) — callers: bedtime and morning wake-up (#874 grace cancel), `cancel_override` (reason passthrough: `user_cancel_override`, `user_cancel_fan_override`, `adopted_matching_decision`), and grace replacement (`superseded`, only when the replaced grace was manual-sourced or override-protecting with >= 1 min left) | `reason`, `trigger`, `source` (actor: `manual`/`automation`), `grace_source`, `remaining_minutes`, `protects_override`, `remote_timer_hours`, `grace_end_time` | "Grace period cancelled ({reason label})" | `{trigger}, {remaining_minutes} min left` — **excluded from dedup** (`_NO_DEDUP`). Natural expiry stays `grace_expired`; watchdog recoveries stay `stuck_grace_recovered`; a user fan-off stays `fan_cancel`. |
+| `fan_override_cleared` | `automation.py` `clear_fan_override(reason)` (Issue #1029) — emitted only when it actually clears an active fan override; skipped for `reason in {"grace_expired", "adopted_matching_decision"}` (natural expiry already has its own row) and when `cancel_override` is the clearer (that path keeps its supplemental fan-only `override_cleared`) | `reason`, `source` (`manual` for `user_cancel*` reasons, else `automation`), `remote_timer_hours`, `active_since` | "Fan override cleared ({reason label})" | `RF timer {remote_timer_hours}h` if present, else blank — **excluded from dedup** (`_NO_DEDUP`). Observational only: listed in the harness `UNMAPPED_PRODUCTION_EVENTS`, never an HVAC decision. |
 
 ### Nat-Vent / Fan
 

@@ -1899,6 +1899,47 @@ def _render_grace_started(p: dict, unit: str) -> tuple[str, str]:
     return label, trigger_label
 
 
+_CANCEL_REASON_LABELS: dict[str, str] = {
+    "bedtime": "bedtime",
+    "morning_wakeup": "morning wake-up",
+    "user_cancel_override": "user cancelled override",
+    "user_cancel_fan_override": "user cancelled fan override",
+    "adopted_matching_decision": "automation adopted matching decision",
+    "superseded": "replaced by a new grace period",
+}
+
+
+def _cancel_reason_label(reason: Any) -> str:
+    """Human label for a cancel/clear reason; never raises, never blank."""
+    if not reason or not isinstance(reason, str):
+        return "unspecified"
+    return _CANCEL_REASON_LABELS.get(reason, reason.replace("_", " "))
+
+
+def _render_grace_cancelled(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1029: grace period ended early on purpose (bedtime, wake-up, cancel, superseded)."""
+    label = f"Grace period cancelled ({_cancel_reason_label(p.get('reason'))})"
+    parts: list[str] = []
+    trigger = p.get("trigger")
+    remaining = p.get("remaining_minutes")
+    if trigger:
+        parts.append(str(trigger))
+    if remaining is not None:
+        parts.append(f"{remaining} min left")
+    settings = ", ".join(parts)
+    rf = p.get("remote_timer_hours")
+    if rf is not None:
+        settings = f"{settings}, RF timer {rf}h" if settings else f"RF timer {rf}h"
+    return label, settings
+
+
+def _render_fan_override_cleared(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1029: fan override flag cleared by an intentional (non-expiry) path."""
+    label = f"Fan override cleared ({_cancel_reason_label(p.get('reason'))})"
+    rf = p.get("remote_timer_hours")
+    return label, (f"RF timer {rf}h" if rf is not None else "")
+
+
 def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
     source = p.get("source", "")
     re_paused = p.get("re_paused", False)
@@ -2652,6 +2693,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "override_self_resolved": _render_override_self_resolved,
     "override_adopted": _render_override_adopted,
     "grace_started": _render_grace_started,
+    "grace_cancelled": _render_grace_cancelled,
+    "fan_override_cleared": _render_fan_override_cleared,
     "grace_expired": _render_grace_expired,
     "nat_vent_fan_on": _render_nat_vent_fan_on,
     "nat_vent_fan_off": _render_nat_vent_fan_off,
@@ -2748,6 +2791,8 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "override_confirmed",
         "override_cleared",
         "override_adopted",
+        "grace_cancelled",
+        "fan_override_cleared",
         "ceiling_guard_fired",
         "incident_detected",
         "setpoint_rejected",

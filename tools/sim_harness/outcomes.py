@@ -160,6 +160,14 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # Cannot hide a real failure: every HVAC decision still maps via its deciding event.
         "outdoor_sensor_fallback",
         "outdoor_sensor_recovered",
+        # Issue #1033: indoor_sensor_unavailable / indoor_sensor_recovered are observational.
+        # They report a sensor-health transition (primary indoor sensor down, sleep sensor
+        # falling back to the primary, or either recovering); they never command HVAC and the
+        # decision events the engine emits afterwards still map. Registering them unmapped cannot
+        # let a real failure pass silently: if indoor-dependent decisions are wrongly made or
+        # skipped, the deciding event (or its absence) is still what the assertion checks.
+        "indoor_sensor_unavailable",
+        "indoor_sensor_recovered",
     }
 )
 

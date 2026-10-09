@@ -53,6 +53,7 @@ def _make_coord(*, sleep_time: str = "22:30", wake_time: str = "06:30") -> Magic
     coord.automation_engine = ae
 
     coord._get_indoor_temp = MagicMock(return_value=66.0)
+    coord._refresh_indoor_sensor_health = MagicMock()  # Issue #1033 funnel, covered in test_indoor_sensor_fallback.py
     coord._last_outdoor_temp = 65.0
     coord._last_predicted_indoor = None
 

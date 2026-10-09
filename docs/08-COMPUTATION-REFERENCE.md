@@ -3375,24 +3375,25 @@ All four sites are covered by tests in `tests/test_coordinator_chart.py`.
 
 ## 20. Chart Log Write Guards
 
-### Bug A — pred_indoor gated on indoor_temp availability
+### Bug A — `indoor` is null on a tick where the sensor is unavailable (CORRECTED, Issue #1033)
 
-`pred_indoor` and `pred_outdoor` are only written to the chart log when
-`indoor_temp` (the actual sensor/climate-entity read for that coordinator tick)
-is also available. If the thermostat is in `unknown` or `unavailable` state —
-as occurs during an HA restart — both `indoor` and `pred_indoor` are null for
-that tick. This prevents restart artifacts from permanently corrupting the
-predicted indoor trend line (`histPredIndoorPts` on the dashboard chart).
+If the thermostat is in `unknown` or `unavailable` state — as occurs during an HA
+restart — `indoor_temp` is `None` for that 30-minute tick and the chart-log `indoor`
+field is written as null, so a restart artifact never becomes a spike on the actual
+indoor line.
 
-The guard lives in `_async_update_data()`:
-
-```python
-if _pred_in and _now_h < len(_pred_in) and indoor_temp is not None:
-    _pred_indoor_val = _pred_in[_now_h]["temp"]
-```
-
-A `DEBUG`-level log is emitted when `indoor_temp` is `None` so the skip is
-visible in HA logs without cluttering normal operation.
+**`pred_indoor` is NOT gated on `indoor_temp`.** An earlier version of this section
+claimed `pred_indoor` and `pred_outdoor` were only written when `indoor_temp` is
+available. The code in `_async_update_data()` (the `chart_log append: event=30min_poll`
+block) does not do that: when `indoor_temp is None` it emits only a `DEBUG` line
+(`"chart log: indoor_temp unavailable — skipping pred_indoor write ..."`, whose wording is
+misleading), then sets `_pred_indoor_val` from the first-write-wins prediction archive
+(`_lookup_pred_archive`) and, only during warm-up, from `_last_predicted_indoor[0]`. The
+value is written regardless of `indoor_temp`. So during a sensor outage the chart log
+holds `indoor=null` with a real `pred_indoor`; this is harmless because the archived
+prediction was made ~4 h earlier and does not depend on the current reading. The tests
+named `test_pred_indoor_*` in `tests/test_coordinator_chart.py` exercise a local helper
+that models the old guard, not the production block; treat them as stale.
 
 ### Bug B — plausible indoor temperature range filter
 
@@ -3405,9 +3406,10 @@ constants:
 | `_MIN_PLAUSIBLE_INDOOR_F` | 40.0 °F | Below this the reading is treated as a sensor glitch |
 | `_MAX_PLAUSIBLE_INDOOR_F` | 110.0 °F | Above this the reading is treated as a sensor glitch |
 
-Values outside this range are logged at `WARNING` level and cause
-`_get_indoor_temp()` to return `None` rather than propagating the bad reading
-into the chart log. The most common trigger is a thermostat that briefly echoes
+Values outside this range cause `_get_indoor_temp()` to return `None` rather
+than propagating the bad reading into the chart log. Since Issue #1033 the per-call
+log line is `DEBUG`; the outage is announced once per episode instead (see "Indoor
+sensor failure reasons and announcements" below). The most common trigger is a thermostat that briefly echoes
 its new setpoint into `current_temperature` during a setpoint-only transition;
 if the 30-minute coordinator tick fires at that moment, the out-of-range value
 would otherwise appear as a permanent spike on the actual indoor line.
@@ -3428,19 +3430,28 @@ second, bedroom-area sensor. While the sleep schedule window is active
 field is unset, behavior is unchanged from Bug B above.
 
 **Fallback, not failure.** If the sleep sensor's state is missing, non-numeric,
-or outside the same `[MIN_PLAUSIBLE_INDOOR_F, MAX_PLAUSIBLE_INDOOR_F]` band as
-Bug B, a `WARNING` is logged (`"Sleep sensor unavailable, falling back to
-primary indoor sensor" entity=<id>`) and resolution falls through to the
-primary source — the function never returns an unavailable reading just
-because the sleep sensor failed. Automation must never stall overnight
-because a bedroom sensor's battery died. An `INFO` line (`"Using sleep indoor
-sensor" entity=<id> value=<X.X>°F`) fires whenever the sleep reading is
-actually used.
+non-finite, outside the same `[MIN_PLAUSIBLE_INDOOR_F, MAX_PLAUSIBLE_INDOOR_F]` band
+as Bug B, or stale (below), resolution falls through to the primary source — the
+function never returns an unavailable reading just because the sleep sensor failed.
+Automation must never stall overnight because a bedroom sensor's battery died. The
+resolver itself no longer logs a per-call `WARNING` and keeps no counter: the former
+module-level `_sleep_sensor_miss_streaks` dict (an INFO-then-WARNING escalation on the
+3rd consecutive miss, advanced by both the coordinator and the engine, so cadence-
+dependent and shared across zones using one sensor) was **removed in Issue #1033**.
+The failure is reported in `IndoorTempReading.sleep_reason` and announced once per
+episode by `_refresh_indoor_sensor_health()` (INFO log, `indoor_sensor_unavailable`
+with `role=sleep`). An `INFO` line (`"Using sleep indoor sensor" entity=<id>
+value=<X.X>°F`) still fires whenever the sleep reading is actually used.
 
 **Provenance, computed once.** `resolve_indoor_temp_with_provenance()` returns
-an `IndoorTempReading(value, source_entity, primary_value)` — `value`/
+an `IndoorTempReading(value, source_entity, primary_value, reason, sleep_reason)` — `value`/
 `source_entity` are the (possibly swapped) comfort-facing result; `primary_value`
 is *always* the unswapped primary-source reading, computed in the same call.
+`reason` is why the primary source produced no reading (`None` = healthy);
+`sleep_reason` is why the sleep sensor was not used, populated only while the sleep
+window is active with a sleep sensor configured (`None` otherwise, and `None` when the
+sleep value was used). The last two fields are trailing and defaulted, so 3-argument
+constructions still work.
 `_get_indoor_temp_with_provenance()` (coordinator.py) is the one place status
 (`sleep_indoor_sensor_active`, surfaced on the Status card per this project's
 Status Card Ontology rules) and thermal-learning sampling (see §22.x below)
@@ -3449,6 +3460,85 @@ read from — neither re-derives "was the sleep sensor used" independently.
 The range check, unit conversion, and fallback-on-failure semantics are
 identical to the primary-sensor path in Bug B — this feature extends the
 resolver, it doesn't introduce a second set of rules.
+
+### Indoor sensor failure reasons and announcements (Issue #1033)
+
+Mirror of the outdoor-sensor fallback (Issue #1032) for the indoor side. There is no
+weather-style fallback for indoor: a failed primary reading is `None` and indoor-
+dependent decisions (nat-vent start, heat/cool family switching, ODE floor/ceiling
+guards, TOU pre-conditioning, thermal sampling) pause. #1033 changes visibility, and
+for a frozen sensor also the value (now `None`).
+
+**Reason set** (`IndoorTempReading.reason` / `.sleep_reason`):
+`not_configured` (source needs an entity, none set), `entity_missing` (not in the state
+machine), `unavailable` (`unavailable`/`unknown`, including a climate entity in that
+state), `no_reading` (climate entity has no `current_temperature`), `non_numeric`,
+`non_finite` (`nan`/`inf`), `implausible` (outside 40–110°F after conversion), `stale`.
+Parsing is done only by `temperature.read_sensor_state_f` (sensor / input_number / sleep
+sensor states) and `temperature.read_attribute_temp_f` (climate attribute); the three
+hand-rolled parses in `indoor_temp.py` are gone.
+
+**Stale rule.** A `sensor`-source primary reading, and the sleep sensor (unless it is an
+`input_number.*`), is treated as failed when `temperature.is_sensor_stale()` says no
+report for more than `INDOOR_SENSOR_STALE_HOURS` = 12 h (age from `last_reported`, falling
+back to `last_updated`; fails open to "fresh" if neither is a real `datetime`).
+`input_number` primary sources are exempt (a helper legitimately stays unchanged for days).
+The 12 h figure is an **uncalibrated assumption** (longer than outdoor's 6 h because a
+false trigger pauses control rather than switching weather source); the only dedicated
+indoor-type sensor on the reference install showed a max 2 h gap between value-change
+records, which does not contradict it. Behavior change: a frozen sensor that HA never marks
+unavailable used to be trusted forever; it is now treated as unavailable (user decision).
+
+**Single announcement funnel.** The resolver is stateless and read-only. It never logs
+above DEBUG and never emits. Exactly one event-loop method,
+`ClimateAdvisorCoordinator._refresh_indoor_sensor_health()`, announces, because:
+(a) `get_chart_data` reaches `_get_indoor_temp()` from an **executor thread**
+(`api.py` → `coordinator.py`), where emitting an event would be thread-unsafe; and
+(b) `_emit_event()` itself calls `_get_indoor_temp()` to enrich the payload with
+`indoor_f`, so emitting from inside the read path would recurse. The funnel is fed from
+the 30-min update, the 5-min thermal tick, the indoor-entity listener, the sleep-entity
+listener (after its sleep-window check) and `_async_thermostat_changed` (so
+`climate_fallback` zones, which have no indoor listener, see recovery within seconds).
+Never call it from the resolver, `_get_indoor_temp()`, the engine or `get_chart_data`.
+
+The funnel feeds `reason` (role `primary`) and, only while `_in_sleep_window`,
+`sleep_reason` (role `sleep`) to the pure `temperature.next_fallback_episode(reason,
+announced, since, now)` (shared with the outdoor tracker), which returns
+`none | fallback | changed | recovered` plus `minutes_down`. Episode state is three plain
+fields per role on the **coordinator instance** (`_indoor_primary_fallback_*`,
+`_indoor_sleep_fallback_*`), so each zone announces independently. Announcements are
+suppressed while `_startup_coalesce_active` (tracked, announced afterwards if still
+failing; a restart during an outage re-announces once). Leaving the sleep window clears
+the sleep episode silently. Log format: outcome phrase then `key=value`:
+`Indoor sensor unavailable: role=… reason=… entity=… using=…` (WARNING for `primary`,
+INFO for `sleep`) and `Indoor sensor recovered: role=… entity=… previous_reason=…
+minutes_down=…` (INFO). Activity Log events: `indoor_sensor_unavailable`
+`{role, reason, entity, using, value_f}` and `indoor_sensor_recovered`
+`{role, entity, value_f, previous_reason, minutes_down}`.
+
+| Condition (`reason`) | Value used | Log | Activity Log | Settings → Indoor Temp Source |
+|---|---|---|---|---|
+| Source needs an entity, none set (`not_configured`) | None (decisions pause) | WARNING once | `indoor_sensor_unavailable` | `Dedicated sensor — none selected (indoor decisions paused)` |
+| Entity not in state machine (`entity_missing`) | None | WARNING once | unavailable event | `Dedicated sensor — sensor.x (sensor entity not found — indoor decisions paused)` |
+| `unavailable` / `unknown` | None | WARNING once | unavailable event | `(sensor unavailable — indoor decisions paused)` |
+| Other text (`non_numeric`) / `nan`, `inf` (`non_finite`) / out of 40–110°F (`implausible`) | None | WARNING once | unavailable event | `(<reason label> — indoor decisions paused)` |
+| `sensor` source, no report for > 12 h (`stale`) | None (was: last value forever) | WARNING once | unavailable event, reason `stale` | `(sensor stopped updating — indoor decisions paused)` |
+| `input_number` source unchanged for hours | value used (exempt) | none | none | unchanged |
+| `climate_fallback`: thermostat missing / `unavailable` (state unavailable or unknown AND no temperature attribute — a state of `unknown` that still publishes `current_temperature` keeps working) / `no_reading` / non-numeric / implausible | None | WARNING once | unavailable event | `Thermostat's built-in sensor (<reason label> — indoor decisions paused)` |
+| Primary recovers | sensor value | INFO once (minutes down) | `indoor_sensor_recovered` | suffix removed |
+| Sleep sensor fails inside sleep window | primary value | INFO once | unavailable event, `role=sleep` | n/a |
+| Sleep sensor recovers | sleep value | INFO once | recovered event, `role=sleep` | n/a |
+| Sleep window ends while sleep sensor failed | primary value | none (DEBUG) | none (episode cleared silently) | n/a |
+| Failure inside startup-coalesce window | None | gated; announced after the window if still failing | gated | live suffix still shown |
+| Wrong-unit but plausible reading | used | unchanged (one-time unit warning) | none | unchanged |
+| Two zones share one sensor | per zone | per zone | per zone | per zone |
+
+The per-read non-numeric / unavailable / out-of-range diagnostics are now `DEBUG`
+(`Indoor temp entity ... unusable: reason=...`, `Indoor temp from climate entity ... unusable: reason=...`,
+`Sleep indoor sensor ... unusable: reason=...`, `Indoor temp ... outside plausible range`), and the
+sleep-sensor streak lines (`Sleep sensor unavailable (n/2)`, `... available again after N misses`) were removed. `entity_health` is unchanged and still
+owns the push notification for a missing/unavailable primary sensor; the Activity Log owns
+the timeline, reason and recovery (see `docs/entity-health-brief.md`).
 
 ### Test coverage
 
@@ -3461,6 +3551,7 @@ resolver, it doesn't introduce a second set of rules.
 | `test_indoor_temp_range_check_accepts_normal` | `tests/test_coordinator_chart.py` |
 | `TestSleepSensorOverrideDirect` (9 cases: valid override, missing/non-numeric/implausible fallback, double-failure, window-inactive, entity-unset, Celsius) | `tests/test_indoor_temp_helper.py` |
 | `TestSleepSensorOverrideBothCallPaths` | `tests/test_indoor_temp_helper.py` |
+| Indoor sensor failure: resolver reasons, `next_fallback_episode`, funnel announcements, Settings suffix (Issue #1033) | `tests/test_indoor_temp_helper.py`, `tests/test_indoor_sensor_fallback.py`, `tests/test_fallback_episode.py`, `tests/test_api.py`, `tests/test_activity_renderers.py` (written by the implementing agents; names not verified at doc time) |
 | `issue_895_sleep_indoor_sensor_swap` (pending scenario) | `tools/simulations/pending/` |
 
 ---

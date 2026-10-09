@@ -106,17 +106,28 @@ def _temp_source_display(coordinator: Any, key: str, raw_source: str, label: str
     entity = config.get(entity_key)
     entity = entity if isinstance(entity, str) and entity else None
     needs_entity = raw_source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
-    if needs_entity and entity is None and key == "outdoor_temp_source":
-        return f"{label} — none selected (using weather service)"
+    is_outdoor = key == "outdoor_temp_source"
+    # Issue #1033: indoor mirrors outdoor; the consequence differs (indoor decisions pause, not fall back).
+    consequence = "using weather service" if is_outdoor else "indoor decisions paused"
+    reason = getattr(
+        coordinator, "_outdoor_sensor_fallback_reason" if is_outdoor else "_indoor_primary_fallback_reason", None
+    )
+    reason = reason if isinstance(reason, str) else None
+
+    def _suffix(text: str) -> str:
+        return f"{OUTDOOR_SENSOR_REASON_LABELS.get(text, text.replace('_', ' '))} — {consequence}"
+
+    if needs_entity and entity is None:
+        return f"{label} — none selected ({consequence})"
+    if raw_source == TEMP_SOURCE_CLIMATE_FALLBACK and not is_outdoor and reason is not None:
+        return f"{label} ({_suffix(reason)})"
     if entity is None:
         return label
     if not needs_entity:
         return f"{label} — {entity} selected but not in use"
     detail = f"{label} — {entity}"
-    if key == "outdoor_temp_source":
-        reason = getattr(coordinator, "_outdoor_sensor_fallback_reason", None)
-        if isinstance(reason, str):
-            detail += f" ({OUTDOOR_SENSOR_REASON_LABELS.get(reason, reason.replace('_', ' '))} — using weather service)"
+    if reason is not None:
+        detail += f" ({_suffix(reason)})"
     return detail
 
 

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import NamedTuple
 
 FAHRENHEIT = "fahrenheit"
 CELSIUS = "celsius"
@@ -105,18 +106,85 @@ def read_state_temp_f(state, attr: str, unit: str) -> float | None:
     "accidentally correct" in fahrenheit-configured installs and silently or loudly
     wrong only in celsius-configured ones).
 
-    Returns None if the state is missing, the attribute is absent/None, or the value
-    isn't numeric — callers decide the fallback.
+    Returns None if the state is missing, the attribute is absent/None, the value
+    isn't numeric, or it isn't finite — callers decide the fallback. Thin delegate over
+    ``read_attribute_temp_f`` (Issue #1033) so there is one implementation; use that
+    function directly when the failure *reason* is needed.
+    """
+    return read_attribute_temp_f(state, attr, unit)[0]
+
+
+def read_attribute_temp_f(state, attr: str, unit: str) -> tuple[float | None, str | None]:
+    """Read a temperature attribute off an HA state as °F, with the failure reason (Issue #1033).
+
+    Returns ``(value_f, None)`` on success, else ``(None, reason)`` with ``reason`` one of
+    ``"entity_missing"`` (state is None), ``"no_reading"`` (attribute absent or None),
+    ``"non_numeric"``, ``"non_finite"`` (``nan``/``inf``). Attribute-reading sibling of
+    ``read_sensor_state_f``.
     """
     if state is None:
-        return None
+        return None, "entity_missing"
     raw = state.attributes.get(attr)
     if raw is None:
-        return None
+        return None, "no_reading"
     try:
-        return to_fahrenheit(float(raw), unit)
+        parsed = float(raw)
     except (ValueError, TypeError):
-        return None
+        return None, "non_numeric"
+    if not math.isfinite(parsed):
+        return None, "non_finite"
+    value_f = to_fahrenheit(parsed, unit)
+    if not math.isfinite(value_f):
+        return None, "non_finite"
+    return value_f, None
+
+
+def is_sensor_stale(state, stale_hours: float, now: datetime) -> bool:
+    """True when a sensor state has not been reported for more than ``stale_hours`` (Issues #1032/#1033).
+
+    Age comes from ``last_reported`` (updates on every report even when the value is unchanged;
+    absent on older HA) falling back to ``last_updated``. Fails open (returns False, i.e.
+    treated as fresh) when neither is a real ``datetime`` or ``now`` is not comparable with it
+    (stub environments), so a missing timestamp can never mark a healthy sensor failed.
+    """
+    last_seen = getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+    if not isinstance(last_seen, datetime):
+        return False
+    try:
+        return now - last_seen > timedelta(hours=stale_hours)
+    except TypeError:
+        return False
+
+
+class EpisodeStep(NamedTuple):
+    """Result of ``next_fallback_episode``: what to announce and the state to store."""
+
+    kind: str  # "none" | "fallback" | "changed" | "recovered"
+    announced: str | None
+    since: datetime | None
+    minutes_down: int | None
+
+
+def next_fallback_episode(
+    reason: str | None, announced: str | None, since: datetime | None, now: datetime
+) -> EpisodeStep:
+    """Pure once-per-episode transition for a sensor failure/recovery announcement (Issue #1033).
+
+    ``reason`` is the current failure reason (None = healthy), ``announced`` the reason last
+    announced (None = nothing outstanding), ``since`` when the outstanding episode began.
+    ``kind``: ``"none"`` (no change — nothing to announce), ``"fallback"`` (None→reason),
+    ``"changed"`` (reason A→B), ``"recovered"`` (reason→None, ``minutes_down`` filled when
+    ``since`` is known). The caller owns logging, event emission and storing the returned state.
+    Shared by the outdoor (#1032) and indoor (#1033) sensor trackers.
+    """
+    if reason == announced:
+        return EpisodeStep("none", announced, since, None)
+    if reason is not None:
+        if announced is None:
+            return EpisodeStep("fallback", reason, now, None)
+        return EpisodeStep("changed", reason, since, None)
+    minutes = round((now - since).total_seconds() / 60) if since else None
+    return EpisodeStep("recovered", None, None, minutes)
 
 
 def read_sensor_state_f(state, unit: str) -> tuple[float | None, str | None]:

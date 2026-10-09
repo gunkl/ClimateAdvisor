@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.88"
+VERSION = "0.7.89"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -450,6 +450,11 @@ TEMP_SOURCE_CLIMATE_FALLBACK = "climate_fallback"
 MIN_PLAUSIBLE_OUTDOOR_F = -60.0
 MAX_PLAUSIBLE_OUTDOOR_F = 150.0
 OUTDOOR_SENSOR_STALE_HOURS = 6.0
+# Issue #1033: same idea for a dedicated indoor sensor (and the sleep sensor). Longer than outdoor
+# because a false trigger here pauses control decisions rather than switching to a weather value.
+# Uncalibrated: 10 days of the install's only dedicated indoor-type sensor showed a max 2 h gap
+# between value-change records (true report cadence unknown) — revisit with real history.
+INDOOR_SENSOR_STALE_HOURS = 12.0
 
 # Sensor attributes
 ATTR_DAY_TYPE = "day_type"

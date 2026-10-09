@@ -32,6 +32,7 @@ if "homeassistant" not in sys.modules:
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
     TEMP_SOURCE_CLIMATE_FALLBACK,
+    TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
 )
 from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: E402
@@ -428,7 +429,8 @@ class TestSleepSensorOverrideDirect:
             in_sleep_window=True,
             sleep_indoor_temp_entity="sensor.bedroom_temp",
         )
-        assert result == (None, None, None)
+        assert (result.value, result.source_entity, result.primary_value) == (None, None, None)
+        assert (result.reason, result.sleep_reason) == ("entity_missing", "entity_missing")
 
     def test_sleep_window_not_active_uses_primary_regardless_of_config(self):
         hass = _hass_with_entities(
@@ -484,134 +486,191 @@ class TestSleepSensorOverrideDirect:
         assert abs(result.primary_value - 71.6) < 0.01  # 22C -> 71.6F
 
 
-class TestSleepSensorMissSeverityEscalation:
-    """Issue #949: resolve_indoor_temp_with_provenance()'s sleep-sensor severity model.
+class TestResolverFailureReasons:
+    """Issue #1033: the resolver reports WHY a reading is unavailable, statelessly and quietly.
 
-    Before the fix, every unavailable cycle logged a WARNING (no dedup, no streak
-    tracking), so a one-cycle blip (HA restart) and a genuine hours-long outage were
-    indistinguishable in the log, and nothing ever marked recovery. The fix tracks a
-    per-entity consecutive-miss streak (module-level ``_sleep_sensor_miss_streaks``
-    dict in indoor_temp.py): misses 1-2 log INFO, miss 3+ escalates to WARNING with
-    the retry count, and recovery logs at the severity the outage actually reached
-    (INFO if it never escalated, WARNING if it did) — the recovery line is the piece
-    that was completely invisible before this fix for anything that reached WARNING.
-
-    ``_sleep_sensor_miss_streaks`` is process-lifetime module state keyed by
-    entity_id, not scoped per test — every test here must reset the streak for its
-    own entity_id before running (and uses a dedicated entity_id, distinct from the
-    one other test classes in this file reuse) so cross-test pollution can't produce
-    a false pass/fail.
+    Replaces Issue #949's ``TestSleepSensorMissSeverityEscalation``. That class asserted a
+    process-global per-entity miss counter that was advanced by BOTH the coordinator and the
+    engine (so "N consecutive checks" really counted reads from two callers at different
+    cadences) and shared across zones using one sensor. Its semantics were wrong, not just
+    inconvenient: the resolver now carries a reason on the reading and the coordinator owns the
+    once-per-episode announcement (tests/test_indoor_sensor_fallback.py), per zone.
     """
 
-    ENTITY_ID = "sensor.issue_949_sleep_severity_test"
+    NOW = _dt.datetime(2026, 10, 9, 12, 0, tzinfo=_dt.UTC)
 
-    def setup_method(self, _method):
-        # Reset this test's entity's streak before every test — module-level dict
-        # persists across tests in the same process (see class docstring).
-        from custom_components.climate_advisor import indoor_temp as _indoor_temp_mod
-
-        _indoor_temp_mod._sleep_sensor_miss_streaks.pop(self.ENTITY_ID, None)
-
-    def _resolve(self, hass):
+    def _res(self, states: dict, *, source=TEMP_SOURCE_SENSOR, entity="sensor.indoor", unit="fahrenheit", **kw):
         return resolve_indoor_temp_with_provenance(
-            hass=hass,
-            source=TEMP_SOURCE_CLIMATE_FALLBACK,
-            unit="fahrenheit",
-            indoor_temp_entity=None,
+            hass=_hass_with_entities(states),
+            source=source,
+            unit=unit,
+            indoor_temp_entity=entity,
             climate_entity="climate.thermostat",
-            in_sleep_window=True,
-            sleep_indoor_temp_entity=self.ENTITY_ID,
+            now=self.NOW,
+            **kw,
         )
 
-    def _unavailable_hass(self):
-        return _hass_with_entities({"climate.thermostat": _make_state("heat", {"current_temperature": 70})})
+    def _aged(self, value, hours):
+        state = _make_state(value)
+        state.last_reported = self.NOW - _dt.timedelta(hours=hours)
+        state.last_updated = self.NOW - _dt.timedelta(hours=hours)
+        return state
 
-    def _available_hass(self, sleep_value="65"):
-        return _hass_with_entities(
-            {
-                "climate.thermostat": _make_state("heat", {"current_temperature": 70}),
-                self.ENTITY_ID: _make_state(sleep_value),
-            }
+    # -- dedicated sensor / input_number ------------------------------------------------------
+
+    def test_healthy_sensor_has_no_reason(self):
+        r = self._res({"sensor.indoor": _make_state("70.5")})
+        assert (r.value, r.reason, r.sleep_reason) == (70.5, None, None)
+
+    def test_no_entity_configured_is_not_configured(self):
+        r = self._res({}, entity=None)
+        assert (r.value, r.reason) == (None, "not_configured")
+
+    def test_entity_absent_from_state_machine_is_entity_missing(self):
+        assert self._res({}).reason == "entity_missing"
+
+    def test_unavailable_and_unknown_states_are_unavailable(self):
+        for raw in ("unavailable", "unknown"):
+            assert self._res({"sensor.indoor": _make_state(raw)}).reason == "unavailable", raw
+
+    def test_text_state_is_non_numeric(self):
+        assert self._res({"sensor.indoor": _make_state("warm")}).reason == "non_numeric"
+
+    def test_nan_and_inf_are_non_finite_not_implausible(self):
+        for raw in ("nan", "inf", "-inf"):
+            assert self._res({"sensor.indoor": _make_state(raw)}).reason == "non_finite", raw
+
+    def test_out_of_range_is_implausible(self):
+        assert self._res({"sensor.indoor": _make_state("150")}).reason == "implausible"
+        assert self._res({"sensor.indoor": _make_state("20")}).reason == "implausible"
+
+    def test_celsius_value_is_converted_before_the_range_check(self):
+        assert self._res({"sensor.indoor": _make_state("21")}, unit="celsius").value is not None
+        assert self._res({"sensor.indoor": _make_state("60")}, unit="celsius").reason == "implausible"
+
+    def test_sensor_not_reported_beyond_threshold_is_stale(self):
+        from custom_components.climate_advisor.const import INDOOR_SENSOR_STALE_HOURS
+
+        r = self._res({"sensor.indoor": self._aged("70", INDOOR_SENSOR_STALE_HOURS + 1)})
+        assert (r.value, r.reason) == (None, "stale")
+
+    def test_sensor_reported_within_threshold_is_fresh(self):
+        from custom_components.climate_advisor.const import INDOOR_SENSOR_STALE_HOURS
+
+        r = self._res({"sensor.indoor": self._aged("70", INDOOR_SENSOR_STALE_HOURS - 1)})
+        assert (r.value, r.reason) == (70.0, None)
+
+    def test_input_number_is_exempt_from_stale(self):
+        entity = "input_number.indoor"
+        r = self._res({entity: self._aged("70", 500)}, source=TEMP_SOURCE_INPUT_NUMBER, entity=entity)
+        assert (r.value, r.reason) == (70.0, None)
+
+    def test_missing_timestamps_fail_open(self):
+        """Stubs and old HA expose no real datetime - must never mark a healthy sensor failed."""
+        assert self._res({"sensor.indoor": _make_state("70")}).reason is None
+
+    # -- climate_fallback --------------------------------------------------------------------
+
+    def _climate(self, states):
+        return self._res(states, source=TEMP_SOURCE_CLIMATE_FALLBACK, entity=None)
+
+    def test_climate_healthy(self):
+        r = self._climate({"climate.thermostat": _make_state("heat", {"current_temperature": 71})})
+        assert (r.value, r.source_entity, r.reason) == (71.0, "climate.thermostat", None)
+
+    def test_climate_entity_missing(self):
+        assert self._climate({}).reason == "entity_missing"
+
+    def test_climate_state_unavailable(self):
+        assert self._climate({"climate.thermostat": _make_state("unavailable", {})}).reason == "unavailable"
+
+    def test_climate_state_unknown_with_a_valid_temperature_still_reads(self):
+        """A thermostat with no HVAC mode reports state "unknown" but still publishes
+        current_temperature - that reading must keep working (Issue #1033 is visibility only)."""
+        r = self._climate({"climate.thermostat": _make_state("unknown", {"current_temperature": 71})})
+        assert (r.value, r.reason) == (71.0, None)
+
+    def test_climate_state_unknown_without_a_temperature_is_unavailable(self):
+        assert self._climate({"climate.thermostat": _make_state("unknown", {})}).reason == "unavailable"
+
+    def test_climate_attribute_absent_or_none_is_no_reading(self):
+        assert self._climate({"climate.thermostat": _make_state("heat", {})}).reason == "no_reading"
+        assert (
+            self._climate({"climate.thermostat": _make_state("heat", {"current_temperature": None})}).reason
+            == "no_reading"
         )
 
-    def test_misses_one_and_two_log_info_not_warning(self, caplog):
-        import logging
-
-        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
-            self._resolve(self._unavailable_hass())  # miss 1
-            self._resolve(self._unavailable_hass())  # miss 2
-
-        assert len(caplog.records) == 2
-        assert all(r.levelno == logging.INFO for r in caplog.records), (
-            f"Expected both of the first two misses to log at INFO, got levels: {[r.levelname for r in caplog.records]}"
+    def test_climate_attribute_text_and_nan(self):
+        assert (
+            self._climate({"climate.thermostat": _make_state("heat", {"current_temperature": "x"})}).reason
+            == "non_numeric"
         )
-        assert "unavailable (1/2)" in caplog.records[0].message
-        assert "unavailable (2/2)" in caplog.records[1].message
+        assert (
+            self._climate({"climate.thermostat": _make_state("heat", {"current_temperature": float("nan")})}).reason
+            == "non_finite"
+        )
 
-    def test_third_consecutive_miss_escalates_to_warning_with_retry_count(self, caplog):
+    def test_climate_implausible(self):
+        assert (
+            self._climate({"climate.thermostat": _make_state("heat", {"current_temperature": 150})}).reason
+            == "implausible"
+        )
+
+    # -- sleep sensor ------------------------------------------------------------------------
+
+    def _sleep(self, sleep_state, *, in_window=True, entity="sensor.bedroom"):
+        states = {"climate.thermostat": _make_state("heat", {"current_temperature": 70})}
+        if sleep_state is not None:
+            states[entity] = sleep_state
+        return self._res(
+            states,
+            source=TEMP_SOURCE_CLIMATE_FALLBACK,
+            entity=None,
+            in_sleep_window=in_window,
+            sleep_indoor_temp_entity=entity,
+        )
+
+    def test_sleep_sensor_ok_swaps_value_and_has_no_sleep_reason(self):
+        r = self._sleep(_make_state("65"))
+        assert (r.value, r.source_entity, r.primary_value, r.sleep_reason) == (65.0, "sensor.bedroom", 70.0, None)
+
+    def test_sleep_sensor_failure_falls_back_to_primary_and_reports_why(self):
+        for state, why in (
+            (None, "entity_missing"),
+            (_make_state("unavailable"), "unavailable"),
+            (_make_state("abc"), "non_numeric"),
+            (_make_state("nan"), "non_finite"),
+            (_make_state("200"), "implausible"),
+        ):
+            r = self._sleep(state)
+            assert (r.value, r.source_entity, r.reason, r.sleep_reason) == (70.0, "climate.thermostat", None, why), why
+
+    def test_stale_sleep_sensor_is_reported_and_input_number_sleep_entity_is_exempt(self):
+        from custom_components.climate_advisor.const import INDOOR_SENSOR_STALE_HOURS
+
+        old = INDOOR_SENSOR_STALE_HOURS + 1
+        assert self._sleep(self._aged("65", old)).sleep_reason == "stale"
+        r = self._sleep(self._aged("65", old), entity="input_number.bedroom")
+        assert (r.value, r.sleep_reason) == (65.0, None)
+
+    def test_sleep_reason_is_not_evaluated_outside_the_window(self):
+        r = self._sleep(_make_state("unavailable"), in_window=False)
+        assert (r.value, r.sleep_reason) == (70.0, None)
+
+    # -- the resolver is quiet and stateless ---------------------------------------------------
+
+    def test_repeated_failures_log_nothing_above_debug_and_hold_no_module_state(self, caplog):
         import logging
 
-        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
-            self._resolve(self._unavailable_hass())  # miss 1 — INFO
-            self._resolve(self._unavailable_hass())  # miss 2 — INFO
-            self._resolve(self._unavailable_hass())  # miss 3 — escalates to WARNING
+        from custom_components.climate_advisor import indoor_temp as mod
 
-        assert caplog.records[-1].levelno == logging.WARNING
-        assert "3 consecutive checks" in caplog.records[-1].message
-
-    def test_recovery_after_never_escalating_logs_info(self, caplog):
-        """Recovery after only 1-2 misses (never reached WARNING) must log the
-        recovery itself at INFO — matching the severity the outage actually reached."""
-        import logging
-
-        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
-            self._resolve(self._unavailable_hass())  # miss 1 — INFO
-            caplog.clear()
-            self._resolve(self._available_hass())  # recovery
-
-        recovery_records = [r for r in caplog.records if "available again" in r.message]
-        assert len(recovery_records) == 1, f"Expected exactly one recovery line, got: {caplog.records}"
-        assert recovery_records[0].levelno == logging.INFO
-        assert "1 consecutive miss" in recovery_records[0].message
-
-    def test_recovery_after_escalation_logs_warning(self, caplog):
-        """Recovery after crossing the WARNING threshold must log the recovery at
-        WARNING too — this is the line that was completely invisible before Issue
-        #949's fix (a WARNING-worthy outage recovering with zero trace in the log)."""
-        import logging
-
-        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):
-            self._resolve(self._unavailable_hass())  # miss 1 — INFO
-            self._resolve(self._unavailable_hass())  # miss 2 — INFO
-            self._resolve(self._unavailable_hass())  # miss 3 — WARNING (escalated)
-            caplog.clear()
-            self._resolve(self._available_hass())  # recovery
-
-        recovery_records = [r for r in caplog.records if "available again" in r.message]
-        assert len(recovery_records) == 1, f"Expected exactly one recovery line, got: {caplog.records}"
-        assert recovery_records[0].levelno == logging.WARNING
-        assert "3 consecutive misses" in recovery_records[0].message
-
-    def test_streak_resets_after_recovery_so_a_later_outage_restarts_at_one(self):
-        """A fresh outage after a full recovery must restart the streak at 1, not
-        continue accumulating from the prior (resolved) outage."""
-        from custom_components.climate_advisor import indoor_temp as _indoor_temp_mod
-
-        self._resolve(self._unavailable_hass())  # miss 1
-        self._resolve(self._unavailable_hass())  # miss 2
-        self._resolve(self._unavailable_hass())  # miss 3 — escalated
-        self._resolve(self._available_hass())  # recovery — streak resets to 0
-        assert _indoor_temp_mod._sleep_sensor_miss_streaks[self.ENTITY_ID] == 0
-
-        self._resolve(self._unavailable_hass())  # a new outage's miss 1
-        assert _indoor_temp_mod._sleep_sensor_miss_streaks[self.ENTITY_ID] == 1
-
-    def test_healthy_cycle_success_line_unaffected(self):
-        """The existing per-cycle 'Using sleep indoor sensor...' INFO line on a
-        healthy cycle (no prior miss) must be unchanged by this fix."""
-        result = self._resolve(self._available_hass())
-        assert result.value == 65.0
-        assert result.source_entity == self.ENTITY_ID
+        assert not hasattr(mod, "_sleep_sensor_miss_streaks")
+        with caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.indoor_temp"):
+            for _ in range(5):
+                self._sleep(_make_state("unavailable"))
+                self._res({"sensor.indoor": _make_state("abc")})
+                self._res({"sensor.indoor": _make_state("200")})
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 class TestSleepSensorOverrideBothCallPaths:

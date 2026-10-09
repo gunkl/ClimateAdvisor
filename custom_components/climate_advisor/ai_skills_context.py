@@ -1940,15 +1940,18 @@ def _render_fan_override_cleared(p: dict, unit: str) -> tuple[str, str]:
     return label, (f"RF timer {rf}h" if rf is not None else "")
 
 
-OUTDOOR_SENSOR_REASON_LABELS: dict[str, str] = {
+SENSOR_REASON_LABELS: dict[str, str] = {
     "not_configured": "no sensor selected",
     "entity_missing": "sensor entity not found",
     "unavailable": "sensor unavailable",
+    "no_reading": "no reading",
     "non_numeric": "sensor reading not a number",
     "non_finite": "sensor reading invalid",
     "implausible": "sensor reading out of range",
     "stale": "sensor stopped updating",
 }
+# Issue #1033: the outdoor name stays importable (api.py, tests); both roles share one table.
+OUTDOOR_SENSOR_REASON_LABELS = SENSOR_REASON_LABELS
 
 _OUTDOOR_SOURCE_IN_USE_LABELS: dict[str, str] = {
     "weather_interpolation": "weather service (hourly forecast)",
@@ -1984,6 +1987,42 @@ def _render_outdoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
     if minutes is not None:
         parts.append(f"{minutes} min on weather service")
     return "Outdoor sensor recovered", ", ".join(parts)
+
+
+def _sensor_reason_label(reason: Any) -> str:
+    return SENSOR_REASON_LABELS.get(reason, str(reason).replace("_", " ")) if reason else "unspecified"
+
+
+def _render_indoor_sensor_unavailable(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1033: an indoor sensor failed (primary: decisions paused; sleep: primary used instead)."""
+    entity = p.get("entity") or "(none selected)"
+    reason_label = _sensor_reason_label(p.get("reason"))
+    if p.get("role") == "sleep":
+        label = f"Sleep sensor {entity} unavailable ({reason_label}) — using the primary indoor sensor"
+    else:
+        label = (
+            f"Indoor sensor {entity} unavailable ({reason_label}) — "
+            "indoor-based automation decisions are paused until it reports again"
+        )
+    return label, ""
+
+
+def _render_indoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1033: an indoor sensor is being read again."""
+    role = "Sleep sensor" if p.get("role") == "sleep" else "Indoor sensor"
+    entity = p.get("entity")
+    label = f"{role} {entity} recovered" if entity else f"{role} recovered"
+    parts: list[str] = []
+    value_f = p.get("value_f")
+    if isinstance(value_f, (int, float)):
+        parts.append(format_temp(value_f, unit))
+    previous = p.get("previous_reason")
+    if previous:
+        parts.append(f"was: {_sensor_reason_label(previous)}")
+    minutes = p.get("minutes_down")
+    if minutes is not None:
+        parts.append(f"down {minutes} min")
+    return label, ", ".join(parts)
 
 
 def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
@@ -2743,6 +2782,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "fan_override_cleared": _render_fan_override_cleared,
     "outdoor_sensor_fallback": _render_outdoor_sensor_fallback,
     "outdoor_sensor_recovered": _render_outdoor_sensor_recovered,
+    "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
+    "indoor_sensor_recovered": _render_indoor_sensor_recovered,
     "grace_expired": _render_grace_expired,
     "nat_vent_fan_on": _render_nat_vent_fan_on,
     "nat_vent_fan_off": _render_nat_vent_fan_off,
@@ -2843,6 +2884,8 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "fan_override_cleared",
         "outdoor_sensor_fallback",
         "outdoor_sensor_recovered",
+        "indoor_sensor_unavailable",
+        "indoor_sensor_recovered",
         "ceiling_guard_fired",
         "incident_detected",
         "setpoint_rejected",

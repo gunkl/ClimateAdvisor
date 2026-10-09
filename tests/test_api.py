@@ -324,6 +324,60 @@ class TestConfigViewDisplayTransform:
     def test_weather_service_without_an_entity_is_unchanged(self):
         assert self._outdoor_source_text({"outdoor_temp_source": "weather_service"}) == "Weather service"
 
+    @staticmethod
+    def _indoor_source_text(config: dict, reason=None, outdoor_reason=None) -> str:
+        import asyncio
+
+        from custom_components.climate_advisor.api import ClimateAdvisorConfigView
+
+        coord = MagicMock()
+        coord.config = config
+        coord._indoor_primary_fallback_reason = reason
+        coord._outdoor_sensor_fallback_reason = outdoor_reason
+        resp = asyncio.run(ClimateAdvisorConfigView().get(_make_view_request(coord)))
+        return {s["key"]: s["value"] for s in resp.json_data["settings"]}["indoor_temp_source"]
+
+    def test_indoor_sensor_failure_says_decisions_paused(self):
+        text = self._indoor_source_text(
+            {"indoor_temp_source": "sensor", "indoor_temp_entity": "sensor.indoor"}, reason="stale"
+        )
+        assert text == "Dedicated sensor — sensor.indoor (sensor stopped updating — indoor decisions paused)"
+
+    def test_indoor_no_reading_label(self):
+        text = self._indoor_source_text(
+            {"indoor_temp_source": "input_number", "indoor_temp_entity": "input_number.in"}, reason="no_reading"
+        )
+        assert text == "input_number helper — input_number.in (no reading — indoor decisions paused)"
+
+    def test_indoor_sensor_source_without_an_entity_is_called_out(self):
+        text = self._indoor_source_text({"indoor_temp_source": "sensor"})
+        assert text == "Dedicated sensor — none selected (indoor decisions paused)"
+
+    def test_indoor_climate_fallback_with_a_reason(self):
+        text = self._indoor_source_text({"indoor_temp_source": "climate_fallback"}, reason="no_reading")
+        assert text == "Thermostat's built-in sensor (no reading — indoor decisions paused)"
+
+    def test_indoor_healthy_output_unchanged(self):
+        assert (
+            self._indoor_source_text({"indoor_temp_source": "sensor", "indoor_temp_entity": "sensor.indoor"})
+            == "Dedicated sensor — sensor.indoor"
+        )
+        assert self._indoor_source_text({"indoor_temp_source": "climate_fallback"}) == "Thermostat's built-in sensor"
+        assert (
+            self._indoor_source_text({"indoor_temp_source": "climate_fallback", "indoor_temp_entity": "sensor.i"})
+            == "Thermostat's built-in sensor — sensor.i selected but not in use"
+        )
+
+    def test_indoor_reason_does_not_leak_into_outdoor_text(self):
+        text = self._outdoor_source_text(
+            {"outdoor_temp_source": "sensor", "outdoor_temp_entity": "sensor.o"}, fallback_reason="stale"
+        )
+        assert text == "Dedicated sensor — sensor.o (sensor stopped updating — using weather service)"
+        indoor = self._indoor_source_text(
+            {"indoor_temp_source": "sensor", "indoor_temp_entity": "sensor.i"}, outdoor_reason="stale"
+        )
+        assert indoor == "Dedicated sensor — sensor.i"
+
 
 class TestToggleAutomationView:
     """Tests for the toggle_automation API endpoint."""

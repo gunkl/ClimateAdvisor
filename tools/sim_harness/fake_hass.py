@@ -34,6 +34,10 @@ class FakeState:
     # unset. Consumers must treat None as "assume already settled", not as a
     # fresh transition — see coordinator.py's _sensor_debounce_pending().
     last_changed: datetime | None = None
+    # Mirror real HA's State.last_updated / State.last_reported (Issue #1032: the outdoor-sensor
+    # staleness guard reads them). None means "not tracked" — the guard fails open (treats as fresh).
+    last_updated: datetime | None = None
+    last_reported: datetime | None = None
 
 
 @dataclass

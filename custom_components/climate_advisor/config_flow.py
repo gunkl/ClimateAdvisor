@@ -204,6 +204,69 @@ def _needs_entity(source: str) -> bool:
     return source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
 
 
+def reconcile_temperature_source(
+    stored_source: str,
+    stored_entity: str | None,
+    submitted_source: str,
+    submitted_entity: str | None,
+    default_source: str,
+) -> tuple[str, str | None, str | None, str]:
+    """Reconcile a temperature source/entity pair in the Options flow (Issue #1032).
+
+    The Options form shows the source select and the entity picker independently, with the
+    entity prefilled from storage, so every combination can be submitted. Without this a
+    picked entity next to ``Weather service`` was saved but silently ignored. Compares the
+    submission with what is *stored* (the prefill makes "unchanged" the common case).
+
+    Returns ``(source, entity, error_key, rule)``. ``error_key`` is a strings.json error for
+    the entity field (the form is re-shown, nothing is saved); ``rule`` names the branch for
+    the INFO log. Rules, in order:
+
+    * default source (weather / climate) submitted:
+        - no entity .................................... ``noop``
+        - source just switched to default, entity unchanged (prefill) ... ``source_default_drops_entity``
+        - source just switched to default, entity also changed ......... error ``source_entity_conflict``
+        - source unchanged, entity new/changed ......................... ``entity_promotes_source``
+          (sensor.* -> sensor, input_number.* -> input_number; any other domain is left alone)
+        - nothing changed (a stale saved mismatch) ..................... ``noop`` (entity_health warns)
+    * sensor / input_number submitted:
+        - no entity, source just changed ............................... error ``entity_required_for_source``
+        - no entity, source unchanged (the user deselected) ............ ``entity_cleared_reverts_source``
+        - entity domain disagrees with the submitted source:
+            source just changed ........................................ error ``entity_domain_mismatch``
+            source unchanged, entity new/changed ....................... ``entity_domain_sets_source``
+            neither changed (legacy state) ............................. ``noop``
+        - otherwise .................................................... ``noop``
+    """
+    entity = submitted_entity or None
+    stored_entity = stored_entity or None
+    source_changed = submitted_source != stored_source
+    entity_changed = entity != stored_entity
+    domain = entity.split(".", 1)[0] if entity else None
+
+    if not _needs_entity(submitted_source):
+        if entity is None:
+            return submitted_source, None, None, "noop"
+        if source_changed:
+            if entity_changed:
+                return submitted_source, entity, "source_entity_conflict", "source_entity_conflict"
+            return submitted_source, None, None, "source_default_drops_entity"
+        if entity_changed and domain in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            return domain, entity, None, "entity_promotes_source"
+        return submitted_source, entity, None, "noop"
+
+    if entity is None:
+        if source_changed:
+            return submitted_source, None, "entity_required_for_source", "entity_required_for_source"
+        return default_source, None, None, "entity_cleared_reverts_source"
+    if domain in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER) and domain != submitted_source:
+        if source_changed:
+            return submitted_source, entity, "entity_domain_mismatch", "entity_domain_mismatch"
+        if entity_changed:
+            return domain, entity, None, "entity_domain_sets_source"
+    return submitted_source, entity, None, "noop"
+
+
 def _entity_selector_for_source(source: str) -> selector.EntitySelector:
     """Return an EntitySelector appropriate for the given source type."""
     if source == TEMP_SOURCE_INPUT_NUMBER:
@@ -954,19 +1017,57 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Temperature source selection."""
-        if user_input is not None:
-            _LOGGER.debug(
-                "Options — outdoor_source=%s, indoor_source=%s",
-                user_input.get("outdoor_temp_source"),
-                user_input.get("indoor_temp_source"),
-            )
-            await self._commit_section(
-                user_input,
-                clearable_keys=("outdoor_temp_entity", "indoor_temp_entity", "sleep_indoor_temp_entity"),
-            )
-            return await self.async_step_init()
+        errors: dict[str, str] = {}
+        stored = {**self.config_entry.data, **self._updates}
+        for key in self._removed:
+            stored.pop(key, None)
 
-        current = self.config_entry.data
+        if user_input is not None:
+            user_input = dict(user_input)
+            for src_key, ent_key, default_src in (
+                ("outdoor_temp_source", "outdoor_temp_entity", TEMP_SOURCE_WEATHER_SERVICE),
+                ("indoor_temp_source", "indoor_temp_entity", TEMP_SOURCE_CLIMATE_FALLBACK),
+            ):
+                stored_src = stored.get(src_key, default_src)
+                new_src, new_ent, error_key, rule = reconcile_temperature_source(
+                    stored_src,
+                    stored.get(ent_key),
+                    user_input.get(src_key, stored_src),
+                    user_input.get(ent_key),
+                    default_src,
+                )
+                if error_key:
+                    errors[ent_key] = error_key
+                    _LOGGER.info("Temperature source rejected: field=%s rule=%s", ent_key, rule)
+                    continue
+                if rule != "noop":
+                    _LOGGER.info(
+                        "Temperature source reconciled: field=%s rule=%s source=%s entity_set=%s",
+                        src_key,
+                        rule,
+                        new_src,
+                        new_ent is not None,
+                    )
+                if src_key in user_input or new_src != stored_src:
+                    user_input[src_key] = new_src
+                if new_ent is None:
+                    user_input.pop(ent_key, None)
+                else:
+                    user_input[ent_key] = new_ent
+            if not errors:
+                _LOGGER.debug(
+                    "Options — outdoor_source=%s, indoor_source=%s",
+                    user_input.get("outdoor_temp_source"),
+                    user_input.get("indoor_temp_source"),
+                )
+                await self._commit_section(
+                    user_input,
+                    clearable_keys=("outdoor_temp_entity", "indoor_temp_entity", "sleep_indoor_temp_entity"),
+                )
+                return await self.async_step_init()
+
+        # On a validation error keep what the user just submitted instead of snapping back to storage.
+        current = {**stored, **user_input} if user_input is not None else stored
 
         return self.async_show_form(
             step_id="temperature_sources",
@@ -1006,6 +1107,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ),
                 }
             ),
+            errors=errors,
         )
 
     # ---- Sensors & Fan ----

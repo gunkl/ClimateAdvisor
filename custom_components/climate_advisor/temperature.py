@@ -6,6 +6,7 @@ This module provides the only conversion boundary used throughout the integratio
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from datetime import datetime
 
@@ -116,6 +117,35 @@ def read_state_temp_f(state, attr: str, unit: str) -> float | None:
         return to_fahrenheit(float(raw), unit)
     except (ValueError, TypeError):
         return None
+
+
+def read_sensor_state_f(state, unit: str) -> tuple[float | None, str | None]:
+    """Read a temperature sensor/input_number entity's *state* as internal Fahrenheit (Issue #1032).
+
+    Sibling of ``read_state_temp_f`` (which reads an *attribute*). Single place that parses a
+    dedicated-sensor reading so ``_get_outdoor_temp`` and the live outdoor-sensor listener
+    cannot drift apart again. Returns ``(value_f, None)`` on success, else ``(None, reason)``
+    with ``reason`` one of ``"entity_missing"``, ``"unavailable"``, ``"non_numeric"``,
+    ``"non_finite"`` — callers own the fallback and the logging.
+
+    ``nan``/``inf`` parse as valid floats, so they are rejected explicitly: otherwise they flow
+    into every comparison (all False for nan) and silently disable the windows gate.
+    """
+    if state is None:
+        return None, "entity_missing"
+    raw = getattr(state, "state", None)
+    if raw in ("unavailable", "unknown"):
+        return None, "unavailable"
+    try:
+        parsed = float(raw)
+    except (ValueError, TypeError):
+        return None, "non_numeric"
+    if not math.isfinite(parsed):
+        return None, "non_finite"
+    value_f = to_fahrenheit(parsed, unit)
+    if not math.isfinite(value_f):
+        return None, "non_finite"
+    return value_f, None
 
 
 def format_temp(value_fahrenheit: float, unit: str, decimals: int = 0) -> str:

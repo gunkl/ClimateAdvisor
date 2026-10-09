@@ -1940,6 +1940,52 @@ def _render_fan_override_cleared(p: dict, unit: str) -> tuple[str, str]:
     return label, (f"RF timer {rf}h" if rf is not None else "")
 
 
+OUTDOOR_SENSOR_REASON_LABELS: dict[str, str] = {
+    "not_configured": "no sensor selected",
+    "entity_missing": "sensor entity not found",
+    "unavailable": "sensor unavailable",
+    "non_numeric": "sensor reading not a number",
+    "non_finite": "sensor reading invalid",
+    "implausible": "sensor reading out of range",
+    "stale": "sensor stopped updating",
+}
+
+_OUTDOOR_SOURCE_IN_USE_LABELS: dict[str, str] = {
+    "weather_interpolation": "weather service (hourly forecast)",
+    "weather_attribute": "weather service (current conditions)",
+}
+
+
+def _render_outdoor_sensor_fallback(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1032: the dedicated outdoor sensor failed, so the weather service value is in use."""
+    reason = p.get("reason")
+    reason_label = OUTDOOR_SENSOR_REASON_LABELS.get(reason, str(reason).replace("_", " ")) if reason else "unspecified"
+    label = f"Outdoor sensor fallback ({reason_label})"
+    parts: list[str] = []
+    in_use = p.get("source_in_use")
+    if in_use:
+        parts.append(f"using {_OUTDOOR_SOURCE_IN_USE_LABELS.get(in_use, str(in_use).replace('_', ' '))}")
+    value_f = p.get("value_f")
+    if isinstance(value_f, (int, float)):
+        parts.append(format_temp(value_f, unit))
+    return label, ", ".join(parts)
+
+
+def _render_outdoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1032: the dedicated outdoor sensor is being read again."""
+    parts: list[str] = []
+    value_f = p.get("value_f")
+    if isinstance(value_f, (int, float)):
+        parts.append(format_temp(value_f, unit))
+    previous = p.get("previous_reason")
+    if previous:
+        parts.append(f"was: {OUTDOOR_SENSOR_REASON_LABELS.get(previous, str(previous).replace('_', ' '))}")
+    minutes = p.get("minutes_in_fallback")
+    if minutes is not None:
+        parts.append(f"{minutes} min on weather service")
+    return "Outdoor sensor recovered", ", ".join(parts)
+
+
 def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
     source = p.get("source", "")
     re_paused = p.get("re_paused", False)
@@ -2695,6 +2741,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "grace_started": _render_grace_started,
     "grace_cancelled": _render_grace_cancelled,
     "fan_override_cleared": _render_fan_override_cleared,
+    "outdoor_sensor_fallback": _render_outdoor_sensor_fallback,
+    "outdoor_sensor_recovered": _render_outdoor_sensor_recovered,
     "grace_expired": _render_grace_expired,
     "nat_vent_fan_on": _render_nat_vent_fan_on,
     "nat_vent_fan_off": _render_nat_vent_fan_off,
@@ -2793,6 +2841,8 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "override_adopted",
         "grace_cancelled",
         "fan_override_cleared",
+        "outdoor_sensor_fallback",
+        "outdoor_sensor_recovered",
         "ceiling_guard_fired",
         "incident_detected",
         "setpoint_rejected",

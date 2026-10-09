@@ -209,10 +209,10 @@
           "sleep_indoor_temp_entity": "Sleep Indoor Temp Sensor"
         },
         "data_description": {
-          "outdoor_temp_source": "Where to read outside temperature. 'Weather service' uses your weather integration; a dedicated sensor or input helper lets you use a specific entity.",
-          "outdoor_temp_entity": "Choose the sensor or input helper that reports outdoor temperature. Only needed if you selected 'Dedicated sensor' or 'Input helper' above.",
+          "outdoor_temp_source": "Where to read outside temperature. 'Weather service' uses your weather integration; a dedicated sensor or input helper lets you use a specific entity. Switching back to 'Weather service' removes the chosen entity.",
+          "outdoor_temp_entity": "Pick the sensor or input helper that reports outdoor temperature - the source above switches to match automatically. Clear this field to go back to the weather service.",
           "indoor_temp_source": "Where to read inside temperature. 'Climate entity' uses your thermostat's built-in sensor; a dedicated sensor or input helper lets you use a separate entity.",
-          "indoor_temp_entity": "Choose the sensor or input helper that reports indoor temperature. Only needed if you selected 'Dedicated sensor' or 'Input helper' above.",
+          "indoor_temp_entity": "Pick the sensor or input helper that reports indoor temperature - the source above switches to match automatically. Clear this field to go back to the thermostat's built-in sensor.",
           "sleep_indoor_temp_entity": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable."
         }
       },
@@ -446,6 +446,9 @@
       }
     },
     "error": {
+      "entity_required_for_source": "Pick the sensor or helper to use, or set the source back to the weather service / climate entity.",
+      "entity_domain_mismatch": "That entity does not match the selected source. Pick a sensor for 'Dedicated sensor' or an input_number for 'Input helper'.",
+      "source_entity_conflict": "You changed the source and the entity at the same time in a way that conflicts. Choose a source, then pick the matching entity (or clear it).",
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
       "schedule_days_required": "Select at least one day",
       "schedule_start_end_equal": "Start and end time must be different",

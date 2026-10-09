@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.87"
+VERSION = "0.7.88"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -443,6 +443,14 @@ TEMP_SOURCE_INPUT_NUMBER = "input_number"
 TEMP_SOURCE_WEATHER_SERVICE = "weather_service"
 TEMP_SOURCE_CLIMATE_FALLBACK = "climate_fallback"
 
+# Dedicated outdoor sensor guards (Issue #1032). A reading outside the plausible range, or a
+# `sensor` (never `input_number`) that has not reported for longer than the stale threshold, is
+# treated as a sensor failure and the weather-service value is used instead (and logged).
+# The stale threshold is an uncalibrated conservative default — revisit with real sensor history.
+MIN_PLAUSIBLE_OUTDOOR_F = -60.0
+MAX_PLAUSIBLE_OUTDOOR_F = 150.0
+OUTDOOR_SENSOR_STALE_HOURS = 6.0
+
 # Sensor attributes
 ATTR_DAY_TYPE = "day_type"
 ATTR_TREND = "trend_direction"
@@ -590,7 +598,8 @@ CONFIG_METADATA = {
         "label": "Outdoor Temp Source",
         "description": (
             "Where outdoor temperature is read from:"
-            " the weather service, a dedicated sensor, or an input_number helper."
+            " the weather service, a dedicated sensor, or an input_number helper. The Settings value also"
+            " names the selected sensor, and says so when it has failed and the weather service is in use instead."
         ),
         "category": "sensors",
         "display_transform": "temp_source_label",

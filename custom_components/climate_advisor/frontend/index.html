@@ -2793,7 +2793,7 @@
         html += `<div class="settings-group"><h3>${catLabel}</h3>`;
         items.forEach(s => {
           const displayValue = s.value == null ? '<span style="color:var(--text-secondary)">not set</span>'
-            : String(s.value);
+            : escapeHtml(String(s.value));
           html += `
             <div class="setting-row">
               <div class="setting-info">

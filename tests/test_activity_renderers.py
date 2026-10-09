@@ -2194,3 +2194,77 @@ class TestGraceCancelledRenderers:
             ]
         )
         assert table.count("Grace period cancelled") == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #1032: outdoor_sensor_fallback / outdoor_sensor_recovered renderers
+# ---------------------------------------------------------------------------
+
+
+class TestOutdoorSensorRenderers:
+    def test_fallback_full_payload(self):
+        label, settings = _act_mod.EVENT_RENDERERS["outdoor_sensor_fallback"](
+            {
+                "reason": "unavailable",
+                "entity": "sensor.outside_temp",
+                "source_in_use": "weather_interpolation",
+                "value_f": 64.0,
+            },
+            "fahrenheit",
+        )
+        assert label == "Outdoor sensor fallback (sensor unavailable)"
+        assert "weather service (hourly forecast)" in settings
+        assert "64°F" in settings
+
+    def test_fallback_converts_value_to_the_users_unit(self):
+        _, settings = _act_mod.EVENT_RENDERERS["outdoor_sensor_fallback"](
+            {"reason": "stale", "source_in_use": "weather_attribute", "value_f": 68.0}, "celsius"
+        )
+        assert "20°C" in settings
+
+    def test_every_reason_the_coordinator_emits_has_a_friendly_label(self):
+        for reason in (
+            "not_configured",
+            "entity_missing",
+            "unavailable",
+            "non_numeric",
+            "non_finite",
+            "implausible",
+            "stale",
+        ):
+            label, _ = _act_mod.EVENT_RENDERERS["outdoor_sensor_fallback"]({"reason": reason}, "fahrenheit")
+            assert "_" not in label, (reason, label)
+
+    def test_fallback_tolerates_missing_and_none_fields(self):
+        label, settings = _act_mod.EVENT_RENDERERS["outdoor_sensor_fallback"](
+            {"reason": None, "source_in_use": None, "value_f": None}, "fahrenheit"
+        )
+        assert label
+        assert settings == ""
+        label, _ = _act_mod.EVENT_RENDERERS["outdoor_sensor_fallback"]({}, "fahrenheit")
+        assert label
+
+    def test_recovered_payload(self):
+        label, settings = _act_mod.EVENT_RENDERERS["outdoor_sensor_recovered"](
+            {"value_f": 72.3, "previous_reason": "stale", "minutes_in_fallback": 95}, "fahrenheit"
+        )
+        assert label == "Outdoor sensor recovered"
+        assert "72°F" in settings
+        assert "sensor stopped updating" in settings
+        assert "95 min on weather service" in settings
+
+    def test_recovered_tolerates_missing_fields(self):
+        label, settings = _act_mod.EVENT_RENDERERS["outdoor_sensor_recovered"]({}, "fahrenheit")
+        assert label
+        assert settings == ""
+
+    def test_both_events_not_deduplicated(self):
+        assert "outdoor_sensor_fallback" in _act_mod._NO_DEDUP
+        assert "outdoor_sensor_recovered" in _act_mod._NO_DEDUP
+        table = _build_table(
+            [
+                _make_event("outdoor_sensor_fallback", hours_ago=3, reason="unavailable"),
+                _make_event("outdoor_sensor_fallback", hours_ago=2, reason="stale"),
+            ]
+        )
+        assert table.count("Outdoor sensor fallback") == 2

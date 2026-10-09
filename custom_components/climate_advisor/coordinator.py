@@ -146,7 +146,9 @@ from .const import (
     FAN_MODE_WHOLE_HOUSE,
     INVESTIGATION_REPORT_HISTORY_CAP,
     INVESTIGATION_REPORTS_FILE,
+    MAX_PLAUSIBLE_OUTDOOR_F,
     MAX_WEATHER_BIAS_APPLY_F,
+    MIN_PLAUSIBLE_OUTDOOR_F,
     MIN_WEATHER_BIAS_APPLY_F,
     NAT_VENT_CUTOFF_REASON_SUSTAIN_S,
     NAT_VENT_HYSTERESIS_F,
@@ -161,6 +163,7 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
+    OUTDOOR_SENSOR_STALE_HOURS,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
@@ -278,6 +281,7 @@ from .temperature import (
     free_cooling_direction_ok,
     from_fahrenheit,
     ha_system_unit,
+    read_sensor_state_f,
     to_fahrenheit,
     unit_key_from_attr,
     unit_mismatch,
@@ -783,6 +787,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._thermostat_fan_only_on_since: datetime | None = None
         self._hvac_session_mode: str | None = None
         self._last_outdoor_temp: float | None = None  # most recent outdoor reading for gate checks
+        # Issue #1032: dedicated-outdoor-sensor fallback state. `_reason` is the live status (drives the
+        # Settings text); `_announced` is what the Activity Log last reported, so events fire on transitions only.
+        self._outdoor_sensor_fallback_reason: str | None = None
+        self._outdoor_sensor_fallback_announced: str | None = None
+        self._outdoor_sensor_fallback_since: datetime | None = None
         # Issue #130 D16: fallback outdoor temp when weather entity is temporarily unavailable
         self._last_known_outdoor_f: float | None = None
         self._last_known_outdoor_ts: datetime | None = None
@@ -1302,7 +1311,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Outdoor temp: register a listener on the configured outdoor sensor entity (Issue #327).
         # The thermostat listener does NOT carry outdoor temp, so outdoor sensor changes are invisible
-        # until the 30-min cycle without this listener.
+        # until the 30-min cycle without this listener. Issue #1032: the listener now ALWAYS refreshes
+        # the shared outdoor value (Status, engine copy, windows gate) via _refresh_outdoor_temp();
+        # only the fan thermostatic re-check stays gated on an active fan / nat-vent session.
         _outdoor_temp_source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
         _outdoor_temp_entity = (
             self.config.get("outdoor_temp_entity")
@@ -1313,16 +1324,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             @callback
             def _async_outdoor_temp_changed(event: Any) -> None:
+                self._refresh_outdoor_temp(min_delta_f=0.1)
                 ae = self.automation_engine
                 if ae._fan_active or ae._natural_vent_active:
-                    new_state = event.data.get("new_state")
-                    if new_state is not None:
-                        try:
-                            unit = self.config.get("temp_unit", "fahrenheit")
-                            new_outdoor = to_fahrenheit(float(new_state.state), unit)
-                            self._last_outdoor_temp = new_outdoor
-                        except (ValueError, TypeError):
-                            pass
                     self.hass.async_create_task(
                         ae.fan_thermostat_check(
                             indoor=self._get_indoor_temp(),
@@ -1343,6 +1347,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _outdoor_temp_entity or "(weather service / 30-min poll)",
             self.config["climate_entity"],
         )
+
+        # Issue #1032: a saved entity next to a default source (weather service / climate entity) is
+        # ignored by every reader. The Options flow now reconciles new saves, but configs saved before
+        # that can still hold the mismatch — say so once per setup instead of staying silent.
+        for _role, _src_key, _ent_key, _default_src in (
+            ("outdoor", "outdoor_temp_source", "outdoor_temp_entity", TEMP_SOURCE_WEATHER_SERVICE),
+            ("indoor", "indoor_temp_source", "indoor_temp_entity", TEMP_SOURCE_CLIMATE_FALLBACK),
+        ):
+            if self.config.get(_ent_key) and self.config.get(_src_key, _default_src) not in (
+                TEMP_SOURCE_SENSOR,
+                TEMP_SOURCE_INPUT_NUMBER,
+            ):
+                _LOGGER.warning(
+                    "Temperature entity configured but not in use: role=%s source=%s entity=%s "
+                    "(set the source to Dedicated sensor / Input helper in Settings to use it)",
+                    _role,
+                    self.config.get(_src_key, _default_src),
+                    self.config.get(_ent_key),
+                )
 
         # Startup coalescing: suppress override detection for 5 minutes, then evaluate state (Issue #321)
         _coalesce_expiry = dt_util.now() + timedelta(seconds=300)
@@ -1393,24 +1416,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     @callback
     def _async_thermal_sample_tick(self, now: datetime) -> None:
         """Sample active thermal observations on the 5-min tick."""
-        self._refresh_weather_service_outdoor_temp()
+        self._refresh_outdoor_temp()
         self._sample_all_observations()
 
-    def _refresh_weather_service_outdoor_temp(self) -> None:
-        """Refresh the interpolated outdoor estimate every 5 min (Issue #511).
+    def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
+        """Refresh the shared outdoor value between 30-min cycles (Issues #511, #1032).
 
-        Weather-service installs only — sensor/input_number installs already get
-        live updates via their own state-change listener (see coordinator.py ~608)
-        and must not be touched here, since they have a true live reading already.
+        Called by the 5-min tick (all sources) and by the dedicated-sensor state listener
+        (``min_delta_f=0.1`` so a chatty sensor does not fan out entity updates for sub-0.1°F
+        changes). Weather-service installs refresh the interpolated estimate (#511). Sensor /
+        input_number installs re-read the sensor — this is also the only periodic check that can
+        notice a stale/frozen sensor, since a frozen sensor emits no state changes (#1032). Before
+        #1032 sensor installs were skipped here on the false premise that their listener already
+        kept them live; that listener only acted while the fan / nat-vent was active.
         """
         source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
-        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
-            return
         weather_entity = self.config.get("weather_entity")
         weather_state = self.hass.states.get(weather_entity) if weather_entity else None
-        if not weather_state:
+        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            weather_attrs = weather_state.attributes if weather_state else {}
+        elif weather_state:
+            weather_attrs = weather_state.attributes
+        else:
             return
-        self._apply_outdoor_temp(self._get_outdoor_temp(weather_state.attributes), record_history=False)
+        value = self._get_outdoor_temp(weather_attrs)
+        previous = getattr(self, "_last_outdoor_temp", None)
+        if min_delta_f > 0 and previous is not None and abs(value - previous) < min_delta_f:
+            return
+        self._apply_outdoor_temp(value, record_history=False)
 
     @property
     def zone_label(self) -> str | None:
@@ -3774,24 +3807,112 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         return result
 
+    def _read_outdoor_sensor(self) -> tuple[float | None, str | None]:
+        """Read the configured dedicated outdoor sensor as °F (Issue #1032).
+
+        Returns ``(value_f, None)`` or ``(None, reason)`` with ``reason`` one of
+        ``not_configured``, ``entity_missing``, ``unavailable``, ``non_numeric``,
+        ``non_finite``, ``implausible``, ``stale``. Pure read — the caller owns the fallback.
+        """
+        source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
+        entity_id = self.config.get("outdoor_temp_entity")
+        if not entity_id:
+            return None, "not_configured"
+        unit = self.config.get("temp_unit", "fahrenheit")
+        state = self.hass.states.get(entity_id)
+        value_f, reason = read_sensor_state_f(state, unit)
+        if reason is not None:
+            return None, reason
+        if not MIN_PLAUSIBLE_OUTDOOR_F <= value_f <= MAX_PLAUSIBLE_OUTDOOR_F:
+            return None, "implausible"
+        # Stale check: `sensor` only (an input_number helper legitimately stays unchanged for days).
+        # last_reported updates on every report even when the value is unchanged; older HA lacks it.
+        # Fails open (treated as fresh) when no real datetime is available (stubs, old HA).
+        if source == TEMP_SOURCE_SENSOR:
+            last_seen = getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+            if isinstance(last_seen, datetime):
+                try:
+                    is_stale = dt_util.utcnow() - last_seen > timedelta(hours=OUTDOOR_SENSOR_STALE_HOURS)
+                except TypeError:  # stub environments return a non-datetime clock — fail open
+                    is_stale = False
+                if is_stale:
+                    return None, "stale"
+        return value_f, None
+
+    def _note_outdoor_sensor_state(
+        self, reason: str | None, entity_id: str | None, source_in_use: str | None, value_f: float | None
+    ) -> None:
+        """Track sensor-fallback state and announce transitions only (Issue #1032).
+
+        Called on every outdoor read (several times per tick), so the INFO log and the
+        Activity Log event fire once per episode: None→reason (fallback), reason A→B, and
+        reason→None (recovered). The current reason is always tracked (it drives the Settings
+        text), but nothing is announced while the startup coalesce is active — the sensor
+        entity may simply not be loaded yet at HA boot.
+        """
+        # getattr defaults: several tests build the coordinator via object.__new__ (bypassing __init__).
+        self._outdoor_sensor_fallback_reason = reason
+        if getattr(self, "_startup_coalesce_active", True):
+            return
+        announced = getattr(self, "_outdoor_sensor_fallback_announced", None)
+        if reason == announced:
+            return
+        now = dt_util.now()
+        if reason is not None:
+            if announced is None:
+                self._outdoor_sensor_fallback_since = now
+            _LOGGER.info(
+                "Outdoor sensor fallback: reason=%s entity=%s using=%s value_f=%s",
+                reason,
+                entity_id,
+                source_in_use,
+                f"{value_f:.1f}" if value_f is not None else "unknown",
+            )
+            self._emit_event(
+                "outdoor_sensor_fallback",
+                {"reason": reason, "entity": entity_id, "source_in_use": source_in_use, "value_f": value_f},
+            )
+        else:
+            since = getattr(self, "_outdoor_sensor_fallback_since", None)
+            minutes = round((now - since).total_seconds() / 60) if since else None
+            _LOGGER.info(
+                "Outdoor sensor recovered: entity=%s previous_reason=%s minutes_in_fallback=%s value_f=%s",
+                entity_id,
+                announced,
+                minutes,
+                f"{value_f:.1f}" if value_f is not None else "unknown",
+            )
+            self._emit_event(
+                "outdoor_sensor_recovered",
+                {"entity": entity_id, "value_f": value_f, "previous_reason": announced, "minutes_in_fallback": minutes},
+            )
+            self._outdoor_sensor_fallback_since = None
+        self._outdoor_sensor_fallback_announced = reason
+
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:
         """Read outdoor temperature based on configured source type."""
         source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
-        unit = self.config.get("temp_unit", "fahrenheit")
 
-        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
-            entity_id = self.config.get("outdoor_temp_entity")
-            if entity_id:
-                state = self.hass.states.get(entity_id)
-                if state:
-                    try:
-                        return to_fahrenheit(float(state.state), unit)
-                    except (ValueError, TypeError):
-                        _LOGGER.warning(
-                            "Outdoor temp entity %s has non-numeric state %r; falling back to weather attribute",
-                            entity_id,
-                            state.state,
-                        )
+        if source not in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            return self._get_weather_outdoor_temp(weather_attrs)[0]
+
+        sensor_value, reason = self._read_outdoor_sensor()
+        entity_id = self.config.get("outdoor_temp_entity")
+        if reason is None:
+            self._note_outdoor_sensor_state(None, entity_id, None, sensor_value)
+            return sensor_value
+        value_f, weather_source = self._get_weather_outdoor_temp(weather_attrs)
+        self._note_outdoor_sensor_state(reason, entity_id, weather_source, value_f)
+        return value_f
+
+    def _get_weather_outdoor_temp(self, weather_attrs: dict) -> tuple[float, str]:
+        """Weather-service outdoor temperature and which weather path produced it.
+
+        Returns ``(value_f, source_label)`` with ``source_label`` one of
+        ``weather_interpolation`` / ``weather_attribute`` (Issue #1032: the label is recorded in
+        the sensor-fallback event so the Activity Log says what was actually used).
+        """
+        unit = self.config.get("temp_unit", "fahrenheit")
 
         # weather_service source or fallback: interpolate between the two nearest
         # hourly-forecast points instead of trusting the weather integration's live
@@ -3813,7 +3934,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     interpolated_f,
                 )
             self._hourly_interp_unavailable_streak = 0
-            return interpolated_f
+            return interpolated_f, "weather_interpolation"
 
         # Issue #874: retry-style escalation, two independent pieces working together:
         # 1. This branch (interpolation unusable this cycle — could be transient, e.g. a
@@ -3835,7 +3956,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Hourly forecast interpolation unavailable for outdoor temp — "
             "falling back to weather nowcast attribute (integration may not support hourly forecasts)"
         )
-        return to_fahrenheit(float(weather_attrs.get("temperature", 65)), unit)
+        return to_fahrenheit(float(weather_attrs.get("temperature", 65)), unit), "weather_attribute"
 
     def _get_indoor_temp(self) -> float | None:
         """Read indoor temperature based on configured source type.

@@ -179,10 +179,30 @@ class TestFlowStep:
         flow.hass.config_entries.async_update_entry.assert_not_called()
 
     def test_error_form_keeps_what_the_user_submitted(self):
-        flow_result, _, _ = _submit(_BASE, {"outdoor_temp_source": S, "indoor_temp_source": C})
-        assert flow_result["step_id"] == "temperature_sources"
-        schema_keys = {str(k): k for k in flow_result["data_schema"].schema}
-        assert schema_keys["outdoor_temp_source"].default() == S
+        """After a validation error the re-shown form defaults to the submitted source, not storage.
+
+        Records the ``vol.Required`` call instead of introspecting the built schema, so it works
+        whether ``voluptuous`` is the real package or the harness's mock (CI has no voluptuous;
+        same approach as Issue #1023's unit-step default tests).
+        """
+        import importlib
+        from unittest.mock import patch
+
+        mod = importlib.import_module("custom_components.climate_advisor.config_flow")
+        seen: dict = {}
+
+        def _spy(key, **kwargs):
+            seen[key] = kwargs.get("default")
+            return key
+
+        flow, _ = _make_flow(_BASE)
+        with patch.object(mod.vol, "Required", side_effect=_spy):
+            result = asyncio.run(
+                flow.async_step_temperature_sources({"outdoor_temp_source": S, "indoor_temp_source": C})
+            )
+        assert result["step_id"] == "temperature_sources"
+        assert result["errors"] == {"outdoor_temp_entity": "entity_required_for_source"}
+        assert seen["outdoor_temp_source"] == S  # submitted value, not the stored weather_service
 
     def test_domain_mismatch_after_changing_the_source_is_rejected(self):
         stored = {**_BASE, "outdoor_temp_source": S, "outdoor_temp_entity": "sensor.o"}

@@ -281,6 +281,8 @@ from .temperature import (
     free_cooling_direction_ok,
     from_fahrenheit,
     ha_system_unit,
+    is_sensor_stale,
+    next_fallback_episode,
     read_sensor_state_f,
     to_fahrenheit,
     unit_key_from_attr,
@@ -792,6 +794,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_sensor_fallback_reason: str | None = None
         self._outdoor_sensor_fallback_announced: str | None = None
         self._outdoor_sensor_fallback_since: datetime | None = None
+        # Issue #1033: per-zone indoor sensor failure episodes (roles: primary, sleep).
+        self._indoor_primary_fallback_reason: str | None = None
+        self._indoor_primary_fallback_announced: str | None = None
+        self._indoor_primary_fallback_since: datetime | None = None
+        self._indoor_sleep_fallback_reason: str | None = None
+        self._indoor_sleep_fallback_announced: str | None = None
+        self._indoor_sleep_fallback_since: datetime | None = None
         # Issue #130 D16: fallback outdoor temp when weather entity is temporarily unavailable
         self._last_known_outdoor_f: float | None = None
         self._last_known_outdoor_ts: datetime | None = None
@@ -1274,6 +1283,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             @callback
             def _async_indoor_temp_changed(event: Any) -> None:
+                self._refresh_indoor_sensor_health()  # Issue #1033: unconditional, not fan-gated
                 ae = self.automation_engine
                 if ae._fan_active or ae._natural_vent_active:
                     self.hass.async_create_task(
@@ -1417,6 +1427,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _async_thermal_sample_tick(self, now: datetime) -> None:
         """Sample active thermal observations on the 5-min tick."""
         self._refresh_outdoor_temp()
+        # Issue #1033: health monitoring must never abort thermal sampling.
+        try:
+            self._refresh_indoor_sensor_health()
+        except Exception:
+            _LOGGER.warning("Indoor sensor health refresh failed on thermal tick; sampling continues", exc_info=True)
         self._sample_all_observations()
 
     def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
@@ -3628,6 +3643,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # whether the sleep sensor is currently in use — never re-derive the latter
         # separately (see indoor_temp.py's IndoorTempReading docstring).
         _indoor_reading = self._get_indoor_temp_with_provenance()
+        self._refresh_indoor_sensor_health()  # Issue #1033
         _indoor_temp = _indoor_reading.value
         _sleep_indoor_sensor_active = (
             _indoor_reading.source_entity is not None
@@ -3828,15 +3844,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Stale check: `sensor` only (an input_number helper legitimately stays unchanged for days).
         # last_reported updates on every report even when the value is unchanged; older HA lacks it.
         # Fails open (treated as fresh) when no real datetime is available (stubs, old HA).
-        if source == TEMP_SOURCE_SENSOR:
-            last_seen = getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
-            if isinstance(last_seen, datetime):
-                try:
-                    is_stale = dt_util.utcnow() - last_seen > timedelta(hours=OUTDOOR_SENSOR_STALE_HOURS)
-                except TypeError:  # stub environments return a non-datetime clock — fail open
-                    is_stale = False
-                if is_stale:
-                    return None, "stale"
+        if source == TEMP_SOURCE_SENSOR and is_sensor_stale(state, OUTDOOR_SENSOR_STALE_HOURS, dt_util.utcnow()):
+            return None, "stale"
         return value_f, None
 
     def _note_outdoor_sensor_state(
@@ -3857,10 +3866,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         announced = getattr(self, "_outdoor_sensor_fallback_announced", None)
         if reason == announced:
             return
-        now = dt_util.now()
-        if reason is not None:
-            if announced is None:
-                self._outdoor_sensor_fallback_since = now
+        step = next_fallback_episode(
+            reason, announced, getattr(self, "_outdoor_sensor_fallback_since", None), dt_util.now()
+        )
+        if step.kind == "none":
+            return
+        if step.kind in ("fallback", "changed"):
             _LOGGER.info(
                 "Outdoor sensor fallback: reason=%s entity=%s using=%s value_f=%s",
                 reason,
@@ -3873,8 +3884,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 {"reason": reason, "entity": entity_id, "source_in_use": source_in_use, "value_f": value_f},
             )
         else:
-            since = getattr(self, "_outdoor_sensor_fallback_since", None)
-            minutes = round((now - since).total_seconds() / 60) if since else None
+            minutes = step.minutes_down
             _LOGGER.info(
                 "Outdoor sensor recovered: entity=%s previous_reason=%s minutes_in_fallback=%s value_f=%s",
                 entity_id,
@@ -3886,8 +3896,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "outdoor_sensor_recovered",
                 {"entity": entity_id, "value_f": value_f, "previous_reason": announced, "minutes_in_fallback": minutes},
             )
-            self._outdoor_sensor_fallback_since = None
-        self._outdoor_sensor_fallback_announced = reason
+        self._outdoor_sensor_fallback_since = step.since
+        self._outdoor_sensor_fallback_announced = step.announced
 
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:
         """Read outdoor temperature based on configured source type."""
@@ -3957,6 +3967,79 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "falling back to weather nowcast attribute (integration may not support hourly forecasts)"
         )
         return to_fahrenheit(float(weather_attrs.get("temperature", 65)), unit), "weather_attribute"
+
+    def _refresh_indoor_sensor_health(self) -> None:
+        """Single event-loop funnel that detects indoor sensor failure episodes (Issue #1033).
+
+        The ONLY caller of ``_note_indoor_sensor_state`` and therefore the only place the
+        indoor sensor unavailable/recovered events originate. Never call this from
+        ``_get_indoor_temp*``, ``_emit_event`` (which reads indoor temp), the resolver, the
+        engine or ``get_chart_data`` (runs in an executor thread). Event loop only.
+        """
+        reading = self._get_indoor_temp_with_provenance()
+        source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
+        primary_entity = (
+            self.config.get("indoor_temp_entity")
+            if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+            else self.config.get("climate_entity")
+        )
+        self._note_indoor_sensor_state("primary", reading.reason, primary_entity, reading.primary_value)
+        sleep_entity = self.config.get("sleep_indoor_temp_entity")
+        if sleep_entity and _in_sleep_window(dt_util.now(), self.config):
+            self._note_indoor_sensor_state("sleep", reading.sleep_reason, sleep_entity, reading.value)
+        else:
+            if getattr(self, "_indoor_sleep_fallback_announced", None) is not None:
+                _LOGGER.debug("Indoor sensor episode cleared: role=sleep reason=window_ended_or_unconfigured")
+            self._indoor_sleep_fallback_reason = None
+            self._indoor_sleep_fallback_announced = None
+            self._indoor_sleep_fallback_since = None
+
+    def _note_indoor_sensor_state(
+        self, role: str, reason: str | None, entity_id: str | None, value_f: float | None
+    ) -> None:
+        """Track one indoor sensor role's failure episode; announce transitions only (Issue #1033).
+
+        The current reason is always tracked (drives the Settings text); nothing is announced
+        while the startup coalesce is active. Called only by ``_refresh_indoor_sensor_health``.
+        """
+        # getattr defaults: tests build the coordinator via object.__new__ (bypassing __init__).
+        setattr(self, f"_indoor_{role}_fallback_reason", reason)
+        if getattr(self, "_startup_coalesce_active", True):
+            return
+        announced = getattr(self, f"_indoor_{role}_fallback_announced", None)
+        since = getattr(self, f"_indoor_{role}_fallback_since", None)
+        step = next_fallback_episode(reason, announced, since, dt_util.now())
+        if step.kind == "none":
+            return
+        if step.kind in ("fallback", "changed"):
+            using = "none" if role == "primary" else "primary_sensor"
+            _log = _LOGGER.warning if role == "primary" else _LOGGER.info
+            _log("Indoor sensor unavailable: role=%s reason=%s entity=%s using=%s", role, reason, entity_id, using)
+            self._emit_event(
+                "indoor_sensor_unavailable",
+                {"role": role, "reason": reason, "entity": entity_id, "using": using, "value_f": None},
+            )
+        else:
+            _LOGGER.info(
+                "Indoor sensor recovered: role=%s entity=%s previous_reason=%s minutes_down=%s value_f=%s",
+                role,
+                entity_id,
+                announced,
+                step.minutes_down,
+                f"{value_f:.1f}" if value_f is not None else "unknown",
+            )
+            self._emit_event(
+                "indoor_sensor_recovered",
+                {
+                    "role": role,
+                    "entity": entity_id,
+                    "value_f": value_f,
+                    "previous_reason": announced,
+                    "minutes_down": step.minutes_down,
+                },
+            )
+        setattr(self, f"_indoor_{role}_fallback_announced", step.announced)
+        setattr(self, f"_indoor_{role}_fallback_since", step.since)
 
     def _get_indoor_temp(self) -> float | None:
         """Read indoor temperature based on configured source type.
@@ -5753,6 +5836,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         doesn't trigger a pointless re-check; the hallway listener
         (``_async_thermostat_changed``) already covers that case.
         """
+        self._refresh_indoor_sensor_health()  # Issue #1033: before the window gate so exit/recovery are seen
         if not _in_sleep_window(dt_util.now(), self.config):
             return
         await self._async_run_temp_reactive_checks()
@@ -5767,6 +5851,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Bug 1 (Issue #321): Suppress override detection during startup coalescing window
         if self._suppress_during_startup_coalescing(f"thermostat override detection for {new_state.state}"):
             return
+
+        # Issue #1033: climate_fallback zones have no indoor listener — feed the health funnel here.
+        if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) == TEMP_SOURCE_CLIMATE_FALLBACK:
+            self._refresh_indoor_sensor_health()
 
         # Bug 3 (Issue #321) / Issue #327 / Issue #858, consolidated by Issue #964:
         # per-temperature-tick re-evaluation of nat-vent cycling, thermostatic fan

@@ -2268,3 +2268,93 @@ class TestOutdoorSensorRenderers:
             ]
         )
         assert table.count("Outdoor sensor fallback") == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #1033: indoor_sensor_unavailable / indoor_sensor_recovered renderers
+# ---------------------------------------------------------------------------
+
+
+class TestIndoorSensorRenderers:
+    def test_primary_unavailable_says_decisions_paused(self):
+        label, _ = _act_mod.EVENT_RENDERERS["indoor_sensor_unavailable"](
+            {"role": "primary", "reason": "stale", "entity": "sensor.indoor", "using": "none", "value_f": None},
+            "fahrenheit",
+        )
+        assert label == (
+            "Indoor sensor sensor.indoor unavailable (sensor stopped updating) — "
+            "indoor-based automation decisions are paused until it reports again"
+        )
+
+    def test_sleep_unavailable_says_primary_in_use(self):
+        label, _ = _act_mod.EVENT_RENDERERS["indoor_sensor_unavailable"](
+            {"role": "sleep", "reason": "unavailable", "entity": "sensor.bedroom", "using": "primary_sensor"},
+            "fahrenheit",
+        )
+        assert label == (
+            "Sleep sensor sensor.bedroom unavailable (sensor unavailable) — using the primary indoor sensor"
+        )
+
+    def test_every_reason_has_a_friendly_label(self):
+        for reason in (
+            "not_configured",
+            "entity_missing",
+            "unavailable",
+            "no_reading",
+            "non_numeric",
+            "non_finite",
+            "implausible",
+            "stale",
+        ):
+            label, _ = _act_mod.EVENT_RENDERERS["indoor_sensor_unavailable"](
+                {"role": "primary", "reason": reason, "entity": "sensor.x"}, "fahrenheit"
+            )
+            assert "_" not in label, (reason, label)
+
+    def test_unavailable_tolerates_missing_and_none_fields(self):
+        label, _ = _act_mod.EVENT_RENDERERS["indoor_sensor_unavailable"](
+            {"role": None, "reason": None, "entity": None, "value_f": None}, "fahrenheit"
+        )
+        assert label
+        label, _ = _act_mod.EVENT_RENDERERS["indoor_sensor_unavailable"]({}, "fahrenheit")
+        assert label
+
+    def test_recovered_payload(self):
+        label, settings = _act_mod.EVENT_RENDERERS["indoor_sensor_recovered"](
+            {
+                "role": "primary",
+                "entity": "sensor.indoor",
+                "value_f": 71.6,
+                "previous_reason": "no_reading",
+                "minutes_down": 42,
+            },
+            "fahrenheit",
+        )
+        assert label == "Indoor sensor sensor.indoor recovered"
+        assert "72°F" in settings
+        assert "was: no reading" in settings
+        assert "down 42 min" in settings
+
+    def test_recovered_sleep_role_and_missing_fields(self):
+        label, settings = _act_mod.EVENT_RENDERERS["indoor_sensor_recovered"](
+            {"role": "sleep", "entity": "sensor.bedroom", "minutes_down": None}, "fahrenheit"
+        )
+        assert label == "Sleep sensor sensor.bedroom recovered"
+        assert settings == ""
+        label, settings = _act_mod.EVENT_RENDERERS["indoor_sensor_recovered"]({}, "fahrenheit")
+        assert label
+        assert settings == ""
+
+    def test_outdoor_labels_alias_shared_table(self):
+        assert _act_mod.OUTDOOR_SENSOR_REASON_LABELS is _act_mod.SENSOR_REASON_LABELS
+
+    def test_both_events_not_deduplicated(self):
+        assert "indoor_sensor_unavailable" in _act_mod._NO_DEDUP
+        assert "indoor_sensor_recovered" in _act_mod._NO_DEDUP
+        table = _build_table(
+            [
+                _make_event("indoor_sensor_unavailable", hours_ago=3, role="primary", reason="stale"),
+                _make_event("indoor_sensor_unavailable", hours_ago=2, role="primary", reason="stale"),
+            ]
+        )
+        assert table.count("Indoor sensor") == 2

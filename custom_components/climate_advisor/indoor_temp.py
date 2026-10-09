@@ -34,15 +34,27 @@ characterizes the whole house's envelope, not one room's comfort, so it always r
 ``primary_value`` regardless of sleep-window state. Both fields are computed by one
 resolver call so a caller never has to re-derive which sensor is "the" primary sensor
 on its own.
+
+Issue #1033 made failures *observable*: the resolver now also reports **why** a reading is
+unavailable (``IndoorTempReading.reason`` / ``sleep_reason``: ``not_configured``,
+``entity_missing``, ``unavailable``, ``no_reading``, ``non_numeric``, ``non_finite``,
+``implausible``, ``stale``). It stays a pure read: it holds no state and never announces —
+the once-per-episode log line and Activity Log events are owned by exactly one event-loop
+caller (``coordinator._refresh_indoor_sensor_health``). Announcing from here would be unsafe:
+``get_chart_data`` reaches this module from an executor thread, and ``coordinator._emit_event``
+itself calls back into the indoor read. Per-call diagnostics are therefore DEBUG only.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any, NamedTuple
 
-from .const import TEMP_SOURCE_INPUT_NUMBER, TEMP_SOURCE_SENSOR
-from .temperature import to_fahrenheit
+from homeassistant.util import dt as dt_util
+
+from .const import INDOOR_SENSOR_STALE_HOURS, TEMP_SOURCE_INPUT_NUMBER, TEMP_SOURCE_SENSOR
+from .temperature import is_sensor_stale, read_attribute_temp_f, read_sensor_state_f
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,23 +64,6 @@ _LOGGER = logging.getLogger(__name__)
 # propagated into automation decisions or the chart log.
 MIN_PLAUSIBLE_INDOOR_F: float = 40.0
 MAX_PLAUSIBLE_INDOOR_F: float = 110.0
-
-# Issue #949: consecutive-miss counter for the sleep-sensor severity escalation in
-# ``resolve_indoor_temp_with_provenance()`` below. This module is a stateless free
-# function (no class instance to hold state on, unlike the coordinator's own analogous
-# ``_hourly_interp_unavailable_streak`` pattern in coordinator.py's
-# ``_get_outdoor_temp()``/``_get_hourly_forecast_data()``), and it's called from two
-# call sites with different cadences (coordinator.py's ~30-min update cycle, and
-# AutomationEngine's own periodic checks) — a module-level dict keyed by entity_id is
-# the closest equivalent: it persists across calls for the life of the process (reset
-# on restart, same as the coordinator's own in-memory streak) without requiring a
-# signature change to either of the ~45 existing ``resolve_indoor_temp_f()`` call sites.
-# Because the two callers' cadences differ and aren't reliably knowable from inside this
-# function, the log messages below report the consecutive-miss count only, not an
-# elapsed-minutes estimate — inventing one from an assumed cadence would just be a new
-# way to be wrong.
-_SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD = 2
-_sleep_sensor_miss_streaks: dict[str, int] = {}
 
 
 class IndoorTempReading(NamedTuple):
@@ -82,6 +77,11 @@ class IndoorTempReading(NamedTuple):
     value: float | None
     source_entity: str | None
     primary_value: float | None
+    # Issue #1033: why the primary source produced no reading (None = healthy), and - only while
+    # the sleep window is active with a sleep sensor configured - why the sleep sensor was not
+    # used. Trailing + defaulted so existing 3-argument constructions keep working.
+    reason: str | None = None
+    sleep_reason: str | None = None
 
 
 def _resolve_primary_indoor_temp_f(
@@ -91,49 +91,64 @@ def _resolve_primary_indoor_temp_f(
     unit: str,
     indoor_temp_entity: str | None,
     climate_entity: str,
-) -> tuple[float | None, str | None]:
+    now: datetime,
+) -> tuple[float | None, str | None, str | None]:
     """Resolve the primary-source indoor temperature (sensor/input_number/climate_fallback).
 
     Factored out of ``resolve_indoor_temp_with_provenance()`` so it's computed exactly
     once and reused for both the comfort-facing result and the always-primary
-    ``primary_value`` field, rather than being resolved twice.
+    ``primary_value`` field, rather than being resolved twice. Returns
+    ``(value_f, source_entity, reason)``; ``reason`` is None exactly when ``value_f`` is set.
     """
     if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
         if not indoor_temp_entity:
-            return None, None
+            return None, None, "not_configured"
         state = hass.states.get(indoor_temp_entity)
-        if state is None:
-            return None, None
-        try:
-            val_f = to_fahrenheit(float(state.state), unit)
-        except (ValueError, TypeError):
-            _LOGGER.warning(
-                "Indoor temp entity %s has non-numeric state %r; treating as unavailable",
-                indoor_temp_entity,
-                state.state,
-            )
-            return None, None
+        val_f, reason = read_sensor_state_f(state, unit)
+        if reason is not None:
+            _LOGGER.debug("Indoor temp entity %s unusable: reason=%s", indoor_temp_entity, reason)
+            return None, None, reason
         checked = _check_plausible(val_f, indoor_temp_entity)
-        return checked, (indoor_temp_entity if checked is not None else None)
+        if checked is None:
+            return None, None, "implausible"
+        # input_number helpers legitimately stay unchanged for days - stale applies to `sensor` only.
+        if source == TEMP_SOURCE_SENSOR and is_sensor_stale(state, INDOOR_SENSOR_STALE_HOURS, now):
+            return None, None, "stale"
+        return checked, indoor_temp_entity, None
 
     # climate_fallback source (also the default for any unrecognized source value)
     climate_state = hass.states.get(climate_entity)
-    if climate_state is None:
-        return None, None
-    temp = climate_state.attributes.get("current_temperature")
-    if temp is None:
-        return None, None
-    try:
-        val_f = to_fahrenheit(float(temp), unit)
-    except (ValueError, TypeError):
-        _LOGGER.warning(
-            "Indoor temp from climate entity %s has non-numeric current_temperature %r; treating as unavailable",
-            climate_entity,
-            temp,
-        )
-        return None, None
+    val_f, reason = read_attribute_temp_f(climate_state, "current_temperature", unit)
+    if reason is not None:
+        # Only a FAILED attribute read is relabelled: a thermostat can report state "unknown"
+        # (no HVAC mode) yet still publish a valid current_temperature, which must keep working.
+        if reason == "no_reading" and getattr(climate_state, "state", None) in ("unavailable", "unknown"):
+            reason = "unavailable"
+        _LOGGER.debug("Indoor temp from climate entity %s unusable: reason=%s", climate_entity, reason)
+        return None, None, reason
     checked = _check_plausible(val_f, climate_entity)
-    return checked, (climate_entity if checked is not None else None)
+    if checked is None:
+        return None, None, "implausible"
+    return checked, climate_entity, None
+
+
+def _resolve_sleep_indoor_temp_f(
+    *, hass: Any, unit: str, sleep_indoor_temp_entity: str, now: datetime
+) -> tuple[float | None, str | None]:
+    """Resolve the sleep-window bedroom sensor: ``(value_f, None)`` or ``(None, reason)``."""
+    state = hass.states.get(sleep_indoor_temp_entity)
+    val_f, reason = read_sensor_state_f(state, unit)
+    if reason is not None:
+        _LOGGER.debug("Sleep indoor sensor %s unusable: reason=%s", sleep_indoor_temp_entity, reason)
+        return None, reason
+    checked = _check_plausible(val_f, sleep_indoor_temp_entity)
+    if checked is None:
+        return None, "implausible"
+    if not sleep_indoor_temp_entity.startswith("input_number.") and is_sensor_stale(
+        state, INDOOR_SENSOR_STALE_HOURS, now
+    ):
+        return None, "stale"
+    return checked, None
 
 
 def resolve_indoor_temp_with_provenance(
@@ -145,77 +160,43 @@ def resolve_indoor_temp_with_provenance(
     climate_entity: str,
     in_sleep_window: bool = False,
     sleep_indoor_temp_entity: str | None = None,
+    now: datetime | None = None,
 ) -> IndoorTempReading:
     """Resolve indoor temperature: comfort-facing value + provenance + always-primary value.
 
     ``source``/``unit``/``indoor_temp_entity``/``climate_entity`` behave exactly as before
     (see module docstring history). When ``in_sleep_window`` and ``sleep_indoor_temp_entity``
     are both set, the sleep sensor is tried first for the comfort-facing ``value`` only; on
-    any failure (missing state, non-numeric, implausible) it falls through to the primary
-    resolution rather than returning an unavailable reading — automation must never stall
+    any failure (missing state, non-numeric, implausible, stale) it falls through to the primary
+    resolution rather than returning an unavailable reading - automation must never stall
     overnight because a bedroom sensor's battery died. ``primary_value`` is always the
-    unswapped primary-source reading, regardless of the sleep-sensor outcome.
+    unswapped primary-source reading, regardless of the sleep-sensor outcome. ``now`` (UTC) is
+    only used for the staleness check and defaults to the current time.
     """
-    primary_val, primary_entity = _resolve_primary_indoor_temp_f(
+    now = now or dt_util.utcnow()
+    primary_val, primary_entity, primary_reason = _resolve_primary_indoor_temp_f(
         hass=hass,
         source=source,
         unit=unit,
         indoor_temp_entity=indoor_temp_entity,
         climate_entity=climate_entity,
+        now=now,
     )
 
+    sleep_reason: str | None = None
     if in_sleep_window and sleep_indoor_temp_entity:
-        state = hass.states.get(sleep_indoor_temp_entity)
-        val_f: float | None = None
-        if state is not None:
-            try:
-                val_f = to_fahrenheit(float(state.state), unit)
-            except (ValueError, TypeError):
-                val_f = None
-            if val_f is not None:
-                val_f = _check_plausible(val_f, sleep_indoor_temp_entity)
+        val_f, sleep_reason = _resolve_sleep_indoor_temp_f(
+            hass=hass, unit=unit, sleep_indoor_temp_entity=sleep_indoor_temp_entity, now=now
+        )
         if val_f is not None:
-            _prior_streak = _sleep_sensor_miss_streaks.get(sleep_indoor_temp_entity, 0)
-            if _prior_streak > 0:
-                # Recovery: reset the streak and log a one-shot line at the severity the
-                # outage actually reached — INFO if it never escalated past the
-                # threshold, WARNING if it did. This is the piece that was previously
-                # invisible: today's per-cycle "Using sleep indoor sensor..." INFO line
-                # below fires identically on a healthy cycle and on the first cycle
-                # after a long outage, so nothing ever marked the recovery itself.
-                _sleep_sensor_miss_streaks[sleep_indoor_temp_entity] = 0
-                _recovery_log = (
-                    _LOGGER.warning if _prior_streak > _SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD else _LOGGER.info
-                )
-                _recovery_log(
-                    "Sleep sensor available again after %d consecutive miss%s — resumed use entity=%s",
-                    _prior_streak,
-                    "" if _prior_streak == 1 else "es",
-                    sleep_indoor_temp_entity,
-                )
             _LOGGER.info(
                 "Using sleep indoor sensor entity=%s value=%.1f°F",
                 sleep_indoor_temp_entity,
                 val_f,
             )
-            return IndoorTempReading(val_f, sleep_indoor_temp_entity, primary_val)
-        _streak = _sleep_sensor_miss_streaks.get(sleep_indoor_temp_entity, 0) + 1
-        _sleep_sensor_miss_streaks[sleep_indoor_temp_entity] = _streak
-        if _streak <= _SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD:
-            _LOGGER.info(
-                "Sleep sensor unavailable (%d/%d) — falling back to primary indoor sensor entity=%s",
-                _streak,
-                _SLEEP_SENSOR_MISS_ESCALATE_THRESHOLD,
-                sleep_indoor_temp_entity,
-            )
-        else:
-            _LOGGER.warning(
-                "Sleep sensor unavailable for %d consecutive checks — falling back to primary indoor sensor entity=%s",
-                _streak,
-                sleep_indoor_temp_entity,
-            )
+            return IndoorTempReading(val_f, sleep_indoor_temp_entity, primary_val, primary_reason, None)
 
-    return IndoorTempReading(primary_val, primary_entity, primary_val)
+    return IndoorTempReading(primary_val, primary_entity, primary_val, primary_reason, sleep_reason)
 
 
 def resolve_indoor_temp_f(
@@ -230,7 +211,7 @@ def resolve_indoor_temp_f(
 ) -> float | None:
     """Read the current comfort-facing indoor temperature in Fahrenheit, or None.
 
-    Back-compat thin wrapper over ``resolve_indoor_temp_with_provenance()`` — unchanged
+    Back-compat thin wrapper over ``resolve_indoor_temp_with_provenance()`` - unchanged
     behavior for the ~45 existing call sites that only need the value, not provenance.
     """
     return resolve_indoor_temp_with_provenance(
@@ -245,10 +226,10 @@ def resolve_indoor_temp_f(
 
 
 def _check_plausible(val_f: float, source_entity: str) -> float | None:
-    """Return val_f if within the plausible indoor range, else log and return None."""
+    """Return val_f if within the plausible indoor range, else log (DEBUG) and return None."""
     if MIN_PLAUSIBLE_INDOOR_F <= val_f <= MAX_PLAUSIBLE_INDOOR_F:
         return val_f
-    _LOGGER.warning(
+    _LOGGER.debug(
         "Indoor temp %.1f°F from %s is outside plausible range [%.0f, %.0f]°F; treating as unavailable",
         val_f,
         source_entity,

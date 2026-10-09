@@ -1014,7 +1014,9 @@ def _make_glide_continuity_coord():
     coord._thermostat_fan_only_on_since = None
     coord._hvac_session_mode = None
     coord._pending_observations = {}
-    coord._get_indoor_temp_with_provenance = MagicMock(return_value=MagicMock(primary_value=72.0))
+    coord._get_indoor_temp_with_provenance = MagicMock(
+        return_value=MagicMock(primary_value=72.0, reason=None, sleep_reason=None)
+    )
     coord._get_outdoor_temp = MagicMock(return_value=60.0)
     coord._start_hvac_observation = AsyncMock()
 

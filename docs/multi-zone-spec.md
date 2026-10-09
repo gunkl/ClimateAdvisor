@@ -2487,6 +2487,8 @@ document.
   This was a real gap, not just a refactor target — it is now fixed for both
   callers by construction, since both delegate to the same guarded helper.
 
+  **(as built, Issue #1033):** the resolver stays stateless and is still shared by both callers, but the process-global `_sleep_sensor_miss_streaks` dict that Issue #895 added to it (a per-entity-id counter advanced by both the coordinator and the engine, therefore shared across zones using one sensor and cadence-dependent) is **gone**. Indoor-sensor episode state is now plain per-zone instance fields on each `ClimateAdvisorCoordinator` (`_indoor_primary_fallback_*`, `_indoor_sleep_fallback_*`: reason announced / since), driven only by `_refresh_indoor_sensor_health()`, so two zones sharing one sensor announce independently in their own logs. See `docs/08-COMPUTATION-REFERENCE.md` section 20.
+
   Shared logic is now `indoor_temp.resolve_indoor_temp_f()`
   (`indoor_temp.py:44-97`, new module, `indoor_temp.py:1-24`'s module
   docstring documents both bugs and the five-whys for why a plain module was

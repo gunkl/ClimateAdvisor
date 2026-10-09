@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.89] — 2026-10-09
+
+- Feat #1033: if your indoor temperature sensor stops working (unavailable, missing, nonsense or out-of-range value, a climate entity with no reading, or a dedicated sensor that has stopped reporting for 12 hours) Climate Advisor now tells you. It pauses indoor-based decisions instead of acting on a frozen number, logs one warning (not one per check), adds an Activity Log row naming the reason, shows the problem next to Indoor Temp Source on the Settings tab, and logs and records when the sensor recovers. A failing bedroom sleep sensor is noted the same way while the primary sensor keeps being used.
+
 ## [0.7.88] — 2026-10-09
 
 - Fix #1032: choosing an outdoor (or indoor) temperature sensor in Settings now actually uses it. Picking the sensor switches the source to match, switching back to the weather service or clearing the sensor reverts cleanly, and a contradictory choice is rejected with a message instead of being silently ignored. The outdoor reading on the Status tab now follows the sensor within seconds instead of up to 30 minutes. If the sensor stops working (unavailable, nonsense or out-of-range value, or no update for 6 hours) Climate Advisor falls back to the weather service and says so in the Activity Log and Settings tab, then logs when the sensor recovers. Settings now shows which sensor is selected.

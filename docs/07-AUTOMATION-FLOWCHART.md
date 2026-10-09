@@ -644,7 +644,7 @@ flowchart TD
 flowchart TD
     A1[Indoor temp change\nvia thermostat current_temperature\nexisting _async_thermostat_changed seam] -->|trigger=indoor| T
     A2[Indoor temp change\nvia indoor_temp_entity sensor\nnew state listener on indoor_temp_entity] -->|trigger=indoor| T
-    A3[Outdoor temp change\nvia outdoor_temp_entity sensor\nnew state listener — did not exist before #327] -->|trigger=outdoor| T
+    A3[Outdoor temp change\nvia outdoor_temp_entity sensor\nstate listener (#327); always refreshes the shared outdoor value (#1032),\nfan check only while fan / nat-vent active] -->|trigger=outdoor| T
     A4[Backstop timer\nself-rescheduling, started in _activate_fan\ncancelled in _deactivate_fan + cleanup] -->|trigger=timer| T
 
     T[fan_thermostat_check\nindoor, outdoor, trigger]

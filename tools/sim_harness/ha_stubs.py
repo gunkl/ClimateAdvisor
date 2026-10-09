@@ -152,6 +152,15 @@ class _MockDataUpdateCoordinator:
         self.hass = args[0] if args else kwargs.get("hass")
         self.data = None
         self.last_update_success = False
+        self.update_listeners_call_count = 0
+
+    def async_update_listeners(self):
+        """Real DataUpdateCoordinator method: push current ``self.data`` to subscribed entities.
+
+        The harness has no entity subscribers, so it only counts calls (Issue #1032: the outdoor
+        sensor listener now reaches ``_apply_outdoor_temp`` -> ``async_update_listeners`` for real).
+        """
+        self.update_listeners_call_count += 1
 
     async def async_request_refresh(self):
         """Stub for triggering a data refresh."""

@@ -1,7 +1,7 @@
 """Coordinator-level tests for outdoor-temp propagation (Issue #511).
 
 Exercises the real ClimateAdvisorCoordinator._apply_outdoor_temp(),
-_refresh_weather_service_outdoor_temp(), _get_outdoor_temp(), and
+_refresh_outdoor_temp(), _get_outdoor_temp(), and
 _async_end_of_day() via the established object.__new__() + types.MethodType()
 partial-instantiation pattern (see test_contact_status.py, test_daily_record_accuracy.py)
 rather than replicating their logic — per project doctrine, mirroring the logic
@@ -60,9 +60,15 @@ def _make_coordinator(outdoor_temp_source: str = TEMP_SOURCE_WEATHER_SERVICE, **
     coord._apply_outdoor_windows_gate = types.MethodType(ClimateAdvisorCoordinator._apply_outdoor_windows_gate, coord)
     coord._apply_outdoor_temp = types.MethodType(ClimateAdvisorCoordinator._apply_outdoor_temp, coord)
     coord._get_outdoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_outdoor_temp, coord)
-    coord._refresh_weather_service_outdoor_temp = types.MethodType(
-        ClimateAdvisorCoordinator._refresh_weather_service_outdoor_temp, coord
-    )
+    coord._get_weather_outdoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_weather_outdoor_temp, coord)
+    coord._read_outdoor_sensor = types.MethodType(ClimateAdvisorCoordinator._read_outdoor_sensor, coord)
+    coord._note_outdoor_sensor_state = types.MethodType(ClimateAdvisorCoordinator._note_outdoor_sensor_state, coord)
+    coord._refresh_outdoor_temp = types.MethodType(ClimateAdvisorCoordinator._refresh_outdoor_temp, coord)
+    coord._emit_event = MagicMock()
+    coord._startup_coalesce_active = False
+    coord._outdoor_sensor_fallback_reason = None
+    coord._outdoor_sensor_fallback_announced = None
+    coord._outdoor_sensor_fallback_since = None
     coord._async_thermal_sample_tick = types.MethodType(ClimateAdvisorCoordinator._async_thermal_sample_tick, coord)
     coord._sample_all_observations = MagicMock()
     return coord
@@ -70,6 +76,24 @@ def _make_coordinator(outdoor_temp_source: str = TEMP_SOURCE_WEATHER_SERVICE, **
 
 def _fc_entry(iso_dt: str, temp: float) -> dict:
     return {"datetime": iso_dt, "temperature": temp}
+
+
+def _install_states(coord, *, sensor_state: str | None, weather_temp: float | None) -> None:
+    """Wire coord.hass.states.get: the sensor entity returns ``sensor_state``, weather returns ``weather_temp``."""
+    sensor = MagicMock()
+    sensor.state = sensor_state
+    weather = MagicMock()
+    weather.attributes = {"temperature": weather_temp}
+    coord._hourly_forecast_temps = []  # force the weather nowcast attribute path
+
+    def _get(entity_id):
+        if entity_id == coord.config.get("outdoor_temp_entity"):
+            return sensor if sensor_state is not None else None
+        if entity_id == coord.config.get("weather_entity"):
+            return weather if weather_temp is not None else None
+        return None
+
+    coord.hass.states.get = MagicMock(side_effect=_get)
 
 
 class TestApplyOutdoorTemp:
@@ -120,27 +144,44 @@ class TestRefreshWeatherServiceOutdoorTemp:
         weather_state.attributes = {"temperature": 71.0}
         coord.hass.states.get = MagicMock(return_value=weather_state)
         coord._hourly_forecast_temps = []  # forces fallback to the live attribute
-        coord._refresh_weather_service_outdoor_temp()
+        coord._refresh_outdoor_temp()
         assert coord._last_outdoor_temp == 71.0
         coord.automation_engine.update_outdoor_temp.assert_called_once_with(71.0)
 
-    def test_sensor_source_is_skipped_entirely(self):
-        coord = _make_coordinator(outdoor_temp_source=TEMP_SOURCE_SENSOR)
-        coord.hass.states.get = MagicMock(side_effect=AssertionError("must not be called for sensor source"))
-        coord._refresh_weather_service_outdoor_temp()
-        assert coord._last_outdoor_temp is None
-        coord.automation_engine.update_outdoor_temp.assert_not_called()
+    @pytest.mark.parametrize("source", [TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER])
+    def test_sensor_sources_refresh_from_the_sensor_not_the_weather(self, source):
+        """Issue #1032: sensor installs used to be skipped here, leaving Status/engine stale up to 30 min."""
+        coord = _make_coordinator(outdoor_temp_source=source)
+        _install_states(coord, sensor_state="72.5", weather_temp=60.0)
+        coord._refresh_outdoor_temp()
+        assert coord._last_outdoor_temp == 72.5
+        coord.automation_engine.update_outdoor_temp.assert_called_once_with(72.5)
 
-    def test_input_number_source_is_skipped_entirely(self):
-        coord = _make_coordinator(outdoor_temp_source=TEMP_SOURCE_INPUT_NUMBER)
-        coord.hass.states.get = MagicMock(side_effect=AssertionError("must not be called for input_number source"))
-        coord._refresh_weather_service_outdoor_temp()
-        assert coord._last_outdoor_temp is None
+    def test_sensor_source_without_weather_entity_state_still_refreshes(self):
+        coord = _make_coordinator(outdoor_temp_source=TEMP_SOURCE_SENSOR)
+        _install_states(coord, sensor_state="68.0", weather_temp=None)
+        coord._refresh_outdoor_temp()
+        assert coord._last_outdoor_temp == 68.0
+
+    def test_min_delta_suppresses_sub_threshold_changes(self):
+        coord = _make_coordinator(outdoor_temp_source=TEMP_SOURCE_SENSOR)
+        coord._last_outdoor_temp = 72.0
+        _install_states(coord, sensor_state="72.05", weather_temp=60.0)
+        coord._refresh_outdoor_temp(min_delta_f=0.1)
+        coord.automation_engine.update_outdoor_temp.assert_not_called()
+        assert coord._last_outdoor_temp == 72.0
+
+    def test_min_delta_passes_real_changes(self):
+        coord = _make_coordinator(outdoor_temp_source=TEMP_SOURCE_SENSOR)
+        coord._last_outdoor_temp = 72.0
+        _install_states(coord, sensor_state="72.4", weather_temp=60.0)
+        coord._refresh_outdoor_temp(min_delta_f=0.1)
+        assert coord._last_outdoor_temp == 72.4
 
     def test_missing_weather_entity_state_is_a_silent_no_op(self):
         coord = _make_coordinator(outdoor_temp_source=TEMP_SOURCE_WEATHER_SERVICE)
         coord.hass.states.get = MagicMock(return_value=None)
-        coord._refresh_weather_service_outdoor_temp()
+        coord._refresh_outdoor_temp()
         assert coord._last_outdoor_temp is None
         coord.automation_engine.update_outdoor_temp.assert_not_called()
 
@@ -158,11 +199,11 @@ class TestRefreshWeatherServiceOutdoorTemp:
                 _fc_entry("2026-05-11T13:00:00+00:00", 70.0),
                 _fc_entry("2026-05-11T14:00:00+00:00", 74.0),
             ]
-            coord._refresh_weather_service_outdoor_temp()
+            coord._refresh_outdoor_temp()
             first = coord._last_outdoor_temp
 
             mock_now.return_value = datetime(2026, 5, 11, 13, 40, 0, tzinfo=UTC)
-            coord._refresh_weather_service_outdoor_temp()
+            coord._refresh_outdoor_temp()
             second = coord._last_outdoor_temp
 
         assert first != second
@@ -213,7 +254,7 @@ class TestChartMachineryNonRegressionGuardrail:
         coord._apply_outdoor_temp(70.0, record_history=False)
         assert coord._pred_archive == {"sentinel": 123.0}
 
-    def test_refresh_weather_service_outdoor_temp_does_not_call_build_predicted_indoor_future(self):
+    def test_refresh_outdoor_temp_does_not_call_build_predicted_indoor_future(self):
         coord = _make_coordinator(outdoor_temp_source=TEMP_SOURCE_WEATHER_SERVICE)
         weather_state = MagicMock()
         weather_state.attributes = {"temperature": 65.0}
@@ -224,7 +265,7 @@ class TestChartMachineryNonRegressionGuardrail:
             patch.object(mod, "_build_predicted_indoor_future") as mock_ode,
             patch.object(mod, "_compute_target_band_schedule") as mock_band,
         ):
-            coord._refresh_weather_service_outdoor_temp()
+            coord._refresh_outdoor_temp()
             mock_ode.assert_not_called()
             mock_band.assert_not_called()
 

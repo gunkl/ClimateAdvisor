@@ -151,6 +151,15 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # the deciding events still map.
         "grace_cancelled",
         "fan_override_cleared",
+        # Issue #1032: outdoor_sensor_fallback / outdoor_sensor_recovered are observational.
+        # They announce which outdoor-temperature source the coordinator is using after a
+        # dedicated sensor failed or recovered; they never command HVAC or change what any
+        # decision event decides (the engine just receives a different outdoor number, and the
+        # deciding events it then emits still map). Left unmapped they would hit the
+        # 'unknown:<type>' catch-all and, under last-decision-wins, shadow a real outcome.
+        # Cannot hide a real failure: every HVAC decision still maps via its deciding event.
+        "outdoor_sensor_fallback",
+        "outdoor_sensor_recovered",
     }
 )
 

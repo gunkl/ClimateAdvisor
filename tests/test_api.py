@@ -265,7 +265,12 @@ class TestConfigViewDisplayTransform:
         from custom_components.climate_advisor.api import ClimateAdvisorConfigView
 
         coord = MagicMock()
-        coord.config = {"indoor_temp_source": "climate_fallback", "outdoor_temp_source": "sensor"}
+        coord.config = {
+            "indoor_temp_source": "climate_fallback",
+            "outdoor_temp_source": "sensor",
+            "outdoor_temp_entity": "sensor.outdoor_temp",
+        }
+        coord._outdoor_sensor_fallback_reason = None
 
         view = ClimateAdvisorConfigView()
         request = _make_view_request(coord)
@@ -273,7 +278,51 @@ class TestConfigViewDisplayTransform:
         settings_by_key = {s["key"]: s["value"] for s in resp.json_data["settings"]}
 
         assert settings_by_key["indoor_temp_source"] == "Thermostat's built-in sensor"
-        assert settings_by_key["outdoor_temp_source"] == "Dedicated sensor"
+        # Issue #1032: the selected sensor is named next to its label.
+        assert settings_by_key["outdoor_temp_source"] == "Dedicated sensor — sensor.outdoor_temp"
+
+    @staticmethod
+    def _outdoor_source_text(config: dict, fallback_reason=None) -> str:
+        import asyncio
+
+        from custom_components.climate_advisor.api import ClimateAdvisorConfigView
+
+        coord = MagicMock()
+        coord.config = config
+        coord._outdoor_sensor_fallback_reason = fallback_reason
+        resp = asyncio.run(ClimateAdvisorConfigView().get(_make_view_request(coord)))
+        return {s["key"]: s["value"] for s in resp.json_data["settings"]}["outdoor_temp_source"]
+
+    def test_outdoor_source_names_the_input_helper_too(self):
+        text = self._outdoor_source_text(
+            {"outdoor_temp_source": "input_number", "outdoor_temp_entity": "input_number.outdoor"}
+        )
+        assert text == "input_number helper — input_number.outdoor"
+
+    def test_outdoor_source_says_when_the_sensor_failed_and_weather_is_in_use(self):
+        text = self._outdoor_source_text(
+            {"outdoor_temp_source": "sensor", "outdoor_temp_entity": "sensor.outdoor_temp"},
+            fallback_reason="unavailable",
+        )
+        assert text == "Dedicated sensor — sensor.outdoor_temp (sensor unavailable — using weather service)"
+
+    def test_outdoor_source_with_a_mock_fallback_reason_is_not_rendered(self):
+        """A MagicMock coordinator attribute (not a str) must never leak into the text."""
+        text = self._outdoor_source_text({"outdoor_temp_source": "sensor", "outdoor_temp_entity": "sensor.o"})
+        assert text == "Dedicated sensor — sensor.o"
+
+    def test_outdoor_sensor_source_without_an_entity_is_called_out(self):
+        text = self._outdoor_source_text({"outdoor_temp_source": "sensor"})
+        assert text == "Dedicated sensor — none selected (using weather service)"
+
+    def test_saved_entity_next_to_weather_service_is_called_out_as_unused(self):
+        text = self._outdoor_source_text(
+            {"outdoor_temp_source": "weather_service", "outdoor_temp_entity": "sensor.outdoor_temp"}
+        )
+        assert text == "Weather service — sensor.outdoor_temp selected but not in use"
+
+    def test_weather_service_without_an_entity_is_unchanged(self):
+        assert self._outdoor_source_text({"outdoor_temp_source": "weather_service"}) == "Weather service"
 
 
 class TestToggleAutomationView:

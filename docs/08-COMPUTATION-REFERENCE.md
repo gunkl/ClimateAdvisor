@@ -1126,7 +1126,7 @@ Five-whys root cause: `self._nat_vent_plan` — meant to be a stable, single-per
 (#817) — was actually being recomputed dozens of times between 6:00–8:21 AM, confirmed against
 live logs (`tools/ha_logs.py`). The 30-min `update_interval` is not the only rebuild trigger:
 `coordinator.py`'s indoor/outdoor temperature state-change listeners (predates #817, traces to
-Fix #327) call `async_request_refresh()` on every sensor update, and those sensors report far
+Fix #327) call `async_request_refresh()` on every sensor update (Issue #1032 correction: they never did — the outdoor listener refreshes the cached outdoor value through `_refresh_outdoor_temp()` → `_apply_outdoor_temp()`, the indoor listener only runs `fan_thermostat_check()`), and those sensors report far
 more often than every 30 minutes. `compute_nat_vent_plan()` races two independent crossing scans
 (`nat_vent_plan.py`) — `outdoor_crossing` (outdoor rises above indoor) vs. `floor_crossing`
 (indoor drops to the comfort floor) — and on a knife-edge day these two crossings land within
@@ -2147,7 +2147,7 @@ If no exit condition fires, the fan continues running. The check is cheap and id
 |---|---|---|
 | Indoor temperature change via thermostat | Existing `_async_thermostat_changed` dispatch → `fan_thermostat_check(trigger="indoor")` | coordinator.py (existing seam, extended) |
 | Indoor temperature change via dedicated sensor | New state listener on `indoor_temp_entity` → `fan_thermostat_check(trigger="indoor")` | coordinator.py (new listener added by Issue #327) |
-| Outdoor temperature change | New state listener on `outdoor_temp_entity` → `fan_thermostat_check(trigger="outdoor")` | coordinator.py (new listener — outdoor had no listener before Issue #327) |
+| Outdoor temperature change | State listener on `outdoor_temp_entity` → **always** `_refresh_outdoor_temp(min_delta_f=0.1)` (Issue #1032: updates Status, the engine copy, the windows gate and entity listeners within seconds — previously only while the fan / nat-vent was active, and it bypassed `_apply_outdoor_temp`), then `fan_thermostat_check(trigger="outdoor")` only while the fan / nat-vent is active. The 5-min tick also re-reads a dedicated sensor (it is the only check that can notice a frozen one). | coordinator.py (listener added by Issue #327; refresh made unconditional by Issue #1032) |
 | Backstop timer | Self-rescheduling timer started in `_activate_fan()`, cancelled in `_deactivate_fan()` and `cleanup()`; reuses the `_fan_min_cycle_cancel` pattern | automation.py |
 
 The backstop timer catches sensors that update slowly or infrequently. The trigger name is passed through to observability logging.

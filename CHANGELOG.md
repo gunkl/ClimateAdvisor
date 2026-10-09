@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.88] — 2026-10-09
+
+- Fix #1032: choosing an outdoor (or indoor) temperature sensor in Settings now actually uses it. Picking the sensor switches the source to match, switching back to the weather service or clearing the sensor reverts cleanly, and a contradictory choice is rejected with a message instead of being silently ignored. The outdoor reading on the Status tab now follows the sensor within seconds instead of up to 30 minutes. If the sensor stops working (unavailable, nonsense or out-of-range value, or no update for 6 hours) Climate Advisor falls back to the weather service and says so in the Activity Log and Settings tab, then logs when the sensor recovers. Settings now shows which sensor is selected.
+
 ## [0.7.87] — 2026-10-07
 
 - Fix #1029: the Activity Log now shows when a grace period or fan override is cancelled early (e.g. by the bedtime or wake-up routine), with the reason and how much time was left.

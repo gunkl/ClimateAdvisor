@@ -14,7 +14,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from . import log_capture, zone_registry
-from .ai_skills_context import build_event_timeline_table
+from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
     API_AI_STATUS,
@@ -84,6 +84,40 @@ _TEMP_SOURCE_LABELS = {
     TEMP_SOURCE_CLIMATE_FALLBACK: "Thermostat's built-in sensor",
     TEMP_SOURCE_WEATHER_SERVICE: "Weather service",
 }
+
+
+_TEMP_SOURCE_ENTITY_KEYS = {
+    "outdoor_temp_source": "outdoor_temp_entity",
+    "indoor_temp_source": "indoor_temp_entity",
+}
+
+
+def _temp_source_display(coordinator: Any, key: str, raw_source: str, label: str, config: dict) -> str:
+    """Settings-tab text for a temperature source: the label plus WHICH sensor, and its health (Issue #1032).
+
+    Entity id only (never a friendly name, which may contain a personal name); the frontend escapes
+    the value. A sensor source that is currently falling back says so, so the Settings tab cannot
+    claim a dedicated sensor is in use while the weather service actually is. A saved entity next to
+    a default source (a pre-#1032 mismatch) is called out as not in use.
+    """
+    entity_key = _TEMP_SOURCE_ENTITY_KEYS.get(key)
+    if entity_key is None:
+        return label
+    entity = config.get(entity_key)
+    entity = entity if isinstance(entity, str) and entity else None
+    needs_entity = raw_source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+    if needs_entity and entity is None and key == "outdoor_temp_source":
+        return f"{label} — none selected (using weather service)"
+    if entity is None:
+        return label
+    if not needs_entity:
+        return f"{label} — {entity} selected but not in use"
+    detail = f"{label} — {entity}"
+    if key == "outdoor_temp_source":
+        reason = getattr(coordinator, "_outdoor_sensor_fallback_reason", None)
+        if isinstance(reason, str):
+            detail += f" ({OUTDOOR_SENSOR_REASON_LABELS.get(reason, reason.replace('_', ' '))} — using weather service)"
+    return detail
 
 
 def _get_coordinator(hass: HomeAssistant, request: web.Request):
@@ -739,7 +773,7 @@ class ClimateAdvisorConfigView(HomeAssistantView):
                 if transform == "seconds_to_minutes" and isinstance(value, (int, float)):
                     value = value // 60
                 elif transform == "temp_source_label" and isinstance(value, str):
-                    value = _TEMP_SOURCE_LABELS.get(value, value)
+                    value = _temp_source_display(coordinator, key, value, _TEMP_SOURCE_LABELS.get(value, value), config)
 
                 settings.append(
                     {

@@ -85,6 +85,7 @@ Before returning config values, `ClimateAdvisorConfigView` applies these transfo
 | List → count string | Any list-typed field | Replaced with `"N configured"` |
 | Time → string | Any `time` object | `str(value)` |
 | Missing key fallback | Any key absent from the config entry (added after entry was created) | Falls back to `meta.get("default")` |
+| Temp-source label (`temp_source_label`) | `outdoor_temp_source`, `indoor_temp_source` | Friendly source label, plus the selected entity id (Issue #1032): `Dedicated sensor — sensor.x`; `… (<reason> — using weather service)` while the outdoor sensor is falling back; `Weather service — sensor.x selected but not in use` for a pre-#1032 mismatch. Entity id only (never a friendly name); the frontend HTML-escapes every settings value. |
 
 ## Error Handling
 

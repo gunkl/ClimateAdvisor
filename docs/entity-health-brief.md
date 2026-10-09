@@ -26,6 +26,7 @@
 - `_notify_entity_health_issues()` — unconditional per-issue logging (ERROR for critical, WARNING otherwise) plus one batched `_notify()` call
 
 **Explicitly does NOT own:**
+- A configured entity that is *ignored by design of the current source* (Issue #1032: e.g. `outdoor_temp_entity` saved while `outdoor_temp_source` is `weather_service`). Its notification text ("isn't responding") and push channel would be wrong for a config mismatch, so that case is surfaced instead by the Options flow's `reconcile_temperature_source()` (prevents new saves), a once-per-setup WARNING in `coordinator.py`, and the Settings tab's "selected but not in use" text. `_outdoor_temp_entity_relevant` still gates the registry row on the source being a dedicated sensor.
 - Any automation/control-logic behavior. `_is_sensor_open()` still treats a missing door/window sensor as closed; `_is_toggle_on()`'s existing per-cycle WARNING is untouched. This module detects and notifies — it never changes what the automation engine does with a degraded reading. Changing that behavior (e.g. failing safe on a missing door sensor) is a distinct, further-reaching change with its own golden-scenario testing burden, deliberately out of scope here.
 - HA Repairs issues or fix-flows. Unlike `weather_entity_not_found` (see [Repairs Brief](repairs-brief.md)), entity health uses notification only — the project owner explicitly rejected a repair-flow-per-entity pattern as unneeded complexity for Issue #805.
 

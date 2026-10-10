@@ -2230,6 +2230,9 @@ def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
         settings = (
             f"{settings}, remote timer: {remote_timer_hours}h" if settings else f"remote timer: {remote_timer_hours}h"
         )
+    # Issue #1045: an override re-armed by the startup reconcile (not a fresh press).
+    if p.get("restored_from"):
+        settings = f"{settings}, restored after restart" if settings else "restored after restart"
     return "Fan manual override", settings
 
 

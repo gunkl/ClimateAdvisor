@@ -1257,6 +1257,9 @@ class TestReconcileFanOnStartupRemoteTimerProvenance:
             duration_override=25200.0,
             remote_timer_hours=8.0,
             is_remote_event=True,
+            # Issue #1045: the re-arm is now tagged so the log line/Activity event can tell a
+            # restored override from a fresh press. Override/grace semantics are unchanged.
+            restored_from="rf_timer",
         )
 
     def test_provenance_present_but_fan_off_takes_no_special_action(self):

@@ -115,6 +115,13 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "sub-minute. Without this, a turn-off issued from this call site left no lockout "
         "timer for a subsequent reconcile call to check."
     ),
+    ("_indoor_blind_stop", 1): (
+        "exempted: Issue #1037 blind-fan timeout — the exit reason is an indoor-sensor outage, "
+        "not an outdoor/indoor temperature condition, so it cannot be re-satisfied by the "
+        "reactivation gate at a barely-changed reading. Re-entry while still blind is impossible "
+        "(decide_nat_vent_gate fails closed on indoor None), and once indoor reads again nat-vent "
+        "should be free to resume immediately if conditions allow — a lockout would only delay it"
+    ),
     ("on_fan_turned_off", 1): (
         "exempted: fires once per real fan-off state-change event (RF timer boundary settle "
         "reconciliation), not a periodic re-evaluation — cannot self-trigger repeatedly the "

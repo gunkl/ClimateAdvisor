@@ -168,6 +168,16 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # skipped, the deciding event (or its absence) is still what the assertion checks.
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        # Issue #1037: fan_blind_started / fan_blind_stopped / fan_blind_recovered report a
+        # blind-fan safety episode (indoor unreadable while a fan session runs). They are
+        # registered unmapped so the 'unknown:<type>' catch-all cannot shadow a real outcome
+        # under last-decision-wins. This cannot let a real failure pass silently: the stop is
+        # asserted through the live engine attributes the harness already exposes
+        # (_natural_vent_active / fan state), not through this event, and the existing exit
+        # decision events (comfort floor, outdoor rise, ...) are unchanged and still map.
+        "fan_blind_started",
+        "fan_blind_stopped",
+        "fan_blind_recovered",
     }
 )
 

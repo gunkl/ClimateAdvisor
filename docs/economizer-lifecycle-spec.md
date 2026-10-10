@@ -48,7 +48,7 @@
 | any | eligible, not `aggressive_savings`, `indoor <= comfort_cool` (or indoor unknown) | `MAINTAIN` | |
 | any | not eligible | `INACTIVE` | Deactivates if a session was active. |
 
-`direction_ok` (`temperature.free_cooling_direction_ok()`, reused unchanged from nat-vent's own Issue #327/#429 consolidation) fails open (`True`) when indoor is unknown, and is exposed on `EconomizerTransition.direction_ok` so the FSM-authoritative shell can reproduce production's own direction-rejected DEBUG log without recomputing the check.
+`direction_ok` (`temperature.free_cooling_direction_ok()`, reused unchanged from nat-vent's own Issue #327/#429 consolidation) fails open (`True`) when indoor is unknown, and is exposed on `EconomizerTransition.direction_ok` so the FSM-authoritative shell can reproduce production's own direction-rejected DEBUG log without recomputing the check. **Known limit (Issue #1037; tracked in #1042):** because this fails open, the economizer can *start* a fan while indoor is unreadable, and can restart one after the blind-fan timeout (`fan_blind_stopped`) ends a nat-vent session. The blind-fan timeout only stops nat-vent sessions; an economizer fan gets the owner alert (`fan_blind_started`) but is not auto-stopped.
 
 Fan activation/deactivation and INFO logging only fire when the resolved phase actually **changes** (`EconomizerTransition.changed`) — matches legacy's own `if self._economizer_phase != "...":` guards exactly, avoiding a redundant `_activate_fan()` call (and its own rate-limit/logging side effects) every 30-min tick a session merely continues in the same phase.
 

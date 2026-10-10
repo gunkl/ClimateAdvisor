@@ -1433,6 +1433,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._refresh_indoor_sensor_health()
         except Exception:
             _LOGGER.warning("Indoor sensor health refresh failed on thermal tick; sampling continues", exc_info=True)
+        # Issue #1037: the one periodic, source-independent place that can notice the indoor
+        # reading returning after a blind-fan stop (the stop cancels the engine's own backstop,
+        # and the climate-attribute / sleep-sensor listeners don't fire for a dedicated sensor).
+        # Separate from the #1033 funnel above, which must never call into the engine.
+        try:
+            _indoor_now = self._get_indoor_temp()
+            if _indoor_now is not None:
+                self.automation_engine.note_indoor_available(_indoor_now)
+        except Exception:
+            _LOGGER.warning("Blind-fan recovery check failed on thermal tick; sampling continues", exc_info=True)
         self._sample_all_observations()
 
     def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
@@ -3693,8 +3703,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_LAST_ACTION_TIME: self.automation_engine._last_action_time,
             ATTR_LAST_ACTION_REASON: self.automation_engine._last_action_reason,
             ATTR_FAN_STATUS: self._compute_fan_status(),
-            ATTR_WHF_STATUS: self._compute_whf_status(),
-            ATTR_HVAC_FAN_STATUS: self._compute_hvac_fan_status(),
+            ATTR_WHF_STATUS: self._append_indoor_blind_suffix(self._compute_whf_status(), card="whf"),
+            ATTR_HVAC_FAN_STATUS: self._append_indoor_blind_suffix(self._compute_hvac_fan_status(), card="hvac"),
             ATTR_FAN_RUNTIME: self.automation_engine._get_fan_runtime_minutes(),
             ATTR_FAN_OVERRIDE_SINCE: self.automation_engine._fan_override_time,
             ATTR_FAN_RUNNING: fan_running,
@@ -5807,6 +5817,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         indoor = self._get_indoor_temp()
         if indoor is None:
             return
+        # Issue #1037: indoor reads again — end any blind-fan episode. After a blind stop the
+        # engine's backstop is cancelled, so this healthy-reading path is the only thing that
+        # can notice the sensor returning. Synchronous no-op when no episode is live.
+        self.automation_engine.note_indoor_available(indoor)
         if self.automation_engine._natural_vent_active:
             await self.automation_engine.nat_vent_temperature_check(indoor, outdoor=self._last_outdoor_temp)
         if self.automation_engine._fan_active or self.automation_engine._natural_vent_active:
@@ -10329,6 +10343,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         direction = getattr(ae, "_fan_rate_limited_direction", None)
         pending = "on" if direction == "activate" else "off"
         return f" ({pending} pending — 5-min floor, applies at {until.strftime('%H:%M:%S')})"
+
+    def _append_indoor_blind_suffix(self, status: str | None, *, card: str) -> str | None:
+        """Append the blind-fan note to a Fan (WHF)/(HVAC) card value (Issue #1037).
+
+        Status Card Ontology: extends the existing fan card's value string (no new card), and
+        the Status card says nothing about it. Reads the engine's single authoritative
+        ``indoor_blind_info`` — never recomputes a deadline (Issues #625/#860/#677). Returns the
+        status unchanged for None, for no live episode, and for a mocked/partial engine
+        (non-dict ``indoor_blind_info``), matching _whf_rate_limit_suffix()'s defensive shape.
+
+        ``card`` is ``"whf"`` or ``"hvac"``. In FAN_MODE_BOTH one session narrated on both cards
+        would be the same fact twice (Status Card Ontology), so only the WHF card carries it.
+        """
+        if status is None:
+            return None
+        if card == "hvac" and self.automation_engine.config.get(CONF_FAN_MODE) == FAN_MODE_BOTH:
+            return status
+        info = getattr(self.automation_engine, "indoor_blind_info", None)
+        if not isinstance(info, dict):
+            return status
+        stop_at = info.get("stop_at")
+        if isinstance(stop_at, datetime):
+            now = dt_util.now()
+            if isinstance(now, datetime) and stop_at <= now:
+                # Deadline passed but the stop has not landed (e.g. the Issue #641 rate limiter
+                # deferred the fan-off): never advertise a time that is already in the past.
+                return f"{status} (indoor sensor offline — stop pending)"
+            return f"{status} (indoor sensor offline — stops {dt_util.as_local(stop_at).strftime('%H:%M')})"
+        return f"{status} (indoor sensor offline — no auto-stop)"
 
     def _compute_hvac_fan_status(self) -> str | None:
         """Return HVAC-fan-blower-specific status, or None when HVAC fan is not configured.

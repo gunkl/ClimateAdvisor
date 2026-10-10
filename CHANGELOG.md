@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.91] — 2026-10-09
+
+- Fix #1037: if your indoor temperature sensor stops reporting while the whole-house fan (or free-cooling fan) is running — for example overnight — Climate Advisor now tells you straight away that the fan is running without a temperature reading, and turns a Climate Advisor-started ventilation fan off if the sensor has not come back after about 30 minutes, so the house is not left overcooling. A fan you started yourself (or with its remote) is never turned off by this; you just get the alert. You also get a message when the sensor is back, and the Fan card and Activity Log show each step.
+
 ## [0.7.90] — 2026-10-09
 
 - Fix #1035: while your indoor temperature sensor is down, Climate Advisor no longer learns from fake 0 °F readings that could skew its learned heating and cooling rates. A heating or cooling session that starts during an outage is skipped and recorded in the learning-health log as "Indoor sensor was unavailable".

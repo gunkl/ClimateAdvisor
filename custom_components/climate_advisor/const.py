@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.90"
+VERSION = "0.7.91"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -331,6 +331,25 @@ MIN_VIABLE_NAT_VENT_HOURS = 1.0
 NAT_VENT_EXIT_SUSTAIN_S = 90.0
 # Not a CONF_* option (matching NAT_VENT_HYSTERESIS_F/MIN_VIABLE_NAT_VENT_HOURS
 # precedent) — plain internal constant, all 5 non-manual-override exit reasons share it.
+
+# Issue #1037: blind-fan safety stop. While indoor temperature is unreadable (None) every
+# indoor-dependent nat-vent exit (comfort floor, away ceiling, outdoor-rise) is blind, so a
+# running ventilation fan can overcool the home indefinitely. The engine times the outage
+# from its 5-minute thermostatic backstop and ends a CA-owned nat-vent session once it has
+# lasted this long. Detection is quantised to that 5-minute tick, so the real stop lands
+# 30-35 min after the first blind sighting. Safety stop, not a comfort preference — plain
+# internal constant (not a CONF_* option), like NAT_VENT_EXIT_SUSTAIN_S above. Do not
+# conflate with the other 300 s/90 s constants: this is an outage deadline, not a debounce.
+INDOOR_BLIND_FAN_STOP_S = 1800.0
+# A blind episode is tracked across calls; if the engine goes this long without evaluating
+# it (backstop not running, i.e. no CA-owned fan), the episode is treated as stale and a
+# later blind sighting starts a fresh clock instead of inheriting an hours-old "since".
+# 3x the 5-minute backstop interval (tolerates two missed ticks).
+INDOOR_BLIND_EPISODE_GAP_S = 900.0
+# Owner-push debounce for blind-fan alerts: a flapping sensor (one good reading between outages) would
+# otherwise send an alert + recovery pair every 5-10 minutes all night. Only the alert push and its
+# paired recovery push are debounced; log lines, Activity Log events and the stop push never are.
+INDOOR_BLIND_PUSH_DEBOUNCE_S = 1800.0
 
 # Issue #821: comfort-floor fallback path sustain window (confidence_k_passive ==
 # "none" case — the actual condition the reported live incident, Zone "Simulated 2",

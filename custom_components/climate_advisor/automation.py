@@ -893,6 +893,18 @@ class AutomationEngine:
         # None when the active override wasn't started by a remote timer, or the
         # remote selected "no timer" (falls back to configured manual_grace_seconds).
         self._fan_remote_timer_hours: float | None = None
+        # Issue #1045: end time (ISO) of a persisted ``fan_manual_override`` manual grace that
+        # was still running when HA went down. Stashed — NOT applied as live override/grace
+        # flags — by restore_state(), then consumed once by the first
+        # _reconcile_fan_on_startup_locked() call (which re-arms through the same
+        # handle_fan_manual_override() path the RF-timer restart re-arm uses, subject to
+        # the same fan-still-running and sealed-house guards).
+        self._pending_override_rearm_end: str | None = None
+        # Issue #1045: True when the most recent reconcile_fan_on_startup() call actually
+        # re-armed a manual override (RF-timer or persisted). The coordinator reads this
+        # instead of re-deriving the re-arm condition, so a second provenance source can
+        # never desync its shadow-FSM feed (#707).
+        self._reconcile_rearmed_override: bool = False
         # RF remote speed selection, for observability only (Issue #519). Set by both
         # handle_fan_manual_override() (an override-classified speed press) and
         # handle_fan_speed_observed() (a comfort-only speed press) — either way, this is
@@ -1639,6 +1651,7 @@ class AutomationEngine:
         remote_timer_hours: float | None = None,
         remote_speed: str | None = None,
         is_remote_event: bool = False,
+        restored_from: str | None = None,
     ) -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
 
@@ -1677,6 +1690,9 @@ class AutomationEngine:
                 for observability only (Issue #519) — same guarded-overwrite treatment as
                 ``remote_timer_hours`` below. None for a non-remote-triggered override, or a
                 remote press with no speed component (e.g. timer alone).
+            restored_from: Set only by the startup reconcile re-arm (Issue #677 ``"rf_timer"``,
+                Issue #1045 ``"persisted"``) — marks this override as restored across an HA
+                restart rather than freshly detected, for the log line and Activity event.
         """
         # Issue #731 Phase 5: origin_state captured before any of this method's writes —
         # routed through _resolve_fan_fsm_state(). See the resolve call below (after all
@@ -1716,26 +1732,31 @@ class AutomationEngine:
 
         _LOGGER.info(
             "Fan override: set — manual fan change detected %s->%s, override active since %s,"
-            " grace period starting%s%s",
+            " grace period starting%s%s%s",
             fan_before or "?",
             fan_after or "?",
             self._fan_override_time,
             f" (RF remote timer: {self._fan_remote_timer_hours}h)" if self._fan_remote_timer_hours is not None else "",
             f" (RF remote speed: {self._fan_remote_speed})" if self._fan_remote_speed is not None else "",
+            (
+                f" (restored after restart: source={restored_from}, remaining={int(duration_override or 0)}s)"
+                if restored_from
+                else ""
+            ),
         )
         if self._emit_event_callback:
-            self._emit_event_callback(
-                "fan_manual_override",
-                {
-                    "fan_before": fan_before,
-                    "fan_after": fan_after,
-                    "override_active_since": self._fan_override_time,
-                    "fan_device": _fan_device_label(self.config),
-                    "event_context_id": event_context_id,
-                    "remote_timer_hours": remote_timer_hours,
-                    "remote_speed": remote_speed,
-                },
-            )
+            _override_event: dict[str, Any] = {
+                "fan_before": fan_before,
+                "fan_after": fan_after,
+                "override_active_since": self._fan_override_time,
+                "fan_device": _fan_device_label(self.config),
+                "event_context_id": event_context_id,
+                "remote_timer_hours": remote_timer_hours,
+                "remote_speed": remote_speed,
+            }
+            if restored_from:
+                _override_event["restored_from"] = restored_from
+            self._emit_event_callback("fan_manual_override", _override_event)
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         _trigger = "fan_manual_override"
@@ -6045,7 +6066,38 @@ class AutomationEngine:
         # When remote_timer_provenance is None (every pre-#677 caller, and every restart
         # with no live remote timer token), this branch is skipped entirely and the rest of
         # this method is byte-for-byte unchanged from before Issue #677.
-        if remote_timer_provenance is not None and thermostat_fan_running:
+        #
+        # Issue #1045: a persisted ``fan_manual_override`` grace (no RF token — e.g. a
+        # physical/remote turn-on with no timer) is the second provenance source for this
+        # same branch. The stash is consumed on the first reconcile call regardless of
+        # outcome, so it can never re-arm later against a different fan state.
+        self._reconcile_rearmed_override = False
+        _rearm: tuple[float, float | None] | None = None
+        _rearm_source = ""
+        _pending_end = self._pending_override_rearm_end
+        self._pending_override_rearm_end = None
+        if remote_timer_provenance is not None:
+            _rearm = (remote_timer_provenance[0], remote_timer_provenance[1])
+            _rearm_source = "rf_timer"
+        elif _pending_end is not None:
+            _pending_dt = dt_util.parse_datetime(_pending_end)
+            _pending_remaining = (_pending_dt - dt_util.now()).total_seconds() if _pending_dt is not None else 0.0
+            if _pending_remaining <= 0:
+                _LOGGER.info(
+                    "Fan override restore dropped: reason=expired_while_down ends=%s (archetype=%s)",
+                    _pending_end,
+                    archetype,
+                )
+            elif not thermostat_fan_running:
+                _LOGGER.info(
+                    "Fan override restore dropped: reason=fan_off_while_down remaining=%.0fs (archetype=%s)",
+                    _pending_remaining,
+                    archetype,
+                )
+            else:
+                _rearm = (_pending_remaining, None)
+                _rearm_source = "persisted"
+        if _rearm is not None and thermostat_fan_running:
             # Issue #882: never re-arm a WHF override against a sealed house — the
             # RF-remote timer surviving a restart doesn't change the sealed-house
             # invariant. any_sensor_open is already supplied by the caller as a live
@@ -6054,9 +6106,10 @@ class AutomationEngine:
             # for a sensor that's already closed).
             if not any_sensor_open:
                 _LOGGER.warning(
-                    "Fan reconcile: live RF remote timer still valid at restart but all"
+                    "Fan reconcile: restored override (source=%s) still valid at restart but all"
                     " monitored sensors are closed — deactivating instead of re-arming"
                     " the sealed-house-unsafe override (archetype=%s)",
+                    _rearm_source,
                     archetype,
                 )
                 self._fan_active = True  # let _deactivate_fan see an owned fan
@@ -6065,12 +6118,13 @@ class AutomationEngine:
                     bypass_absolute_override=True,
                 )
                 return
-            _remaining_seconds, _token_hours = remote_timer_provenance
+            _remaining_seconds, _token_hours = _rearm
             _LOGGER.info(
-                "Fan reconcile: live RF remote timer still valid at restart (%sh token,"
+                "Fan reconcile: restored override still valid at restart (source=%s, token=%s,"
                 " %.0fs remaining) and fan is still running — re-arming manual override"
                 " instead of treating this as an unexplained fan state (archetype=%s)",
-                _token_hours,
+                _rearm_source,
+                f"{_token_hours}h" if _token_hours is not None else "none",
                 _remaining_seconds,
                 archetype,
             )
@@ -6079,8 +6133,10 @@ class AutomationEngine:
                 fan_after="on",
                 duration_override=_remaining_seconds,
                 remote_timer_hours=_token_hours,
-                is_remote_event=True,
+                is_remote_event=_rearm_source == "rf_timer",
+                restored_from=_rearm_source,
             )
+            self._reconcile_rearmed_override = True
             return
 
         if not thermostat_fan_running:
@@ -6358,11 +6414,13 @@ class AutomationEngine:
             # the reactivation lockout for a genuinely-open-window state.
             decision = "turn-off"
             _LOGGER.info(
-                "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s",
+                "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s"
+                " override_on_record=%s",
                 thermostat_fan_running,
                 nat_vent_eligible,
                 decision,
                 archetype,
+                self._fan_override_active,
             )
             _turn_off_reason = f"{trigger} reconcile — fan running without CA warrant"
 
@@ -12253,8 +12311,10 @@ class AutomationEngine:
         PROTECTING_OVERRIDE`), so restoring it cannot collide with
         `coordinator._check_orphaned_grace()`, which force-cancels any `_grace_protects_override`
         grace with no override flag behind it, every update cycle, un-gated by startup coalescing.
-        Other manual triggers (`dashboard_resume`, `fan_manual_override`, `override_confirmed`)
-        are deliberately NOT covered — see `_maybe_restore_fan_off_grace()` docstring.
+        `fan_manual_override` is covered separately (Issue #1045): `_stash_fan_manual_override_rearm()`
+        records its persisted end time and the startup reconcile re-arms override + grace together.
+        `dashboard_resume`/`override_confirmed` are deliberately NOT covered (Issue #1046, not planned)
+        — see `_maybe_restore_fan_off_grace()` docstring.
         """
         # _paused_by_door and _pre_pause_mode are intentionally NOT restored here.
         # __init__ already sets both to their clean defaults (False / None).
@@ -12356,6 +12416,8 @@ class AutomationEngine:
         )
         # Issue #1006: narrow post-clean-slate exception — see restore_state()'s own docstring.
         self._maybe_restore_fan_off_grace(state)
+        # Issue #1045: the fan_manual_override counterpart — stashed for reconcile, not applied here.
+        self._stash_fan_manual_override_rearm(state)
 
     def _maybe_restore_fan_off_grace(self, state: dict[str, Any]) -> None:
         """Re-arm a `fan_off` manual grace with meaningful remaining duration (Issue #1006).
@@ -12379,31 +12441,74 @@ class AutomationEngine:
           `_start_grace_period_action()` at its real call site (`resume_from_pause()`), bypassing
           the `_start_grace_period()` wrapper this method reuses — restoring it via the wrapper is
           not confirmed correct and needs its own verification pass first.
-        Both are tracked as separate follow-up issues, not silently dropped.
+        `fan_manual_override` is handled by `_stash_fan_manual_override_rearm()` (Issue #1045);
+        `dashboard_resume`/`override_confirmed` are recorded in Issue #1046 (closed, not planned).
 
         Uses the `duration_override` mechanism already built for Issue #677's RF-remote-timer
         restart re-arm — same pattern, sourced from persisted JSON instead of a live RF-remote
         re-announcement.
         """
-        if state.get("last_resume_source") != "manual" or state.get("last_grace_trigger") != "fan_off":
+        persisted = self._persisted_manual_grace(state, "fan_off")
+        if persisted is None:
             return
-        grace_end_time = state.get("grace_end_time")
-        if not grace_end_time:
-            return
-        try:
-            end_dt = datetime.fromisoformat(grace_end_time)
-        except (TypeError, ValueError):
-            return
-        remaining_seconds = (end_dt - dt_util.now()).total_seconds()
-        if remaining_seconds <= 0:
-            # Grace already elapsed while HA was down — nothing to restore, normal clean slate.
-            return
+        remaining_seconds, grace_end_time = persisted
         _LOGGER.info(
             "Fan-off manual grace restored across restart: %.0fs remaining (originally ends %s)",
             remaining_seconds,
             grace_end_time,
         )
         self._start_grace_period("manual", trigger="fan_off", duration_override=remaining_seconds)
+
+    @staticmethod
+    def _persisted_manual_grace(state: dict[str, Any], trigger: str) -> tuple[float, str] | None:
+        """Return ``(remaining_seconds, grace_end_time)`` for a persisted manual grace, else None.
+
+        Shared by every restart-survival path (Issue #1006 ``fan_off``, Issue #1045
+        ``fan_manual_override``) so "is this persisted grace manual, of this trigger, and
+        still in the future" is decided in exactly one place. None when the persisted grace
+        is not manual-sourced, has a different trigger, has no/unparseable end time, or
+        already elapsed while HA was down (normal clean slate applies).
+        """
+        if state.get("last_resume_source") != "manual" or state.get("last_grace_trigger") != trigger:
+            return None
+        grace_end_time = state.get("grace_end_time")
+        if not grace_end_time:
+            return None
+        try:
+            end_dt = datetime.fromisoformat(grace_end_time)
+        except (TypeError, ValueError):
+            return None
+        remaining_seconds = (end_dt - dt_util.now()).total_seconds()
+        if remaining_seconds <= 0:
+            return None
+        return remaining_seconds, grace_end_time
+
+    def _stash_fan_manual_override_rearm(self, state: dict[str, Any]) -> None:
+        """Remember a still-running persisted ``fan_manual_override`` grace for reconcile (Issue #1045).
+
+        Confirmed live 2026-10-09: the occupant turned the whole-house fan on with no RF timer
+        token; an HA restart minutes later cleared the override (clean slate), and the startup
+        reconcile then read the still-running fan as unwarranted and turned it off.
+
+        Deliberately a stash, not a restore: ``fan_manual_override`` is override-protecting
+        (``_GRACE_TRIGGERS_PROTECTING_OVERRIDE``), so applying only its grace here would be
+        force-cancelled by ``coordinator._check_orphaned_grace()`` (no override flag behind
+        it). ``_reconcile_fan_on_startup_locked()`` consumes the stash and re-arms override
+        AND grace together via ``handle_fan_manual_override()`` once it has confirmed the fan
+        is still physically running and the sealed-house guard (#882) passes.
+        """
+        self._pending_override_rearm_end = None
+        persisted = self._persisted_manual_grace(state, "fan_manual_override")
+        if persisted is None:
+            return
+        remaining_seconds, grace_end_time = persisted
+        self._pending_override_rearm_end = grace_end_time
+        _LOGGER.info(
+            "Fan override restore pending: trigger=fan_manual_override remaining=%.0fs ends=%s"
+            " — startup reconcile will re-arm if the fan is still running",
+            remaining_seconds,
+            grace_end_time,
+        )
 
     def get_serializable_state(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot of the engine's internal state.

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.92] — 2026-10-09
+
+- Fix #1045: a whole-house fan you turned on yourself now keeps running through a Home Assistant restart for the rest of its manual-override period. Before, a restart a few minutes after you switched the fan on made Climate Advisor forget it, and it switched the fan off again (or took it over as free cooling and stopped it soon after). The Activity Log now marks an override that was kept across a restart.
+
 ## [0.7.91] — 2026-10-09
 
 - Fix #1037: if your indoor temperature sensor stops reporting while the whole-house fan (or free-cooling fan) is running — for example overnight — Climate Advisor now tells you straight away that the fan is running without a temperature reading, and turns a Climate Advisor-started ventilation fan off if the sensor has not come back after about 30 minutes, so the house is not left overcooling. A fan you started yourself (or with its remote) is never turned off by this; you just get the alert. You also get a message when the sensor is back, and the Fan card and Activity Log show each step.

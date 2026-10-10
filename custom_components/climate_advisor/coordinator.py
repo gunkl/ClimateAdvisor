@@ -2803,7 +2803,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # synchronous inner handle_fan_manual_override() call), so
         # self.automation_engine's live flags are already correct — same
         # read-fresh-from-production pattern _check_orphaned_grace() uses at ~2865-2869.
-        if _remote_timer_provenance is not None and _thermostat_fan_running:
+        # Issue #1045: decided by the engine's own signal ("a restored override was actually
+        # re-armed"), not by re-deriving the condition here — there are now two provenance
+        # sources (live RF token, persisted override) and a sealed-house deactivate path that
+        # must NOT feed the tracker. ``is True`` keeps MagicMock-stubbed engines inert.
+        if getattr(self.automation_engine, "_reconcile_rearmed_override", False) is True:
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
             try:
@@ -7012,6 +7016,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The clean-slate restart policy (#282/#327) never persists CA's own
         ``_fan_remote_timer_hours``/``_grace_active``/``_timer_boundary_settle_until`` —
         deliberately unchanged here, this reads nothing new into ``climate_advisor_state.json``.
+        (Issue #1045 adds a second, independent provenance source for a manual turn-on with NO
+        RF timer token: the engine's persisted ``fan_manual_override`` grace end time — see
+        ``AutomationEngine._stash_fan_manual_override_rearm``. A live RF token still wins.)
         But the ``fan_remote_entity`` (the same ``event.*`` entity ``_async_fan_remote_changed()``
         listens to) independently re-announces its last retained ``event_type`` as the ESPHome
         device reconnects after restart (see docs/fan-remote-spec.md § Restart Behavior, already

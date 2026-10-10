@@ -10,7 +10,7 @@
 | How long does each grace type last by default, and can it be configured? | Manual grace defaults to 1800 s (30 min); automation grace defaults to 300 s (5 min). Both durations are configurable via `manual_grace_seconds` and `automation_grace_seconds` in config; a value of 0 disables grace entirely. | [§ Grace Period Types](#grace-period-types) |
 | What does an active grace period suppress? | A door or window opening during an active grace period does NOT pause HVAC (unless outdoor temperature is already cool enough to qualify for natural ventilation). | [§ Manual Grace — What It Suppresses](#manual-grace) |
 | When a grace timer fires, what are the three possible outcomes? | (1) Within planned window period → clear grace silently. (2) A sensor is still open → clear grace flags, then schedule `_re_pause_for_open_sensor()`. (3) All sensors closed → clear grace flags, optionally send notification. | [§ Timer Lifecycle — Expiry Callback](#timer-lifecycle) |
-| Is grace state persisted across HA restarts? | Mostly no (Issue #282 — clean slate), with one narrow exception (Issue #1006). Override state (`_manual_override_active`, `_override_confirm_pending`) and pause state (`_paused_by_door`, `_pre_pause_mode`) are never restored — `restore_state()` deliberately leaves both at `__init__`'s clean defaults; the door/window listener and `_do_startup_coalesce()` (Issue #321/#523) re-derive pause state from the sensor's live state within the first 5 minutes. As of Issue #1006, a **`fan_off`-triggered manual grace with remaining duration IS re-armed** after the clean-slate reset, via `_maybe_restore_fan_off_grace()` — confirmed live 2026-09-28 that a restart landing minutes into a 3-hour fan-off grace silently discarded it and let nat-vent reactivate the fan 5 minutes later with zero memory of the user's action. Scoped narrowly to `fan_off` only (the one manual trigger that never sets `_manual_override_active`/`_fan_override_active`) — `dashboard_resume`, `fan_manual_override`, and `override_confirmed` are NOT restored (tracked as separate follow-ups). | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage), [§ Fan-Off Grace Restart Persistence (Issue #1006)](#fan-off-grace-restart-persistence-issue-1006) |
+| Is grace state persisted across HA restarts? | Mostly no (Issue #282 — clean slate), with two narrow exceptions (Issue #1006, Issue #1045). Override state (`_manual_override_active`, `_override_confirm_pending`) and pause state (`_paused_by_door`, `_pre_pause_mode`) are never restored — `restore_state()` deliberately leaves both at `__init__`'s clean defaults; the door/window listener and `_do_startup_coalesce()` (Issue #321/#523) re-derive pause state from the sensor's live state within the first 5 minutes. As of Issue #1006, a **`fan_off`-triggered manual grace with remaining duration IS re-armed** after the clean-slate reset, via `_maybe_restore_fan_off_grace()` — confirmed live 2026-09-28 that a restart landing minutes into a 3-hour fan-off grace silently discarded it and let nat-vent reactivate the fan 5 minutes later with zero memory of the user's action. Scoped narrowly to `fan_off` only (the one manual trigger that never sets `_manual_override_active`/`_fan_override_active`). As of Issue #1045, a persisted **`fan_manual_override`** manual grace is *stashed* at restore and re-armed (override + grace together, via `handle_fan_manual_override()`) by the startup fan reconcile when the fan is still physically running — see [§ Fan Manual-Override Restart Survival](#fan-manual-override-restart-survival-issue-1045). `dashboard_resume` and `override_confirmed` are NOT restored (Issue #1046, closed not planned); automation-sourced 300 s graces stay clean-slate by decision. | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage), [§ Fan-Off Grace Restart Persistence (Issue #1006)](#fan-off-grace-restart-persistence-issue-1006), [§ Fan Manual-Override Restart Survival (Issue #1045)](#fan-manual-override-restart-survival-issue-1045) |
 | What happens to an active grace period when occupancy changes? | The engine has no explicit occupancy-triggered grace cancellation. Grace timers run to expiry regardless of occupancy transitions; occupancy handlers (`handle_occupancy_away`, `handle_occupancy_home`) do not call `_cancel_grace_timers()`. | [§ Occupancy Interaction](#occupancy-interaction) |
 | What is the override confirmation delay — how does it work and what does it gate? | A debounce window (default 600 s) between detecting a thermostat mode change and formally accepting it as a manual override. While pending, `apply_classification()` returns early, blocking all HVAC commands. If the mode self-corrects within the window (transient glitch), the event is discarded — no grace period starts. | [§ Override Confirmation Delay](#override-confirmation-delay) |
 | What are all the callsites that clear a manual override, and under what conditions? | Eight sites: `_grace_expired()` (3 branches), scheduled handlers (bedtime/wakeup), dashboard cancel buttons (2), occupancy handlers (away/vacation). Each logged at INFO with reason. Important caveat: bedtime/wakeup must snapshot `_fan_override_active` *before* calling `clear_manual_override()`, since that call clears the flag as a side effect — see [§ Shared Scheduled-Band Gate](#shared-scheduled-band-gate-issue-498)'s "Capture-before-clear hazard". | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
@@ -616,12 +616,50 @@ and no override flag behind it, which `coordinator._check_orphaned_grace()` (the
 watchdog, no startup-coalescing gate, runs every update cycle) would force-cancel within
 ~30 seconds.
 
-**Deliberately NOT covered by this exception** (tracked as separate follow-up issues, not silently
-dropped): `dashboard_resume` (dispatches its own FSM event kind directly at its real call site,
-bypassing the `_start_grace_period()` wrapper this fix reuses — needs its own verification before
-inclusion); `fan_manual_override`/`override_confirmed` (the two override-protecting triggers —
-restoring their grace would require restoring the override flag in lockstep, a materially bigger
-change).
+**Deliberately NOT covered by this exception:** `dashboard_resume` (dispatches its own FSM event
+kind directly at its real call site, bypassing the `_start_grace_period()` wrapper this fix reuses)
+and `override_confirmed` (needs a live thermostat-mode check) — both recorded in Issue #1046, closed
+as not planned. `fan_manual_override` is covered by Issue #1045 (next subsection). Automation-sourced
+graces (`sensor_closed_resume`, `nat_vent_exit_resume`, 300 s) stay clean-slate **by decision**:
+they are shorter than the 5-minute startup-coalescing window, so nothing is lost by dropping them.
+
+### Fan Manual-Override Restart Survival (Issue #1045)
+
+**Occupant outcome:** a fan the occupant turned on (physical switch, remote press with no timer, or the
+HA fan entity) keeps running through an HA restart for the rest of its manual grace, instead of being
+shut off by the startup reconcile a few minutes later. Confirmed live 2026-10-09: 17:32 turn-on ->
+17:36 restart -> 17:41 `Fan reconcile ... decision=turn-off`; and 18:05 turn-on -> 18:20 restart ->
+fan adopted as a CA nat-vent session at a 0.3°F margin and exited 16 minutes later.
+
+**Mechanism.** `fan_manual_override` is override-protecting, so its grace cannot be restored alone —
+`coordinator._check_orphaned_grace()` would force-cancel it (no override flag behind it). Instead:
+
+1. `restore_state()` still clears every live override/grace flag. It additionally calls
+   `_stash_fan_manual_override_rearm(state)`, which stores only the persisted `grace_end_time`
+   in `_pending_override_rearm_end` when `last_resume_source == "manual"`,
+   `last_grace_trigger == "fan_manual_override"` and the end time is in the future
+   (`_persisted_manual_grace()` — the single helper shared with the Issue #1006 `fan_off` path).
+2. The first `_reconcile_fan_on_startup_locked()` call consumes the stash (always cleared, whatever the
+   outcome). Provenance precedence: a live RF-remote timer token (Issue #677) wins; otherwise the stash.
+3. If the fan is physically running it re-arms through the **same** `handle_fan_manual_override(
+   duration_override=remaining, restored_from=...)` the RF path uses, so override flag, grace timer,
+   FSM state and WHF HVAC suppression are set together. Guards are shared with the RF path: fan must be
+   physically running; the Issue #882 sealed-house guard (all monitored sensors closed -> deactivate
+   instead of re-arm). Stash is dropped, with an INFO log, when the grace expired while HA was down
+   (`expired_while_down`) or the fan was off at restart (`fan_off_while_down`).
+   **Known ordering caveat:** `_do_startup_coalesce()` runs the door/window handler (which may start a
+   free-cooling session on the already-running fan) *before* the fan reconcile. When that happens both the
+   free-cooling session and the restored override reference the fan; the override wins — a CA stop request
+   returns `OVERRIDDEN` and leaves the fan running — and the free-cooling session simply continues under
+   normal management once the override ends. The same ordering already applied to the RF-timer re-arm.
+4. `AutomationEngine._reconcile_rearmed_override` records that a re-arm happened; the coordinator's
+   shadow override/grace FSM feed (#707) reads it instead of re-deriving the condition.
+
+**Observability.** `Fan override restore pending: ...` (restore), `Fan override: set ... (restored after
+restart: source=persisted|rf_timer, remaining=Ns)`, `Fan override restore dropped: reason=...`, and the
+Fan reconcile turn-off line now carries `override_on_record=`. The `fan_manual_override` Activity event
+gains `restored_from` and the Activity renderer appends "restored after restart". Status keeps its
+existing grace text (end time from `grace_end_time`; duration is the remaining time).
 
 **Issue #627 correction — the settling window did NOT cover every call site that reads the cleared override flags.** The claim above ("the `_first_run` window provides the equivalent protection period") was true for `coordinator.py`'s thermostat/fan override-detection listeners, but not for the periodic `backstop_30min` untracked-fan reconcile (`coordinator.py`, see `docs/08-COMPUTATION-REFERENCE.md` §9e) — that call site checked only `_fan_override_active` (cleared by the clean-slate above) and had no `_startup_coalesce_active` gate of its own. On a live install this let it fire within the first second after restart, misread a fan still legitimately running under a pre-restart RF-remote timer as unwarranted, turn it off, and release the WHF/HVAC mutex (`_pre_fan_hvac_mode`) — letting the AC be commanded on while the whole-house fan may still have been physically running. Fixed by gating that call site behind `not self._startup_coalesce_active` too, so it now waits for the same 300s window described here before making any decision. Grace/override state itself is still always discarded on restart exactly as described above; only the *timing* of one downstream consumer of that cleared state changed.
 

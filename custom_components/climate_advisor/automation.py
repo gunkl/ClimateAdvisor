@@ -105,6 +105,9 @@ from .const import (
     HVAC_FAN_RESTRICT_BOTH,
     HVAC_FAN_RESTRICT_COOL,
     HVAC_FAN_RESTRICT_HEAT,
+    INDOOR_BLIND_EPISODE_GAP_S,
+    INDOOR_BLIND_FAN_STOP_S,
+    INDOOR_BLIND_PUSH_DEBOUNCE_S,
     MIN_VIABLE_NAT_VENT_HOURS,
     NAT_VENT_EXIT_SUSTAIN_S,
     NAT_VENT_HYSTERESIS_F,
@@ -1000,6 +1003,23 @@ class AutomationEngine:
         # in a new one.
         self._nat_vent_exit_candidate_reason: NatVentExitReason | None = None
         self._nat_vent_exit_candidate_since: datetime | None = None
+
+        # Issue #1037: blind-fan episode (indoor temperature unreadable while a CA-owned
+        # fan session runs). Keyed on the OUTAGE, not the session: cleared only when indoor
+        # reads again (note_indoor_available) or when the episode goes stale
+        # (INDOOR_BLIND_EPISODE_GAP_S without an evaluation), so a second session inside one
+        # outage neither re-alerts nor restarts the 30-minute clock. Not persisted across
+        # restarts (matches _nat_vent_exit_candidate_since / _nat_vent_outdoor_exit_time):
+        # reconcile_fan_on_startup already ends a blind WHF session within ~5 minutes of a
+        # restart because the nat-vent gate fails closed on indoor None.
+        self._indoor_blind_since: datetime | None = None
+        self._indoor_blind_last_seen: datetime | None = None
+        self._indoor_blind_session: str | None = None
+        self._indoor_blind_alerted: bool = False
+        self._indoor_blind_alert_pushed: bool = False  # the episode's alert push actually went out (not debounced)
+        self._indoor_blind_last_alert_push: datetime | None = None  # push debounce clock; survives episodes
+        self._indoor_blind_stopped: bool = False
+        self._indoor_blind_stop_deferred_logged: bool = False
 
         # Issue #821 (comfort-floor defense): which HVAC "family" is currently active —
         # "heating" or "cooling" (AC actively cooling OR WHF/nat-vent active are both
@@ -10872,6 +10892,15 @@ class AutomationEngine:
         # timer to also re-evaluate cycling while nat-vent is active.
         if self._natural_vent_active and indoor is not None:
             await self.nat_vent_temperature_check(indoor, outdoor=outdoor)
+        # Issue #1037: with indoor unreadable every indoor-dependent exit above is blind
+        # (comfort floor, away ceiling, outdoor-rise, cycling) — time the outage, alert the
+        # owner, and end a CA-owned nat-vent session if it does not self-resolve. Runs after
+        # the checks above and before the re-arm decision; wrapped so a failure here can
+        # never stop the backstop chain from re-arming (the only thing still watching the fan).
+        try:
+            await self.indoor_blind_check(indoor)
+        except Exception:
+            _LOGGER.warning("Blind-fan check failed on backstop tick; backstop continues", exc_info=True)
         # Re-arm only if the fan is still active after the check. Architecture-reset
         # Step 2: the decision now lives in desired_state.decide_fan_thermo_backstop() —
         # this method still owns actually calling _start_fan_thermo_backstop() to
@@ -10898,6 +10927,331 @@ class AutomationEngine:
         if self._fan_thermo_cancel:
             self._fan_thermo_cancel()
             self._fan_thermo_cancel = None
+
+    # ------------------------------------------------------------------
+    # Blind-fan safety (Issue #1037)
+    # ------------------------------------------------------------------
+    # Occupant experience: if the indoor temperature becomes unreadable overnight while a
+    # ventilation fan is running, every indoor-dependent exit (comfort floor, away ceiling,
+    # outdoor-rise) goes blind and the fan keeps pulling cold air in until the sensor
+    # returns. The owner is told once, and a CA-owned nat-vent session is ended after
+    # INDOOR_BLIND_FAN_STOP_S. Manual / RF-remote overrides are alert-only (revealed
+    # preference); economizer fans are alert-only (known limit, #1042).
+    # Known limit: this runs from the thermostatic backstop, which is armed only for
+    # CA-activated fans — a manual/RF-timer fan with no CA session behind it has no
+    # backstop, so it is not covered.
+
+    def _indoor_blind_session_kind(self) -> str | None:
+        """Which fan session (if any) is exposed to an indoor outage right now.
+
+        ``"nat_vent"`` (CA-owned; will be stopped), ``"override"`` (manual/RF — alert only),
+        ``"economizer"`` (alert only) or None. A min-runtime-only cycle is deliberately None:
+        it is indoor-independent by design (desired_state.py), so an outage changes nothing
+        about it and stopping it would break the configured circulation.
+        """
+        if self._natural_vent_active:
+            return "override" if self._fan_override_active else "nat_vent"
+        if self._fan_active:
+            if self._fan_override_active:
+                return "override"
+            if self._economizer_active:
+                return "economizer"
+        return None
+
+    def _reset_indoor_blind_episode(self) -> None:
+        """Clear every blind-episode field (episode ended or went stale).
+
+        ``_indoor_blind_last_alert_push`` is deliberately NOT cleared: it is the push debounce
+        clock and must survive episodes, or a flapping sensor would re-alert every cycle.
+        """
+        self._indoor_blind_since = None
+        self._indoor_blind_last_seen = None
+        self._indoor_blind_session = None
+        self._indoor_blind_alerted = False
+        self._indoor_blind_alert_pushed = False
+        self._indoor_blind_stopped = False
+        self._indoor_blind_stop_deferred_logged = False
+
+    @property
+    def indoor_blind_info(self) -> dict[str, Any] | None:
+        """The one authoritative read of an active blind episode for display (Issue #1037).
+
+        None unless an alerted episode is live with a fan session still running. ``stop_at`` is
+        None for alert-only sessions (override/economizer). The coordinator's Fan-card suffix
+        reads this directly rather than recomputing a deadline (Issues #625/#860/#677: one
+        number, one owner).
+        """
+        since = self._indoor_blind_since
+        last_seen = self._indoor_blind_last_seen
+        if since is None or last_seen is None or not self._indoor_blind_alerted or self._indoor_blind_stopped:
+            return None
+        if self._indoor_blind_session_kind() is None:
+            return None
+        if (dt_util.now() - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S:
+            return None  # stale episode — nothing is evaluating it any more
+        will_stop = self._indoor_blind_session == "nat_vent"
+        return {
+            "since": since,
+            "session": self._indoor_blind_session,
+            "stop_at": since + timedelta(seconds=INDOOR_BLIND_FAN_STOP_S) if will_stop else None,
+        }
+
+    def _request_indoor_blind_refresh(self) -> None:
+        """Refresh coordinator data so the Fan-card suffix reflects a blind-fan transition now
+        instead of at the next 30-minute poll (the same reason _request_refresh_callback
+        exists, Issue #290 Fix 1). Event emission stays at each call site, as elsewhere."""
+        if self._request_refresh_callback:
+            self._request_refresh_callback()
+
+    def _notify_indoor_blind(self, title: str, message: str) -> None:
+        """Fire-and-forget owner push (task, so a notify failure can never kill the backstop chain)."""
+
+        async def _send() -> None:
+            try:
+                await self._notify(message, title, "indoor_blind_fan")
+            except Exception:
+                _LOGGER.warning("Blind-fan notification failed: title=%s", title, exc_info=True)
+
+        self.hass.async_create_task(_send())
+
+    def _push_indoor_blind_alert(self, title: str, message: str, *, force: bool = False) -> bool:
+        """Send the episode's alert push unless one went out within INDOOR_BLIND_PUSH_DEBOUNCE_S.
+
+        A flapping sensor would otherwise produce an alert + recovery pair every 5-10 minutes
+        all night. The log line and Activity Log event are never debounced — only the push.
+        ``force`` bypasses the debounce for a message whose content changed materially (a fan
+        restarted after a stop, or Climate Advisor taking over a fan it had said it would not
+        stop). The stop push is safety-critical and never goes through here.
+        """
+        now = dt_util.now()
+        last = self._indoor_blind_last_alert_push
+        if not force and last is not None and (now - last).total_seconds() < INDOOR_BLIND_PUSH_DEBOUNCE_S:
+            _LOGGER.info(
+                "Blind-fan alert push suppressed: reason=debounce since_last_s=%.0f window_s=%.0f",
+                (now - last).total_seconds(),
+                INDOOR_BLIND_PUSH_DEBOUNCE_S,
+            )
+            return False
+        self._indoor_blind_last_alert_push = now
+        self._notify_indoor_blind(title, message)
+        return True
+
+    async def indoor_blind_check(self, indoor: float | None) -> None:
+        """Time an indoor-temperature outage against a running fan session (Issue #1037).
+
+        Called from ``_thermo_backstop_task`` with the engine's own freshly-resolved indoor
+        reading. ``indoor`` is taken once as a parameter and never re-read after an ``await``
+        (Issue #1036). A non-None reading ends any episode (``note_indoor_available``).
+        """
+        if indoor is not None:
+            self.note_indoor_available(indoor)
+            return
+        session = self._indoor_blind_session_kind()
+        if session is None:
+            return
+        now = dt_util.now()
+        last_seen = self._indoor_blind_last_seen
+        previous_session = self._indoor_blind_session
+        force_push = False
+        if self._indoor_blind_stopped:
+            # The owner was told "ventilation fan turned off" and a fan is running blind again
+            # inside the same outage (e.g. the economizer, which fails open on indoor None —
+            # #1042). Start a fresh, fully-alerted episode instead of staying silent.
+            _LOGGER.warning("Fan running blind again after a blind stop: session=%s", session)
+            self._reset_indoor_blind_episode()
+            force_push = True
+        elif (
+            self._indoor_blind_since is None
+            or last_seen is None
+            or (now - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S
+        ):
+            # No live episode, or the previous one was last evaluated too long ago to trust
+            # (e.g. a stale "since" from before the fan stopped being backstopped).
+            self._reset_indoor_blind_episode()
+        elif previous_session is not None and previous_session != session and session == "nat_vent":
+            # Climate Advisor now owns a fan it had told the owner it would NOT stop (a manual /
+            # economizer session ended while the nat-vent session stayed): restart the deadline
+            # from now and send a fresh alert, so the owner is never told "won't turn it off"
+            # and then surprised by a stop with no warning.
+            _LOGGER.info(
+                "Blind-fan session handed to Climate Advisor: previous=%s session=%s restarting_deadline=true",
+                previous_session,
+                session,
+            )
+            self._indoor_blind_since = None
+            self._indoor_blind_alerted = False
+            self._indoor_blind_alert_pushed = False
+            force_push = True
+        since = _resolve_candidate_since(
+            candidate="blind",
+            previous_candidate="blind" if self._indoor_blind_since is not None else None,
+            previous_since=self._indoor_blind_since,
+            now=now,
+        )
+        self._indoor_blind_since = since
+        self._indoor_blind_last_seen = now
+        self._indoor_blind_session = session
+        will_stop = session == "nat_vent"
+        stop_at = since + timedelta(seconds=INDOOR_BLIND_FAN_STOP_S)
+        blind_s = (now - since).total_seconds()
+
+        if not self._indoor_blind_alerted:
+            self._indoor_blind_alerted = True
+            _LOGGER.warning(
+                "Fan running blind: indoor temperature unavailable session=%s will_stop=%s stop_at=%s",
+                session,
+                will_stop,
+                stop_at.strftime("%H:%M") if will_stop else "none",
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "fan_blind_started",
+                    {
+                        "session": session,
+                        "will_stop": will_stop,
+                        "stop_at": stop_at.isoformat() if will_stop else None,
+                        "fan_device": _fan_device_label(self.config),
+                    },
+                )
+            self._request_indoor_blind_refresh()
+            if will_stop:
+                outcome = (
+                    f"Climate Advisor will turn the fan off at {stop_at.strftime('%H:%M')} if it doesn't come back."
+                )
+            elif session == "override":
+                outcome = (
+                    "The fan was turned on manually (or by its remote), so Climate Advisor will NOT turn it off — "
+                    "you may want to."
+                )
+            else:
+                outcome = "Climate Advisor will not turn this fan off automatically — you may want to."
+            self._indoor_blind_alert_pushed = self._push_indoor_blind_alert(
+                "Climate Advisor: fan running without a temperature reading",
+                "The indoor temperature sensor stopped reporting while a ventilation fan is running, so Climate "
+                f"Advisor can't tell whether the house is getting too cold. {outcome}",
+                force=force_push,
+            )
+        else:
+            _LOGGER.debug(
+                "Fan still blind: session=%s blind_s=%.0f remaining_s=%s",
+                session,
+                blind_s,
+                f"{max(0.0, INDOOR_BLIND_FAN_STOP_S - blind_s):.0f}" if will_stop else "n/a",
+            )
+
+        if not will_stop:
+            return
+        if not _is_transition_confirmed(
+            candidate="blind",
+            candidate_since=since,
+            now=now,
+            sustain_seconds=INDOOR_BLIND_FAN_STOP_S,
+        ):
+            return
+        await self._indoor_blind_stop(blind_s)
+
+    async def _indoor_blind_stop(self, blind_s: float) -> None:
+        """End the CA-owned nat-vent session once the outage has lasted INDOOR_BLIND_FAN_STOP_S."""
+        minutes = int(blind_s // 60)
+        # No set_outdoor_exit_time: this exit is not outdoor-driven, so there is no flip-flop
+        # against the instant reactivation gate to lock out, and nat-vent should be free to
+        # resume the moment indoor reads again and conditions allow (registered as exempt in
+        # tests/test_nat_vent_exit_lockout_coverage.py). Re-entry while still blind is
+        # impossible: decide_nat_vent_gate fails closed on indoor None.
+        result = await self._exit_nat_vent(
+            reason=f"indoor temperature unavailable for {minutes} min — stopping ventilation fan",
+            event_type="fan_blind_stopped",
+            event_payload={
+                "session": "nat_vent",
+                "minutes_blind": minutes,
+                "fan_device": _fan_device_label(self.config),
+                "fan_mode_change": _fan_transition_text(self.config, activating=False),
+            },
+        )
+        if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+            # Session preserved by _end_nat_vent_session(); retried on the next backstop tick.
+            _log = _LOGGER.debug if self._indoor_blind_stop_deferred_logged else _LOGGER.warning
+            _log("Fan stop deferred: indoor blind timeout result=%s retry=next_tick", result.name)
+            self._indoor_blind_stop_deferred_logged = True
+            return
+        self._indoor_blind_stopped = True
+        _LOGGER.warning("Fan stopped: indoor blind timeout minutes_blind=%d result=%s", minutes, result.name)
+        self._request_indoor_blind_refresh()  # clear the Fan-card suffix now (_exit_nat_vent emitted the event)
+        self._notify_indoor_blind(
+            "Climate Advisor: ventilation fan turned off",
+            f"The indoor temperature sensor has been unavailable for {minutes} minutes, so Climate Advisor turned the "
+            "ventilation fan off to avoid overcooling the house. Please check the sensor.",
+        )
+
+    def note_indoor_available(self, indoor: float) -> None:
+        """Indoor reads again: end any blind episode and report recovery (Issue #1037).
+
+        Synchronous and cheap (an early return when no episode is live) so the coordinator
+        can call it on every temperature tick. After a blind stop the backstop is cancelled,
+        so a coordinator-driven call (its 5-minute tick and its healthy-reading path) is the
+        only thing that can notice the sensor returning — the #1033 funnel must not call into
+        the engine. Mirrors ``indoor_blind_check``'s stale-episode guard: an episode nobody has
+        evaluated for INDOOR_BLIND_EPISODE_GAP_S, or one the timeout already stopped, reports
+        its duration as a lower bound from the last blind sighting, never "now".
+        """
+        since = self._indoor_blind_since
+        if since is None:
+            return
+        now = dt_util.now()
+        alerted = self._indoor_blind_alerted
+        alert_pushed = self._indoor_blind_alert_pushed
+        stopped = self._indoor_blind_stopped
+        session = self._indoor_blind_session
+        last_seen = self._indoor_blind_last_seen
+        stale = last_seen is None or (now - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S
+        lower_bound = stopped or stale
+        end = last_seen if lower_bound and last_seen is not None else now
+        minutes = int((end - since).total_seconds() // 60)
+        fan_running = self._indoor_blind_session_kind() is not None
+        self._reset_indoor_blind_episode()
+        if not alerted:
+            return
+        _LOGGER.info(
+            "Fan blind episode ended: recovered minutes_blind=%d lower_bound=%s stopped=%s fan_running=%s "
+            "session=%s indoor=%.1f",
+            minutes,
+            lower_bound,
+            stopped,
+            fan_running,
+            session,
+            indoor,
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "fan_blind_recovered",
+                {
+                    "session": session,
+                    "minutes_blind": minutes,
+                    "lower_bound": lower_bound,
+                    "stopped": stopped,
+                    "fan_running": fan_running,
+                    "indoor_f": indoor,
+                },
+            )
+        self._request_indoor_blind_refresh()
+        if not alert_pushed:
+            return  # the alert push was debounced, so its recovery push is too (no orphan "it's back")
+        if stopped:
+            tail = "The fan stays off; ventilation may resume if conditions allow."
+        elif fan_running:
+            tail = "Climate Advisor is monitoring the fan normally again."
+        else:
+            tail = "The fan is no longer running."
+        if lower_bound and minutes < 5:
+            when = "after a short outage"
+        elif lower_bound:
+            when = f"after at least {minutes} minutes"
+        else:
+            when = f"after about {minutes} minutes"
+        self._notify_indoor_blind(
+            "Climate Advisor: indoor temperature is back",
+            f"The indoor temperature sensor is reporting again {when}. {tail}",
+        )
 
     def _reconcile_fan_physical_drift(self) -> None:
         """Detect and self-correct a stale _fan_active=True with no matching physical fan (Issue #423).

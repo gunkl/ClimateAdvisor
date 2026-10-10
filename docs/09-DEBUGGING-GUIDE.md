@@ -157,6 +157,15 @@ python3 tools/ha_logs.py --lines 3000 --filter "unit\|Observed outdoor extreme"
 
 **What to expect after changing the unit:** the options flow only writes the new unit and raises a Repairs "reload needed" issue; the unit applies after the Repairs "Fix", a manual reload or an HA restart. Since 0.7.83 that restore discards the same-day readings, so Forecast Low/High and the day trend recover straight away (before it, wrong values persisted until the 23:59 history clear). An already-written morning briefing may keep its old wording until the next one. Avoid switching units just to test. **Not repaired:** chart-log history and learning/thermal records written while the unit was wrong stay as recorded; chart entries fade as they age out. A unit change on the same restart as the first upgrade to 0.7.83 is not detected (the older state file has no `temp_unit`). See [temperature-conversion.md](temperature-conversion.md#provider-unit-must-equal-the-configured-unit-issue-1015) and [state-persistence.md](state-persistence.md#temp_unit-key-and-same-day-restore-rule-issue-1015).
 
+## Debugging a Fan Running Without an Indoor Temperature (Issue #1037)
+
+**Symptom:** the house overcooled overnight with a ventilation fan running, or you received "Climate Advisor: fan running without a temperature reading" / "ventilation fan turned off" / "indoor temperature is back" pushes.
+
+1. Activity Log: `fan_blind_started` (session, will_stop, stop_at) -> `fan_blind_stopped` (minutes_blind) -> `fan_blind_recovered` (minutes_blind, stopped). Next to them, the #1033 `indoor_sensor_unavailable` / `indoor_sensor_recovered` rows give the *reason* (stale, unavailable, no_reading, ...) - the engine does not know it.
+2. Logs (`python tools/ha_logs.py --lines 3000`): WARNING `Fan running blind: ...`, DEBUG `Fan still blind: ... remaining_s=`, WARNING `Fan stopped: indoor blind timeout ...`, WARNING `Fan stop deferred: ... retry=next_tick` (Issue #641 rate limiter), INFO `Fan blind episode ended: recovered ...`. The real stop is 30-35 min after the first blind line (5-minute tick).
+3. Status tab: the Fan (WHF)/(HVAC) card shows `(indoor sensor offline — stops HH:MM)` or `(— no auto-stop)` while an alerted episode is live.
+4. No alert at all? The backstop only runs for CA-activated fans. A manual/RF-timer fan with no CA session, and the min-runtime cycle, are not covered by design; a *frozen but numeric* indoor value is not a blind episode (tracked in #1043).
+
 ## Debugging AI Features
 
 ### AI Status Sensor

@@ -2025,6 +2025,54 @@ def _render_indoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
     return label, ", ".join(parts)
 
 
+_BLIND_SESSION_LABELS = {
+    "nat_vent": "ventilation fan",
+    "override": "manually started fan",
+    "economizer": "economizer fan",
+}
+
+
+def _render_fan_blind_started(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1037: a fan session is running while the indoor temperature is unreadable."""
+    kind = _BLIND_SESSION_LABELS.get(p.get("session"), "fan")
+    label = f"Fan running blind -- {kind} on with no indoor temperature reading"
+    stop_at = p.get("stop_at")
+    if p.get("will_stop") and stop_at:
+        return label, f"auto-stop at {_fmt_time(stop_at)} if the sensor does not return"
+    return label, "no auto-stop (not a Climate Advisor-owned ventilation session)"
+
+
+def _render_fan_blind_stopped(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1037: the blind-fan timeout ended a nat-vent session (always ends the fan)."""
+    minutes = p.get("minutes_blind")
+    label = "Nat-vent exit -- indoor temperature unavailable"
+    if minutes is not None:
+        label = f"{label} for {minutes} min"
+    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
+    return f"{label} ({fan_change})", ""
+
+
+def _render_fan_blind_recovered(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1037: indoor temperature reads again after a blind-fan episode."""
+    label = "Fan blind episode ended -- indoor temperature reading again"
+    parts: list[str] = []
+    value_f = p.get("indoor_f")
+    if isinstance(value_f, (int, float)):
+        parts.append(format_temp(value_f, unit))
+    minutes = p.get("minutes_blind")
+    if minutes is not None:
+        # lower_bound: the outage is measured to the last blind sighting (a stopped or
+        # unevaluated episode), so the real duration may be longer.
+        parts.append(f"blind {'at least ' if p.get('lower_bound') else ''}{minutes} min")
+    if p.get("stopped"):
+        parts.append("fan had been stopped")
+    elif p.get("fan_running", True) is False:
+        parts.append("fan no longer running")
+    else:
+        parts.append("fan kept running")
+    return label, ", ".join(parts)
+
+
 def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
     source = p.get("source", "")
     re_paused = p.get("re_paused", False)
@@ -2784,6 +2832,9 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "outdoor_sensor_recovered": _render_outdoor_sensor_recovered,
     "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
     "indoor_sensor_recovered": _render_indoor_sensor_recovered,
+    "fan_blind_started": _render_fan_blind_started,
+    "fan_blind_stopped": _render_fan_blind_stopped,
+    "fan_blind_recovered": _render_fan_blind_recovered,
     "grace_expired": _render_grace_expired,
     "nat_vent_fan_on": _render_nat_vent_fan_on,
     "nat_vent_fan_off": _render_nat_vent_fan_off,
@@ -2886,6 +2937,9 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "outdoor_sensor_recovered",
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        "fan_blind_started",
+        "fan_blind_stopped",
+        "fan_blind_recovered",
         "ceiling_guard_fired",
         "incident_detected",
         "setpoint_rejected",
@@ -3009,6 +3063,9 @@ def _render_timeline_events(
             "nat_vent_outdoor_rise_exit",
             "nat_vent_away_ceiling_exit",
             "nat_vent_manual_override_exit",
+            # Issue #1037: the blind-fan timeout ends a CA-owned nat-vent session the
+            # same way (routed through _exit_nat_vent() -> _deactivate_fan()).
+            "fan_blind_stopped",
         ):
             _fan_ca_owns = False
 
@@ -3582,6 +3639,9 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
                     "nat_vent_outdoor_rise_exit",
                     "nat_vent_away_ceiling_exit",
                     "nat_vent_manual_override_exit",
+                    # Issue #1037: blind-fan timeout also releases the fan (mirror of the
+                    # _render_timeline_events() tracker above).
+                    "fan_blind_stopped",
                 )
                 and _own_ca
             ):

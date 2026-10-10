@@ -89,6 +89,12 @@ Both #1 and #2 already exit the session (clearing `_natural_vent_active`) before
 
 This one remaining instance was enforced by a durable static check rather than only described in prose — see `tests/test_duplicate_gate_detection.py` in [Code Reference](#code-reference) below, which AST-scans for structurally-duplicated gate conditions across the decision-leaf modules and requires every finding to be classified in a registry. Since the legacy branch it was tracking is now deleted, this instance is resolved; the registry test remains as a general-purpose guard against future duplication.
 
+## Blind-Fan Timeout (Issue #1037)
+
+A nat-vent session can outlive its own safety exits: comfort-floor, away-ceiling and outdoor-rise all require a numeric indoor reading (`nat_vent_exit.py` guards on `inputs.indoor is not None`), so while the indoor sensor is unreadable the fan keeps pulling outdoor air in. This was an original design gap (the guards date to Fix #99; #1033's stale-sensor rule only made `None` more reachable), not a regression.
+
+**Exit path added:** `AutomationEngine.indoor_blind_check()` (called from `_thermo_backstop_task`) ends a CA-owned session via `_exit_nat_vent(event_type="fan_blind_stopped")` once indoor has been unreadable for `INDOOR_BLIND_FAN_STOP_S` (30 min; 30-35 min in practice). It is classified *exempted* in `tests/test_nat_vent_exit_lockout_coverage.py` (`("_indoor_blind_stop", 1)`): the reason is a sensor outage, not an indoor/outdoor reading the reactivation gate could re-satisfy, and re-entry while blind is impossible because `decide_nat_vent_gate` fails closed on `indoor is None`. A `RATE_LIMITED` result preserves the session and retries on the next tick (`_end_nat_vent_session`, Issue #931). Manual-override sessions are never stopped by this path (alert only). See `08-COMPUTATION-REFERENCE.md` (Blind-fan safety) for the full state table and known limits.
+
 ## Handoff to Pause/Grace
 
 `_exit_nat_vent()` forks based on `_any_monitored_sensor_open()`:

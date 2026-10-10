@@ -2358,3 +2358,56 @@ class TestIndoorSensorRenderers:
             ]
         )
         assert table.count("Indoor sensor") == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #1037: fan_blind_started / fan_blind_stopped / fan_blind_recovered renderers
+# ---------------------------------------------------------------------------
+
+
+class TestFanBlindRenderers:
+    def test_started_with_auto_stop_names_the_stop_time(self):
+        label, settings = _act_mod.EVENT_RENDERERS["fan_blind_started"](
+            {"session": "nat_vent", "will_stop": True, "stop_at": "2026-10-09T02:30:00+00:00"}, "fahrenheit"
+        )
+        assert label == "Fan running blind -- ventilation fan on with no indoor temperature reading"
+        assert settings.startswith("auto-stop at ")
+        assert "sensor does not return" in settings
+
+    def test_started_for_alert_only_session_says_no_auto_stop(self):
+        label, settings = _act_mod.EVENT_RENDERERS["fan_blind_started"](
+            {"session": "override", "will_stop": False, "stop_at": None}, "fahrenheit"
+        )
+        assert "manually started fan" in label
+        assert "no auto-stop" in settings
+
+    def test_stopped_folds_the_fan_transition_into_the_label(self):
+        label, _ = _act_mod.EVENT_RENDERERS["fan_blind_stopped"](
+            {"session": "nat_vent", "minutes_blind": 30, "fan_mode_change": "WHF: on->off"}, "fahrenheit"
+        )
+        assert label == "Nat-vent exit -- indoor temperature unavailable for 30 min (WHF: on->off)"
+
+    def test_recovered_reports_whether_the_fan_had_been_stopped(self):
+        _, settings = _act_mod.EVENT_RENDERERS["fan_blind_recovered"](
+            {"session": "nat_vent", "minutes_blind": 30, "stopped": True, "indoor_f": 67.0}, "fahrenheit"
+        )
+        assert "fan had been stopped" in settings
+        assert "blind 30 min" in settings
+        _, settings = _act_mod.EVENT_RENDERERS["fan_blind_recovered"](
+            {"minutes_blind": 5, "stopped": False}, "fahrenheit"
+        )
+        assert "fan kept running" in settings
+        _, settings = _act_mod.EVENT_RENDERERS["fan_blind_recovered"](
+            {"minutes_blind": 45, "stopped": False, "fan_running": False, "lower_bound": True}, "fahrenheit"
+        )
+        assert "fan no longer running" in settings
+        assert "blind at least 45 min" in settings
+
+    def test_all_three_tolerate_empty_payloads(self):
+        for name in ("fan_blind_started", "fan_blind_stopped", "fan_blind_recovered"):
+            label, _ = _act_mod.EVENT_RENDERERS[name]({}, "fahrenheit")
+            assert label, name
+
+    def test_all_three_not_deduplicated(self):
+        for name in ("fan_blind_started", "fan_blind_stopped", "fan_blind_recovered"):
+            assert name in _act_mod._NO_DEDUP

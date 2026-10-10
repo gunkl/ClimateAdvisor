@@ -168,6 +168,20 @@ class TestBuildOverrideDetailsContext:
             ctx = asyncio.run(build_override_details_context(None, coord, hours=24))
         assert "CA owns fan" in ctx
 
+    def test_blind_fan_stop_releases_ca_fan_ownership(self):
+        """Issue #1037 (#957 mirror-check): ``fan_blind_stopped`` ends a CA-owned fan, so the
+        ownership history must show CA releasing it — otherwise the tracker stays stale-True."""
+        recent = datetime.datetime.now(datetime.UTC)
+        coord = _make_coordinator()
+        coord._event_log = [
+            {"type": "fan_activated", "time": recent - datetime.timedelta(minutes=40)},
+            {"type": "fan_blind_stopped", "time": recent - datetime.timedelta(minutes=1)},
+        ]
+        with patch("custom_components.climate_advisor.ai_skills_context.dt_util.as_local", side_effect=lambda x: x):
+            ctx = asyncio.run(build_override_details_context(None, coord, hours=24))
+        assert "CA owns fan" in ctx
+        assert "CA released fan (fan_blind_stopped)" in ctx
+
     def test_fan_ownership_filters_by_window_before_200_limit(self):
         """Issue #432 regression: a fan-ownership transition well inside the requested
         window must survive even though the raw event log has far more than 200

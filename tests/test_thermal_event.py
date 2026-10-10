@@ -107,7 +107,9 @@ def _make_v3_coord(
 
     climate_state = MagicMock()
     climate_state.state = "idle"
-    climate_state.attributes = {"hvac_action": "idle"}
+    # Issue #1035: the REAL _get_current_sample (bound below) reads the indoor temp via the
+    # shared resolver, which needs a valid current_temperature on the climate entity.
+    climate_state.attributes = {"hvac_action": "idle", "current_temperature": indoor_temp}
     weather_state = MagicMock()
     weather_state.attributes = {"temperature": outdoor_temp}
 

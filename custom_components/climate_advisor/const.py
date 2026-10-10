@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.7.89"
+VERSION = "0.7.90"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1285,6 +1285,7 @@ REJECT_OLS_BAD_FIT = "ols_bad_fit"
 REJECT_OLS_WRONG_SIGN = "ols_wrong_sign"
 REJECT_OLS_BOUNDS = "ols_bounds"
 REJECT_ABANDONED = "abandoned"
+REJECT_INDOOR_UNAVAILABLE = "indoor_unavailable"
 REJECT_TOO_FEW_BLOCKS = "too_few_blocks"
 REJECT_WINDOW_TOO_SHORT = "window_too_short"
 REJECT_NO_INTERIOR_PEAK = "no_interior_peak"

@@ -133,7 +133,7 @@ Invoked for both HOME and GUEST modes (coordinator routes GUEST through this sam
 1. Sets `self._occupancy_mode = OCCUPANCY_HOME`
 2. If no current classification (`_current_classification` is None): return (no HVAC action)
 3. If `c.hvac_mode` is `"heat"` or `"cool"`: call `_set_temperature_for_mode()` to restore comfort temperature
-4. **Notification suppression check 1 — proximity:** if indoor temp is already closer to comfort than to setback (`abs(indoor - comfort) < abs(indoor - setback)`), record notification timestamp and return without sending
+4. **Notification suppression check 1 — proximity:** if indoor temp is already closer to comfort than to setback (`abs(indoor - comfort) < abs(indoor - setback)`), record notification timestamp and return without sending. `HomeDecision` carries `indoor_temp_f` (Issue #1036) — the `HomeInputs.indoor_temp_f` the decision was made from — and the shell's log line and the `occupancy_comfort_restored` event use that value instead of re-reading the sensor after the restore `await` (a re-read could be `None` if the thermostat dropped out and crashed the `%.1f` formatting). Set on every non-NONE outcome; `None` default
 5. **Notification suppression check 2 — debounce:** if a welcome-home notification was sent within `CONF_WELCOME_HOME_DEBOUNCE` seconds, return without sending
 6. Record `_last_welcome_home_notified = now`
 7. Send notification: `"Welcome home! Restoring comfort temperature. Should feel normal in about 20–30 minutes."` via `_notify(..., notification_type="occupancy_home")`

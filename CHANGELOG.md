@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.90] — 2026-10-09
+
+- Fix #1035: while your indoor temperature sensor is down, Climate Advisor no longer learns from fake 0 °F readings that could skew its learned heating and cooling rates. A heating or cooling session that starts during an outage is skipped and recorded in the learning-health log as "Indoor sensor was unavailable".
+- Fix #1036: if the thermostat drops out right after you arrive home, the welcome-home step no longer fails partway through; it uses the temperature it actually based its decision on.
+- Fix #1038: on Celsius installs, the indoor temperature shown in Activity Log rows written by the automation engine (override detected, comfort band applied, occupancy setback and restore, free-cooling manual-override exit) is now correct instead of wildly off (21.5 °C used to show as -5.8 °C).
+- Internal (#1039): the chart's predicted-indoor line is now covered by tests of the real code instead of a copy, and a misleading debug message about it was corrected. No change to what you see.
+
 ## [0.7.89] — 2026-10-09
 
 - Feat #1033: if your indoor temperature sensor stops working (unavailable, missing, nonsense or out-of-range value, a climate entity with no reading, or a dedicated sensor that has stopped reporting for 12 hours) Climate Advisor now tells you. It pauses indoor-based decisions instead of acting on a frozen number, logs one warning (not one per check), adds an Activity Log row naming the reason, shows the problem next to Indoor Temp Source on the Settings tab, and logs and records when the sensor recovers. A failing bedroom sleep sensor is noted the same way while the primary sensor keeps being used.

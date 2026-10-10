@@ -73,12 +73,7 @@ class TestPredArchiveContract:
     def test_chart_log_uses_archive_not_current_ode(self):
         """When archive has an entry for now_dt, it wins over current ODE[0].
 
-        Simulates the chart_log pred_indoor selection block:
-          _archived_pred = self._lookup_pred_archive(_now_dt)   # → 76.0
-          if _archived_pred is not None:
-              _pred_indoor_val = _archived_pred                  # ← this path
-          elif self._last_predicted_indoor:
-              _pred_indoor_val = ...  # warmup fallback (not taken)
+        Calls the real ``_select_pred_indoor`` (the chart_log pred_indoor selection).
 
         The archive value (76.0) was written by an ODE 4h ago; the current ODE[0]
         (74.1) was re-seeded from actual and would collapse to actual if used.
@@ -95,13 +90,10 @@ class TestPredArchiveContract:
         # Current ODE[0] re-seeds from actual and produces a different value
         coord._last_predicted_indoor = [{"ts": now_dt.isoformat(), "temp": 74.1}]
 
-        # Replicate selection logic from coordinator.py
+        # Real selection method (Issue #1039) - not a copy of its branching
         _archived_pred = coord._lookup_pred_archive(now_dt)
-        _pred_indoor_val: float | None = None
-        if _archived_pred is not None:
-            _pred_indoor_val = _archived_pred
-        elif coord._last_predicted_indoor:
-            _pred_indoor_val = coord._last_predicted_indoor[0].get("temp")
+        _pred_indoor_val, _source = coord._select_pred_indoor(now_dt)
+        assert _source == "archive"
 
         assert _pred_indoor_val == 76.0, (
             f"Archive must win: expected 76.0, got {_pred_indoor_val!r} "
@@ -119,10 +111,7 @@ class TestPredArchiveContract:
     def test_warmup_falls_back_to_current_ode(self):
         """During warmup (first 4h after restart), archive is empty; use ODE[0].
 
-        The warmup path exercises:
-          _archived_pred = self._lookup_pred_archive(_now_dt)   # → None (empty archive)
-          elif self._last_predicted_indoor:
-              _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # ← this path
+        Calls the real ``_select_pred_indoor``; the archive is empty so ODE[0] is used.
         """
         ClimateAdvisorCoordinator = _get_coordinator_class()
         coord = object.__new__(ClimateAdvisorCoordinator)
@@ -131,13 +120,10 @@ class TestPredArchiveContract:
         now_dt = datetime(2026, 5, 14, 10, 0, 0, tzinfo=UTC)
         coord._last_predicted_indoor = [{"ts": now_dt.isoformat(), "temp": 71.5}]
 
-        # Replicate selection logic
+        # Real selection method (Issue #1039) - not a copy of its branching
         _archived_pred = coord._lookup_pred_archive(now_dt)
-        _pred_indoor_val: float | None = None
-        if _archived_pred is not None:
-            _pred_indoor_val = _archived_pred
-        elif coord._last_predicted_indoor:
-            _pred_indoor_val = coord._last_predicted_indoor[0].get("temp")
+        _pred_indoor_val, _source = coord._select_pred_indoor(now_dt)
+        assert _source == "ode-warmup"
 
         assert _archived_pred is None, "Archive must be empty during warmup"
         assert _pred_indoor_val == 71.5, f"Warmup fallback must return ODE[0]=71.5; got {_pred_indoor_val!r}"
@@ -245,3 +231,36 @@ class TestPredArchiveContract:
             f"Archive contains {len(coord._pred_archive)} entries — "
             f"expected at most {PRED_ARCHIVE_HORIZON_HOURS + 1} for a {PRED_ARCHIVE_HORIZON_HOURS}h horizon"
         )
+
+
+class TestSelectPredIndoor:
+    """Issue #1039: the real ``_select_pred_indoor`` (value, source) contract."""
+
+    def _coord(self, archive, predicted):
+        coord = object.__new__(_get_coordinator_class())
+        coord._pred_archive = archive
+        coord._last_predicted_indoor = predicted
+        return coord
+
+    def test_archive_wins_over_warmup(self):
+        now_dt = datetime(2026, 5, 14, 10, 0, 0, tzinfo=UTC)
+        coord = self._coord({}, [{"temp": 74.1}])
+        coord._pred_archive[coord._pred_archive_key(now_dt)] = 76.0
+        assert coord._select_pred_indoor(now_dt) == (76.0, "archive")
+
+    def test_warmup_when_archive_empty(self):
+        now_dt = datetime(2026, 5, 14, 10, 0, 0, tzinfo=UTC)
+        coord = self._coord({}, [{"temp": 71.5}])
+        assert coord._select_pred_indoor(now_dt) == (71.5, "ode-warmup")
+
+    def test_none_when_both_empty(self):
+        now_dt = datetime(2026, 5, 14, 10, 0, 0, tzinfo=UTC)
+        coord = self._coord({}, [])
+        assert coord._select_pred_indoor(now_dt) == (None, "none")
+
+    def test_archived_zero_is_still_archive(self):
+        """A falsy archived value (0.0) must still win (is-not-None check, not truthiness)."""
+        now_dt = datetime(2026, 5, 14, 10, 0, 0, tzinfo=UTC)
+        coord = self._coord({}, [{"temp": 74.1}])
+        coord._pred_archive[coord._pred_archive_key(now_dt)] = 0.0
+        assert coord._select_pred_indoor(now_dt) == (0.0, "archive")

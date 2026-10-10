@@ -21,6 +21,7 @@
 | How is `solar_phase_offset_h` learned from chart_log? | Daytime passive windows (HVAC off, fan off, windows closed) are scanned for the indoor temperature peak hour. `phase_obs = peak_hour − 13` is accumulated via EWMA (α=0.10), clamped to [0, 4]. | [§Solar Phase Offset Learning](#solar-phase-offset-learning) |
 | What is engine visibility and where is it exposed? | `get_engine_status()` returns per-engine `active`, `value`, and (for `k_passive`/`k_solar`) `confidence` fields. Exposed at REST `/api/climate_advisor/engines`, dashboard Debug tab, AI investigator context, and `tools/engine_status.py`. | [§Engine Visibility](#engine-visibility) |
 | Why does `k_active_cool` stay `None` despite AC cycling normally? | Two v0.3.50 bugs can cause this: (1) the `"samples": []` key shadow — `_start_hvac_observation` created a `"samples"` key that was always returned instead of `"active_samples"`; (2) startup recovery discarded all HVAC pending obs by reading the wrong key. Both fixed in v0.3.50. Check `--rejections --type hvac_cool` for `n=0` entries with elapsed > 0. | [§Observation Pipeline Failure Modes](#observation-pipeline-failure-modes) |
+| What happens to thermal learning while the indoor sensor is unavailable? | `_get_current_sample()` returns `None` (no fake `0.0`); pre-heat and event-driven samples are skipped (DEBUG), and an HVAC session that starts during the outage is not started and records an `indoor_unavailable` rejection (INFO `Thermal HVAC observation not started`). Operational interruption, not a quality failure (Issue #1035). | [Indoor-sensor outage handling](#indoor-sensor-outage-handling-issue-1035) |
 | What rejection codes indicate normal operation vs. pipeline failure for HVAC obs types? | `new_session_started` (short-cycling), `plateau_guard` (insufficient post-heat decay), and `n=0 delta_t=0.00°F` (sensor quantization) are expected on some homes. `n=0` with elapsed > 0 in pre-v0.3.50 coordinators indicates the key-shadow bug. | [§Known Rejection Patterns](#known-rejection-patterns) |
 
 ---
@@ -109,11 +110,59 @@ Enforced structurally, not by convention: `tests/test_thermal_observations.py`'s
 `TestThermalSamplingNeverUsesSleepSensor` is a registry-driven AST test (mirroring
 `tests/test_executor_offload.py`'s `_BLOCKING_METHODS` pattern) that fails CI if any
 function in its `_THERMAL_INDOOR_TEMP_CALL_SITES` registry — currently
-`_get_current_sample`, `_start_hvac_observation`, `_sample_all_observations`,
+`_get_current_sample`, `_start_hvac_observation` (via `_get_current_sample` since #1035), `_sample_all_observations`,
 `_end_hvac_active_phase` — ever reads the swap-aware `.value`/`_get_indoor_temp()`
 instead of `.primary_value`. Add a new function to that registry (and this note) if a
 future observation type gains its own indoor-temp read site outside the four listed
 here.
+
+`_get_current_sample(elapsed_minutes)` returns `dict | None` (Issue #1035). It reads
+`.primary_value` for indoor and `_get_outdoor_temp()` for outdoor and returns `None` when
+either is unreadable; the former `0.0` sentinel (which thermal learning would have fit
+as a real temperature) is gone. Every caller must skip, never append, on `None`:
+
+| Caller | Behaviour when the sample is `None` |
+|---|---|
+| `_update_pre_heat_buffer` (every tick) | Prunes entries older than `THERMAL_PRE_HEAT_BUFFER_MINUTES` first, then appends only a real sample; DEBUG `Pre-heat sample skipped: reason=indoor_unavailable`. The buffer is simply shorter. |
+| `_start_hvac_observation` | The observation is not created. INFO `Thermal HVAC observation not started [type=... reason=indoor_unavailable ...]` plus a structured `indoor_unavailable` rejection (see below). |
+| Event-driven HVAC sample in `_async_thermostat_changed` | Skipped; DEBUG `Event-driven HVAC sample skipped: type=... reason=indoor_unavailable`; `last_event_sample_time` is not advanced so the next thermostat event retries. |
+| `_sample_all_observations` (5-min tick, both sampling sites) | `continue` — the observation keeps its existing samples. |
+| `_end_hvac_active_phase` | The closing sample is not appended; the phase still ends. |
+
+### Indoor-sensor outage handling (Issue #1035)
+
+Occupant outcome: while the indoor sensor is down, the house is not taught a wrong
+heat-up or cool-down rate from fake `0.0°F` readings (which previously could pass the
+`compute_k_active` bounds with a value about 28% low and then drive pre-conditioning and
+predictions). The outage itself is announced once per episode by the indoor-sensor
+failure visibility feature (Issue #1033); this section covers only what learning does.
+
+A heating/cooling session that **starts** during an outage has no valid `start_indoor_f`,
+so it is not started and not learned. The skip is recorded through
+`ClimateAdvisorCoordinator._append_rejection(obs_type, event)` (the entry-recording tail
+split out of `_abandon_observation`, which now calls it too; it records, caps and syncs
+the entry only - each caller persists it: `_abandon_observation` fires the save, the async
+`_start_hvac_observation` awaits it; behaviour for existing callers is unchanged) with `REJECT_INDOOR_UNAVAILABLE = "indoor_unavailable"`
+(`const.py`). The entry is persisted and capped like any other rejection, counted by
+`_build_learning_health` (the code is in its `all_reason_codes` list), treated as an
+operational interruption (not a signal-quality failure) by `ai_skills_context.py`'s
+`_OPERATIONAL_CODES`, and shown in the dashboard as "Indoor sensor was unavailable"
+(`REASON_LABELS` in `index.html`). Its structured event carries `n_samples=0`,
+`delta_t_f=0.0`, `elapsed_minutes=0`.
+
+Known consequences (accepted, not defects):
+
+- A session that begins during an outage is not learned, even if the sensor returns a
+  minute later. The next session's `Thermal HVAC observation started` INFO line is the
+  resume signal.
+- `_hvac_active` is derived from a pending HVAC observation, so it is `False` for such a
+  session. Every consumer ORs it with the live `_is_heating_cooling` reading, and new
+  non-HVAC triggers require a non-None indoor reading, so decisions are cushioned.
+- The restart-time late start (an HVAC run already in progress when HA restarts) is
+  skipped if the indoor sensor has not loaded yet; that session is simply not learned.
+- The single-point `k_active` fallback in `learning.py` (average of pre-heat plus active
+  samples) can no longer be polluted by a stored `0.0`, because no `0.0` sample is ever
+  stored.
 
 ---
 

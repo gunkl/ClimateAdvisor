@@ -2669,7 +2669,7 @@ class TestIssue402ClassOscillationPrevention:
         """FAN_MODE_HVAC (ceiling-relevant archetype): once indoor exceeds the ceiling,
         _nat_vent_may_reactivate() blocks reactivation -- consistent with the ODE guard's
         dormancy condition also lifting (indoor > ceiling_threshold means the guard's
-        `_indoor_cg <= _ceiling_threshold_val` dormancy clause is False), so the guard
+        `indoor <= ceiling_threshold` dormancy clause is False), so the guard
         would proceed to evaluate escalation rather than staying dormant. Both sides agree
         nat-vent should not be the one running past the ceiling for this archetype.
         """

@@ -172,6 +172,7 @@ from .const import (
     REJECT_AC_NO_SETPOINT_BREACH,
     REJECT_AC_SETPOINT_OUT_OF_RANGE,
     REJECT_AC_SETPOINT_UNSTABLE,
+    REJECT_INDOOR_UNAVAILABLE,
     REJECT_NO_INTERIOR_PEAK,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
@@ -3748,21 +3749,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             outdoor_temp = forecast.current_outdoor_temp if forecast else None
             # Extract current-hour prediction to persist alongside actual reading
             _pred_outdoor_val: float | None = None
-            _pred_indoor_val: float | None = None
             if indoor_temp is None:
+                # Issue #1039: pred_indoor is written regardless of indoor (the archived
+                # value was recorded ~4h earlier while healthy); only indoor is null.
                 _LOGGER.debug(
-                    "chart log: indoor_temp unavailable — skipping pred_indoor write"
+                    "chart log: indoor_temp unavailable — indoor logged as null; pred_indoor still written"
                     " (thermostat may be unknown/unavailable)"
                 )
             _now_dt = dt_util.now()
             _pred_outdoor_val = _extract_current_hour_forecast_temp(self._hourly_forecast_temps, _now_dt)
-            # First-write-wins archive: pred_indoor reflects ODE made ~4h ago.
-            # Falls back to current ODE[0] only during warmup (first 4h after restart/install).
-            _archived_pred = self._lookup_pred_archive(_now_dt)
-            if _archived_pred is not None:
-                _pred_indoor_val = _archived_pred
-            elif self._last_predicted_indoor:
-                _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
+            _pred_indoor_val, _pred_indoor_source = self._select_pred_indoor(_now_dt)
             # Issue #982: compute once, reuse below — same "compute once" pattern as the
             # classification_change site (Issue #510 0.4), avoids 3 separate
             # _compute_fan_status() calls (and duplicate WARNING logs) for the same instant.
@@ -3801,7 +3797,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 (_pred_indoor_val - indoor_temp)
                 if (_pred_indoor_val is not None and indoor_temp is not None)
                 else float("nan"),
-                "archive" if _archived_pred is not None else ("ode-warmup" if self._last_predicted_indoor else "none"),
+                _pred_indoor_source,
             )
 
         with contextlib.suppress(Exception):
@@ -6327,7 +6323,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         THERMAL_MAX_ACTIVE_SAMPLES as _THERMAL_MAX_ACTIVE,
                     )
 
-                    if len(_active_samples) < _THERMAL_MAX_ACTIVE:
+                    if _evt_sample is None:
+                        # Issue #1035: no fake 0.0 sample; leave last_event_sample_time
+                        # untouched so the next thermostat event retries.
+                        _LOGGER.debug(
+                            "Event-driven HVAC sample skipped: type=%s reason=indoor_unavailable",
+                            _active_obs_type,
+                        )
+                    elif len(_active_samples) < _THERMAL_MAX_ACTIVE:
                         _active_samples.append(_evt_sample)
                         _active_obs["last_event_sample_time"] = dt_util.now().isoformat()
                         _ind = _evt_sample.get("indoor_temp_f")
@@ -7489,8 +7492,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # Thermal observation pipeline (Issue #114)
     # ------------------------------------------------------------------
 
-    def _get_current_sample(self, elapsed_minutes: float) -> dict:
+    def _get_current_sample(self, elapsed_minutes: float) -> dict | None:
         """Build a sample dict from current sensor readings.
+
+        Issue #1035: returns ``None`` when the indoor or outdoor reading is unavailable,
+        instead of a fake 0.0 that thermal learning would fit as a real temperature.
+        Callers must skip (not append) on ``None``.
 
         Issue #895: deliberately reads ``.primary_value``, never ``.value`` — the
         thermal model fits the whole house's envelope and must never see the
@@ -7505,10 +7512,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else {}
         )
         outdoor = self._get_outdoor_temp(weather_attrs)
+        if indoor is None or outdoor is None:
+            return None
         return {
             "timestamp": dt_util.now().isoformat(),
-            "indoor_temp_f": indoor if indoor is not None else 0.0,
-            "outdoor_temp_f": outdoor if outdoor is not None else 0.0,
+            "indoor_temp_f": indoor,
+            "outdoor_temp_f": outdoor,
             "elapsed_minutes": elapsed_minutes,
         }
 
@@ -7523,11 +7532,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         now = dt_util.now()
         sample = self._get_current_sample(0.0)
-        sample["timestamp"] = now.isoformat()
-        self._pre_heat_sample_buffer.append(sample)
-        # Keep only entries within the buffer window
+        # Prune first so a stale buffer cannot survive an outage and be copied into a
+        # post-recovery session (Issue #1035).
         cutoff = (now - timedelta(minutes=THERMAL_PRE_HEAT_BUFFER_MINUTES)).isoformat()
         self._pre_heat_sample_buffer = [s for s in self._pre_heat_sample_buffer if s["timestamp"] >= cutoff]
+        if sample is None:
+            _LOGGER.debug("Pre-heat sample skipped: reason=indoor_unavailable")
+        else:
+            sample["timestamp"] = now.isoformat()
+            self._pre_heat_sample_buffer.append(sample)
         # Hard cap at 15
         if len(self._pre_heat_sample_buffer) > 15:
             self._pre_heat_sample_buffer = self._pre_heat_sample_buffer[-15:]
@@ -7564,6 +7577,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if obs_type in self._pending_observations:
             self._abandon_observation(obs_type, "new HVAC session started")
 
+        # Issue #1035: one sample read (Issue #895: .primary_value via _get_current_sample).
+        # A session that starts while the indoor sensor is unavailable has no valid
+        # start_indoor_f, so it is not started (and not learned) rather than seeded with 0.0.
+        first_sample = self._get_current_sample(0.0)
+        if first_sample is None:
+            _LOGGER.info(
+                "Thermal HVAC observation not started [type=%s reason=%s n=0/? dt=0.00°F/? elapsed=0m]",
+                obs_type,
+                REJECT_INDOOR_UNAVAILABLE,
+            )
+            self._append_rejection(
+                obs_type,
+                {
+                    "obs_type": obs_type,
+                    "reason_code": REJECT_INDOOR_UNAVAILABLE,
+                    "n_samples": 0,
+                    "n_required": None,
+                    "r_squared": None,
+                    "r_squared_required": THERMAL_MIN_R_SQUARED,
+                    "delta_t_f": 0.0,
+                    "delta_t_required": None,
+                    "elapsed_minutes": 0,
+                    "sf_range": 0.0,
+                    "indoor_direction": "flat",
+                    "timestamp": dt_util.now().isoformat(),
+                },
+            )
+            await self._executor_job(self.learning.save_state)
+            return
         _LOGGER.info(
             "_start_hvac_observation: type=%s starting (prior obs=%s)",
             obs_type,
@@ -7587,8 +7629,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 }
             )
 
-        # Issue #895: .primary_value, not .value — see _get_current_sample() docstring.
-        indoor = self._get_indoor_temp_with_provenance().primary_value
+        indoor = first_sample["indoor_temp_f"]
         import uuid as _uuid_mod
 
         obs: dict = {
@@ -7622,7 +7663,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "session_minutes": None,
             "_phase": "active",
         }
-        first_sample = self._get_current_sample(0.0)
         obs["active_samples"].append(first_sample)
         obs["start_outdoor_f"] = first_sample["outdoor_temp_f"]
 
@@ -7643,7 +7683,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Thermal HVAC observation started: obs_id=%s mode=%s indoor=%.1f°F",
             obs["obs_id"],
             session_mode,
-            indoor if indoor is not None else 0.0,
+            indoor,
         )
 
     def _sample_all_observations(self) -> None:
@@ -7709,6 +7749,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 elapsed = (now - active_start).total_seconds() / 60.0
 
                 sample = self._get_current_sample(elapsed)
+                if sample is None:
+                    continue
                 if phase == "active":
                     samples = obs["active_samples"]
                     if len(samples) < THERMAL_MAX_ACTIVE_SAMPLES:
@@ -7779,6 +7821,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     except Exception:
                         pass
                 sample = self._get_current_sample(elapsed)
+                if sample is None:
+                    continue
                 samples_list = obs.setdefault("samples", [])
                 if len(samples_list) >= THERMAL_MAX_OBS_SAMPLES:
                     self._commit_observation_if_sufficient(obs_type, "max_samples_reached")
@@ -8869,8 +8913,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except Exception:
                 _elapsed = 0.0
             active_samples = obs.get("active_samples", [])
-            if len(active_samples) < THERMAL_MAX_ACTIVE_SAMPLES:
-                active_samples.append(self._get_current_sample(_elapsed))
+            _end_sample = self._get_current_sample(_elapsed)
+            if _end_sample is not None and len(active_samples) < THERMAL_MAX_ACTIVE_SAMPLES:
+                active_samples.append(_end_sample)
             _cur_peak = obs.get("peak_indoor_f")
             if obs_type == OBS_TYPE_HVAC_COOL:
                 # For cooling, peak is the minimum (lowest indoor temp reached)
@@ -9099,6 +9144,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "indoor_direction": _dir_ab,
             "timestamp": dt_util.now().isoformat(),
         }
+        self._append_rejection(obs_type, event)
+        # Issue #491: async_add_executor_job() already returns a scheduled awaitable —
+        # wrapping it in async_create_task() (which requires a coroutine, not a Future)
+        # raised "TypeError: a coroutine was expected, got <Future ...>" on every restart
+        # that hit this abandonment path, crashing the whole coordinator update.
+        self._executor_job(self.learning.save_state)
+
+    def _append_rejection(self, obs_type: str, event: dict) -> None:
+        """Record a structured rejection event, cap the bucket and sync it to LearningState (Issue #1035).
+
+        Recording only: the caller persists (``_abandon_observation`` is sync and fires the save
+        without awaiting; ``_start_hvac_observation`` is async and awaits it).
+        """
         if not hasattr(self, "_rejection_log"):
             self._rejection_log = {}
         bucket = self._rejection_log.setdefault(obs_type, [])
@@ -9107,11 +9165,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             bucket.pop(0)
         # Sync to LearningState so rejection_log is persisted by save_state()
         self.learning._state.rejection_log = self._rejection_log
-        # Issue #491: async_add_executor_job() already returns a scheduled awaitable —
-        # wrapping it in async_create_task() (which requires a coroutine, not a Future)
-        # raised "TypeError: a coroutine was expected, got <Future ...>" on every restart
-        # that hit this abandonment path, crashing the whole coordinator update.
-        self._executor_job(self.learning.save_state)
 
     def _build_learning_health(self) -> dict:
         """Aggregate _rejection_log into a per-obs-type health dict for get_thermal_model().
@@ -9138,6 +9191,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             REJECT_OLS_WRONG_SIGN,
             REJECT_OLS_BOUNDS,
             REJECT_ABANDONED,
+            REJECT_INDOOR_UNAVAILABLE,
             REJECT_WINDOW_TOO_SHORT,
             REJECT_NO_INTERIOR_PEAK,
         ]
@@ -9961,6 +10015,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _lookup_pred_archive(self, now_dt: datetime) -> float | None:
         """Return first-written ODE prediction for this 30-min slot (None on cache miss)."""
         return self._pred_archive.get(self._pred_archive_key(now_dt))
+
+    def _select_pred_indoor(self, now_dt: datetime) -> tuple[float | None, str]:
+        """Select the pred_indoor value for the chart-log 30-min poll plus its source label.
+
+        First-write-wins archive: pred_indoor reflects the ODE made ~4h ago ("archive").
+        Falls back to current ODE[0] only during warmup, the first 4h after restart/install
+        ("ode-warmup"). Returns (None, "none") when neither is available. Independent of
+        the current indoor reading (Issue #1039).
+        """
+        archived = self._lookup_pred_archive(now_dt)
+        if archived is not None:
+            return archived, "archive"
+        if self._last_predicted_indoor:
+            return self._last_predicted_indoor[0].get("temp"), "ode-warmup"
+        return None, "none"
 
     def _read_chart_hvac_action(self, _fan_status: str | None = None) -> str:
         """Return the thermostat's current hvac_action string for chart logging.

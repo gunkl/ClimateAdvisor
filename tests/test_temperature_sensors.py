@@ -619,3 +619,56 @@ def test_forecast_low_sensor_has_measurement_state_class():
     from custom_components.climate_advisor.sensor import ClimateAdvisorForecastLowSensor
 
     assert ClimateAdvisorForecastLowSensor._attr_state_class == SensorStateClass.MEASUREMENT
+
+
+# ---------------------------------------------------------------------------
+# Group D: 30-min chart-log append with indoor=None (Issue #1039)
+# ---------------------------------------------------------------------------
+
+
+class TestChartLogAppendIndoorNone:
+    """Drive the REAL 30-min chart-log append in _async_update_data with indoor=None.
+
+    Production writes pred_indoor regardless of indoor (the archived value was recorded
+    ~4h earlier while healthy); only ``indoor`` is logged as null (Issue #1039).
+    """
+
+    def _run(self, caplog, *, indoor_temp):
+        import logging
+        from datetime import UTC
+
+        now = datetime(2026, 4, 9, 14, 7, 0, tzinfo=UTC)
+        coord = _make_update_data_coord(indoor_temp=indoor_temp)
+        coord._entity_health_state = {}
+        coord._pred_archive[coord._pred_archive_key(now)] = 70.5
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util") as cdt,
+            patch("custom_components.climate_advisor.automation.dt_util") as adt,
+            caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            cdt.now.return_value = now
+            adt.now.return_value = now
+            asyncio.run(coord._async_update_data())
+        polls = [c for c in coord._chart_log.append.call_args_list if c.kwargs.get("event") is None]
+        return coord, polls
+
+    def test_pred_indoor_written_with_null_indoor(self, caplog):
+        coord, polls = self._run(caplog, indoor_temp=None)
+        assert len(polls) >= 1, "30-min append never called (error silently swallowed by contextlib.suppress?)"
+        kw = polls[-1].kwargs
+        assert kw["indoor"] is None
+        assert kw["pred_indoor"] == 70.5
+
+    def test_debug_text_accurate_when_indoor_none(self, caplog):
+        self._run(caplog, indoor_temp=None)
+        text = caplog.text
+        assert "skipping pred_indoor write" not in text
+        assert "indoor logged as null; pred_indoor still written" in text
+
+    def test_pred_indoor_written_with_indoor_present(self, caplog):
+        coord, polls = self._run(caplog, indoor_temp=72.0)
+        assert len(polls) >= 1
+        kw = polls[-1].kwargs
+        assert kw["indoor"] == 72.0
+        assert kw["pred_indoor"] == 70.5
+        assert "indoor logged as null" not in caplog.text

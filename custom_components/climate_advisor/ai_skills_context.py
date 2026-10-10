@@ -895,7 +895,7 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     ]
 
     # Reason codes that indicate the observation was interrupted by normal system operation.
-    _OPERATIONAL_CODES = {"abandoned"}
+    _OPERATIONAL_CODES = {"abandoned", "indoor_unavailable"}
 
     # Reason codes that indicate a signal quality problem worth flagging.
     _QUALITY_FAILURE_CODES = {

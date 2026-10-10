@@ -2378,7 +2378,7 @@ class AutomationEngine:
             self.hass.async_create_task(
                 self._stand_down_whf_for_override_conflict(
                     mode=detected_mode,
-                    indoor_temp=self._indoor_f_for_event(),
+                    indoor_temp=self._get_indoor_temp_f(),
                     event_source="override_detected",
                 )
             )
@@ -2430,7 +2430,7 @@ class AutomationEngine:
                         "classification_mode": classification_mode,
                         "old_setpoint_f": old_setpoint_f,
                         "new_setpoint_f": new_setpoint_f,
-                        "indoor_f": self._indoor_f_for_event(),
+                        "indoor_f": self._get_indoor_temp_f(),
                     },
                 )
         else:
@@ -3156,7 +3156,7 @@ class AutomationEngine:
                     "active": _effective_active,
                     "mode": _cmd_shape,
                     "reason": band.reason,
-                    "indoor_f": self._indoor_f_for_event(),
+                    "indoor_f": self._get_indoor_temp_f(),
                 },
             )
 
@@ -9467,8 +9467,11 @@ class AutomationEngine:
         _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
         _k_active_cool = _thermal.get("k_active_cool")
         _comfort_cool_cg = self.config.get("comfort_cool")
-        _outdoor = self._last_outdoor_temp
-        _indoor_cg = self._get_indoor_temp_f()
+        # Issue #1036: use the readings the decision was made from — a second
+        # read could be None by now and would crash the %.1f / :.1f formatting below.
+        # (Either may be None on MODEL_INELIGIBLE/MISSING_TEMPS, and both on NOT_APPLICABLE; only %s-logged there.)
+        _outdoor = outcome_obj.outdoor
+        _indoor_cg = outcome_obj.indoor
         _unit = self.config.get("temp_unit", "fahrenheit")
 
         _LOGGER.debug(
@@ -9745,7 +9748,7 @@ class AutomationEngine:
                     "floor": _band.floor,
                     "ceiling": _band.ceiling,
                     "occupancy": mode,
-                    "indoor_f": self._indoor_f_for_event(),
+                    "indoor_f": self._get_indoor_temp_f(),
                 },
             )
         await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
@@ -9795,11 +9798,13 @@ class AutomationEngine:
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "occupancy_comfort_restored",
-                    {"mode": c.hvac_mode, "target_f": comfort, "indoor_f": self._indoor_f_for_event()},
+                    {"mode": c.hvac_mode, "target_f": comfort, "indoor_f": decision.indoor_temp_f},
                 )
 
         if decision.notify is HomeNotifyOutcome.SUPPRESSED_NEAR_COMFORT:
-            indoor_temp = self._get_indoor_temp_f()
+            # Issue #1036: the value the decision used (non-None by construction on this
+            # outcome) — a fresh read after the restore await could be None.
+            indoor_temp = decision.indoor_temp_f
             comfort = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
             setback = self.config["setback_heat"] if c.hvac_mode == "heat" else self.config["setback_cool"]
             _LOGGER.info(
@@ -11794,16 +11799,6 @@ class AutomationEngine:
             in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
             sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
         )
-
-    def _indoor_f_for_event(self) -> float | None:
-        """Read current indoor temp from climate entity for event enrichment."""
-        try:
-            state = self.hass.states.get(self.climate_entity)
-            if state is not None:
-                return float(state.attributes["current_temperature"])
-        except (TypeError, ValueError, KeyError, AttributeError):
-            pass
-        return None
 
     def _recent_duplicate(
         self,

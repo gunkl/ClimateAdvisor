@@ -340,6 +340,8 @@ Look for:
 - `"keeping alive"` — multi-window accumulator running; observation extending past 30 min
 - `"Thermal event commit"` — successful commit with k_passive and R²
 - `"abandoned"` / `"max_window_exceeded"` — rejection with reason code
+- `"Thermal HVAC observation not started [type=... reason=indoor_unavailable ...]"` (INFO) — an HVAC session began while the indoor temperature sensor was unreadable, so that session was deliberately not learned (Issue #1035). It is also stored as a structured `indoor_unavailable` rejection: `python3 tools/learning_db.py --rejections --entry-id <id>`. Check the Activity Log for the `indoor_sensor_unavailable` / `indoor_sensor_recovered` rows (Issue #1033) to see how long the outage lasted. The next `"Thermal HVAC observation started"` line shows learning resumed.
+- DEBUG only (enable debug logging): `"Pre-heat sample skipped: reason=indoor_unavailable"` (every tick) and `"Event-driven HVAC sample skipped: type=... reason=indoor_unavailable"` — samples dropped during an outage instead of being stored as fake `0.0°F` readings.
 
 **Step 4 — Common root causes:**
 
@@ -348,6 +350,7 @@ Look for:
 | All rejections `small_delta` | Integer-°F thermostat; ΔT < 0.2°F in 30 min | Normal — multi-window (Issue #126) accumulates up to 4h; check "keeping alive" logs |
 | All rejections `too_few_samples` | Conditions change too fast | Check elapsed_minutes in rejection log; may need longer stable windows |
 | R² rejection logged repeatedly | Short HVAC runs or sensor noise | Use 24h chart view; check run lengths |
+| Rejections show `indoor_unavailable` (elapsed 0) | Indoor sensor was unreadable when an HVAC session started; session not learned (Issue #1035) | Activity Log `indoor_sensor_unavailable` rows; fix the sensor — no action on the thermal model needed |
 | Rejections show `abandoned`, elapsed < 5 min | Condition-change abort (window closed, HVAC started) | Normal if window briefly closed; look for restart immediately after |
 | No rejections AND count stays 0 | Observation never started | Check `hvac_action` / window sensor state; thermal trigger eval logs |
 

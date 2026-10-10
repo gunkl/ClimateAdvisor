@@ -186,10 +186,17 @@ class HomeDecision:
     notification-suppression check, so a restore can happen even when the
     notification itself is suppressed (near-comfort or debounce), and a notification
     can be sent even on an "off" day when no restore occurs.
+
+    ``indoor_temp_f`` (Issue #1036) is the indoor reading the decision was made
+    from (``HomeInputs.indoor_temp_f``), carried so the shell logs/emits the value
+    that drove the decision instead of re-reading the sensor after an await (which
+    could return None). Non-None on SUPPRESSED_NEAR_COMFORT by construction;
+    default None on the NONE outcome.
     """
 
     restore: bool
     notify: HomeNotifyOutcome
+    indoor_temp_f: float | None = None
 
 
 def decide_home_dispatch(inputs: HomeInputs) -> HomeDecision:
@@ -210,7 +217,9 @@ def decide_home_dispatch(inputs: HomeInputs) -> HomeDecision:
         and inputs.setback_f is not None
         and abs(inputs.indoor_temp_f - inputs.comfort_f) < abs(inputs.indoor_temp_f - inputs.setback_f)
     ):
-        return HomeDecision(restore=restore, notify=HomeNotifyOutcome.SUPPRESSED_NEAR_COMFORT)
+        return HomeDecision(
+            restore=restore, notify=HomeNotifyOutcome.SUPPRESSED_NEAR_COMFORT, indoor_temp_f=inputs.indoor_temp_f
+        )
 
     # Check 2: debounce — skip notification if one was sent recently.
     if (
@@ -218,6 +227,8 @@ def decide_home_dispatch(inputs: HomeInputs) -> HomeDecision:
         and inputs.seconds_since_last_notified is not None
         and inputs.seconds_since_last_notified < inputs.debounce_seconds
     ):
-        return HomeDecision(restore=restore, notify=HomeNotifyOutcome.SUPPRESSED_DEBOUNCE)
+        return HomeDecision(
+            restore=restore, notify=HomeNotifyOutcome.SUPPRESSED_DEBOUNCE, indoor_temp_f=inputs.indoor_temp_f
+        )
 
-    return HomeDecision(restore=restore, notify=HomeNotifyOutcome.SEND)
+    return HomeDecision(restore=restore, notify=HomeNotifyOutcome.SEND, indoor_temp_f=inputs.indoor_temp_f)

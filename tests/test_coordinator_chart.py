@@ -1,10 +1,5 @@
 """Tests for Issue #120 — chart log spike suppression.
 
-Two bugs are fixed:
-
-Bug A: pred_indoor must not be written to the chart log when indoor_temp is None
-        (thermostat in unknown/unavailable state, e.g. right after HA restart).
-
 Bug B: _get_indoor_temp() must reject physically implausible sensor readings
         (e.g. thermostat echoing new setpoint into current_temperature) by checking
         against a plausible indoor range [40, 110] °F.
@@ -14,11 +9,13 @@ TDD note
 Bug B tests (range-check_rejects_*) FAIL before the fix because _get_indoor_temp()
 returns raw values without a plausible-range guard.  They pass after the fix.
 
-Bug A tests exercise the guard logic in the chart-log block. Because the guard
-is inline inside _async_update_data() (not a standalone callable), the tests
-verify the intended post-fix behaviour directly rather than through the full
-_async_update_data() path; the Bug B failures are the pre-fix red-bar evidence
-for this issue as a whole.
+Bug A (Issue #120) originally gated the chart-log pred_indoor write on
+``indoor_temp is not None``.  That guard was removed as a side effect of Issue #137,
+and the old Bug A tests only exercised a copy of it (Issue #1039).  Production now
+writes pred_indoor regardless of indoor (the archived value was recorded ~4h earlier
+while healthy; only ``indoor`` is logged as null).  The real selection method
+``_select_pred_indoor`` is tested below and in tests/test_pred_archive.py; the real
+30-min append with indoor=None is tested in tests/test_temperature_sensors.py.
 """
 
 from __future__ import annotations
@@ -54,67 +51,6 @@ def _get_coordinator_class():
 
 def _get_coordinator_module():
     return importlib.import_module("custom_components.climate_advisor.coordinator")
-
-
-# ---------------------------------------------------------------------------
-# Helper: simulate the chart-log guard from _async_update_data lines 1182-1186
-# ---------------------------------------------------------------------------
-
-
-def _eval_pred_indoor_guard(indoor_temp, pred_in, now_h=10):
-    """Evaluate the chart-log pred_indoor guard as it should exist post-fix.
-
-    Mirrors the production code:
-        if _pred_in and _now_h < len(_pred_in) and indoor_temp is not None:
-            _pred_indoor_val = _pred_in[_now_h]["temp"]
-
-    Used by Bug A tests to assert the INTENDED behaviour is correct.
-    """
-    _pred_indoor_val = None
-    if pred_in and now_h < len(pred_in) and indoor_temp is not None:
-        _pred_indoor_val = pred_in[now_h]["temp"]
-    return _pred_indoor_val
-
-
-# ---------------------------------------------------------------------------
-# TestChartLogSpikeSuppression  (Bug A)
-# ---------------------------------------------------------------------------
-
-
-class TestChartLogSpikeSuppression:
-    """Bug A: pred_indoor must not be written when indoor_temp is None.
-
-    The chart-log block in _async_update_data() must gate the pred_indoor write
-    on ``indoor_temp is not None``.  These tests verify that the guard logic
-    produces the correct values — the Bug B failures below provide the TDD
-    red-bar for this issue's pre-fix state.
-    """
-
-    def test_pred_indoor_not_written_when_indoor_temp_none(self):
-        """When indoor_temp is None, pred_indoor guard must yield None.
-
-        Simulates a HA-restart tick where the thermostat is in unknown state
-        (indoor_temp=None) but a forecast-based prediction is available.
-        The guard must suppress the pred_indoor write so the chart log does
-        not record a permanently corrupt spike.
-        """
-        _pred_in = [{"temp": float(i + 50)} for i in range(24)]  # hour 10 → 60.0
-
-        result = _eval_pred_indoor_guard(indoor_temp=None, pred_in=_pred_in)
-
-        assert result is None, (
-            "pred_indoor_val must be None when indoor_temp is None; "
-            f"got {result!r} — Bug A guard missing from coordinator.py"
-        )
-
-    def test_pred_indoor_written_when_indoor_temp_available(self):
-        """Regression guard: when indoor_temp is present, pred_indoor IS written."""
-        _pred_in = [{"temp": float(i + 50)} for i in range(24)]  # hour 10 → 60.0
-        expected = _pred_in[10]["temp"]  # 60.0
-
-        result = _eval_pred_indoor_guard(indoor_temp=72.0, pred_in=_pred_in)
-
-        assert result == expected, f"pred_indoor_val should be {expected} when indoor_temp is available; got {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -399,44 +335,25 @@ class TestPredIndoorIntegration:
             f"ODE [0].temp={result[0]['temp']:.2f} equals seed 69.0 — physics is not diverging; model may be ignored"
         )
 
-    def test_pred_indoor_diverges_from_actual_when_model_active(self):
+    def test_pred_indoor_warmup_fallback_uses_real_select_pred_indoor(self):
         """pred_indoor warmup path: archive miss falls back to _last_predicted_indoor[0]['temp'].
 
-        Tests the warmup-fallback branch of the first-write-wins archive selection
-        logic (Issue #139).  During the first 4h after a restart the archive is empty,
-        so pred_indoor is sourced from the current ODE curve's [0] entry — the same
-        source as before the archive was introduced.
-
-        Selection logic (coordinator.py):
-          _archived_pred = self._lookup_pred_archive(_now_dt)  # → None (cache miss)
-          if _archived_pred is not None:
-              _pred_indoor_val = _archived_pred
-          elif self._last_predicted_indoor:
-              _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
-
-        Path exercised: archive empty → uses _last_predicted_indoor[0].
+        Drives the REAL ``_select_pred_indoor`` (Issue #139 archive, Issue #1039 extraction)
+        rather than a copy of its branching.  During the first 4h after a restart the
+        archive is empty, so pred_indoor is sourced from the current ODE curve's [0] entry.
         """
-        _last_predicted_indoor = [{"temp": 71.5, "ts": "2026-05-13T15:00:00"}]
-        indoor_temp = 69.0
+        from datetime import datetime
 
-        # Replicate the updated selection logic from coordinator.py (archive-aware branch).
-        # _pred_archive is empty → _archived_pred is None → warmup fallback.
-        _pred_archive: dict[int, float] = {}
-        _archived_pred = None  # simulates lookup_pred_archive miss (empty archive)
+        now = datetime(2026, 5, 13, 14, 30, 0, tzinfo=UTC)
+        coord = object.__new__(_get_coordinator_class())
+        coord._pred_archive = {}
+        coord._last_predicted_indoor = [{"temp": 71.5, "ts": "2026-05-13T15:00:00"}]
+        select = types.MethodType(_get_coordinator_class()._select_pred_indoor, coord)
 
-        _pred_indoor_val = None
-        if _archived_pred is not None:
-            _pred_indoor_val = _archived_pred
-        elif _last_predicted_indoor:
-            _pred_indoor_val = _last_predicted_indoor[0].get("temp")  # warmup fallback
+        value, source = select(now)
 
-        assert _pred_indoor_val == 71.5, (
-            f"pred_indoor must be 71.5 (warmup fallback from ODE[0]); got {_pred_indoor_val!r}"
-        )
-        assert abs(_pred_indoor_val - indoor_temp) > 0, (
-            f"pred_indoor ({_pred_indoor_val}) must differ from indoor_temp ({indoor_temp})"
-        )
-        assert _pred_archive == {}, "archive must remain empty — warmup fallback does not populate it"
+        assert (value, source) == (71.5, "ode-warmup")
+        assert coord._pred_archive == {}, "warmup fallback must not populate the archive"
 
 
 # ---------------------------------------------------------------------------

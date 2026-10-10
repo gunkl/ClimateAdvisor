@@ -127,10 +127,12 @@ class TestMissingTemps:
     def test_outdoor_none(self) -> None:
         decision = decide_ode_ceiling_guard(_inputs(predicted_indoor=_CURVE, outdoor=None))
         assert decision.outcome == OdeCeilingGuardOutcome.MISSING_TEMPS
+        assert (decision.indoor, decision.outdoor) == (74.0, None)
 
     def test_indoor_none(self) -> None:
         decision = decide_ode_ceiling_guard(_inputs(predicted_indoor=_CURVE, indoor=None))
         assert decision.outcome == OdeCeilingGuardOutcome.MISSING_TEMPS
+        assert (decision.indoor, decision.outdoor) == (None, 85.0)
 
 
 class TestNoCeilingThreshold:

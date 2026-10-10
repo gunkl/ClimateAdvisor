@@ -99,6 +99,8 @@ def _escalate_decision() -> ClassificationDecision:
         hours_to_breach=2.0,
         lead_min=30.0,
         should_deactivate_fan=True,
+        indoor=76.0,
+        outdoor=90.0,
     )
     return ClassificationDecision(
         event_kind=ClassificationFsmEventKind.CYCLE_EVALUATED,

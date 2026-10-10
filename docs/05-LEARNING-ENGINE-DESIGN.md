@@ -204,7 +204,7 @@ Rolling commit rules (in `_commit_rolling_window_obs()`):
 | `_abandon_observation(obs_type, reason)` | `coordinator.py` | Discards pending observation; logs WARNING with type, reason, sample count, and ΔT |
 | `_update_thermal_model_cache(obs)` | `learning.py` | Applies committed observation to EWMA cache; routes each mode to the correct parameter |
 
-**Pre-heat buffer:** `_pre_heat_sample_buffer` is sampled every coordinator poll regardless of HVAC state. Holds at most `THERMAL_PRE_HEAT_BUFFER_MINUTES (15)` entries. When `_start_hvac_observation()` fires, these samples are included in the HVAC observation's `pre_heat_samples` list and contribute to the OLS regression for `k_passive`.
+**Pre-heat buffer:** `_pre_heat_sample_buffer` is sampled every coordinator poll regardless of HVAC state, except while the indoor (or outdoor) reading is unavailable: `_get_current_sample()` returns `None` then and nothing is appended (Issue #1035; stale entries are still pruned). A heating/cooling session that starts during such an outage is not started at all and records an `indoor_unavailable` rejection — see [thermal-model-v3-spec.md](thermal-model-v3-spec.md#indoor-sensor-outage-handling-issue-1035). Holds at most `THERMAL_PRE_HEAT_BUFFER_MINUTES (15)` entries. When `_start_hvac_observation()` fires, these samples are included in the HVAC observation's `pre_heat_samples` list and contribute to the OLS regression for `k_passive`.
 
 ### Parameter Extraction
 

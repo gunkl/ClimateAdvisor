@@ -89,13 +89,23 @@ class OdeCeilingGuardDecision:
     """The outcome, plus every computed value the shell's logging/event payload
     needs (avoids re-deriving breach_ts/hours_to_breach/lead_min a second time
     in automation.py — mirrors ``nat_vent_exit.py``'s ``NatVentExitDecision``
-    convention of carrying its own computed audit fields)."""
+    convention of carrying its own computed audit fields).
+
+    ``indoor``/``outdoor`` (Issue #1036) are the exact readings the decision was
+    made from, set on every outcome except NOT_APPLICABLE. They are non-None on
+    every outcome after the MISSING_TEMPS check; on MODEL_INELIGIBLE and
+    MISSING_TEMPS they carry whatever was read (either may be None, which is how
+    the DEBUG line shows which reading was missing). The shell must log/emit
+    these rather than re-reading the sensors, which could have become None since
+    the decision was computed. They stay None only for NOT_APPLICABLE."""
 
     outcome: OdeCeilingGuardOutcome
     breach_ts: datetime | None = None
     hours_to_breach: float | None = None
     lead_min: float | None = None
     should_deactivate_fan: bool = False
+    indoor: float | None = None
+    outdoor: float | None = None
 
 
 @dataclass(frozen=True)
@@ -184,26 +194,36 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
         return OdeCeilingGuardDecision(outcome=OdeCeilingGuardOutcome.NOT_APPLICABLE)
 
     if not _model_eligible(inputs):
-        return OdeCeilingGuardDecision(outcome=OdeCeilingGuardOutcome.MODEL_INELIGIBLE)
+        return OdeCeilingGuardDecision(
+            outcome=OdeCeilingGuardOutcome.MODEL_INELIGIBLE, indoor=inputs.indoor, outdoor=inputs.outdoor
+        )
 
     if inputs.outdoor is None or inputs.indoor is None:
-        return OdeCeilingGuardDecision(outcome=OdeCeilingGuardOutcome.MISSING_TEMPS)
+        return OdeCeilingGuardDecision(
+            outcome=OdeCeilingGuardOutcome.MISSING_TEMPS, indoor=inputs.indoor, outdoor=inputs.outdoor
+        )
 
     if inputs.ceiling_threshold is None:
         # Issue #402: WHOLE_HOUSE/BOTH archetypes have no ceiling-based compressor
         # handoff at all — never escalate, regardless of nat-vent transients.
-        return OdeCeilingGuardDecision(outcome=OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD)
+        return OdeCeilingGuardDecision(
+            outcome=OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD, indoor=inputs.indoor, outdoor=inputs.outdoor
+        )
 
     # Issue #247: dormancy is THREE conditions — outdoor cooler than indoor AND
     # nat-vent actually running AND indoor still within the ceiling threshold.
     if inputs.outdoor <= inputs.indoor and inputs.natural_vent_active and inputs.indoor <= inputs.ceiling_threshold:
-        return OdeCeilingGuardDecision(outcome=OdeCeilingGuardOutcome.DORMANT)
+        return OdeCeilingGuardDecision(
+            outcome=OdeCeilingGuardOutcome.DORMANT, indoor=inputs.indoor, outdoor=inputs.outdoor
+        )
 
     tolerance = _CEILING_BRIDGE_TOLERANCE_F if inputs.k_passive_via_bridge else 0.0
     threshold = inputs.comfort_cool + tolerance
     breach_ts = _scan_for_breach(inputs.predicted_indoor, threshold)
     if breach_ts is None:
-        return OdeCeilingGuardDecision(outcome=OdeCeilingGuardOutcome.NO_BREACH_PREDICTED)
+        return OdeCeilingGuardDecision(
+            outcome=OdeCeilingGuardOutcome.NO_BREACH_PREDICTED, indoor=inputs.indoor, outdoor=inputs.outdoor
+        )
 
     hours_to_breach = (_to_utc(breach_ts) - _to_utc(inputs.now)).total_seconds() / 3600
 
@@ -223,6 +243,8 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
             hours_to_breach=hours_to_breach,
             lead_min=lead_min,
             should_deactivate_fan=inputs.natural_vent_active,
+            indoor=inputs.indoor,
+            outdoor=inputs.outdoor,
         )
 
     return OdeCeilingGuardDecision(
@@ -230,4 +252,6 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
         breach_ts=breach_ts,
         hours_to_breach=hours_to_breach,
         lead_min=lead_min,
+        indoor=inputs.indoor,
+        outdoor=inputs.outdoor,
     )

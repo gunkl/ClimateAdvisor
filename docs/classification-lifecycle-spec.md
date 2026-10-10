@@ -67,8 +67,8 @@
 | Outcome | Condition | Shell action |
 |---|---|---|
 | `NOT_APPLICABLE` | `predicted_indoor` empty/None, or `classification.hvac_mode != "off"` | None — matches production's outer `if predicted_indoor and hvac_mode == "off":` guard |
-| `MODEL_INELIGIBLE` | `k_passive` missing/non-negative, or confidence is `"none"` without bridge, or `comfort_cool` missing | DEBUG log only |
-| `MISSING_TEMPS` | `outdoor` or `indoor` unavailable | DEBUG log only |
+| `MODEL_INELIGIBLE` | `k_passive` missing/non-negative, or confidence is `"none"` without bridge, or `comfort_cool` missing | DEBUG log only (carries the `indoor`/`outdoor` readings, either may be `None`) |
+| `MISSING_TEMPS` | `outdoor` or `indoor` unavailable | DEBUG log only (carries the `indoor`/`outdoor` readings; the unavailable one is `None`) |
 | `NO_CEILING_THRESHOLD` | Archetype is WHOLE_HOUSE/BOTH (Issue #402) | DEBUG log only — never escalates for this archetype |
 | `DORMANT` | Issue #247's 3-condition dormancy test: `outdoor <= indoor` AND `natural_vent_active` AND `indoor <= ceiling_threshold` | DEBUG log only |
 | `NO_BREACH_PREDICTED` | Predicted curve never crosses `comfort_cool (+ bridge tolerance)` | DEBUG log only |
@@ -81,7 +81,7 @@
 
 `apply_classification()`'s ceiling-guard section (automation.py) calls the FSM unconditionally. As of Phase 6 (Issues #757–#770), the legacy inline block has been deleted — the FSM is the sole authority.
 
-`_resolve_classification_fsm_state()` builds one `ClassificationFsmInputs` snapshot and calls `classification_fsm.transition()`; `_apply_ode_ceiling_guard_decision()` then reproduces the exact same logging/event/HVAC-write behavior, driven by the returned `OdeCeilingGuardDecision`.
+`_resolve_classification_fsm_state()` builds one `ClassificationFsmInputs` snapshot and calls `classification_fsm.transition()`; `_apply_ode_ceiling_guard_decision()` then reproduces the exact same logging/event/HVAC-write behavior, driven by the returned `OdeCeilingGuardDecision`. The decision also carries the exact `indoor` and `outdoor` readings it was made from (Issue #1036; non-None on every outcome after the missing-temps check; on MODEL_INELIGIBLE / MISSING_TEMPS they carry whatever was read, so a `None` marks the missing reading; `None` for both only on NOT_APPLICABLE); the shell logs and emits those values and never re-reads the sensors, so a sensor dropout between decision and logging cannot raise a `TypeError` in the `:.1f` formatting.
 
 ## Shadow-Diagnostic Coverage (historical)
 

@@ -3369,7 +3369,10 @@ The temperature forecast chart displays four activity bars fed by `ChartStateLog
 3. Manual override event (event-driven)
 4. HVAC action transition event (event-driven)
 
-All four sites are covered by tests in `tests/test_coordinator_chart.py`.
+The 30-minute poll site's `pred_indoor` selection is covered by real-code tests that
+call `ClimateAdvisorCoordinator._select_pred_indoor()` and the real chart-log append
+(see §20 Test coverage); the remaining sites are covered by the other
+`tests/test_coordinator_chart.py` classes.
 
 ---
 
@@ -3382,18 +3385,24 @@ restart — `indoor_temp` is `None` for that 30-minute tick and the chart-log `i
 field is written as null, so a restart artifact never becomes a spike on the actual
 indoor line.
 
-**`pred_indoor` is NOT gated on `indoor_temp`.** An earlier version of this section
+**`pred_indoor` is NOT gated on `indoor_temp` (write-always, Issue #1039).** An earlier version of this section
 claimed `pred_indoor` and `pred_outdoor` were only written when `indoor_temp` is
 available. The code in `_async_update_data()` (the `chart_log append: event=30min_poll`
 block) does not do that: when `indoor_temp is None` it emits only a `DEBUG` line
-(`"chart log: indoor_temp unavailable — skipping pred_indoor write ..."`, whose wording is
-misleading), then sets `_pred_indoor_val` from the first-write-wins prediction archive
-(`_lookup_pred_archive`) and, only during warm-up, from `_last_predicted_indoor[0]`. The
-value is written regardless of `indoor_temp`. So during a sensor outage the chart log
-holds `indoor=null` with a real `pred_indoor`; this is harmless because the archived
-prediction was made ~4 h earlier and does not depend on the current reading. The tests
-named `test_pred_indoor_*` in `tests/test_coordinator_chart.py` exercise a local helper
-that models the old guard, not the production block; treat them as stale.
+(`"chart log: indoor_temp unavailable — indoor logged as null; pred_indoor still written ..."`;
+before Issue #1039 the wording said "skipping pred_indoor write", which was false), then
+calls `ClimateAdvisorCoordinator._select_pred_indoor(now_dt) -> (value, source)`, which
+returns the first-write-wins prediction archive value (`_lookup_pred_archive`, source
+`"archive"`), else, only during warm-up, `_last_predicted_indoor[0]["temp"]` (source
+`"ode-warmup"`), else `(None, "none")`. The 30-minute append and its later source-tag
+DEBUG both use this one method. The value is written regardless of `indoor_temp`, so
+during a sensor outage the chart log holds `indoor=null` with a real `pred_indoor`; this
+is harmless because the archived prediction was made ~4 h earlier and does not depend on
+the current reading (no consumer computes pred − actual, and chart buckets average
+non-null values only). The earlier tests named `test_pred_indoor_not_written_when_indoor_temp_none`
+/ `test_pred_indoor_written_when_indoor_temp_available` tested a local copy of a guard
+production no longer had; they were removed in Issue #1039 and replaced by tests of the
+real method.
 
 ### Bug B — plausible indoor temperature range filter
 
@@ -3544,8 +3553,12 @@ the timeline, reason and recovery (see `docs/entity-health-brief.md`).
 
 | Test | File |
 |---|---|
-| `test_pred_indoor_not_written_when_indoor_temp_none` | `tests/test_coordinator_chart.py` |
-| `test_pred_indoor_written_when_indoor_temp_available` | `tests/test_coordinator_chart.py` |
+| `TestSelectPredIndoor` (archive wins, warm-up fallback, none, archived 0.0 still archive) | `tests/test_pred_archive.py` |
+| `test_pred_indoor_warmup_fallback_uses_real_select_pred_indoor` | `tests/test_coordinator_chart.py` |
+| `TestChartLogAppendIndoorNone` (`pred_indoor` written with null indoor, accurate DEBUG text, written with indoor present) | `tests/test_temperature_sensors.py` |
+| Issue #1035 thermal outage: `_get_current_sample` None, pre-heat prune/skip, HVAC start skipped + `indoor_unavailable` rejection, learning-health and AI-context registries, event-driven skip | `tests/test_thermal_sample_outage.py` |
+| Issue #1036 snapshots: `HomeDecision.indoor_temp_f`, `OdeCeilingGuardDecision.indoor/outdoor`, no crash when indoor vanishes | `tests/test_indoor_snapshot_decisions.py` |
+| Issue #1038 engine event indoor: Celsius conversion, sensor source, implausible readings | `tests/test_engine_event_indoor_unit.py` |
 | `test_indoor_temp_range_check_rejects_extreme_low` | `tests/test_coordinator_chart.py` |
 | `test_indoor_temp_range_check_rejects_extreme_high` | `tests/test_coordinator_chart.py` |
 | `test_indoor_temp_range_check_accepts_normal` | `tests/test_coordinator_chart.py` |
@@ -3566,7 +3579,7 @@ No OLS math, automation behavior, or thermal thresholds changed in Issue #124. T
 
 ### 21.2 Rejection Reason Codes
 
-Six `REJECT_*` constants in `const.py` identify every point where an observation can be discarded. Each constant is also stored as the `reason_code` field in the `ThermalRejectionEvent` emitted at that point.
+Seven `REJECT_*` constants in `const.py` identify every point where an observation can be discarded. Each constant is also stored as the `reason_code` field in the `ThermalRejectionEvent` emitted at that point.
 
 | Constant | Value | When fired |
 |---|---|---|
@@ -3576,6 +3589,7 @@ Six `REJECT_*` constants in `const.py` identify every point where an observation
 | `REJECT_OLS_WRONG_SIGN` | `"ols_wrong_sign"` | OLS produced a positive k_passive (physics violation) |
 | `REJECT_OLS_BOUNDS` | `"ols_bounds"` | k_passive outside `[THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX]` = `[-0.5, -0.001]` hr⁻¹ |
 | `REJECT_ABANDONED` | `"abandoned"` | Observation abandoned before OLS could run (e.g., HVAC mode change, wall-clock timeout) |
+| `REJECT_INDOOR_UNAVAILABLE` | `"indoor_unavailable"` | An HVAC observation could not start because the indoor sensor was unreadable at session start (Issue #1035). Operational interruption, not a signal-quality failure; recorded via `_append_rejection()`, no OLS ran |
 
 ### 21.3 `ThermalRejectionEvent` Fields
 

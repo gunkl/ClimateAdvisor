@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.107] — 2026-10-25
+
+- Fix #1104: with no fan configured, a leftover "fan running" flag could make Climate Advisor repeatedly restore heating and restart the automation grace period about once a minute (and repeat "grace period expired" notifications). The flag is now cleared, never adopted from the thermostat's blower, and ignored on restart when no fan is configured.
+
 ## [0.7.106] — 2026-10-11
 
 - Fix #1095: when automation holds the whole-house fan back (for example during a grace period after you turned the fan off), the log and Status card now say why and when it ends, and a new End Grace Period button lets you end it without resuming.

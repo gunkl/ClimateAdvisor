@@ -1601,7 +1601,7 @@ class TestFanSerialization:
 
     def test_restore_state_loads_fan_fields(self):
         """restore_state populates fan tracking fields from saved data."""
-        engine = _make_automation_engine()
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
 
         engine.restore_state(
             {

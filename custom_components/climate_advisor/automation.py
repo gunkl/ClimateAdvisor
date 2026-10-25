@@ -7786,6 +7786,9 @@ class AutomationEngine:
             # system that never actually ran natural ventilation in that window
             # (Issue #893/#984).
             decision = "adopt-circulation"
+            if fan_mode == FAN_MODE_DISABLED:
+                _LOGGER.info("Fan reconcile: no fan configured — thermostat blower not adopted")
+                return
             self._fan_active = True
             if self._fan_on_since is None:
                 self._fan_on_since = dt_util.now().isoformat()
@@ -13657,6 +13660,11 @@ class AutomationEngine:
             release_suppression = restore_hvac
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
+            # Callers pre-set _fan_active before calling; nothing else clears it with no fan.
+            if self._fan_active or self._fan_on_since is not None:
+                _LOGGER.warning("Fan mode disabled — clearing stale fan_active (%s)", reason)
+                self._fan_active = False
+                self._fan_on_since = None
             return FanCommandResult.DISABLED
 
         if self._fan_override_active and not bypass_absolute_override:
@@ -14412,6 +14420,12 @@ class AutomationEngine:
         self._last_action_reason = state.get("last_action_reason")
         self._fan_active = state.get("fan_active", False)
         self._fan_on_since = state.get("fan_on_since")
+        if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_DISABLED and (
+            self._fan_active or self._fan_on_since is not None
+        ):
+            _LOGGER.warning("Ignoring persisted fan_active=%s — fan mode is disabled", self._fan_active)
+            self._fan_active = False
+            self._fan_on_since = None
         # Issue #835: unlike override/grace state, these ARE restored (not clean-slate)
         # — forgetting a recent heat/cool cycle on restart would let the
         # hvac_fan_restrict_mode guard immediately approve activation into a still-wet

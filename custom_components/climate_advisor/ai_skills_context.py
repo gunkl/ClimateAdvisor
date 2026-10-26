@@ -578,6 +578,9 @@ fan_status values explained:
   running (manual override) — fan running; user overrode CA's command at the thermostat
   running (untracked)       — thermostat reports fan on but CA's _fan_active=False;
                              typical after HA restart, or post-heat blowdown transient
+  running (thermostat)      — the thermostat's own schedule/circulation blower (hvac_action=fan, fan_mode
+                             attr auto) that CA did not command and does not own; shown instead of
+                             'running (untracked)' (see fan_observed_started/stopped events)
   off (manual override)     — _fan_override_active=True AND _fan_active=False; user turned
                              the fan on at the thermostat (setting _fan_override_active=True),
                              then turned it off before the grace period expired. The override
@@ -2366,6 +2369,40 @@ def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
     return "Fan stopped (external)", settings
 
 
+def _render_fan_observed_started(p: dict, unit: str) -> tuple[str, str]:
+    origin = str(p.get("origin", "unknown")).replace("_", " ")
+    action = str(p.get("hvac_action", "")).strip()
+    mode = str(p.get("thermostat_fan_mode", "")).strip()
+    cfg = str(p.get("fan_mode_config", "")).strip()
+    settings = (
+        f"thermostat blower on (CA did not command; {origin}; fan_mode={mode or 'n/a'}, "
+        f"hvac_action={action or 'n/a'}; CA fan config: {cfg or 'n/a'})"
+    )
+    return "Thermostat fan running (observed, not CA-controlled)", settings
+
+
+def _render_fan_observed_stopped(p: dict, unit: str) -> tuple[str, str]:
+    minutes = p.get("duration_minutes")
+    cfg = str(p.get("fan_mode_config", "")).strip()
+    dur = f" after {minutes} min" if minutes is not None else ""
+    return "Thermostat fan stopped (observed)", f"thermostat blower off{dur} (CA fan config: {cfg or 'n/a'})"
+
+
+def _render_fan_ownership_self_healed(p: dict, unit: str) -> tuple[str, str]:
+    since = p.get("was_on_since")
+    settings = "CA released a fan it believed it was running" + (f" (since {since})" if since else "")
+    return "Fan ownership cleaned up (self-heal)", settings
+
+
+def _render_fan_orphan_released(p: dict, unit: str) -> tuple[str, str]:
+    old = p.get("old_fan_mode")
+    sent = p.get("command_sent")
+    return (
+        "Fan released after configuration change",
+        f"thermostat fan_mode {old} -> {sent} (CA had left it on under the previous configuration)",
+    )
+
+
 def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
     """Issue #567: branch on `trigger` — not every fan_cancel event is a user action.
 
@@ -2851,6 +2888,16 @@ def _render_incident_detected(p: dict, unit: str) -> tuple[str, str]:
         if result:
             tried += f" ({result})"
         settings_parts.append(tried)
+    if cls == "grace_churn":
+        settings_parts.append(
+            f"same grace '{p.get('trigger')}' started {p.get('count')}x in {p.get('window_minutes')} min"
+            f" ({p.get('first_time')} .. {p.get('last_time')}); CA fan config: {p.get('fan_mode_config')}"
+            + (
+                f"; last fan event: {p['last_fan_event'].get('type')}"
+                if isinstance(p.get("last_fan_event"), dict)
+                else ""
+            )
+        )
     settings = ", ".join(settings_parts)
     return label, settings
 
@@ -3061,6 +3108,10 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "stranded_hvac_suppression_restored": _render_stranded_hvac_suppression_restored,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,
+    "fan_observed_started": _render_fan_observed_started,
+    "fan_observed_stopped": _render_fan_observed_stopped,
+    "fan_ownership_self_healed": _render_fan_ownership_self_healed,
+    "fan_orphan_released": _render_fan_orphan_released,
     "fan_cancel": _render_fan_cancel,
     "nat_vent_outdoor_rise_exit": _render_nat_vent_outdoor_rise_exit,
     "nat_vent_reconcile_exit": _render_nat_vent_reconcile_exit,

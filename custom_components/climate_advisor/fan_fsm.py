@@ -297,6 +297,7 @@ class FanFsmInputs:
     hysteresis: float = 0.0
     manual_override_active: bool = False
     manual_override_mode: str | None = None
+    archetype_requires_open_sensor: bool = False
 
 
 @dataclass(frozen=True)
@@ -391,6 +392,7 @@ def _thermostat_check_inputs(inputs: FanFsmInputs) -> FanThermostatInputs:
         natural_vent_active=inputs.natural_vent_active,
         manual_override_active=inputs.manual_override_active,
         manual_override_mode=inputs.manual_override_mode,
+        archetype_requires_open_sensor=inputs.archetype_requires_open_sensor,
     )
 
 

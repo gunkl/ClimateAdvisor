@@ -72,6 +72,7 @@ class FanThermostatInputs:
     natural_vent_active: bool
     manual_override_active: bool
     manual_override_mode: str | None
+    archetype_requires_open_sensor: bool = False
 
 
 def resolve_hard_exit_floor(
@@ -142,6 +143,11 @@ def decide_fan_thermostat_check(inputs: FanThermostatInputs) -> FanThermostatOut
     # own priority order for the same reason.
     if inputs.manual_override_active and inputs.manual_override_mode not in (None, "off"):
         return FanThermostatOutcome.STOP_MANUAL_OVERRIDE_CONFLICT
+
+    # --- Check 0b (Issue #1103): an HVAC blower (no nat-vent session, archetype needs no open sensor)
+    # only circulates indoor air; floor/outdoor-rise rules do not apply to it ---
+    if not inputs.natural_vent_active and not inputs.archetype_requires_open_sensor:
+        return FanThermostatOutcome.KEEP
 
     # --- Check 1: free-cooling direction guard (Issue #327) ---
     # Non-strict >=, NO hysteresis — this boundary is deliberately different

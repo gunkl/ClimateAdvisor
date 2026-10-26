@@ -107,6 +107,8 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._outdoor_temp_today_sample_count = 0
     ae._nat_vent_outdoor_exit_time = None
     ae._grace_active = False
+    ae._grace_churn_starts = {}  # Issue #1104: grace_churn tracking (set by __init__ in production)
+    ae._grace_churn_last_emit = {}
     ae._grace_protects_override = False
     ae._override_confirm_pending = False
     ae._grace_end_time = None

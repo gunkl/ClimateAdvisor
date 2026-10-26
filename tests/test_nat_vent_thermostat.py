@@ -819,6 +819,11 @@ class TestReconcileFanOnStartupSleepAwareFloor:
         FAN_MODE_HVAC silent-adopt exemption is scoped to "no sensor open, ordinary
         circulation" only, not to every ineligible case."""
         ae = self._make_reconcile_engine(fan_mode=FAN_MODE_HVAC)
+        # Issue #1103: an UNOWNED fan the thermostat reports as "on" (not its own schedule blower) is
+        # still adopted; the schedule-blower case is observe-only (next test).
+        live = MagicMock()
+        live.attributes = {"fan_modes": ["auto", "on"], "fan_mode": "on", "hvac_action": "fan"}
+        ae.hass.states.get.return_value = live
         ae._emit_event_callback = MagicMock()
 
         with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
@@ -835,6 +840,35 @@ class TestReconcileFanOnStartupSleepAwareFloor:
         ae._emit_event_callback.assert_not_called()
         assert ae._fan_active is True
         assert ae._natural_vent_active is False
+
+    def test_hvac_thermostat_schedule_blower_is_observed_not_adopted(self):
+        """Issue #1103: same daytime-ineligible reading and no open sensor, but the live thermostat
+        reports its own schedule blower (hvac_action "fan", fan_mode attribute "auto") with no CA record.
+        The occupant's Ecobee keeps running its fan-minimum-runtime blower and CA neither claims it
+        (_fan_active False), stops it, nor starts a grace/nat-vent exit -- it only records
+        fan_observed_started."""
+        ae = self._make_reconcile_engine(fan_mode=FAN_MODE_HVAC)
+        live = MagicMock()
+        live.attributes = {"fan_modes": ["auto", "on"], "fan_mode": "auto", "hvac_action": "fan"}
+        ae.hass.states.get.return_value = live
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
+            asyncio.run(
+                ae.reconcile_fan_on_startup(
+                    indoor=67.0,
+                    outdoor=59.0,
+                    thermostat_fan_running=True,
+                    any_sensor_open=False,
+                )
+            )
+
+        ae._exit_nat_vent.assert_not_called()
+        assert ae._fan_active is False
+        assert ae._natural_vent_active is False
+        assert ae._grace_active is False
+        assert [e[0] for e in emitted] == ["fan_observed_started"], emitted
 
     def test_hvac_archetype_with_open_sensor_still_turns_off(self):
         """Issue #984 regression fix: a FAN_MODE_HVAC fan running and NOT nat-vent

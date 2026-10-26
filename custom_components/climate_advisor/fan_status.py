@@ -22,8 +22,12 @@ FAN_STATUS_ACTIVE_VALUES: frozenset[str] = frozenset(
         "active (unconfirmed)",
         "running (manual override)",
         "running (untracked)",
+        "running (thermostat)",
     }
 )
+
+# Observed (not CA-controlled) thermostat-schedule blower: one story via fan_observed_* events, not an anomaly.
+FAN_STATUS_THERMOSTAT = "running (thermostat)"
 
 
 def is_ca_fan_running(fan_status: str) -> bool:

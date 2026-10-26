@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from .const import FAN_MODE_DISABLED
+
 # Preference order when resolving "turn the fan on" against a real fan_modes list —
 # checked case-insensitively, first match wins.
 _ON_PREFERENCE = ("on", "high", "medium", "low")
@@ -27,6 +29,29 @@ _OFF_PREFERENCE = ("auto", "off", "low")
 # Values that mean "fan is not actively running" when read back from a real entity —
 # anything NOT in this set (and non-empty) is treated as an active/running fan mode.
 _INACTIVE_FAN_MODE_VALUES = frozenset({"", "auto", "off"})
+
+
+def is_thermostat_schedule_signal(fan_mode_attr: str, hvac_action_attr: str) -> bool:
+    """True when the thermostat's own schedule is the only reason its blower runs.
+
+    ``hvac_action == "fan"`` while the ``fan_mode`` attribute is in the inactive set
+    (empty/auto/off): e.g. an Ecobee fan-min-on-time or the post-compressor tail. A
+    ``fan_mode`` attribute that reads active ("on", a named speed) is a fan someone
+    commanded, not the thermostat's schedule.
+    """
+    return (
+        str(hvac_action_attr).strip().lower() == "fan"
+        and str(fan_mode_attr).strip().lower() in _INACTIVE_FAN_MODE_VALUES
+    )
+
+
+def fan_control_enabled(fan_mode: str) -> bool:
+    """True when Climate Advisor controls a fan at all (any configured fan_mode but disabled).
+
+    Single predicate for "is fan control configured" — a disabled install owns no fan, so the
+    thermostat's blower is never CA's to adopt, time, or override-track.
+    """
+    return fan_mode != FAN_MODE_DISABLED
 
 
 def resolve_fan_mode_command(fan_modes: list[str] | None, intent: Literal["on", "off"]) -> str | None:

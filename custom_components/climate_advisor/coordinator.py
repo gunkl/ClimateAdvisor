@@ -258,8 +258,9 @@ from .const import (
     is_unavailable_state,
 )
 from .entity_health import run_entity_health_sweep
-from .fan_mode_resolver import is_thermostat_fan_physically_active
+from .fan_mode_resolver import fan_control_enabled, is_thermostat_fan_physically_active
 from .fan_status import (
+    FAN_STATUS_THERMOSTAT,
     fan_entity_on,
     is_ca_fan_running,
     parse_remote_speed_event,
@@ -3052,6 +3053,46 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         await self._async_save_state()
                 return result
 
+    def _self_heal_fan_ownership(self) -> None:
+        """Quiet ownership invariant (Issues #1103/#1104).
+
+        CA claims a fan it commanded, but the blower is physically off and nothing explains it.
+        """
+        ae = self.automation_engine
+        if not ae._fan_active:
+            return
+        if (
+            ae._natural_vent_active
+            or ae._fan_min_runtime_active
+            or ae._fan_override_active
+            or ae._fan_command_pending
+            or self._is_recent_fan_command(threshold_seconds=30.0)
+        ):
+            return
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode == FAN_MODE_WHOLE_HOUSE:
+            return  # separate physical device; the drift check owns it
+        cs = self.hass.states.get(self.config.get("climate_entity", ""))
+        if cs is None:
+            return
+        if is_thermostat_fan_physically_active(
+            str(cs.attributes.get("fan_mode", "")), str(cs.attributes.get("hvac_action", "")).lower()
+        ):
+            return
+        if fan_mode == FAN_MODE_BOTH and self._get_fan_physical_state() is not False:
+            return
+        _LOGGER.info("Self-heal: cleared stale fan ownership (fan_mode=%s, blower physically off)", fan_mode)
+        self._emit_event(
+            "fan_ownership_self_healed",
+            {
+                "was_on_since": ae._fan_on_since,
+                "reason": "blower physically off with no CA command, session or override behind the ownership flag",
+                "fan_mode_config": fan_mode,
+            },
+        )
+        ae._fan_active = False
+        ae._fan_on_since = None
+
     async def _async_update_data_impl(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min)."""
         # Re-resolve group membership in case it changed
@@ -3571,6 +3612,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "state_contradiction_warning",
                     {"hvac_mode": hvac_mode, "hvac_action": hvac_action},
                 )
+
+        self._self_heal_fan_ownership()
 
         # Issue #331 follow-up: surface an UNTRACKED fan (the thermostat running its own
         # blower/fan that CA did not command) in the event log so it is not invisible.
@@ -6362,8 +6405,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _old_fan_mode_347 = old_state.attributes.get("fan_mode", "")
         _new_fan_mode_347 = new_state.attributes.get("fan_mode", "")
         _ae_347 = self.automation_engine
+        _fan_ctl_347 = fan_control_enabled(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
+        if old_action != "fan" and new_action == "fan":
+            _ae_347._observed_fan_origin_hint = (
+                "post_heat_tail"
+                if old_action in ("heating", "cooling")
+                else "thermostat_schedule"
+                if old_action in ("idle", "off", "")
+                else "unknown"
+            )
+        elif old_action == "fan" and new_action != "fan":
+            _ae_347._note_observed_fan_stopped()
+        if not _fan_ctl_347:
+            # No fan configured: the thermostat's blower is not CA's to adopt or reconcile — log the edge only.
+            if old_action != "fan" and new_action == "fan":
+                _LOGGER.info("HVAC fan started outside CA control (fan_mode=disabled)")
+                _ae_347._note_observed_fan_started()
+            elif old_action == "fan" and new_action != "fan":
+                _LOGGER.info("HVAC fan stopped outside CA control (fan_mode=disabled)")
+        elif (
+            old_action == "fan"
+            and new_action != "fan"
+            and not _ae_347._fan_active
+            and not _ae_347._natural_vent_active
+            and not _ae_347._fan_override_active
+            and not self._is_recent_fan_command(threshold_seconds=30.0)
+        ):
+            _LOGGER.info("HVAC fan stopped outside CA control (thermostat schedule)")
         if (
-            old_action != "fan"
+            _fan_ctl_347
+            and old_action != "fan"
             and new_action == "fan"
             and _old_fan_mode_347 == _new_fan_mode_347
             and not _ae_347._fan_active
@@ -6665,8 +6736,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Detect manual fan_mode attribute changes on thermostat (Issue #37)
         new_fan_mode = new_state.attributes.get("fan_mode")
         old_fan_mode = old_state.attributes.get("fan_mode")
+        _fan_ctl_37 = fan_control_enabled(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
+        if not _fan_ctl_37 and new_fan_mode is not None and old_fan_mode is not None and new_fan_mode != old_fan_mode:
+            _LOGGER.info(
+                "HVAC fan_mode changed outside CA control: %s -> %s (fan_mode=disabled)", old_fan_mode, new_fan_mode
+            )
         if (
-            new_fan_mode is not None
+            _fan_ctl_37
+            and new_fan_mode is not None
             and old_fan_mode is not None
             and new_fan_mode != old_fan_mode
             and not self.automation_engine._fan_command_pending
@@ -9845,6 +9922,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "config", None):
             entry.setdefault("indoor_f", self._get_indoor_temp())
             entry.setdefault("outdoor_f", getattr(self, "_last_outdoor_temp", None))
+        if event_type == "incident_detected" and entry.get("incident_class") == "grace_churn":
+            entry["last_fan_event"] = next(
+                (
+                    {"type": e.get("type"), "time": e.get("time")}
+                    for e in reversed(self._event_log)
+                    if str(e.get("type", "")).startswith("fan_")
+                ),
+                None,
+            )
         self._event_log.append(entry)
         self._event_log = _prune_event_log(self._event_log, _now)
 
@@ -10643,6 +10729,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "active",
             "running (manual override)",
             "running (untracked)",
+            FAN_STATUS_THERMOSTAT,
         }
 
     def _compute_fan_status(self) -> str:
@@ -10748,6 +10835,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermostat_fan_mode = cs.attributes.get("fan_mode", "")
                 thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
                 if is_thermostat_fan_physically_active(thermostat_fan_mode, thermostat_hvac_action):
+                    if ae.is_thermostat_schedule_blower():
+                        return FAN_STATUS_THERMOSTAT
                     return resolve_untracked_fan_status(
                         recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0)
                     )
@@ -10942,6 +11031,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return _nv_status
             return "nat-vent (session active, fan idle)"
         if _thermostat_fan_on() is True:
+            if ae.is_thermostat_schedule_blower():
+                return FAN_STATUS_THERMOSTAT
             return resolve_untracked_fan_status(recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0))
         return "inactive"
 

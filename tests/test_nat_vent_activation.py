@@ -2885,7 +2885,7 @@ class TestNoSpuriousFanCyclingEventWhenNoFanConfigured:
         with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
             asyncio.run(engine.nat_vent_temperature_check(71.0, outdoor=None))  # <= off_threshold
 
-        assert engine._fan_active is True, "no fan device configured -- _deactivate_fan() must stay a no-op"
+        assert engine._fan_active is False, "no fan device configured -- stale _fan_active is cleared"
         event_names = [e[0] for e in emitted]
         assert "nat_vent_fan_off" not in event_names, (
             f"nat_vent_fan_off must not fire when _deactivate_fan() was a no-op (fan_mode disabled); "

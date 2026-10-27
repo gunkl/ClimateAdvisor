@@ -31,6 +31,7 @@
 | `occupancy_transition` | Any `occupancy_change` event in event_log during the last cycle | Reactive | Both | Medium | #220 -- near-zero occupancy transition coverage in golden suite |
 | `override_active_on_occupancy` | `manual_override_active=True` at the time of an `occupancy_change` event | Reactive | Integration | Medium | Compound condition exposed by #220 investigation |
 | `hvac_command_failed` | `hass.services.async_call("climate", ...)` fails inside `_call_climate` (used by `_set_hvac_mode()`, `_set_temperature()` and the retry nudge) — announced once per episode; recovery is the `hvac_command_recovered` event | **Proactive** | Integration | **HIGH** | #805 -- a removed/invalid `climate_entity` previously propagated uncaught, risking an aborted update cycle instead of a caught, logged, notified failure |
+| `grace_churn` | The same automation-grace trigger starts 3 or more times within 60 minutes (`automation.py` `_note_automation_grace_start`, called from the unprotected-grace start); at most one incident per trigger per 6 hours | **Proactive** | Logic | Medium | #1103/#1104 -- a thermostat-initiated fan blower CA kept stopping caused repeated automation graces that looked like manual overrides; the loop is now reported once instead of staying silent |
 
 ---
 
@@ -71,6 +72,8 @@ All numeric fields are in Fahrenheit regardless of the user's display unit setti
 **Nat-vent-tolerance gate (Issue #411):** `comfort_violation`/`comfort_undertemp` additionally call `coordinator._is_nat_vent_tolerated_deviation(indoor, comfort_heat, comfort_cool)` before emitting. This returns `True` (suppress) only when `automation_engine._natural_vent_active` is `True` **and** indoor is within the configured nat-vent hysteresis band of the comfort edge -- i.e. the deviation is the system's own designed-in cycling tolerance, not a failure to hold the band. It does not add a sustained-duration tracker and does not change the underlying >0.5 F trigger threshold; it only prevents a false-positive incident (and the identical blind spot in `comfort_violations_minutes` accumulation, which feeds `comfort_score`) during correct, expected WHF/fan cycling.
 
 **Across loop runs:** `tools/simulation_loop.py` maintains `results/processed_incidents.json`, a list of `incident_id` values already processed. Before building a BSpec for an incident, the loop checks this file. Incidents with a matching `incident_id` are skipped, regardless of when the loop last ran.
+
+**`grace_churn` (Issues #1103/#1104):** payload `trigger`, `count`, `window_minutes` (60), `first_time`, `last_time`, `fan_mode_config` and `last_fan_event` (`type`/`time` of the most recent `fan_*` Activity Log event, added by `coordinator._emit_event`, or `null`). Only automation-sourced graces count (`source == "automation"`); manual graces never do. Per-trigger dedup: one incident per trigger per 6 hours. It is a symptom detector -- it names the loop, not its cause -- so the `last_fan_event` field is what points an investigator at the fan.
 
 **Episode-gated proactive class (Issue #1049):** `hvac_command_failed` is announced once per failure episode (state `_hvac_cmd_fail_announced` / `_hvac_cmd_fail_since` on the engine), not once per failing command; `hvac_command_recovered` closes it.
 

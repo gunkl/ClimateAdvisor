@@ -1601,7 +1601,7 @@ class TestFanSerialization:
 
     def test_restore_state_loads_fan_fields(self):
         """restore_state populates fan tracking fields from saved data."""
-        engine = _make_automation_engine()
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
 
         engine.restore_state(
             {
@@ -3258,6 +3258,14 @@ class TestReconcileFanOnStartup:
         engine._deactivate_fan = AsyncMock()
         return engine
 
+    @staticmethod
+    def _set_live_thermostat(engine, *, fan_mode_attr, hvac_action):
+        """Make the live thermostat read explicit (Issue #1103): the classifier that separates the
+        thermostat's own schedule blower from an unowned manual fan reads exactly these two attributes."""
+        state = MagicMock()
+        state.attributes = {"fan_modes": ["auto", "on"], "fan_mode": fan_mode_attr, "hvac_action": hvac_action}
+        engine.hass.states.get.return_value = state
+
     def test_no_fan_when_thermostat_fan_not_running(self):
         """thermostat fan off → decision no-fan; stale flags cleared, deactivate called to
         release any stranded HVAC suppression (Issue #405).
@@ -3703,8 +3711,14 @@ class TestReconcileFanOnStartup:
         blower, not an exhaust fan) — before this fix, every ordinary blower/min-runtime
         cycle on a plain HVAC-fan config was misread as an aborted nat-vent session,
         spamming the Activity Report with a phantom 'natural ventilation ended' + grace
-        period (Issue #893)."""
+        period (Issue #893).
+
+        Issue #1103 scoping: this is the UNTRACKED-fan variant -- the live thermostat reports
+        fan_mode "on" (someone set the fan on) with no CA record behind it, so it is not the
+        thermostat's own schedule and stays adopted. The occupant's fan keeps running and is
+        accounted for (see test_observe_only_thermostat_schedule_blower_hvac for the schedule case)."""
         engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        self._set_live_thermostat(engine, fan_mode_attr="on", hvac_action="fan")
         engine._emit_event_callback = MagicMock()
 
         asyncio.run(
@@ -3717,6 +3731,31 @@ class TestReconcileFanOnStartup:
         engine._emit_event_callback.assert_not_called()
         assert engine._fan_active is True
         assert engine._natural_vent_active is False
+
+    def test_observe_only_thermostat_schedule_blower_hvac(self):
+        """Issue #1103: the same reconcile, but the live thermostat reports an Ecobee schedule blower
+        (hvac_action "fan" with fan_mode attribute "auto") and CA has no command record. The occupant's
+        thermostat keeps running its own fan-minimum-runtime blower: CA records it
+        (fan_observed_started), does NOT claim it (_fan_active stays False), does not stop it, starts no
+        grace and does not route through the nat-vent exit."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+        self._set_live_thermostat(engine, fan_mode_attr="auto", hvac_action="fan")
+        engine._exit_nat_vent = AsyncMock()
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+            )
+        )
+
+        engine._deactivate_fan.assert_not_awaited()
+        engine._exit_nat_vent.assert_not_awaited()
+        assert engine._fan_active is False
+        assert engine._natural_vent_active is False
+        assert engine._grace_active is False
+        emitted = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert emitted == ["fan_observed_started"], emitted
 
     def test_turn_off_when_outdoor_warmer_whole_house(self):
         """Fan running, window open but outdoor warmer than indoor → not eligible → turn off."""
@@ -4318,6 +4357,17 @@ def _make_coordinator_for_fan_status(
     ae._fan_active = fan_active
     ae._fan_override_active = fan_override_active
     ae._natural_vent_active = natural_vent_active
+    # Issue #1104: the shared classifier is real (not a MagicMock attribute), reading the same stub state.
+    import types as _types
+
+    from custom_components.climate_advisor.automation import AutomationEngine as _AE
+
+    ae.hass = hass
+    ae.climate_entity = "climate.thermostat"
+    ae._fan_command_pending = False
+    ae._is_recent_fan_command_callback = lambda threshold_seconds=30.0: recent_fan_command
+    ae._get_fan_physical_state_callback = None
+    ae.is_thermostat_schedule_blower = _types.MethodType(_AE.is_thermostat_schedule_blower, ae)
     coord.automation_engine = ae
 
     # Wire _get_fan_physical_state to return the supplied physical_state value
@@ -4449,7 +4499,7 @@ class TestDualFanStatus:
             climate_hvac_action="fan",
             recent_fan_command=False,
         )
-        assert coord._compute_hvac_fan_status() == "running (untracked)"
+        assert coord._compute_hvac_fan_status() == "running (thermostat)"
 
     def test_both_mode_returns_whf_active_and_hvac_active(self):
         """FAN_MODE_BOTH: both _compute_whf_status and _compute_hvac_fan_status return 'active'."""
@@ -4530,7 +4580,7 @@ class TestDualFanStatus:
             climate_hvac_action="fan",
             recent_fan_command=False,
         )
-        assert coord._compute_fan_status() == "running (untracked)"
+        assert coord._compute_fan_status() == "running (thermostat)"
 
     def test_whf_status_nat_vent_idle(self):
         """_compute_whf_status returns 'nat-vent (session active, fan idle)' when nat-vent active, fan idle."""

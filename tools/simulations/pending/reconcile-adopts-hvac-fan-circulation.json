@@ -6,7 +6,8 @@
   "notes": [
     "Companion to the existing reconcile-turns-off-unwarranted-fan.json golden, which is scoped to fan_mode=whole_house_fan and must remain unaffected by this fix -- that scenario is the proof this new archetype branch does not regress the WHF-side turn-off behavior.",
     "Before Issue #984's fix, this exact input (FAN_MODE_HVAC, thermostat_fan_running=true, any_sensor_open=false) fell into the same unconditional 'turn it off' branch as a WHF fan, emitting nat_vent_reconcile_exit and starting a 5-minute grace period on every ordinary blower/min-runtime cycle -- pure Activity Report noise with no real nat-vent session to end.",
-    "Uses the new reconcile_adopted_circulation custom assertion type added to outcomes.py for this closure -- reads final engine_state (_fan_active=True, _natural_vent_active=False, _grace_active=False) and confirms no nat_vent_reconcile_exit event was emitted, since this branch deliberately produces neither a fan_activated nor a nat_vent_reconcile_exit event."
+    "Uses the new reconcile_adopted_circulation custom assertion type added to outcomes.py for this closure -- reads final engine_state (_fan_active=True, _natural_vent_active=False, _grace_active=False) and confirms no nat_vent_reconcile_exit event was emitted, since this branch deliberately produces neither a fan_activated nor a nat_vent_reconcile_exit event.",
+    "Issue #1103: the live thermostat attributes are set explicitly (fan_mode 'on') so the scenario states WHICH kind of unowned fan is adopted; a thermostat-schedule blower (fan_mode 'auto') is observe-only and covered by reconcile-observes-thermostat-schedule-fan."
   ],
   "config": {
     "comfort_heat": 68,
@@ -23,6 +24,14 @@
       "hvac_mode": "off",
       "windows_recommended": false,
       "note": "Mild day: HVAC off."
+    },
+    {
+      "time": "2026-07-10T06:00:30",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "hvac_action": "fan",
+      "thermostat_fan_mode": "on",
+      "note": "Issue #1103: the live thermostat reports fan_mode 'on' (someone set the fan on) with hvac_action 'fan' and CA has no command record -- an unowned fan that is NOT the thermostat's own schedule blower, so reconcile still adopts it (the Ecobee schedule-blower case is the observe-only sibling scenario reconcile-observes-thermostat-schedule-fan)."
     },
     {
       "time": "2026-07-10T06:01:00",

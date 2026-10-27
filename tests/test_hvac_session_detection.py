@@ -77,6 +77,7 @@ def _make_thermostat_coord(*, hvac_on_since=None):
         "weather_entity": "weather.test",
         "comfort_heat": 70,
         "comfort_cool": 75,
+        "fan_mode": "hvac_fan",  # Issue #1103: fan-mode handlers run only when a fan is configured
     }
 
     ae = MagicMock()
@@ -179,6 +180,7 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
         "weather_entity": "weather.test",
         "comfort_heat": 70,
         "comfort_cool": 75,
+        "fan_mode": "hvac_fan",  # Issue #1103: fan-mode handlers run only when a fan is configured
         "setback_heat": 60,
         "setback_cool": 80,
         "wake_time": "06:30",

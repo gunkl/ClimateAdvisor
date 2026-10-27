@@ -116,6 +116,8 @@ def _make_automation_engine_stub() -> AutomationEngine:
     ae._current_classification = None
     ae._sensor_check_callback = None
     ae._emit_event_callback = None
+    ae._grace_churn_starts = {}  # Issue #1104: grace_churn tracking (set by __init__ in production)
+    ae._grace_churn_last_emit = {}
     return ae
 
 

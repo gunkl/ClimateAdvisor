@@ -188,12 +188,18 @@ from .fan_lifecycle import (
     WhfHvacOwnership,
     derive_fan_lifecycle_state,
 )
-from .fan_mode_resolver import is_thermostat_fan_physically_active, resolve_fan_mode_command
+from .fan_mode_resolver import (
+    fan_control_enabled,
+    is_thermostat_fan_physically_active,
+    is_thermostat_schedule_signal,
+    resolve_fan_mode_command,
+)
 from .fan_status import fan_entity_on
 from .fan_thermostat_decision import (
     FanThermostatInputs,
     FanThermostatOutcome,
     _resolve_vent_floor,
+    decide_fan_thermostat_check,
     resolve_hard_exit_floor,
 )
 from .fan_toggle_rate_limit import (
@@ -1213,6 +1219,16 @@ class AutomationEngine:
         # Fan state tracking (Issue #37)
         self._fan_active: bool = False
         self._fan_on_since: str | None = None  # ISO timestamp
+        # Issue #1103/#1104 observability: thermostat blower CA did not command (fan_observed_* events),
+        # once-per-session Check 0b skip log, and automation-grace churn tracking (incident grace_churn).
+        self._observed_fan_since: datetime | None = None
+        self._observed_fan_origin_hint: str | None = None
+        self._floor_skip_logged_for: str | None = None
+        self._grace_churn_starts: dict[str, list[datetime]] = {}
+        self._grace_churn_last_emit: dict[str, datetime] = {}
+        # Issue #1103: restore found a persisted CA-owned fan under a now-disabled fan config; the next
+        # reconcile hands the blower back once.
+        self._release_orphan_fan_pending: bool = False
         # Issue #835: last time the live hvac_action read was heating/cooling — used by
         # the hvac_fan_restrict_mode guard to avoid running the HVAC fan shortly after a
         # cooling cycle (humid climates) or, symmetrically, after a heating cycle.
@@ -6863,6 +6879,9 @@ class AutomationEngine:
             natural_vent_active=self._natural_vent_active,
             manual_override_active=self._manual_override_active,
             manual_override_mode=self._manual_override_mode,
+            archetype_requires_open_sensor=_fan_archetype_requires_open_sensor(
+                str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
+            ),
         )
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state(). Per
@@ -6904,6 +6923,20 @@ class AutomationEngine:
         # independently reproducing a gating attempt here (it broke 6 additional locked
         # golden scenarios) and tracing this method's own history and lockout coverage
         # directly. See docs/08-COMPUTATION-REFERENCE.md §6f for the full rationale.
+
+        if (
+            outcome is FanThermostatOutcome.KEEP
+            and not inputs.archetype_requires_open_sensor
+            and not self._natural_vent_active
+            and self._floor_skip_logged_for != self._fan_on_since
+            and decide_fan_thermostat_check(replace(inputs, archetype_requires_open_sensor=True))
+            is not FanThermostatOutcome.KEEP
+        ):
+            self._floor_skip_logged_for = self._fan_on_since
+            _LOGGER.info(
+                "Fan thermostat check: circulation fan kept running:"
+                " floor/outdoor rules apply only to nat-vent sessions"
+            )
 
         if outcome is FanThermostatOutcome.KEEP:
             _LOGGER.debug(
@@ -7324,6 +7357,111 @@ class AutomationEngine:
         elapsed = (now - self._nat_vent_outdoor_exit_time).total_seconds()
         return elapsed, lockout_s
 
+    def _blower_is_thermostat_initiated(
+        self, thermostat_fan_running: bool, nat_vent_eligible: bool, any_sensor_open: bool
+    ) -> bool:
+        """Reconcile's view of the shared classifier (see ``is_thermostat_schedule_blower``)."""
+        if not thermostat_fan_running or nat_vent_eligible or any_sensor_open:
+            return False  # open sensor: door/window pause + lockout paths (#790/#984) keep ownership of the decision
+        return self.is_thermostat_schedule_blower()
+
+    def is_thermostat_schedule_blower(self) -> bool:
+        """THE classifier: the running blower is the thermostat's own schedule, with no CA record behind it.
+
+        Shared by reconcile (observe-only gate), the fan status computation and the untracked-fan
+        event/backstop block, so the three can never disagree. Live thermostat attributes decide the
+        origin (hvac_action "fan" with an inactive fan_mode attribute); a fan_mode attribute that reads
+        active with no CA command is somebody's manual change -- NOT the thermostat's schedule.
+        """
+        if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) not in (FAN_MODE_HVAC, FAN_MODE_BOTH):
+            return False  # WHF-only: the signal is the real fan entity, not a thermostat schedule
+        cs = self.hass.states.get(self.climate_entity)
+        if cs is None or not is_thermostat_schedule_signal(
+            cs.attributes.get("fan_mode", ""), cs.attributes.get("hvac_action", "")
+        ):
+            return False
+        if self._fan_active or self._natural_vent_active or self._fan_override_active:
+            return False
+        if self._fan_command_pending:
+            return False
+        if self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0):
+            return False
+        # BOTH: a physically-running whole-house fan is a CA-controllable device, not the thermostat's schedule.
+        return not (
+            self._get_fan_physical_state_callback is not None and self._get_fan_physical_state_callback() is True
+        )
+
+    def _observed_fan_payload(self) -> dict[str, Any]:
+        cs = self.hass.states.get(self.climate_entity)
+        return {
+            "fan_mode_config": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            "thermostat_fan_mode": str(cs.attributes.get("fan_mode", "")) if cs is not None else "",
+            "hvac_action": str(cs.attributes.get("hvac_action", "")) if cs is not None else "",
+        }
+
+    def _note_observed_fan_started(self) -> None:
+        """A thermostat blower CA did not command started (once per start edge)."""
+        if self._observed_fan_since is not None:
+            return
+        self._observed_fan_since = dt_util.now()
+        origin = self._observed_fan_origin_hint or "unknown"
+        self._observed_fan_origin_hint = None
+        if self._emit_event_callback:
+            self._emit_event_callback("fan_observed_started", {"origin": origin, **self._observed_fan_payload()})
+
+    def _note_observed_fan_stopped(self) -> None:
+        """The observed thermostat blower stopped (once per stop edge)."""
+        since, self._observed_fan_since = self._observed_fan_since, None
+        if since is None:
+            return
+        minutes = round(max(0.0, (dt_util.now() - since).total_seconds()) / 60.0, 1)
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "fan_observed_stopped", {"duration_minutes": minutes, **self._observed_fan_payload()}
+            )
+
+    def _note_automation_grace_start(self, trigger: str) -> None:
+        """Self-report a repeating automation grace: >=3 starts of the same trigger within 60 min."""
+        now = dt_util.now()
+        starts = [t for t in self._grace_churn_starts.get(trigger, []) if (now - t) < timedelta(minutes=60)]
+        starts.append(now)
+        self._grace_churn_starts[trigger] = starts
+        last = self._grace_churn_last_emit.get(trigger)
+        if len(starts) < 3 or (last is not None and (now - last) < timedelta(hours=6)):
+            return
+        self._grace_churn_last_emit[trigger] = now
+        self._emit_engine_incident(
+            "grace_churn",
+            {
+                "trigger": trigger,
+                "count": len(starts),
+                "window_minutes": 60,
+                "first_time": starts[0].isoformat(),
+                "last_time": starts[-1].isoformat(),
+                "fan_mode_config": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            },
+        )
+
+    async def _release_orphaned_hvac_fan(self) -> None:
+        """Issue #1103: fan control was disabled while CA owned the thermostat blower -- hand it back once."""
+        cs = self.hass.states.get(self.climate_entity)
+        if cs is None:
+            return
+        attr = str(cs.attributes.get("fan_mode", ""))
+        if not is_thermostat_fan_physically_active(attr, ""):
+            return
+        target = resolve_fan_mode_command(cs.attributes.get("fan_modes"), "off")
+        if target is None:
+            return
+        _LOGGER.info(
+            "Releasing CA-owned HVAC fan left on from previous configuration (fan_mode %s -> %s)", attr, target
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback("fan_orphan_released", {"old_fan_mode": attr, "command_sent": target})
+        await self.hass.services.async_call(
+            "climate", "set_fan_mode", {"entity_id": self.climate_entity, "fan_mode": target}, blocking=True
+        )
+
     async def _reconcile_fan_on_startup_locked(
         self,
         *,
@@ -7422,6 +7560,24 @@ class AutomationEngine:
                 restored_from=_rearm_source,
             )
             self._reconcile_rearmed_override = True
+            return
+
+        if not fan_control_enabled(fan_mode):
+            # No fan configured: thermostat blower is not ours. Clear fan-lifecycle flags only;
+            # nat-vent session flags (_natural_vent_active/_nat_vent_soft_start) are untouched.
+            self._fan_active = False
+            self._fan_on_since = None
+            _LOGGER.info(
+                "Fan reconcile: thermostat_fan_running=%s decision=not-applicable archetype=%s trigger=%s",
+                thermostat_fan_running,
+                archetype,
+                trigger,
+            )
+            if thermostat_fan_running:
+                self._note_observed_fan_started()
+            if self._release_orphan_fan_pending:
+                self._release_orphan_fan_pending = False
+                await self._release_orphaned_hvac_fan()
             return
 
         if not thermostat_fan_running:
@@ -7608,6 +7764,18 @@ class AutomationEngine:
             and any_sensor_open
             and _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
         )
+
+        # Issue #1103/#1104 "observe, don't own": a blower running with no CA command record behind it is the
+        # thermostat's own schedule -- record it, never adopt it as CA-owned, no grace, no turn-off.
+        if self._blower_is_thermostat_initiated(thermostat_fan_running, nat_vent_eligible, any_sensor_open):
+            _LOGGER.info(
+                "Fan reconcile: HVAC fan running outside CA control (thermostat schedule) trigger=%s archetype=%s"
+                " — decision=observe-only",
+                trigger,
+                archetype,
+            )
+            self._note_observed_fan_started()
+            return
 
         if nat_vent_eligible:
             # Adopt the running fan as CA-owned nat-vent
@@ -8060,6 +8228,8 @@ class AutomationEngine:
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.UNPROTECTED_GRACE_STARTED)
+            if source == "automation":
+                self._note_automation_grace_start(trigger)
             # Issue #672: a second, DISTINCT event from _start_grace_period_action()'s own
             # "grace_started" (which also fires for the 3 protecting triggers, via their
             # own direct dispatcher call sites — reusing it here would wrongly feed
@@ -11997,6 +12167,7 @@ class AutomationEngine:
             ),
             manual_override_active=bool(self._manual_override_active),
             manual_override_mode=self._manual_override_mode,
+            archetype_requires_open_sensor=_fan_archetype_requires_open_sensor(fan_mode),
         )
 
     @property
@@ -13656,7 +13827,11 @@ class AutomationEngine:
         if release_suppression is None:
             release_suppression = restore_hvac
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        if fan_mode == FAN_MODE_DISABLED:
+        if not fan_control_enabled(fan_mode):
+            if self._fan_active or self._fan_on_since is not None:
+                _LOGGER.warning("Fan mode disabled — clearing stale fan_active (%s)", reason)
+                self._fan_active = False
+                self._fan_on_since = None
             return FanCommandResult.DISABLED
 
         if self._fan_override_active and not bypass_absolute_override:
@@ -14412,6 +14587,13 @@ class AutomationEngine:
         self._last_action_reason = state.get("last_action_reason")
         self._fan_active = state.get("fan_active", False)
         self._fan_on_since = state.get("fan_on_since")
+        if not fan_control_enabled(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)) and (
+            self._fan_active or self._fan_on_since is not None
+        ):
+            _LOGGER.warning("Ignoring persisted fan_active=%s — fan mode is disabled", self._fan_active)
+            self._release_orphan_fan_pending = bool(self._fan_active)  # CA owned a blower under the old config
+            self._fan_active = False
+            self._fan_on_since = None
         # Issue #835: unlike override/grace state, these ARE restored (not clean-slate)
         # — forgetting a recent heat/cool cycle on restart would let the
         # hvac_fan_restrict_mode guard immediately approve activation into a still-wet

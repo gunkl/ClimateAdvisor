@@ -151,6 +151,7 @@ def _make_thermostat_coordinator_stub(
         "weather_entity": "weather.forecast_home",
         "comfort_heat": 70,
         "comfort_cool": 75,
+        "fan_mode": "hvac_fan",  # Issue #1103: fan-mode handlers run only when a fan is configured
     }
 
     # Automation engine — MagicMock (NOT AsyncMock) per project convention

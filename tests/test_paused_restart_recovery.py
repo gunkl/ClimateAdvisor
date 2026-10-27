@@ -159,8 +159,9 @@ class TestOtherStateFieldsStillRestored:
     """Pause fields are cleared but other engine state must still be restored normally."""
 
     def test_fan_active_restored(self):
-        """_fan_active is a legitimate carry-across field and must be restored."""
+        """_fan_active is a legitimate carry-across field and must be restored (when a fan is configured)."""
         engine = _make_engine()
+        engine.config["fan_mode"] = "hvac_fan"
         engine.restore_state({"fan_active": True})
         assert engine._fan_active is True
 
@@ -179,6 +180,7 @@ class TestOtherStateFieldsStillRestored:
     def test_pause_cleared_while_fan_restored_simultaneously(self):
         """Both rules apply together: pause cleared, fan_active restored."""
         engine = _make_engine()
+        engine.config["fan_mode"] = "hvac_fan"
         engine.restore_state(
             {
                 "paused_by_door": True,

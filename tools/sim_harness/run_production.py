@@ -246,6 +246,7 @@ def _inject_thermostat_mode(
     dispatch: bool = False,
     temperature: float | None = None,
     hvac_action: str | None = None,
+    fan_mode_attr: str | None = None,
 ) -> None:
     """Update the thermostat state string on the climate entity.
 
@@ -265,6 +266,9 @@ def _inject_thermostat_mode(
             omitted (the default, all pre-existing scenarios), the entity's existing
             ``hvac_action`` attribute is left untouched, matching the prior behavior
             exactly.
+        fan_mode_attr: Issue #1103 — optional ``fan_mode`` attribute, so a scenario can state
+            whether the thermostat's running blower is its own schedule (``"auto"``) or a fan
+            someone set on (``"on"``). Omitted = attribute left untouched (prior behavior).
     """
     existing = fake_hass.states.get(climate_entity)
     attrs = dict(existing.attributes) if existing is not None else {}
@@ -272,6 +276,8 @@ def _inject_thermostat_mode(
         attrs["temperature"] = temperature
     if hvac_action is not None:
         attrs["hvac_action"] = hvac_action
+    if fan_mode_attr is not None:
+        attrs["fan_mode"] = fan_mode_attr
     if dispatch:
         fake_hass.states.async_set(climate_entity, hvac_mode, attrs)
     else:
@@ -772,6 +778,7 @@ def _dispatch_event(
         new_hvac_mode = event.get("hvac_mode", "off")
         new_temperature = event.get("temperature")  # optional (Issue #483)
         new_hvac_action = event.get("hvac_action")  # optional (Issue #790)
+        new_fan_mode_attr = event.get("thermostat_fan_mode")  # optional (Issue #1103)
         if coordinator is not None:
             _inject_thermostat_mode(
                 fake_hass,
@@ -780,10 +787,16 @@ def _dispatch_event(
                 dispatch=True,
                 temperature=new_temperature,
                 hvac_action=new_hvac_action,
+                fan_mode_attr=new_fan_mode_attr,
             )
         else:
             _inject_thermostat_mode(
-                fake_hass, climate_entity, new_hvac_mode, temperature=new_temperature, hvac_action=new_hvac_action
+                fake_hass,
+                climate_entity,
+                new_hvac_mode,
+                temperature=new_temperature,
+                hvac_action=new_hvac_action,
+                fan_mode_attr=new_fan_mode_attr,
             )
 
     elif etype == "cancel_override":

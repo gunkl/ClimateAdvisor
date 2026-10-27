@@ -26,6 +26,9 @@ _BASE = {
     "natural_vent_active": False,
     "manual_override_active": False,
     "manual_override_mode": None,
+    # WHF-style archetype by default: the floor/direction rules apply. The HVAC-circulation case
+    # (flag False) is covered explicitly in TestCheck0bHvacCirculationExempt.
+    "archetype_requires_open_sensor": True,
 }
 
 
@@ -95,9 +98,21 @@ class TestCheck1DirectionReversal:
         result = decide_fan_thermostat_check(_inputs(outdoor=75.0, indoor=74.0, natural_vent_active=True))
         assert result == FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT
 
-    def test_reversal_without_nat_vent_deactivates_plainly(self):
+    def test_whf_reversal_without_nat_vent_deactivates_plainly(self):
+        """Whole-house fan (needs an open sensor), no nat-vent session: outdoor air warmer than
+        indoor means the fan is pulling heat in -- stop it."""
         result = decide_fan_thermostat_check(_inputs(outdoor=75.0, indoor=74.0, natural_vent_active=False))
         assert result == FanThermostatOutcome.STOP_DEACTIVATE
+
+    def test_hvac_circulation_reversal_without_nat_vent_keeps(self):
+        """Issue #1103: an HVAC circulation blower (no nat-vent session, archetype needs no open sensor)
+        only moves indoor air, so outdoor air being warmer is irrelevant. The old expectation
+        (STOP_DEACTIVATE) made CA stop the thermostat's own fan-minimum-runtime blower, which the
+        thermostat restarted -- the occupant saw the fan fight CA all afternoon."""
+        result = decide_fan_thermostat_check(
+            _inputs(outdoor=75.0, indoor=74.0, natural_vent_active=False, archetype_requires_open_sensor=False)
+        )
+        assert result == FanThermostatOutcome.KEEP
 
     def test_none_outdoor_never_triggers_check1(self):
         assert decide_fan_thermostat_check(_inputs(outdoor=None, indoor=74.0)) == FanThermostatOutcome.KEEP
@@ -268,3 +283,25 @@ class TestCheckOrdering:
             _inputs(outdoor=80.0, indoor=65.0, comfort_heat_raw=70.0, natural_vent_active=False)
         )
         assert result == FanThermostatOutcome.STOP_DEACTIVATE  # Check 1's outcome, not Check 2's
+
+
+class TestCheck0bHvacCirculationExempt:
+    """Issue #1103: floor/outdoor rules govern nat-vent and whole-house-fan sessions only."""
+
+    def test_hvac_circulation_ignores_comfort_floor(self):
+        result = decide_fan_thermostat_check(
+            _inputs(indoor=70.0, outdoor=65.0, comfort_heat_raw=70.0, archetype_requires_open_sensor=False)
+        )
+        assert result == FanThermostatOutcome.KEEP
+
+    def test_nat_vent_session_still_governed_even_without_open_sensor_archetype(self):
+        result = decide_fan_thermostat_check(
+            _inputs(
+                indoor=70.0,
+                outdoor=65.0,
+                comfort_heat_raw=70.0,
+                natural_vent_active=True,
+                archetype_requires_open_sensor=False,
+            )
+        )
+        assert result != FanThermostatOutcome.KEEP

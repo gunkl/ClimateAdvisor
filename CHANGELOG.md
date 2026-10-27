@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.7.107] — 2026-10-26
+
+All changes below affect only the HVAC system's own blower (furnace/AC fan), with fan control set to "HVAC fan" or "disabled" (and the HVAC side of "both"). Whole-house fans are not changed.
+
+- Fix #1104: when your thermostat runs its own blower (for example an Ecobee fan-minutes-per-hour cycle, or the blower tail after heating or cooling), Climate Advisor no longer takes it over, tries to stop it, re-sends your setpoint, or starts a grace period. It records the blower starting and stopping in the Activity Report and the Fan card shows "running (thermostat)". With fan control disabled, manual fan changes at the thermostat are recorded only. A blower Climate Advisor left on after you switched fan control to disabled is released once on the next restart, and a stale "fan on" flag is cleared quietly.
+- Fix #1103: with the "HVAC fan" setting, Climate Advisor's own hourly blower circulation run is no longer cut short by the open-window cooling rules, so it runs its full time without a grace period.
+- Observability: new Activity Report rows for thermostat blower started/stopped, fan ownership cleanup and fan released after a configuration change, plus a "grace_churn" incident when the same automation grace starts three or more times in an hour.
+
 ## [0.7.106] — 2026-10-11
 
 - Fix #1095: when automation holds the whole-house fan back (for example during a grace period after you turned the fan off), the log and Status card now say why and when it ends, and a new End Grace Period button lets you end it without resuming.

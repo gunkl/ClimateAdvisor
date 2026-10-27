@@ -1,0 +1,79 @@
+{
+  "name": "reconcile-observes-thermostat-schedule-fan",
+  "description": "The thermostat's own schedule blower (Ecobee fan-minimum-runtime: hvac_action 'fan' with the fan_mode attribute 'auto') is found running on a plain HVAC-fan config with no sensor open and CA has no command record behind it. Climate Advisor must observe it (fan_observed_started) and leave it alone: it does not claim it, stop it, start a grace period or narrate a nat-vent exit (Issues #1103/#1104).",
+  "source": "synthetic",
+  "issue": 1103,
+  "notes": [
+    "Observe-only sibling of reconcile-adopts-hvac-fan-circulation: identical reconcile inputs (fan_mode=hvac_fan, thermostat_fan_running=true, any_sensor_open=false, nat-vent not eligible); only the live thermostat attributes differ (fan_mode 'auto' + hvac_action 'fan' = the thermostat's schedule, versus fan_mode 'on' = a fan someone set on).",
+    "Occupant outcome before the fix: CA adopted the thermostat's blower as its own, later tried to turn it off, the thermostat restarted it, and the Activity Report filled with grace periods and fan fights. After: one 'Thermostat fan running (observed, not CA-controlled)' row and no CA action."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan",
+    "fan_entity": "climate.thermostat"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: HVAC off."
+    },
+    {
+      "time": "2026-07-10T06:00:30",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "hvac_action": "fan",
+      "thermostat_fan_mode": "auto",
+      "note": "The thermostat's own schedule blower: hvac_action 'fan' while the fan_mode attribute stays 'auto'."
+    },
+    {
+      "time": "2026-07-10T06:01:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 74.0,
+      "outdoor_f": 80.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": false,
+      "note": "Reconcile finds the schedule blower running with no CA command record behind it."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Mild-day classification applied: hvac_mode=off."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "event_emitted",
+      "event": "fan_observed_started",
+      "reason": "The thermostat's blower is recorded in the Activity Report as observed, not CA-controlled."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "fan_not_active",
+      "reason": "CA does not claim the thermostat's blower (_fan_active stays False)."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "nat_vent_not_active",
+      "reason": "No nat-vent session is invented around the thermostat's blower."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "no_new_unprotected_grace_after",
+      "since": "2026-07-10T06:00:30",
+      "reason": "No automation grace is started for a blower CA does not own."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A thermostat-initiated schedule blower is observed and left alone",
+    "observed_behavior": "fan_observed_started recorded; _fan_active False; no nat-vent exit, no grace, no fan command",
+    "expected_behavior": "Per Issues #1103/#1104: Climate Advisor owns only fans it commanded; the thermostat's own blower is observed, never adopted or stopped"
+  }
+}

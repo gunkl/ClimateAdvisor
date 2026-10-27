@@ -110,6 +110,7 @@ def _make_coord(*, fan_command_time=None):
         "weather_entity": "weather.test",
         "comfort_heat": 70,
         "comfort_cool": 75,
+        "fan_mode": "hvac_fan",  # Issue #1103: fan-mode handlers run only when a fan is configured
         "fan_state_feedback": True,  # tests validate feedback-mode override detection
     }
 

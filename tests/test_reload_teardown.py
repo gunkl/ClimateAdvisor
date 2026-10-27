@@ -63,6 +63,20 @@ def test_unloaded_instance_stays_dead_after_startup_window():
     # so unload + advance need their own patched context.
     with scheduler.installed():
         scheduler.advance_to(t0 + timedelta(seconds=_UNLOAD_AT_S))
+
+        # Positive controls: the assertions below are only meaningful if (a) a refresh
+        # really reaches _async_update_data on the live instance (a no-op refresh, e.g.
+        # from a test module swapping the coordinator's base class, made T1 pass on
+        # 1df0246) and (b) the FakeScheduler captured the 300 s startup timer, i.e.
+        # the coordinator code running is the module the scheduler patched.
+        update_calls.clear()
+        run_coro(old_coordinator.async_request_refresh())
+        assert len(update_calls) == 1, "harness refresh is a no-op: T1 would pass vacuously"
+        live_before_unload = [_callback_name(e.callback) for e in scheduler.live_callbacks()]
+        assert any("_on_startup_coalesce_timer" in name for name in live_before_unload), (
+            f"startup timer not captured by FakeScheduler: T1 would pass vacuously ({live_before_unload})"
+        )
+
         run_coro(async_unload_entry_like_ha(fake_hass, zone["entry"]))
 
         unloaded_at = scheduler.now()

@@ -4,34 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-
-# Inject a real DataUpdateCoordinator base class into the mocked HA module
-# BEFORE importing the coordinator module (so the class inherits properly).
-_update_coord_mod = sys.modules["homeassistant.helpers.update_coordinator"]
-
-
-class _FakeDataUpdateCoordinator:
-    """Minimal stand-in for DataUpdateCoordinator so the real coordinator can inherit."""
-
-    def __init__(self, hass, *args, **kwargs):
-        self.hass = hass
-
-    async def async_request_refresh(self):
-        """Stub for triggering a data refresh."""
-
-    async def async_shutdown(self):
-        """HA base shutdown; ClimateAdvisorCoordinator.async_shutdown() awaits it (Issue #1102)."""
-        self._shutdown_requested = True
-
-
-_update_coord_mod.DataUpdateCoordinator = _FakeDataUpdateCoordinator
-
-# Force reimport of the coordinator module with the real base class
-if "custom_components.climate_advisor.coordinator" in sys.modules:
-    del sys.modules["custom_components.climate_advisor.coordinator"]
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402

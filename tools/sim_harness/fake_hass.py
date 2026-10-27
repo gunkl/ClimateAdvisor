@@ -495,10 +495,13 @@ class _FakeBus:
     def async_listen_once(self, event_type: str, callback: Any) -> Any:
         remove_holder: list[Any] = []
 
-        def _wrapped(event: Any) -> None:
+        def _wrapped(event: Any) -> Any:
             if remove_holder:
                 remove_holder[0]()
-            callback(event)
+            # Issue #1102: return the listener's result so async_fire hands a coroutine
+            # to the task runner, as real HA runs an async listener. Rule #8: the
+            # wrapper used to drop it (the coroutine never ran) — missing, not wrong.
+            return callback(event)
 
         remove_holder.append(self.async_listen(event_type, _wrapped))
         return remove_holder[0]

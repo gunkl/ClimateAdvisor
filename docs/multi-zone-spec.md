@@ -2425,6 +2425,13 @@ Properties that hold throughout, not just before/after:
 3. A destructive service call (`reset_learning_data`) always requires and honors
    an explicit zone/entry identifier once PR4 ships — it can never again silently
    resolve to "whichever entry set up last."
+4. Per-zone teardown (Issue #1102): unloading or reloading one zone's entry
+   leaves no timer or listener of that zone's old coordinator/engine alive, and
+   a shut-down instance refuses to command devices or notify. This is per entry
+   and independent of the domain-wide teardown above (services, panel, REST
+   views and the log-capture handler still go only when the LAST zone unloads —
+   unchanged). See
+   [Teardown Contract](02-ARCHITECTURE-REFERENCE.md#teardown-contract-issue-1102).
 
 ## Error Conditions
 

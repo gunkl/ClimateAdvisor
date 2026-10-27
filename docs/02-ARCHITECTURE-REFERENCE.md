@@ -30,6 +30,7 @@
 | What does the diagnostics download / investigator snapshot contain about the thermostat? | `diagnostic_snapshot.build_diagnostic_snapshot()`: live climate attributes, a parsed `capabilities` block, a `last_command` block, plus `recent_hvac_events`, all redacted inside the builder. | [Debugging Guide](09-DEBUGGING-GUIDE.md#reading-the-thermostat-diagnostics-blocks-and-confirming-an-ignored-mode-issue-1049) |
 | Which edge of the comfort band does the thermostat guard (heat or cool), and which modules own that decision? | `comfort_family_decision.decide_comfort_family()` (pure leaf) + `comfort_family_fsm.transition()` (dwell anti-chatter), shelled by `AutomationEngine._resolve_comfort_family_via_fsm()`; reactive on every thermostat temperature change via `comfort_family_temperature_check()`. Nearest-edge arming, Issue #1066 (supersedes the #827 day-type-default-edge / sustain machinery and the ODE floor guard; Issue #1073 then restores a recency-gated against-grain tolerance as the settling guard). | [Comfort Edge Selector](#comfort-edge-selector-issue-1066) |
 | Where is the history of commanded HVAC mode changes kept, and what reads it? | A 200-entry ring buffer (`AutomationEngine.comfort_mode_changes`, written by `_record_commanded_mode()`, persisted in the state file); `control_quality.py` derives the `control_quality` block of `build_diagnostic_snapshot()` from it. | [Comfort Edge Selector](#comfort-edge-selector-issue-1066) and [Debugging Guide](09-DEBUGGING-GUIDE.md#control-quality-report-issue-1066) |
+| What happens to the old coordinator and engine when a config entry reloads or unloads (settings save, Repairs fix)? | `async_shutdown()` latches both (`_shut_down`), runs HA's base shutdown, saves, then releases every timer and listener it registered; HA calls it a second time from the entry's on_unload, and that call is a no-op. A shut-down instance refuses every command, notification and arm with one WARNING. Issue #1102. | [§Teardown Contract](#teardown-contract-issue-1102) |
 | Which pure function decides the "house off-target, equipment not running" stall alert, and where do the shared notify/reminder helpers live? | `comfort_stall_decision.decide_comfort_stall()` (clock + exclusions; shell `coordinator._update_comfort_stall()`); `coordinator._notify_in_background(title, message, type, *, email=True)` is the one coordinator-side fire-and-forget owner-alert routine (entity health, invariant watchdog, stall; the engine-side indoor-blind alert in `automation.py` still has its own `_push_indoor_blind_alert` / `_notify_indoor_blind`) and `temperature.reminder_due()` its pure reminder predicate; `desired_state.decide_open_sensor_hold()` is the one open-window predicate. | [House-off-target stall alert](08-COMPUTATION-REFERENCE.md#house-off-target-stall-alert-issue-1050-part-of-1048) |
 
 ## File Structure
@@ -490,6 +491,83 @@ engine's events/decisions mutate real production state and event history regardl
 second engine's own `dry_run`/`role`. `tests/test_engine_callback_isolation.py::TestHazardCharacterization`
 reproduces this exact hazard today (a second engine built with the production bundle leaks
 an event into the production event log) as a concrete negative example for review.
+
+## Teardown Contract (Issue #1102)
+
+Occupant view: after a settings save (which reloads the config entry) there must be exactly
+one Climate Advisor instance per zone that can command the fan, thermostat blower or HVAC,
+send a notification, or react to occupancy. Before #1102 a reload inside the 300 s startup
+window left the old instance alive through its uncancelled startup timer; it kept commanding
+the whole-house fan, turned it back on after the occupant switched it off, and blamed them.
+
+**When teardown runs.** HA unloads a config entry on reload and on removal, never on a
+restart. HA's `ConfigEntry.async_unload` calls `async_unload_entry()` (which calls
+`coordinator.async_shutdown()`), then runs the entry's on_unload callbacks LIFO. Because
+`DataUpdateCoordinator` takes `config_entry` from the setup ContextVar and registers
+`async_shutdown` there, **`async_shutdown()` runs twice per unload**. A restart fires
+`EVENT_HOMEASSISTANT_STOP` instead, so the STOP listener (`_persist_shutdown_diagnostics`)
+remains the only restart-time save.
+
+**Release rule.** Every resource is released by the mechanism that owns it:
+
+| Resource kind | Where the handle lives | Released by |
+|---|---|---|
+| Setup-lifetime coordinator timers/listeners (scheduled events, state listeners, bus listeners, startup-coalesce timer, weather retry, api.py cancel-override follow-up) | `coordinator._unsub_listeners` | `async_shutdown()` drains the list |
+| Runtime re-armed coordinator timers (occupancy away, TOU away/vacation, door debounce, fan-remote burst, pre-cool trigger) | own handle + cancel helper (`_cancel_*`) | `async_shutdown()` calls each helper |
+| Occupancy / door-window listeners | `_unsub_occupancy_listeners`, `_unsub_dw_listeners` | their `_unsubscribe_*` helpers, from `async_shutdown()` |
+| Engine timers (grace, fan cycles, backstop, revisit, override confirm, setpoint retry, mode-align recheck, fan verify) | own handle | `AutomationEngine.cleanup()` (#729) |
+| STARTED weather-validation hook (`__init__.py`) | `async_at_started` cancel | `entry.async_on_unload` |
+
+A handle from `async_call_later` / `async_track_*` / `async_at_start(ed)` /
+`bus.async_listen(_once)` is never discarded: `tests/test_teardown_static.py` fails on a bare
+call. The api.py follow-up is the one append-only exception (one entry per cancel-override
+click, never removed, a no-op after firing; growth is bounded by user clicks).
+
+**Shutdown order (`async_shutdown`).**
+1. If already shut down, return (the second call from on_unload must not re-save: by then
+   `cleanup()` has wiped the engine's grace, and saving again would lose a fan-off grace).
+2. Set `coordinator._shut_down`, then `automation_engine._shut_down` (nothing can command
+   during the awaited saves).
+3. `await super().async_shutdown()` — HA's base: no further refreshes.
+4. Saves: shutdown diagnostics, runtime flush, state.
+5. Release (table above).
+6. `automation_engine.cleanup()` (also sets the engine latch, so `cleanup()` is terminal for
+   any caller).
+
+All attribute reads use `getattr` defaults: HA also shuts down a coordinator whose setup
+failed part-way.
+
+**Shut-down latch.** A dead instance is reachable only through a leak, so the latch is a
+safety net plus a tripwire, not the release mechanism. Each refusal logs one WARNING naming
+the instance (`entry_id#objectid` / engine object id) and returns the call site's existing
+no-op result, so nothing retries, re-arms or notifies. Unlike `dry_run`, it never reports
+success.
+
+| Site | Refusal |
+|---|---|
+| `coordinator._async_update_data` | returns current `data` (tripwire: HA's own post-shutdown gate is silent) |
+| `_zone_scoped` / `_zone_scoped_sync` wrappers (every wrapped timer/listener) | return `None` |
+| `coordinator._async_send_briefing` (registered unwrapped; push + email) | return |
+| `coordinator._async_command_fan_entity` | `False` |
+| `AutomationEngine._call_climate` | `ClimateCallResult(REJECTED)` |
+| `_set_hvac_mode` (incl. off-assert blower call), `_set_temperature_impl` | `HvacCommandResult.FAILED`, before `_write_seq` / `_note_*` / verify / retry |
+| `_activate_fan`, `_deactivate_fan` (incl. blower calls) | `FanCommandResult.DISABLED`, before the verify timers |
+| `_call_fan_service_with_context` | return, before `_record_fan_command_context` |
+| `_release_orphaned_hvac_fan`, `_notify` | return |
+| `_start_fan_thermo_backstop` (stops an in-flight tick re-arming), `_start_grace_period_action` | no timer; grace returns `False` ("grace disabled") |
+
+`tests/test_teardown_static.py` also fails if a `hass.services.async_call` in
+`automation.py` or `coordinator.py` sits in a function without the latch (allowlist: the two
+read-only `weather.get_forecasts` fetches).
+
+**Reload from inside setup.** Code running inside `async_setup_entry()` schedules a reload
+with `hass.config_entries.async_schedule_reload(entry_id)`; awaiting `async_reload` there
+waits on the entry's own setup lock.
+
+**Tests.** `tests/test_reload_teardown.py` (T1: unload at +172 s, nothing runs after),
+`tests/test_reload_lifecycle.py` (no live timer/listener after unload; fan-off grace survives
+a reload and state is saved once; every refusal; STARTED hook; scheduled reload). The harness
+unloads the way HA does via `build_coordinator.async_unload_entry_like_ha()`.
 
 ## Automation Engine — Occupancy Methods
 

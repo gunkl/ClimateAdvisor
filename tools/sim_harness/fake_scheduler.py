@@ -96,6 +96,11 @@ class FakeScheduler:
         # raises mid-timeline, but G3 assertions can inspect this list and
         # fail a scenario that had unexpected production errors.
         self.callback_errors: list[tuple[datetime, BaseException]] = []
+        # Issue #1102: every timer registration, in order, as (armed_at, fire_at,
+        # callback). Lets lifecycle tests prove a torn-down instance arms nothing
+        # after unload — including timers that are armed AND fire inside the
+        # advanced window, which a before/after heap diff would miss.
+        self.armed_log: list[tuple[datetime, datetime, Any]] = []
 
     # ------------------------------------------------------------------
     # Clock
@@ -117,11 +122,21 @@ class FakeScheduler:
         """Register a callback to fire at an absolute virtual datetime."""
         entry = _ScheduledCallback(fire_at=fire_at, callback=callback)
         heapq.heappush(self._heap, entry)
+        self.armed_log.append((self._clock, fire_at, callback))
 
         def _cancel() -> None:
             entry._cancelled = True
 
         return _cancel
+
+    def live_callbacks(self) -> list[_ScheduledCallback]:
+        """Return pending, non-cancelled timer entries, soonest first (Issue #1102).
+
+        Cancelling a daily/interval registration marks its pending heap entry
+        cancelled too (see ``_schedule_daily``/``_schedule_interval``), so this
+        reflects exactly the timers that would still fire.
+        """
+        return sorted(e for e in self._heap if not e._cancelled)
 
     def _schedule_daily(self, hour: int | None, minute: int | None, second: int | None, callback: Any) -> Any:
         """Fire ``callback`` when local time matches hour/minute/second, then reschedule +1 day.
@@ -152,13 +167,14 @@ class FakeScheduler:
             # (e.g. coordinator._async_send_briefing/_async_morning_wakeup, both async def).
             result = callback(now)
             if not cancelled[0]:
-                self._schedule_at(_next_fire_at(now), _fire_and_reschedule)
+                pending[0] = self._schedule_at(_next_fire_at(now), _fire_and_reschedule)
             return result
 
-        self._schedule_at(_next_fire_at(self._clock), _fire_and_reschedule)
+        pending = [self._schedule_at(_next_fire_at(self._clock), _fire_and_reschedule)]
 
         def _cancel() -> None:
             cancelled[0] = True
+            pending[0]()  # mark the pending heap entry cancelled (live_callbacks fidelity)
 
         return _cancel
 
@@ -172,13 +188,14 @@ class FakeScheduler:
             # Issue #476: see matching comment in _schedule_daily's _fire_and_reschedule.
             result = callback(now)
             if not cancelled[0]:
-                self._schedule_at(now + interval, _fire_and_reschedule)
+                pending[0] = self._schedule_at(now + interval, _fire_and_reschedule)
             return result
 
-        self._schedule_at(self._clock + interval, _fire_and_reschedule)
+        pending = [self._schedule_at(self._clock + interval, _fire_and_reschedule)]
 
         def _cancel() -> None:
             cancelled[0] = True
+            pending[0]()  # mark the pending heap entry cancelled (live_callbacks fidelity)
 
         return _cancel
 

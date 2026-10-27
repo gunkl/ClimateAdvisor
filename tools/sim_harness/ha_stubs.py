@@ -150,9 +150,19 @@ class _MockDataUpdateCoordinator:
         # pattern (test_occupancy.py, test_weather_bias.py, test_learning_toggle.py)
         # happened not to exercise a method needing self.hass before this fix.
         self.hass = args[0] if args else kwargs.get("hass")
+        self.config_entry = kwargs.get("config_entry")
         self.data = None
         self.last_update_success = False
         self.update_listeners_call_count = 0
+        # Issue #1102: real DataUpdateCoordinator.async_shutdown() sets this and
+        # every later refresh is ignored (HA update_coordinator.py:217-222, 445).
+        # The stub previously had no shutdown at all, so a test could not
+        # represent HA's teardown gate — old semantics were missing, not wrong.
+        self._shutdown_requested = False
+
+    async def async_shutdown(self):
+        """Real DataUpdateCoordinator.async_shutdown: stop all further refreshes."""
+        self._shutdown_requested = True
 
     def async_update_listeners(self):
         """Real DataUpdateCoordinator method: push current ``self.data`` to subscribed entities.
@@ -163,7 +173,9 @@ class _MockDataUpdateCoordinator:
         self.update_listeners_call_count += 1
 
     async def async_request_refresh(self):
-        """Stub for triggering a data refresh."""
+        """Stub for triggering a data refresh (ignored after async_shutdown, as in HA)."""
+        if self._shutdown_requested:
+            return
         await self.async_config_entry_first_refresh()
 
     async def async_config_entry_first_refresh(self):

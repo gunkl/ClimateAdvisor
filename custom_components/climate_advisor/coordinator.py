@@ -43,6 +43,7 @@ from .automation import (
     AutomationEngine,
     AutomationEngineCallbacks,
     _in_sleep_window,
+    _refuse_if_shut_down,
     awake_comfort_edges,
     compute_bedtime_setback,
     compute_pre_cool_target,
@@ -448,22 +449,9 @@ def _instance_tag(coordinator: Any) -> str:
     return f"{getattr(coordinator, '_entry_id', '') or '?'}#{id(coordinator):x}"
 
 
-def _refuse_if_shut_down(coordinator: Any, action: str) -> bool:
-    """Issue #1102 latch: True (with one WARNING) if this coordinator was shut down.
-
-    A shut-down coordinator is one a reload/unload has replaced. Anything still able to
-    call into it (a timer, a listener, a refresh) is a leak; refusing keeps it from
-    commanding devices or notifying, and the WARNING makes the leak visible. Module-level
-    with ``is True`` so MagicMock-based test stubs (truthy attributes and methods) pass.
-    """
-    if getattr(coordinator, "_shut_down", False) is not True:
-        return False
-    _LOGGER.warning(
-        "Shut-down Climate Advisor instance %s asked to run %s — refused (stale after reload/unload)",
-        _instance_tag(coordinator),
-        action,
-    )
-    return True
+def _coordinator_label(coordinator: Any) -> str:
+    """Who-label for automation._refuse_if_shut_down's WARNING (Issue #1102)."""
+    return f"Climate Advisor coordinator {_instance_tag(coordinator)}"
 
 
 def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
@@ -1589,7 +1577,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         @functools.wraps(callback_fn)
         async def _wrapped(*args: Any, **kwargs: Any) -> Any:
-            if _refuse_if_shut_down(self, getattr(callback_fn, "__name__", "callback")):
+            if _refuse_if_shut_down(self, getattr(callback_fn, "__name__", "callback"), label=_coordinator_label):
                 return None
             with log_capture.zone_scope(self.zone_label):
                 return await callback_fn(*args, **kwargs)
@@ -1601,7 +1589,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         @functools.wraps(callback_fn)
         def _wrapped(*args: Any, **kwargs: Any) -> Any:
-            if _refuse_if_shut_down(self, getattr(callback_fn, "__name__", "callback")):
+            if _refuse_if_shut_down(self, getattr(callback_fn, "__name__", "callback"), label=_coordinator_label):
                 return None
             with log_capture.zone_scope(self.zone_label):
                 return callback_fn(*args, **kwargs)
@@ -3049,7 +3037,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         additive — no change to control flow, return value, or exception
         propagation below.
         """
-        if _refuse_if_shut_down(self, "_async_update_data"):
+        if _refuse_if_shut_down(self, "run _async_update_data", label=_coordinator_label):
             # Issue #1102 tripwire: HA's own post-shutdown gate is silent; this one logs.
             return self.data
         with log_capture.zone_scope(self.zone_label):
@@ -4955,7 +4943,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         registered without ``_zone_scoped`` (so F11 does not reach it), and the push and
         email below are raw ``notify`` calls.
         """
-        if _refuse_if_shut_down(self, "daily briefing"):
+        if _refuse_if_shut_down(self, "send the daily briefing", label=_coordinator_label):
             return
         with log_capture.zone_scope(self.zone_label):
             if self._briefing_sent_today:
@@ -6869,7 +6857,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return False
         domain = fan_entity_id.split(".")[0]  # "fan" or "switch"
         service = "turn_on" if on else "turn_off"
-        if _refuse_if_shut_down(self, f"{domain}.{service} {fan_entity_id}"):
+        if _refuse_if_shut_down(self, f"call {domain}.{service} {fan_entity_id}", label=_coordinator_label):
             return False
         if not self._automation_enabled:
             _LOGGER.info(
@@ -12117,8 +12105,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         Order: latch this coordinator, latch the engine (so nothing commands during the
         awaited saves), HA's base shutdown (no further refreshes), saves, release every
-        timer/listener, engine cleanup. getattr defaults keep it safe on a partially
-        initialised coordinator, which HA also shuts down after a failed setup.
+        timer/listener, engine cleanup. The release and cleanup run in a ``finally``, so a
+        save that raises cannot leave timers or listeners behind.
+
+        Partial-initialisation safety holds once ``__init__`` has completed (e.g. HA shuts
+        the coordinator down after async_restore_state/async_setup failed). A failure
+        inside ``__init__`` after ``super().__init__`` (which already registered this
+        method on the entry's on_unload) is NOT covered — follow-up J.
         """
         if getattr(self, "_shut_down", False) is True:
             _LOGGER.debug("async_shutdown: instance %s already shut down — no-op", _instance_tag(self))
@@ -12130,40 +12123,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _LOGGER.info("Climate Advisor v%s shutting down (instance %s)", VERSION, _instance_tag(self))
         await super().async_shutdown()
 
-        # Restart-cause diagnostics (Issue #403): mark this as a clean shutdown so the
-        # next startup can distinguish a routine restart from a crash.
-        await self._persist_shutdown_diagnostics()
+        try:
+            # Restart-cause diagnostics (Issue #403): mark this as a clean shutdown so the
+            # next startup can distinguish a routine restart from a crash.
+            await self._persist_shutdown_diagnostics()
 
-        # Flush any accumulated runtime (heat/cool or fan_only) and save state before
-        # cleanup. Issue #912: _flush_runtime_for_mode() replaces the old unconditional
-        # _flush_hvac_runtime() so an in-progress fan_only session isn't lost on shutdown.
-        self._flush_runtime_for_mode(self._hvac_session_mode)
-        await self._async_save_state()
+            # Flush any accumulated runtime (heat/cool or fan_only) and save state before
+            # cleanup. Issue #912: _flush_runtime_for_mode() replaces the old unconditional
+            # _flush_hvac_runtime() so an in-progress fan_only session isn't lost on shutdown.
+            self._flush_runtime_for_mode(self._hvac_session_mode)
+            await self._async_save_state()
+        finally:
+            # Issue #1102: release always runs, even if a save above raised.
+            # Cancel any pending occupancy away setback timer
+            self._cancel_occupancy_away_timer()
+            # Issue #899: cancel any pending TOU away/vacation T_start guard timer
+            self._cancel_tou_av_stop_timer()
 
-        # Cancel any pending occupancy away setback timer
-        self._cancel_occupancy_away_timer()
-        # Issue #899: cancel any pending TOU away/vacation T_start guard timer
-        self._cancel_tou_av_stop_timer()
+            # Cancel any pending debounce timers
+            for cancel in self._door_open_timers.values():
+                cancel()
+            self._door_open_timers.clear()
+            self._door_open_timer_expiry.clear()
 
-        # Cancel any pending debounce timers
-        for cancel in self._door_open_timers.values():
-            cancel()
-        self._door_open_timers.clear()
-        self._door_open_timer_expiry.clear()
+            # Issue #1102: release the timers/listeners that used to outlive an unload
+            # (F3 occupancy listeners, F4 fan-remote burst, F5 pre-cool trigger; F1/F2/F8
+            # handles are in _unsub_listeners below).
+            self._unsubscribe_occupancy_listeners()
+            self._cancel_fan_remote_burst(reason="shutdown")
+            self._cancel_pre_cool_trigger()
 
-        # Issue #1102: release the timers/listeners that used to outlive an unload
-        # (F3 occupancy listeners, F4 fan-remote burst, F5 pre-cool trigger; F1/F2/F8
-        # handles are in _unsub_listeners below).
-        self._unsubscribe_occupancy_listeners()
-        self._cancel_fan_remote_burst(reason="shutdown")
-        self._cancel_pre_cool_trigger()
-
-        for unsub in self._unsub_listeners:
-            unsub()
-        self._unsub_listeners.clear()
-        self._unsubscribe_door_window_listeners()
-        if engine is not None:
-            engine.cleanup()
+            for unsub in self._unsub_listeners:
+                unsub()
+            self._unsub_listeners.clear()
+            self._unsubscribe_door_window_listeners()
+            if engine is not None:
+                engine.cleanup()
 
 
 def _decide_pre_cool_reschedule(

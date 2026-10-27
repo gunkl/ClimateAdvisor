@@ -365,23 +365,20 @@ def _sanitize_comfort_hold(item: Any) -> dict[str, Any] | None:
     }
 
 
-def _refuse_if_shut_down(engine: Any, action: str) -> bool:
-    """Issue #1102 latch: True (with one WARNING) if this engine was shut down.
+def _refuse_if_shut_down(obj: Any, action: str, *, label: Callable[[Any], str] | None = None) -> bool:
+    """Issue #1102 latch: True (with one WARNING) if ``obj`` was shut down.
 
-    A shut-down engine belongs to a coordinator a reload/unload has replaced; any call
-    still reaching it comes from a leaked timer or listener. Unlike dry_run, a refusal
-    never pretends the action happened: each caller returns its existing no-op result so
-    nothing retries, re-arms or notifies. Module-level with ``is True`` so MagicMock-based
-    test stubs (truthy attributes and methods) pass.
+    The one shut-down check for both the engine and the coordinator (which passes its own
+    ``label``). A shut-down instance belongs to a config entry a reload/unload has
+    replaced; any call still reaching it comes from a leaked timer or listener. Unlike
+    dry_run, a refusal never pretends the action happened: each caller returns its
+    existing no-op result so nothing retries, re-arms or notifies. Module-level with
+    ``is True`` so MagicMock-based test stubs (truthy attributes and methods) pass.
     """
-    if getattr(engine, "_shut_down", False) is not True:
+    if getattr(obj, "_shut_down", False) is not True:
         return False
-    _LOGGER.warning(
-        "Shut-down automation engine %x (%s) asked to %s — refused (stale after reload/unload)",
-        id(engine),
-        getattr(engine, "climate_entity", "?"),
-        action,
-    )
+    who = label(obj) if label is not None else f"automation engine {id(obj):x} ({getattr(obj, 'climate_entity', '?')})"
+    _LOGGER.warning("Shut-down %s asked to %s — refused (stale after reload/unload)", who, action)
     return True
 
 

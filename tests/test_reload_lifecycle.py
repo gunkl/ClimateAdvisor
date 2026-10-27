@@ -131,6 +131,37 @@ def test_reload_during_fan_off_grace_keeps_grace_and_saves_once():
     assert new_ae._grace_end_time == grace_end
 
 
+def test_failed_save_still_releases_everything():
+    """A save that raises during shutdown (disk full, permissions) must not strand timers.
+
+    Occupant view: without the try/finally the old instance would stay armed and could
+    keep driving the fan after the reload, exactly the #1102 failure.
+    """
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+
+    coord, _entry, fake_hass, scheduler = _build(
+        home_toggle_entity="input_boolean.home",
+        vacation_toggle_entity="input_boolean.vacation",
+    )
+
+    async def _save_fails() -> None:
+        raise OSError("disk full")
+
+    coord._async_save_state = _save_fails
+    with scheduler.installed():
+        scheduler.advance_by(172)
+        assert scheduler.live_callbacks()  # startup timer + retry are pending
+        with pytest.raises(OSError, match="disk full"):
+            run_coro(coord.async_shutdown())
+
+    leftover = [getattr(e.callback, "__qualname__", repr(e.callback)) for e in scheduler.live_callbacks()]
+    assert leftover == [], f"timers still live after a failed save: {leftover}"
+    assert all(not v for v in fake_hass._state_listeners.values())
+    # Only the entry-owned STARTED hook remains; HA releases it via the entry's on_unload.
+    assert {k for k, v in fake_hass.bus._listeners.items() if v} <= {EVENT_HOMEASSISTANT_STARTED}
+    assert coord.automation_engine._shut_down is True
+
+
 def test_shutdown_twice_is_noop_and_partial_coordinator_is_safe():
     """A coordinator that never ran async_setup (HA shuts it down after a failed setup)."""
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator

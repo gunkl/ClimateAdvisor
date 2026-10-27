@@ -16,6 +16,7 @@ import contextlib
 import inspect
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -307,6 +308,18 @@ class _FakeStates:
 
     def get(self, entity_id: str) -> FakeState | None:
         return self._states.get(entity_id)
+
+    def async_all(self, domain: str | None = None) -> list[Any]:
+        """Real ``hass.states.async_all(domain)``: states (with ``entity_id``) in a domain.
+
+        Issue #1102 (T8): __init__.py's weather auto-resolve calls it on the reload
+        path. Rule #8: the method was missing from the fake, not wrong.
+        """
+        return [
+            SimpleNamespace(entity_id=eid, state=st.state, attributes=st.attributes)
+            for eid, st in self._states.items()
+            if domain is None or eid.split(".", 1)[0] == domain
+        ]
 
     def set(self, entity_id: str, state: FakeState) -> None:
         self._states[entity_id] = state

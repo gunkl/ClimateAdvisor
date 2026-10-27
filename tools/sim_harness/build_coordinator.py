@@ -304,16 +304,10 @@ def build_headless_multi_zone(
     """
     install_ha_stubs()
 
-    from custom_components.climate_advisor import async_setup_entry  # noqa: PLC0415
-    from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
     from custom_components.climate_advisor.coordinator import (  # noqa: PLC0415
         ClimateAdvisorCoordinator,
     )
-    from tools.sim_harness.ha_stubs import (  # noqa: PLC0415
-        ConfigEntry,
-        _current_entry,
-        _MockDataUpdateCoordinator,
-    )
+    from tools.sim_harness.ha_stubs import ConfigEntry, _MockDataUpdateCoordinator  # noqa: PLC0415
 
     # Same __bases__ guard as build_headless_coordinator() — see that
     # function's comment for the full explanation (Issue #497 follow-up).
@@ -377,21 +371,7 @@ def build_headless_multi_zone(
             # itself, matching production's actual sequencing.
             fake_hass.config_entries.register_entry(entry)
 
-            # Issue #1102: real HA's ConfigEntry.async_setup sets the current_entry
-            # ContextVar around async_setup_entry(); the coordinator reads it and
-            # registers async_shutdown on the entry's on_unload list.
-            _token = _current_entry.set(entry)
-            try:
-                run_coro(async_setup_entry(fake_hass, entry))
-            finally:
-                _current_entry.reset(_token)
-            # Settle any fire-and-forget hass.async_create_task() calls /
-            # scheduled callbacks queued during this zone's setup before
-            # moving on to the next zone — same reasoning as
-            # build_headless_coordinator's post-startup scheduler.advance_to.
-            scheduler.advance_to(scheduler.now())
-
-            coordinator = fake_hass.data[DOMAIN][entry.entry_id]
+            coordinator = setup_entry_like_ha(fake_hass, scheduler, entry)
             zones[zone_label] = {
                 "coordinator": coordinator,
                 "entry": entry,
@@ -399,6 +379,31 @@ def build_headless_multi_zone(
             }
 
     return zones, fake_hass, scheduler
+
+
+def setup_entry_like_ha(fake_hass: FakeHass, scheduler: FakeScheduler, entry: Any) -> Any:
+    """Run the REAL async_setup_entry() for ``entry`` as HA does; return its coordinator.
+
+    Must be called inside ``scheduler.installed()``. Issue #1102: real HA's
+    ConfigEntry.async_setup sets the current_entry ContextVar around
+    async_setup_entry(); the coordinator reads it and registers async_shutdown on
+    the entry's on_unload list. Also used to set an entry up again after an unload
+    (a reload), against the same FakeHass and config_dir.
+    """
+    from custom_components.climate_advisor import async_setup_entry  # noqa: PLC0415
+    from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
+    from tools.sim_harness.ha_stubs import _current_entry  # noqa: PLC0415
+
+    token = _current_entry.set(entry)
+    try:
+        run_coro(async_setup_entry(fake_hass, entry))
+    finally:
+        _current_entry.reset(token)
+    # Settle any fire-and-forget hass.async_create_task() calls / scheduled callbacks
+    # queued during setup — same reasoning as build_headless_coordinator's
+    # post-startup scheduler.advance_to.
+    scheduler.advance_to(scheduler.now())
+    return fake_hass.data[DOMAIN][entry.entry_id]
 
 
 async def async_unload_entry_like_ha(fake_hass: FakeHass, entry: Any) -> bool:

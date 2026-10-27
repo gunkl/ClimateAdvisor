@@ -390,6 +390,11 @@ class FakeScheduler:
                 "custom_components.climate_advisor.coordinator.async_call_later",
                 side_effect=_fake_async_call_later,
             ),
+            # Issue #1102 (F8): api.py's cancel-override follow-up timer.
+            patch(
+                "custom_components.climate_advisor.api.async_call_later",
+                side_effect=_fake_async_call_later,
+            ),
             patch(
                 "custom_components.climate_advisor.coordinator.async_track_time_change",
                 side_effect=_fake_async_track_time_change,

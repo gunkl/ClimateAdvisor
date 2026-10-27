@@ -10,7 +10,10 @@ only injected if it is not already present in sys.modules).
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import enum as _enum
+import inspect
 import os
 import sys
 import uuid
@@ -40,6 +43,8 @@ _HA_MODULES = [
     "homeassistant.helpers.update_coordinator",
     "homeassistant.helpers.entity_platform",
     "homeassistant.helpers.event",
+    # Issue #1102 (F6): __init__.py imports async_at_started from here.
+    "homeassistant.helpers.start",
     "homeassistant.helpers.selector",
     "homeassistant.components",
     "homeassistant.components.sensor",
@@ -150,7 +155,14 @@ class _MockDataUpdateCoordinator:
         # pattern (test_occupancy.py, test_weather_bias.py, test_learning_toggle.py)
         # happened not to exercise a method needing self.hass before this fix.
         self.hass = args[0] if args else kwargs.get("hass")
-        self.config_entry = kwargs.get("config_entry")
+        # Issue #1102: real HA takes config_entry from the current_entry ContextVar when
+        # it is not passed (set during async_setup_entry) and then registers
+        # async_shutdown with config_entry.async_on_unload — which is why HA calls
+        # async_shutdown twice on every unload. Rule #8: the stub had neither, so a
+        # test could not represent HA's real teardown sequence (missing, not wrong).
+        self.config_entry = kwargs["config_entry"] if "config_entry" in kwargs else _current_entry.get()
+        if self.config_entry is not None and hasattr(self.config_entry, "async_on_unload"):
+            self.config_entry.async_on_unload(self.async_shutdown)
         self.data = None
         self.last_update_success = False
         self.update_listeners_call_count = 0
@@ -387,6 +399,53 @@ def _remove_panel(hass: Any, frontend_url_path: str) -> None:
     hass.data.get("_panels", {}).pop(frontend_url_path, None)
 
 
+# Issue #1102: HA's config_entries.current_entry ContextVar (set by ConfigEntry.async_setup
+# around the integration's async_setup_entry). build_headless_multi_zone sets it the same way.
+_current_entry: contextvars.ContextVar[Any] = contextvars.ContextVar("current_entry", default=None)
+
+
+def _run_hass_job(hass: Any, job: Any, *args: Any) -> None:
+    """Run a callback like HA's async_run_hass_job: a coroutine starts as an eager task."""
+    result = job(*args)
+    if not inspect.iscoroutine(result):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        hass.async_create_task(result)
+        return
+    asyncio.Task(result, loop=loop, eager_start=True)
+
+
+def _async_at_started(hass: Any, at_start_cb: Any) -> Any:
+    """Real-semantics homeassistant.helpers.start.async_at_started (Issue #1102, F6).
+
+    Runs ``at_start_cb(hass)`` now if HA is already running (FakeHass.is_running), else
+    once on EVENT_HOMEASSISTANT_STARTED. The returned cancel is safe after firing.
+    Rule #8: the module did not exist in the stub layer (missing, not wrong).
+    """
+    if hass.is_running:
+        _run_hass_job(hass, at_start_cb, hass)
+        return lambda: None
+
+    unsub: list[Any] = []
+
+    def _matched(_event: Any) -> None:
+        unsub.clear()
+        _run_hass_job(hass, at_start_cb, hass)
+
+    unsub.append(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _matched))
+
+    def _cancel() -> None:
+        if unsub:
+            unsub.pop()()
+
+    return _cancel
+
+
+EVENT_HOMEASSISTANT_STARTED = "homeassistant_started"
+
+
 class ConfigEntry:
     """Minimal stand-in for homeassistant.config_entries.ConfigEntry (Issue #796).
 
@@ -419,6 +478,22 @@ class ConfigEntry:
         self.title = title
         self.version = version
         self.options = dict(options or {})
+        self._on_unload: list[Any] = []
+
+    def async_on_unload(self, func: Any) -> None:
+        """Real ConfigEntry.async_on_unload: register a callback run when the entry unloads.
+
+        Issue #1102. Rule #8: the stub had no on_unload list, so the second
+        async_shutdown HA makes on every unload could not be represented (missing).
+        """
+        self._on_unload.append(func)
+
+    async def async_process_on_unload(self, hass: Any) -> None:
+        """Real ConfigEntry._async_process_on_unload: run callbacks LIFO, await coroutines."""
+        while self._on_unload:
+            result = self._on_unload.pop()()
+            if inspect.isawaitable(result):
+                await result
 
 
 class _SensorStateClass(_enum.StrEnum):
@@ -531,6 +606,13 @@ def install_ha_stubs() -> None:
     # parity/forward-compatibility rather than because anything currently
     # evaluates it at import time.
     config_entries.ConfigEntry = ConfigEntry
+    config_entries.current_entry = _current_entry
+
+    # Issue #1102 (F6): real-semantics async_at_started, and the STARTED event name it
+    # listens for (a real string so tests can fire it on FakeHass's bus).
+    sys.modules["homeassistant.helpers.start"].async_at_started = _async_at_started
+    helpers.start = sys.modules["homeassistant.helpers.start"]
+    sys.modules["homeassistant.const"].EVENT_HOMEASSISTANT_STARTED = EVENT_HOMEASSISTANT_STARTED
 
     # Issue #808: real AbortFlow exception so _abort_if_unique_id_configured()
     # can raise it and test drivers can catch it, mirroring the real

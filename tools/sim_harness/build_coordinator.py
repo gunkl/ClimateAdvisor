@@ -309,7 +309,11 @@ def build_headless_multi_zone(
     from custom_components.climate_advisor.coordinator import (  # noqa: PLC0415
         ClimateAdvisorCoordinator,
     )
-    from tools.sim_harness.ha_stubs import ConfigEntry, _MockDataUpdateCoordinator  # noqa: PLC0415
+    from tools.sim_harness.ha_stubs import (  # noqa: PLC0415
+        ConfigEntry,
+        _current_entry,
+        _MockDataUpdateCoordinator,
+    )
 
     # Same __bases__ guard as build_headless_coordinator() — see that
     # function's comment for the full explanation (Issue #497 follow-up).
@@ -373,7 +377,14 @@ def build_headless_multi_zone(
             # itself, matching production's actual sequencing.
             fake_hass.config_entries.register_entry(entry)
 
-            run_coro(async_setup_entry(fake_hass, entry))
+            # Issue #1102: real HA's ConfigEntry.async_setup sets the current_entry
+            # ContextVar around async_setup_entry(); the coordinator reads it and
+            # registers async_shutdown on the entry's on_unload list.
+            _token = _current_entry.set(entry)
+            try:
+                run_coro(async_setup_entry(fake_hass, entry))
+            finally:
+                _current_entry.reset(_token)
             # Settle any fire-and-forget hass.async_create_task() calls /
             # scheduled callbacks queued during this zone's setup before
             # moving on to the next zone — same reasoning as
@@ -388,3 +399,20 @@ def build_headless_multi_zone(
             }
 
     return zones, fake_hass, scheduler
+
+
+async def async_unload_entry_like_ha(fake_hass: FakeHass, entry: Any) -> bool:
+    """Unload ``entry`` the way HA's ConfigEntry.async_unload does (Issue #1102).
+
+    HA calls the integration's ``async_unload_entry()`` and, if it returns True, runs
+    the entry's on_unload callbacks LIFO — including the coordinator's own
+    ``async_shutdown`` (registered by DataUpdateCoordinator), i.e. a SECOND shutdown.
+    Calling ``async_unload_entry()`` alone (the older harness path) skips that second
+    call, so a bug that only shows on it (N4: the lost fan-off grace) could not be seen.
+    """
+    from custom_components.climate_advisor import async_unload_entry  # noqa: PLC0415
+
+    ok = await async_unload_entry(fake_hass, entry)
+    if ok:
+        await entry.async_process_on_unload(fake_hass)
+    return ok

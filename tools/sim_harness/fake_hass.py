@@ -377,6 +377,7 @@ class _FakeConfigEntries:
 
     def __init__(self) -> None:
         self._entries: dict[str, Any] = {}
+        self.scheduled_reloads: list[str] = []
 
     def register_entry(self, entry: Any) -> None:
         """Harness-only: add an entry to the registry (real HA does this at
@@ -425,6 +426,13 @@ class _FakeConfigEntries:
     async def async_reload(self, entry_id: str) -> bool:
         """No-op — no scenario currently exercises a live reload mid-run."""
         return True
+
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Real HA schedules (does not await) a reload of the entry (Issue #1102, F7).
+
+        Recorded, not performed. Rule #8: the method was missing from the fake.
+        """
+        self.scheduled_reloads.append(entry_id)
 
 
 class _FakeHttp:
@@ -556,6 +564,10 @@ class FakeHass:
     # ------------------------------------------------------------------
     # State-change listener registry (real dispatch, coordinator-fidelity)
     # ------------------------------------------------------------------
+
+    def listener_count(self) -> int:
+        """Live state-change plus bus listeners (Issue #1102 leak checks)."""
+        return sum(len(v) for v in self._state_listeners.values()) + sum(len(v) for v in self.bus._listeners.values())
 
     def add_state_listener(self, entity_ids: str | list[str], callback: Any) -> Any:
         """Register a state-change listener; mirrors async_track_state_change_event.

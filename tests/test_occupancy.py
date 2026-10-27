@@ -22,6 +22,10 @@ class _FakeDataUpdateCoordinator:
     async def async_request_refresh(self):
         """Stub for triggering a data refresh."""
 
+    async def async_shutdown(self):
+        """HA base shutdown; ClimateAdvisorCoordinator.async_shutdown() awaits it (Issue #1102)."""
+        self._shutdown_requested = True
+
 
 _update_coord_mod.DataUpdateCoordinator = _FakeDataUpdateCoordinator
 

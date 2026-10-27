@@ -1201,9 +1201,13 @@ class TestCancelViewsGraceCancellation:
         coordinator.automation_engine = ae
         coordinator._current_classification = None
 
-        with patch("homeassistant.helpers.event.async_call_later") as mock_call_later:
+        # Issue #1102 (F8): api.py now imports async_call_later at module level and keeps
+        # the handle on the coordinator so unload cancels it.
+        coordinator._unsub_listeners = []
+        with patch("custom_components.climate_advisor.api.async_call_later") as mock_call_later:
             self._post(ClimateAdvisorCancelFanOverrideView, coordinator)
             mock_call_later.assert_called_once()
+        assert coordinator._unsub_listeners == [mock_call_later.return_value]
 
 
 class TestResumeFromPauseViewFeedsOverrideGraceFsm:

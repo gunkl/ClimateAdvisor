@@ -12,6 +12,7 @@ from typing import Any
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_call_later
 
 from . import log_capture, zone_registry
 from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table
@@ -826,7 +827,6 @@ def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae:
     sibling).
     """
     from homeassistant.core import callback
-    from homeassistant.helpers.event import async_call_later
 
     @callback
     def _apply_after_delay(_now):
@@ -837,7 +837,10 @@ def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae:
             if coordinator._current_classification:
                 hass.async_create_task(ae.apply_classification(coordinator._current_classification))
 
-    async_call_later(hass, 10, _apply_after_delay)
+    # Issue #1102 (F8): keep the handle on the coordinator so unloading it cancels this
+    # follow-up. Exception to the release rule: one entry per cancel-override click,
+    # never removed, a no-op after firing — growth is bounded by user clicks.
+    coordinator._unsub_listeners.append(async_call_later(hass, 10, _apply_after_delay))
 
 
 class ClimateAdvisorCancelOverrideView(HomeAssistantView):

@@ -365,6 +365,26 @@ def _sanitize_comfort_hold(item: Any) -> dict[str, Any] | None:
     }
 
 
+def _refuse_if_shut_down(engine: Any, action: str) -> bool:
+    """Issue #1102 latch: True (with one WARNING) if this engine was shut down.
+
+    A shut-down engine belongs to a coordinator a reload/unload has replaced; any call
+    still reaching it comes from a leaked timer or listener. Unlike dry_run, a refusal
+    never pretends the action happened: each caller returns its existing no-op result so
+    nothing retries, re-arms or notifies. Module-level with ``is True`` so MagicMock-based
+    test stubs (truthy attributes and methods) pass.
+    """
+    if getattr(engine, "_shut_down", False) is not True:
+        return False
+    _LOGGER.warning(
+        "Shut-down automation engine %x (%s) asked to %s — refused (stale after reload/unload)",
+        id(engine),
+        getattr(engine, "climate_entity", "?"),
+        action,
+    )
+    return True
+
+
 class FanCommandResult(Enum):
     """Outcome of an `_activate_fan()`/`_deactivate_fan()` call (Issue #649).
 
@@ -1030,6 +1050,10 @@ class AutomationEngine:
     # attribute in __init__ below.
     role: str = "production"
 
+    # Issue #1102: shut-down latch (see _refuse_if_shut_down). Class-level default for
+    # engines built via object.__new__ in tests; __init__ sets the instance attribute.
+    _shut_down: bool = False
+
     # Issue #1049: class-level defaults for attributes first read by the climate-command
     # helpers below, so engines built via object.__new__ (skipping __init__) still work.
     _write_seq: int = 0
@@ -1161,6 +1185,9 @@ class AutomationEngine:
 
         # Dry-run mode: when True, all service calls are logged but skipped
         self.dry_run: bool = False
+        # Issue #1102: set by the coordinator first thing in async_shutdown() and by
+        # cleanup(); once set, this engine refuses every command, notification and arm.
+        self._shut_down: bool = False
 
         # Grace period state
         self._manual_grace_cancel: Any | None = None
@@ -1745,6 +1772,8 @@ class AutomationEngine:
         ``email=False`` suppresses the email channel for this call (push still follows its
         per-event preference); the default keeps today's push + email behavior.
         """
+        if _refuse_if_shut_down(self, f"send notification {title!r}"):
+            return
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would send notification: %s — %s role=%s", title, message, self.role)
             return
@@ -3713,6 +3742,9 @@ class AutomationEngine:
         keeps the ``HVAC command failed`` / ``Temperature command failed`` ERROR wording and
         the entity id that existing tests and log searches rely on).
         """
+        if _refuse_if_shut_down(self, f"call climate.{service}"):
+            # REJECTED: every caller skips quietly on it (no verify, retry or nudge follow-up).
+            return ClimateCallResult(ClimateCallOutcome.REJECTED)
         task = asyncio.ensure_future(self.hass.services.async_call("climate", service, data, blocking=True))
         try:
             await asyncio.wait_for(asyncio.shield(task), CLIMATE_CALL_TIMEOUT_S)
@@ -4206,6 +4238,8 @@ class AutomationEngine:
                     {"attempted_mode": mode, "reason": reason},
                 )
             return HvacCommandResult.WHF_BLOCKED
+        if _refuse_if_shut_down(self, f"set HVAC mode {mode}"):
+            return HvacCommandResult.FAILED  # before _write_seq / _note_* / verify / retry
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would set HVAC mode to %s — %s role=%s", mode, reason, self.role)
             return HvacCommandResult.DRY_RUN
@@ -4439,6 +4473,8 @@ class AutomationEngine:
         unit = self._temp_unit
         # Convert internal °F to user's unit before sending to HA climate entity
         service_temp = from_fahrenheit(temperature, unit)
+        if _refuse_if_shut_down(self, f"set temperature {temperature}"):
+            return HvacCommandResult.FAILED  # before _write_seq / _note_* / verify / retry
         if self.dry_run:
             _LOGGER.info(
                 "[DRY RUN] Would set temperature to %s (%s mode) — %s role=%s",
@@ -7444,6 +7480,8 @@ class AutomationEngine:
 
     async def _release_orphaned_hvac_fan(self) -> None:
         """Issue #1103: fan control was disabled while CA owned the thermostat blower -- hand it back once."""
+        if _refuse_if_shut_down(self, "release orphaned HVAC fan"):
+            return
         cs = self.hass.states.get(self.climate_entity)
         if cs is None:
             return
@@ -8108,7 +8146,12 @@ class AutomationEngine:
         defers to another already-active *manual* grace — automation-over-automation
         replacement (e.g. `nat_vent_exit_resume` replacing `sensor_closed_resume`) is
         unaffected.
+
+        Issue #1102: a shut-down engine returns False (the "grace disabled" contract), so
+        no grace timer is armed on a dead instance and callers write no grace flags.
         """
+        if _refuse_if_shut_down(self, f"arm grace period ({source}/{trigger})"):
+            return False
         if source == "automation" and self._grace_active and self._last_resume_source == "manual":
             _manual_end = dt_util.parse_datetime(self._grace_end_time) if self._grace_end_time else None
             if _manual_end is not None and dt_util.now() < _manual_end:
@@ -12643,6 +12686,8 @@ class AutomationEngine:
         context through to their own state write. This is why the context check is
         additive/corroborating rather than a replacement for the existing checks.
         """
+        if _refuse_if_shut_down(self, f"call {domain}.{service} {entity_id}"):
+            return  # before _record_fan_command_context (Issue #1102)
         cmd_context = Context()
         self._record_fan_command_context(cmd_context.id)
         await self.hass.services.async_call(domain, service, {"entity_id": entity_id}, context=cmd_context)
@@ -12901,6 +12946,8 @@ class AutomationEngine:
                 else FanCommandResult.RATE_LIMITED_DUP
             )
 
+        if _refuse_if_shut_down(self, f"activate fan ({reason})"):
+            return FanCommandResult.DISABLED  # existing no-op result; before verify timers
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would activate fan — %s role=%s", reason, self.role)
             return FanCommandResult.EXECUTED
@@ -13053,8 +13100,11 @@ class AutomationEngine:
 
         The timer is self-rescheduling: each fire re-schedules the next tick before
         calling fan_thermostat_check, so it runs continuously while the fan is active.
-        Cancelled by _deactivate_fan and cleanup.
+        Cancelled by _deactivate_fan and cleanup. Issue #1102: a shut-down engine refuses
+        to arm, so a tick already in flight during cleanup() cannot re-arm the chain.
         """
+        if _refuse_if_shut_down(self, "arm fan thermostatic backstop"):
+            return
         if self._fan_thermo_cancel:
             self._fan_thermo_cancel()
             self._fan_thermo_cancel = None
@@ -14004,6 +14054,8 @@ class AutomationEngine:
                 else FanCommandResult.RATE_LIMITED_DUP
             )
 
+        if _refuse_if_shut_down(self, f"deactivate fan ({reason})"):
+            return FanCommandResult.DISABLED  # existing no-op result; before verify timers
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would deactivate fan — %s role=%s", reason, self.role)
             return FanCommandResult.EXECUTED
@@ -14846,7 +14898,13 @@ class AutomationEngine:
         }
 
     def cleanup(self) -> None:
-        """Remove all active listeners and cancel pending timers."""
+        """Remove all active listeners and cancel pending timers.
+
+        Issue #1102: also latches the engine (``_shut_down``). The coordinator sets the
+        latch earlier, before its awaited saves; setting it here too makes cleanup() a
+        terminal state for any caller, including tests that call it directly.
+        """
+        self._shut_down = True
         self._cancel_grace_timers()
         self._stop_fan_min_runtime_cycles()
         self._cancel_fan_thermo_backstop()  # Issue #327

@@ -107,6 +107,9 @@ def _make_coord_stub():
     coord._emit_event = MagicMock()
     coord.claude_client = None
 
+    # Issue #1102: async_shutdown() now calls super().async_shutdown() (HA's base gate),
+    # which needs isinstance(coord, ClimateAdvisorCoordinator); Mock honours __class__.
+    coord.__class__ = ClimateAdvisorCoordinator
     coord.async_shutdown = types.MethodType(ClimateAdvisorCoordinator.async_shutdown, coord)
     coord.async_restore_state = types.MethodType(ClimateAdvisorCoordinator.async_restore_state, coord)
     coord._persist_shutdown_diagnostics = types.MethodType(

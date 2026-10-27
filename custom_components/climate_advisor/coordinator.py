@@ -443,6 +443,29 @@ _VACATION_ACTION_MESSAGES: tuple[str, ...] = (
 )
 
 
+def _instance_tag(coordinator: Any) -> str:
+    """Entry id plus object id, so two instances of one zone are told apart in logs (#1102)."""
+    return f"{getattr(coordinator, '_entry_id', '') or '?'}#{id(coordinator):x}"
+
+
+def _refuse_if_shut_down(coordinator: Any, action: str) -> bool:
+    """Issue #1102 latch: True (with one WARNING) if this coordinator was shut down.
+
+    A shut-down coordinator is one a reload/unload has replaced. Anything still able to
+    call into it (a timer, a listener, a refresh) is a leak; refusing keeps it from
+    commanding devices or notifying, and the WARNING makes the leak visible. Module-level
+    with ``is True`` so MagicMock-based test stubs (truthy attributes and methods) pass.
+    """
+    if getattr(coordinator, "_shut_down", False) is not True:
+        return False
+    _LOGGER.warning(
+        "Shut-down Climate Advisor instance %s asked to run %s — refused (stale after reload/unload)",
+        _instance_tag(coordinator),
+        action,
+    )
+    return True
+
+
 def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
     """Deterministically pick one line from ``pool`` per calendar day.
 
@@ -596,6 +619,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # Loop-computed once per cycle; read (never recomputed) by the executor-thread chart path.
     _occupancy_restore_held_cache: bool = False
     _stall_status: dict[str, str] | None = None  # the open hvac_control_issues entry, else None
+    # Issue #1102: shut-down latch. Set once, first thing in async_shutdown(); a dead
+    # instance (left reachable by a timer or listener after a reload) refuses to act.
+    # Class-level default so coordinators built via object.__new__ in tests still work.
+    _shut_down: bool = False
 
     def __init__(self, hass: HomeAssistant, config: dict[str, Any], entry_id: str = "") -> None:
         """Initialize the coordinator."""
@@ -606,9 +633,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=30),
         )
         self.config = config
-        # Issue #563: DataUpdateCoordinator.config_entry is intentionally never set
-        # (see class docstring/CLAUDE.md — always None), so a plain entry_id is kept
-        # separately for the one case that needs to write back to the config entry
+        # Issue #563 / #1102: config_entry is not passed explicitly, but HA's
+        # DataUpdateCoordinator still sets it from the config_entries.current_entry
+        # ContextVar during async_setup_entry(), and then registers async_shutdown with
+        # config_entry.async_on_unload, so HA calls async_shutdown() a second time on
+        # every unload (see async_shutdown()). Outside setup (tests, the simulation
+        # harness) it is None. A plain entry_id is kept separately for the one case that
+        # needs to write back to the config entry
         # at runtime: async_persist_model_fallback(). Empty string when not supplied
         # (e.g. the simulation harness, which has no real ConfigEntry) — callers that
         # need it check for a resolvable entry via hass.config_entries.async_get_entry.
@@ -1427,7 +1458,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._startup_timer_fired = True
             self.hass.async_create_task(self.async_request_refresh())
 
-        async_call_later(self.hass, 300, _on_startup_coalesce_timer)
+        # Issue #1102 (F1): keep the handle so unload cancels it. Discarding it let a
+        # reload inside this 300 s window revive the dead instance when it fired.
+        self._unsub_listeners.append(async_call_later(self.hass, 300, _on_startup_coalesce_timer))
         _LOGGER.info(
             "Startup coalescing window started — override detection suppressed for 300s, coalescing at %s",
             _coalesce_expiry.strftime("%H:%M:%S"),
@@ -1556,6 +1589,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         @functools.wraps(callback_fn)
         async def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            if _refuse_if_shut_down(self, getattr(callback_fn, "__name__", "callback")):
+                return None
             with log_capture.zone_scope(self.zone_label):
                 return await callback_fn(*args, **kwargs)
 
@@ -1566,6 +1601,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         @functools.wraps(callback_fn)
         def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            if _refuse_if_shut_down(self, getattr(callback_fn, "__name__", "callback")):
+                return None
             with log_capture.zone_scope(self.zone_label):
                 return callback_fn(*args, **kwargs)
 
@@ -3012,6 +3049,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         additive — no change to control flow, return value, or exception
         propagation below.
         """
+        if _refuse_if_shut_down(self, "_async_update_data"):
+            # Issue #1102 tripwire: HA's own post-shutdown gate is silent; this one logs.
+            return self.data
         with log_capture.zone_scope(self.zone_label):
             # Defensive defaults: several existing tests partially instantiate the
             # coordinator via object.__new__() (bypassing __init__) and bind only the
@@ -3476,7 +3516,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 def _schedule_retry(_now: Any) -> None:
                     self.hass.async_create_task(self.async_request_refresh())
 
-                async_call_later(self.hass, delay, _schedule_retry)
+                # Issue #1102 (F2): keep the handle so unload cancels it (at most 5 retries).
+                self._unsub_listeners.append(async_call_later(self.hass, delay, _schedule_retry))
             else:
                 _LOGGER.warning(
                     "Weather entity still unavailable after startup retries; will try again at next scheduled update"
@@ -4909,7 +4950,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
           test action, not the unattended daily spam this mute exists to prevent). Only the
           scheduled ``briefing_time`` trigger (``_async_send_briefing_scheduled`` below) passes
           True.
+
+        Issue #1102: a shut-down instance refuses up front. The scheduled trigger is
+        registered without ``_zone_scoped`` (so F11 does not reach it), and the push and
+        email below are raw ``notify`` calls.
         """
+        if _refuse_if_shut_down(self, "daily briefing"):
+            return
         with log_capture.zone_scope(self.zone_label):
             if self._briefing_sent_today:
                 return
@@ -5643,6 +5690,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _heat_direction = bool(self._current_classification and self._current_classification.hvac_mode == "heat")
         return (_lower if _heat_direction else _upper), "passive"
 
+    def _cancel_pre_cool_trigger(self) -> None:
+        """Cancel any pending pre-cool trigger timer (Issue #1102, F5).
+
+        Shared by the nat-vent-exit reschedule, the midnight reset and async_shutdown().
+        ``getattr`` default: tests partially instantiate the coordinator via object.__new__.
+        """
+        if getattr(self, "_pre_cool_trigger_cancel", None) is not None:
+            self._pre_cool_trigger_cancel()
+            _LOGGER.debug("Pre-cool trigger timer cancelled")
+        self._pre_cool_trigger_cancel = None
+
     def _maybe_schedule_pre_cool(self) -> None:
         """Schedule the overnight pre-cool trigger if tonight is eligible and not yet scheduled."""
         if self._pre_cool_trigger_scheduled:
@@ -5715,8 +5773,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         if new_trigger is None:
             return
-        if self._pre_cool_trigger_cancel is not None:
-            self._pre_cool_trigger_cancel()
+        self._cancel_pre_cool_trigger()
         self._pre_cool_trigger_cancel = async_track_point_in_time(
             self.hass, self._zone_scoped(self._async_pre_cool_trigger), new_trigger
         )
@@ -5799,9 +5856,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         await self._refresh_hourly_forecast()
 
         # Reset pre-cool state for the new day
-        if self._pre_cool_trigger_cancel is not None:
-            self._pre_cool_trigger_cancel()
-            self._pre_cool_trigger_cancel = None
+        self._cancel_pre_cool_trigger()
         self._pre_cool_trigger_scheduled = False
         self._pre_cool_status = None
         self._pre_cool_trigger_dt = None
@@ -6814,6 +6869,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return False
         domain = fan_entity_id.split(".")[0]  # "fan" or "switch"
         service = "turn_on" if on else "turn_off"
+        if _refuse_if_shut_down(self, f"{domain}.{service} {fan_entity_id}"):
+            return False
         if not self._automation_enabled:
             _LOGGER.info(
                 "[DRY RUN] Would command fan entity %s.%s entity_id=%s (automation disabled)",
@@ -7118,17 +7175,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._cancel_fan_remote_burst()  # supersedes any not-yet-applied override intent
         # else: unknown/ignored token, or a bare "on" with no open burst — unchanged behavior.
 
-    def _cancel_fan_remote_burst(self) -> None:
+    def _cancel_fan_remote_burst(self, reason: str = "off received") -> None:
         """Cancel any pending fan-remote burst without flushing it (Issue #519).
 
         Called when `off` arrives — turning the fan off supersedes any not-yet-applied
-        override/comfort intent from a burst still being combined.
+        override/comfort intent from a burst still being combined — and from
+        async_shutdown() (Issue #1102), so the burst timer cannot fire on a dead instance.
         """
-        if self._fan_remote_burst_cancel is not None:
+        if getattr(self, "_fan_remote_burst_cancel", None) is not None:
             self._fan_remote_burst_cancel()
             self._fan_remote_burst_cancel = None
-        if self._fan_remote_burst is not None:
-            _LOGGER.info("Fan remote burst cancelled — off received")
+        if getattr(self, "_fan_remote_burst", None) is not None:
+            _LOGGER.info("Fan remote burst cancelled — %s", reason)
             self._fan_remote_burst = None
 
     def _arm_fan_remote_burst(self) -> None:
@@ -12049,8 +12107,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
 
     async def async_shutdown(self) -> None:
-        """Clean up on shutdown."""
-        _LOGGER.info("Climate Advisor v%s shutting down", VERSION)
+        """Tear this instance down for good (Issue #1102: latched, idempotent).
+
+        HA calls this twice on every unload: from async_unload_entry(), then again from
+        the entry's on_unload callbacks (DataUpdateCoordinator registers async_shutdown
+        there; config_entry comes from the setup ContextVar). The second call must be a
+        no-op: by then cleanup() has wiped the engine's grace state, and saving again
+        would overwrite the fan-off grace the first save kept (N4).
+
+        Order: latch this coordinator, latch the engine (so nothing commands during the
+        awaited saves), HA's base shutdown (no further refreshes), saves, release every
+        timer/listener, engine cleanup. getattr defaults keep it safe on a partially
+        initialised coordinator, which HA also shuts down after a failed setup.
+        """
+        if getattr(self, "_shut_down", False) is True:
+            _LOGGER.debug("async_shutdown: instance %s already shut down — no-op", _instance_tag(self))
+            return
+        self._shut_down = True
+        engine = getattr(self, "automation_engine", None)
+        if engine is not None:
+            engine._shut_down = True
+        _LOGGER.info("Climate Advisor v%s shutting down (instance %s)", VERSION, _instance_tag(self))
+        await super().async_shutdown()
 
         # Restart-cause diagnostics (Issue #403): mark this as a clean shutdown so the
         # next startup can distinguish a routine restart from a crash.
@@ -12073,11 +12151,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._door_open_timers.clear()
         self._door_open_timer_expiry.clear()
 
+        # Issue #1102: release the timers/listeners that used to outlive an unload
+        # (F3 occupancy listeners, F4 fan-remote burst, F5 pre-cool trigger; F1/F2/F8
+        # handles are in _unsub_listeners below).
+        self._unsubscribe_occupancy_listeners()
+        self._cancel_fan_remote_burst(reason="shutdown")
+        self._cancel_pre_cool_trigger()
+
         for unsub in self._unsub_listeners:
             unsub()
         self._unsub_listeners.clear()
         self._unsubscribe_door_window_listeners()
-        self.automation_engine.cleanup()
+        if engine is not None:
+            engine.cleanup()
 
 
 def _decide_pre_cool_reschedule(

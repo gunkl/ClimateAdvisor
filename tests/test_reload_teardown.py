@@ -10,8 +10,9 @@ unloading inside that window leaves the timer armed; when it fires it calls
 ``_async_update_data`` cycle and lets the dead engine command devices again.
 
 T1 (plan v5): set up one zone through the REAL ``async_setup_entry``; unload
-it through the REAL ``async_unload_entry`` at t0+172 s (inside the startup
-window, as in the field incident); advance the virtual clock past t0+600 s.
+it at t0+172 s the way HA does (the REAL ``async_unload_entry``, then the
+entry's on_unload callbacks LIFO) — inside the startup window, as in the
+field incident; advance the virtual clock past t0+600 s.
 After unload the old instance must run no ``_async_update_data``, make no
 service call, and arm no timer.
 
@@ -24,7 +25,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from tools.sim_harness._loop import run_coro
-from tools.sim_harness.build_coordinator import build_headless_multi_zone
+from tools.sim_harness.build_coordinator import async_unload_entry_like_ha, build_headless_multi_zone
 
 _UNLOAD_AT_S = 172
 _ADVANCE_PAST_S = 601
@@ -35,8 +36,6 @@ def _callback_name(cb) -> str:
 
 
 def test_unloaded_instance_stays_dead_after_startup_window():
-    from custom_components.climate_advisor import async_unload_entry  # noqa: PLC0415
-
     # Harness default: no weather entity, so setup's first refresh also arms the
     # weather-not-ready retry chain (coordinator.py:3479, discarded handle, F2).
     # Both it and the 300 s startup-coalesce timer (coordinator.py:1430, F1)
@@ -64,7 +63,7 @@ def test_unloaded_instance_stays_dead_after_startup_window():
     # so unload + advance need their own patched context.
     with scheduler.installed():
         scheduler.advance_to(t0 + timedelta(seconds=_UNLOAD_AT_S))
-        run_coro(async_unload_entry(fake_hass, zone["entry"]))
+        run_coro(async_unload_entry_like_ha(fake_hass, zone["entry"]))
 
         unloaded_at = scheduler.now()
         update_calls.clear()

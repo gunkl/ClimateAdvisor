@@ -134,7 +134,7 @@ def _fetch_debug_state(ha_url: str, ha_token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+    except urllib.error.HTTPError, urllib.error.URLError, OSError:
         print("Warning: could not fetch live pipeline state -- skipping Current Observations section")
         return None
 

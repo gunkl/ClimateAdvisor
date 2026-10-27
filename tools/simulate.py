@@ -283,7 +283,7 @@ def print_cases_summary() -> None:
         for f in files:
             try:
                 result = run_scenario_production(f, state=state)
-            except (json.JSONDecodeError, OSError, KeyError):
+            except json.JSONDecodeError, OSError, KeyError:
                 print(f"  [ERROR] {f.stem}: unreadable or invalid")
                 continue
 
@@ -672,7 +672,7 @@ def main() -> int:
                         verdict = verdict_raw if isinstance(verdict_raw, dict) else {}
                         verdict_tag = f" [{verdict['type']}]" if verdict.get("type") else ""
                         print(f"  {f.stem}{issue}{verdict_tag}: {desc}")
-                    except (json.JSONDecodeError, OSError):
+                    except json.JSONDecodeError, OSError:
                         print(f"  {f.stem}: [unreadable]")
         return 0
 

@@ -528,7 +528,7 @@ class ClimateAdvisorChartDataView(HomeAssistantView):
                 try:
                     # Frontend sends milliseconds; coordinator expects seconds
                     before_ts = float(before_ts_str) / 1000.0
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     before_ts = None
 
             # get_chart_data runs ODE prediction inline — offload to executor to avoid blocking event loop.
@@ -1036,7 +1036,7 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
         with log_capture.zone_scope(coordinator.zone_label):
             try:
                 hours = float(request.query.get("hours", 12))
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 hours = 12.0
             hours = max(1.0, min(hours, 168.0))
 
@@ -1116,7 +1116,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
             # silently did nothing beyond 7 days since the data was never retained.
             try:
                 hours: int = max(1, min(int(body.get("hours", 24)), 168))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 hours = 24
             deep: bool = bool(body.get("deep", False))
 
@@ -1287,7 +1287,7 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
             try:
                 hours = float(request.rel_url.query.get("hours", "24"))
                 hours = max(0.5, min(hours, 168))  # clamp: 30 min – 7 days
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 hours = 24.0
 
             cutoff = (dt_util.now() - timedelta(hours=hours)).isoformat()

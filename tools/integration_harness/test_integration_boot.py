@@ -67,8 +67,8 @@ class TestHABoot:
         data = resp.json()
         version = data.get("version", "")
         assert version, f"No version in /api/config response: {data}"
-        # We pinned 2025.5.x in the Dockerfile
-        assert version.startswith("2025."), f"Unexpected HA version '{version}' — check the Dockerfile base image"
+        # We pinned 2026.10.x in the Dockerfile (CA needs Python 3.14, HA >= 2026.3)
+        assert version.startswith("2026."), f"Unexpected HA version '{version}' — check the Dockerfile base image"
 
 
 class TestClimateAdvisorLoaded:

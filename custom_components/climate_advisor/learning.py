@@ -236,7 +236,7 @@ def _resolve_solar_phase_offset(cache: dict) -> float:
             return True
         try:
             return (_date.today() - _date.fromisoformat(last_obs_date_str)).days > THERMAL_PARAM_STALE_DAYS
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return True
 
     primary = cache.get("solar_phase_offset_h")
@@ -404,7 +404,7 @@ def compute_k_passive_blocks(
         if t0.tzinfo is None:
             t0 = t0.replace(tzinfo=UTC)
         t0_epoch = t0.timestamp()
-    except (ValueError, KeyError, TypeError):
+    except ValueError, KeyError, TypeError:
         return None, 0.0, REJECT_TOO_FEW_SAMPLES
 
     # Group entries into block_minutes-wide blocks
@@ -418,7 +418,7 @@ def compute_k_passive_blocks(
             elapsed_s = ts.timestamp() - t0_epoch
             block_idx = int((elapsed_s / 60.0) // block_minutes)
             blocks.setdefault(block_idx, []).append(entry)
-        except (ValueError, KeyError, TypeError):
+        except ValueError, KeyError, TypeError:
             continue
 
     # Build synthetic samples from block averages
@@ -557,7 +557,7 @@ def compute_k_passive_endpoint(
 
     try:
         ts_list = [datetime.fromisoformat(s["ts"]) for s in window]
-    except (ValueError, KeyError, TypeError):
+    except ValueError, KeyError, TypeError:
         return None
     ts_list = [ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts for ts in ts_list]
     t0_epoch = ts_list[0].timestamp()
@@ -566,7 +566,7 @@ def compute_k_passive_endpoint(
         outdoors = [float(s["outdoor"]) for s in window]
         t_start = float(window[0]["indoor"])
         t_end = float(window[-1]["indoor"])
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return None
 
     dt_hours = times_hours[-1]
@@ -1976,7 +1976,7 @@ class LearningEngine:
             ts_str = entry.get("timestamp", "")
             try:
                 ts = datetime.fromisoformat(ts_str)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             if ts < cutoff_30:
                 break  # history is chronological; once past cutoff we can stop
@@ -2036,7 +2036,7 @@ class LearningEngine:
                         try:
                             hour = int(o.get("time", "12:00").split(":")[0])
                             hour_counts[hour] = hour_counts.get(hour, 0) + 1
-                        except (ValueError, IndexError):
+                        except ValueError, IndexError:
                             pass
 
                     direction_word = "up" if up_count >= down_count else "down"

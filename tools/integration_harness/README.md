@@ -10,7 +10,7 @@ periodic update cycles, and real timer firing.
 
 ```
 tools/integration_harness/
-├── Dockerfile              # Extends HA:2025.5.3 with libfaketime + anthropic
+├── Dockerfile              # Extends HA:2026.10.4 with libfaketime + anthropic
 ├── docker-compose.yml      # Compose stack: one service (homeassistant)
 ├── docker-entrypoint.sh    # Injects LD_PRELOAD when FAKETIME is set
 ├── conftest.py             # pytest fixtures: boot stack, auth, teardown
@@ -139,7 +139,7 @@ per-commit CI. Recommended gate: pull-request merge (not every push).
 ## Foundation milestone (completed)
 
 The `test_integration_boot.py` file proves the foundation:
-- HA 2025.5.3 boots in Docker in < 90s
+- HA 2025.5.3 booted in Docker in < 90s (base image now 2026.10.4, Issue #1102 S1: CA needs Python 3.14)
 - `climate_advisor` config entry state = `loaded`
 - 18 `sensor.climate_advisor_*` entities + 1 `switch.climate_advisor_*` are visible
 - Demo climate (`climate.ecobee`) and weather (`weather.demo_weather_north`) entities present

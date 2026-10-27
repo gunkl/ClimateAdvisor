@@ -176,7 +176,7 @@ def check_strings(component_dir):
         _ = strings["config"]["step"]["user"]
         if verbose:
             print("  OK: config.step.user exists")
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         result.error("Missing required key path: config.step.user")
 
     # Issue #1061: HA reads translations/en.json at runtime, so it must equal strings.json.
@@ -258,7 +258,7 @@ def check_hardcoded_units(component_dir):
     return result
 
 
-def check_python_temperature_literals(component_dir: str) -> "CheckResult":
+def check_python_temperature_literals(component_dir: str) -> CheckResult:
     """Flag bare numeric temperature literals in comparison contexts in Python files.
 
     Catches patterns like `outdoor < 60` that should reference a named _F constant.

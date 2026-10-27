@@ -35,7 +35,7 @@ def parse_version(v: str) -> tuple[int, ...]:
     v = str(v).split("-")[0].split("/")[0]
     try:
         return tuple(int(x) for x in v.split("."))
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return (0,)
 
 

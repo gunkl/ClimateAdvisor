@@ -16,7 +16,7 @@ clamp-to-setpoint behavior.
 NOTE ON HA VERSION: ClimateEntity/RestoreEntity's API shape used here
 (hvac_modes, target_temperature, current_temperature, async_get_last_state,
 async_write_ha_state) has been stable since well before hacs.json's pinned
-minimum homeassistant version (2024.6.0), but this was NOT verified against
+minimum homeassistant version (2026.3.0), but this was NOT verified against
 a locally-installed `homeassistant` package — none exists in this repo/venv.
 Test on a real Home Assistant instance before relying on it.
 """
@@ -230,7 +230,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             if restored_temp is not None:
                 try:
                     self._current_temp = float(restored_temp)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     _LOGGER.warning(
                         "Could not restore current_temperature=%r for %s, keeping initial_temp_f",
                         restored_temp,
@@ -419,12 +419,12 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         if attr_temp is not None:
             try:
                 return float(attr_temp)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 pass
 
         try:
             return float(state.state)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
     async def _async_tick(self, now: datetime) -> None:

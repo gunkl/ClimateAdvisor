@@ -146,7 +146,7 @@ def interpolate_numeric(states: list[dict], timestamps: list[datetime], attr: st
         try:
             raw = state["attributes"].get(attr) if attr else state["state"]
             result.append(float(raw))
-        except (ValueError, TypeError, KeyError):
+        except ValueError, TypeError, KeyError:
             result.append(None)
     return result
 

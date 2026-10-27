@@ -178,7 +178,7 @@ def _scan_for_breach(predicted_indoor: list[dict], threshold: float) -> datetime
             return None
         try:
             return datetime.fromisoformat(ts_str)
-        except (KeyError, ValueError, TypeError):
+        except KeyError, ValueError, TypeError:
             return None
     return None
 

@@ -323,7 +323,7 @@ class TestStuckGraceDetection:
                             "stuck_grace_recovered",
                             {"grace_end_time": end_time_str},
                         )
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     pass
 
     def test_stuck_grace_clears_override(self):

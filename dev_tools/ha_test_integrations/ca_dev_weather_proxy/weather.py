@@ -15,7 +15,7 @@ outdoor diurnal shape.
 NOTE ON HA VERSION: WeatherEntity's API shape used here (native_temperature,
 condition, async_forecast_daily/async_forecast_hourly returning Forecast
 dicts) has been stable since well before hacs.json's pinned minimum
-homeassistant version (2024.6.0), but this was NOT verified against a
+homeassistant version (2026.3.0), but this was NOT verified against a
 locally-installed `homeassistant` package — none exists in this repo/venv.
 Test on a real Home Assistant instance before relying on it.
 """

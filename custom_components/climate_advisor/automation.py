@@ -521,7 +521,7 @@ def parse_thermostat_capabilities(hvac_modes: Any, supported_features: Any) -> T
 
     try:
         features = int(supported_features)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         features = 0
 
     supports_heat_cool = "heat_cool" in modes or "auto" in modes
@@ -815,7 +815,7 @@ def _in_sleep_window(now: datetime, config: dict) -> bool:
         now_time = now.time().replace(second=0, microsecond=0)
         sleep_t = dt_time(sleep_h, sleep_m)
         wake_t = dt_time(wake_h, wake_m)
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return False
     return now_time >= sleep_t or now_time < wake_t
 
@@ -3061,7 +3061,7 @@ class AutomationEngine:
         unit = self._temp_unit
         try:
             current_f = to_fahrenheit(float(raw_setpoint), unit)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return True
         return abs(current_f - target_f) <= OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
 
@@ -8551,7 +8551,7 @@ class AutomationEngine:
             _end = dt_util.parse_datetime(end_iso) if end_iso else None
             if _end is not None:
                 remaining_minutes = max(0, int((_end - dt_util.now()).total_seconds() // 60))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             remaining_minutes = None
 
         if cancel_timers:
@@ -10269,7 +10269,7 @@ class AutomationEngine:
                 if raw_setpoint is not None:
                     unit = self._temp_unit
                     current_setpoint_f = to_fahrenheit(float(raw_setpoint), unit)
-        except (TypeError, ValueError, AttributeError):
+        except TypeError, ValueError, AttributeError:
             current_setpoint_f = None
             target_setpoint_f = None
 
@@ -10564,7 +10564,7 @@ class AutomationEngine:
             _end = dt_util.parse_datetime(end_iso) if end_iso else None
             if _end is not None:
                 ends = dt_util.as_local(_end).strftime("%H:%M")
-        except (TypeError, ValueError, AttributeError):
+        except TypeError, ValueError, AttributeError:
             ends = None
         return f"trigger={trigger or None} source={source or None} ends={ends}"
 
@@ -10871,7 +10871,7 @@ class AutomationEngine:
             return None
         try:
             ts = datetime.fromisoformat(ts_iso)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
@@ -10937,7 +10937,7 @@ class AutomationEngine:
                 continue
             try:
                 ts = datetime.fromisoformat(entry["ts"])
-            except (KeyError, ValueError, TypeError):
+            except KeyError, ValueError, TypeError:
                 continue
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=UTC)
@@ -11239,7 +11239,7 @@ class AutomationEngine:
             if prev is not None and prev.get("candidate_family") == candidate and prev.get("end_ts"):
                 try:
                     gap = (now - datetime.fromisoformat(prev["end_ts"])).total_seconds()
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     gap = None
                 if gap is not None and 0 <= gap <= _COMFORT_HOLD_MERGE_S:
                     prev["end_ts"] = None
@@ -12821,7 +12821,7 @@ class AutomationEngine:
                 return False
             try:
                 ts = datetime.fromisoformat(ts_iso)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 return False
             now = dt_util.now()
             if not isinstance(now, datetime):
@@ -14666,7 +14666,7 @@ class AutomationEngine:
         if last_notified:
             try:
                 self._last_welcome_home_notified = datetime.fromisoformat(last_notified)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 self._last_welcome_home_notified = None
         else:
             self._last_welcome_home_notified = None
@@ -14797,7 +14797,7 @@ class AutomationEngine:
             return None
         try:
             end_dt = datetime.fromisoformat(grace_end_time)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         remaining_seconds = (end_dt - dt_util.now()).total_seconds()
         if remaining_seconds <= 0:

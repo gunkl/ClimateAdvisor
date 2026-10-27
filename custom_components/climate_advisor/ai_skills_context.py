@@ -1055,7 +1055,7 @@ def filter_events_by_window(
                 event_dt = datetime.datetime.fromisoformat(str(raw_time))
                 if event_dt.tzinfo is None:
                     event_dt = event_dt.replace(tzinfo=datetime.UTC)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 event_dt = None
                 filtered.append(entry)
                 continue
@@ -1427,7 +1427,7 @@ def _fmt_temp_cell(val: Any, unit: str) -> str:
     """Format a temperature value for a timeline table cell; em-dash when unavailable."""
     try:
         return format_temp(float(val), unit)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "—"
 
 
@@ -1586,7 +1586,7 @@ def _parse_event_time(raw_time: Any) -> datetime.datetime | None:
     else:
         try:
             dt = datetime.datetime.fromisoformat(str(raw_time))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.UTC)
@@ -1617,7 +1617,7 @@ def _format_band_setpoint(floor: Any, ceiling: Any, active: Any, unit: str) -> s
     try:
         floor_f = float(floor)
         ceiling_f = float(ceiling)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return ""
     if active == "ceiling":
         return f"setpoint: {format_temp(ceiling_f, unit)} Cool ({format_temp(floor_f, unit)} Heat)"
@@ -1773,7 +1773,7 @@ def _render_pre_cool_applied(p: dict, unit: str) -> tuple[str, str]:
                 settings = _format_band_setpoint(floor, float(target), "ceiling", unit)
             else:
                 settings = f"setpoint: {format_temp(float(target), unit)} Cool"
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pass
     return label, settings
 
@@ -3788,7 +3788,7 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
                 f"[OK] Indoor {_ct_s} is within comfort band "
                 f"[{format_temp(ch, _temp_unit, 1)}-{format_temp(cc, _temp_unit, 1)}]"
             )
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         pass
 
     lines = ["=== STATE CROSS-VALIDATION ===", *(state_flags if state_flags else ["  No contradictions detected."])]

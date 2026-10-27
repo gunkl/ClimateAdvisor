@@ -1077,7 +1077,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if raw_setpoint is not None:
                     unit = config.get("temp_unit", "fahrenheit")
                     current_setpoint_f = to_fahrenheit(float(raw_setpoint), unit)
-        except (TypeError, ValueError, AttributeError):
+        except TypeError, ValueError, AttributeError:
             current_setpoint_f = None
             target_setpoint_f = None
 
@@ -1660,7 +1660,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.last_update_error_time = state.get("last_update_error_time")
         try:
             self.consecutive_failure_count = int(state.get("consecutive_failure_count", 0) or 0)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             self.consecutive_failure_count = 0
 
         if state_date != today_str:
@@ -1787,7 +1787,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._briefing_nat_vent_cutoff = (
                 datetime.fromisoformat(_restored_nat_vent_cutoff) if _restored_nat_vent_cutoff else None
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             self._briefing_nat_vent_cutoff = None
         self._briefing_nat_vent_cutoff_reason = briefing.get("briefing_nat_vent_cutoff_reason")
         _restored_evening_open_time = briefing.get("briefing_evening_open_time")
@@ -1795,7 +1795,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._briefing_evening_open_time = (
                 datetime.fromisoformat(_restored_evening_open_time) if _restored_evening_open_time else None
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             self._briefing_evening_open_time = None
 
         # Automation state
@@ -1822,7 +1822,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if away_since:
             try:
                 self._occupancy_away_since = datetime.fromisoformat(away_since)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 self._occupancy_away_since = None
 
         # Chart_log endpoint estimator backfill flags (Issue #137)
@@ -1848,7 +1848,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for k, v in raw_archive.items():
                 try:
                     restored[int(k)] = float(v)
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     continue
             self._pred_archive = restored
 
@@ -3370,7 +3370,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for _ae in self._last_predicted_indoor:
                 try:
                     _ae_dt = datetime.fromisoformat(_ae["ts"])
-                except (ValueError, KeyError):
+                except ValueError, KeyError:
                     continue
                 if _ae_dt > _archive_cutoff:
                     break
@@ -4322,7 +4322,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         continue
                     try:
                         new_entry[key] = to_fahrenheit(float(value), unit)
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         continue
                 normalised.append(new_entry)
             _LOGGER.debug("Hourly forecast normalised: entries=%d unit=%s", len(normalised), unit)
@@ -4535,7 +4535,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     # Raw date: no tz conversion. API date intent, compared against local now_date.
                     fc_date = fc_obj.date()
                     forecast_by_date.setdefault(fc_date, entry)
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     continue
             today_fc = forecast_by_date.get(now_date)
             tomorrow_fc = forecast_by_date.get(tomorrow_date)
@@ -5315,7 +5315,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             try:
                 _dt_obj = datetime.fromisoformat(_dt_str)
                 _band_timestamps.append(dt_util.as_local(_dt_obj) if _dt_obj.tzinfo else _dt_obj)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
         # Compute pre-cool band parameters for chart dip visualization
@@ -5592,7 +5592,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             try:
                 ts_dt = datetime.fromisoformat(ts_str)
                 ts_dt = dt_util.as_local(ts_dt) if ts_dt.tzinfo else ts_dt
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             if ts_dt <= now and (best is None or ts_dt > best[0]):
                 best = (ts_dt, entry)
@@ -6712,7 +6712,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "magnitude": abs(magnitude),
                     }
                 )
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 # Issue #583: diagnostic evidence for the still-open Phase (b) investigation
                 # (leading hypothesis: a WHF-triggered HVAC-off transition producing a None
                 # temperature reading outside the ~30s command-recency window). Do NOT count
@@ -6723,7 +6723,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         if _last_cmd_time is not None
                         else "None"
                     )
-                except (TypeError, AttributeError):
+                except TypeError, AttributeError:
                     _cmd_age = "None"
                 _LOGGER.debug(
                     "Setpoint override swallowed (non-numeric temp): old_temp=%s new_temp=%s "
@@ -6807,7 +6807,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _fan_cmd_age = (
                     f"{(dt_util.now() - _fan_ct).total_seconds():.0f}s ago" if _fan_ct is not None else "None"
                 )
-            except (TypeError, AttributeError):
+            except TypeError, AttributeError:
                 _fan_cmd_age = "None"
             try:
                 _hvac_cmd_age = (
@@ -6815,7 +6815,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     if _last_cmd_time is not None
                     else "None"
                 )
-            except (TypeError, AttributeError):
+            except TypeError, AttributeError:
                 _hvac_cmd_age = "None"
             _LOGGER.info(
                 "Manual HVAC fan_mode change detected: %s -> %s (fan_cmd=%s, hvac_cmd=%s, expected_confirmation=%s)",
@@ -8424,7 +8424,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ts = ts.replace(tzinfo=UTC)
             local_hour = dt_util.as_local(ts).hour
             return 8 <= local_hour <= 19
-        except (ValueError, AttributeError):
+        except ValueError, AttributeError:
             return False
 
     def _select_estimator(
@@ -8533,7 +8533,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     and not self._is_solar_hour(current[-1]["ts"])
                 ):
                     windows.append(list(current))
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 pass
             current.clear()
 
@@ -8591,7 +8591,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if ts1.tzinfo is None:
                 ts1 = ts1.replace(tzinfo=UTC)
             dt_hours = (ts1 - ts0).total_seconds() / 3600.0
-        except (ValueError, KeyError):
+        except ValueError, KeyError:
             return None
 
         if abs(t_end - t_start) < THERMAL_CHART_LOG_PASSIVE_MIN_DT_F:
@@ -8657,7 +8657,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if ts1.tzinfo is None:
                     ts1 = ts1.replace(tzinfo=UTC)
                 dt_hours = (ts1 - ts0).total_seconds() / 3600.0
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 continue
 
             t_start = window[0]["indoor"]
@@ -8749,7 +8749,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     and not self._is_solar_hour(current[-1]["ts"])
                 ):
                     windows.append(list(current))
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 pass
             current.clear()
 
@@ -8811,7 +8811,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if ts1.tzinfo is None:
                 ts1 = ts1.replace(tzinfo=UTC)
             dt_hours = (ts1 - ts0).total_seconds() / 3600.0
-        except (ValueError, KeyError):
+        except ValueError, KeyError:
             return None
 
         if abs(t_end - t_start) < THERMAL_CHART_LOG_PASSIVE_MIN_DT_F:
@@ -8892,7 +8892,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if ts1.tzinfo is None:
                     ts1 = ts1.replace(tzinfo=UTC)
                 dt_hours = (ts1 - ts0).total_seconds() / 3600.0
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 continue
 
             t_start = window[0]["indoor"]
@@ -8995,7 +8995,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             _ts_first = entries[0].get("ts", "?")
             _ts_last = entries[-1].get("ts", "?")
-        except (IndexError, AttributeError):
+        except IndexError, AttributeError:
             _ts_first = _ts_last = "?"
         _LOGGER.info(
             "Solar phase fit: %d chart_log entries available, scanning last %d day(s) (%s–%s)",
@@ -9020,7 +9020,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 local0 = dt_util.as_local(ts0)
                 if 8 <= local0.hour < 20:
                     windows.append(list(current))
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 pass
             current.clear()
 
@@ -9162,7 +9162,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 continue
             try:
                 day_str = datetime.fromisoformat(entry["ts"]).strftime("%Y-%m-%d")
-            except (KeyError, ValueError):
+            except KeyError, ValueError:
                 continue
             days[day_str].append(entry)
 
@@ -10415,7 +10415,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 continue
             try:
                 ov_time = datetime.fromisoformat(ov_time_str)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             preceding = [
                 e for e in recent_events if e.get("type") in automation_event_types and e.get("time", "") < ov_time_str
@@ -10434,7 +10434,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                                 "gap_seconds": round(gap_seconds),
                             },
                         )
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     pass
 
         current_data = self.data or {}
@@ -12360,7 +12360,7 @@ def _solar_factor(
     """
     try:
         h = int(local_hour)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0.0
     effective_hour = h - int(round(phase_offset_h))
     if effective_hour < THERMAL_SOLAR_DAYTIME_START_H or effective_hour >= THERMAL_SOLAR_DAYTIME_END_H:
@@ -12389,7 +12389,7 @@ def _estimate_solar_phase_offset(
     # Parse timestamps
     try:
         times = [datetime.fromisoformat(str(e["ts"])) for e in window_entries]
-    except (KeyError, ValueError, TypeError):
+    except KeyError, ValueError, TypeError:
         return None, REJECT_TOO_FEW_SAMPLES
 
     # Window span check
@@ -12400,7 +12400,7 @@ def _estimate_solar_phase_offset(
     # Extract indoor temps
     try:
         indoor_temps = [float(e["indoor"]) for e in window_entries]
-    except (KeyError, ValueError, TypeError):
+    except KeyError, ValueError, TypeError:
         return None, REJECT_SMALL_DELTA
 
     # Indoor ΔT check
@@ -12435,7 +12435,7 @@ def _entry_hour(entry: dict) -> int | None:
     """Parse local hour from a chart_log entry ts field. Returns None on failure."""
     try:
         return datetime.fromisoformat(entry["ts"]).hour
-    except (KeyError, ValueError, TypeError):
+    except KeyError, ValueError, TypeError:
         return None
 
 
@@ -12850,7 +12850,7 @@ def _find_ceiling_breach_time(
             if ts_str:
                 try:
                     return datetime.fromisoformat(ts_str)
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     continue
     return None
 
@@ -13121,7 +13121,7 @@ def _build_predicted_indoor_future(
                 _lts = dt_util.as_local(_dt_o) if _dt_o.tzinfo else _dt_o
                 if _lts > now:
                     _future_timestamps_for_band.append(_lts)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
         # Compute pre-cool band parameters so the prediction curve tracks the pre-cool setpoint
         _ode_pc_trigger_h: float | None = None
@@ -13174,7 +13174,7 @@ def _build_predicted_indoor_future(
         try:
             dt_obj = datetime.fromisoformat(dt_str)
             local_ts = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         if local_ts <= now:
             skipped_past += 1
@@ -13376,7 +13376,7 @@ def _build_predicted_indoor_future(
             try:
                 _pt_dt = datetime.fromisoformat(_pt["ts"])
                 _next_dt = datetime.fromisoformat(_next["ts"])
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 continue
             _mid_dt = _pt_dt + (_next_dt - _pt_dt) / 2
             _mid_temp = round((_pt["temp"] + _next["temp"]) / 2, 1)
@@ -13436,7 +13436,7 @@ def _build_outdoor_curve(
             if local_dt.date() != today:
                 continue
             known[local_dt.hour] = float(temp)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
 
     if not known:
@@ -13544,7 +13544,7 @@ def _parse_forecast_entries(hourly_forecast: list[dict] | None) -> list[tuple[da
         try:
             dt_obj = datetime.fromisoformat(dt_str)
             result.append((dt_obj, float(temp)))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
     return result
 
@@ -13619,7 +13619,7 @@ def _build_extended_hourly_forecast(
             continue
         try:
             datetime.fromisoformat(dt_str)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         real_entries.append(entry)
 
@@ -13634,7 +13634,7 @@ def _build_extended_hourly_forecast(
             continue
         try:
             dt_obj = datetime.fromisoformat(dt_str)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         daily_parsed.append((dt_obj, entry))
 
@@ -14367,7 +14367,7 @@ def _parse_time(time_str: str) -> time:
         if len(parts) < 2:
             raise ValueError(f"Expected HH:MM format, got {time_str!r}")
         return time(int(parts[0]), int(parts[1]))
-    except (ValueError, IndexError, AttributeError):
+    except ValueError, IndexError, AttributeError:
         _LOGGER.warning(
             "Could not parse time %r — defaulting to 06:00",
             time_str,

@@ -116,7 +116,7 @@ def _read_json(path: Path, default) -> object:
         if not isinstance(data, type(default)):
             return default
         return data
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError, json.JSONDecodeError:
         return default
 
 
@@ -372,7 +372,7 @@ def _bootstrap_pending_bspecs(stats: dict) -> int:
                 age = (now - datetime.fromisoformat(last_run)).total_seconds()
                 if age < 86400:  # skip if run in last 24 hours
                     continue
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
         print(f"  [bootstrap] running simulate.py on authored BSpec: {name}")
         sim_result = run_simulate(f)  # run_simulate expects a Path

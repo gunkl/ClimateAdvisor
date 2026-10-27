@@ -131,7 +131,7 @@ def read_attribute_temp_f(state, attr: str, unit: str) -> tuple[float | None, st
         return None, "no_reading"
     try:
         parsed = float(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None, "non_numeric"
     if not math.isfinite(parsed):
         return None, "non_finite"
@@ -219,7 +219,7 @@ def read_sensor_state_f(state, unit: str) -> tuple[float | None, str | None]:
         return None, "unavailable"
     try:
         parsed = float(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None, "non_numeric"
     if not math.isfinite(parsed):
         return None, "non_finite"
@@ -326,7 +326,7 @@ def find_temperature_crossing(
             continue
         try:
             outdoor_by_ts[datetime.fromisoformat(ts_str)] = float(temp)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
 
     for entry in indoor_curve:
@@ -336,7 +336,7 @@ def find_temperature_crossing(
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         if after is not None and ts <= after:
             continue

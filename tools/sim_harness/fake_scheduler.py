@@ -340,7 +340,7 @@ class FakeScheduler:
                 return None
             try:
                 return datetime.fromisoformat(dt_str)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 return None
 
         def _fake_async_track_time_change(

@@ -1690,7 +1690,7 @@ class TestBriefingRegeneration:
             for k, v in raw_archive.items():
                 try:
                     restored[int(k)] = float(v)
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     continue
             restored_coord._pred_archive = restored
 
@@ -1711,7 +1711,7 @@ class TestBriefingRegeneration:
             for k, v in bad_archive.items():
                 try:
                     restored[int(k)] = float(v)
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     continue
             coord._pred_archive = restored
 

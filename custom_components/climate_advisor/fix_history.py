@@ -52,7 +52,7 @@ def parse_version(version_str: str) -> tuple[int, ...]:
     try:
         first = str(version_str).split("-")[0].split("/")[0]
         return tuple(int(x) for x in first.split("."))
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return (0,)
 
 

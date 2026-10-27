@@ -1,0 +1,5 @@
+# Real-Home-Assistant test tier (tests_ha/) only. Do NOT install into the
+# environment that runs tests/: the plugin auto-loads through its pytest entry
+# point, while tests/conftest.py stubs out homeassistant for the whole process.
+# Pinned to the plugin release that pins HA 2026.10.4 (needs Python >=3.14.2).
+pytest-homeassistant-custom-component==0.13.375

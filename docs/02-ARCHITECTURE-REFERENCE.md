@@ -523,6 +523,14 @@ A handle from `async_call_later` / `async_track_*` / `async_at_start(ed)` /
 call. The api.py follow-up is the one append-only exception (one entry per cancel-override
 click, never removed, a no-op after firing; growth is bounded by user clicks).
 
+**Real-HA leak check.** `tests_ha/test_unload_cleanup.py` sets up one zone in a real Home
+Assistant core (pytest-homeassistant-custom-component), unloads it and ends without advancing
+time; HA's autouse `verify_cleanup` fixture then fails the test on any timer, task or thread
+still alive. It names no resource, so a new leak anywhere in setup fails it. It runs in its own
+CI job (`ha-lifecycle` in `.github/workflows/validate.yml`) and environment
+(`requirements_test_ha.txt`), because `tests/conftest.py` stubs `homeassistant` for the whole
+process: `pytest -c tests_ha/pytest.ini --rootdir=tests_ha tests_ha/`.
+
 **Shutdown order (`async_shutdown`).**
 1. If already shut down, return (the second call from on_unload must not re-save: by then
    `cleanup()` has wiped the engine's grace, and saving again would lose a fan-off grace).

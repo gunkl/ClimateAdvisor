@@ -272,7 +272,14 @@ from .hvac_action import is_hvac_action_active, is_hvac_compressor_active
 from .incident_payload import build_incident_payload
 from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import run_invariant_checks
-from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, compute_k_passive_endpoint
+from .learning import (
+    SHUTDOWN_KIND_HA_STOP,
+    SHUTDOWN_KIND_UNLOAD,
+    DailyRecord,
+    LearningEngine,
+    compute_k_passive_blocks,
+    compute_k_passive_endpoint,
+)
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
@@ -1479,7 +1486,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # async_restore_state() fell through to "unknown" on every real-world restart.
         @callback
         def _async_homeassistant_stop(_event: Event) -> None:
-            self.hass.async_create_task(self._persist_shutdown_diagnostics())
+            self.hass.async_create_task(self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP))
 
         self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _async_homeassistant_stop))
 
@@ -1870,6 +1877,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # version against VERSION, and check whether the prior shutdown was clean.
         _last_shutdown_version = self.learning._state.last_shutdown_version
         _clean_shutdown = self.learning._state.clean_shutdown
+        _shutdown_kind = self.learning._state.last_shutdown_kind
         _restart_payload: dict[str, Any] = {"recovered_events": len(self._event_log)}
         if isinstance(_last_shutdown_version, str) and _last_shutdown_version and _last_shutdown_version != VERSION:
             _cause = "version_changed"
@@ -1881,7 +1889,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _restart_payload["old_version"] = _last_shutdown_version
             _restart_payload["new_version"] = VERSION
         elif _clean_shutdown:
-            _cause = "user_restart"
+            # Issue #1110: a config-entry unload (zone reload: settings applied, Repairs fix,
+            # weather auto-resolve) is not an HA restart. The persisted kind is authoritative;
+            # hass.is_running (True on a reload, False during bootstrap) is only a fallback for
+            # state persisted before #1110 recorded the kind.
+            if _shutdown_kind == SHUTDOWN_KIND_UNLOAD or (
+                _shutdown_kind is None and getattr(self.hass, "is_running", False) is True
+            ):
+                _cause = "reload"
+            else:
+                _cause = "user_restart"
         else:
             _cause = "unknown"
         _restart_payload["cause"] = _cause
@@ -1891,6 +1908,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # is correctly classified as "unknown" rather than stale-carrying "user_restart".
         # Not persisted here — it will be written on the next save_state() call.
         self.learning._state.clean_shutdown = False
+        self.learning._state.last_shutdown_kind = None
 
         _LOGGER.info("State restore complete")
 
@@ -12067,8 +12085,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "nat_vent_cycling_paused": ae._natural_vent_active and not ae._fan_active,
         }
 
-    async def _persist_shutdown_diagnostics(self) -> None:
+    async def _persist_shutdown_diagnostics(self, *, kind: str) -> None:
         """Persist restart-cause diagnostics (Issue #403/#413).
+
+        ``kind`` (Issue #1110) records which path is shutting down: ``"unload"`` from
+        async_shutdown() (zone reload / repair / entry removal) or ``"ha_stop"`` from the
+        EVENT_HOMEASSISTANT_STOP listener, so the next restore can tell a zone reload from
+        an HA restart.
 
         Shared by async_shutdown() (fires on config-entry unload/reload) and the
         EVENT_HOMEASSISTANT_STOP listener registered in async_setup() (fires on a real
@@ -12087,11 +12110,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.learning._state.clean_shutdown = True
             self.learning._state.last_shutdown_version = VERSION
             self.learning._state.user_initiated_restart = self._user_initiated_shutdown
+            self.learning._state.last_shutdown_kind = kind
             await self._executor_job(self.learning.save_state)
             _LOGGER.info(
-                "Shutdown diagnostics persisted: version=%s user_initiated=%s",
+                "Shutdown diagnostics persisted: version=%s user_initiated=%s kind=%s",
                 VERSION,
                 self._user_initiated_shutdown,
+                kind,
             )
 
     async def async_shutdown(self) -> None:
@@ -12126,7 +12151,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             # Restart-cause diagnostics (Issue #403): mark this as a clean shutdown so the
             # next startup can distinguish a routine restart from a crash.
-            await self._persist_shutdown_diagnostics()
+            await self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_UNLOAD)
 
             # Flush any accumulated runtime (heat/cool or fan_only) and save state before
             # cleanup. Issue #912: _flush_runtime_for_mode() replaces the old unconditional

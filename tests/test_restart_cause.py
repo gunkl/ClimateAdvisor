@@ -300,7 +300,7 @@ class TestHomeAssistantStopPersistsShutdownDiagnostics:
         """Extract the handler by replicating the closure logic in async_setup()."""
 
         def _async_homeassistant_stop(_event):
-            coord.hass.async_create_task(coord._persist_shutdown_diagnostics())
+            coord.hass.async_create_task(coord._persist_shutdown_diagnostics(kind="ha_stop"))
 
         return _async_homeassistant_stop
 
@@ -459,3 +459,133 @@ class TestRenderSystemRestarted:
         label, _ = _render_system_restarted({"recovered_events": 3}, "fahrenheit")
         assert "unknown" in label
         assert "3 prior events recovered" in label
+
+
+# ---------------------------------------------------------------------------
+# Issue #1110: a zone reload (config-entry unload) is not an HA restart
+# ---------------------------------------------------------------------------
+
+
+def _restart_cause(coord) -> str:
+    calls = coord._emit_event.call_args_list
+    return next(c[0][1] for c in calls if c[0][0] == "system_restarted")["cause"]
+
+
+class TestReloadCause:
+    """After a settings reload / repair / weather auto-resolve, the occupant must read
+    "zone reloaded", never "HA restarted" (Issue #1110)."""
+
+    def test_unload_records_kind_unload(self):
+        coord = _make_coord_stub()
+        asyncio.run(coord.async_shutdown())
+        assert coord.learning._state.last_shutdown_kind == "unload"
+
+    def test_stop_listener_records_kind_ha_stop(self):
+        coord = _make_coord_stub()
+        asyncio.run(coord._persist_shutdown_diagnostics(kind="ha_stop"))
+        assert coord.learning._state.last_shutdown_kind == "ha_stop"
+
+    def test_unload_then_restore_classifies_reload(self):
+        coord = _make_coord_stub()
+        asyncio.run(coord.async_shutdown())  # reload = unload, then a fresh setup
+        asyncio.run(coord.async_restore_state())
+        assert _restart_cause(coord) == "reload"
+
+    def test_ha_stop_then_restore_stays_user_restart(self):
+        coord = _make_coord_stub()
+        asyncio.run(coord._persist_shutdown_diagnostics(kind="ha_stop"))
+        asyncio.run(coord.async_restore_state())
+        assert _restart_cause(coord) == "user_restart"
+
+    def test_version_change_wins_over_reload(self):
+        coord = _make_coord_stub()
+        coord.learning._state.clean_shutdown = True
+        coord.learning._state.last_shutdown_version = "0.4.59"
+        coord.learning._state.last_shutdown_kind = "unload"
+        asyncio.run(coord.async_restore_state())
+        assert _restart_cause(coord) == "version_changed"
+
+    def test_unclean_exit_after_unload_kind_is_unknown(self):
+        """A crash leaves clean_shutdown False; a stale kind must not turn it into reload."""
+        coord = _make_coord_stub()
+        coord.learning._state.clean_shutdown = False
+        coord.learning._state.last_shutdown_version = VERSION
+        coord.learning._state.last_shutdown_kind = "unload"
+        asyncio.run(coord.async_restore_state())
+        assert _restart_cause(coord) == "unknown"
+
+    def test_legacy_state_without_kind_falls_back_to_hass_is_running_true(self):
+        coord = _make_coord_stub()
+        coord.learning._state.clean_shutdown = True
+        coord.learning._state.last_shutdown_version = VERSION
+        coord.learning._state.last_shutdown_kind = None
+        coord.hass.is_running = True
+        asyncio.run(coord.async_restore_state())
+        assert _restart_cause(coord) == "reload"
+
+    def test_legacy_state_without_kind_at_boot_is_user_restart(self):
+        coord = _make_coord_stub()
+        coord.learning._state.clean_shutdown = True
+        coord.learning._state.last_shutdown_version = VERSION
+        coord.learning._state.last_shutdown_kind = None
+        coord.hass.is_running = False
+        asyncio.run(coord.async_restore_state())
+        assert _restart_cause(coord) == "user_restart"
+
+    def test_known_kind_overrides_hass_is_running(self):
+        """The persisted kind is authoritative: an HA stop whose setup outlasted bootstrap
+        (is_running already True) is still a restart."""
+        coord = _make_coord_stub()
+        coord.learning._state.clean_shutdown = True
+        coord.learning._state.last_shutdown_version = VERSION
+        coord.learning._state.last_shutdown_kind = "ha_stop"
+        coord.hass.is_running = True
+        asyncio.run(coord.async_restore_state())
+        assert _restart_cause(coord) == "user_restart"
+
+    def test_kind_reset_in_memory_after_classification(self):
+        coord = _make_coord_stub()
+        coord.learning._state.clean_shutdown = True
+        coord.learning._state.last_shutdown_version = VERSION
+        coord.learning._state.last_shutdown_kind = "unload"
+        asyncio.run(coord.async_restore_state())
+        assert coord.learning._state.last_shutdown_kind is None
+
+    def test_learning_state_kind_default_round_trip_and_defensive(self, tmp_path):
+        import json
+
+        assert LearningState().last_shutdown_kind is None
+        engine = LearningEngine(tmp_path)
+        engine._state.last_shutdown_kind = "unload"
+        engine.save_state()
+        engine2 = LearningEngine(tmp_path)
+        engine2.load_state()
+        assert engine2._state.last_shutdown_kind == "unload"
+
+        for bad in (123, "bogus", ["unload"]):
+            (tmp_path / "climate_advisor_learning.json").write_text(json.dumps({"last_shutdown_kind": bad}))
+            engine3 = LearningEngine(tmp_path)
+            engine3.load_state()
+            assert engine3._state.last_shutdown_kind is None
+
+    def test_render_reload_never_says_ha_restart(self):
+        from custom_components.climate_advisor.ai_skills_context import _render_system_restarted
+
+        label, _ = _render_system_restarted({"recovered_events": 4, "cause": "reload"}, "fahrenheit")
+        assert "Climate Advisor zone reloaded (settings applied / repair)" in label
+        assert "HA restart" not in label
+        assert "4 prior events recovered" in label
+
+    def test_investigator_prompt_lists_reload_as_benign(self):
+        from custom_components.climate_advisor.ai_skills_investigator import _SYSTEM_PROMPT
+
+        assert "cause=user_restart/version_changed/reload (benign, expected)" in _SYSTEM_PROMPT
+
+    def test_production_stop_listener_passes_ha_stop_kind(self):
+        """The closure replicas above pass kind="ha_stop"; pin that production does too."""
+        import inspect
+
+        src = inspect.getsource(ClimateAdvisorCoordinator.async_setup)
+        assert "self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP)" in src
+        shutdown_src = inspect.getsource(ClimateAdvisorCoordinator.async_shutdown)
+        assert "self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_UNLOAD)" in shutdown_src

@@ -2397,6 +2397,13 @@ def _render_fan_ownership_self_healed(p: dict, unit: str) -> tuple[str, str]:
 def _render_fan_orphan_released(p: dict, unit: str) -> tuple[str, str]:
     old = p.get("old_fan_mode")
     sent = p.get("command_sent")
+    if p.get("dry_run") is True:
+        # Issue #1108: automation was off -- nothing was sent and the pending release was dropped.
+        return (
+            "Fan left as-is: observe-only mode",
+            f"thermostat fan_mode stays {old} (automation off; CA would have released the fan it"
+            " left on under the previous configuration)",
+        )
     return (
         "Fan released after configuration change",
         f"thermostat fan_mode {old} -> {sent} (CA had left it on under the previous configuration)",

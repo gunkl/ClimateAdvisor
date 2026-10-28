@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
@@ -512,6 +512,7 @@ class TestHandleAllDoorsWindowsClosed:
             "set_hvac_mode",
             {"entity_id": "climate.thermostat", "hvac_mode": "cool"},
             blocking=True,
+            context=ANY,
         )
 
 
@@ -619,6 +620,7 @@ class TestHandleAllDoorsWindowsClosedZeroDurationGrace:
             "set_hvac_mode",
             {"entity_id": "climate.thermostat", "hvac_mode": "heat"},
             blocking=True,
+            context=ANY,
         )
 
 
@@ -1027,7 +1029,11 @@ class TestPauseForDoorWindowActionSplit:
         assert result is False  # hvac_already_off=False -- was actively turned off
         assert engine._pre_pause_mode == "cool"
         engine.hass.services.async_call.assert_any_call(
-            "climate", "set_hvac_mode", {"entity_id": "climate.thermostat", "hvac_mode": "off"}, blocking=True
+            "climate",
+            "set_hvac_mode",
+            {"entity_id": "climate.thermostat", "hvac_mode": "off"},
+            blocking=True,
+            context=ANY,
         )
 
     def test_action_returns_true_when_already_off(self):
@@ -1757,7 +1763,11 @@ class TestRePauseForOpenSensorFsmAuthoritative:
         assert engine._paused_entity == "re-check"
         assert engine._paused_since is not None
         engine.hass.services.async_call.assert_any_call(
-            "climate", "set_hvac_mode", {"entity_id": "climate.thermostat", "hvac_mode": "off"}, blocking=True
+            "climate",
+            "set_hvac_mode",
+            {"entity_id": "climate.thermostat", "hvac_mode": "off"},
+            blocking=True,
+            context=ANY,
         )
 
 

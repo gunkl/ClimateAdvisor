@@ -11,6 +11,9 @@ the whole-house fan back on after the occupant switched it off.
   function that itself checks the shut-down latch (``_refuse_if_shut_down``), except
   the read-only ``weather.get_forecasts`` fetches. A new command site added without
   the latch fails here instead of reaching a dead instance in production.
+- T7c (Issue #1108): the same service-call sites must each honour observe-only mode
+  (reference ``dry_run`` or ``_automation_enabled``), so a new command site cannot act
+  while the automation switch is off.
 """
 
 from __future__ import annotations
@@ -101,4 +104,44 @@ def test_every_service_call_is_behind_the_shutdown_latch():
     assert unlatched == [], (
         "service calls in functions that do not check the #1102 shut-down latch "
         "(add `if _refuse_if_shut_down(self, ...): return <no-op result>` before the call):\n" + "\n".join(unlatched)
+    )
+
+
+# --- T7c (Issue #1108): every command site honours observe-only mode -----------------------
+
+_OBSERVE_ONLY_MARKERS = {"dry_run", "_automation_enabled"}
+
+
+def _checks_observe_only(fn: ast.AST) -> bool:
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Attribute) and n.attr in _OBSERVE_ONLY_MARKERS:
+            return True
+        if isinstance(n, ast.Name) and n.id in _OBSERVE_ONLY_MARKERS:
+            return True
+    return False
+
+
+def test_every_service_call_honours_observe_only_mode():
+    """T7c: with the automation switch OFF, no command may reach a device or notifier.
+
+    Occupant experience being guarded: the person switched Climate Advisor to observe-only
+    and expects it to be hands-off; a command site added without the dry_run gate (the class
+    behind #589 and #1108) turns their fan or thermostat anyway. Every function in
+    automation.py / coordinator.py that calls ``hass.services.async_call`` must itself
+    reference ``dry_run`` or ``_automation_enabled``, except the read-only forecast fetches.
+    """
+    ungated = []
+    seen = 0
+    for filename in ("automation.py", "coordinator.py"):
+        for fn, call in _service_call_sites(filename):
+            seen += 1
+            if (filename, fn.name) in _SERVICE_CALL_ALLOWLIST:
+                continue
+            if not _checks_observe_only(fn):
+                ungated.append(f"{filename}:{call.lineno} in {fn.name}()")
+    assert seen > 0, "no hass.services.async_call found — the AST matcher is broken"
+    assert ungated == [], (
+        "service calls in functions that do not honour observe-only mode "
+        "(add `if self.dry_run is True: log '[DRY RUN] Would ...'; return <no-op result>` before the call):\n"
+        + "\n".join(ungated)
     )

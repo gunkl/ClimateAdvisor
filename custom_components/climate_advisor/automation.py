@@ -461,6 +461,10 @@ class ClimateCallOutcome(Enum):
     TIMEOUT = "timeout"  # no answer in time — state unknown, NOT a failure
     REJECTED = "rejected"  # HA validation (out of range / mode not offered) — skip quietly
     FAILED = "failed"  # real failure (entity missing, integration error, ...)
+    # Issue #1108: observe-only (automation switched off) -- nothing was sent. Distinct from
+    # REJECTED on purpose: callers stop WITHOUT any failure/rejection note (no
+    # ``hvac_mode_not_applied`` line for a command that never went out).
+    DRY_RUN = "dry_run"
 
 
 @dataclass(frozen=True)
@@ -474,6 +478,13 @@ class ClimateCallResult:
     def ok(self) -> bool:
         return self.outcome is ClimateCallOutcome.OK
 
+
+# Issue #1109: command kind -> the engine attribute holding that kind's recent CA command
+# contexts (see ``AutomationEngine._record_command_context``).
+_COMMAND_CONTEXT_SETS = {
+    "fan": "_recent_fan_command_context_ids",
+    "climate": "_recent_climate_command_context_ids",
+}
 
 # Seconds to wait for a blocking climate service call before treating the answer as unknown.
 CLIMATE_CALL_TIMEOUT_S = 10
@@ -1365,6 +1376,10 @@ class AutomationEngine:
         # Issue #561: bounded recency list, not a single last-write-wins id — see
         # _record_fan_command_context()'s docstring for why a scalar isn't safe.
         self._recent_fan_command_context_ids: list[tuple[str, datetime]] = []
+        # Issue #1109: the same recency set for CA's thermostat (climate.*) commands. Kept apart
+        # from the fan set on purpose: the fan set GATES a decision (fan override suppression in
+        # coordinator._async_fan_entity_changed); the climate set is diagnostic only (D6).
+        self._recent_climate_command_context_ids: list[tuple[str, datetime]] = []
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
@@ -3740,9 +3755,20 @@ class AutomationEngine:
         the entity id that existing tests and log searches rely on).
         """
         if _refuse_if_shut_down(self, f"call climate.{service}"):
-            # REJECTED: every caller skips quietly on it (no verify, retry or nudge follow-up).
+            # REJECTED stops every caller (no verify, retry or nudge follow-up). Not every caller is
+            # silent on it -- ``_set_hvac_mode``/``_ensure_hvac_mode_for_write`` note a rejection
+            # (``hvac_mode_not_applied``); for a shut-down instance that is harmless because its
+            # event callback is detached on unload. Observe-only uses the distinct DRY_RUN below.
             return ClimateCallResult(ClimateCallOutcome.REJECTED)
-        task = asyncio.ensure_future(self.hass.services.async_call("climate", service, data, blocking=True))
+        if self.dry_run is True:
+            # Issue #1108 choke-point backstop: the outer gates (_set_hvac_mode/_set_temperature,
+            # _retry_callback) normally return first; this catches any path that bypasses them.
+            _LOGGER.info("[DRY RUN] Would call climate.%s %s role=%s", service, data, self.role)
+            return ClimateCallResult(ClimateCallOutcome.DRY_RUN)
+        # Issue #1109: carries a recorded CA Context (diagnostic only), like fan commands.
+        task = asyncio.ensure_future(
+            self._call_service_with_context("climate", service, data, kind="climate", blocking=True)
+        )
         try:
             await asyncio.wait_for(asyncio.shield(task), CLIMATE_CALL_TIMEOUT_S)
         except TimeoutError:
@@ -4259,6 +4285,8 @@ class AutomationEngine:
                 f"HVAC command failed — mode={mode} entity={self.climate_entity}",
             )
             self._restamp_climate_command_times(temp=False)
+            if _call.outcome is ClimateCallOutcome.DRY_RUN:
+                return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- stop, no note
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 self._mode_switch_marker = None
                 self._note_mode_rejected(mode, _call.error)
@@ -4306,10 +4334,11 @@ class AutomationEngine:
                         )
                     else:
                         try:
-                            await self.hass.services.async_call(
+                            await self._call_service_with_context(
                                 "climate",
                                 "set_fan_mode",
                                 {"entity_id": self.climate_entity, "fan_mode": _off_value},
+                                kind="climate",
                             )
                             _LOGGER.debug("Asserted fan_mode=%s alongside hvac_mode=off", _off_value)
                         except Exception:
@@ -4348,6 +4377,14 @@ class AutomationEngine:
             recent_switch_to_mode=self._mode_switch_marker_recent(mode),
         ):
             return True
+        if self.dry_run is True:
+            # Issue #1108 (J1): observe-only -- stop BEFORE the commanded-mode stamps below, so no
+            # mode-change ring-buffer entry or ``hvac_mode_not_applied`` line is written for a
+            # mode switch that is never sent.
+            _LOGGER.info(
+                "[DRY RUN] Would switch HVAC mode before setpoint write — %s -> %s role=%s", live, mode, self.role
+            )
+            return False
         _LOGGER.info("Switching HVAC mode before setpoint write — %s -> %s entity=%s", live, mode, self.climate_entity)
         # Stamp BEFORE the awaited call so the echo of our own mode change is never read as a
         # manual change (same contract as _set_hvac_mode).
@@ -4363,6 +4400,8 @@ class AutomationEngine:
         finally:
             self._hvac_command_pending = False
         self._restamp_climate_command_times()
+        if _call.outcome is ClimateCallOutcome.DRY_RUN:
+            return False  # Issue #1108: nothing sent -- stop the write, no note
         if _call.outcome is ClimateCallOutcome.FAILED:
             self._mode_switch_marker = None
             self._last_mode_switch_result = HvacCommandResult.FAILED
@@ -4536,6 +4575,8 @@ class AutomationEngine:
                 f"mode={mode} entity={self.climate_entity}",
             )
             self._restamp_climate_command_times()
+            if _call.outcome is ClimateCallOutcome.DRY_RUN:
+                return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- no verify/retry
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 # Out-of-range / mode-not-offered: skipped quietly (no incident, no verify).
                 return HvacCommandResult.FAILED
@@ -4610,6 +4651,13 @@ class AutomationEngine:
                 _retry_mode = mode
 
                 async def _retry_callback(_now: Any) -> None:
+                    if self.dry_run is True:
+                        # Issue #1108 (J1): automation was switched off after the rejected write.
+                        # Return BEFORE the nudge branch: it emits ``setpoint_nudge`` and switches
+                        # the mode itself, so gating only the final call would still log a nudge
+                        # that never happened.
+                        _LOGGER.info("[DRY RUN] Would retry rejected setpoint write role=%s", self.role)
+                        return
                     # Issue #411: on the 2nd+ consecutive rejection for this commanded value,
                     # nudge the setpoint by ±1°F first — some thermostat integrations dedup a
                     # repeated identical set_temperature payload, so retrying with the exact
@@ -4663,6 +4711,8 @@ class AutomationEngine:
                             f"mode={_retry_mode} entity={self.climate_entity}",
                         )
                         self._restamp_climate_command_times()
+                        if _nudge_call.outcome is ClimateCallOutcome.DRY_RUN:
+                            return  # Issue #1108: nothing sent -- no note, no real-target follow-up
                         if _nudge_call.outcome in (ClimateCallOutcome.FAILED, ClimateCallOutcome.REJECTED):
                             if _nudge_call.outcome is ClimateCallOutcome.FAILED:
                                 self._note_hvac_command_failed(_retry_mode, _nudge_call.error, setpoint_f=_nudge_temp_f)
@@ -7488,13 +7538,33 @@ class AutomationEngine:
         target = resolve_fan_mode_command(cs.attributes.get("fan_modes"), "off")
         if target is None:
             return
+        if self.dry_run is True:
+            # Issue #1108 (D1 skip-and-clear): observe-only -- leave the blower as it is. The caller
+            # already cleared the one-shot pending flag, so the release is dropped, not deferred:
+            # after observe-only the running fan may well be the occupant's own choice.
+            _LOGGER.info(
+                "[DRY RUN] Would release CA-owned HVAC fan left on from previous configuration"
+                " (fan_mode %s -> %s) role=%s",
+                attr,
+                target,
+                self.role,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "fan_orphan_released", {"old_fan_mode": attr, "command_sent": None, "dry_run": True}
+                )
+            return
         _LOGGER.info(
             "Releasing CA-owned HVAC fan left on from previous configuration (fan_mode %s -> %s)", attr, target
         )
         if self._emit_event_callback:
             self._emit_event_callback("fan_orphan_released", {"old_fan_mode": attr, "command_sent": target})
-        await self.hass.services.async_call(
-            "climate", "set_fan_mode", {"entity_id": self.climate_entity, "fan_mode": target}, blocking=True
+        await self._call_service_with_context(
+            "climate",
+            "set_fan_mode",
+            {"entity_id": self.climate_entity, "fan_mode": target},
+            kind="climate",
+            blocking=True,
         )
 
     async def _reconcile_fan_on_startup_locked(
@@ -12668,6 +12738,43 @@ class AutomationEngine:
         await self._call_fan_service_with_context(domain, desired_service, fan_entity)
         return True
 
+    async def _call_service_with_context(
+        self, domain: str, service: str, data: dict[str, Any], *, kind: str, blocking: bool = False
+    ) -> None:
+        """Issue one CA command carrying a fresh, recorded HA Context (Issues #482, #1109).
+
+        The one command-kind-agnostic sender. ``kind`` picks the recency set the context id is
+        recorded in (``_COMMAND_CONTEXT_SETS``): ``"fan"`` for WHF fan/switch commands (read by
+        the fan-entity provenance check, which gates override suppression), ``"climate"`` for
+        thermostat commands (diagnostic only, Issue #1109 / D6 -- no decision reads it). The
+        shut-down latch and the observe-only gate stay here, ahead of the recording, so no
+        context is recorded for a command that is never sent (T7b/T7c enforce both). Exceptions
+        from the service call propagate unchanged to the caller.
+        """
+        entity_id = data.get("entity_id")
+        if _refuse_if_shut_down(self, f"call {domain}.{service} {entity_id}"):
+            return  # before _record_command_context (Issue #1102)
+        if self.dry_run is True:
+            # Issue #1108 choke-point backstop (e.g. the WHF drift off-command): nothing sent, so
+            # no context is recorded either.
+            _LOGGER.info("[DRY RUN] Would call %s.%s %s role=%s", domain, service, entity_id, self.role)
+            return
+        cmd_context = Context()
+        self._record_command_context(kind, cmd_context.id)
+        _LOGGER.debug(
+            "Sending %s.%s entity=%s context_id=%s kind=%s role=%s",
+            domain,
+            service,
+            entity_id,
+            cmd_context.id,
+            kind,
+            self.role,
+        )
+        if blocking:
+            await self.hass.services.async_call(domain, service, data, blocking=True, context=cmd_context)
+        else:
+            await self.hass.services.async_call(domain, service, data, context=cmd_context)
+
     async def _call_fan_service_with_context(self, domain: str, service: str, entity_id: str) -> None:
         """Issue a fan/switch service call carrying a fresh HA Context (Issue #482).
 
@@ -12682,15 +12789,18 @@ class AutomationEngine:
         not guaranteed by HA core — some integrations do not carry the calling
         context through to their own state write. This is why the context check is
         additive/corroborating rather than a replacement for the existing checks.
+
+        Issue #1109: a thin wrapper over ``_call_service_with_context`` (``kind="fan"``), which
+        holds the shut-down latch and the observe-only gate.
         """
-        if _refuse_if_shut_down(self, f"call {domain}.{service} {entity_id}"):
-            return  # before _record_fan_command_context (Issue #1102)
-        cmd_context = Context()
-        self._record_fan_command_context(cmd_context.id)
-        await self.hass.services.async_call(domain, service, {"entity_id": entity_id}, context=cmd_context)
+        await self._call_service_with_context(domain, service, {"entity_id": entity_id}, kind="fan")
 
     def _record_fan_command_context(self, context_id: str) -> None:
-        """Record a just-issued CA fan-command context id (Issue #561).
+        """Record a just-issued CA fan-command context id (Issue #561); see ``_record_command_context``."""
+        self._record_command_context("fan", context_id)
+
+    def _record_command_context(self, kind: str, context_id: str) -> None:
+        """Record a just-issued CA command context id in the ``kind`` recency set (Issues #561, #1109).
 
         Replaces a single last-write-wins ``_fan_command_context_id`` attribute, which
         could be overwritten by a second overlapping fan command before the first
@@ -12700,26 +12810,35 @@ class AutomationEngine:
         set instead means either command's context can still be matched, regardless of
         which one the coordinator's state-change listener happens to see first.
         """
+        attr = _COMMAND_CONTEXT_SETS[kind]
         now = dt_util.now()
         cutoff = now - timedelta(seconds=30)
-        self._recent_fan_command_context_ids = [
-            (cid, ts) for cid, ts in self._recent_fan_command_context_ids if ts >= cutoff
-        ]
-        self._recent_fan_command_context_ids.append((context_id, now))
+        try:
+            recent = [(cid, ts) for cid, ts in getattr(self, attr, []) if ts >= cutoff]
+        except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
+            recent = []
+        recent.append((context_id, now))
+        setattr(self, attr, recent)
 
-    def fan_command_context_matches(self, event_context_id: str | None, event_context_parent_id: str | None) -> bool:
-        """Return True if either id matches a CA fan command issued in the last 30s (Issue #561).
-
-        Checked by ``coordinator._async_fan_entity_changed()`` in place of the old
-        single-id equality check.
-        """
+    def command_context_matches(
+        self, kind: str, event_context_id: str | None, event_context_parent_id: str | None
+    ) -> bool:
+        """True if either id matches a CA ``kind`` command issued in the last 30 s (Issues #561, #1109)."""
         if event_context_id is None and event_context_parent_id is None:
             return False
         cutoff = dt_util.now() - timedelta(seconds=30)
         return any(
             ts >= cutoff and cid in (event_context_id, event_context_parent_id)
-            for cid, ts in self._recent_fan_command_context_ids
+            for cid, ts in getattr(self, _COMMAND_CONTEXT_SETS[kind], [])
         )
+
+    def fan_command_context_matches(self, event_context_id: str | None, event_context_parent_id: str | None) -> bool:
+        """Return True if either id matches a CA fan command issued in the last 30s (Issue #561).
+
+        Checked by ``coordinator._async_fan_entity_changed()`` in place of the old
+        single-id equality check. Fan kind only: a thermostat command's context never counts.
+        """
+        return self.command_context_matches("fan", event_context_id, event_context_parent_id)
 
     def _fan_toggle_rate_limited(self, *, action: str, reason: str) -> FanCommandResult | None:
         """Hard safety backstop against rapid fan on/off/on cycling (Issue #641).
@@ -13012,10 +13131,11 @@ class AutomationEngine:
                             _fan_modes_on,
                         )
                     else:
-                        await self.hass.services.async_call(
+                        await self._call_service_with_context(
                             "climate",
                             "set_fan_mode",
                             {"entity_id": self.climate_entity, "fan_mode": _on_value},
+                            kind="climate",
                         )
                         _activated_hvac = True
                         _LOGGER.info("Activated HVAC fan (fan_mode=%s) — %s role=%s", _on_value, reason, self.role)
@@ -14151,10 +14271,11 @@ class AutomationEngine:
                         _fan_modes_deact,
                     )
                 else:
-                    await self.hass.services.async_call(
+                    await self._call_service_with_context(
                         "climate",
                         "set_fan_mode",
                         {"entity_id": self.climate_entity, "fan_mode": _deact_value},
+                        kind="climate",
                     )
                     _LOGGER.info("Deactivated HVAC fan (fan_mode=%s) — %s role=%s", _deact_value, reason, self.role)
 

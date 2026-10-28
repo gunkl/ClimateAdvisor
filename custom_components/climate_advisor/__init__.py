@@ -17,10 +17,10 @@ from pathlib import Path
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.start import async_at_started
 
 from . import log_capture, zone_registry
 from .api import API_VIEWS
@@ -530,7 +530,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Defer weather entity validation until HA is fully started so all
     # entities are loaded — avoids false "not found" on startup race.
-    async def _validate_weather_entity(_event=None):
+    async def _validate_weather_entity(_hass: HomeAssistant) -> None:
         weather_entity = entry.data.get("weather_entity", "")
         if not hass.states.get(weather_entity):
             resolved = _resolve_weather_entity(hass, weather_entity)
@@ -542,7 +542,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 hass.config_entries.async_update_entry(entry, data={**entry.data, "weather_entity": resolved})
                 ir.async_delete_issue(hass, DOMAIN, f"weather_entity_not_found_{entry.entry_id}")
-                await hass.config_entries.async_reload(entry.entry_id)
+                # Issue #1102 (F7): schedule, never await, a reload from inside setup —
+                # awaiting async_reload here waits on this entry's own setup lock
+                # (self-deadlock), and HA documents async_schedule_reload for integrations.
+                hass.config_entries.async_schedule_reload(entry.entry_id)
             else:
                 # Issue #812: entry-scoped issue_id + data={"entry_id": ...}
                 # so a multi-zone install's Repairs "Fix" targets THIS zone
@@ -567,12 +570,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             ir.async_delete_issue(hass, DOMAIN, f"weather_entity_not_found_{entry.entry_id}")
 
-    if hass.is_running:
-        # Integration reloaded after startup (e.g., from repairs flow) — validate now
-        await _validate_weather_entity()
-    else:
-        # First startup — wait until all integrations are loaded
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _validate_weather_entity)
+    # Issue #1102 (F6): HA's async_at_started runs now if HA is already running (a reload)
+    # or once on EVENT_HOMEASSISTANT_STARTED (first boot). Its cancel goes to the entry's
+    # on_unload, so a STARTED listener can no longer outlive an unload of this entry.
+    entry.async_on_unload(async_at_started(hass, _validate_weather_entity))
 
     coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data), entry_id=entry.entry_id)
 

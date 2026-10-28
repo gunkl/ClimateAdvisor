@@ -815,6 +815,38 @@ class TestBriefingNotificationSplit:
         side_effect=_side_effect_generate_briefing,
     )
     @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_shut_down_coordinator_sends_no_briefing(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
+        """Issue #1102: a coordinator replaced by a reload sends no briefing push or email.
+
+        Same setup as test_push_gets_tldr_email_gets_full (which sends two notify calls);
+        the only difference is the shut-down latch.
+        """
+        mock_classify.return_value = _make_classification()
+
+        coord = self._make_coordinator_stub()
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        _bind_refresh_hourly_forecast(coord)
+        coord._shut_down = True
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        calls = coord.hass.services.async_call.call_args_list
+        assert [c for c in calls if c[0][0] == "notify"] == []
+        mock_gen.assert_not_called()
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
     def test_email_disabled_only_push(self, mock_classify, mock_gen, mock_pred, mock_outdoor):
         """When email is disabled, only push notification is sent."""
         mock_classify.return_value = _make_classification()
@@ -1658,7 +1690,7 @@ class TestBriefingRegeneration:
             for k, v in raw_archive.items():
                 try:
                     restored[int(k)] = float(v)
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     continue
             restored_coord._pred_archive = restored
 
@@ -1679,7 +1711,7 @@ class TestBriefingRegeneration:
             for k, v in bad_archive.items():
                 try:
                     restored[int(k)] = float(v)
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     continue
             coord._pred_archive = restored
 

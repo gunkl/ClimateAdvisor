@@ -16,6 +16,7 @@ import contextlib
 import inspect
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -308,6 +309,18 @@ class _FakeStates:
     def get(self, entity_id: str) -> FakeState | None:
         return self._states.get(entity_id)
 
+    def async_all(self, domain: str | None = None) -> list[Any]:
+        """Real ``hass.states.async_all(domain)``: states (with ``entity_id``) in a domain.
+
+        Issue #1102 (T8): __init__.py's weather auto-resolve calls it on the reload
+        path. Rule #8: the method was missing from the fake, not wrong.
+        """
+        return [
+            SimpleNamespace(entity_id=eid, state=st.state, attributes=st.attributes)
+            for eid, st in self._states.items()
+            if domain is None or eid.split(".", 1)[0] == domain
+        ]
+
     def set(self, entity_id: str, state: FakeState) -> None:
         self._states[entity_id] = state
 
@@ -377,6 +390,7 @@ class _FakeConfigEntries:
 
     def __init__(self) -> None:
         self._entries: dict[str, Any] = {}
+        self.scheduled_reloads: list[str] = []
 
     def register_entry(self, entry: Any) -> None:
         """Harness-only: add an entry to the registry (real HA does this at
@@ -426,6 +440,13 @@ class _FakeConfigEntries:
         """No-op — no scenario currently exercises a live reload mid-run."""
         return True
 
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Real HA schedules (does not await) a reload of the entry (Issue #1102, F7).
+
+        Recorded, not performed. Rule #8: the method was missing from the fake.
+        """
+        self.scheduled_reloads.append(entry_id)
+
 
 class _FakeHttp:
     """Minimal stand-in for hass.http (Issue #796).
@@ -474,10 +495,13 @@ class _FakeBus:
     def async_listen_once(self, event_type: str, callback: Any) -> Any:
         remove_holder: list[Any] = []
 
-        def _wrapped(event: Any) -> None:
+        def _wrapped(event: Any) -> Any:
             if remove_holder:
                 remove_holder[0]()
-            callback(event)
+            # Issue #1102: return the listener's result so async_fire hands a coroutine
+            # to the task runner, as real HA runs an async listener. Rule #8: the
+            # wrapper used to drop it (the coroutine never ran) — missing, not wrong.
+            return callback(event)
 
         remove_holder.append(self.async_listen(event_type, _wrapped))
         return remove_holder[0]
@@ -556,6 +580,10 @@ class FakeHass:
     # ------------------------------------------------------------------
     # State-change listener registry (real dispatch, coordinator-fidelity)
     # ------------------------------------------------------------------
+
+    def listener_count(self) -> int:
+        """Live state-change plus bus listeners (Issue #1102 leak checks)."""
+        return sum(len(v) for v in self._state_listeners.values()) + sum(len(v) for v in self.bus._listeners.values())
 
     def add_state_listener(self, entity_ids: str | list[str], callback: Any) -> Any:
         """Register a state-change listener; mirrors async_track_state_change_event.

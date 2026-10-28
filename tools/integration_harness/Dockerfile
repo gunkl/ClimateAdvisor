@@ -23,7 +23,7 @@
 # - anthropic is pre-installed to avoid a network call on every container start.
 #   HA's integration loader would pip-install it anyway, but this is faster for CI.
 
-FROM ghcr.io/home-assistant/home-assistant:2025.5.3
+FROM ghcr.io/home-assistant/home-assistant:2026.10.4
 
 # Install libfaketime and curl (healthcheck uses curl).
 # Base image is Alpine Linux — use apk, not apt-get.

@@ -437,7 +437,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                                 "window_compliance is 0.0 but a 'low_window_compliance'"
                                 " suggestion exists — compliance counter may be zeroed incorrectly"
                             )
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         pass
 
                 # High override count check
@@ -449,7 +449,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                                 f"total_manual_overrides={total_overrides} is unusually high (>50)."
                                 f" Verify that overrides are not being double-counted."
                             )
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         pass
             except Exception:
                 _LOGGER.warning("investigator fallback: failed compliance cross-check")
@@ -470,7 +470,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                                         f"frequent_overrides suggestion cites override_count={count}"
                                         f" which exceeds the suspicious threshold of 50."
                                     )
-                            except (TypeError, ValueError):
+                            except TypeError, ValueError:
                                 pass
             except Exception:
                 _LOGGER.warning("investigator fallback: failed override suggestion check")
@@ -578,7 +578,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                 continue
             try:
                 commanded_val = float(commanded)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
             if etype == "setpoint_nudge":
                 nudged_values.add(commanded_val)

@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.0] — 2026-10-27
+
+- **Requires Home Assistant 2026.3 or newer.** Climate Advisor now targets Python 3.14, which Home Assistant has used since 2026.3. Older Home Assistant versions can no longer load it.
+- Fix #1102: saving Climate Advisor settings no longer leaves a hidden old copy running in the background. That copy could turn the whole-house fan back on after you turned it off and then report that you had turned it on. A fan-off grace period you just started now also survives a settings save.
+
 ## [0.7.107] — 2026-10-26
 
 All changes below affect only the HVAC system's own blower (furnace/AC fan), with fan control set to "HVAC fan" or "disabled" (and the HVAC side of "both"). Whole-house fans are not changed.

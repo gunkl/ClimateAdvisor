@@ -18,10 +18,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install test dependencies
         run: pip install -r requirements_test.txt
@@ -37,3 +37,26 @@ jobs:
 
       - name: Run unit tests
         run: pytest tests/ -v --tb=short
+
+  # Real Home Assistant tier (Issue #1102 follow-up S1). Its own job and its own
+  # environment: tests/ stubs homeassistant for the whole process, and this plugin
+  # auto-loads into any pytest run in the environment it is installed in.
+  ha-lifecycle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install real-HA test dependencies
+        run: pip install -r requirements_test_ha.txt
+
+      - name: Run real-HA lifecycle tests
+        run: pytest -c tests_ha/pytest.ini --rootdir=tests_ha tests_ha/

@@ -14,7 +14,7 @@ How to set up your local environment, run tests, and lint the Climate Advisor co
 
 ## Prerequisites
 
-- Python 3.11+ (match your Home Assistant version)
+- Python 3.14+ (Climate Advisor requires Home Assistant 2026.3 or newer, which runs on Python 3.14)
 - Git
 
 ## Setup
@@ -63,6 +63,17 @@ pytest tests/test_classifier.py -v
 # Run a specific test by name
 pytest tests/ -v -k "test_classify_hot_day"
 ```
+
+A second, small tier in `tests_ha/` runs Climate Advisor inside a **real** Home Assistant core
+(HA's own leak checker, Issue #1102). It needs its own environment, because its pytest plugin
+auto-loads and would collide with the stubs in `tests/`:
+
+```bash
+pip install -r requirements_test_ha.txt   # in a separate venv, Python 3.14.2+
+pytest -c tests_ha/pytest.ini --rootdir=tests_ha tests_ha/
+```
+
+CI runs it as the `ha-lifecycle` job.
 
 ### Test Coverage
 

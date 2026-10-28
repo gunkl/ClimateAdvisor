@@ -178,7 +178,7 @@ def _build_classification_from_event(event: dict) -> Any:
         try:
             h, m = val.split(":")
             return dt_time(int(h), int(m))
-        except (ValueError, AttributeError):
+        except ValueError, AttributeError:
             return None
 
     c.window_open_time = _parse_time(event.get("window_open_time"))
@@ -320,7 +320,7 @@ def _parse_event_time(time_str: str, default: datetime) -> datetime:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return default
 
 
@@ -605,7 +605,7 @@ def _dispatch_event(
             if _cls_indoor_f is not None:
                 try:
                     _cls_indoor_f = float(_cls_indoor_f)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     _cls_indoor_f = None
         # Issue #474: when a real coordinator is present, also set its own
         # _current_classification — _async_thermostat_changed's override-detection

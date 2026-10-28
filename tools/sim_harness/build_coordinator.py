@@ -304,8 +304,6 @@ def build_headless_multi_zone(
     """
     install_ha_stubs()
 
-    from custom_components.climate_advisor import async_setup_entry  # noqa: PLC0415
-    from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
     from custom_components.climate_advisor.coordinator import (  # noqa: PLC0415
         ClimateAdvisorCoordinator,
     )
@@ -373,14 +371,7 @@ def build_headless_multi_zone(
             # itself, matching production's actual sequencing.
             fake_hass.config_entries.register_entry(entry)
 
-            run_coro(async_setup_entry(fake_hass, entry))
-            # Settle any fire-and-forget hass.async_create_task() calls /
-            # scheduled callbacks queued during this zone's setup before
-            # moving on to the next zone — same reasoning as
-            # build_headless_coordinator's post-startup scheduler.advance_to.
-            scheduler.advance_to(scheduler.now())
-
-            coordinator = fake_hass.data[DOMAIN][entry.entry_id]
+            coordinator = setup_entry_like_ha(fake_hass, scheduler, entry)
             zones[zone_label] = {
                 "coordinator": coordinator,
                 "entry": entry,
@@ -388,3 +379,45 @@ def build_headless_multi_zone(
             }
 
     return zones, fake_hass, scheduler
+
+
+def setup_entry_like_ha(fake_hass: FakeHass, scheduler: FakeScheduler, entry: Any) -> Any:
+    """Run the REAL async_setup_entry() for ``entry`` as HA does; return its coordinator.
+
+    Must be called inside ``scheduler.installed()``. Issue #1102: real HA's
+    ConfigEntry.async_setup sets the current_entry ContextVar around
+    async_setup_entry(); the coordinator reads it and registers async_shutdown on
+    the entry's on_unload list. Also used to set an entry up again after an unload
+    (a reload), against the same FakeHass and config_dir.
+    """
+    from custom_components.climate_advisor import async_setup_entry  # noqa: PLC0415
+    from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
+    from tools.sim_harness.ha_stubs import _current_entry  # noqa: PLC0415
+
+    token = _current_entry.set(entry)
+    try:
+        run_coro(async_setup_entry(fake_hass, entry))
+    finally:
+        _current_entry.reset(token)
+    # Settle any fire-and-forget hass.async_create_task() calls / scheduled callbacks
+    # queued during setup — same reasoning as build_headless_coordinator's
+    # post-startup scheduler.advance_to.
+    scheduler.advance_to(scheduler.now())
+    return fake_hass.data[DOMAIN][entry.entry_id]
+
+
+async def async_unload_entry_like_ha(fake_hass: FakeHass, entry: Any) -> bool:
+    """Unload ``entry`` the way HA's ConfigEntry.async_unload does (Issue #1102).
+
+    HA calls the integration's ``async_unload_entry()`` and, if it returns True, runs
+    the entry's on_unload callbacks LIFO — including the coordinator's own
+    ``async_shutdown`` (registered by DataUpdateCoordinator), i.e. a SECOND shutdown.
+    Calling ``async_unload_entry()`` alone (the older harness path) skips that second
+    call, so a bug that only shows on it (N4: the lost fan-off grace) could not be seen.
+    """
+    from custom_components.climate_advisor import async_unload_entry  # noqa: PLC0415
+
+    ok = await async_unload_entry(fake_hass, entry)
+    if ok:
+        await entry.async_process_on_unload(fake_hass)
+    return ok

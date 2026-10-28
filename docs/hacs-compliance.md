@@ -55,7 +55,7 @@ Minimum required: `name` field. CA's `hacs.json` also sets `render_readme`,
 {
   "name": "Climate Advisor",
   "render_readme": true,
-  "homeassistant": "2024.6.0",
+  "homeassistant": "2026.3.0",
   "hide_default_branch": true
 }
 ```

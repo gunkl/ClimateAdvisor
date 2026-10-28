@@ -137,7 +137,7 @@ def _fetch_live_pipeline(ha_url: str, ha_token: str) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+    except urllib.error.HTTPError, urllib.error.URLError, OSError:
         return None
 
     try:

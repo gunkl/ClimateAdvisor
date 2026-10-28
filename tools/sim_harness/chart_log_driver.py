@@ -30,7 +30,7 @@ def load_chart_log(path: str | Path) -> list[dict[str, Any]]:
         return []
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return []
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
@@ -41,7 +41,7 @@ def load_chart_log(path: str | Path) -> list[dict[str, Any]]:
 def _parse_ts(ts: str) -> datetime | None:
     try:
         return datetime.fromisoformat(ts)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 

@@ -237,7 +237,7 @@ the thermostat sim's config flow.
 
 There is no `homeassistant` pip package in this repo/venv, so nothing here
 was importable or runnable in this session — these files were written
-carefully by HA convention (targeting the `homeassistant: 2024.6.0` minimum
+carefully by HA convention (targeting the `homeassistant: 2026.3.0` minimum
 pinned in `hacs.json`) and need to be installed and exercised on a real HA
 instance by a human before being trusted. The one exception:
 `ca_dev_thermostat_sim/test_sim_math.py` hand-verifies the ODE formula

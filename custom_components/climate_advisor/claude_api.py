@@ -712,7 +712,7 @@ class ClaudeAPIClient:
         self._rate_counters.manual_requests_today = int(data.get("manual_requests_today", 0))
         try:
             self._rate_counters.counter_date = date.fromisoformat(data["counter_date"])
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             self._rate_counters.counter_date = date.today()
         self._investigator_requests_today = int(data.get("investigator_requests_today", 0))
         self._investigator_requests_date = data.get("investigator_requests_date", "")

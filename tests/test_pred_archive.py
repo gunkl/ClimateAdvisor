@@ -202,7 +202,7 @@ class TestPredArchiveContract:
         for ae in forecast:
             try:
                 ae_dt = datetime.fromisoformat(ae["ts"])
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 continue
             if ae_dt > archive_cutoff:
                 break

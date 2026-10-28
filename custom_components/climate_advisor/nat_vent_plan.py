@@ -467,7 +467,7 @@ def compute_nat_vent_plan(
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         if float(i_temp) > comfort_cool:
             result["ceiling_breach_time"] = ts

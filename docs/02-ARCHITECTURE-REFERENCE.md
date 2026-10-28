@@ -443,7 +443,7 @@ Guards are placed at the 3 thermostat primitives (`_set_hvac_mode`, `_set_temper
 | Choke point | Paths it covers | Observe-only result |
 |---|---|---|
 | `_call_climate` | every `climate.*` write, incl. the setpoint-nudge write and `_ensure_hvac_mode_for_write` | `[DRY RUN] Would call climate.<svc>` and `ClimateCallResult(DRY_RUN)`. `DRY_RUN` is distinct from `REJECTED`: callers stop **without** any note (no `hvac_mode_not_applied`, no verify/retry). `_ensure_hvac_mode_for_write` also returns False before its commanded-mode stamps. |
-| `_call_fan_service_with_context` | WHF control-entity commands, incl. the physical-drift off-command | `[DRY RUN] Would call <domain>.<svc>`; returns before `_record_fan_command_context` |
+| `_call_service_with_context` (via `_call_fan_service_with_context` for WHF; Issue #1109 routes `_call_climate` and the thermostat `set_fan_mode` calls through it too) | WHF control-entity commands, incl. the physical-drift off-command | `[DRY RUN] Would call <domain>.<svc>`; returns before `_record_command_context` |
 | `_release_orphaned_hvac_fan` | the one-shot post-restore orphan release (Issues #1103/#1104) | **skip-and-clear**: nothing sent, the pending release is dropped (not deferred), `fan_orphan_released` is emitted with `dry_run: True`, `command_sent: None` |
 | setpoint `_retry_callback` (15-min retry after a rejected write) | the nudge-then-target retry | returns at the top, before the `setpoint_nudge` event, so no nudge is logged that never happened |
 
@@ -571,7 +571,7 @@ success.
 | `AutomationEngine._call_climate` | `ClimateCallResult(REJECTED)` |
 | `_set_hvac_mode` (incl. off-assert blower call), `_set_temperature_impl` | `HvacCommandResult.FAILED`, before `_write_seq` / `_note_*` / verify / retry |
 | `_activate_fan`, `_deactivate_fan` (incl. blower calls) | `FanCommandResult.DISABLED`, before the verify timers |
-| `_call_fan_service_with_context` | return, before `_record_fan_command_context` |
+| `_call_service_with_context` (every CA fan/climate command; Issue #1109) | return, before `_record_command_context` |
 | `_release_orphaned_hvac_fan`, `_notify` | return |
 | `_start_fan_thermo_backstop` (stops an in-flight tick re-arming), `_start_grace_period_action` | no timer; grace returns `False` ("grace disabled") |
 

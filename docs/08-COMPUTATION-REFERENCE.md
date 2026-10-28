@@ -2275,6 +2275,25 @@ written by `_record_fan_command_context()` and checked via
 overlapping commands' contexts can still be matched, regardless of which one the coordinator's
 listener happens to see first.
 
+**Thermostat command context (Issue #1109, diagnostic only).** Every CA command now goes through
+one command-kind-agnostic sender, `_call_service_with_context(domain, service, data, kind=...,
+blocking=...)`, which holds the shut-down latch and the observe-only gate, creates a fresh
+`Context`, records its id via `_record_command_context(kind, id)` and logs it at DEBUG
+(`Sending <domain>.<svc> entity=... context_id=... kind=... role=...`). Kinds keep separate
+30-second recency sets: `"fan"` (`_recent_fan_command_context_ids`, the WHF fan/switch commands
+via `_call_fan_service_with_context`) and `"climate"` (`_recent_climate_command_context_ids`:
+`_call_climate` plus the four direct thermostat `set_fan_mode` calls -- off-assert, orphan
+release, HVAC-fan activate/deactivate). `fan_command_context_matches()` reads the fan set only,
+so a thermostat command can never suppress a fan override. `command_context_matches("climate",
+...)` is read by exactly one place, the DEBUG line `thermostat state change provenance: ...
+event_context_id/parent_id/user_id ... context_matches_ca=` in
+`coordinator._async_thermostat_changed()` (written only when the mode, a setpoint or the fan mode
+changed). **No decision reads the climate set** (owner decision D6): override detection is
+unchanged, guarded by `tests/test_thermostat_command_context.py`. A match is conclusive that CA
+sent the change; a non-match proves nothing (cloud thermostats report by polling with a new
+context). `coordinator._async_command_fan_entity` (command-only fan mode) still sends without a
+context; nothing reads one there.
+
 **Listener registration observability:** at coordinator setup, one INFO line is emitted:
 
 ```

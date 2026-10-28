@@ -6086,6 +6086,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state or not old_state:
             return
 
+        # Issue #1109: provenance evidence for a disputed thermostat change, DIAGNOSTIC ONLY (D6):
+        # nothing below reads it. Logged only when something CA can command changed (mode,
+        # setpoint, fan mode), not on every temperature tick. A match is conclusive that the change
+        # came from CA's own command; a non-match proves nothing (context often does not propagate).
+        if old_state.state != new_state.state or any(
+            old_state.attributes.get(_a) != new_state.attributes.get(_a)
+            for _a in ("temperature", "target_temp_low", "target_temp_high", "fan_mode")
+        ):
+            _ev_ctx = getattr(event, "context", None)
+            _ev_ctx_id = getattr(_ev_ctx, "id", None)
+            _ev_ctx_parent = getattr(_ev_ctx, "parent_id", None)
+            try:
+                _ctx_matches_ca = self.automation_engine.command_context_matches("climate", _ev_ctx_id, _ev_ctx_parent)
+            except TypeError:  # diagnostic only: a clock mix must never abort override detection
+                _ctx_matches_ca = None
+            _LOGGER.debug(
+                "thermostat state change provenance: %s -> %s event_context_id=%s"
+                " event_context_parent_id=%s event_context_user_id=%s context_matches_ca=%s",
+                old_state.state,
+                new_state.state,
+                _ev_ctx_id,
+                _ev_ctx_parent,
+                getattr(_ev_ctx, "user_id", None),
+                _ctx_matches_ca,
+            )
+
         # Issue #1048 change 9: remember when heating/cooling equipment was last seen active
         # (per direction) for the comfort stall alert. Before any early return so a short
         # cycle between two 30-min coordinator updates is never missed.

@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor import automation as automation_module
 from custom_components.climate_advisor.automation import (
@@ -67,7 +67,7 @@ class TestCallClimate:
         assert result.outcome is ClimateCallOutcome.OK
         args, kwargs = engine.hass.services.async_call.call_args
         assert args[:2] == ("climate", "set_hvac_mode")
-        assert kwargs == {"blocking": True}
+        assert kwargs == {"blocking": True, "context": ANY}  # Issue #1109: CA context attached
 
     def test_timeout_is_unknown_state_not_failure_and_does_not_cancel_the_call(self, caplog):
         engine = _make_engine()

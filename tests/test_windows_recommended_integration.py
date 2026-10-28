@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import importlib as _importlib
 from datetime import UTC, datetime, time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
@@ -279,6 +279,7 @@ class TestWindowsRecommendedPauseSuppression:
             "set_hvac_mode",
             {"entity_id": "climate.thermostat", "hvac_mode": "off"},
             blocking=True,
+            context=ANY,
         )
 
     # ------------------------------------------------------------------

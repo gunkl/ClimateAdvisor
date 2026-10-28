@@ -260,8 +260,10 @@ class TestWeatherEntityRepairFlow:
         assert new_data["weather_entity"] == "weather.home"
         # Verify issue was deleted
         mock_delete.assert_called_once()
-        # Verify integration reload was deferred via async_create_task
-        hass.async_create_task.assert_called_once()
+        # Issue #1116: the reload is scheduled via HA's documented
+        # async_schedule_reload (never awaited inside the flow), not a bare task.
+        hass.config_entries.async_schedule_reload.assert_called_once_with(entry.entry_id)
+        hass.async_create_task.assert_not_called()
 
     def test_shows_error_on_invalid_entity(self):
         """Selecting an entity that doesn't exist shows error."""
@@ -543,17 +545,14 @@ class TestMultiZoneRepairFlowTargeting:
         issue_id_a = f"weather_entity_not_found_{entry_a.entry_id}"
         flow = asyncio.run(async_create_fix_flow(fake_hass, issue_id_a, {"entry_id": entry_a.entry_id}))
         flow.hass = fake_hass
-        # The flow defers the reload via hass.async_create_task() — close the
-        # coroutine rather than letting the harness's FakeScheduler queue it
-        # unrun, which would trigger a "coroutine was never awaited"
-        # RuntimeWarning at GC (see CLAUDE.md's async-mock testing rules).
-        fake_hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
 
         with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue") as mock_delete:
             result = asyncio.run(flow.async_step_init(user_input={"weather_entity": "weather.new_forecast_for_a"}))
 
         assert result["type"] == "create_entry"
         assert entry_a.data["weather_entity"] == "weather.new_forecast_for_a"
+        # Issue #1116: only zone A's reload is scheduled (async_schedule_reload).
+        assert fake_hass.config_entries.scheduled_reloads == [entry_a.entry_id]
         # Zone B's config entry must be byte-for-byte untouched.
         assert entry_b.data == original_b_data
         mock_delete.assert_called_once_with(
@@ -578,7 +577,6 @@ class TestMultiZoneRepairFlowTargeting:
         issue_id_b = f"weather_entity_not_found_{entry_b.entry_id}"
         flow = asyncio.run(async_create_fix_flow(fake_hass, issue_id_b, {"entry_id": entry_b.entry_id}))
         flow.hass = fake_hass
-        fake_hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
 
         with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue") as mock_delete:
             result = asyncio.run(flow.async_step_init(user_input={"weather_entity": "weather.new_forecast_for_b"}))
@@ -633,7 +631,6 @@ class TestMultiZoneRepairFlowTargeting:
         # Old unscoped issue_id, data=None — the pre-#812 call shape.
         flow = asyncio.run(async_create_fix_flow(fake_hass, "weather_entity_not_found", None))
         flow.hass = fake_hass
-        fake_hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
 
         with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue"):
             result = asyncio.run(flow.async_step_init(user_input={"weather_entity": "weather.only_zone_new"}))

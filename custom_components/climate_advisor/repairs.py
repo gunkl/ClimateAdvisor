@@ -77,8 +77,11 @@ class WeatherEntityRepairFlow(RepairsFlow):
                 self.hass.config_entries.async_update_entry(
                     entry, data={**entry.data, "weather_entity": weather_entity}
                 )
-                # Defer reload to avoid tearing down the integration mid-flow
-                self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                # Defer the reload so the integration isn't torn down mid-flow.
+                # Issue #1116: async_schedule_reload is HA's documented API for an
+                # integration to reload its own entry (Teardown Contract) — not a bare
+                # hass.async_create_task of async_reload.
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
             if entry_id is not None:
                 ir.async_delete_issue(self.hass, DOMAIN, f"weather_entity_not_found_{entry_id}")
 

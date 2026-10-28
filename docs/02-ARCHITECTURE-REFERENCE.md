@@ -570,7 +570,9 @@ read-only `weather.get_forecasts` fetches).
 
 **Reload from inside setup.** Code running inside `async_setup_entry()` schedules a reload
 with `hass.config_entries.async_schedule_reload(entry_id)`; awaiting `async_reload` there
-waits on the entry's own setup lock.
+waits on the entry's own setup lock. The weather Repairs fix (`repairs.py`
+`WeatherEntityRepairFlow`) uses the same API (Issue #1116). The reload_needed Repairs flow
+awaits `async_reload` directly: it holds no setup lock and a reload error surfaces in the dialog.
 
 **Tests.** `tests/test_reload_teardown.py` (T1: unload at +172 s, nothing runs after),
 `tests/test_reload_lifecycle.py` (no live timer/listener after unload; fan-off grace survives

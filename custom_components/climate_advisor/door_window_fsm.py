@@ -287,6 +287,13 @@ class DoorWindowFsmInputs:
                                              ``UNPROTECTED_GRACE_STARTED`` docstring for
                                              the same source-mismatch pitfall already
                                              found there).
+      manual_override_owns_hvac            -> self._manual_override_active or
+                                             self._override_confirm_pending — added under
+                                             Issue #1119: _sync_paused_by_door_with_live_
+                                             sensors() leaves the system alone while the
+                                             occupant's override (or its pending
+                                             confirmation) owns the thermostat; the
+                                             SYNC_RECONCILE copy below mirrors that guard.
       now                                  -> caller-resolved wall-clock time
       nat_vent_gate_ruled_out               -> True only for _pause_for_door_window()'s
                                              own SENSOR_OPENED dispatch (Issue #757
@@ -315,6 +322,9 @@ class DoorWindowFsmInputs:
     now: datetime
     manual_grace_would_start: bool = True
     automation_grace_would_start: bool = True
+    # Issue #1119: see the docstring row above. Defaults False (the pre-#1119 shape) so every
+    # existing hand-built input snapshot keeps its meaning.
+    manual_override_owns_hvac: bool = False
     # Issue #757 Phase 6 Step 4 fix: SENSOR_OPENED's transition independently
     # re-derives TWO conditions that can override a pause — "is this within a
     # windows-recommended planned window" and "would nat-vent activate" (via
@@ -479,6 +489,11 @@ def _sync_reconcile_next_state(
     if current_state == DoorWindowLifecycleState.NORMAL and inputs.grace_active:
         return DoorWindowLifecycleState.GRACE
 
+    # Issue #1119: production's re-check returns before any pause while a manual override or
+    # its pending confirmation owns the thermostat (placed after the #672 grace branch so a
+    # NORMAL origin with a live override grace still reports GRACE, exactly as before).
+    if inputs.manual_override_owns_hvac:
+        return current_state
     if inputs.within_planned_window:
         return current_state
     if not decide_open_sensor_hold(

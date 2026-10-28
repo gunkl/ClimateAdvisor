@@ -3074,7 +3074,22 @@ class AutomationEngine:
         the band's active edge, so a warm/mild day (classification mode "off") still resolves.
         ``(None, None)`` when the selector does not apply (nat-vent / WHF / TOU bank owns the
         thermostat, or a thermostat without the capability).
+
+        Issue #1119 (regression from #1073): also ``(None, None)`` while the open-window hold is
+        live (``_paused_by_door``, or ``decide_open_sensor_hold()`` -- the same predicate
+        ``_apply_comfort_band()`` / ``_sync_paused_by_door_with_live_sensors()`` act on). There
+        automation's real decision is OFF whatever the selector previews, so a heat/cool override
+        can never "match" it: the pre-expiry revisit must not claim "automation agrees" and cancel
+        the occupant's grace only to switch their heat/cool off in the same instant. Single source
+        for production adoption, the override/grace FSM inputs and the coordinator shadow.
         """
+        if self._paused_by_door or decide_open_sensor_hold(
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+            debounce_pending=self._sensor_debounce_pending,
+            any_sensor_open=self._any_monitored_sensor_open(),
+        ):
+            return None, None
         band = self._resolved_comfort_band(classification)
         day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, "cool")
         now = dt_util.now()
@@ -5194,7 +5209,18 @@ class AutomationEngine:
         could write an active HVAC mode into an open window with no live check at all. Confirmed
         live: 2026-08-11 incident, a sensor open since bedtime with no fresh open event ever
         firing. Call this at the top of each of those four, before they build the gate's inputs.
+
+        Issue #1119 (design gap since #620): leaves the system alone while a manual override or
+        its pending confirmation is active. The occupant's mode wins for the grace period
+        (grace-periods-spec §Manual Grace: a door/window does not pause HVAC during manual grace)
+        and the designed moment to switch off is grace expiry with a sensor still open
+        (``_on_grace_expired()`` re-pauses). Before this, wake-up / bedtime / pre-cool / both TOU
+        pre-conditioning paths ran this re-check ahead of their own ``DEFER_OVERRIDE`` gate and
+        switched the occupant's heat/cool off inside a grace CA had just announced. A grace with
+        no manual override (fan-off / automation grace) does NOT block the re-check (D16).
         """
+        if self._manual_override_active or self._override_confirm_pending:
+            return  # the occupant owns the thermostat; grace expiry / the gate decide, not this
         if self._paused_by_door:
             return  # already paused
         if self._is_within_planned_window_period():
@@ -10064,6 +10090,7 @@ class AutomationEngine:
             pre_pause_mode_active=bool(self._pre_pause_mode),
             manual_grace_would_start=self._grace_would_start("manual", now),
             automation_grace_would_start=self._grace_would_start("automation", now),
+            manual_override_owns_hvac=bool(self._manual_override_active or self._override_confirm_pending),
             now=now,
             nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
         )

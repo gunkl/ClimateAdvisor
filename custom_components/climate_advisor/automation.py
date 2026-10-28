@@ -5198,6 +5198,30 @@ class AutomationEngine:
         """
         return bool(self._sensor_debounce_pending_callback and self._sensor_debounce_pending_callback())
 
+    def _scheduled_routine_waits_for_pending_override(self, routine: str) -> bool:
+        """True (and logs) when a scheduled routine must wait on an unconfirmed manual change.
+
+        Issue #1119 follow-up (owner decision): wake-up, bedtime and pre-cool wait while
+        ``_override_confirm_pending`` is set, exactly as ``apply_classification()`` and both TOU
+        pre-conditioning paths already do (#786 Fix 2). Before, they replaced the occupant's
+        just-made change (``clear_manual_override(reason="morning_wakeup")`` etc. + band arm) --
+        and with a door open the band arm's #629 guard then switched HVAC off. The confirm timer
+        decides what happens next: a still-divergent change becomes a protected override (the
+        routine then skips on ``DEFER_OVERRIDE``); a reverted one self-resolves and the next
+        ``apply_classification()`` cycle arms the time-resolved band. Kept out of
+        ``decide_scheduled_band_gate()``: its other callers already return on a pending confirm
+        before reaching it, and ``classification_fsm`` / the harness consume its 5-input shape.
+        """
+        if not self._override_confirm_pending:
+            return False
+        _LOGGER.info(
+            "Override confirmation pending (detected=%s at %s) — skipping %s",
+            self._override_confirm_mode,
+            self._override_confirm_time,
+            routine,
+        )
+        return True
+
     async def _sync_paused_by_door_with_live_sensors(self) -> None:
         """Reconcile ``_paused_by_door`` with live, debounce-settled sensor state (Issue #620).
 
@@ -8881,6 +8905,15 @@ class AutomationEngine:
         # reversal exit, sleep-aware cycling target), so bedtime just defers entirely while
         # nat-vent/WHF is active. (2) bedtime now also defers when paused by an open door/
         # window, which it never checked before (finding #11).
+        # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
+        if self._scheduled_routine_waits_for_pending_override("bedtime setback"):
+            if self._emit_event_callback and not self._recent_duplicate(
+                "bedtime_setback_skipped", ("override_confirm_pending",)
+            ):
+                self._emit_event_callback("bedtime_setback_skipped", {"reason": "override_confirm_pending"})
+            if self._today_record is not None:
+                self._today_record.setback_skipped_reason = "override_confirm_pending"
+            return
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()
@@ -9102,6 +9135,9 @@ class AutomationEngine:
         # nat_vent_temperature_check() already cycles the fan around during the sleep window —
         # free cooling is already doing at least as much work as pre-cool's own AC ceiling
         # would (Issue #498 finding #8a).
+        # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
+        if self._scheduled_routine_waits_for_pending_override("pre-cool"):
+            return "skipped: override confirmation pending"
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()
@@ -9265,6 +9301,11 @@ class AutomationEngine:
         # skips whenever the user is overriding the fan (previously missing that check
         # entirely, unlike handle_bedtime()). It also now defers when paused by an open door/
         # window, which it never checked before (finding #11).
+        # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
+        if self._scheduled_routine_waits_for_pending_override("morning wake-up"):
+            if self._emit_event_callback:
+                self._emit_event_callback("morning_wakeup_skipped", {"reason": "override_confirm_pending"})
+            return
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()

@@ -38,7 +38,10 @@ from custom_components.climate_advisor.door_window_fsm import (
     DoorWindowLifecycleState,
     transition,
 )
+from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
 from tests.test_restore_resolved_band import _classification, _make_engine, _run
+
+_OGF_CONFIRM_EXPIRED = OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED
 
 _AUTOMATION = "custom_components.climate_advisor.automation"
 _DAY = datetime(2026, 10, 28, 14, 0, 0, tzinfo=UTC)
@@ -191,13 +194,13 @@ class TestScheduledRoutinesLeaveOverrideAlone:
         assert engine._test_state.state == mode
 
     @pytest.mark.parametrize("mode", _MODES)
-    @pytest.mark.parametrize("caller", ["tou", "tou_away", "apply_classification"])
+    @pytest.mark.parametrize("caller", list(_CALLERS))
     def test_pending_confirmation_is_not_switched_off(self, caller, mode):
-        """Callers that defer to a pending confirmation must not reach an "off" either.
+        """No caller reaches an "off" while the occupant's change awaits confirmation.
 
-        wake-up / bedtime / pre-cool deliberately supersede an UNCONFIRMED change by design
-        (``clear_manual_override(reason="morning_wakeup")`` etc.), so they are covered at the
-        helper level below rather than end-to-end.
+        wake-up / bedtime / pre-cool used to replace an UNCONFIRMED change
+        (``clear_manual_override(reason="morning_wakeup")`` + band arm, whose #629 guard then
+        paused); owner decision (#1119 follow-up): they now wait, as TOU / apply_classification do.
         """
         engine = _engine_with_override(mode, confirmed=False)
         _drive(engine, caller)
@@ -298,3 +301,85 @@ class TestDoorWindowFsmMirrorsTheGuard:
             DoorWindowLifecycleState.NORMAL, DoorWindowFsmEvent(DoorWindowFsmEventKind.SYNC_RECONCILE, inputs)
         )
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+
+
+# ---------------------------------------------------------------------------
+# Owner decision (#1119 follow-up): wake-up / bedtime / pre-cool WAIT on a pending
+# override confirmation -- door open or closed -- exactly like TOU / apply_classification.
+# ---------------------------------------------------------------------------
+
+_WAITING_ROUTINES = ["wakeup", "bedtime", "pre_cool"]
+
+
+def _climate_commands(engine: AutomationEngine) -> list[tuple[str, dict]]:
+    return [(c.args[1], c.args[2]) for c in engine.hass.services.async_call.call_args_list if c.args[0] == "climate"]
+
+
+class TestScheduledRoutinesWaitOnPendingConfirmation:
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize("door_open", [True, False], ids=["door_open", "door_closed"])
+    @pytest.mark.parametrize("caller", _WAITING_ROUTINES)
+    def test_unconfirmed_change_is_left_alone(self, caller, door_open, mode):
+        engine = _engine_with_override(mode, confirmed=False)
+        if not door_open:
+            engine._sensor_check_callback = lambda: False
+        _drive(engine, caller)
+        assert _climate_commands(engine) == [], f"{caller} wrote over the occupant's unconfirmed {mode}"
+        assert engine._override_confirm_pending is True, f"{caller} discarded the pending confirmation"
+        assert engine._override_confirm_mode == mode
+        assert engine._paused_by_door is False
+        assert engine._test_state.state == mode
+
+    @pytest.mark.parametrize("mode", _MODES)
+    def test_wakeup_skip_is_visible_in_the_activity_log(self, mode):
+        engine = _engine_with_override(mode, confirmed=False)
+        events = []
+        engine._emit_event_callback = lambda kind, payload: events.append((kind, payload))
+        _drive(engine, "wakeup")
+        assert ("morning_wakeup_skipped", {"reason": "override_confirm_pending"}) in events
+
+    @pytest.mark.parametrize("mode", _MODES)
+    def test_bedtime_skip_is_visible_in_the_activity_log(self, mode):
+        engine = _engine_with_override(mode, confirmed=False)
+        events = []
+        engine._emit_event_callback = lambda kind, payload: events.append((kind, payload))
+        _drive(engine, "bedtime")
+        assert ("bedtime_setback_skipped", {"reason": "override_confirm_pending"}) in events
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize("caller", _WAITING_ROUTINES)
+    def test_control_no_pending_change_routine_still_runs(self, caller, mode):
+        """Positive control: with nothing pending (door closed) each routine still writes."""
+        engine = _engine_with_override(mode, confirmed=False)
+        engine._override_confirm_pending = False
+        engine._override_confirm_mode = None
+        engine._sensor_check_callback = lambda: False
+        _drive(engine, caller)
+        assert _climate_commands(engine), f"{caller} did nothing with no pending change"
+
+
+# ---------------------------------------------------------------------------
+# Owner decision (#1119, caveat 2): "Manual Change Pause" = 0 minutes (manual_grace_seconds=0).
+# A manual heat/cool change made with a window open stays until something else ends it; it does
+# NOT fall back to the window pause on its own (there is no grace expiry to re-pause at).
+# ---------------------------------------------------------------------------
+
+
+class TestZeroManualGraceKeepsOverrideWithWindowOpen:
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize("caller", list(_CALLERS))
+    def test_no_off_from_any_recheck_path_with_grace_disabled(self, caller, mode):
+        engine = _make_engine(indoor=_INDOOR[mode], mode=mode, manual_grace_seconds=0)
+        engine._test_state.attributes["temperature"] = _EDGE[mode]
+        engine._sensor_check_callback = lambda: True
+        engine._sensor_debounce_pending_callback = lambda: False
+        engine._current_classification = _classification(_DAY_TYPE[mode])
+        with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
+            engine._confirm_override_action(mode, source="pause")  # the real confirm side effect
+            engine._resolve_override_grace_fsm_state(kind=_OGF_CONFIRM_EXPIRED)
+        assert engine._manual_override_active is True
+        assert engine._grace_active is False, "premise: manual grace disabled -> no grace timer"
+        _drive(engine, caller)
+        assert "off" not in _hvac_mode_commands(engine), f"{caller} switched the occupant's {mode} off"
+        assert engine._manual_override_active is True
+        assert engine._paused_by_door is False

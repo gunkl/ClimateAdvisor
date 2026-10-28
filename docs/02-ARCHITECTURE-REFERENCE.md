@@ -517,11 +517,27 @@ remains the only restart-time save.
 | Occupancy / door-window listeners | `_unsub_occupancy_listeners`, `_unsub_dw_listeners` | their `_unsubscribe_*` helpers, from `async_shutdown()` |
 | Engine timers (grace, fan cycles, backstop, revisit, override confirm, setpoint retry, mode-align recheck, fan verify) | own handle | `AutomationEngine.cleanup()` (#729) |
 | STARTED weather-validation hook (`__init__.py`) | `async_at_started` cancel | `entry.async_on_unload` |
+| Coordinator state-save / observation-commit tasks (Issue #1113 group A: `set_automation_enabled` save, thermostat-off save in `_async_thermostat_changed`, the two `_commit_observation` spawns) | `config_entry._tasks` via `coordinator._spawn(coro)` | HA awaits them on unload (up to 10 s, then one WARNING), before a reload's new setup starts |
 
 A handle from `async_call_later` / `async_track_*` / `async_at_start(ed)` /
 `bus.async_listen(_once)` is never discarded: `tests/test_teardown_static.py` fails on a bare
 call. The api.py follow-up is the one append-only exception (one entry per cancel-override
 click, never removed, a no-op after firing; growth is bounded by user clicks).
+
+**Entry-tied tasks (Issue #1113).** `coordinator._spawn(coro, *, background=False)` starts a
+task with `config_entry.async_create_task` (or `async_create_background_task`, which HA
+cancels on unload), falling back to `hass.async_create_task` when the coordinator has no
+entry (tests, simulation harness). Occupant view: during a settings save, the old instance's
+save or observation commit finishes before the new instance reads the files, so no learned
+observation is lost. A restart never unloads entries, so behaviour at HA stop is unchanged.
+Two kinds of task must **never** be entry-tied: the `EVENT_HOMEASSISTANT_STOP` listener's
+`_persist_shutdown_diagnostics` task, and anything that reloads or unloads its own entry
+(it would wait on itself; use `async_schedule_reload`). `tests/test_teardown_static.py`
+(T7d) ratchets the remaining bare `hass.async_create_task` calls (Issue #1113 groups B-D:
+engine/timer dispatch, refresh requests, notifications) by count per (file, function): a new
+bare call fails, and a converted site must lower its allowlist count.
+`tests_ha/test_unload_cleanup.py::test_unload_waits_for_a_coordinator_save_task` checks in
+real HA that unload stays in `UNLOAD_IN_PROGRESS` until a `_spawn`ed save finishes.
 
 **Real-HA leak check.** `tests_ha/test_unload_cleanup.py` sets up one zone in a real Home
 Assistant core (pytest-homeassistant-custom-component), unloads it and ends without advancing

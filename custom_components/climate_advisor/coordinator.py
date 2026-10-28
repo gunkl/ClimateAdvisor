@@ -14,7 +14,7 @@ import hashlib
 import logging
 import math
 import statistics
-from collections.abc import Callable, Container
+from collections.abc import Callable, Container, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -1205,7 +1205,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Automation %s",
             "enabled" if enabled else "disabled (observe-only)",
         )
-        self.hass.async_create_task(self._async_save_state())
+        self._spawn(self._async_save_state())
 
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
@@ -1568,6 +1568,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         value (the executor future) and exception propagation as before.
         """
         return self.hass.async_add_executor_job(log_capture.bind_zone_for_executor(fn), *args)
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any], *, background: bool = False) -> asyncio.Task[Any]:
+        """Start ``coro`` as a task tied to this zone's config entry (Issue #1113).
+
+        Entry tasks are awaited by HA when the entry unloads (and, during a reload,
+        before the new instance's setup starts), so a state save or observation commit
+        cannot land after the replacement instance has loaded. ``background=True``
+        makes an entry *background* task instead, which HA cancels on unload — only for
+        work whose loss on unload is harmless.
+
+        Mandatory fallback: with no config entry (tests, the simulation harness, any
+        instance built outside ``async_setup_entry``) this is a plain
+        ``hass.async_create_task``. Never use this for work that reloads or unloads its
+        own entry (it would wait on itself) or for the EVENT_HOMEASSISTANT_STOP listener.
+        """
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            return self.hass.async_create_task(coro)
+        name = f"climate_advisor {getattr(coro, '__qualname__', 'task')}"
+        if background:
+            return entry.async_create_background_task(self.hass, coro, name)
+        return entry.async_create_task(self.hass, coro, name)
 
     def _zone_scoped(self, callback_fn: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap an async HA-registered callback to run inside this coordinator's zone_scope.
@@ -6417,7 +6439,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._hvac_on_since = None
             self._thermostat_fan_only_on_since = None
             self._hvac_session_mode = None
-            self.hass.async_create_task(self._async_save_state())
+            self._spawn(self._async_save_state())
         elif was_running and is_running and old_action != new_action:
             # heat_cool mode: hvac_action switched heating↔cooling mid-session
             if is_hvac_compressor_active(old_action) and is_hvac_compressor_active(new_action):
@@ -9634,7 +9656,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._pending_observations.pop(obs_type, None)
                     return
             obs["status"] = "committing"  # prevent duplicate commit on next poll
-            self.hass.async_create_task(self._commit_observation(obs_type, force_grade="low"))
+            self._spawn(self._commit_observation(obs_type, force_grade="low"))
         else:
             self._abandon_observation(obs_type, abandon_reason)
 
@@ -9753,7 +9775,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._pending_observations.pop(obs_type, None)
                 return
         obs["status"] = "committing"
-        self.hass.async_create_task(self._commit_observation(obs_type, force_grade="low"))
+        self._spawn(self._commit_observation(obs_type, force_grade="low"))
 
     def _compute_next_action(
         self,

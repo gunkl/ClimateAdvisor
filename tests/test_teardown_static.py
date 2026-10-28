@@ -102,3 +102,118 @@ def test_every_service_call_is_behind_the_shutdown_latch():
         "service calls in functions that do not check the #1102 shut-down latch "
         "(add `if _refuse_if_shut_down(self, ...): return <no-op result>` before the call):\n" + "\n".join(unlatched)
     )
+
+
+# ---------------------------------------------------------------------------
+# T7d (Issue #1113): no new bare ``hass.async_create_task`` — ratcheting allowlist.
+#
+# Occupant experience being guarded: during a settings save (zone reload), a state
+# save or thermal-observation commit spawned as a bare HA task can land AFTER the new
+# zone instance has loaded, so a learned observation is lost or the state file is
+# briefly stale. Coordinator work that must finish before the new instance starts goes
+# through ``ClimateAdvisorCoordinator._spawn`` (config-entry task: unload waits for
+# it). Every remaining bare call is counted per (file, enclosing function). A NEW bare
+# call fails here; converting one means LOWERING its count below (the ratchet).
+# ---------------------------------------------------------------------------
+
+# Permanent: these must stay bare hass tasks.
+_BARE_TASK_PERMANENT = {
+    # The EVENT_HOMEASSISTANT_STOP listener: restart-only path. HA never unloads entries
+    # on stop, and an entry/background task would gain nothing (background = cancelled).
+    ("coordinator.py", "_async_homeassistant_stop"): 1,
+    # _spawn's mandatory fallback when there is no config entry (tests, sim harness).
+    ("coordinator.py", "_spawn"): 1,
+}
+
+# Ratchet: groups B-D of Issue #1113 (engine/timer dispatch, refresh requests,
+# notifications), tolerated at their current counts. Lower a count when a site is
+# converted to an entry-tied task; never raise one.
+_BARE_TASK_RATCHET = {
+    ("api.py", "_apply_after_delay"): 1,
+    ("automation.py", "_clear_fan_flags_and_start_grace"): 1,
+    ("automation.py", "_confirm_override_expired"): 1,
+    ("automation.py", "_grace_expired"): 1,
+    ("automation.py", "_notify_indoor_blind"): 1,
+    ("automation.py", "_on_grace_expired"): 2,
+    ("automation.py", "_reconcile_fan_physical_drift"): 1,
+    ("automation.py", "_retry"): 1,
+    ("automation.py", "_revisit_fired"): 1,
+    ("automation.py", "_schedule_check"): 1,
+    ("automation.py", "_schedule_real_target"): 1,
+    ("automation.py", "_schedule_retry"): 1,
+    ("automation.py", "_thermo_tick"): 1,
+    ("automation.py", "_turn_off"): 1,
+    ("automation.py", "_turn_on"): 1,
+    ("automation.py", "_verify_setpoint_after_fan_off"): 1,
+    ("automation.py", "_verify_setpoint_after_fan_on"): 1,
+    ("automation.py", "clear_fan_override"): 1,
+    ("automation.py", "handle_fan_manual_override"): 1,
+    ("automation.py", "on_fan_turned_off"): 1,
+    ("automation.py", "start_override_confirmation"): 1,
+    ("coordinator.py", "_async_door_window_changed"): 2,
+    ("coordinator.py", "_async_fan_entity_changed"): 1,
+    ("coordinator.py", "_async_indoor_temp_changed"): 1,
+    ("coordinator.py", "_async_outdoor_temp_changed"): 1,
+    ("coordinator.py", "_async_thermostat_changed"): 1,
+    ("coordinator.py", "_build_production_automation_callbacks"): 1,
+    ("coordinator.py", "_burst_window_elapsed"): 1,
+    ("coordinator.py", "_debounce_expired"): 1,
+    ("coordinator.py", "_do_debounce"): 1,
+    ("coordinator.py", "_do_startup_coalesce"): 1,
+    ("coordinator.py", "_notify_in_background"): 1,
+    ("coordinator.py", "_occupancy_away_timer_expired"): 1,
+    ("coordinator.py", "_on_post_grace_fan_check"): 1,
+    ("coordinator.py", "_on_startup_coalesce_timer"): 1,
+    ("coordinator.py", "_on_whf_release_reclassify"): 1,
+    ("coordinator.py", "_schedule_retry"): 1,
+    ("coordinator.py", "_tou_av_window_start"): 1,
+    ("coordinator.py", "_update_comfort_stall"): 2,
+}
+
+
+def _bare_hass_task_counts() -> dict[tuple[str, str], int]:
+    """Count ``hass.async_create_task(...)`` / ``<x>.hass.async_create_task(...)`` calls
+    per (package-relative file, nearest enclosing function)."""
+    counts: dict[tuple[str, str], int] = {}
+
+    def visit(node: ast.AST, rel: str, fn: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            child_fn = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "async_create_task"
+            ):
+                owner = child.func.value
+                if (isinstance(owner, ast.Name) and owner.id == "hass") or (
+                    isinstance(owner, ast.Attribute) and owner.attr == "hass"
+                ):
+                    key = (rel, fn)
+                    counts[key] = counts.get(key, 0) + 1
+            visit(child, rel, child_fn)
+
+    for path in sorted(_PKG.rglob("*.py")):
+        rel = path.relative_to(_PKG).as_posix()
+        visit(ast.parse(path.read_text(encoding="utf-8")), rel, "<module>")
+    return counts
+
+
+def test_no_new_bare_hass_async_create_task():
+    allowed = dict(_BARE_TASK_RATCHET)
+    for key, n in _BARE_TASK_PERMANENT.items():
+        allowed[key] = allowed.get(key, 0) + n
+    actual = _bare_hass_task_counts()
+    problems = []
+    for key in sorted(set(actual) | set(allowed)):
+        have, may = actual.get(key, 0), allowed.get(key, 0)
+        if have > may:
+            problems.append(
+                f"{key[0]}:{key[1]} has {have} bare hass.async_create_task call(s), allowlist {may} "
+                "— use coordinator._spawn (config-entry task) instead"
+            )
+        elif have < may:
+            problems.append(
+                f"{key[0]}:{key[1]} has {have} bare call(s) but the allowlist says {may} "
+                "— lower the ratchet entry (converted sites must not be re-addable)"
+            )
+    assert problems == [], "\n".join(problems)

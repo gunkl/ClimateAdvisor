@@ -461,6 +461,10 @@ class ClimateCallOutcome(Enum):
     TIMEOUT = "timeout"  # no answer in time — state unknown, NOT a failure
     REJECTED = "rejected"  # HA validation (out of range / mode not offered) — skip quietly
     FAILED = "failed"  # real failure (entity missing, integration error, ...)
+    # Issue #1108: observe-only (automation switched off) -- nothing was sent. Distinct from
+    # REJECTED on purpose: callers stop WITHOUT any failure/rejection note (no
+    # ``hvac_mode_not_applied`` line for a command that never went out).
+    DRY_RUN = "dry_run"
 
 
 @dataclass(frozen=True)
@@ -3740,8 +3744,16 @@ class AutomationEngine:
         the entity id that existing tests and log searches rely on).
         """
         if _refuse_if_shut_down(self, f"call climate.{service}"):
-            # REJECTED: every caller skips quietly on it (no verify, retry or nudge follow-up).
+            # REJECTED stops every caller (no verify, retry or nudge follow-up). Not every caller is
+            # silent on it -- ``_set_hvac_mode``/``_ensure_hvac_mode_for_write`` note a rejection
+            # (``hvac_mode_not_applied``); for a shut-down instance that is harmless because its
+            # event callback is detached on unload. Observe-only uses the distinct DRY_RUN below.
             return ClimateCallResult(ClimateCallOutcome.REJECTED)
+        if self.dry_run is True:
+            # Issue #1108 choke-point backstop: the outer gates (_set_hvac_mode/_set_temperature,
+            # _retry_callback) normally return first; this catches any path that bypasses them.
+            _LOGGER.info("[DRY RUN] Would call climate.%s %s role=%s", service, data, self.role)
+            return ClimateCallResult(ClimateCallOutcome.DRY_RUN)
         task = asyncio.ensure_future(self.hass.services.async_call("climate", service, data, blocking=True))
         try:
             await asyncio.wait_for(asyncio.shield(task), CLIMATE_CALL_TIMEOUT_S)
@@ -4259,6 +4271,8 @@ class AutomationEngine:
                 f"HVAC command failed — mode={mode} entity={self.climate_entity}",
             )
             self._restamp_climate_command_times(temp=False)
+            if _call.outcome is ClimateCallOutcome.DRY_RUN:
+                return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- stop, no note
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 self._mode_switch_marker = None
                 self._note_mode_rejected(mode, _call.error)
@@ -4348,6 +4362,14 @@ class AutomationEngine:
             recent_switch_to_mode=self._mode_switch_marker_recent(mode),
         ):
             return True
+        if self.dry_run is True:
+            # Issue #1108 (J1): observe-only -- stop BEFORE the commanded-mode stamps below, so no
+            # mode-change ring-buffer entry or ``hvac_mode_not_applied`` line is written for a
+            # mode switch that is never sent.
+            _LOGGER.info(
+                "[DRY RUN] Would switch HVAC mode before setpoint write — %s -> %s role=%s", live, mode, self.role
+            )
+            return False
         _LOGGER.info("Switching HVAC mode before setpoint write — %s -> %s entity=%s", live, mode, self.climate_entity)
         # Stamp BEFORE the awaited call so the echo of our own mode change is never read as a
         # manual change (same contract as _set_hvac_mode).
@@ -4363,6 +4385,8 @@ class AutomationEngine:
         finally:
             self._hvac_command_pending = False
         self._restamp_climate_command_times()
+        if _call.outcome is ClimateCallOutcome.DRY_RUN:
+            return False  # Issue #1108: nothing sent -- stop the write, no note
         if _call.outcome is ClimateCallOutcome.FAILED:
             self._mode_switch_marker = None
             self._last_mode_switch_result = HvacCommandResult.FAILED
@@ -4536,6 +4560,8 @@ class AutomationEngine:
                 f"mode={mode} entity={self.climate_entity}",
             )
             self._restamp_climate_command_times()
+            if _call.outcome is ClimateCallOutcome.DRY_RUN:
+                return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- no verify/retry
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 # Out-of-range / mode-not-offered: skipped quietly (no incident, no verify).
                 return HvacCommandResult.FAILED
@@ -4610,6 +4636,13 @@ class AutomationEngine:
                 _retry_mode = mode
 
                 async def _retry_callback(_now: Any) -> None:
+                    if self.dry_run is True:
+                        # Issue #1108 (J1): automation was switched off after the rejected write.
+                        # Return BEFORE the nudge branch: it emits ``setpoint_nudge`` and switches
+                        # the mode itself, so gating only the final call would still log a nudge
+                        # that never happened.
+                        _LOGGER.info("[DRY RUN] Would retry rejected setpoint write role=%s", self.role)
+                        return
                     # Issue #411: on the 2nd+ consecutive rejection for this commanded value,
                     # nudge the setpoint by ±1°F first — some thermostat integrations dedup a
                     # repeated identical set_temperature payload, so retrying with the exact
@@ -4663,6 +4696,8 @@ class AutomationEngine:
                             f"mode={_retry_mode} entity={self.climate_entity}",
                         )
                         self._restamp_climate_command_times()
+                        if _nudge_call.outcome is ClimateCallOutcome.DRY_RUN:
+                            return  # Issue #1108: nothing sent -- no note, no real-target follow-up
                         if _nudge_call.outcome in (ClimateCallOutcome.FAILED, ClimateCallOutcome.REJECTED):
                             if _nudge_call.outcome is ClimateCallOutcome.FAILED:
                                 self._note_hvac_command_failed(_retry_mode, _nudge_call.error, setpoint_f=_nudge_temp_f)
@@ -7487,6 +7522,22 @@ class AutomationEngine:
             return
         target = resolve_fan_mode_command(cs.attributes.get("fan_modes"), "off")
         if target is None:
+            return
+        if self.dry_run is True:
+            # Issue #1108 (D1 skip-and-clear): observe-only -- leave the blower as it is. The caller
+            # already cleared the one-shot pending flag, so the release is dropped, not deferred:
+            # after observe-only the running fan may well be the occupant's own choice.
+            _LOGGER.info(
+                "[DRY RUN] Would release CA-owned HVAC fan left on from previous configuration"
+                " (fan_mode %s -> %s) role=%s",
+                attr,
+                target,
+                self.role,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "fan_orphan_released", {"old_fan_mode": attr, "command_sent": None, "dry_run": True}
+                )
             return
         _LOGGER.info(
             "Releasing CA-owned HVAC fan left on from previous configuration (fan_mode %s -> %s)", attr, target
@@ -12685,6 +12736,11 @@ class AutomationEngine:
         """
         if _refuse_if_shut_down(self, f"call {domain}.{service} {entity_id}"):
             return  # before _record_fan_command_context (Issue #1102)
+        if self.dry_run is True:
+            # Issue #1108 choke-point backstop (e.g. the WHF drift off-command): nothing sent, so
+            # no context is recorded either.
+            _LOGGER.info("[DRY RUN] Would call %s.%s %s role=%s", domain, service, entity_id, self.role)
+            return
         cmd_context = Context()
         self._record_fan_command_context(cmd_context.id)
         await self.hass.services.async_call(domain, service, {"entity_id": entity_id}, context=cmd_context)

@@ -312,8 +312,8 @@ def _build_restart_summary(events: list) -> str:
     """Summarize `system_restarted` events by cause (Issue #563).
 
     `coordinator.py`'s restart-cause classification (Issue #403/#413) already
-    distinguishes `user_restart`/`version_changed` (benign — a deploy or a normal
-    restart) from `unknown` (crash-like, worth flagging) and stamps it as the
+    distinguishes `user_restart`/`version_changed`/`reload` (benign — a normal
+    restart, a deploy, or a zone reload, Issue #1110) from `unknown` (crash-like, worth flagging) and stamps it as the
     event's `cause` field. Previously nothing surfaced that breakdown to the
     investigator — only a raw `system_restarted` count was visible via
     `event_type_counts` — so a day of routine deploys could get narrated as
@@ -339,7 +339,8 @@ def _build_restart_summary(events: list) -> str:
     lines.append(f"  {len(restarts)} restart(s) in this window: {breakdown}")
     lines.append(
         "  Only cause=unknown restarts are potentially crash-like and worth mentioning;"
-        " user_restart (a normal restart) and version_changed (a deploy) are expected,"
+        " user_restart (a normal restart), version_changed (a deploy) and reload (a Climate"
+        " Advisor zone reload: settings applied or a repair) are expected,"
         " benign events — do not narrate them as problems or cite the raw restart count"
         " as if every restart were equally concerning."
     )
@@ -740,6 +741,10 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 "  avg_daily_thermostat_fan_only_runtime_minutes: "
                 f"{compliance.get('avg_daily_thermostat_fan_only_runtime_minutes', 'unknown')}",
                 f"  comfort_score:                  {compliance.get('comfort_score', 'unknown')}",
+                "  NOTE — comfort_score: share of time indoor stayed inside the target range IN EFFECT",
+                "  at that moment (the chart's target band: sleep/away setbacks included), not the static",
+                "  awake comfort range. A planned setback is not a violation (Issue #1107, 0.8.1+;",
+                "  older days in the 14-day window were scored against the static range).",
                 f"  total_manual_overrides:         {compliance.get('total_manual_overrides', 'unknown')}",
                 f"  pending_suggestions:            {compliance.get('pending_suggestions', 'unknown')}",
                 "  NOTE — window_compliance scope: the value above uses the last 14 days only",
@@ -1487,7 +1492,11 @@ def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
             rows.append(row)
 
         note = "  Note: event log ring buffer covers ~50-60h; use daily summaries for context beyond that."
-        return ["", header, col_hdr, sep, *rows, note]
+        viol_note = (
+            "  Note: Viol(min) = minutes indoor was outside the target range in effect at the time"
+            " (sleep/away setbacks included; days before 0.8.1 used the static comfort range)."
+        )
+        return ["", header, col_hdr, sep, *rows, note, viol_note]
     except Exception:
         _LOGGER.warning("activity_report: failed to build daily summaries -- skipping")
         return []
@@ -2397,6 +2406,13 @@ def _render_fan_ownership_self_healed(p: dict, unit: str) -> tuple[str, str]:
 def _render_fan_orphan_released(p: dict, unit: str) -> tuple[str, str]:
     old = p.get("old_fan_mode")
     sent = p.get("command_sent")
+    if p.get("dry_run") is True:
+        # Issue #1108: automation was off -- nothing was sent and the pending release was dropped.
+        return (
+            "Fan left as-is: observe-only mode",
+            f"thermostat fan_mode stays {old} (automation off; CA would have released the fan it"
+            " left on under the previous configuration)",
+        )
     return (
         "Fan released after configuration change",
         f"thermostat fan_mode {old} -> {sent} (CA had left it on under the previous configuration)",
@@ -2768,6 +2784,13 @@ def _render_system_restarted(p: dict, unit: str) -> tuple[str, str]:
         )
     if cause == "user_restart":
         return f"--- HA restart boundary (user_restart, {recovered} prior events recovered) ---", ""
+    if cause == "reload":
+        # Issue #1110: a config-entry reload, not an HA restart. Not "settings saved" — a
+        # weather auto-resolve reload involves no user action.
+        return (
+            f"--- Climate Advisor zone reloaded (settings applied / repair), {recovered} prior events recovered ---",
+            "",
+        )
     return f"--- HA restart boundary (unknown, {recovered} prior events recovered) ---", ""
 
 

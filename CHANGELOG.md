@@ -3,6 +3,19 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.1] — 2026-10-28
+
+- Fix #1119: if you turn heat or cool on at the thermostat while a door or window is open, Climate Advisor now keeps your setting for the full grace period it announced. Previously the morning wake-up (and bedtime, pre-cool or time-of-use pre-conditioning) could switch it off within minutes. The 5-minute re-check could also wrongly report "automation agrees", end your grace early and switch it off again. If the door is still open when the grace ends, heating or cooling pauses then, as documented. If "Manual Change Pause" is set to 0 minutes, your change stays until you or something else ends it.
+- Changed (#1119): wake-up, bedtime and pre-cool now wait while Climate Advisor is still confirming a thermostat change you just made, instead of replacing it. The Activity Log shows "skipped -- override_confirm_pending".
+- Fix #1108: with automation switched off (observe-only), Climate Advisor no longer touches your equipment. It won't turn off a thermostat fan it had left on, won't switch the thermostat mode or leave the setpoint a degree off after a rejected change, and won't send an "off" signal to a whole-house fan. The Activity Log now says "Fan left as-is: observe-only mode" instead of claiming a fan was released, and no longer shows a setpoint nudge that never happened.
+- Fix #1107: the Comfort Score no longer counts your planned sleep and away temperatures as discomfort. Time only counts against the score when the house is outside the target range Climate Advisor was holding at that moment (the band shown on the chart). Expect the score to rise if you use setbacks. Older days keep their old values and age out of the 14-day window within two weeks. The "comfort violations" suggestion no longer suggests weaker setbacks just because setbacks happened.
+- Fix #1110: after a settings save, a Repairs fix or a weather auto-repair, the Activity Log and AI reports now say "Climate Advisor zone reloaded (settings applied / repair)". They no longer claim Home Assistant restarted.
+- Fix #1121: a single brief thermostat error (for example a Nest cloud hiccup) no longer puts a red "Thermostat commands are failing" warning on the Status card. The warning now appears only after failures have lasted 5 minutes, never while the thermostat already shows the requested mode or you're controlling it yourself, and it clears as soon as a retry succeeds.
+- Fix #1109: Climate Advisor's own thermostat commands now carry an identifying Home Assistant context, and the debug log records the context of each thermostat change, so a disputed change can be traced. This doesn't change how Climate Advisor decides anything.
+- Fix #1113: a state save or learned observation started just before a settings save now finishes before the zone reloads, so it can't be lost.
+- Fix #1116: the weather Repairs fix reloads the zone through Home Assistant's recommended method. You won't notice any difference.
+- Tests (#1117): the simulation harness now handles Home Assistant times the way Home Assistant does, so automated tests reach the regular 30-minute fan, natural-ventilation and comfort checks they used to skip.
+
 ## [0.8.0] — 2026-10-27
 
 - **Requires Home Assistant 2026.3 or newer.** Climate Advisor now targets Python 3.14, which Home Assistant has used since 2026.3. Older Home Assistant versions can no longer load it.

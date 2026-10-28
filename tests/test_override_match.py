@@ -101,3 +101,32 @@ class TestDecideOverrideMatchesDecision:
 
     def test_default_tolerance_constant_matches_automation_py(self):
         assert OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F == 1.0
+
+
+class TestOpenWindowHoldNeverAdopts:
+    """Issue #1119 (D1, regression from #1073): the comfort-edge selector may "agree" with the
+    occupant's heat/cool, but a live open-window hold forces automation's real outcome to off --
+    so the override must not be adopted (no false "automation agrees", no grace cancelled)."""
+
+    @staticmethod
+    def _engine(mode):
+        from tests.test_override_vs_open_window import _engine_with_override
+
+        return _engine_with_override(mode)
+
+    def _check(self, mode):
+        from unittest.mock import patch
+
+        from tests.test_override_vs_open_window import _AUTOMATION, _DAY
+
+        engine = self._engine(mode)
+        c = engine._current_classification
+        with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
+            assert engine._override_match_inputs(c) == (None, None)
+            assert engine._override_matches_current_decision(c) is False
+
+    def test_selector_agrees_but_open_window_hold_does_not_adopt_heat(self):
+        self._check("heat")
+
+    def test_selector_agrees_but_open_window_hold_does_not_adopt_cool(self):
+        self._check("cool")

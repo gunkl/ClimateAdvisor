@@ -65,6 +65,11 @@ from .temperature import format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
 
+# Issue #1110: which shutdown path persisted the restart-cause diagnostics.
+SHUTDOWN_KIND_UNLOAD = "unload"  # config-entry unload (zone reload / repair / removal)
+SHUTDOWN_KIND_HA_STOP = "ha_stop"  # EVENT_HOMEASSISTANT_STOP (real HA restart/stop)
+SHUTDOWN_KINDS = frozenset({SHUTDOWN_KIND_UNLOAD, SHUTDOWN_KIND_HA_STOP})
+
 
 class ObsSample(TypedDict):
     timestamp: str
@@ -883,7 +888,7 @@ class DailyRecord:
 
     # Outcomes
     avg_indoor_temp: float | None = None
-    comfort_violations_minutes: float = 0.0  # Time spent outside comfort range
+    comfort_violations_minutes: float = 0.0  # Time outside the target range in effect (#1107)
     estimated_cost: float | None = None
 
     # User responded to suggestion?
@@ -928,6 +933,10 @@ class LearningState:
     last_shutdown_version: str | None = None
     clean_shutdown: bool = False
     user_initiated_restart: bool = False
+    # Issue #1110: which path wrote the clean-shutdown marker — "unload" (config-entry
+    # unload/reload, async_shutdown) or "ha_stop" (EVENT_HOMEASSISTANT_STOP). None for
+    # state persisted before #1110 (classifier falls back to hass.is_running).
+    last_shutdown_kind: str | None = None
 
 
 class LearningEngine:
@@ -1020,6 +1029,8 @@ class LearningEngine:
                     self._state.clean_shutdown = False
                 if not isinstance(self._state.user_initiated_restart, bool):
                     self._state.user_initiated_restart = False
+                if self._state.last_shutdown_kind not in SHUTDOWN_KINDS:
+                    self._state.last_shutdown_kind = None
                 return
             except (json.JSONDecodeError, TypeError) as err:
                 _LOGGER.warning("Failed to load learning state, starting fresh: %s", err)

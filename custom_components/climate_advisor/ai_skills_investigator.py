@@ -92,7 +92,7 @@ INVESTIGATION PROCEDURE
  entry appears there, report it as a known false positive citing that section, not as a new\
  incongruity you derived from timestamps.
    - RESTART HISTORY already separates cause=unknown (potentially crash-like, worth mentioning)\
- from cause=user_restart/version_changed (benign, expected) â€" never cite the raw restart count\
+ from cause=user_restart/version_changed/reload (benign, expected) â€" never cite the raw restart count\
  as if every restart were equally concerning; only cause=unknown restarts are noteworthy.
 10b. NO SPECULATIVE COMPARATIVE HYPOTHESES: Do not hypothesize that a learned rate or metric is\
  biased or contaminated by comparing it to a hypothetical alternate condition (e.g.\

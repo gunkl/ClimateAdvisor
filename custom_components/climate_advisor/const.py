@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -218,6 +218,12 @@ COMFORT_STALL_MARGIN_F = 1.0
 COMFORT_STALL_SUSTAIN_SECONDS = 3 * 3600
 # ... raises one owner alert, repeated no more often than this while it persists.
 COMFORT_STALL_REMINDER_SECONDS = 12 * 3600
+
+# Issue #1121: the Status card's "Thermostat commands are failing" entry waits until the
+# failure episode is at least this old, so one brief (e.g. cloud) error that the next
+# command fixes never raises a red banner. The ERROR log and the once-per-episode
+# hvac_command_failed incident are not held.
+HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN = 5
 
 
 # Occupancy toggle configuration

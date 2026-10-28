@@ -1,0 +1,122 @@
+{
+  "name": "issue_1119_manual_heat_during_open_window_survives_wakeup",
+  "description": "Cold mild-day morning (indoor 65-67F, outdoor 47F) with a door open since 05:10 (HVAC already off, so the pause only sets the flag). At 05:53 the occupant turns heat on at the thermostat (68F). Climate Advisor confirms it at 06:03 and starts a 3-hour manual grace. At 06:30 the scheduled wake-up runs and at 06:35 the classification revisit runs, the door still open the whole time. Neither may switch the heat off: the occupant's mode holds for the grace period (grace-periods-spec Manual Grace), and the revisit must not adopt the override as 'automation agrees' while the open-window hold forces automation's real outcome to off.",
+  "source": "Live incident 2026-10-28 (v0.7.107), Issue #1119",
+  "issue": 1119,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant: a door open all night; they turned the heat on at 05:53, CA promised to leave it alone for 3 hours, then switched it off at 06:30 (wake-up) and again at 06:35 (revisit claimed 'automation agrees', cancelled the grace, and the window guard switched it off in the same instant).",
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Effectiveness: removing the _sync_paused_by_door_with_live_sensors() override guard (D2, design gap since #620) makes the 06:30 wake-up command off -> hvac_mode_never_commanded(off since 06:00) fails and morning_wakeup_skipped is preceded by a pause. Removing the open-window-hold check in _override_decision_mode_and_target() (D1, regression from #1073) makes the 06:35 revisit adopt (override_adopted, grace_cancelled) and command off -> override_active and hvac_mode_never_commanded both fail. Verified by reverting each guard separately (see Return Contract).",
+    "(b) Docs<->production: docs/grace-periods-spec.md Manual Grace ('Already-open sensors (Issue #1119)') and its State Machine row 'GRACE (override) + scheduled routine / revisit with a sensor already open -> GRACE (unchanged)'; docs/08-COMPUTATION-REFERENCE.md Issue #1119 paragraph under the #620 entries. Both describe exactly what this scenario asserts.",
+    "(c) User outcome if this regresses: the occupant's manual heat (or cool) is silently switched off minutes after CA promised to hold it, and the Activity Record falsely says 'automation agrees'. They have to fight the thermostat repeatedly while the house sits below the comfort floor.",
+    "Scenario ends at 06:40, before the 09:03 grace expiry, because engine_state is a final snapshot; the expiry re-pause is covered by tests/test_override_vs_open_window.py::TestOpenWindowProtectionStillWorks::test_grace_expiry_with_sensor_still_open_re_pauses.",
+    "No tools/sim_harness/outcomes.py change (rule #8 not triggered): uses existing override_confirmed, morning_wakeup_skipped, override_active and hvac_mode_never_commanded (forbidden_modes=[off], since=06:00)."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "manual_grace_seconds": 10800,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "off",
+    "door_window_sensors": ["binary_sensor.back_door"]
+  },
+  "events": [
+    {
+      "time": "2026-10-28T05:00:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 47.0,
+      "note": "Cold morning: indoor already below the 66F sleep floor, so the open door is a plain pause, not natural ventilation."
+    },
+    {
+      "time": "2026-10-28T05:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: classification mode off, but the comfort-edge selector arms heat at the floor."
+    },
+    {
+      "time": "2026-10-28T05:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door opens and stays open (harness debounce 0s) -> paused."
+    },
+    {
+      "time": "2026-10-28T05:53:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "temperature": 68.0,
+      "note": "Occupant turns heat on at 68F during the door/window pause -> override detection, 10-min confirm."
+    },
+    {
+      "time": "2026-10-28T06:03:00",
+      "type": "temp_update",
+      "indoor_f": 67.0,
+      "outdoor_f": 47.0,
+      "note": "Confirm window elapses -> override confirmed, 3-hour manual grace starts."
+    },
+    {
+      "time": "2026-10-28T06:30:00",
+      "type": "wakeup",
+      "note": "Scheduled wake-up with the door still open. Must skip for the override, not switch heat off."
+    },
+    {
+      "time": "2026-10-28T06:35:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "5-minute revisit: the selector would arm heat at 68 (the occupant's setpoint). Must not adopt while the open-window hold forces off."
+    },
+    {
+      "time": "2026-10-28T06:40:00",
+      "type": "temp_update",
+      "indoor_f": 67.5,
+      "outdoor_f": 47.0,
+      "note": "Door still open; occupant's heat still running."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-10-28T06:03:00",
+      "expect": "override_confirmed",
+      "reason": "The occupant's heat is confirmed as a manual override after 10 minutes.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-10-28T06:30:00",
+      "expect": "morning_wakeup_skipped",
+      "reason": "Wake-up skips because the occupant owns the thermostat (DEFER_OVERRIDE).",
+      "track": "integration"
+    },
+    {
+      "at": "2026-10-28T06:40:00",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["off"],
+      "since": "2026-10-28T06:00:00",
+      "reason": "Neither the wake-up re-check nor the revisit switches the occupant's heat off inside the grace.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-10-28T06:40:00",
+      "expect": "override_active",
+      "reason": "The revisit did not adopt (no false 'automation agrees'); the override and its grace survive.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A manual heat override made while a door is open survives the scheduled wake-up and the classification revisit until its grace ends.",
+    "observed_behavior": "override confirmed 06:03 -> wake-up skipped for the override at 06:30 -> revisit at 06:35 leaves the override alone -> no off command after 06:00, override still active at 06:40.",
+    "expected_behavior": "grace-periods-spec Manual Grace: during manual grace a door/window does not pause HVAC; the re-pause happens at grace expiry if a sensor is still open."
+  }
+}

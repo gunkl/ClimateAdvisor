@@ -436,7 +436,18 @@ INFO  [DRY RUN] Would send notification: Climate Advisor — 🏠 Welcome home! 
 
 ### Implementation
 
-Guards are placed at the 3 thermostat primitives (`_set_hvac_mode`, `_set_temperature`, `_notify`) in `AutomationEngine` plus the briefing notification in the coordinator. Higher-level logic (classification application, door/window pause tracking, grace periods, occupancy handling) continues unaffected.
+Guards are placed at the 3 thermostat primitives (`_set_hvac_mode`, `_set_temperature`, `_notify`) and the fan primitives (`_activate_fan`, `_deactivate_fan`) in `AutomationEngine`, the fan-entity command (`_async_command_fan_entity`, Issue #589) and the briefing notification in the coordinator. Higher-level logic (classification application, door/window pause tracking, grace periods, occupancy handling) continues unaffected.
+
+**Choke-point backstops (Issue #1108).** Some paths reach a device without passing a primitive, so the lowest command choke points carry their own `self.dry_run is True` gate (`is True`, because MagicMock test stubs are truthy):
+
+| Choke point | Paths it covers | Observe-only result |
+|---|---|---|
+| `_call_climate` | every `climate.*` write, incl. the setpoint-nudge write and `_ensure_hvac_mode_for_write` | `[DRY RUN] Would call climate.<svc>` and `ClimateCallResult(DRY_RUN)`. `DRY_RUN` is distinct from `REJECTED`: callers stop **without** any note (no `hvac_mode_not_applied`, no verify/retry). `_ensure_hvac_mode_for_write` also returns False before its commanded-mode stamps. |
+| `_call_service_with_context` (via `_call_fan_service_with_context` for WHF; Issue #1109 routes `_call_climate` and the thermostat `set_fan_mode` calls through it too) | WHF control-entity commands, incl. the physical-drift off-command | `[DRY RUN] Would call <domain>.<svc>`; returns before `_record_command_context` |
+| `_release_orphaned_hvac_fan` | the one-shot post-restore orphan release (Issues #1103/#1104) | **skip-and-clear**: nothing sent, the pending release is dropped (not deferred), `fan_orphan_released` is emitted with `dry_run: True`, `command_sent: None` |
+| setpoint `_retry_callback` (15-min retry after a rejected write) | the nudge-then-target retry | returns at the top, before the `setpoint_nudge` event, so no nudge is logged that never happened |
+
+Pending timers are not cancelled when automation is switched off; the gates make them harmless. `tests/test_teardown_static.py` (T7c) fails if a function in `automation.py` or `coordinator.py` that calls `hass.services.async_call` references neither `dry_run` nor `_automation_enabled` (allowlist: the read-only forecast fetches).
 
 ## Engine Callback Isolation (Issue #604, Block 5 subtask N2)
 
@@ -517,11 +528,27 @@ remains the only restart-time save.
 | Occupancy / door-window listeners | `_unsub_occupancy_listeners`, `_unsub_dw_listeners` | their `_unsubscribe_*` helpers, from `async_shutdown()` |
 | Engine timers (grace, fan cycles, backstop, revisit, override confirm, setpoint retry, mode-align recheck, fan verify) | own handle | `AutomationEngine.cleanup()` (#729) |
 | STARTED weather-validation hook (`__init__.py`) | `async_at_started` cancel | `entry.async_on_unload` |
+| Coordinator state-save / observation-commit tasks (Issue #1113 group A: `set_automation_enabled` save, thermostat-off save in `_async_thermostat_changed`, the two `_commit_observation` spawns) | `config_entry._tasks` via `coordinator._spawn(coro)` | HA awaits them on unload (up to 10 s, then one WARNING), before a reload's new setup starts |
 
 A handle from `async_call_later` / `async_track_*` / `async_at_start(ed)` /
 `bus.async_listen(_once)` is never discarded: `tests/test_teardown_static.py` fails on a bare
 call. The api.py follow-up is the one append-only exception (one entry per cancel-override
 click, never removed, a no-op after firing; growth is bounded by user clicks).
+
+**Entry-tied tasks (Issue #1113).** `coordinator._spawn(coro, *, background=False)` starts a
+task with `config_entry.async_create_task` (or `async_create_background_task`, which HA
+cancels on unload), falling back to `hass.async_create_task` when the coordinator has no
+entry (tests, simulation harness). Occupant view: during a settings save, the old instance's
+save or observation commit finishes before the new instance reads the files, so no learned
+observation is lost. A restart never unloads entries, so behaviour at HA stop is unchanged.
+Two kinds of task must **never** be entry-tied: the `EVENT_HOMEASSISTANT_STOP` listener's
+`_persist_shutdown_diagnostics` task, and anything that reloads or unloads its own entry
+(it would wait on itself; use `async_schedule_reload`). `tests/test_teardown_static.py`
+(T7d) ratchets the remaining bare `hass.async_create_task` calls (Issue #1113 groups B-D:
+engine/timer dispatch, refresh requests, notifications) by count per (file, function): a new
+bare call fails, and a converted site must lower its allowlist count.
+`tests_ha/test_unload_cleanup.py::test_unload_waits_for_a_coordinator_save_task` checks in
+real HA that unload stays in `UNLOAD_IN_PROGRESS` until a `_spawn`ed save finishes.
 
 **Real-HA leak check.** `tests_ha/test_unload_cleanup.py` sets up one zone in a real Home
 Assistant core (pytest-homeassistant-custom-component), unloads it and ends without advancing
@@ -560,7 +587,7 @@ success.
 | `AutomationEngine._call_climate` | `ClimateCallResult(REJECTED)` |
 | `_set_hvac_mode` (incl. off-assert blower call), `_set_temperature_impl` | `HvacCommandResult.FAILED`, before `_write_seq` / `_note_*` / verify / retry |
 | `_activate_fan`, `_deactivate_fan` (incl. blower calls) | `FanCommandResult.DISABLED`, before the verify timers |
-| `_call_fan_service_with_context` | return, before `_record_fan_command_context` |
+| `_call_service_with_context` (every CA fan/climate command; Issue #1109) | return, before `_record_command_context` |
 | `_release_orphaned_hvac_fan`, `_notify` | return |
 | `_start_fan_thermo_backstop` (stops an in-flight tick re-arming), `_start_grace_period_action` | no timer; grace returns `False` ("grace disabled") |
 
@@ -570,7 +597,9 @@ read-only `weather.get_forecasts` fetches).
 
 **Reload from inside setup.** Code running inside `async_setup_entry()` schedules a reload
 with `hass.config_entries.async_schedule_reload(entry_id)`; awaiting `async_reload` there
-waits on the entry's own setup lock.
+waits on the entry's own setup lock. The weather Repairs fix (`repairs.py`
+`WeatherEntityRepairFlow`) uses the same API (Issue #1116). The reload_needed Repairs flow
+awaits `async_reload` directly: it holds no setup lock and a reload error surfaces in the dialog.
 
 **Tests.** `tests/test_reload_teardown.py` (T1: unload at +172 s, nothing runs after),
 `tests/test_reload_lifecycle.py` (no live timer/listener after unload; fan-off grace survives

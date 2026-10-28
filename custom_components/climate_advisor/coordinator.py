@@ -14,7 +14,7 @@ import hashlib
 import logging
 import math
 import statistics
-from collections.abc import Callable, Container
+from collections.abc import Callable, Container, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -158,6 +158,7 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN,
     INVESTIGATION_REPORT_HISTORY_CAP,
     INVESTIGATION_REPORTS_FILE,
     MAX_PLAUSIBLE_OUTDOOR_F,
@@ -272,7 +273,14 @@ from .hvac_action import is_hvac_action_active, is_hvac_compressor_active
 from .incident_payload import build_incident_payload
 from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import run_invariant_checks
-from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks, compute_k_passive_endpoint
+from .learning import (
+    SHUTDOWN_KIND_HA_STOP,
+    SHUTDOWN_KIND_UNLOAD,
+    DailyRecord,
+    LearningEngine,
+    compute_k_passive_blocks,
+    compute_k_passive_endpoint,
+)
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
@@ -1198,7 +1206,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Automation %s",
             "enabled" if enabled else "disabled (observe-only)",
         )
-        self.hass.async_create_task(self._async_save_state())
+        self._spawn(self._async_save_state())
 
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
@@ -1479,7 +1487,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # async_restore_state() fell through to "unknown" on every real-world restart.
         @callback
         def _async_homeassistant_stop(_event: Event) -> None:
-            self.hass.async_create_task(self._persist_shutdown_diagnostics())
+            self.hass.async_create_task(self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP))
 
         self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _async_homeassistant_stop))
 
@@ -1561,6 +1569,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         value (the executor future) and exception propagation as before.
         """
         return self.hass.async_add_executor_job(log_capture.bind_zone_for_executor(fn), *args)
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any], *, background: bool = False) -> asyncio.Task[Any]:
+        """Start ``coro`` as a task tied to this zone's config entry (Issue #1113).
+
+        Entry tasks are awaited by HA when the entry unloads (and, during a reload,
+        before the new instance's setup starts), so a state save or observation commit
+        cannot land after the replacement instance has loaded. ``background=True``
+        makes an entry *background* task instead, which HA cancels on unload — only for
+        work whose loss on unload is harmless.
+
+        Mandatory fallback: with no config entry (tests, the simulation harness, any
+        instance built outside ``async_setup_entry``) this is a plain
+        ``hass.async_create_task``. Never use this for work that reloads or unloads its
+        own entry (it would wait on itself) or for the EVENT_HOMEASSISTANT_STOP listener.
+        """
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            return self.hass.async_create_task(coro)
+        name = f"climate_advisor {getattr(coro, '__qualname__', 'task')}"
+        if background:
+            return entry.async_create_background_task(self.hass, coro, name)
+        return entry.async_create_task(self.hass, coro, name)
 
     def _zone_scoped(self, callback_fn: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap an async HA-registered callback to run inside this coordinator's zone_scope.
@@ -1870,6 +1900,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # version against VERSION, and check whether the prior shutdown was clean.
         _last_shutdown_version = self.learning._state.last_shutdown_version
         _clean_shutdown = self.learning._state.clean_shutdown
+        _shutdown_kind = self.learning._state.last_shutdown_kind
         _restart_payload: dict[str, Any] = {"recovered_events": len(self._event_log)}
         if isinstance(_last_shutdown_version, str) and _last_shutdown_version and _last_shutdown_version != VERSION:
             _cause = "version_changed"
@@ -1881,7 +1912,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _restart_payload["old_version"] = _last_shutdown_version
             _restart_payload["new_version"] = VERSION
         elif _clean_shutdown:
-            _cause = "user_restart"
+            # Issue #1110: a config-entry unload (zone reload: settings applied, Repairs fix,
+            # weather auto-resolve) is not an HA restart. The persisted kind is authoritative;
+            # hass.is_running (True on a reload, False during bootstrap) is only a fallback for
+            # state persisted before #1110 recorded the kind.
+            if _shutdown_kind == SHUTDOWN_KIND_UNLOAD or (
+                _shutdown_kind is None and getattr(self.hass, "is_running", False) is True
+            ):
+                _cause = "reload"
+            else:
+                _cause = "user_restart"
         else:
             _cause = "unknown"
         _restart_payload["cause"] = _cause
@@ -1891,6 +1931,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # is correctly classified as "unknown" rather than stale-carrying "user_restart".
         # Not persisted here — it will be written on the next save_state() call.
         self.learning._state.clean_shutdown = False
+        self.learning._state.last_shutdown_kind = None
 
         _LOGGER.info("State restore complete")
 
@@ -3447,10 +3488,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if forecast.current_indoor_temp is not None:
                 self._indoor_temp_history.append((now_str, forecast.current_indoor_temp))
 
-                # Track comfort violations (elapsed minutes since last check, capped at 30)
+                # Track comfort violations (elapsed minutes since last check, capped at 30).
+                # Issue #1107: judged against the target range in effect (sleep/away
+                # setbacks included), not the static awake comfort range.
                 if self._today_record:
-                    comfort_low = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
-                    comfort_high = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
+                    comfort_low, comfort_high = self._comfort_score_band_now()
                     now = dt_util.now()
                     if self._last_violation_check is not None:
                         elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
@@ -6086,6 +6128,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state or not old_state:
             return
 
+        # Issue #1109: provenance evidence for a disputed thermostat change, DIAGNOSTIC ONLY (D6):
+        # nothing below reads it. Logged only when something CA can command changed (mode,
+        # setpoint, fan mode), not on every temperature tick. A match is conclusive that the change
+        # came from CA's own command; a non-match proves nothing (context often does not propagate).
+        if old_state.state != new_state.state or any(
+            old_state.attributes.get(_a) != new_state.attributes.get(_a)
+            for _a in ("temperature", "target_temp_low", "target_temp_high", "fan_mode")
+        ):
+            _ev_ctx = getattr(event, "context", None)
+            _ev_ctx_id = getattr(_ev_ctx, "id", None)
+            _ev_ctx_parent = getattr(_ev_ctx, "parent_id", None)
+            try:
+                _ctx_matches_ca = self.automation_engine.command_context_matches("climate", _ev_ctx_id, _ev_ctx_parent)
+            except TypeError:  # diagnostic only: a clock mix must never abort override detection
+                _ctx_matches_ca = None
+            _LOGGER.debug(
+                "thermostat state change provenance: %s -> %s event_context_id=%s"
+                " event_context_parent_id=%s event_context_user_id=%s context_matches_ca=%s",
+                old_state.state,
+                new_state.state,
+                _ev_ctx_id,
+                _ev_ctx_parent,
+                getattr(_ev_ctx, "user_id", None),
+                _ctx_matches_ca,
+            )
+
         # Issue #1048 change 9: remember when heating/cooling equipment was last seen active
         # (per direction) for the comfort stall alert. Before any early return so a short
         # cycle between two 30-min coordinator updates is never missed.
@@ -6399,7 +6467,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._hvac_on_since = None
             self._thermostat_fan_only_on_since = None
             self._hvac_session_mode = None
-            self.hass.async_create_task(self._async_save_state())
+            self._spawn(self._async_save_state())
         elif was_running and is_running and old_action != new_action:
             # heat_cool mode: hvac_action switched heating↔cooling mid-session
             if is_hvac_compressor_active(old_action) and is_hvac_compressor_active(new_action):
@@ -9616,7 +9684,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._pending_observations.pop(obs_type, None)
                     return
             obs["status"] = "committing"  # prevent duplicate commit on next poll
-            self.hass.async_create_task(self._commit_observation(obs_type, force_grade="low"))
+            self._spawn(self._commit_observation(obs_type, force_grade="low"))
         else:
             self._abandon_observation(obs_type, abandon_reason)
 
@@ -9735,7 +9803,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._pending_observations.pop(obs_type, None)
                 return
         obs["status"] = "committing"
-        self.hass.async_create_task(self._commit_observation(obs_type, force_grade="low"))
+        self._spawn(self._commit_observation(obs_type, force_grade="low"))
 
     def _compute_next_action(
         self,
@@ -10098,11 +10166,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         state = self.hass.states.get(ae.climate_entity)
         live = getattr(state, "state", None)
         # Never show a self-contradicting entry: hidden while the occupant owns the thermostat
-        # and whenever the thermostat already reports the requested mode.
+        # and whenever the thermostat already reports the mode the entry is about. Shared by
+        # mode_not_obeyed and (Issue #1121) command_failing.
         user_owns = bool(getattr(ae, "_manual_override_active", False)) or bool(
             getattr(ae, "_override_confirm_pending", False)
         )
-        if isinstance(requested, str) and requested and not user_owns and live != requested:
+
+        def _contradicted(mode: str) -> bool:
+            return user_owns or live == mode
+
+        if isinstance(requested, str) and requested and not _contradicted(requested):
             detail = f"Thermostat is not following the requested mode: requested {requested}, reports {live!r}"
             mins = _minutes_since(getattr(rec, "mismatch_since", None))
             if mins is not None:
@@ -10110,11 +10183,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             issues.append({"issue": "mode_not_obeyed", "detail": detail})
         failed_mode = getattr(ae, "_hvac_cmd_fail_mode", None)
         if getattr(ae, "_hvac_cmd_fail_announced", None) and isinstance(failed_mode, str) and failed_mode:
-            detail = f"Thermostat commands are failing (last attempted mode: {failed_mode})"
+            # Issue #1121: held until the episode is >= HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN old
+            # (one brief error the next command fixes never shows), and hidden when it would
+            # contradict the thermostat. The ERROR log and the incident are not held.
             mins = _minutes_since(getattr(ae, "_hvac_cmd_fail_since", None))
-            if mins is not None:
-                detail += f" for {mins} min"
-            issues.append({"issue": "command_failing", "detail": detail})
+            if mins is not None and mins >= HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN and not _contradicted(failed_mode):
+                detail = f"Thermostat commands are failing (last attempted mode: {failed_mode}) for {mins} min"
+                issues.append({"issue": "command_failing", "detail": detail})
         # Issue #1048 change 9: the comfort stall entry. Hidden while a mode-not-obeyed
         # episode is open -- that entry already says why the equipment is not running.
         stall = self._stall_status
@@ -10346,6 +10421,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._notify_in_background(
                 "Climate Advisor — house still off-target", message, "hvac_output_stall", email=False
             )
+
+    def _comfort_score_band_now(self) -> tuple[float, float]:
+        """The (low, high) range the Comfort Score judges indoor against right now (Issue #1107).
+
+        Occupant outcome: a planned sleep/away setback the person configured is not counted
+        as discomfort. Uses this cycle's resolved target band (``_target_band_lower_upper_now()``
+        -- the same band the chart draws, Issue #514), so a minute only counts as a
+        violation when indoor is outside the range Climate Advisor is actually holding.
+        Falls back to the static ``comfort_heat``/``comfort_cool`` while no band has been
+        resolved (``(None, None)``: before the first cycle's band, or a weather source with
+        no hourly forecast) -- i.e. exactly the pre-#1107 behaviour, never a guess.
+        """
+        lower, upper = self._target_band_lower_upper_now()
+        if lower is None or upper is None:
+            return (
+                float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
+                float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            )
+        return float(lower), float(upper)
 
     def _is_nat_vent_tolerated_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
         """True if this comfort-band deviation is expected nat-vent cycling tolerance, not a violation.
@@ -12067,8 +12161,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "nat_vent_cycling_paused": ae._natural_vent_active and not ae._fan_active,
         }
 
-    async def _persist_shutdown_diagnostics(self) -> None:
+    async def _persist_shutdown_diagnostics(self, *, kind: str) -> None:
         """Persist restart-cause diagnostics (Issue #403/#413).
+
+        ``kind`` (Issue #1110) records which path is shutting down: ``"unload"`` from
+        async_shutdown() (zone reload / repair / entry removal) or ``"ha_stop"`` from the
+        EVENT_HOMEASSISTANT_STOP listener, so the next restore can tell a zone reload from
+        an HA restart.
 
         Shared by async_shutdown() (fires on config-entry unload/reload) and the
         EVENT_HOMEASSISTANT_STOP listener registered in async_setup() (fires on a real
@@ -12087,11 +12186,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.learning._state.clean_shutdown = True
             self.learning._state.last_shutdown_version = VERSION
             self.learning._state.user_initiated_restart = self._user_initiated_shutdown
+            self.learning._state.last_shutdown_kind = kind
             await self._executor_job(self.learning.save_state)
             _LOGGER.info(
-                "Shutdown diagnostics persisted: version=%s user_initiated=%s",
+                "Shutdown diagnostics persisted: version=%s user_initiated=%s kind=%s",
                 VERSION,
                 self._user_initiated_shutdown,
+                kind,
             )
 
     async def async_shutdown(self) -> None:
@@ -12126,7 +12227,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             # Restart-cause diagnostics (Issue #403): mark this as a clean shutdown so the
             # next startup can distinguish a routine restart from a crash.
-            await self._persist_shutdown_diagnostics()
+            await self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_UNLOAD)
 
             # Flush any accumulated runtime (heat/cool or fan_only) and save state before
             # cleanup. Issue #912: _flush_runtime_for_mode() replaces the old unconditional

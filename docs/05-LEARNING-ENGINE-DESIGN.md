@@ -39,7 +39,7 @@ Every day, a `DailyRecord` is saved with:
 
 ### Outcomes
 - Average indoor temperature
-- Minutes spent outside comfort range (comfort violations)
+- Minutes spent outside the target range in effect (comfort violations; planned sleep/away setbacks are not violations, Issue #1107)
 - Estimated energy cost (future: from utility rate integration)
 
 ### Suggestion Tracking
@@ -85,7 +85,7 @@ Suggestions are generated when `generate_suggestions()` is called (typically dur
 
 ### Pattern: Comfort Violations
 
-**Detection:** Indoor temp outside comfort range for > 30 minutes on 5+ of the last 14 days.
+**Detection:** Indoor temp outside the target range in effect (see [Comfort Violations](#comfort-violations-comfort_violations_minutes)) for > 30 minutes on 5+ of the last 14 days. Since Issue #1107 a planned sleep/away setback no longer counts, so this pattern fires only when the house misses the band CA was actually holding — it no longer recommends weaker setbacks merely because setbacks happened.
 **Suggestion:** "Would you like to reduce the setback aggressiveness, or start the morning warm-up earlier?"
 **If accepted:** Setback modifier increases by 2°F (less aggressive), and/or morning pre-heat starts 15 minutes earlier.
 
@@ -637,11 +637,19 @@ The `get_compliance_summary()` method returns a dict suitable for sensor attribu
 
 #### Comfort Violations (`comfort_violations_minutes`)
 **Unit:** minutes
-**What it means:** Time during the day when the indoor temperature was outside the configured
-comfort range (`comfort_heat`–`comfort_cool` settings, default 70–75°F).
+**What it means:** Time during the day when the indoor temperature was outside the **target
+range in effect at that moment** — the same time-varying target band the chart draws
+(awake: `comfort_heat`–`comfort_cool`, widened by aggressive savings when on; sleep: `sleep_heat`–`sleep_cool`
+with the wake/sleep ramps; away/vacation: the setback range). Issue #1107: before 0.8.1 it was always
+the static `comfort_heat`–`comfort_cool` range, so CA's own planned setbacks counted as discomfort.
+The band is read via `coordinator._comfort_score_band_now()` → `_target_band_lower_upper_now()`
+(the per-cycle cached band, Issue #514); while no band has been resolved yet (`(None, None)`: before
+the first cycle's band, or a weather source with no hourly forecast) it falls back to the static
+`comfort_heat`–`comfort_cool` range. The nat-vent tolerance gate (Issue #411) is judged against the
+same resolved range. History is not rewritten; the 14-day window turns over within 14 days.
 **How it accumulates:** The coordinator checks indoor temperature on every data update.
 Each check adds the **actual elapsed time** since the previous check (capped at 30 minutes)
-when the temperature is outside the comfort range. This prevents double-counting when the
+when the temperature is outside the target range in effect. This prevents double-counting when the
 coordinator is refreshed more frequently than the 30-minute scheduled interval (e.g., after
 door/window events or automation revisits).
 **Maximum per day:** 1440 minutes (24 hours). Values above 1440 in historical records
@@ -649,7 +657,7 @@ indicate data recorded before v0.2.x (fixed-30-min bug) and should be disregarde
 
 #### Comfort Score (`comfort_score`)
 **Formula:** `1 − (sum of daily violation_minutes / (days_recorded × 1440))`
-**Range:** 0.0 (always outside range) to 1.0 (always within range), reported as a percentage
+**Range:** 0.0 (always outside the target range in effect) to 1.0 (always within it), reported as a percentage
 **Example:** 3 days, total 2160 violation minutes → `1 − (2160 / 4320)` = 0.50 = 50%
 **Sensor:** `sensor.climate_advisor_comfort_score` reports this as a percentage (0–100%)
 **Trigger:** More than 5 days with over 30 violation minutes triggers the `comfort_violations`

@@ -883,7 +883,7 @@ class DailyRecord:
 
     # Outcomes
     avg_indoor_temp: float | None = None
-    comfort_violations_minutes: float = 0.0  # Time spent outside comfort range
+    comfort_violations_minutes: float = 0.0  # Time outside the target range in effect (#1107)
     estimated_cost: float | None = None
 
     # User responded to suggestion?

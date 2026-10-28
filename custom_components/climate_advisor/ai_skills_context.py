@@ -740,6 +740,10 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 "  avg_daily_thermostat_fan_only_runtime_minutes: "
                 f"{compliance.get('avg_daily_thermostat_fan_only_runtime_minutes', 'unknown')}",
                 f"  comfort_score:                  {compliance.get('comfort_score', 'unknown')}",
+                "  NOTE — comfort_score: share of time indoor stayed inside the target range IN EFFECT",
+                "  at that moment (the chart's target band: sleep/away setbacks included), not the static",
+                "  awake comfort range. A planned setback is not a violation (Issue #1107, 0.8.1+;",
+                "  older days in the 14-day window were scored against the static range).",
                 f"  total_manual_overrides:         {compliance.get('total_manual_overrides', 'unknown')}",
                 f"  pending_suggestions:            {compliance.get('pending_suggestions', 'unknown')}",
                 "  NOTE — window_compliance scope: the value above uses the last 14 days only",
@@ -1487,7 +1491,11 @@ def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
             rows.append(row)
 
         note = "  Note: event log ring buffer covers ~50-60h; use daily summaries for context beyond that."
-        return ["", header, col_hdr, sep, *rows, note]
+        viol_note = (
+            "  Note: Viol(min) = minutes indoor was outside the target range in effect at the time"
+            " (sleep/away setbacks included; days before 0.8.1 used the static comfort range)."
+        )
+        return ["", header, col_hdr, sep, *rows, note, viol_note]
     except Exception:
         _LOGGER.warning("activity_report: failed to build daily summaries -- skipping")
         return []

@@ -3089,7 +3089,22 @@ class AutomationEngine:
         the band's active edge, so a warm/mild day (classification mode "off") still resolves.
         ``(None, None)`` when the selector does not apply (nat-vent / WHF / TOU bank owns the
         thermostat, or a thermostat without the capability).
+
+        Issue #1119 (regression from #1073): also ``(None, None)`` while the open-window hold is
+        live (``_paused_by_door``, or ``decide_open_sensor_hold()`` -- the same predicate
+        ``_apply_comfort_band()`` / ``_sync_paused_by_door_with_live_sensors()`` act on). There
+        automation's real decision is OFF whatever the selector previews, so a heat/cool override
+        can never "match" it: the pre-expiry revisit must not claim "automation agrees" and cancel
+        the occupant's grace only to switch their heat/cool off in the same instant. Single source
+        for production adoption, the override/grace FSM inputs and the coordinator shadow.
         """
+        if self._paused_by_door or decide_open_sensor_hold(
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+            debounce_pending=self._sensor_debounce_pending,
+            any_sensor_open=self._any_monitored_sensor_open(),
+        ):
+            return None, None
         band = self._resolved_comfort_band(classification)
         day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, "cool")
         now = dt_util.now()
@@ -5237,6 +5252,30 @@ class AutomationEngine:
         """
         return bool(self._sensor_debounce_pending_callback and self._sensor_debounce_pending_callback())
 
+    def _scheduled_routine_waits_for_pending_override(self, routine: str) -> bool:
+        """True (and logs) when a scheduled routine must wait on an unconfirmed manual change.
+
+        Issue #1119 follow-up (owner decision): wake-up, bedtime and pre-cool wait while
+        ``_override_confirm_pending`` is set, exactly as ``apply_classification()`` and both TOU
+        pre-conditioning paths already do (#786 Fix 2). Before, they replaced the occupant's
+        just-made change (``clear_manual_override(reason="morning_wakeup")`` etc. + band arm) --
+        and with a door open the band arm's #629 guard then switched HVAC off. The confirm timer
+        decides what happens next: a still-divergent change becomes a protected override (the
+        routine then skips on ``DEFER_OVERRIDE``); a reverted one self-resolves and the next
+        ``apply_classification()`` cycle arms the time-resolved band. Kept out of
+        ``decide_scheduled_band_gate()``: its other callers already return on a pending confirm
+        before reaching it, and ``classification_fsm`` / the harness consume its 5-input shape.
+        """
+        if not self._override_confirm_pending:
+            return False
+        _LOGGER.info(
+            "Override confirmation pending (detected=%s at %s) — skipping %s",
+            self._override_confirm_mode,
+            self._override_confirm_time,
+            routine,
+        )
+        return True
+
     async def _sync_paused_by_door_with_live_sensors(self) -> None:
         """Reconcile ``_paused_by_door`` with live, debounce-settled sensor state (Issue #620).
 
@@ -5248,7 +5287,18 @@ class AutomationEngine:
         could write an active HVAC mode into an open window with no live check at all. Confirmed
         live: 2026-08-11 incident, a sensor open since bedtime with no fresh open event ever
         firing. Call this at the top of each of those four, before they build the gate's inputs.
+
+        Issue #1119 (design gap since #620): leaves the system alone while a manual override or
+        its pending confirmation is active. The occupant's mode wins for the grace period
+        (grace-periods-spec §Manual Grace: a door/window does not pause HVAC during manual grace)
+        and the designed moment to switch off is grace expiry with a sensor still open
+        (``_on_grace_expired()`` re-pauses). Before this, wake-up / bedtime / pre-cool / both TOU
+        pre-conditioning paths ran this re-check ahead of their own ``DEFER_OVERRIDE`` gate and
+        switched the occupant's heat/cool off inside a grace CA had just announced. A grace with
+        no manual override (fan-off / automation grace) does NOT block the re-check (D16).
         """
+        if self._manual_override_active or self._override_confirm_pending:
+            return  # the occupant owns the thermostat; grace expiry / the gate decide, not this
         if self._paused_by_door:
             return  # already paused
         if self._is_within_planned_window_period():
@@ -8929,6 +8979,15 @@ class AutomationEngine:
         # reversal exit, sleep-aware cycling target), so bedtime just defers entirely while
         # nat-vent/WHF is active. (2) bedtime now also defers when paused by an open door/
         # window, which it never checked before (finding #11).
+        # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
+        if self._scheduled_routine_waits_for_pending_override("bedtime setback"):
+            if self._emit_event_callback and not self._recent_duplicate(
+                "bedtime_setback_skipped", ("override_confirm_pending",)
+            ):
+                self._emit_event_callback("bedtime_setback_skipped", {"reason": "override_confirm_pending"})
+            if self._today_record is not None:
+                self._today_record.setback_skipped_reason = "override_confirm_pending"
+            return
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()
@@ -9150,6 +9209,9 @@ class AutomationEngine:
         # nat_vent_temperature_check() already cycles the fan around during the sleep window —
         # free cooling is already doing at least as much work as pre-cool's own AC ceiling
         # would (Issue #498 finding #8a).
+        # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
+        if self._scheduled_routine_waits_for_pending_override("pre-cool"):
+            return "skipped: override confirmation pending"
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()
@@ -9313,6 +9375,11 @@ class AutomationEngine:
         # skips whenever the user is overriding the fan (previously missing that check
         # entirely, unlike handle_bedtime()). It also now defers when paused by an open door/
         # window, which it never checked before (finding #11).
+        # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
+        if self._scheduled_routine_waits_for_pending_override("morning wake-up"):
+            if self._emit_event_callback:
+                self._emit_event_callback("morning_wakeup_skipped", {"reason": "override_confirm_pending"})
+            return
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()
@@ -10138,6 +10205,7 @@ class AutomationEngine:
             pre_pause_mode_active=bool(self._pre_pause_mode),
             manual_grace_would_start=self._grace_would_start("manual", now),
             automation_grace_would_start=self._grace_would_start("automation", now),
+            manual_override_owns_hvac=bool(self._manual_override_active or self._override_confirm_pending),
             now=now,
             nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
         )

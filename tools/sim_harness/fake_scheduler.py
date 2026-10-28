@@ -19,7 +19,9 @@ Patching contract (applied via the ``installed()`` context manager):
   - ``custom_components.climate_advisor.automation.dt_util.utcnow``
     → returns current virtual clock value
   - ``custom_components.climate_advisor.automation.dt_util.as_local``
-    → identity pass-through
+    → HA-faithful: naive input is treated as the clock's local zone, aware input
+      is converted into it; the result is always aware (Issue #1117 — was an
+      identity pass-through that returned naive input naive)
 
 Issue #474 extended the same contract to ``custom_components.climate_advisor.
 coordinator`` — ``async_call_later``, ``async_track_time_change``,
@@ -89,6 +91,11 @@ class FakeScheduler:
         """
         if start is None:
             start = datetime(2024, 1, 15, 8, 0, 0, tzinfo=UTC)
+        # Issue #1117: real HA's dt_util.now() is always aware, and the HA-faithful
+        # dt_util.as_local below returns aware datetimes in the clock's zone. A naive
+        # clock would make now() naive while as_local is aware — a split HA never has.
+        if start.tzinfo is None:
+            raise ValueError(f"FakeScheduler start must be timezone-aware (got naive {start!r})")
         self._clock: datetime = start
         self._heap: list[_ScheduledCallback] = []
         self._task_queue: list[Any] = []  # coroutines from async_create_task
@@ -295,7 +302,7 @@ class FakeScheduler:
           - ``callback``          → identity
           - ``dt_util.now``       → self.now
           - ``dt_util.utcnow``    → self.now
-          - ``dt_util.as_local``  → identity
+          - ``dt_util.as_local``  → HA-faithful (naive = local zone; always aware; #1117)
 
         Patches applied to ``coordinator`` (Issue #474 — coordinator-level
         Tier A coverage), same clock/callback shape plus the additional
@@ -334,6 +341,22 @@ class FakeScheduler:
 
         def _fake_async_call_later(hass: Any, delay: float, cb: Any) -> Any:
             return self._schedule(delay, cb)
+
+        def _ha_as_local(value: datetime) -> datetime:
+            """HA-faithful ``dt_util.as_local`` (Issue #1117).
+
+            Real HA treats a naive datetime as already being in the configured local
+            zone and ALWAYS returns an aware datetime in that zone; an aware input is
+            converted (same instant) into it. The harness's local zone is the virtual
+            clock's zone (UTC by default). The previous identity stand-in returned a
+            naive input naive — a contract production never sees — which crashed the
+            regular refresh in tests only (naive-vs-aware compare in the forecast
+            fallback) before the comfort accumulation and fan/nat-vent re-check.
+            """
+            local_tz = self._clock.tzinfo
+            if value.tzinfo is None:
+                return value.replace(tzinfo=local_tz)
+            return value.astimezone(local_tz)
 
         def _fake_parse_datetime(dt_str: str | None) -> datetime | None:
             if not dt_str:
@@ -380,7 +403,7 @@ class FakeScheduler:
             ),
             patch(
                 "custom_components.climate_advisor.automation.dt_util.as_local",
-                side_effect=lambda x: x,
+                side_effect=_ha_as_local,
             ),
             patch(
                 "custom_components.climate_advisor.automation.dt_util.parse_datetime",
@@ -425,7 +448,7 @@ class FakeScheduler:
             ),
             patch(
                 "custom_components.climate_advisor.coordinator.dt_util.as_local",
-                side_effect=lambda x: x,
+                side_effect=_ha_as_local,
             ),
             patch(
                 "custom_components.climate_advisor.coordinator.dt_util.parse_datetime",

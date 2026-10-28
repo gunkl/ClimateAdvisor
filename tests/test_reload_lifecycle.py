@@ -20,6 +20,7 @@ coordinator and api helpers; FakeHass sees state and bus listeners.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -33,6 +34,8 @@ from tools.sim_harness.build_coordinator import (
 
 _FAN_ENTITY = "fan.whole_house"
 _THERMOSTAT = "climate.zone_a_thermostat"
+_T0 = datetime(2024, 1, 15, 8, 0, tzinfo=UTC)  # build_headless_multi_zone's default clock start
+_WEATHER = "weather.test_forecast"  # build_headless_multi_zone's default weather entity
 
 
 def _zone_config(**extra: Any) -> dict[str, Any]:
@@ -209,6 +212,16 @@ def _seed_live_device_states(fake_hass) -> None:
         ),
     )
     fake_hass.states.set(_FAN_ENTITY, FakeState(state="on"))
+    # A normal daily forecast, so the briefing case below would really generate and
+    # send on a live instance (reachable headless since #1117's HA-faithful as_local).
+    fake_hass.states.set(
+        _WEATHER,
+        FakeState(state="sunny", attributes={"temperature": 55, "forecast": _daily_forecast()}),
+    )
+
+
+def _daily_forecast() -> list[dict]:
+    return [{"datetime": (_T0 + timedelta(days=i)).isoformat(), "temperature": 60 + i, "templow": 45} for i in range(5)]
 
 
 def _refusal_cases():
@@ -255,9 +268,9 @@ def _refusal_cases():
         ),
         ("engine._start_fan_thermo_backstop", lambda c, ae: ae._start_fan_thermo_backstop(), _is(None)),
         ("coordinator._async_command_fan_entity", lambda c, ae: c._async_command_fan_entity(on=True), _is(False)),
-        # The briefing latch is covered in test_coordinator.py
-        # (test_shut_down_coordinator_sends_no_briefing): headless, a briefing needs a
-        # forecast, which the multi-zone fixture cannot provide (as_local harness gap).
+        # Issue #1117: reachable headless now (was the "as_local harness gap"); the
+        # positive control is test_live_instance_sends_briefing below.
+        ("coordinator._async_send_briefing", lambda c, ae: c._async_send_briefing(_T0), _is(None)),
     ]
 
 
@@ -282,6 +295,16 @@ def test_shut_down_instance_refuses(name, call, check):
     assert check(result), f"{name}: unexpected result {result!r}"
     assert fake_hass.action_log[actions_before:] == [], f"{name}: service call after shutdown"
     assert scheduler.armed_log[armed_before:] == [], f"{name}: timer armed after shutdown"
+
+
+def test_live_instance_sends_briefing():
+    """Positive control for the briefing refusal case: a LIVE instance does notify."""
+    coord, _entry, fake_hass, scheduler = _build()
+    with scheduler.installed():
+        _seed_live_device_states(fake_hass)
+        run_coro(coord._async_send_briefing(scheduler.now()))
+        scheduler.advance_by(1)
+    assert [a for a in fake_hass.action_log if a["domain"] == "notify"], "live briefing sent nothing"
 
 
 def test_in_flight_backstop_tick_does_not_rearm_or_command():
@@ -375,9 +398,13 @@ def test_reload_path_schedules_reload_instead_of_awaiting_it():
     with scheduler.installed():
         run_coro(async_unload_entry_like_ha(fake_hass, entry))
         fake_hass.is_running = True
-        # Exactly one weather entity -> auto-resolve. Unavailable, so the new instance's
-        # first refresh takes the not-ready path (keeps clear of the as_local harness gap).
-        fake_hass.states.set("weather.home", FakeState(state="unavailable"))
+        # Exactly one weather entity -> auto-resolve. Available with a normal daily
+        # forecast: the new instance's first refresh runs the full regular cycle
+        # (reachable headless since #1117's HA-faithful as_local).
+        fake_hass.states.set(
+            "weather.home",
+            FakeState(state="sunny", attributes={"temperature": 55, "forecast": _daily_forecast()}),
+        )
         fake_hass.config_entries.async_reload = AsyncMock()
         setup_entry_like_ha(fake_hass, scheduler, entry)
 

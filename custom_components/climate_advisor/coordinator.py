@@ -3488,10 +3488,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if forecast.current_indoor_temp is not None:
                 self._indoor_temp_history.append((now_str, forecast.current_indoor_temp))
 
-                # Track comfort violations (elapsed minutes since last check, capped at 30)
+                # Track comfort violations (elapsed minutes since last check, capped at 30).
+                # Issue #1107: judged against the target range in effect (sleep/away
+                # setbacks included), not the static awake comfort range.
                 if self._today_record:
-                    comfort_low = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
-                    comfort_high = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
+                    comfort_low, comfort_high = self._comfort_score_band_now()
                     now = dt_util.now()
                     if self._last_violation_check is not None:
                         elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
@@ -10420,6 +10421,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._notify_in_background(
                 "Climate Advisor — house still off-target", message, "hvac_output_stall", email=False
             )
+
+    def _comfort_score_band_now(self) -> tuple[float, float]:
+        """The (low, high) range the Comfort Score judges indoor against right now (Issue #1107).
+
+        Occupant outcome: a planned sleep/away setback the person configured is not counted
+        as discomfort. Uses this cycle's resolved target band (``_target_band_lower_upper_now()``
+        -- the same band the chart draws, Issue #514), so a minute only counts as a
+        violation when indoor is outside the range Climate Advisor is actually holding.
+        Falls back to the static ``comfort_heat``/``comfort_cool`` while no band has been
+        resolved (``(None, None)``: before the first cycle's band, or a weather source with
+        no hourly forecast) -- i.e. exactly the pre-#1107 behaviour, never a guess.
+        """
+        lower, upper = self._target_band_lower_upper_now()
+        if lower is None or upper is None:
+            return (
+                float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
+                float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            )
+        return float(lower), float(upper)
 
     def _is_nat_vent_tolerated_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
         """True if this comfort-band deviation is expected nat-vent cycling tolerance, not a violation.

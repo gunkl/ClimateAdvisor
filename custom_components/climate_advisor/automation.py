@@ -4667,6 +4667,10 @@ class AutomationEngine:
                             if _nudge_call.outcome is ClimateCallOutcome.FAILED:
                                 self._note_hvac_command_failed(_retry_mode, _nudge_call.error, setpoint_f=_nudge_temp_f)
                             return  # no nudge landed -- do not schedule the real-target follow-up
+                        if _nudge_call.outcome is ClimateCallOutcome.OK:
+                            # Issue #1121 mirror: a failed nudge opens the episode, so a
+                            # successful one closes it like every other climate write.
+                            self._note_hvac_command_ok(_retry_mode)
 
                         async def _send_real_target(_later: Any) -> None:
                             if not decide_scheduled_write_seq_current(

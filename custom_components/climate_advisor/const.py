@@ -219,6 +219,12 @@ COMFORT_STALL_SUSTAIN_SECONDS = 3 * 3600
 # ... raises one owner alert, repeated no more often than this while it persists.
 COMFORT_STALL_REMINDER_SECONDS = 12 * 3600
 
+# Issue #1121: the Status card's "Thermostat commands are failing" entry waits until the
+# failure episode is at least this old, so one brief (e.g. cloud) error that the next
+# command fixes never raises a red banner. The ERROR log and the once-per-episode
+# hvac_command_failed incident are not held.
+HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN = 5
+
 
 # Occupancy toggle configuration
 CONF_HOME_TOGGLE = "home_toggle_entity"

@@ -158,6 +158,7 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN,
     INVESTIGATION_REPORT_HISTORY_CAP,
     INVESTIGATION_REPORTS_FILE,
     MAX_PLAUSIBLE_OUTDOOR_F,
@@ -10138,11 +10139,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         state = self.hass.states.get(ae.climate_entity)
         live = getattr(state, "state", None)
         # Never show a self-contradicting entry: hidden while the occupant owns the thermostat
-        # and whenever the thermostat already reports the requested mode.
+        # and whenever the thermostat already reports the mode the entry is about. Shared by
+        # mode_not_obeyed and (Issue #1121) command_failing.
         user_owns = bool(getattr(ae, "_manual_override_active", False)) or bool(
             getattr(ae, "_override_confirm_pending", False)
         )
-        if isinstance(requested, str) and requested and not user_owns and live != requested:
+
+        def _contradicted(mode: str) -> bool:
+            return user_owns or live == mode
+
+        if isinstance(requested, str) and requested and not _contradicted(requested):
             detail = f"Thermostat is not following the requested mode: requested {requested}, reports {live!r}"
             mins = _minutes_since(getattr(rec, "mismatch_since", None))
             if mins is not None:
@@ -10150,11 +10156,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             issues.append({"issue": "mode_not_obeyed", "detail": detail})
         failed_mode = getattr(ae, "_hvac_cmd_fail_mode", None)
         if getattr(ae, "_hvac_cmd_fail_announced", None) and isinstance(failed_mode, str) and failed_mode:
-            detail = f"Thermostat commands are failing (last attempted mode: {failed_mode})"
+            # Issue #1121: held until the episode is >= HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN old
+            # (one brief error the next command fixes never shows), and hidden when it would
+            # contradict the thermostat. The ERROR log and the incident are not held.
             mins = _minutes_since(getattr(ae, "_hvac_cmd_fail_since", None))
-            if mins is not None:
-                detail += f" for {mins} min"
-            issues.append({"issue": "command_failing", "detail": detail})
+            if mins is not None and mins >= HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN and not _contradicted(failed_mode):
+                detail = f"Thermostat commands are failing (last attempted mode: {failed_mode}) for {mins} min"
+                issues.append({"issue": "command_failing", "detail": detail})
         # Issue #1048 change 9: the comfort stall entry. Hidden while a mode-not-obeyed
         # episode is open -- that entry already says why the equipment is not running.
         stall = self._stall_status

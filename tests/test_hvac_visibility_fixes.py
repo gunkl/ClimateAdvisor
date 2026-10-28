@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import types
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,9 +43,9 @@ def _status_coord(engine):
     return coord
 
 
-def _issues(coord):
+def _issues(coord, now=NOW):
     with patch("custom_components.climate_advisor.coordinator.dt_util") as dt:
-        dt.now.return_value = NOW
+        dt.now.return_value = now
         return coord._compute_hvac_control_issues()
 
 
@@ -120,10 +121,12 @@ class TestAttemptedModeWording:
     def test_command_failing_uses_the_attempted_mode_and_diagnostics_agree(self):
         engine = _engine("off")
         engine.hass.services.async_call.side_effect = RuntimeError("boom")
-        asyncio.run(engine._set_hvac_mode("cool", reason="t"))
+        with patch.object(automation_module.dt_util, "now", return_value=NOW):
+            asyncio.run(engine._set_hvac_mode("cool", reason="t"))
         assert engine._hvac_cmd_fail_mode == "cool"
         assert engine._hvac_cmd_fail_announced == "failed"
-        detail = _issues(_status_coord(engine))[0]["detail"]
+        # Issue #1121: the entry is held until the failure episode is 5 min old.
+        detail = _issues(_status_coord(engine), NOW + timedelta(minutes=5))[0]["detail"]
         assert "last attempted mode: cool" in detail
         snap = build_last_command(SimpleNamespace(automation_engine=engine), "off", "fahrenheit")
         assert snap["command_failure_mode"] == "cool"

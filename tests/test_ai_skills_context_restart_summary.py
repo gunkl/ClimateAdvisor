@@ -56,3 +56,11 @@ class TestBuildRestartSummary:
         events = ["not a dict", None, {"type": "system_restarted", "cause": "unknown", "time": "x"}]
         ctx = _build_restart_summary(events)
         assert "unknown=1" in ctx
+
+    def test_reload_is_listed_as_benign(self):
+        """Issue #1110: a zone reload is a benign, expected event, not a crash."""
+        events = [{"type": "system_restarted", "cause": "reload", "time": "10:00"}]
+        ctx = _build_restart_summary(events)
+        assert "reload=1" in ctx
+        assert "reload (a Climate Advisor zone reload" in ctx
+        assert "cause=unknown restart timestamps" not in ctx

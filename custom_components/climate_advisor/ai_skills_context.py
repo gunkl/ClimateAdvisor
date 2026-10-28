@@ -312,8 +312,8 @@ def _build_restart_summary(events: list) -> str:
     """Summarize `system_restarted` events by cause (Issue #563).
 
     `coordinator.py`'s restart-cause classification (Issue #403/#413) already
-    distinguishes `user_restart`/`version_changed` (benign — a deploy or a normal
-    restart) from `unknown` (crash-like, worth flagging) and stamps it as the
+    distinguishes `user_restart`/`version_changed`/`reload` (benign — a normal
+    restart, a deploy, or a zone reload, Issue #1110) from `unknown` (crash-like, worth flagging) and stamps it as the
     event's `cause` field. Previously nothing surfaced that breakdown to the
     investigator — only a raw `system_restarted` count was visible via
     `event_type_counts` — so a day of routine deploys could get narrated as
@@ -339,7 +339,8 @@ def _build_restart_summary(events: list) -> str:
     lines.append(f"  {len(restarts)} restart(s) in this window: {breakdown}")
     lines.append(
         "  Only cause=unknown restarts are potentially crash-like and worth mentioning;"
-        " user_restart (a normal restart) and version_changed (a deploy) are expected,"
+        " user_restart (a normal restart), version_changed (a deploy) and reload (a Climate"
+        " Advisor zone reload: settings applied or a repair) are expected,"
         " benign events — do not narrate them as problems or cite the raw restart count"
         " as if every restart were equally concerning."
     )
@@ -2775,6 +2776,13 @@ def _render_system_restarted(p: dict, unit: str) -> tuple[str, str]:
         )
     if cause == "user_restart":
         return f"--- HA restart boundary (user_restart, {recovered} prior events recovered) ---", ""
+    if cause == "reload":
+        # Issue #1110: a config-entry reload, not an HA restart. Not "settings saved" — a
+        # weather auto-resolve reload involves no user action.
+        return (
+            f"--- Climate Advisor zone reloaded (settings applied / repair), {recovered} prior events recovered ---",
+            "",
+        )
     return f"--- HA restart boundary (unknown, {recovered} prior events recovered) ---", ""
 
 

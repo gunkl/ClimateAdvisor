@@ -1,0 +1,4 @@
+{
+  "_comment": "Known promise hits on LOCKED golden scenarios. A listed hit is tolerated; an unlisted hard hit fails tests/test_goldens_promises.py; a listed hit that no longer occurs fails it too (remove the stale entry). Goldens are never edited to make a promise pass. Each row carries issue and expected_count (distinct hits tolerated; more or fewer fails).",
+  "waivers": []
+}

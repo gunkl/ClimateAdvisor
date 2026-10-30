@@ -12,6 +12,7 @@
 | Where do assertions land — event_log, action_log, or engine state? | All three. `event_log` carries decisions (`ceiling_guard_fired`, `nat_vent_comfort_floor_exit`, etc.). `action_log` carries service calls (`climate.set_temperature`). `engine_state` is a snapshot of live engine flags after all events process. | [sim-harness-spec.md — Assertion Surface](sim-harness-spec.md#assertion-surface) |
 | What does `simulator_support: false` mean now? | The real engine CAN evaluate these once the scenario supplies the needed inputs (e.g. `predicted_indoor`). Not skipped in Tier A. Previously marked phantom because the legacy simulator had no ODE. | [Scope](#scope) |
 | Where is the full Tier 3 spec covering each harness module? | Covers `fake_hass.py`, `fake_scheduler.py`, `build_engine.py`, `run_production.py`, `outcomes.py`, and `ha_stubs.py` with module-level Anchors. | [sim-harness-spec.md](sim-harness-spec.md) |
+| What is the Session seam? | `session.py` defines one runner protocol; `FakeHassSession` (fast default) and `RealHASession` (real HA, `tests_ha/`) implement it; generated days, promises and surface checks run on top. | [sim-harness-spec.md](sim-harness-spec.md#session-seam-generated-days-and-promises-issues-1127-1128) |
 
 ---
 

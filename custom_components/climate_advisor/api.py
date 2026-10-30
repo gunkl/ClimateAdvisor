@@ -388,6 +388,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 # Status card only, per this project's Status Card Ontology: it answers "what's
                 # happening right now, and why."
                 "invariant_violations": data.get("invariant_violations", []),
+                # Issue #1128 I8: household-promise counters (counts + last hit only), null when none missed;
+                # shown on the Debug tab only, never on the Status cards.
+                "promise_summary": data.get("promise_summary"),
                 # Issue #1049: thermostat not following commands (open mode-alignment / command-failure
                 # episode) — empty list when fine. Same Status Card Ontology as invariant_violations.
                 "hvac_control_issues": data.get("hvac_control_issues", []),

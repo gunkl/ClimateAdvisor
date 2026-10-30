@@ -21,18 +21,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# voluptuous may resolve to ha_stubs.py's MagicMock stub in environments where the
-# real package isn't installed (e.g. CI's requirements_test.txt intentionally omits
-# it — see test_security_validation.py's identical HAS_VOLUPTUOUS gate). A MagicMock's
-# default __iter__ yields nothing, so any assertion that inspects a real vol.Schema's
-# internal .schema dict must skip rather than false-fail against the stub.
-try:
-    import voluptuous as _vol_check
-
-    HAS_VOLUPTUOUS = not isinstance(_vol_check, MagicMock) and hasattr(_vol_check, "Schema")
-except ImportError:
-    HAS_VOLUPTUOUS = False
-
 # ---------------------------------------------------------------------------
 # Helpers shared across all test classes
 # ---------------------------------------------------------------------------
@@ -2352,7 +2340,6 @@ class TestNotificationsStep:
         assert data["push_entity_health"] is False
         assert data["email_entity_health"] is False
 
-    @pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")
     def test_briefing_notifications_field_defaults_true_when_only_zone(self):
         """Issue #817 Part 3: sole zone defaults to notifying when the key isn't set yet."""
         from custom_components.climate_advisor.const import CONF_BRIEFING_NOTIFICATIONS_ENABLED
@@ -2365,7 +2352,6 @@ class TestNotificationsStep:
         schema_keys = {str(k): k for k in result["data_schema"].schema}
         assert schema_keys[CONF_BRIEFING_NOTIFICATIONS_ENABLED].default() is True
 
-    @pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")
     def test_briefing_notifications_field_respects_stored_value(self):
         """An already-configured value wins over the stably-first-zone default."""
         from custom_components.climate_advisor.const import CONF_BRIEFING_NOTIFICATIONS_ENABLED
@@ -3067,7 +3053,6 @@ class TestZoneNamingDefaultSuggestion:
 class TestZoneNamingScheduleStep:
     """async_step_schedule() — zone_name field rendering and title assignment."""
 
-    @pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")
     def test_form_includes_zone_name_field_with_suggested_default(self):
         hass = _make_zone_naming_hass({"climate.bedroom_thermostat": "Bedroom Thermostat"})
         flow = _make_real_config_flow(hass, {"climate_entity": "climate.bedroom_thermostat"})
@@ -3260,7 +3245,6 @@ async def _coro(value):
     return value
 
 
-@pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed (schema keys are stubbed)")
 class TestOptionsFlowCelsiusRoundTrip:
     """Issue #1049: re-saving options in a Celsius household showed 18.00000000004, failed with
     'too large', and the threshold sliders topped out at 18 / bottomed at -2 °C. Uses the real

@@ -389,8 +389,13 @@ Python 3.14 removed the implicit event loop. Use `asyncio.run()` instead of
 
 **All new or modified tests MUST pass with warnings-as-errors before completion:**
 ```bash
-pytest tests/test_<file>.py -W error::pytest.PytestUnraisableExceptionWarning -W error::RuntimeWarning
+python scripts/test.py unit tests/test_<file>.py
 ```
+The runner already applies `-W error::pytest.PytestUnraisableExceptionWarning -W error::RuntimeWarning`.
+
+#### Test Environment and Tiers (Issue #1125)
+
+uv is the environment manager; the single dependency source is `pyproject.toml` + `uv.lock` (no requirements files, Python pinned in `.python-version`). `python scripts/test.py unit|ha|all` is the one entry point: `unit` is the stubbed `tests/` tier, `ha` runs `tests_ha/` inside a real Home Assistant core (via WSL on Windows). A skip caused by a missing dependency now fails the test instead of passing silently. The household promises (`PROMISES` in `invariant_watchdog.py`, spec `docs/household-promises-spec.md`) are the checks shared by tests and production: log-only at home, hard/warning in tests. Generated days: `python tools/simulate.py --generate N` runs N random households against the real engine and judges them with the same promises.
 
 ### Golden Simulation Test Policy
 
@@ -610,7 +615,7 @@ anything pushed to GitHub for Climate Advisor, with no exception and no need to 
 git diff
 
 # 3. Human tests changes
-pytest tests/ -v
+python scripts/test.py unit
 
 # 4. Human commits
 git add .
@@ -770,7 +775,7 @@ the Investigator already reads live open issues (bounded, TTL-cached).
 1. Bump `VERSION` in `const.py` and `manifest.json` to the next patch version
 2. Append a `fix_history.jsonl` entry per fixed/added issue via `tools/add_fix_entry.py` (see above)
 3. Add a matching `CHANGELOG.md` entry
-4. Run `python -m pytest tests/test_version_sync.py` to confirm versions match
+4. Run `python scripts/test.py unit tests/test_version_sync.py` to confirm versions match
 5. Then open the PR
 
 #### GitHub Release tagging (for distributable releases only)

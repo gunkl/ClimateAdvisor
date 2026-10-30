@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.2] — 2026-10-30
+
+- Feat #1128: Climate Advisor now quietly checks its own behaviour against a set of household promises (for example, it never undoes your manual thermostat change early, never runs the AC while the whole-house fan runs, never touches your equipment while automation is off). A missed promise is only noted, not alerted: the AI Investigator shows it as a "Noted, not alerted" line and the diagnostics report counts how often each promise was missed. The dashboard's Debug tab shows a "Household Promises Missed" line (only when something was missed). The whole-house-fan/AC alert is unchanged.
+
 ## [0.8.1] — 2026-10-28
 
 - Fix #1119: if you turn heat or cool on at the thermostat while a door or window is open, Climate Advisor now keeps your setting for the full grace period it announced. Previously the morning wake-up (and bedtime, pre-cool or time-of-use pre-conditioning) could switch it off within minutes. The 5-minute re-check could also wrongly report "automation agrees", end your grace early and switch it off again. If the door is still open when the grace ends, heating or cooling pauses then, as documented. If "Manual Change Pause" is set to 0 minutes, your change stays until you or something else ends it.

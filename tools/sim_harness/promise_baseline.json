@@ -1,0 +1,14 @@
+{
+  "_comment": "Warning-severity promise hits per golden (distinct hits). Ratchet: a run may report fewer, never more. Regenerate only with a reviewed reason.",
+  "warnings": {
+    "2026-03-28-overnight": {
+      "comfort_kept": 1
+    },
+    "issue_764_bedtime_economizer_teardown_gate": {
+      "comfort_kept": 1
+    },
+    "issue_882_sealed_house_whf_override": {
+      "blind_fan_continue": 1
+    }
+  }
+}

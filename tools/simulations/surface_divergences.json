@@ -1,0 +1,80 @@
+{
+  "_comment": "Promise 8 (surfaces_agree) ratchet - Issue #1128 I6. Divergences between what a Climate Advisor surface shows and the band the engine arms, KNOWN on HEAD. A listed row is tolerated; an unlisted divergence fails tests/test_promise_surfaces.py; a listed row that no longer diverges also fails (remove it). Goldens are LOCKED, so known divergences are recorded here, never by editing a scenario. 'scenario' = one golden; 'context: generated' = the fixed generated sample in tests (seeds 101 and 102, 10 days each, profile coordinator). Regenerate evidence with: python tools/simulate.py --surfaces --generate 10 --seeds 101 102. 'issue' is a GitHub number ('unfiled' is allowed only for a harness-premise row). 'signature' lists the divergence shapes tolerated, as '<band>/<edge>' (band sleep|awake; edge low|high|low+high|reader_failed|text): a new shape on an already-ledgered surface FAILS, and a listed shape that stops occurring is stale.",
+  "divergences": [
+    {
+      "surface": "next_action",
+      "scenario": "bedtime_natvent_continuation",
+      "issue": 1136,
+      "evidence": "22:30 sleep window: engine armed 64-72 F; Next User Action flips at 67.8/74.2 F (the flat daytime comfort_heat/comfort_cool in _compute_next_action).",
+      "signature": [
+        "sleep/low+high"
+      ]
+    },
+    {
+      "surface": "next_action",
+      "scenario": "wakeup_preserves_whf_manual_override",
+      "issue": 1136,
+      "evidence": "22:30 sleep window: armed 64-72 F; Next User Action flips at 67.8/74.2 F (flat comfort edges).",
+      "signature": [
+        "sleep/low+high"
+      ]
+    },
+    {
+      "surface": "next_action",
+      "scenario": "warming_trend_pre_cool_applied",
+      "issue": 1136,
+      "evidence": "22:30 sleep window: armed ceiling 72 F; Next User Action flips at 69.8 F (flat comfort_cool).",
+      "signature": [
+        "sleep/high"
+      ]
+    },
+    {
+      "surface": "next_action",
+      "scenario": "warming_trend_pre_cool_nat_vent_bypass",
+      "issue": 1136,
+      "evidence": "22:30 sleep window: armed ceiling 72 F; Next User Action flips at 69.8 F (flat comfort_cool).",
+      "signature": [
+        "sleep/high"
+      ]
+    },
+    {
+      "surface": "next_action",
+      "scenario": "whf_reactivates_after_sleep_floor_exit",
+      "issue": 1136,
+      "evidence": "00:00 sleep window: armed 64-72 F; Next User Action flips at 67.8/74.2 F (flat comfort edges).",
+      "signature": [
+        "sleep/low+high"
+      ]
+    },
+    {
+      "surface": "fan_cards",
+      "scenario": "reconcile-adopts-running-fan-as-nat-vent",
+      "issue": "unfiled",
+      "evidence": "HARNESS PREMISE, not a production claim: the scenario scripts 'whole-house fan already running' only through reconcile_fan_on_startup(thermostat_fan_running=True); the FakeHass fan.whole_house entity stays off, so the Fan (WHF) card says 'active' (adopted) against a physically-off fan. Revisit when the harness mirrors the scripted fan state into the entity.",
+      "signature": [
+        "awake/text"
+      ]
+    },
+    {
+      "surface": "chart_band",
+      "context": "generated",
+      "issue": 1089,
+      "evidence": "Known and documented (#1089, closed): at night the chart draws the adaptive compute_bedtime_setback() sleep temperature while the engine arms the raw configured sleep_heat/sleep_cool, so they differ when a sleep temperature is outside the setback limits. E.g. day_seed 101000000 05:00: comfort_cool=sleep_cool=80 F, chart ceiling 78 F, thermostat armed at 80 F. Replay: python tools/simulate.py --generate-day 101000000",
+      "signature": [
+        "sleep/high"
+      ]
+    },
+    {
+      "surface": "next_action",
+      "context": "generated",
+      "issue": 1136,
+      "evidence": "Same flat-config reading as the golden rows: e.g. day_seed 102000003 05:00 armed ceiling 77 F, Next User Action flips at 79.2 F. Replay: python tools/simulate.py --generate-day 102000003 The awake/low+high shape is a daytime one, seen at the wakeup event on day_seeds 101000006 (05:30, armed 65-79 F, Next User Action flips at 66.8/77.2 F) and 102000004 (07:00, armed 66-76 F, flips at 67.8/74.2 F): the awake armed edges differ from the flat comfort edges the Next User Action line uses. Same root cause as the sleep rows; any NEW daytime shape beyond this one fails.",
+      "signature": [
+        "sleep/high",
+        "sleep/low",
+        "sleep/low+high",
+        "awake/low+high"
+      ]
+    }
+  ]
+}

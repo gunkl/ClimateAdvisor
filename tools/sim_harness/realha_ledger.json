@@ -1,0 +1,139 @@
+{
+ "version": 1,
+ "description": "Real-HA golden divergence ledger (Step 2 #1127). A golden that fails on real Home Assistant must be listed with a class (E environment, F fake artifact, T trigger, P production bug, G golden premise), the failing assertion indexes (-1 = an exception Climate Advisor logged, -2 = a timer left armed after unload) and evidence. An unlisted failure fails; an entry whose scenario now passes, or fails differently, fails. Never edit a golden to remove an entry. failing_outcomes pins WHAT each failing assertion actually produced (assertion index -> actual outcome; -1 -> exception:<types>, -2 -> timer:<callback>), so a worse or different failure of a ledgered assertion fails.",
+ "entries": [
+  {
+   "scenario": "733_restart_reconcile_clobbers_fresh_nat_vent",
+   "failing_assertions": [
+    0
+   ],
+   "first_difference": "a0@2026-08-21T23:19 expected nat_vent_still_active, real natural_ventilation (sensor_opened emitted twice: 23:15 and 23:19)",
+   "evidence": "The golden's sensor_open carries seed:true, which FakeHass applies with a silent state set so no listener runs and only the 23:19 startup_coalesce sees the open window. Real HA has no silent write: states.async_set always notifies, so the real door/window listener activates nat-vent at 23:15 and the later coalesce re-activates it. The adapter records note 'seed/seed_fresh' on the run. Dump: .pytest_cache/realha/733_restart_reconcile_clobbers_fresh_nat_vent.real.json",
+   "occupant_view": "Same end state for the person (fan on, window open); only the path to it differs. No occupant impact found.",
+   "issue_or_justification": "Trigger divergence. The real analog of 'window was already open before HA started' is a state that exists before the listener subscribes, i.e. a real restart with the sensor open; model it with house.restart in a dedicated real-HA test, not by editing this golden.",
+   "class": "T",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "failing_outcomes": {
+    "0": "natural_ventilation"
+   }
+  },
+  {
+   "scenario": "cool_all_day_heat_all_day",
+   "failing_assertions": [
+    1
+   ],
+   "first_difference": "a1@2026-01-15T09:00 expected classification_applied, real comfort_restored (morning_wakeup at 06:30:00)",
+   "evidence": "Engine-only golden (no use_coordinator): FakeHass has no coordinator, so no daily schedule. Real HA runs the default wake_time 06:30 timer and emits morning_wakeup, which the outcomes layer maps to comfort_restored; the golden asserts 'no new decision after the 06:01 classification'. The event log shows morning_wakeup@06:30:00 only on the real side.",
+   "occupant_view": "The home restores comfort at the default wake time, as it should; the golden's 'nothing happens until bedtime' premise only holds in a world without the daily schedule.",
+   "issue_or_justification": "Trigger divergence: the scenario models only its listed events. Not a production defect.",
+   "class": "T",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "failing_outcomes": {
+    "1": "comfort_restored"
+   }
+  },
+  {
+   "scenario": "warm_day_planned_window_no_pause",
+   "failing_assertions": [
+    1
+   ],
+   "first_difference": "a1@2026-07-15T08:00 expected classification_applied, real comfort_restored (morning_wakeup at 06:30:00)",
+   "evidence": "Same mechanism as cool_all_day_heat_all_day: engine-only scenario without wake_time config; real HA fires the default 06:30 wakeup, mapped to comfort_restored, so the 08:00 'last decision' is not the 06:01 classification.",
+   "occupant_view": "No occupant impact; the morning wake-up restore is intended behavior.",
+   "issue_or_justification": "Trigger divergence (daily schedule not modeled by an engine-only scenario).",
+   "class": "T",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "failing_outcomes": {
+    "1": "comfort_restored"
+   }
+  },
+  {
+   "scenario": "window_close_stops_whole_house_fan",
+   "failing_assertions": [
+    0
+   ],
+   "first_difference": "a0@2026-06-12T06:01 expected classification_applied, real fan_activated (min_runtime_cycle at 05:59:59)",
+   "evidence": "Config has fan_min_runtime_per_hour=15 and fan_mode=whole_house_fan. Engine-only FakeHass never runs coordinator start-up, so start_min_fan_runtime_cycles() is never called; real HA starts the hourly minimum-runtime fan cycles at coordinator start-up (fan_activated reason=min_runtime_cycle at 05:59:59, then hourly at :59:59), so the 06:01 'last decision' is the fan, not the classification.",
+   "occupant_view": "With a minimum-runtime fan configured the whole-house fan runs 15 minutes each hour, as configured; the golden's timeline omits it.",
+   "issue_or_justification": "Trigger divergence (coordinator start-up behavior absent from the engine-only scenario).",
+   "class": "T",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "failing_outcomes": {
+    "0": "unknown:fan_activated"
+   }
+  },
+  {
+   "scenario": "issue-392-natvent-ceiling-oscillation",
+   "failing_assertions": [
+    2,
+    3
+   ],
+   "first_difference": "a2@2026-07-02T18:53 expected natural_ventilation, real classification_suppressed_paused; a3@18:56 real paused (nat_vent_outdoor_rise_exit at 18:53:00 with indoor 72.0, outdoor 72.0)",
+   "evidence": "One temp_update carries indoor 75 and outdoor 72. FakeHass applies both, then evaluates once. Real HA delivers them through two listeners; whichever is written first is evaluated against the other's old value. Outdoor-first (current adapter): the outdoor listener sees old indoor 72 vs new outdoor 72 and exits nat-vent. Indoor-first: this scenario passes but bedtime_natvent_continuation and 2026-03-28-overnight fail the same way (experiment run 2026-10-30, reverted).",
+   "occupant_view": "Two real sensors never update atomically, so the exit can fire on a half-updated pair; the person would see the fan stop and the window-open pause start for about 2 minutes before the next reading re-engages it.",
+   "issue_or_justification": "Trigger/environment divergence: the golden's atomic two-reading update has no real-HA equivalent. Whether CA should ride out one stale partner reading is a separate design question for the owner; no issue filed.",
+   "class": "T",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "failing_outcomes": {
+    "2": "classification_suppressed_paused",
+    "3": "paused"
+   }
+  },
+  {
+   "scenario": "wakeup_preserves_whf_manual_override",
+   "failing_assertions": [
+    0
+   ],
+   "first_difference": "a0@2026-07-14T06:30 expected hvac_write_blocked_whf_active, real comfort_restored; at 06:00:00 CA turned the person's whole-house fan OFF (fan.turn_off, backstop_30min reconcile) instead of recording fan_manual_override",
+   "evidence": "Log 'fan_entity physical transition off -> on - requesting refresh' runs _async_update_data(), whose untracked-fan backstop reconcile switches the fan off BEFORE _async_fan_entity_changed() records the manual override (the provenance line 'context_confirms_ca=False' is logged after the fan.turn_off). Known production bug Issue #1130; same race as the strict-xfail tests_ha/test_escaped_bugs.py::test_press_is_not_raced_by_immediate_reconcile.",
+   "occupant_view": "The person turns the whole-house fan on at the wall and Climate Advisor switches it off again within the same second; the override and the morning wake-up protection the golden describes never take hold.",
+   "issue_or_justification": "Issue #1130 (open). Replay: python scripts/test.py ha tests_ha/test_goldens_realha.py -k wakeup_preserves_whf_manual_override. Remove this entry when #1130 is fixed (the ratchet will say so).",
+   "class": "P",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "issue": 1130,
+   "failing_outcomes": {
+    "0": "comfort_restored"
+   }
+  },
+  {
+   "scenario": "restart_whf_ac_mutex_backstop_race",
+   "failing_assertions": [
+    0
+   ],
+   "first_difference": "a0@2026-08-11T19:05:30 expected hvac_mode_never_commanded, real classification_applied; at 18:59:41 CA turned the person's fan off (fan.turn_off, nat_vent_reconcile_exit) right after external_fan_state_change on",
+   "evidence": "Same Issue #1130 race as wakeup_preserves_whf_manual_override: the fan-entity listener's immediate refresh runs the untracked-fan backstop reconcile first (fan_running_untracked + nat_vent_reconcile_exit at 18:59:41, then fan.turn_off), so no fan_manual_override is recorded and the later restart finds no override to protect.",
+   "occupant_view": "The person starts the whole-house fan while the AC is cooling and CA switches it off at once, then restores the AC setpoint; after a restart nothing of the person's choice survives.",
+   "issue_or_justification": "Issue #1130 (open). Replay: python scripts/test.py ha tests_ha/test_goldens_realha.py -k restart_whf_ac_mutex_backstop_race",
+   "class": "P",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "issue": 1130,
+   "failing_outcomes": {
+    "0": "classification_applied"
+   }
+  },
+  {
+   "scenario": "ceiling_guard_fires_when_outdoor_stays_below_indoor",
+   "failing_assertions": [
+    -2
+   ],
+   "first_difference": "both assertions pass; after unload a 10 s timer 'AutomationEngine._set_temperature_impl.<locals>._schedule_check' is still armed (HA verify_cleanup: Lingering timer)",
+   "evidence": "At 15:30 one apply_classification pass calls _set_temperature twice (daily classification 74F, then ODE ceiling guard 74F) within the same instant. automation.py:4792 does self._setpoint_retry_cancel = async_call_later(hass, 10, _schedule_check) without cancelling the previous handle, so the first handle is orphaned and cleanup() (automation.py:15134) cancels only the last. Sibling sites with the same overwrite-without-cancel shape: automation.py:4766 and :4779 (same field), :13299 (_fan_on_verify_cancel) and :14436 (_fan_off_verify_cancel); the correct pattern already exists at :4251 (_mode_align_recheck_cancel).",
+   "occupant_view": "After the person saves settings or HA reloads the zone, a stale copy of the setpoint check can still wake up about 10 s later (the Issue #1102 ghost-timer class). The shutdown latch refuses any new command, so the visible effect is a late setpoint check and log noise, not a wrong thermostat command; confirmed only for the 10 s timer here.",
+   "issue_or_justification": "New finding, no issue filed yet (production code is out of scope for this step). Replay: python scripts/test.py ha tests_ha/test_goldens_realha.py -k ceiling_guard_fires_when_outdoor_stays_below_indoor. Remove this entry when the overwrite sites cancel the prior handle.",
+   "class": "P",
+   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
+   "date": "2026-10-30",
+   "issue": 1135,
+   "failing_outcomes": {
+    "-2": "timer:_run_async_call_action"
+   }
+  }
+ ]
+}

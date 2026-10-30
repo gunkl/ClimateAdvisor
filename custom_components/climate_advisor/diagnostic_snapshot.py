@@ -332,6 +332,15 @@ def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_qu
     if include_control_quality:
         snapshot["control_quality"] = _build_control_quality_section(coordinator, config)
 
+    # Issue #1128: per-promise hit counters (counts and timestamps only, no entity ids).
+    promise_stats = getattr(coordinator, "_promise_stats", None)
+    if isinstance(promise_stats, dict) and promise_stats:
+        snapshot["promise_stats"] = {
+            str(k): {"hits": v.get("hits"), "first_ts": v.get("first_ts"), "last_ts": v.get("last_ts")}
+            for k, v in promise_stats.items()
+            if isinstance(v, dict)
+        }
+
     return snapshot
 
 
@@ -378,6 +387,12 @@ def render_diagnostic_snapshot_text(snapshot: dict[str, Any]) -> str:
             lines.append(f"    {key}: {fan_attrs[key]!r}")
 
     lines.extend(_render_control_quality(snapshot.get("control_quality")))
+
+    ps = snapshot.get("promise_stats")
+    if isinstance(ps, dict) and ps:
+        lines.append("  household_promises (hits since first seen):")
+        for key in sorted(ps):
+            lines.append(f"    {key}: hits={ps[key].get('hits')} last={ps[key].get('last_ts')}")
 
     return "\n".join(lines) + "\n"
 

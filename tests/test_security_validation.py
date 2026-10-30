@@ -11,21 +11,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# voluptuous availability probe
-# ---------------------------------------------------------------------------
-
-try:
-    import voluptuous as vol
-
-    HAS_VOLUPTUOUS = not isinstance(vol, MagicMock) and hasattr(vol, "Schema") and callable(vol.Schema)
-except ImportError:
-    HAS_VOLUPTUOUS = False
-
 
 # ---------------------------------------------------------------------------
 # TestNotifyServiceValidation
@@ -175,7 +162,6 @@ class TestCrossFieldValidation:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")
 class TestServiceSchemaValidation:
     """respond_to_suggestion service schema validates action and suggestion_key."""
 

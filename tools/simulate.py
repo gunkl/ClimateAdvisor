@@ -37,6 +37,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-s
 
 from datetime import date as dt_date
 from pathlib import Path
+from typing import Any
 
 SIMULATIONS_DIR = Path(__file__).parent / "simulations"
 STATE_DIRS: dict[str, Path] = {
@@ -68,7 +69,7 @@ def _find_scenario(name: str) -> tuple[Path, str] | None:
 # ------------------------------------------------------------------
 
 
-def run_scenario_production(scenario_file: Path, state: str | None = None) -> dict:
+def run_scenario_production(scenario_file: Path, state: str | None = None, *, promises: bool = False) -> dict:
     """Run a scenario through the real production AutomationEngine (or coordinator).
 
     Drives the real ``AutomationEngine`` headless via ``tools/sim_harness``. By
@@ -82,6 +83,11 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
     listener, timers, and startup lifecycle are running, not skipped.
     (``simulator_support: false`` assertions are always evaluated — not skipped
     in either mode.)
+
+    Issue #1128 I2: ``promises=True`` also feeds the production promise registry through a
+    ``PromiseProbe`` and adds ``promise_violations`` (hard) / ``promise_warnings`` /
+    ``promise_waived`` to the result. It never changes ``passed``, ``check_assertion`` or
+    ``production_outcome_at`` (outcomes.py semantics are untouched).
     """
     # Lazy imports: ensure the repo root is importable when run standalone
     # (python tools/simulate.py puts tools/ on sys.path, not the repo root).
@@ -98,7 +104,12 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
         scenario = json.load(f)
 
     use_coordinator = bool(scenario.get("use_coordinator", False))
-    result = run_production_scenario(scenario, use_coordinator=use_coordinator)
+    probe = None
+    if promises:
+        from tools.sim_harness.promise_probe import PromiseProbe, waivers_for  # noqa: PLC0415
+
+        probe = PromiseProbe(scenario_name=scenario_file.stem, waivers=waivers_for(scenario_file.stem))
+    result = run_production_scenario(scenario, use_coordinator=use_coordinator, probe=probe)
     decisions = _out.production_decisions(result)
 
     assertion_results: list[dict] = []
@@ -163,7 +174,7 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
         # Unexpected callback errors make the run untrustworthy — never report pass.
         passed = False
 
-    return {
+    out = {
         "name": scenario.get("name", scenario_file.stem),
         "description": scenario.get("description", ""),
         "issue": scenario.get("issue"),
@@ -189,6 +200,24 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
         "passed": passed,
         "callback_errors": callback_errors,
     }
+    report = result.promise_report
+    if report is not None:
+
+        def _row(h: Any) -> dict:
+            return {
+                "promise": h.promise,
+                "severity": h.severity,
+                "ts": h.ts.isoformat(),
+                "step": h.step,
+                "detail": h.detail,
+                "evidence": dict(h.evidence),
+                "replay": h.replay,
+            }
+
+        out["promise_violations"] = [_row(h) for h in report.hard]
+        out["promise_warnings"] = [_row(h) for h in report.warnings]
+        out["promise_waived"] = [{**_row(h), "reason": h.waiver} for h in report.waived]
+    return out
 
 
 # ------------------------------------------------------------------
@@ -629,7 +658,52 @@ def main() -> int:
         dest="fix_crlf",
         help="Normalize CRLF→LF in all scenario JSON files (run before --sign on Windows)",
     )
+    parser.add_argument(
+        "--generate",
+        type=int,
+        metavar="N",
+        help="Issue #1128: run N generated household days per --seeds master seed through the production "
+        "engine and judge them with the household promises",
+    )
+    parser.add_argument("--seeds", type=int, nargs="+", default=[1], help="master seeds for --generate")
+    parser.add_argument(
+        "--generate-day", type=int, metavar="DAY_SEED", help="Generate and judge ONE day by its seed (replay a seed)"
+    )
+    parser.add_argument(
+        "--replay-generated",
+        metavar="FILE",
+        help="Replay a saved generated-day scenario (tools/simulations/generated/failures/*.json)",
+    )
+    parser.add_argument("--shrink", action="store_true", help="with --replay-generated: also write a shrunk copy")
+    parser.add_argument("--profile", default="coordinator", help="generator profile: coordinator | engine | mixed")
+    parser.add_argument(
+        "--surfaces",
+        action="store_true",
+        help="Issue #1128 P8 (surfaces_agree): judge every golden (and, with --generate N --seeds ..., generated "
+        "days) for status/chart/briefing/next-action agreement with the armed band; ratcheted by "
+        "tools/simulations/surface_divergences.json",
+    )
     args = parser.parse_args()
+
+    if args.surfaces:
+        _repo_root = str(Path(__file__).resolve().parent.parent)
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
+        from tools.sim_harness import surfaces as _surfaces  # noqa: PLC0415
+
+        return _surfaces.cli_surfaces(args.seeds, args.generate or 0, args.profile)
+
+    if args.generate or args.generate_day is not None or args.replay_generated:
+        _repo_root = str(Path(__file__).resolve().parent.parent)
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
+        from tools.sim_harness import replay as _replay  # noqa: PLC0415
+
+        if args.replay_generated:
+            return _replay.cli_replay(args.replay_generated, do_shrink=args.shrink)
+        if args.generate_day is not None:
+            return _replay.cli_generate_day(args.generate_day, args.profile)
+        return _replay.cli_generate(args.seeds, args.generate, args.profile)
 
     for d in STATE_DIRS.values():
         d.mkdir(parents=True, exist_ok=True)

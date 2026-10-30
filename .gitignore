@@ -46,3 +46,11 @@ node_modules/
 package-lock.json
 playwright-report/
 test-results/
+
+# uv test environments
+.venv-test/
+.venv-test-ha/
+
+# Hypothesis example database and generated promise-probe failures (Issue #1128)
+.hypothesis/
+tools/simulations/generated/

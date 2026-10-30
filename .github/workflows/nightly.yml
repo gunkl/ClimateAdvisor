@@ -1,0 +1,92 @@
+name: Nightly generated days and real-HA tier
+
+# Issue #1128 I11 / epic #1125 Step 3. The unit tier runs a small fixed sample of generated
+# household days on every PR; this workflow explores far more of them with fresh seeds, and
+# re-runs the real Home Assistant tier, so a regression that only a rare day triggers is found
+# overnight instead of by a customer. A failing run uploads the replayable scenario files.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Number of master seeds"
+        default: "12"
+      days:
+        description: "Generated days per master seed"
+        default: "250"
+
+jobs:
+  generated-days:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Install test dependencies
+        run: uv sync --locked --only-group test
+
+      - name: Pick fresh master seeds (printed so a failure is replayable)
+        id: seeds
+        env:
+          INPUT_SEEDS: ${{ github.event.inputs.seeds }}
+          INPUT_DAYS: ${{ github.event.inputs.days }}
+        run: |
+          count="${INPUT_SEEDS:-12}"
+          days="${INPUT_DAYS:-250}"
+          case "$count" in ''|*[!0-9]*) echo "seeds must be a positive integer, got '$count'" >&2; exit 1;; esac
+          case "$days" in ''|*[!0-9]*) echo "days must be a positive integer, got '$days'" >&2; exit 1;; esac
+          if [ "$count" -lt 1 ] || [ "$count" -gt 100 ] || [ "$days" -lt 1 ] || [ "$days" -gt 5000 ]; then
+            echo "seeds must be 1-100 and days 1-5000" >&2; exit 1
+          fi
+          base=$(( (GITHUB_RUN_NUMBER % 1000) * 1000 ))
+          list=""
+          for i in $(seq 1 "$count"); do list="$list $((base + i))"; done
+          echo "list=${list# }" >> "$GITHUB_OUTPUT"
+          echo "days=$days" >> "$GITHUB_OUTPUT"
+          echo "Master seeds: ${list# }"
+
+      - name: Generated days judged by the household promises (P1-P7)
+        run: >
+          uv run --locked --only-group test python tools/simulate.py
+          --generate ${{ steps.seeds.outputs.days }}
+          --seeds ${{ steps.seeds.outputs.list }}
+
+      - name: Generated days judged by surfaces_agree (P8, ratcheted)
+        run: >
+          uv run --locked --only-group test python tools/simulate.py
+          --surfaces --generate 50
+          --seeds ${{ steps.seeds.outputs.list }}
+
+      - name: Upload failing scenarios
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: generated-failures
+          path: tools/simulations/generated/failures/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  ha-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Run real-HA lifecycle tests
+        run: python3 scripts/test.py ha  # uv run --locked --only-group test-ha (own venv)

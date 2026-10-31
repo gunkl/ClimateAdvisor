@@ -211,6 +211,7 @@ def run_scenario_production(scenario_file: Path, state: str | None = None, *, pr
                 "step": h.step,
                 "detail": h.detail,
                 "evidence": dict(h.evidence),
+                "mechanism": h.mechanism,
                 "replay": h.replay,
             }
 
@@ -677,6 +678,19 @@ def main() -> int:
     parser.add_argument("--shrink", action="store_true", help="with --replay-generated: also write a shrunk copy")
     parser.add_argument("--profile", default="coordinator", help="generator profile: coordinator | engine | mixed")
     parser.add_argument(
+        "--waiver-ledger",
+        metavar="PATH",
+        help="Issue #1153: with --generate, judge hard hits against this strict, issue-linked waiver ledger "
+        "(tools/sim_harness/nightly_waivers.json); stale, expired or closed-issue entries fail the run",
+    )
+    parser.add_argument(
+        "--issue-state",
+        choices=("github", "offline"),
+        default="offline",
+        help="with --waiver-ledger: read issue open/closed from GitHub (CI) or skip that check loudly (local)",
+    )
+    parser.add_argument("--issue-state-file", metavar="FILE", help="offline: JSON {issue: open|closed}")
+    parser.add_argument(
         "--surfaces",
         action="store_true",
         help="Issue #1128 P8 (surfaces_agree): judge every golden (and, with --generate N --seeds ..., generated "
@@ -703,7 +717,14 @@ def main() -> int:
             return _replay.cli_replay(args.replay_generated, do_shrink=args.shrink)
         if args.generate_day is not None:
             return _replay.cli_generate_day(args.generate_day, args.profile)
-        return _replay.cli_generate(args.seeds, args.generate, args.profile)
+        return _replay.cli_generate(
+            args.seeds,
+            args.generate,
+            args.profile,
+            ledger_path=args.waiver_ledger,
+            issue_state=args.issue_state,
+            issue_state_file=args.issue_state_file,
+        )
 
     for d in STATE_DIRS.values():
         d.mkdir(parents=True, exist_ok=True)

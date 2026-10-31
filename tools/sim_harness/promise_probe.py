@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from tools.sim_harness.ha_stubs import install_ha_stubs
+from tools.sim_harness.mechanism import FSM_FLAGS, build_mechanism, current_commit
 
 # The production promise modules live inside the climate_advisor package, whose __init__ needs
 # Home Assistant; under FakeHass that is the stub layer (idempotent, adapter-side only).
@@ -81,6 +82,9 @@ class ProbeHit:
     replay: dict
     occurrences: int = 1
     waiver: str | None = None  # reason, when waived
+    # Issue #1153: the mechanism that produced the hit (tools/sim_harness/mechanism.py), every field
+    # present and None where unknowable.  Waivers match on this, never on a seed.
+    mechanism: dict | None = None
 
 
 @dataclass
@@ -180,6 +184,7 @@ class PromiseProbe:
         self._steps = 0
         self._label_index = -1
         self._hits: dict[str, ProbeHit] = {}  # dedup key -> first hit
+        self._mode_set_events: list[tuple[datetime, dict]] = []  # recent thermostat_mode_set events (#1153)
         self._order: list[str] = []
 
     # ── wiring ────────────────────────────────────────────────────────────────
@@ -219,6 +224,8 @@ class PromiseProbe:
             self._journal.record_command(c)
         for ts, etype, payload in batch.events:
             self._journal.on_event(ts, etype, payload)
+            if etype == "thermostat_mode_set":
+                self._mode_set_events = [*self._mode_set_events[-63:], (ts, payload)]
         inp = self._journal.window(now)
         new: list[ProbeHit] = []
         for hit in run_promise_checks(inp, self._cfg, scope=SCOPE_TEST):
@@ -230,6 +237,7 @@ class PromiseProbe:
             if not self._journal.is_new(hit.key):
                 continue
             severity = _SEVERITY_BY_KEY.get(hit.promise, SEVERITY_HARD)
+            ctx_fn = getattr(self._source, "mechanism_context", None)
             ph = ProbeHit(
                 promise=hit.promise,
                 severity=severity,
@@ -244,6 +252,13 @@ class PromiseProbe:
                     "virtual_ts": now.isoformat(),
                 },
                 waiver=self._waivers.get(hit.promise),
+                mechanism=build_mechanism(
+                    hit,
+                    inp,
+                    ctx=ctx_fn() if callable(ctx_fn) else None,
+                    mode_set_events=self._mode_set_events,
+                    commit=current_commit(),
+                ),
             )
             self._hits[key] = ph
             self._order.append(key)
@@ -296,6 +311,10 @@ class FakeHassPromiseSource:
         self._pending: list[Reading] = []
         self._actions_seen = 0
         self._events_seen = 0
+        # Issue #1153: why each command went out, captured at send time (the engine's mode-change
+        # reason is only set inside the sending call) from the same observer hook production uses.
+        self._cmd_causes: list[tuple[str, str, str | None, str | None]] = []
+        self._install_cause_capture()
         session.fake_hass.states.add_observer(self._on_state_write)
 
     # ── PromiseSource ──────────────────────────────────────────────────────────
@@ -327,7 +346,52 @@ class FakeHassPromiseSource:
         self._events_seen = len(elog)
         return SourceBatch(readings=readings, commands=commands, events=events)
 
+    def mechanism_context(self) -> dict[str, Any]:
+        """Engine override/grace flags and the configured grace, sampled NOW (Issue #1153).
+
+        Called when a hit is first detected, so it is the state at detection, not at the instant the
+        hit's own evidence was recorded.  A flag the engine does not have reads as ``None``."""
+        from custom_components.climate_advisor.const import CONF_MANUAL_GRACE_PERIOD  # noqa: PLC0415
+
+        engine = self._s.engine
+        out: dict[str, Any] = {}
+        for attr, suffix in FSM_FLAGS:
+            value = getattr(engine, attr, None)
+            out[f"fsm_{suffix}"] = value if isinstance(value, bool) else None
+        grace = self._s.config.get(CONF_MANUAL_GRACE_PERIOD)
+        out["configured_grace_seconds"] = (
+            grace if isinstance(grace, (int, float)) and not isinstance(grace, bool) else None
+        )
+        return out
+
     # ── internals ──────────────────────────────────────────────────────────────
+    def _install_cause_capture(self) -> None:
+        """Record the engine's ``_mode_change_reason`` for every command, chaining any existing observer.
+
+        Same value production journals as ``Command.cause`` (``coordinator._promise_observe_command``).
+        Read-only: the original observer still runs first and nothing is sent or changed here."""
+        engine = self._s.engine
+        original = getattr(engine, "_command_observer", None)
+
+        def capture(domain: str, service: str, data: dict, kind: str) -> None:
+            if original is not None:
+                original(domain, service, data, kind)
+            entity = data.get("entity_id") if isinstance(data, dict) else None
+            cause = getattr(engine, "_mode_change_reason", None)
+            self._cmd_causes = [
+                *self._cmd_causes[-255:],
+                (domain, service, entity, cause if isinstance(cause, str) else None),
+            ]
+
+        engine._command_observer = capture
+
+    def _take_cause(self, domain: str, service: str, entity: Any) -> str | None:
+        for i, (d, sv, ent, cause) in enumerate(self._cmd_causes):
+            if (d, sv, ent) == (domain, service, entity):
+                del self._cmd_causes[i]
+                return cause
+        return None
+
     def _on_state_write(self, entity_id: str) -> None:
         if entity_id in self._watched:
             self._pending.append(self._reading(self.now()))
@@ -413,6 +477,7 @@ class FakeHassPromiseSource:
             return None
         service = str(entry.get("service", ""))
         data = entry.get("data") or {}
+        cause = self._take_cause(domain, service, data.get("entity_id"))
         ts = entry.get("ts") or now
         enabled = self._automation_enabled()
         if domain == "climate":
@@ -434,6 +499,7 @@ class FakeHassPromiseSource:
                 origin="ca",
                 automation_enabled=enabled,
                 indoor_f=indoor_f,
+                cause=cause,
             )
         # fan / switch
         return Command(
@@ -444,4 +510,5 @@ class FakeHassPromiseSource:
             origin="ca",
             automation_enabled=enabled,
             indoor_f=indoor_f,
+            cause=cause,
         )

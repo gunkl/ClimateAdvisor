@@ -349,7 +349,7 @@ class TestOverrideAdoptionOnResolvedBand:
         # band), so the occupant's Off is a real override and is NOT adopted ...
         engine, c = _override_engine(day="warm", indoor=71.0, user_mode="off", setpoint=70.0)
         assert _matches(engine, c) is False
-        # ... unless CA itself is holding HVAC off (open-window hold), where Off agrees with CA.
+        # ... unless CA has actually paused HVAC for a door/window (_paused_by_door), where Off agrees with CA.
         engine._paused_by_door = True
         assert _matches(engine, c) is True
         hot_engine, hot = _override_engine(day="hot", indoor=71.0, user_mode="off", setpoint=70.0)

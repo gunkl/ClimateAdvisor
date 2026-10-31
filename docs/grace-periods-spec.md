@@ -789,14 +789,14 @@ The same wait applies to `apply_tou_precondition()` / `apply_tou_away_vacation_p
   Event: "override_detected" (dupe-gated 5-min window)
   Timer: CONF_OVERRIDE_CONFIRM_PERIOD (default 600 s)
        ↓ timer fires → _confirm_override_expired()
-       ├─ [PATH A: state still divergent from classification, OR an "off" while CA's plan is not HVAC off (Issue #1159)]
+       ├─ [PATH A: state still divergent from classification, OR an "off" while CA has not paused HVAC for a door/window (Issue #1159)]
        │   └─ _confirm_override(current_mode)
        │       _manual_override_active = True
        │       Event: "override_confirmed"
        │       _start_grace_period("manual")      ← see Grace Period Types § Manual Grace
        │       apply_classification() remains blocked for CONF_MANUAL_GRACE_PERIOD (30 min)
        │
-       └─ [PATH B: state returned to classification (an "off" only counts while CA's own plan is HVAC off)]
+       └─ [PATH B: state returned to classification (an "off" only counts once CA has paused HVAC for a door/window)]
            _override_confirm_pending = False
            Event: "override_self_resolved"
            Notification sent (if notify service configured): "Brief thermostat adjustment

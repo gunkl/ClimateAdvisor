@@ -228,8 +228,9 @@ class TestOffWithOpenWindowIsTreatedAsOnHotDays:
 class TestOffAfterCaPausedHvac:
     """CA has actually paused HVAC for a door/window (``_paused_by_door``): the occupant's Off agrees with it.
 
-    This state precedes the override (the window pause came first, the occupant then changed the mode and
-    switched Off); it is never entered while an override is active, so the tests set the flag directly.
+    The pause is reached while the Off is still unconfirmed (a window opens and settles inside the confirm
+    window), or during the grace when handle_door_window_open()'s nat-vent gate passes but the lockout or a
+    Phase 2 guard then rejects it; the tests set the flag directly.
     """
 
     def test_off_while_window_pause_in_force_self_resolves(self):

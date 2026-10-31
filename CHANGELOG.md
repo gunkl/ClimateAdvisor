@@ -5,7 +5,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.8.9] — 2026-10-31
 
-- Fix #1159: If you switch the thermostat Off on a mild day, Climate Advisor now keeps it off for your manual-change pause, the same as on hot or cold days, instead of switching heating or cooling back on within half an hour. You get the usual manual-change notice, and automatic control resumes when the pause ends. If a window is open and Climate Advisor is already holding the system off, nothing changes.
+- Fix #1159: if you switch the thermostat Off on a mild day, Climate Advisor now keeps it off for your manual-change pause, the same as on hot or cold days, instead of switching heating or cooling back on within half an hour.
 
 ## [0.8.8] — 2026-10-31
 

@@ -76,3 +76,27 @@ class TestDecideOverrideConfirmPath:
             classification_mode="cool",
         )
         assert result == OverrideConfirmPathOutcome.CONFIRM
+
+
+class TestOccupantOffIssue1159:
+    """An "off" equal to the classification LABEL is a real change unless CA has paused HVAC for a door/window."""
+
+    def test_off_on_off_labelled_day_confirms_when_ca_is_not_holding_off(self):
+        assert (
+            decide_override_confirm_path(
+                setpoint_override=False,
+                current_mode="off",
+                classification_mode="off",
+            )
+            == OverrideConfirmPathOutcome.CONFIRM
+        )
+
+    def test_off_equal_to_a_non_off_label_is_still_a_plain_self_resolve(self):
+        assert (
+            decide_override_confirm_path(
+                setpoint_override=False,
+                current_mode="cool",
+                classification_mode="cool",
+            )
+            == OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
+        )

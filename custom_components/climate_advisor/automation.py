@@ -142,6 +142,7 @@ from .desired_state import (
     decide_setpoint_retry_action,
 )
 from .override_confirm_split import OverrideConfirmPathOutcome, decide_override_confirm_path
+from .override_match import decide_override_matches_decision
 
 if TYPE_CHECKING:
     from .classification_fsm import ClassificationDecision
@@ -3089,7 +3090,16 @@ class AutomationEngine:
         if self._manual_override_mode not in ("heat", "cool"):
             # "off" / heat_cool / auto: no setpoint to compare and no selector family -- the
             # override matches only when automation's day mode is the same non-setpoint mode.
-            return self._manual_override_mode == classification.hvac_mode
+            # Issue #1159: an occupant's "off" never matches (the pure leaf owns that rule): on a mild day
+            # "off" is only a label, so the occupant's Off is a real manual change, as on a hot/cold day.
+            return decide_override_matches_decision(
+                manual_override_active=self._manual_override_active,
+                manual_override_mode=self._manual_override_mode,
+                manual_override_source=self._manual_override_source,
+                classification_mode=classification.hvac_mode,
+                current_setpoint_f=None,
+                target_setpoint_f=None,
+            )
 
         # Issue #1073 (S6 / #1070): compare against what the SELECTOR would arm now and the RESOLVED
         # band edge, not ``classification.hvac_mode`` / the flat band. On warm and mild days the

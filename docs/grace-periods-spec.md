@@ -19,6 +19,7 @@
 | Can every grace type be "orphaned" in the Issue #508 sense — does the watchdog apply to fan-off/window-close/resume grace too? | No (Issue #530 fix). `_start_grace_period(trigger=...)` sets `_grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE` (only `"fan_manual_override"` and `"override_confirmed"`) — the watchdog now only fires for grace that was genuinely started to protect a real override. Before this fix, the watchdog inferred "orphaned" purely from absent override flags, which is also the NORMAL, by-design shape of fan-off/drift-correction/window-close/dashboard-resume grace — every one of those was being killed within about one event-loop tick of starting. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
 | A fan-off arrives seconds after an RF-remote-timer grace expires — is that a fresh event? | No (Issue #530). `_on_grace_expired()` arms `_timer_boundary_settle_until` (2 min) whenever the expiring grace's `_fan_remote_timer_hours` was set. A fan-off inside that window is treated as the tail of the SAME timer boundary — routed straight through `_exit_nat_vent()` instead of starting an independent new grace. | [§ RF-Timer Boundary Settle Window (Issue #530)](#rf-timer-boundary-settle-window-issue-530) |
 | A default-duration manual fan-on's grace expires while the fan is still running (or CA reactivates it after a grace expiry) — is the fan's eventual real off treated as fresh, hours later? | No, as of Issue #829. `_fan_manual_origin_unclosed` is a state-based (not time-boxed) sibling of the RF-timer settle window, armed in `clear_fan_override()`/`_re_pause_for_open_sensor()`/`_reconcile_fan_on_startup_locked()` whenever CA hands a still-running fan's ownership to itself with no real timer to anchor the settle window to. `on_fan_turned_off()` checks it alongside the settle window. | [§ Manual-Origin Unclosed Marker (Issue #829)](#manual-origin-unclosed-marker-issue-829) |
+| Is an occupant's Off on a mild day (classification `off`) kept? | Yes (Issue #1159). An occupant Off is always a manual change: confirmed (PATH A) and kept for the manual grace exactly as on hot/cold days, and never adopted as matching. This holds even if CA's own door/window pause (`_paused_by_door`) engages before the confirm or during the grace; nothing is written until the grace ends. | [§ State Machine](#state-machine) |
 | Does PATH B (self-resolved transient) send a notification? | Yes (Issue #200). When the thermostat reverts to the expected mode within the confirmation window, a push notification is sent: "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." | [§ State Machine — PATH B](#state-machine) |
 | What happens if the user changes to a different mode while a grace period is already active? | The current override and grace timer are cleared, and a fresh 10-minute confirmation window starts for the new mode (Issue #201). The latest user action always wins. | [§ Second Override During Active Grace](#second-override-during-active-grace-issue-201) |
 | Where can the user see how much longer an active grace period will run, and what caused it? | Debug tab shows full `grace_end_time` and `last_action_reason`. Status tab shows `_format_grace_remaining()` with a cause label from `_GRACE_TRIGGER_LABELS`, e.g. "grace period (manual) — thermostat override — 30 min (ends 7:14 AM)" — this display moved onto the Status card and reached its current duration+cause-label shape across issues #620→#498→#527→#625 (full history in git blame; current shape is what's shown here). | [§ Debounce and Grace Period System](02-ARCHITECTURE-REFERENCE.md#debounce-and-grace-period-system) |
@@ -788,14 +789,14 @@ The same wait applies to `apply_tou_precondition()` / `apply_tou_away_vacation_p
   Event: "override_detected" (dupe-gated 5-min window)
   Timer: CONF_OVERRIDE_CONFIRM_PERIOD (default 600 s)
        ↓ timer fires → _confirm_override_expired()
-       ├─ [PATH A: state still divergent from classification]
+       ├─ [PATH A: state still divergent from classification, OR an "off" (always a manual change, Issue #1159)]
        │   └─ _confirm_override(current_mode)
        │       _manual_override_active = True
        │       Event: "override_confirmed"
        │       _start_grace_period("manual")      ← see Grace Period Types § Manual Grace
        │       apply_classification() remains blocked for CONF_MANUAL_GRACE_PERIOD (30 min)
        │
-       └─ [PATH B: state returned to classification]
+       └─ [PATH B: state returned to classification (an "off" only counts once CA has paused HVAC for a door/window)]
            _override_confirm_pending = False
            Event: "override_self_resolved"
            Notification sent (if notify service configured): "Brief thermostat adjustment
@@ -803,6 +804,10 @@ The same wait applies to `apply_tou_precondition()` / `apply_tou_away_vacation_p
            apply_classification() unblocked immediately
            No grace period started
 ```
+
+**An occupant's Off on a mild day (Issue #1159).** On a mild or warm day the classification label is `hvac_mode == "off"`, but since #249 Climate Advisor does not write Off on those days: it arms the comfort band (heat or cool, `select_comfort_band()`). The raw comparison "Off == label `off`" therefore used to take PATH B (no override, no grace, no notice), and the next 30-minute refresh wrote heat/cool again, undoing the occupant's Off. Now an Off is a real manual change on every day type: PATH A, `override_confirmed`, the usual manual grace and notice, then CA resumes. There is no exception: an occupant Off is always a manual change, including while CA's own door/window pause (`_paused_by_door`) is in force (override detection compares against `_last_commanded_hvac_mode`, so an Off while CA has already written Off is never detected as an override at all). The confirm split (`decide_override_confirm_path`) always confirms an `off`, so the confirm split, adoption and the FSM cannot disagree. Heat/cool overrides and heat_cool/auto are unchanged.
+
+**Adoption of an "off" override.** `_override_matches_current_decision()` (and the pure twin `decide_override_matches_decision`) never adopts an "off" override as matching: an occupant Off is always a manual change, kept for the whole grace (pre-expiry revisit and natural expiry). Otherwise the confirmed Off would be adopted and cleared at the next refresh and CA would write cool/heat again.
 
 **Total blocking time if confirmed:** up to `CONF_OVERRIDE_CONFIRM_PERIOD + CONF_MANUAL_GRACE_PERIOD` = 10 + 30 = **40 minutes** (both configurable).
 

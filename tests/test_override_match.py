@@ -43,7 +43,8 @@ class TestDecideOverrideMatchesDecision:
         assert _base(manual_override_mode="heat", classification_mode="cool") is False
 
     # Branch 3: non-heat/cool mode match -> True (no setpoint to compare).
-    def test_off_mode_match_true(self):
+    def test_off_mode_never_matches(self):
+        """Issue #1159: an occupant's "off" is never adopted as matching an "off" label (a real manual change)."""
         assert (
             _base(
                 manual_override_mode="off",
@@ -51,7 +52,7 @@ class TestDecideOverrideMatchesDecision:
                 current_setpoint_f=None,
                 target_setpoint_f=None,
             )
-            is True
+            is False
         )
 
     def test_heat_cool_mode_match_true_ignores_setpoint(self):

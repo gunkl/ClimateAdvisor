@@ -94,15 +94,14 @@ class TestManualOverrideSurvivesRestart:
         payloads = [p for (t, p, _ts) in event_log if t == "fan_manual_override"]
         assert payloads and "restored_from" not in payloads[-1]
 
-    def test_shadow_fsm_tracker_fed_for_persisted_rearm(self) -> None:
+    def test_persisted_rearm_lands_on_a_protecting_grace_state(self) -> None:
         from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
 
         coordinator, _fake_hass, scheduler, _event_log = _build()
         _restart(coordinator, scheduler, _persisted(scheduler, remaining_s=3600))
-        assert coordinator._override_grace_fsm_state == (
-            OverrideConfirmState.IDLE,
-            GraceState.ACTIVE_PROTECTING_OVERRIDE,
-        )
+        ae = coordinator.automation_engine
+        assert ae.override_grace_lifecycle_state == (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
+        assert ae._grace_active is True and ae._grace_protects_override is True
 
     def test_orphaned_grace_watchdog_leaves_rearmed_grace_alone(self) -> None:
         coordinator, _fake_hass, scheduler, _event_log = _build()
@@ -132,16 +131,17 @@ class TestPersistedOverrideDropped:
         assert ae._reconcile_rearmed_override is False
         assert ae._pending_override_rearm_end is None
 
-    def test_sealed_house_does_not_rearm_and_does_not_feed_shadow_fsm(self) -> None:
-        from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
-
+    def test_sealed_house_does_not_rearm(self) -> None:
         coordinator, _fake_hass, scheduler, _event_log = _build(window_open=False)
         _restart(coordinator, scheduler, _persisted(scheduler, remaining_s=7200))
         ae = coordinator.automation_engine
         assert ae._fan_override_active is False
         assert ae._reconcile_rearmed_override is False
-        # #882 sealed-house deactivate path must not claim an override re-arm to the tracker.
-        assert coordinator._override_grace_fsm_state == (OverrideConfirmState.IDLE, GraceState.NONE)
+        # #882 sealed-house deactivate path: no protecting grace, no override, nothing left in the FSM.
+        from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
+
+        assert ae._grace_protects_override is False
+        assert ae.override_grace_lifecycle_state == (OverrideConfirmState.IDLE, GraceState.NONE)
 
     def test_other_trigger_is_not_stashed(self) -> None:
         coordinator, _fake_hass, scheduler, _event_log = _build()

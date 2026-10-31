@@ -73,6 +73,8 @@ Source: `invariant_watchdog.py` (`_COMMON_LISTED`, `_THERMOSTAT_LISTED`, `_FAN_O
 | reason containing `ceiling` (#134) | no | no | yes |
 | `stuck_grace_recovered` | not excused | not excused | not excused |
 
+**What the episode records for a setpoint change during a door pause (Issues #1131/#1133).** A setpoint-only change made while a door/window pause has the thermostat Off is recorded with `override_detected.detected_mode` = the pre-pause mode (`AutomationEngine._occupant_mode_when_ca_holds_off()`), not Climate Advisor's own pause `off`: the thermostat reads Off only because CA put it there, and what the occupant asked for is HVAC at their setpoint. Recorded as `off`, the door-close mode restore read as CA reversing the occupant's value. A temperature-only change while the whole-house fan owns HVAC is not an override at all (no episode). P4 itself is unchanged; the 10 seeds x 100 coordinator-day calibration is `override_respected` 30 hits before the #1131/#1133/#1146/#1147/#1148 fixes and 0 after, so `tests/test_sim_generator.py::_UNTRIAGED_ON_HEAD` no longer lists it.
+
 Reversal: thermostat mode differing from the occupant's, or a setpoint differing by at least 2.0 F; fan: the opposite on/off. A command equal to the occupant's value is a re-affirm. A newer occupant action after the episode start excuses a later CA command. A restart empties the journal, so restart survival (#1006, #1045) belongs to the real-HA lifecycle tests.
 
 ## Test-side use

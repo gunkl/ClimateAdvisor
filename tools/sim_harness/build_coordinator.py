@@ -190,14 +190,14 @@ def build_headless_coordinator(
     #     only via automation_engine._emit_event_callback. In real production both
     #     paths funnel into the same method (coordinator.py wires
     #     automation_engine._emit_event_callback = self._emit_event), which is also
-    #     the ONLY place _feed_lifecycle_fsms_from_event() is called — the real
-    #     side effect that feeds the nat-vent/door-window/override-grace shadow
-    #     FSMs their event-driven transitions.
+    #     where the coordinator's event-driven side effects (event log, promise
+    #     journal, incident hooks) run. (It once also fed the shadow FSM trackers
+    #     via _feed_lifecycle_fsms_from_event(), deleted in Issue #1152.)
     #
     #     Issue #666: this used to point automation_engine._emit_event_callback at
     #     a bare local function that only appended to the flat scenario event_log,
-    #     bypassing coordinator._emit_event (and therefore
-    #     _feed_lifecycle_fsms_from_event()) entirely for every engine-originated
+    #     bypassing coordinator._emit_event (and therefore its
+    #     event-driven side effects, then including the FSM feed) entirely for every engine-originated
     #     event. The accompanying comment claimed this was "purely additive" and
     #     "does not change what any existing event type is captured as" — false:
     #     it silently dropped the FSM-feed side effect for the whole coordinator-

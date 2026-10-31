@@ -159,17 +159,22 @@ def test_an_episode_without_a_grace_mark_has_null_grace_seconds() -> None:
     assert out["episode_grace_seconds"] is None and out["configured_grace_seconds"] == 0
 
 
-def test_a_real_generated_day_hit_carries_the_1133_mechanism() -> None:
-    """Day 1000025 is one of the 12 days named in #1133 (grace 0, window opens after a confirmed override)."""
-    rec = run_day(1000025)
-    hits = [h for h in rec.report.hard if h.promise == "override_respected"]
-    assert hits, "day 1000025 no longer breaks override_respected (fixed?) - pick a day that still does"
+def test_a_real_generated_day_hit_carries_a_full_mechanism_from_the_live_engine() -> None:
+    """End to end: a real day's hit gets every mechanism field, with the FSM flags read from the live engine.
+
+    This used day 1000025's #1133 pause hit; #1133 is fixed, so that day now keeps the promise and is
+    pinned in test_sim_generator._PROTECT_MANUAL_CHANGE_SEEDS. The command/episode/reading mapping it
+    exercised is pinned by the hand-built test above. Day 1000015 still produces a comfort_kept warning;
+    if a fix removes it, pick a day that still has a hit.
+    """
+    rec = run_day(1000015)
+    hits = [*rec.report.hard, *rec.report.warnings]
+    assert hits, "day 1000015 no longer produces a promise hit - pick a day that still does"
     m = hits[0].mechanism
     assert set(m) == set(mech.MECHANISM_FIELDS)
-    assert m["cause"] == "pause" and m["command_service"] == "set_hvac_mode" and m["command_mode"] == "off"
-    assert m["configured_grace_seconds"] == 0 and m["fsm_manual_override_active"] is True
-    assert m["fsm_paused_by_door"] is True and m["sensor_open"] is True
-    assert m["command_origin"] == "ca" and m["command_reason"] == "door or window opened"
+    fsm_fields = [f for f in mech.MECHANISM_FIELDS if f.startswith("fsm_")]
+    assert fsm_fields and all(m[f] is not None for f in fsm_fields), "FSM flags must come from the live engine"
+    assert m["configured_grace_seconds"] is not None and m["sensor_open"] is not None
     assert m["commit"] == mech.current_commit()
 
 

@@ -2412,8 +2412,8 @@ class TestDebounceGraceInteraction:
 
         assert engine._paused_by_door is True
 
-    def test_zero_grace_allows_immediate_repause(self):
-        """With CONF_MANUAL_GRACE_PERIOD=0, manual override leaves no grace — next open pauses."""
+    def test_zero_grace_override_is_protected_from_a_later_open(self):
+        """Manual Change Pause = 0 leaves no grace flag, yet a later open must not pause over the override (#1133)."""
         engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 0})
         engine.hass.states.get.return_value = _make_state("heat")
 
@@ -2431,12 +2431,15 @@ class TestDebounceGraceInteraction:
         assert engine._grace_active is False
         assert engine._paused_by_door is False
 
-        # Door opens again — should pause immediately (no grace blocking)
+        # Door opens again. Issue #1133 (owner decision): the occupant's change -- here still inside its
+        # confirmed or pending -- is protected, so the later open must NOT pause HVAC over it. (Before
+        # #1133 this paused immediately because no grace flag existed to block it.)
         engine.hass.services.async_call.reset_mock()
+        assert engine._manual_change_protected() is True
         with patch("custom_components.climate_advisor.automation.async_call_later"):
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is True
+        assert engine._paused_by_door is False
 
 
 # ---------------------------------------------------------------------------

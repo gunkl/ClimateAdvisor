@@ -104,16 +104,20 @@ class TestPauseRecordedWhenNatVentSkipped:
         _assert_pause_recorded_and_restored(engine)
 
     @pytest.mark.parametrize("mode", ["heat", "cool"])
-    def test_manual_override_without_grace_records_pause_and_close_restores(self, mode):
-        """Manual Change Pause = 0: an override is active, no grace is running (the #1119 early return
-        in the periodic re-sync means nothing else would ever record the pause)."""
+    def test_manual_override_without_grace_is_not_paused_at_all(self, mode):
+        """Manual Change Pause = 0: an override is active, no grace is running. #1132 recorded the pause
+        for this shape; Issue #1133 (owner decision, 2026-10-30) went further -- a window opening later
+        must not pause HVAC over a confirmed override at all, so there is no pause to record and the
+        occupant's mode is left exactly as they set it."""
         engine = _engine(mode=mode)
         engine._manual_override_active = True
         engine._manual_override_mode = mode
         engine._manual_override_source = "pause"
         engine._grace_active = False
         _open(engine)
-        _assert_pause_recorded_and_restored(engine, was=mode)
+        assert engine._paused_by_door is False
+        assert engine._test_state.state == mode
+        assert engine._pre_pause_mode is None
 
     def test_grace_origin_skip_records_pause(self):
         """GRACE origin: a live grace whose reactivation gate is viable falls through the grace

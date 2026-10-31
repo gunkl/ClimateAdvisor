@@ -174,6 +174,10 @@ class _Rig:
         ae.climate_entity = "climate.thermostat"
         ae._manual_override_active = False
         ae._override_confirm_pending = False
+        # the REAL predicate against this stub's flags (Issue #1133 L4: the coordinator reads it, no hand copy)
+        from custom_components.climate_advisor.automation import AutomationEngine
+
+        ae._manual_change_protected = types.MethodType(AutomationEngine._manual_change_protected, ae)
         ae._paused_by_door = False
         ae._natural_vent_active = False
         ae._hvac_write_record = None

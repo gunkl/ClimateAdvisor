@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.9] — 2026-10-31
+
+- Fix #1159: If you switch the thermostat Off on a mild day, Climate Advisor now keeps it off for your manual-change pause, the same as on hot or cold days, instead of switching heating or cooling back on within half an hour. You get the usual manual-change notice, and automatic control resumes when the pause ends. If a window is open and Climate Advisor is already holding the system off, nothing changes.
+
 ## [0.8.8] — 2026-10-31
 
 - Fix #1149: right after the AC has cooled the house, a thermostat you switched Off (or one in heat/cool auto mode, or one that just came back online) is no longer switched to heat for a shallow dip under your comfort minimum. Climate Advisor keeps the cooling side armed (the AC stays idle because the house is below your maximum) until the recency window passes or the house drops more than your tolerance below the minimum, and then it heats. Likewise, right after the furnace has run, a slight overshoot just above your maximum no longer starts the AC. The natural side for the day (heating on a cool or cold day, cooling on a hot or warm day) is never delayed, and if neither side ran recently nothing changes.

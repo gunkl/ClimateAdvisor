@@ -43,16 +43,18 @@ class TestDecideOverrideMatchesDecision:
         assert _base(manual_override_mode="heat", classification_mode="cool") is False
 
     # Branch 3: non-heat/cool mode match -> True (no setpoint to compare).
-    def test_off_mode_match_true(self):
-        assert (
-            _base(
-                manual_override_mode="off",
-                classification_mode="off",
-                current_setpoint_f=None,
-                target_setpoint_f=None,
-            )
-            is True
-        )
+    def test_off_mode_match_true_only_while_ca_plans_hvac_off(self):
+        """Issue #1159: an occupant's "off" matches an "off" label only while CA's own plan is HVAC off;
+        on a mild day the label does not mean CA plans off, so it is a real override (not adopted)."""
+        kw = {
+            "manual_override_mode": "off",
+            "classification_mode": "off",
+            "current_setpoint_f": None,
+            "target_setpoint_f": None,
+        }
+        assert _base(**kw, ca_plans_hvac_off=True) is True
+        assert _base(**kw, ca_plans_hvac_off=False) is False
+        assert _base(**kw) is False
 
     def test_heat_cool_mode_match_true_ignores_setpoint(self):
         """Non-heat/cool mode match returns True even if setpoint fields would

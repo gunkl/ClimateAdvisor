@@ -142,6 +142,7 @@ from .desired_state import (
     decide_setpoint_retry_action,
 )
 from .override_confirm_split import OverrideConfirmPathOutcome, decide_override_confirm_path
+from .override_match import decide_override_matches_decision
 
 if TYPE_CHECKING:
     from .classification_fsm import ClassificationDecision
@@ -2975,6 +2976,7 @@ class AutomationEngine:
                     setpoint_override=source == "setpoint",
                     current_mode=current_mode,
                     classification_mode=cls_mode,
+                    ca_plans_hvac_off=self._ca_plans_hvac_off(),
                 )
                 is OverrideConfirmPathOutcome.CONFIRM
             ):
@@ -3072,7 +3074,17 @@ class AutomationEngine:
         if self._manual_override_mode not in ("heat", "cool"):
             # "off" / heat_cool / auto: no setpoint to compare and no selector family -- the
             # override matches only when automation's day mode is the same non-setpoint mode.
-            return self._manual_override_mode == classification.hvac_mode
+            # Issue #1159: an occupant's "off" matches only while CA's own plan is HVAC off (the pure
+            # leaf owns that rule); on a mild day "off" is a label, CA arms the band, so it is a real override.
+            return decide_override_matches_decision(
+                manual_override_active=self._manual_override_active,
+                manual_override_mode=self._manual_override_mode,
+                manual_override_source=self._manual_override_source,
+                classification_mode=classification.hvac_mode,
+                current_setpoint_f=None,
+                target_setpoint_f=None,
+                ca_plans_hvac_off=self._ca_plans_hvac_off(),
+            )
 
         # Issue #1073 (S6 / #1070): compare against what the SELECTOR would arm now and the RESOLVED
         # band edge, not ``classification.hvac_mode`` / the flat band. On warm and mild days the
@@ -3097,6 +3109,22 @@ class AutomationEngine:
             return True
         return abs(current_f - target_f) <= OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
 
+    def _ca_plans_hvac_off(self) -> bool:
+        """True while CA's own plan right now is HVAC off (Issue #1159, extracted from #1119).
+
+        The open-window hold: ``_paused_by_door``, or ``decide_open_sensor_hold()`` (the predicate
+        ``_apply_comfort_band()`` / ``_sync_paused_by_door_with_live_sensors()`` act on). It is the one
+        state in which CA writes/keeps the thermostat Off on purpose; on a mild day the classification
+        label "off" is NOT such a state (CA arms the comfort band, #249). Single source for the
+        override confirm split, adoption, the override/grace FSM inputs and the coordinator shadow.
+        """
+        return self._paused_by_door or decide_open_sensor_hold(
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+            debounce_pending=self._sensor_debounce_pending,
+            any_sensor_open=self._any_monitored_sensor_open(),
+        )
+
     def _override_decision_mode_and_target(self, classification: DayClassification) -> tuple[str | None, float | None]:
         """What automation would arm right now, for override adoption (Issue #1073, S6).
 
@@ -3115,12 +3143,7 @@ class AutomationEngine:
         the occupant's grace only to switch their heat/cool off in the same instant. Single source
         for production adoption, the override/grace FSM inputs and the coordinator shadow.
         """
-        if self._paused_by_door or decide_open_sensor_hold(
-            natural_vent_active=self._natural_vent_active,
-            whf_owns_hvac=self._whf_owns_hvac(),
-            debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_open(),
-        ):
+        if self._ca_plans_hvac_off():
             return None, None
         band = self._resolved_comfort_band(classification)
         day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, "cool")
@@ -10578,6 +10601,7 @@ class AutomationEngine:
             tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
             within_planned_window=self._is_within_planned_window_period(),
             any_sensor_open=self._any_monitored_sensor_open(),
+            ca_plans_hvac_off=self._ca_plans_hvac_off(),
             # Issue #757 Phase 6 Step 3 correction: for GRACE_TIMER_EXPIRED specifically,
             # _cancel_grace_timers_action() already set _last_resume_source=None before
             # this dispatch, so this read is always "automation" for that kind. Confirmed

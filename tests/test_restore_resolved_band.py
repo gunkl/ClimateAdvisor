@@ -344,8 +344,13 @@ class TestOverrideAdoptionOnResolvedBand:
         engine._manual_override_active = False
         assert _matches(engine, c) is False
 
-    def test_off_override_matches_an_off_decision_without_a_setpoint(self):
+    def test_off_override_matches_only_while_ca_holds_hvac_off(self):
+        # Issue #1159: on a warm/mild day the "off" label is not a plan to hold HVAC off (CA arms the
+        # band), so the occupant's Off is a real override and is NOT adopted ...
         engine, c = _override_engine(day="warm", indoor=71.0, user_mode="off", setpoint=70.0)
+        assert _matches(engine, c) is False
+        # ... unless CA itself is holding HVAC off (open-window hold), where Off agrees with CA.
+        engine._paused_by_door = True
         assert _matches(engine, c) is True
         hot_engine, hot = _override_engine(day="hot", indoor=71.0, user_mode="off", setpoint=70.0)
         assert _matches(hot_engine, hot) is False

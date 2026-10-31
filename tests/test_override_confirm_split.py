@@ -19,6 +19,7 @@ class TestDecideOverrideConfirmPath:
             setpoint_override=True,
             current_mode="cool",
             classification_mode="cool",
+            ca_plans_hvac_off=False,
         )
         assert result == OverrideConfirmPathOutcome.CONFIRM
 
@@ -27,6 +28,7 @@ class TestDecideOverrideConfirmPath:
             setpoint_override=False,
             current_mode="heat",
             classification_mode="cool",
+            ca_plans_hvac_off=False,
         )
         assert result == OverrideConfirmPathOutcome.CONFIRM
 
@@ -35,6 +37,7 @@ class TestDecideOverrideConfirmPath:
             setpoint_override=False,
             current_mode="cool",
             classification_mode="cool",
+            ca_plans_hvac_off=False,
         )
         assert result == OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
 
@@ -45,6 +48,7 @@ class TestDecideOverrideConfirmPath:
             setpoint_override=False,
             current_mode="unavailable",
             classification_mode="cool",
+            ca_plans_hvac_off=False,
         )
         assert result == OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
 
@@ -53,6 +57,7 @@ class TestDecideOverrideConfirmPath:
             setpoint_override=False,
             current_mode="unknown",
             classification_mode="cool",
+            ca_plans_hvac_off=False,
         )
         assert result == OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
 
@@ -64,6 +69,7 @@ class TestDecideOverrideConfirmPath:
             setpoint_override=False,
             current_mode="heat",
             classification_mode=None,
+            ca_plans_hvac_off=False,
         )
         assert result == OverrideConfirmPathOutcome.CONFIRM
 
@@ -74,5 +80,44 @@ class TestDecideOverrideConfirmPath:
             setpoint_override=True,
             current_mode="unavailable",
             classification_mode="cool",
+            ca_plans_hvac_off=False,
         )
         assert result == OverrideConfirmPathOutcome.CONFIRM
+
+
+class TestOccupantOffIssue1159:
+    """An "off" equal to the classification LABEL is a real change unless CA itself plans HVAC off."""
+
+    def test_off_on_off_labelled_day_confirms_when_ca_is_not_holding_off(self):
+        assert (
+            decide_override_confirm_path(
+                setpoint_override=False,
+                current_mode="off",
+                classification_mode="off",
+                ca_plans_hvac_off=False,
+            )
+            == OverrideConfirmPathOutcome.CONFIRM
+        )
+
+    def test_off_on_off_labelled_day_discards_when_ca_plans_hvac_off(self):
+        assert (
+            decide_override_confirm_path(
+                setpoint_override=False,
+                current_mode="off",
+                classification_mode="off",
+                ca_plans_hvac_off=True,
+            )
+            == OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
+        )
+
+    def test_plan_flag_does_not_affect_other_modes(self):
+        for plan in (True, False):
+            assert (
+                decide_override_confirm_path(
+                    setpoint_override=False,
+                    current_mode="cool",
+                    classification_mode="cool",
+                    ca_plans_hvac_off=plan,
+                )
+                == OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
+            )

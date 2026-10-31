@@ -62,6 +62,21 @@ importlib.import_module("custom_components")
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
+
+@pytest.fixture
+def snapshot(snapshot):
+    """Pin the Home Assistant snapshot extension (``tests_ha/snapshots/``) regardless of plugin load order.
+
+    Both syrupy and pytest-homeassistant-custom-component register a plugin-level ``snapshot`` fixture; whichever
+    registers last wins, and that order differs between machines (Issue #1125: on GitHub CI syrupy's plain fixture
+    won and looked in ``__snapshots__/``, reporting every snapshot as missing). A conftest fixture always outranks
+    plugin fixtures, and re-applying the same extension is a no-op.
+    """
+    from pytest_homeassistant_custom_component.syrupy import HomeAssistantSnapshotExtension
+
+    return snapshot.use_extension(HomeAssistantSnapshotExtension)
+
+
 # Determinism stress knob (Issue #1125): ``CA_HA_EXECUTOR_JITTER_MS=40`` delays every thread-pool job by a random
 # 0-40 ms of REAL time, the way a loaded CI runner does. The tier must give identical results with and without it;
 # a test that only passes on a fast machine is a test that races the executor.

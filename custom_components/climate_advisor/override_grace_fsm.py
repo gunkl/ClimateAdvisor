@@ -135,7 +135,7 @@ class OverrideGraceFsmInputs:
       setpoint_override       -> (the detected override's source == "setpoint")
       current_mode             -> self.hass.states.get(self.climate_entity).state
       classification_mode      -> self._current_classification.hvac_mode
-      ca_plans_hvac_off        -> self._ca_plans_hvac_off()  (Issue #1159)
+      ca_paused_hvac           -> self._ca_paused_hvac()  (Issue #1159)
       manual_override_active   -> self._manual_override_active
       manual_override_mode      -> self._manual_override_mode
       manual_override_source    -> self._manual_override_source
@@ -183,10 +183,11 @@ class OverrideGraceFsmInputs:
     # confirm-path decisions unchanged. ``decision_mode_resolved`` False keeps the legacy behaviour.
     decision_mode: str | None = None
     decision_mode_resolved: bool = False
-    # Issue #1159: CA's own plan right now is HVAC off (open-window hold), via
-    # ``AutomationEngine._ca_plans_hvac_off()``. The ONLY state in which an occupant "off" matches
-    # automation's decision (confirm split + adoption); on a mild day the "off" label does not.
-    ca_plans_hvac_off: bool = False
+    # Issue #1159: CA has actually paused HVAC for a door/window (``_paused_by_door``), via
+    # ``AutomationEngine._ca_paused_hvac()``. The ONLY state in which an occupant "off" matches
+    # automation's decision (confirm split + adoption); on a mild day the "off" label does not, and neither
+    # does a merely open sensor (CA makes no pause during a manual override).
+    ca_paused_hvac: bool = False
 
 
 @dataclass(frozen=True)
@@ -236,7 +237,7 @@ def _grace_expiry_outcome_str(inputs: OverrideGraceFsmInputs) -> str:
         current_setpoint_f=inputs.current_setpoint_f,
         target_setpoint_f=inputs.target_setpoint_f,
         tolerance_f=inputs.tolerance_f,
-        ca_plans_hvac_off=inputs.ca_plans_hvac_off,
+        ca_paused_hvac=inputs.ca_paused_hvac,
     )
     outcome = decide_grace_expiry_outcome(
         GraceExpiryInputs(
@@ -267,7 +268,7 @@ def _transition_from_no_grace(
             setpoint_override=inputs.setpoint_override,
             current_mode=inputs.current_mode or "unknown",
             classification_mode=inputs.classification_mode,
-            ca_plans_hvac_off=inputs.ca_plans_hvac_off,
+            ca_paused_hvac=inputs.ca_paused_hvac,
         )
         if path == OverrideConfirmPathOutcome.CONFIRM and inputs.grace_would_start:
             next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
@@ -374,7 +375,7 @@ def _transition_from_grace_unprotected(
             setpoint_override=inputs.setpoint_override,
             current_mode=inputs.current_mode or "unknown",
             classification_mode=inputs.classification_mode,
-            ca_plans_hvac_off=inputs.ca_plans_hvac_off,
+            ca_paused_hvac=inputs.ca_paused_hvac,
         )
         if path == OverrideConfirmPathOutcome.CONFIRM:
             # _confirm_override() cancels the unprotected grace and starts a fresh

@@ -118,9 +118,9 @@ def _make_automation_engine_stub() -> AutomationEngine:
     ae._emit_event_callback = None
     ae._grace_churn_starts = {}  # Issue #1104: grace_churn tracking (set by __init__ in production)
     ae._grace_churn_last_emit = {}
-    # Issue #1159: the FSM input builder now also reads CA's "HVAC off by plan" fact (open-window hold);
+    # Issue #1159: the FSM input builder now also reads CA's "paused HVAC for a door/window" fact;
     # these grace-flag tests do not exercise it, and the bare stub lacks the sensor/WHF state it reads.
-    ae._ca_plans_hvac_off = lambda: False
+    ae._ca_paused_hvac = lambda: False
     return ae
 
 

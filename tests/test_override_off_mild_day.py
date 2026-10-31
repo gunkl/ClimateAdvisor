@@ -13,6 +13,8 @@ events and the override flags.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -43,6 +45,12 @@ class _Scene:
         _apply(self.engine, self.clock, day, indoor)
         assert _mode(self.engine) == ca_first, "precondition: CA's own first write"
 
+    def _patch_all(self):
+        stack = ExitStack()
+        for p in self._patches():
+            stack.enter_context(p)
+        return stack
+
     def _patches(self):
         return (
             patch(f"{_AUTOMATION}.callback", side_effect=lambda fn: fn),
@@ -51,13 +59,14 @@ class _Scene:
                 side_effect=lambda _h, _d, fn: self.timers.append(fn) or MagicMock(),
             ),
             patch(f"{_AUTOMATION}.dt_util.now", side_effect=self.clock),
+            # a second manual grace replacing a live one parses the first's end time (the stub returns a mock)
+            patch(f"{_AUTOMATION}.dt_util.parse_datetime", side_effect=datetime.fromisoformat),
         )
 
     def occupant_sets(self, new_mode: str, *, old_mode: str) -> None:
         """The thermostat changes to ``new_mode`` and the engine starts override confirmation."""
         self.engine._test_state.state = new_mode
-        p1, p2, p3 = self._patches()
-        with p1, p2, p3:
+        with self._patch_all():
             self.engine.handle_manual_override(
                 old_mode=old_mode,
                 new_mode=new_mode,
@@ -66,15 +75,17 @@ class _Scene:
 
     def confirm_elapses(self) -> None:
         self.clock.advance(minutes=10)
-        p1, p2, p3 = self._patches()
-        with p1, p2, p3:
+        with self._patch_all():
             self.timers[-1](None)  # the confirmation-window timer
 
     def grace_expires(self) -> None:
         self.clock.advance(minutes=60)
-        p1, p2, p3 = self._patches()
-        with p1, p2, p3:
+        with self._patch_all():
             self.engine._on_grace_expired("manual", 3600, False)
+
+    def window(self, *, open_: bool) -> None:
+        """A monitored door/window is open (debounce settled) or closed, as the engine's live sensor check sees it."""
+        self.engine._sensor_check_callback = lambda: open_
 
     def refresh(self) -> list[str]:
         """The next half-hourly refresh; returns the mode writes it made."""
@@ -156,25 +167,87 @@ class TestControlsUnchanged:
         assert s.engine._grace_active
 
 
-class TestOffWhileCaHoldsHvacOff:
-    """CA's own plan is HVAC off (open-window hold): the occupant's Off agrees with it, so it is not an override."""
+class TestOffWithOpenWindowIsTreatedAsOnHotDays:
+    """An open window alone does not end an occupant's Off: only an actual CA door/window pause does.
+
+    During a manual override CA makes no door/window pause (#1119), so a mild-day Off must behave exactly
+    as on a hot or cold day: kept, nothing written, until the manual grace ends. The hot row is the control.
+    """
+
+    _DAYS = pytest.mark.parametrize(
+        ("day", "indoor", "ca_first"),
+        [("hot", 76.0, "cool"), ("mild", 72.0, "cool"), ("mild", 64.0, "heat")],
+        ids=["hot_control", "mild_ca_in_cool", "mild_ca_in_heat"],
+    )
+
+    @_DAYS
+    def test_confirmed_off_survives_window_open_settle_and_close(self, day, indoor, ca_first):
+        s = _Scene(day=day, indoor=indoor, ca_first=ca_first)
+        s.occupant_sets("off", old_mode=ca_first)
+        s.confirm_elapses()
+        assert s.engine._manual_override_mode == "off"
+
+        s.window(open_=True)  # opens and settles
+        assert s.refresh() == []
+        assert not s.engine._paused_by_door  # CA does not pause HVAC inside the occupant's grace
+        assert s.engine._manual_override_active
+        assert s.engine._grace_active
+        assert "override_adopted" not in s.events
+        assert _mode(s.engine) == "off"
+
+        s.window(open_=False)
+        assert s.refresh() == []  # closing the window does not let CA resume early
+        assert s.engine._manual_override_active
+        assert _mode(s.engine) == "off"
+
+        s.grace_expires()
+        assert not s.engine._manual_override_active
+        s.refresh()
+        assert _mode(s.engine) == ca_first
+
+    @_DAYS
+    def test_off_during_heat_grace_with_window_open_is_confirmed(self, day, indoor, ca_first):
+        s = _Scene(day=day, indoor=indoor, ca_first=ca_first)
+        s.occupant_sets("heat", old_mode=ca_first)
+        s.confirm_elapses()
+        assert s.engine._manual_override_mode == "heat"
+        s.window(open_=True)
+
+        s.occupant_sets("off", old_mode="heat")
+        s.confirm_elapses()
+
+        assert s.events.count("override_confirmed") == 2
+        assert "override_self_resolved" not in s.events
+        assert s.engine._manual_override_active
+        assert s.engine._manual_override_mode == "off"
+        assert s.engine._grace_active
+        assert s.refresh() == []
+        assert _mode(s.engine) == "off"
+
+
+class TestOffAfterCaPausedHvac:
+    """CA has actually paused HVAC for a door/window (``_paused_by_door``): the occupant's Off agrees with it.
+
+    This state precedes the override (the window pause came first, the occupant then changed the mode and
+    switched Off); it is never entered while an override is active, so the tests set the flag directly.
+    """
 
     def test_off_while_window_pause_in_force_self_resolves(self):
         s = _Scene(day="mild", indoor=72.0, ca_first="cool")
         s.occupant_sets("off", old_mode="cool")
-        s.engine._paused_by_door = True  # a monitored window is open and CA is holding HVAC off
+        s.engine._paused_by_door = True  # CA's door/window pause is in force
         s.confirm_elapses()
         assert "override_self_resolved" in s.events
         assert "override_confirmed" not in s.events
         assert not s.engine._manual_override_active
         assert not s.engine._grace_active
 
-    def test_confirmed_off_is_adopted_once_ca_itself_holds_hvac_off(self):
+    def test_confirmed_off_is_adopted_once_ca_has_paused_hvac(self):
         s = _Scene(day="mild", indoor=72.0, ca_first="cool")
         s.occupant_sets("off", old_mode="cool")
         s.confirm_elapses()
         assert s.engine._manual_override_active
-        s.engine._paused_by_door = True  # now a window opens: CA's plan is off as well
+        s.engine._paused_by_door = True  # CA's pause is now in force as well
         s.refresh()
         assert "override_adopted" in s.events
         assert not s.engine._manual_override_active

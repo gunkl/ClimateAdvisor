@@ -1130,7 +1130,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
                 within_planned_window=ae._is_within_planned_window_period(),
                 any_sensor_open=ae._any_monitored_sensor_open(),
-                ca_plans_hvac_off=ae._ca_plans_hvac_off(),
+                ca_paused_hvac=ae._ca_paused_hvac(),
                 grace_source=ae._last_resume_source or "automation",
                 now=now,
                 decision_mode=decision_mode,

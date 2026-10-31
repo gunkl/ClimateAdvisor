@@ -2045,7 +2045,7 @@ The fix replaces the comparison target with `ae._last_commanded_hvac_mode or cla
 
 This ensures mode overrides are correctly detected regardless of whether the thermostat is single- or dual-setpoint capable.
 
-**Confirming an "off" (Issue #1159).** Detection can fire on an Off whose value equals the classification label `off` (mild/warm days; CA does not write Off on those days since #249, it arms the band). At confirmation expiry `decide_override_confirm_path()` therefore treats an `off` as a real, divergent change (PATH A, manual grace, notice) unless `AutomationEngine._ca_plans_hvac_off()` is true (open-window hold), and `decide_override_matches_decision()` adopts an `off` override only under the same fact. See `grace-periods-spec.md` § State Machine.
+**Confirming an "off" (Issue #1159).** Detection can fire on an Off whose value equals the classification label `off` (mild/warm days; CA does not write Off on those days since #249, it arms the band). At confirmation expiry `decide_override_confirm_path()` therefore treats an `off` as a real, divergent change (PATH A, manual grace, notice) unless `AutomationEngine._ca_paused_hvac()` is true (`_paused_by_door`: CA has actually paused HVAC for a door/window; an open sensor alone does not count), and `decide_override_matches_decision()` adopts an `off` override only under the same fact. See `grace-periods-spec.md` § State Machine.
 
 #### Dual Setpoint Override Detection — `heat_cool` Mode (Issue #269 Bug D)
 

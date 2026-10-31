@@ -3901,7 +3901,11 @@ class AutomationEngine:
         if changes is None:
             changes = deque(maxlen=COMFORT_MODE_CHANGE_LOG_CAP)
             self._comfort_mode_changes = changes
-        band = getattr(self, "_last_comfort_band", None)
+        # Issue #1120: record the band in force NOW, not the last one ARMED -- a skipped wake-up or
+        # bedtime (override, open window) leaves ``_last_comfort_band`` on the previous period's band.
+        # ``_last_comfort_band`` is only the fallback before any classification exists.
+        _cls = getattr(self, "_current_classification", None)
+        band = self._resolved_comfort_band(_cls) if _cls is not None else getattr(self, "_last_comfort_band", None)
         try:
             indoor = self._get_indoor_temp_f()
         except Exception:  # noqa: BLE001 - bookkeeping must never break a mode write

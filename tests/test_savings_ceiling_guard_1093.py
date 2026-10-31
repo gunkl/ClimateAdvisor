@@ -82,6 +82,9 @@ def _make_engine(
         config=config,
     )
     engine._sensor_check_callback = lambda: sensor_open
+    # Sealed = sensors configured and none open (the coordinator's real predicate is pinned separately
+    # in TestSealedNeedsKnownClosedSensors, which wires the real callback).
+    engine._sensors_known_closed_callback = lambda: bool(sensors) and not sensor_open
     engine._thermal_model = {"k_passive": -0.5, "confidence_k_passive": "high", "k_active_cool": -2.0}
     engine._natural_vent_active = False
     engine._last_outdoor_temp = 90.0
@@ -214,17 +217,150 @@ class TestWholeHouseFanHomeFollowsTheSealedState:
         assert decision.outcome is OdeCeilingGuardOutcome.ESCALATE
 
 
+def _wired_whf_engine(states: dict[str, str | None], *, inverted: bool = False):
+    """A WHF engine whose sealed-house callback is the coordinator's REAL ``_all_sensors_known_closed``
+    reading a fake HA state table (``None`` = entity missing from HA)."""
+    coordinator_cls = _get_coordinator_module().ClimateAdvisorCoordinator
+    coord = object.__new__(coordinator_cls)
+    coord.config = {"sensor_polarity_inverted": inverted}
+    coord._resolved_sensors = list(states)
+
+    def _get(entity_id):
+        raw = states[entity_id]
+        if raw is None:
+            return None
+        st = MagicMock()
+        st.state = raw
+        return st
+
+    coord.hass = MagicMock()
+    coord.hass.states.get = _get
+    engine = _make_engine(savings=True, fan_mode=FAN_MODE_WHOLE_HOUSE, sensors=list(states))
+    engine._sensors_known_closed_callback = coord._all_sensors_known_closed
+    engine._sensor_check_callback = coord._any_sensor_open
+    return engine
+
+
+class TestSealedNeedsKnownClosedSensors:
+    """A sensor the integration cannot read (Zigbee hub down: unavailable/unknown/missing) is NOT closed,
+    so a WHF home with it stays on the no-handoff path instead of starting the AC with windows maybe open."""
+
+    _TWO = ["binary_sensor.front_door", "binary_sensor.office_window"]
+
+    def test_all_closed_escalates(self):
+        engine = _wired_whf_engine({self._TWO[0]: "off", self._TWO[1]: "off"})
+        decision, _events = asyncio.run(_run(engine, _BREACH_77))
+        assert decision.outcome is OdeCeilingGuardOutcome.ESCALATE
+        assert engine._set_temperature.await_args.args[0] == 77.0
+
+    def test_one_sensor_unavailable_is_not_sealed(self):
+        engine = _wired_whf_engine({self._TWO[0]: "off", self._TWO[1]: "unavailable"})
+        decision, _events = asyncio.run(_run(engine, _BREACH_77))
+        assert decision.outcome is OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD
+        engine._set_temperature.assert_not_awaited()
+
+    def test_all_sensors_unknown_is_not_sealed(self):
+        engine = _wired_whf_engine({self._TWO[0]: "unknown", self._TWO[1]: "unknown"})
+        decision, _events = asyncio.run(_run(engine, _BREACH_77))
+        assert decision.outcome is OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD
+        engine._set_temperature.assert_not_awaited()
+
+    def test_a_sensor_missing_from_ha_is_not_sealed(self):
+        engine = _wired_whf_engine({self._TWO[0]: "off", self._TWO[1]: None})
+        decision, _events = asyncio.run(_run(engine, _BREACH_77))
+        assert decision.outcome is OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD
+
+    def test_an_open_sensor_is_not_sealed(self):
+        engine = _wired_whf_engine({self._TWO[0]: "off", self._TWO[1]: "on"})
+        decision, _events = asyncio.run(_run(engine, _BREACH_77))
+        assert decision.outcome is OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD
+
+    def test_inverted_polarity_reads_off_as_open(self):
+        engine = _wired_whf_engine({self._TWO[0]: "on", self._TWO[1]: "on"}, inverted=True)
+        decision, _events = asyncio.run(_run(engine, _BREACH_77))
+        assert decision.outcome is OdeCeilingGuardOutcome.ESCALATE
+        engine = _wired_whf_engine({self._TWO[0]: "on", self._TWO[1]: "off"}, inverted=True)
+        decision, _events = asyncio.run(_run(engine, _BREACH_77))
+        assert decision.outcome is OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD
+
+    def test_unavailable_sensor_does_not_read_as_open_for_the_whf_stop(self):
+        # The WHF safety-stop direction is unchanged: an unreadable sensor is not "open".
+        engine = _wired_whf_engine({self._TWO[0]: "off", self._TWO[1]: "unavailable"})
+        assert engine._any_monitored_sensor_open() is False
+
+    def test_without_the_callback_wired_the_house_is_not_sealed(self):
+        engine = _make_engine(savings=True, fan_mode=FAN_MODE_WHOLE_HOUSE, sensors=self._TWO)
+        engine._sensors_known_closed_callback = None
+        assert engine._whf_house_sealed_with_known_sensors() is False
+
+
 class TestCeilingThresholdHasOneSource:
     @pytest.mark.parametrize(("savings", "expected"), [(True, 77.0), (False, 75.0)])
     def test_matches_the_armed_awake_ceiling(self, savings, expected):
         engine = _make_engine(savings=savings)
         assert engine._ceiling_threshold(75.0) == expected
 
-    def test_forecast_default_keeps_the_whf_archetype_none_even_when_sealed(self):
-        # The forecast walk and the nat-vent gate are window-open decisions: they never pass house_sealed.
+    def test_default_keeps_the_whf_archetype_none_unless_house_sealed_is_passed(self):
+        # Only the callers that know the sealed state (the guard, the chart forecast) pass house_sealed.
         engine = _make_engine(savings=True, fan_mode=FAN_MODE_WHOLE_HOUSE, sensors=["binary_sensor.door"])
         assert engine._ceiling_threshold(75.0) is None
         assert engine._ceiling_threshold(75.0, house_sealed=True) == 77.0
+
+
+class TestGuardLoggingAndEventPayload:
+    def test_no_ceiling_line_says_why_unknown_sensor(self, caplog):
+        engine = _wired_whf_engine({"binary_sensor.a": "off", "binary_sensor.b": "unavailable"})
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_run(engine, _BREACH_77))
+        assert any("a door/window sensor state is unknown or unavailable" in r.getMessage() for r in caplog.records)
+
+    def test_no_ceiling_line_says_why_window_open(self, caplog):
+        engine = _wired_whf_engine({"binary_sensor.a": "off", "binary_sensor.b": "on"})
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_run(engine, _BREACH_77))
+        assert any("a door/window is open" in r.getMessage() for r in caplog.records)
+
+    def test_no_ceiling_line_says_why_no_sensors(self, caplog):
+        engine = _make_engine(savings=True, fan_mode=FAN_MODE_WHOLE_HOUSE, sensors=[])
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_run(engine, _BREACH_77))
+        assert any("no door/window sensors configured" in r.getMessage() for r in caplog.records)
+
+    def test_eval_line_carries_house_sealed(self, caplog):
+        engine = _wired_whf_engine({"binary_sensor.a": "off", "binary_sensor.b": "off"})
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_run(engine, _BREACH_77))
+        assert any("ceiling=77.0, house_sealed=True" in r.getMessage() for r in caplog.records)
+
+    def test_escalation_payload_carries_ceiling_and_the_legacy_key(self):
+        # Savings off, HVAC-fan home, nat-vent running but indoor already past the 75 ceiling: the guard
+        # ends the session and emits the escalation event.
+        engine = _make_engine(savings=False)
+        engine._natural_vent_active = True
+        engine._last_outdoor_temp = 70.0
+        engine._deactivate_fan = AsyncMock(return_value=None)
+        engine._get_indoor_temp_f = lambda: 76.0
+        _decision, events = asyncio.run(_run(engine, _BREACH_75_ONLY))
+        payload = [p for n, p in events if n == "nat_vent_ceiling_escalation"]
+        assert len(payload) == 1
+        assert payload[0]["ceiling"] == 75.0
+        assert payload[0]["comfort_cool"] == 75.0
+
+
+class TestChartForecastReadsTheSameSealedDecision:
+    """The chart forecast must not disagree with the guard: get_chart_data() asks the engine's sealed
+    predicate and passes it to the SAME _ceiling_threshold() the guard uses."""
+
+    @pytest.mark.parametrize("sealed", [True, False])
+    def test_forecast_walk_ceiling_is_resolved_with_the_engine_sealed_decision(self, sealed):
+        coord_mod = _get_coordinator_module()
+        coord = _make_full_chart_coord(daily_forecast_full=None)
+        ae = coord.automation_engine
+        ae._whf_house_sealed_with_known_sensors = MagicMock(return_value=sealed)
+        now_p, as_local_p = _patched_dt_util(coord_mod)
+        with now_p, as_local_p:
+            coord.get_chart_data("24h")
+        assert ae._ceiling_threshold.call_args.kwargs == {"house_sealed": sealed}
 
 
 class TestPlanBreachTimeFollowsTheGuardCeiling:

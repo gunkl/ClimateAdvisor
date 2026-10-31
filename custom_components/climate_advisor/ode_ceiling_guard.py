@@ -77,7 +77,9 @@ class OdeCeilingGuardOutcome(Enum):
     NOT_APPLICABLE = "not_applicable"  # predicted_indoor empty/None, or classification.hvac_mode != "off"
     MODEL_INELIGIBLE = "model_ineligible"  # k_passive/confidence/comfort_cool preconditions not met
     MISSING_TEMPS = "missing_temps"  # outdoor or indoor reading unavailable
-    NO_CEILING_THRESHOLD = "no_ceiling_threshold"  # WHF/BOTH with a window open or no sensors — no handoff
+    NO_CEILING_THRESHOLD = (
+        "no_ceiling_threshold"  # WHF/BOTH home not known sealed (window open / sensor unknown / none) — no handoff
+    )
     DORMANT = "dormant"  # free cooling viable (Issue #247's 3-condition dormancy test)
     NO_BREACH_PREDICTED = "no_breach_predicted"  # curve never crosses ceiling_threshold + tolerance
     STANDING_BY = "standing_by"  # breach predicted, but outside the lead-time window

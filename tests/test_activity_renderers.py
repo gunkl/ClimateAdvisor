@@ -1626,6 +1626,21 @@ class TestLifecycleScopedNarration:
         assert "lead=15min" in st
         assert "k_cool=-0.550" in st
 
+    def test_nat_vent_ceiling_escalation_prefers_the_ceiling_key(self):
+        # Issue #1093: "ceiling" is the guard ceiling (77 with Prefer savings); old rows only have comfort_cool.
+        ev, _st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
+            {"indoor": 78.0, "ceiling": 77.0, "comfort_cool": 75.0, "hours_to_breach": 0.4, "lead_min": 15},
+            "fahrenheit",
+        )
+        assert "ceiling 77" in ev
+
+    def test_nat_vent_ceiling_escalation_old_rows_fall_back_to_comfort_cool(self):
+        ev, _st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
+            {"indoor": 78.0, "comfort_cool": 76.0, "hours_to_breach": 0.4, "lead_min": 15},
+            "fahrenheit",
+        )
+        assert "ceiling 76" in ev
+
     def test_nat_vent_bedtime_continue_shows_outdoor_and_sleep_cool(self):
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_bedtime_continue"](
             {"fan_device": "whf", "outdoor_temp": 70.0, "sleep_cool": 74.0},

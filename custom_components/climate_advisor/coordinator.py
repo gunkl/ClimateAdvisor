@@ -49,6 +49,7 @@ from .automation import (
     compute_pre_cool_target,
     fallback_edges_without_classification,
     hvac_outcome_label,
+    resolve_active_band,
     resolve_pre_cool_modifier,
 )
 from .briefing import generate_briefing
@@ -10011,7 +10012,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         comfort_cool = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
-        comfort_heat = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         fan_enabled = fan_mode != FAN_MODE_DISABLED
 
@@ -10154,8 +10154,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # WARM/MILD/COOL fallback: symmetric cooling-direction and heating-direction
         # checks, both gated on live outdoor-vs-indoor direction (Issue #428).
-        cooling_needed = indoor_temp is not None and indoor_temp > comfort_cool
-        heating_needed = indoor_temp is not None and indoor_temp < comfort_heat
+        # Issue #1136: judge "too warm / too cold" against the band the thermostat is armed
+        # with right now (sleep at night, setback away -- the engine's one resolver), not the
+        # flat daytime comfort_heat/comfort_cool config values.
+        _armed = resolve_active_band(
+            c,
+            self.config,
+            occupancy_mode=self._occupancy_mode,
+            now=dt_util.now(),
+        )
+        _armed_heat, _armed_cool = _armed.floor, _armed.ceiling
+        cooling_needed = indoor_temp is not None and indoor_temp > _armed_cool
+        heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):

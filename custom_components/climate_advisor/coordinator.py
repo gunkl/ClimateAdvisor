@@ -10156,7 +10156,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # checks, both gated on live outdoor-vs-indoor direction (Issue #428).
         # Issue #1136: judge "too warm / too cold" against the band the thermostat is armed
         # with right now (sleep at night, setback away -- the engine's one resolver), not the
-        # flat daytime comfort_heat/comfort_cool config values.
+        # flat daytime comfort_heat/comfort_cool config values. Issue #1094: the resolver's awake
+        # edges are awake_comfort_edges(), so the Prefer savings margin is already included.
         _armed = resolve_active_band(
             c,
             self.config,

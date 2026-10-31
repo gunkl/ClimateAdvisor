@@ -68,12 +68,11 @@
       "surface": "next_action",
       "context": "generated",
       "issue": 1136,
-      "evidence": "Same flat-config reading as the golden rows: e.g. day_seed 102000003 05:00 armed ceiling 77 F, Next User Action flips at 79.2 F. Replay: python tools/simulate.py --generate-day 102000003 The awake/low+high shape is a daytime one, seen at the wakeup event on day_seeds 101000006 (05:30, armed 65-79 F, Next User Action flips at 66.8/77.2 F) and 102000004 (07:00, armed 66-76 F, flips at 67.8/74.2 F): the awake armed edges differ from the flat comfort edges the Next User Action line uses. Same root cause as the sleep rows; any NEW daytime shape beyond this one fails.",
+      "evidence": "Same flat-config reading as the golden rows: e.g. day_seed 102000003 05:00 armed ceiling 77 F, Next User Action flips at 79.2 F. Replay: python tools/simulate.py --generate-day 102000003 Same root cause as the sleep rows. (The awake/low+high shape was the Prefer savings margin and went away with the #1094 fix; any NEW daytime shape fails.)",
       "signature": [
         "sleep/high",
         "sleep/low",
-        "sleep/low+high",
-        "awake/low+high"
+        "sleep/low+high"
       ]
     }
   ]

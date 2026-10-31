@@ -251,6 +251,7 @@ _UNTRIAGED_ON_HEAD: set[str] = set()
 # attributes it to, the rest are nightly seeds the family clears together.
 _PROTECT_MANUAL_CHANGE_SEEDS = {
     1000016: "#1131 setpoint change during a door pause overwritten at the door close",
+    1000025: "#1133 grace 0, window opened after a confirmed override (the #1153 mechanism example)",
     3000032: "#1131 (3000032 is the second #1131 example)",
     1003000002: "#1146 setpoint-only override lost its grace flags",
     1008000153: "#1146",

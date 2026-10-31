@@ -10,6 +10,7 @@ the configured literals, never recomputed by the test.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import importlib
 from unittest.mock import patch
@@ -114,3 +115,53 @@ class TestModeChangeRecordsBandInForce1120:
         assert (entry["floor_f"], entry["ceiling_f"]) == expected
         payload = next(d for t, d in events if t == "thermostat_mode_set")
         assert (payload["floor_f"], payload["ceiling_f"]) == expected
+
+
+class TestPreCoolRowQuotesArmedBand1120:
+    """Pre-cool arms a lowered ceiling; its mode-change row must show THAT band, not the clock band."""
+
+    @staticmethod
+    def _hot_tomorrow_engine():
+        engine = _make_engine(indoor=75.0, mode="off")
+        engine.config.update(_CFG)
+        c = _cls()
+        c.tomorrow_high = 100
+        c.setback_modifier = -3.0
+        engine._current_classification = c
+        return engine
+
+    def test_pre_cool_row_shows_the_ceiling_it_armed(self):
+        engine = self._hot_tomorrow_engine()
+        # 03:00 is inside the sleep window (64-72); pre-cool lowers the 72 ceiling by 3 to 69.
+        now = datetime.datetime(2026, 10, 28, 3, 0, tzinfo=datetime.UTC)
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=now):
+            asyncio.run(engine.handle_pre_cool(75.0, False))
+        entry = engine.comfort_mode_changes[-1]
+        assert entry["to_mode"] == "cool"
+        assert (entry["floor_f"], entry["ceiling_f"]) == (64.0, 69.0)
+
+    def test_row_after_pre_cool_goes_back_to_clock_band(self):
+        engine = self._hot_tomorrow_engine()
+        now = datetime.datetime(2026, 10, 28, 3, 0, tzinfo=datetime.UTC)
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=now):
+            asyncio.run(engine.handle_pre_cool(75.0, False))
+            engine._append_mode_change("cool", "heat", "user")
+        entry = engine.comfort_mode_changes[-1]
+        assert (entry["floor_f"], entry["ceiling_f"]) == (64.0, 72.0)
+
+    def test_door_pause_row_shows_clock_band_even_with_stale_armed_cache(self):
+        engine = _make_engine(indoor=75.0, mode="cool")
+        engine.config.update(_CFG)
+        engine._current_classification = _cls()
+        engine._last_comfort_band = ComfortBand(floor=64.0, ceiling=69.0, active="ceiling", reason="stale pre-cool")
+        now = datetime.datetime(2026, 10, 28, 12, 0, tzinfo=datetime.UTC)
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=now):
+
+            async def _pause():
+                with engine._mode_change_context("pause"):
+                    await engine._set_hvac_mode("off", reason="door open")
+
+            asyncio.run(_pause())
+        entry = engine.comfort_mode_changes[-1]
+        assert (entry["to_mode"], entry["reason"]) == ("off", "pause")
+        assert (entry["floor_f"], entry["ceiling_f"]) == (68.0, 74.0)

@@ -1500,6 +1500,7 @@ class AutomationEngine:
         self._comfort_hold_episode: dict[str, Any] | None = None
         self._comfort_mode_changes: deque[dict[str, Any]] = deque(maxlen=COMFORT_MODE_CHANGE_LOG_CAP)
         self._mode_change_reason: str = "other"
+        self._mode_change_band: ComfortBand | None = None  # Issue #1120: band armed for the write in flight
         # Issue #1066 (F1): TOU banking window. Set by the coordinator each cycle
         # (set_tou_precondition_window) from the resolved scheduler phase: while now < until the
         # TOU precondition owns the thermostat and the comfort-edge selector defers. ``mode`` is
@@ -3683,7 +3684,7 @@ class AutomationEngine:
         _effective_active = {"cool": "ceiling", "heat": "floor"}.get(_resolved_mode, band.active)
 
         if _effective_active == "ceiling" and caps.supports_cool:
-            with self._mode_change_context("selector"):
+            with self._mode_change_context("selector", band=band):
                 _write_result = await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
@@ -3695,7 +3696,7 @@ class AutomationEngine:
             # to preserve, unlike _set_temperature_for_mode()'s two equivalent
             # branches below.)
         elif _effective_active == "floor" and caps.supports_heat:
-            with self._mode_change_context("selector"):
+            with self._mode_change_context("selector", band=band):
                 _write_result = await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
@@ -3824,14 +3825,24 @@ class AutomationEngine:
         return ClimateCallResult(ClimateCallOutcome.OK)
 
     @contextlib.contextmanager
-    def _mode_change_context(self, reason: str) -> Iterator[None]:
-        """Issue #1066: label the commanded-mode changes made inside the block (ring buffer)."""
+    def _mode_change_context(self, reason: str, *, band: ComfortBand | None = None) -> Iterator[None]:
+        """Issue #1066: label the commanded-mode changes made inside the block (ring buffer).
+
+        Issue #1120: ``band`` is the comfort band ``_apply_comfort_band()`` has just armed for the
+        write inside the block (pre-cool's lowered ceiling, nat-vent AC assist's full band...); the
+        ring-buffer row quotes it instead of the clock-resolved band. Every other writer (pause,
+        restore, ODE guard, TOU, nat-vent...) passes none, and a nested block resets it, so a row is
+        only ever stamped with a band armed for THAT write.
+        """
         prior = getattr(self, "_mode_change_reason", "other")
+        prior_band = getattr(self, "_mode_change_band", None)
         self._mode_change_reason = reason
+        self._mode_change_band = band
         try:
             yield
         finally:
             self._mode_change_reason = prior
+            self._mode_change_band = prior_band
 
     def _record_commanded_mode(self, mode: str, reason_text: str | None = None) -> None:
         """Single writer of ``_last_commanded_hvac_mode`` (Issue #1066).
@@ -3879,7 +3890,13 @@ class AutomationEngine:
         # The "from" side is CA's last command when it differs; when CA is reversing an occupant's change
         # (prev == mode) the thermostat was really in the live mode.
         _from = _live if (prev == mode and _live is not None) else prev
-        self._append_mode_change(_from, mode, getattr(self, "_mode_change_reason", "other"), reason_text)
+        self._append_mode_change(
+            _from,
+            mode,
+            getattr(self, "_mode_change_reason", "other"),
+            reason_text,
+            armed_band=getattr(self, "_mode_change_band", None),
+        )
 
     def _live_hvac_state(self) -> str | None:
         """The thermostat's reported HVAC mode, or None when unreadable or not a real mode (unavailable/unknown)."""
@@ -3890,7 +3907,15 @@ class AutomationEngine:
         live = getattr(state, "state", None) if state is not None else None
         return _real_hvac_mode(live)
 
-    def _append_mode_change(self, prev: str | None, mode: str, reason: str, reason_text: str | None = None) -> None:
+    def _append_mode_change(
+        self,
+        prev: str | None,
+        mode: str,
+        reason: str,
+        reason_text: str | None = None,
+        *,
+        armed_band: ComfortBand | None = None,
+    ) -> None:
         """Append one entry to the capped mode-change ring buffer (the one mode-change clock).
 
         Issue #1073 (S3): shared by the commanded-mode choke point (``_record_commanded_mode``)
@@ -3904,8 +3929,13 @@ class AutomationEngine:
         # Issue #1120: record the band in force NOW, not the last one ARMED -- a skipped wake-up or
         # bedtime (override, open window) leaves ``_last_comfort_band`` on the previous period's band.
         # ``_last_comfort_band`` is only the fallback before any classification exists.
+        # The one exception: a write ``_apply_comfort_band()`` itself just armed (pre-cool's lowered
+        # ceiling) quotes that band (``armed_band``) -- it is fresh by construction for this write.
         _cls = getattr(self, "_current_classification", None)
-        band = self._resolved_comfort_band(_cls) if _cls is not None else getattr(self, "_last_comfort_band", None)
+        if armed_band is not None:
+            band = armed_band
+        else:
+            band = self._resolved_comfort_band(_cls) if _cls is not None else getattr(self, "_last_comfort_band", None)
         try:
             indoor = self._get_indoor_temp_f()
         except Exception:  # noqa: BLE001 - bookkeeping must never break a mode write

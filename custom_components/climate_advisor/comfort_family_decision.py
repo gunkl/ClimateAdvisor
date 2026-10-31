@@ -22,8 +22,8 @@ appliance overshoots (a compressor stops about half a degree past its setpoint, 
 thermostat reports whole degrees), so a reading at or past an edge right after the
 OPPOSITE family ran is usually that overshoot, not a real need. After a cool bank the
 house typically reads 68-70 first (INSIDE the arming margin, not yet a breach), so the
-guard covers the margin zone as well as the breach zone. A SWITCH from a known current
-family is HELD (outcome HOLD, target = the current family, ``held=True``) when ALL of:
+guard covers the margin zone as well as the breach zone. A SWITCH away from "the family being left" is
+HELD (outcome HOLD, target = that family, ``held=True``) when ALL of:
 
   (a) the switch is against the day's grain -- the target is not ``native_family``
       (the native side has tolerance 0 and is never delayed; a day type with no
@@ -38,9 +38,15 @@ family is HELD (outcome HOLD, target = the current family, ``held=True``) when A
       ``hold_depth_f`` (0.0 inside the band).
 
 Going deeper than the tolerance past the edge ALWAYS switches at once (R1). The
-hysteresis-gap ("keep current family") path is unchanged, never when the current family
-is unknown (adoption), and a hold never moves the dwell clock. When the window lapses a
-margin switch proceeds normally (the 600 s dwell lock still applies to non-breach switches).
+hysteresis-gap ("keep current family") path is unchanged and a hold never moves the dwell clock.
+
+"The family being left" is the thermostat's live family (``current_family``). When the live family is
+UNKNOWN (Off / heat_cool / auto / unavailable -- the occupant switched it Off, or it just came back
+online) the shell names the family that ran or was deliberately commanded most recently
+(``settling_from_family``) and the guard treats THAT as the family being left, so the same hold applies
+(Issue #1149: otherwise a thermostat switched Off right after the AC ran was heated for a shallow dip).
+With neither a live family nor a recent run there is nothing to hold and the selector adopts normally.
+When the window lapses a margin switch proceeds normally (the 600 s dwell lock still applies to non-breach switches).
 
 Capabilities: heat-only thermostat -> heating; cool-only -> cooling; neither ->
 NOT_APPLICABLE. Nat-vent or whole-house-fan owning the HVAC, or missing
@@ -129,10 +135,15 @@ class ComfortFamilyInputs:
     tolerance_f: float = 0.0
     # The day's native family ("cooling" hot/warm, "heating" cool/cold, None mild/unknown).
     native_family: str | None = None
-    # Minutes since the family being LEFT (current_family) ran or was commanded; None = unknown.
+    # Minutes since the family being LEFT ran or was commanded; None = unknown. The family being left is
+    # ``current_family`` when known, else ``settling_from_family``.
     opposite_ran_min_ago: float | None = None
     # comfort_family_recency_window_min; 0.0 (default) disables the guard.
     recency_window_min: float = 0.0
+    # Issue #1149: stand-in for "the family being left" while ``current_family`` is None (thermostat Off,
+    # heat_cool, auto or unavailable): the family that ran / was deliberately commanded most recently
+    # inside the window, chosen by the shell. Ignored when ``current_family`` is known. None = nothing ran.
+    settling_from_family: str | None = None
 
 
 def _native_family(day_type: str | None) -> str | None:
@@ -170,9 +181,10 @@ def _settling_hold(
     ``past_edge`` is the SIGNED distance past the target edge: positive when the house is beyond
     it (breach zone), zero or negative when still inside the band (margin zone).
     """
-    current = inputs.current_family
+    # The live family when known; else (Issue #1149) the family that most recently ran, as named by the shell.
+    current = inputs.current_family if inputs.current_family is not None else inputs.settling_from_family
     if current is None or target == current:
-        return None  # adoption (unknown family) or no switch: nothing to hold
+        return None  # nothing ran and the family is unknown (plain adoption), or no switch: nothing to hold
     if inputs.native_family is not None and target == inputs.native_family:
         return None  # the day's native side is never delayed (tolerance 0)
     ran = inputs.opposite_ran_min_ago

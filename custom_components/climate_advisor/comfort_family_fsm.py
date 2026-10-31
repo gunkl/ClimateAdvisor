@@ -7,8 +7,9 @@ Mirrors ``economizer_fsm.py``'s split: a pure decision leaf
 - ``ComfortFamilyState`` — the 2-state enum (``HEATING``/``COOLING``).
 - ``transition(current_state, event, dwell_state) -> ComfortFamilyTransition``
   — the single entry point, called once per relevant cycle. ``current_state``
-  may be None (family unknown: thermostat off/heat_cool/unavailable); the leaf
-  then uses its default family as tie-break.
+  may be None (family unknown: thermostat off/heat_cool/auto/unavailable); the
+  leaf then uses its default family as tie-break, unless a family ran recently
+  (``settling_from_family``), which the settling guard then holds (Issue #1149).
 
 What this module owns that the leaf does not:
 
@@ -95,6 +96,8 @@ class ComfortFamilyFsmInputs:
     native_family: str | None = None
     opposite_ran_min_ago: float | None = None
     recency_window_min: float = 0.0
+    # Issue #1149: the family the guard treats as being left while the live state is None (see leaf).
+    settling_from_family: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,7 @@ def _leaf_inputs(inputs: ComfortFamilyFsmInputs, current_state: ComfortFamilySta
         native_family=inputs.native_family,
         opposite_ran_min_ago=inputs.opposite_ran_min_ago,
         recency_window_min=inputs.recency_window_min,
+        settling_from_family=inputs.settling_from_family,
     )
 
 

@@ -11305,6 +11305,25 @@ class AutomationEngine:
         except TypeError:  # naive vs aware mix: treat the window as lapsed
             return False
 
+    def _minutes_since_family_ran(self, family: str, now: datetime) -> float | None:
+        """Issue #1073/#1149: minutes since ``family`` ("heating"/"cooling") ran or was DELIBERATELY commanded.
+
+        min() of the equipment clock and the mode-change clock; either None = unknown, so the result is
+        None when neither is known. Only DELIBERATE commands count (user, TOU bank, ODE guard); a
+        selector/restore/default write says nothing about the equipment having run (the #1066 09:17 symptom).
+        The ONE place this fact is computed, for the known-family and the unknown-family settling guard alike.
+        """
+        _cands = [
+            v
+            for v in (
+                self.minutes_since_equipment_ran(family, now),
+                self.minutes_since_mode_set(family, now, _DELIBERATE_MODE_REASONS),
+            )
+            # A negative value is a future timestamp (clock jump / restore): unknown, not "just ran".
+            if v is not None and v >= 0.0
+        ]
+        return min(_cands) if _cands else None
+
     def _comfort_family_inputs(
         self,
         day_mode: str,
@@ -11326,23 +11345,20 @@ class AutomationEngine:
             day_type = self._current_classification.day_type if self._current_classification else None
         caps = self._get_thermostat_capabilities()
         current_state = self._current_thermostat_family(now)
-        # Issue #1073 settling guard: minutes since the family being LEFT ran or was commanded.
-        # min() of the equipment clock and the mode-change clock; either None = unknown. The thermal
-        # model is deliberately not consulted (R7).
-        opposite_ran: float | None = None
+        # Issue #1073 settling guard: minutes since the family being LEFT ran or was commanded. The thermal
+        # model is deliberately not consulted (R7). Issue #1149: when the live family is unknown (Off /
+        # heat_cool / auto / unavailable) the family that ran most recently stands in as "the family being
+        # left" (the guard needs the side that ran, not the live mode), so a thermostat the occupant switched
+        # Off right after the AC ran is not flipped to heat for a shallow dip.
+        settling_from: str | None = None
         if current_state is not None:
-            _cands = [
-                v
-                for v in (
-                    self.minutes_since_equipment_ran(current_state.value, now),
-                    # Only DELIBERATE commands count (user, TOU bank, ODE guard); a selector/restore/default
-                    # write says nothing about the equipment having run (the #1066 09:17 symptom).
-                    self.minutes_since_mode_set(current_state.value, now, _DELIBERATE_MODE_REASONS),
-                )
-                # A negative value is a future timestamp (clock jump / restore): unknown, not "just ran".
-                if v is not None and v >= 0.0
-            ]
-            opposite_ran = min(_cands) if _cands else None
+            opposite_ran = self._minutes_since_family_ran(current_state.value, now)
+        else:
+            opposite_ran = None
+            for _fam in (ComfortFamilyState.HEATING.value, ComfortFamilyState.COOLING.value):
+                _ago = self._minutes_since_family_ran(_fam, now)
+                if _ago is not None and (opposite_ran is None or _ago < opposite_ran):
+                    settling_from, opposite_ran = _fam, _ago  # newest wins
         inputs = ComfortFamilyFsmInputs(
             default_family="heating" if day_mode == "heat" else "cooling",
             indoor=indoor if indoor is not None else self._get_indoor_temp_f(),
@@ -11365,6 +11381,7 @@ class AutomationEngine:
             recency_window_min=float(
                 self.config.get(CONF_COMFORT_FAMILY_RECENCY_WINDOW_MIN, DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN)
             ),
+            settling_from_family=settling_from,
         )
         return inputs, current_state
 
@@ -11418,7 +11435,9 @@ class AutomationEngine:
             self._comfort_hold_signature = None
             self._end_comfort_hold_episode(result, fsm_inputs, floor, ceiling, now)
             return
-        current = result.from_state.value if result.from_state is not None else None
+        # The family being held: the live one when known, else (Issue #1149) the family that ran, which the
+        # hold's target_family names in both cases.
+        current = decision.target_family
         signature = (str(decision.hold_candidate_family), str(current))
         is_new = signature != getattr(self, "_comfort_hold_signature", None)
         self._comfort_hold_signature = signature

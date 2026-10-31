@@ -48,6 +48,7 @@ from .automation import (
     compute_pre_cool_target,
     fallback_edges_without_classification,
     hvac_outcome_label,
+    resolve_active_band,
     resolve_pre_cool_modifier,
 )
 from .briefing import generate_briefing
@@ -924,6 +925,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return AutomationEngineCallbacks(
             revisit=self.async_request_refresh,
             sensor_check=self._any_sensor_open,
+            # Issue #1093: the sealed-house read for the ODE ceiling guard -- "every configured
+            # sensor reports a real closed state" (unavailable/unknown is NOT closed).
+            sensors_known_closed=self._all_sensors_known_closed,
             # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell
             # whether any currently-open monitored sensor is still within its
             # CONF_SENSOR_DEBOUNCE settle window. Issue #623: _door_open_timers alone
@@ -2450,9 +2454,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return state.state == "off"
         return state.state == "on"
 
+    def _state_is_known_closed(self, state: Any) -> bool:
+        """Return True only when a contact-sensor State positively reads 'closed', respecting polarity.
+
+        Issue #1093. The complement of ``_state_is_open`` over the two real states only: an
+        unavailable/unknown/missing state is neither open nor known-closed. ``_state_is_open``
+        stays the one definition of "open" (an unreadable sensor must not block the WHF safety
+        stop); this is the one definition of "known closed" (an unreadable sensor must not count
+        as a sealed house).
+        """
+        if not state or state.state not in ("on", "off"):
+            return False
+        return not self._state_is_open(state)
+
     def _is_sensor_open(self, entity_id: str) -> bool:
         """Check if a door/window sensor is in the 'open' state, respecting polarity."""
         return self._state_is_open(self.hass.states.get(entity_id))
+
+    def _all_sensors_known_closed(self) -> bool:
+        """True when at least one door/window sensor is configured AND every one reads a real closed state.
+
+        Issue #1093: the sealed-house predicate behind ``AutomationEngine._whf_house_sealed_with_known_sensors()``.
+        No sensors configured, or any sensor unavailable/unknown/missing, is unknown -- not sealed.
+        """
+        return bool(self._resolved_sensors) and all(
+            self._state_is_known_closed(self.hass.states.get(s)) for s in self._resolved_sensors
+        )
 
     def _is_recent_hvac_command(self, threshold_seconds: float = 3.0) -> bool:
         """Check if an HVAC command was issued very recently (race guard)."""
@@ -5175,6 +5202,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._nat_vent_plan = None
             return
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+        # Issue #1093: the plan's AC-handoff time measures against the ceiling the thermostat is armed
+        # with (Prefer savings widens it) -- the engine's single source, not comfort_cool + a margin here.
+        _, _armed_ceiling = awake_comfort_edges(
+            self.config, aggressive_savings=bool(self.config.get("aggressive_savings", False))
+        )
         if c.day_type == DAY_TYPE_HOT:
             # Issue #876: HOT's own open-time field is window_opportunity_morning_start
             # (window_open_time is always None for HOT — see classifier.py) and the
@@ -5185,6 +5217,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                ceiling=_armed_ceiling,
                 window_open_time=c.window_opportunity_morning_start,
             )
         else:
@@ -5194,6 +5227,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                ceiling=_armed_ceiling,
                 comfort_heat_raw=_comfort_heat_raw,
                 sleep_heat=_sleep_heat,
                 in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
@@ -9729,7 +9763,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         comfort_cool = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
-        comfort_heat = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         fan_enabled = fan_mode != FAN_MODE_DISABLED
 
@@ -9872,8 +9905,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # WARM/MILD/COOL fallback: symmetric cooling-direction and heating-direction
         # checks, both gated on live outdoor-vs-indoor direction (Issue #428).
-        cooling_needed = indoor_temp is not None and indoor_temp > comfort_cool
-        heating_needed = indoor_temp is not None and indoor_temp < comfort_heat
+        # Issue #1136: judge "too warm / too cold" against the band the thermostat is armed
+        # with right now (sleep at night, setback away -- the engine's one resolver), not the
+        # flat daytime comfort_heat/comfort_cool config values. Issue #1094: the resolver's awake
+        # edges are awake_comfort_edges(), so the Prefer savings margin is already included.
+        # With an engine the read goes through its _resolved_comfort_band() -- the same call (and the TOU
+        # away/vacation expansion the thermostat is armed with, Issue #1080) the restore, override matching
+        # and the status API use; without one, the bare resolver.
+        if ae is not None:
+            _armed = ae._resolved_comfort_band(c)
+        else:
+            _armed = resolve_active_band(
+                c,
+                self.config,
+                occupancy_mode=self._occupancy_mode,
+                now=dt_util.now(),
+            )
+        _armed_heat, _armed_cool = _armed.floor, _armed.ceiling
+        cooling_needed = indoor_temp is not None and indoor_temp > _armed_cool
+        heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
@@ -11639,7 +11689,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _ae = getattr(self, "automation_engine", None)
             _day_modes = _compute_day_hvac_modes(_extended_forecast, now, self._current_classification)
             _comfort_cool_raw = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-            _ceiling_threshold = _ae._ceiling_threshold(_comfort_cool_raw) if _ae else None
+            # Issue #1093: the SAME sealed decision the live ODE ceiling guard makes. Sensor state is only
+            # known now, so the walk holds the current sealed state for every forecast hour; hours where the
+            # walk plans a nat-vent/WHF session skip the guard inside _walk_forward_regime() (the FSM's
+            # WHF-archetype defer). One predicate, one ceiling -- the chart never disagrees with the guard.
+            _house_sealed = bool(_ae and _ae._whf_house_sealed_with_known_sensors())
+            _ceiling_threshold = _ae._ceiling_threshold(_comfort_cool_raw, house_sealed=_house_sealed) if _ae else None
             _regime_by_ts = _walk_forward_regime(
                 _day_modes,
                 _raw_predicted_indoor,
@@ -14154,7 +14209,14 @@ def _walk_forward_regime(
         # Hot day's morning window and evening reopen are two separate, independent
         # opportunities in the same day, unlike an "off" day's single escalate-once
         # pattern).
-        if day_mode == "off":
+        #
+        # Issue #1093: a WHF/BOTH home's ceiling_threshold is only non-None when the house is sealed
+        # right now (the caller holds that state forward). In a forecast hour where this walk plans a
+        # nat-vent/WHF session the windows are open and the fan owns the cooling, so the guard is
+        # skipped -- matching classification_fsm.py's NOT_EVALUATED_WHF_ARCHETYPE defer. Unsealed WHF
+        # homes have ceiling_threshold=None and could never escalate here, so this changes nothing there.
+        _whf_archetype_session = session_active and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+        if day_mode == "off" and not _whf_archetype_session:
             _idx = predicted_indoor_index.get(ts_str)
             _remaining_predicted_indoor = predicted_indoor[_idx:] if _idx is not None else []
             guard_decision = decide_ode_ceiling_guard(

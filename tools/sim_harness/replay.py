@@ -17,8 +17,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from tools.sim_harness.generator import (
@@ -31,10 +32,15 @@ from tools.sim_harness.generator import (
     run_day,
     save_finding,
 )
+from tools.sim_harness.mechanism import fingerprint
 
 
 def format_hit(h) -> str:
-    return f"  [{h.severity}] {h.promise} at {h.ts.isoformat()} ({h.step}): {h.detail}  evidence={dict(h.evidence)}"
+    mech = getattr(h, "mechanism", None)
+    tail = f"\n    mechanism={json.dumps(mech, sort_keys=True)}" if mech else ""
+    return (
+        f"  [{h.severity}] {h.promise} at {h.ts.isoformat()} ({h.step}): {h.detail}  evidence={dict(h.evidence)}{tail}"
+    )
 
 
 def _hits_promise(scenario: dict, promise: str) -> bool:
@@ -132,11 +138,25 @@ def cli_generate_day(day_seed: int, profile: str, *, save: bool = False) -> int:
     return 1 if rec.report.hard else 0
 
 
-def cli_generate(master_seeds: list[int], days: int, profile: str, *, save: bool = True) -> int:
-    """Run ``days`` generated days for each master seed; exit 1 if any hard promise broke or any day crashed."""
+def cli_generate(
+    master_seeds: list[int],
+    days: int,
+    profile: str,
+    *,
+    save: bool = True,
+    ledger_path: str | None = None,
+    issue_state: str = "offline",
+    issue_state_file: str | None = None,
+) -> int:
+    """Run ``days`` generated days for each master seed; exit 1 if any hard promise broke or any day crashed.
+
+    Issue #1153: with ``ledger_path`` the hard hits are judged against the strict nightly waiver ledger
+    (``nightly_ledger.py``).  A hit a live entry covers is reported, not failed; an unlisted hit, an
+    expired / closed / stale / ambiguous entry fails the run."""
     _quiet()
     bad = 0
     crashed = 0
+    all_hits: list[tuple[int, object]] = []
     for ms in master_seeds:
         res = run_batch(ms, days, profile, save_dir=FAILURES_DIR if save else None)
         s = res.to_summary()
@@ -156,7 +176,50 @@ def cli_generate(master_seeds: list[int], days: int, profile: str, *, save: bool
         # A day that crashed or logged an exception was not judged at all: never report it as green.
         crashed += len(res.errors) + len(res.callback_error_days)
         bad += sum(len(v) for v in res.hits.values())
-    return 1 if (bad or crashed) else 0
+        all_hits.extend(row for rows in res.hits.values() for row in rows)
+    if all_hits:
+        print("hard hits by mechanism (a waiver matches on these fields, never on a seed):")
+        groups: dict[tuple[str, str], int] = {}
+        for _, h in all_hits:
+            k = (h.promise, fingerprint(getattr(h, "mechanism", None)))
+            groups[k] = groups.get(k, 0) + 1
+        for (promise, fp), n in sorted(groups.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"  {n:4d} x {promise}: {fp}")
+    if ledger_path is None:
+        return 1 if (bad or crashed) else 0
+    return judge_with_ledger(all_hits, ledger_path, issue_state, issue_state_file, crashed)
+
+
+def judge_with_ledger(
+    all_hits: list[tuple[int, object]],
+    ledger_path: str,
+    issue_state: str,
+    issue_state_file: str | None,
+    crashed: int,
+    *,
+    today: date | None = None,
+) -> int:
+    """Apply the nightly waiver ledger to a whole run and print the verdict; 1 = red."""
+    from custom_components.climate_advisor.invariant_watchdog import PROMISES  # noqa: PLC0415
+    from tools.sim_harness import nightly_ledger as nl  # noqa: PLC0415
+
+    ledger = nl.load_ledger(Path(ledger_path), promise_keys=[p.key for p in PROMISES])
+    states = nl.issue_states_from_args(
+        issue_state,
+        state_file=issue_state_file,
+        repo=os.environ.get("GITHUB_REPOSITORY"),
+        token=os.environ.get("GITHUB_TOKEN"),
+    )
+    ev = nl.evaluate(all_hits, ledger, today=today or datetime.now(UTC).date(), issue_states=states)
+    print(f"waiver ledger {ledger_path}: {len(ledger)} entries, issue state={issue_state}")
+    for line in nl.format_evaluation(ev, ledger):
+        print(line)
+    for ds, h in ev.unwaived[:10]:
+        print(f"  UNWAIVED {h.promise} day_seed={ds}: {h.detail}")
+        print(f"    mechanism={json.dumps(getattr(h, 'mechanism', None), sort_keys=True)}")
+    if ev.unwaived:
+        print(f"  {len(ev.unwaived)} hard hit(s) are not covered by a live waiver")
+    return 0 if (ev.clean and not crashed) else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -167,13 +230,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--generate", type=int, metavar="N", help="days per master seed")
     ap.add_argument("--seeds", type=int, nargs="+", default=[1])
     ap.add_argument("--profile", choices=PROFILES, default="coordinator")
+    ap.add_argument("--waiver-ledger", metavar="PATH", help="Issue #1153: judge --generate hits against this ledger")
+    ap.add_argument("--issue-state", choices=("github", "offline"), default="offline")
+    ap.add_argument("--issue-state-file", metavar="PATH", help="offline: JSON {issue: open|closed}")
     args = ap.parse_args(argv)
     if args.file:
         return cli_replay(args.file, do_shrink=args.shrink)
     if args.generate_day is not None:
         return cli_generate_day(args.generate_day, args.profile)
     if args.generate:
-        return cli_generate(args.seeds, args.generate, args.profile)
+        return cli_generate(
+            args.seeds,
+            args.generate,
+            args.profile,
+            ledger_path=args.waiver_ledger,
+            issue_state=args.issue_state,
+            issue_state_file=args.issue_state_file,
+        )
     ap.print_help()
     return 0
 

@@ -18,6 +18,8 @@ import sys
 from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 if "homeassistant" not in sys.modules:
     from conftest import _install_ha_stubs
 
@@ -983,3 +985,63 @@ class TestLiveInstanceReproduction:
             "Target line is still a single flat value across the whole forecast -- the "
             "original reported symptom (a misleading flat line) is not actually fixed"
         )
+
+
+class TestWalkForwardRegimeSealedWholeHouseFan:
+    """Issue #1093: a sealed WHF/BOTH home gets the ceiling-guard escalation in the forecast too; an hour
+    where the walk plans a WHF/nat-vent session skips the guard (the FSM's WHF-archetype defer)."""
+
+    _TM = {"k_passive": -1.0, "confidence_k_passive": "high"}
+
+    def _run(self, fan_mode: str, initial_session: bool, indoor_now: float, outdoor_now: float):
+        mod = _mod()
+        ts1 = _ts(12)
+        ts_breach = _ts(13)
+        cfg = {**_BASE_CONFIG, "fan_mode": fan_mode}
+        return mod._walk_forward_regime(
+            {date(2026, 7, 13): "off"},
+            _series([(ts1, indoor_now), (ts_breach, 78.0)]),
+            _series([(ts1, outdoor_now)]),
+            _band([(ts1, 68.0, 76.0)]),
+            cfg,
+            "home",
+            self._TM,
+            False,
+            None,
+            76.0,  # the ceiling a SEALED home is given (an unsealed WHF home is given None)
+            initial_session,
+        )
+
+    @pytest.mark.parametrize("fan_mode", ["whole_house_fan", "both"])
+    def test_sealed_whf_home_escalates_in_the_forecast(self, fan_mode: str) -> None:
+        # No session planned (outdoor warmer than indoor): the sealed home behaves like a non-WHF home.
+        result = self._run(fan_mode, False, 75.0, 80.0)
+        assert result[_ts(12)] == {"nat_vent_active": False, "hvac_mode": "cool"}
+
+    @pytest.mark.parametrize("fan_mode", ["whole_house_fan", "both"])
+    def test_planned_whf_session_hour_skips_the_guard(self, fan_mode: str) -> None:
+        result = self._run(fan_mode, True, 77.0, 72.0)
+        assert result[_ts(12)] == {"nat_vent_active": True, "hvac_mode": "off"}
+
+    def test_hvac_fan_home_with_the_same_inputs_still_escalates(self) -> None:
+        # Control: the skip is WHF-archetype only.
+        result = self._run("hvac_fan", True, 77.0, 72.0)
+        assert result[_ts(12)] == {"nat_vent_active": False, "hvac_mode": "cool"}
+
+    def test_unsealed_whf_home_is_given_no_ceiling_and_never_escalates(self) -> None:
+        mod = _mod()
+        ts1 = _ts(12)
+        result = mod._walk_forward_regime(
+            {date(2026, 7, 13): "off"},
+            _series([(ts1, 75.0), (_ts(13), 78.0)]),
+            _series([(ts1, 80.0)]),
+            _band([(ts1, 68.0, 76.0)]),
+            {**_BASE_CONFIG, "fan_mode": "whole_house_fan"},
+            "home",
+            self._TM,
+            False,
+            None,
+            None,
+            False,
+        )
+        assert result[ts1] == {"nat_vent_active": False, "hvac_mode": "off"}

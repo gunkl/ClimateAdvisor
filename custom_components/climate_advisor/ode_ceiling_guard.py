@@ -77,9 +77,11 @@ class OdeCeilingGuardOutcome(Enum):
     NOT_APPLICABLE = "not_applicable"  # predicted_indoor empty/None, or classification.hvac_mode != "off"
     MODEL_INELIGIBLE = "model_ineligible"  # k_passive/confidence/comfort_cool preconditions not met
     MISSING_TEMPS = "missing_temps"  # outdoor or indoor reading unavailable
-    NO_CEILING_THRESHOLD = "no_ceiling_threshold"  # WHOLE_HOUSE/BOTH archetype — no compressor handoff point
+    NO_CEILING_THRESHOLD = (
+        "no_ceiling_threshold"  # WHF/BOTH home not known sealed (window open / sensor unknown / none) — no handoff
+    )
     DORMANT = "dormant"  # free cooling viable (Issue #247's 3-condition dormancy test)
-    NO_BREACH_PREDICTED = "no_breach_predicted"  # curve never crosses comfort_cool + tolerance
+    NO_BREACH_PREDICTED = "no_breach_predicted"  # curve never crosses ceiling_threshold + tolerance
     STANDING_BY = "standing_by"  # breach predicted, but outside the lead-time window
     ESCALATE = "escalate"  # breach within lead time — shell must switch to active cooling
 
@@ -97,7 +99,13 @@ class OdeCeilingGuardDecision:
     MISSING_TEMPS they carry whatever was read (either may be None, which is how
     the DEBUG line shows which reading was missing). The shell must log/emit
     these rather than re-reading the sensors, which could have become None since
-    the decision was computed. They stay None only for NOT_APPLICABLE."""
+    the decision was computed. They stay None only for NOT_APPLICABLE.
+
+    ``ceiling`` (Issue #1093) is the caller-resolved ``ceiling_threshold`` the breach scan, lead
+    time and dormancy test were all measured against. It is set on every outcome from DORMANT
+    onward (the first one past the NO_CEILING_THRESHOLD check), and the shell must write THIS as
+    the cool setpoint rather than re-reading config, so what the guard predicts and what it holds
+    can never be two different numbers."""
 
     outcome: OdeCeilingGuardOutcome
     breach_ts: datetime | None = None
@@ -106,6 +114,7 @@ class OdeCeilingGuardDecision:
     should_deactivate_fan: bool = False
     indoor: float | None = None
     outdoor: float | None = None
+    ceiling: float | None = None
 
 
 @dataclass(frozen=True)
@@ -128,7 +137,14 @@ class OdeCeilingGuardInputs:
       natural_vent_active                 -> self._natural_vent_active
       ceiling_threshold                    -> self._ceiling_threshold(comfort_cool) — caller-
                                               resolved; see module docstring's five-whys for why
-                                              this module does not re-derive it itself
+                                              this module does not re-derive it itself.
+                                              Issue #1093: this ONE value is the ceiling the guard
+                                              defends — the dormancy test, the breach scan, the
+                                              lead-time delta and the cool setpoint the shell
+                                              writes all read it. It is the savings-adjusted awake
+                                              ceiling (``awake_comfort_edges()``), so Prefer savings
+                                              moves all four together. ``comfort_cool`` below is now
+                                              only the model-eligibility precondition.
       now                                   -> caller-resolved wall-clock time (dt_util.now()),
                                               same convention as every other pure module's `now`
     """
@@ -214,21 +230,29 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
     # nat-vent actually running AND indoor still within the ceiling threshold.
     if inputs.outdoor <= inputs.indoor and inputs.natural_vent_active and inputs.indoor <= inputs.ceiling_threshold:
         return OdeCeilingGuardDecision(
-            outcome=OdeCeilingGuardOutcome.DORMANT, indoor=inputs.indoor, outdoor=inputs.outdoor
+            outcome=OdeCeilingGuardOutcome.DORMANT,
+            indoor=inputs.indoor,
+            outdoor=inputs.outdoor,
+            ceiling=inputs.ceiling_threshold,
         )
 
     tolerance = _CEILING_BRIDGE_TOLERANCE_F if inputs.k_passive_via_bridge else 0.0
-    threshold = inputs.comfort_cool + tolerance
+    # Issue #1093: breach scan and lead time measure against the SAME resolved ceiling the
+    # dormancy test above uses (savings-adjusted), not the plain comfort_cool.
+    threshold = inputs.ceiling_threshold + tolerance
     breach_ts = _scan_for_breach(inputs.predicted_indoor, threshold)
     if breach_ts is None:
         return OdeCeilingGuardDecision(
-            outcome=OdeCeilingGuardOutcome.NO_BREACH_PREDICTED, indoor=inputs.indoor, outdoor=inputs.outdoor
+            outcome=OdeCeilingGuardOutcome.NO_BREACH_PREDICTED,
+            indoor=inputs.indoor,
+            outdoor=inputs.outdoor,
+            ceiling=inputs.ceiling_threshold,
         )
 
     hours_to_breach = (_to_utc(breach_ts) - _to_utc(inputs.now)).total_seconds() / 3600
 
     lead_min = compute_lead_minutes_from_rate(
-        delta_t=inputs.comfort_cool - inputs.indoor,
+        delta_t=inputs.ceiling_threshold - inputs.indoor,
         rate=inputs.k_active_cool,
         min_minutes=_LEAD_MIN_FLOOR,
         max_minutes=_LEAD_MIN_CEIL,
@@ -245,6 +269,7 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
             should_deactivate_fan=inputs.natural_vent_active,
             indoor=inputs.indoor,
             outdoor=inputs.outdoor,
+            ceiling=inputs.ceiling_threshold,
         )
 
     return OdeCeilingGuardDecision(
@@ -254,4 +279,5 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
         lead_min=lead_min,
         indoor=inputs.indoor,
         outdoor=inputs.outdoor,
+        ceiling=inputs.ceiling_threshold,
     )

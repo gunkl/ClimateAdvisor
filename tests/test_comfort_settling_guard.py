@@ -337,8 +337,10 @@ class TestR2:
         _reactive(engine, clock, 65.0)  # depth 3 > 2: R1
         assert _mode(engine) == "heat"
 
-    def test_R2_unknown_current_family_adopts_without_a_hold(self):
-        engine, _ = _scene(day="mild", mode="off", indoor=67.0, ran="cool", ran_min=10.0)
+    def test_R2_unknown_current_family_with_nothing_run_adopts_without_a_hold(self):
+        """Issue #1149: an unknown live family is held only when a family ran inside the window; with
+        nothing run there is nothing to hold (the unknown-family hold itself: test_comfort_settling_unknown_family)."""
+        engine, _ = _scene(day="mild", mode="off", indoor=67.0, ran=None)
         assert _mode(engine) == "heat"
         assert engine._last_comfort_hold is None
 

@@ -62,11 +62,64 @@ importlib.import_module("custom_components")
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
+# Determinism stress knob (Issue #1125): ``CA_HA_EXECUTOR_JITTER_MS=40`` delays every thread-pool job by a random
+# 0-40 ms of REAL time, the way a loaded CI runner does. The tier must give identical results with and without it;
+# a test that only passes on a fast machine is a test that races the executor.
+_JITTER_MS = float(os.environ.get("CA_HA_EXECUTOR_JITTER_MS", "0") or 0)
+if _JITTER_MS > 0:
+    import asyncio
+    import functools
+    import random
+    import time
+
+    _real_sleep = time.sleep
+    _real_run_in_executor = asyncio.BaseEventLoop.run_in_executor
+
+    def _delayed(func, *args):
+        _real_sleep(random.uniform(0, _JITTER_MS) / 1000)
+        return func(*args)
+
+    def _jittered_run_in_executor(self, executor, func, *args):
+        return _real_run_in_executor(self, executor, functools.partial(_delayed, func, *args))
+
+    asyncio.BaseEventLoop.run_in_executor = _jittered_run_in_executor
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--ca-order",
+        default="",
+        help="reverse | shuffle[:SEED] - run the tier in another order (every test must pass in any order)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    order = config.getoption("--ca-order")
+    if order == "reverse":
+        items.reverse()
+    elif order.startswith("shuffle"):
+        import random
+
+        random.Random(int(order.partition(":")[2] or 0)).shuffle(items)
+
 
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Let HA load integrations from custom_components/."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def _fixed_ha_timer_jitter(monkeypatch):
+    """Home Assistant offsets its time-change listeners and every coordinator's refresh by a RANDOM 0.05-0.5 s
+    (``randint(RANDOM_MICROSECOND_MIN, RANDOM_MICROSECOND_MAX)``) so real installs do not fire together. On the
+    frozen, step-driven clock that random fraction decides which side of a step boundary a timer lands on, so the
+    same commit ordered events differently from run to run (Issue #1125). Pin it to one value."""
+    from homeassistant.helpers import event, update_coordinator
+
+    fixed = (event.RANDOM_MICROSECOND_MIN + event.RANDOM_MICROSECOND_MAX) // 2
+    monkeypatch.setattr(event, "randint", lambda _a, _b: fixed)
+    monkeypatch.setattr(update_coordinator, "randint", lambda _a, _b: fixed)
 
 
 @pytest.fixture

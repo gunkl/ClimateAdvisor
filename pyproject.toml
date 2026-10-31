@@ -38,7 +38,8 @@ members = []
 [tool.ruff]
 target-version = "py314"
 line-length = 120
-exclude = [".claude"]
+# plans/ holds design documents whose fenced Python blocks are sketches, not code ruff should reformat
+exclude = [".claude", "plans"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP", "B", "SIM", "T20", "ASYNC"]

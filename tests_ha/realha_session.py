@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -57,6 +58,7 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from tests_ha.house import CLIMATE_ENTITY, House, WholeHouseFan, build_house
 from tests_ha.house.builder import OUTDOOR_F_SENSOR
+from tests_ha.house.settle import quiesce, track_executor
 from tools.sim_harness.scenario_model import (
     ProductionRunResult,
     build_classification_from_event,
@@ -130,6 +132,23 @@ class _ErrorCapture(logging.Handler):
         exc = record.exc_info[1] if record.exc_info else None
         if exc is not None:
             self.errors.append((dt_util.utcnow(), exc))
+
+
+# A handle's repr names its callback's source file (``... at /abs/path/file.py:123``).  The checkout directory is
+# called "ClimateAdvisor" and on CI the virtualenv lives inside it, so every Home Assistant helper timer (the
+# sim's ``_TrackTimeInterval``, ``_run_async_call_action``) carried that word in its PATH and was blamed on
+# Climate Advisor (Issue #1125: 100 goldens "leaked" a timer on CI and none did locally).  Ownership is decided on
+# what the callback IS (class / module names), and by file only when that file is inside the integration package.
+_SOURCE_PATH = re.compile(r"[^\s'\"<>()]*[/\\][^\s'\"<>()]*\.py")
+_OWNER_NAMES = ("climate_advisor", "AutomationEngine", "ClimateAdvisor")
+
+
+def _is_climate_advisor_timer(text: str) -> bool:
+    """True when the timer handle's repr belongs to Climate Advisor, whatever directory the checkout is in."""
+    paths = _SOURCE_PATH.findall(text)
+    if any("custom_components/climate_advisor/" in p.replace("\\", "/") for p in paths):
+        return True
+    return any(name in _SOURCE_PATH.sub("", text) for name in _OWNER_NAMES)
 
 
 def _first_value(events: list[dict], key: str, default: float | None) -> float | None:
@@ -257,6 +276,7 @@ class RealHASession:
             self.notes.append(
                 "scenario reports outdoor but never indoor temperature; the sim thermostat starts at 72 F"
             )
+        track_executor(self.hass.loop)
         self.house = await build_house(
             self.hass,
             self.freezer,
@@ -359,21 +379,19 @@ class RealHASession:
         """Let everything runnable finish, without ever blocking on the frozen clock.
 
         ``hass.async_block_till_done`` waits for tracked tasks, including one that is merely sleeping; on a frozen
-        clock that never ends.  So: yield until HA has no tracked task, and if one is left (a sleeper), move the
-        clock a second so it can wake, up to 30 s of simulated time per drain.
+        clock that never ends.  So: settle the loop (``quiesce``: no thread-pool job in flight, nothing ready, no
+        timer due - a property of the loop, not an iteration count), and if a tracked task is still left it is a
+        sleeper: move the clock a second so it can wake, up to 30 s of simulated time per drain.  Nothing here
+        depends on how fast the machine is (Issue #1125).
         """
         hass = self.hass
         for _ in range(30):
-            for _ in range(50):
-                await asyncio.sleep(0)
-                if not hass._tasks:
-                    break
+            await quiesce(hass.loop)
             if not hass._tasks:
-                break
+                return
             self.freezer.tick(timedelta(seconds=1))
             async_fire_time_changed(hass)
-        for _ in range(5):
-            await asyncio.sleep(0)
+        await quiesce(hass.loop)
 
     async def advance_to(self, ts: datetime) -> None:
         now = dt_util.utcnow()
@@ -689,7 +707,7 @@ class RealHASession:
             if not isinstance(handle, asyncio.TimerHandle) or handle.cancelled():
                 continue
             text = f"{handle!r} {handle._args!r}"
-            if "climate_advisor" in text or "AutomationEngine" in text or "ClimateAdvisor" in text:
+            if _is_climate_advisor_timer(text):
                 self.leaked_timers.append(text[:300])
                 handle.cancel()
 

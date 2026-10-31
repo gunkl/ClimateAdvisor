@@ -279,6 +279,7 @@ async def test_person_switching_fan_off_is_respected_by_the_new_instance(make_ho
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,  # a hang (pytest-timeout) or a settle error must stay a real failure, not satisfy the xfail
     reason=(
         "Issue #1130: the person turning the whole-house fan on "
         "is raced by the Issue #510 immediate refresh. _async_fan_entity_changed() schedules async_request_refresh() "

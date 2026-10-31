@@ -18,7 +18,6 @@ Lifecycle contract
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -38,6 +37,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from .calls import CallRecorder
 from .fans import WholeHouseFan
+from .settle import quiesce, track_executor
 from .weather import HouseWeather
 
 SIM_DOMAIN = "ca_dev_thermostat_sim"
@@ -181,11 +181,11 @@ class House:
 
     async def open(self, name: str = "window") -> None:
         self.hass.states.async_set(f"binary_sensor.house_{name}", "on")
-        await self.hass.async_block_till_done()
+        await self._drain()
 
     async def close_contact(self, name: str = "window") -> None:
         self.hass.states.async_set(f"binary_sensor.house_{name}", "off")
-        await self.hass.async_block_till_done()
+        await self._drain()
 
     def _occupant_context(self) -> Context:
         assert self.recorder is not None
@@ -209,7 +209,7 @@ class House:
                 blocking=True,
                 context=ctx,
             )
-        await self.hass.async_block_till_done()
+        await self._drain()
 
     async def occupant_sets_fan_mode(self, fan_mode: str) -> None:
         """The person turns the thermostat blower on/off in its app."""
@@ -220,13 +220,13 @@ class House:
             blocking=True,
             context=self._occupant_context(),
         )
-        await self.hass.async_block_till_done()
+        await self._drain()
 
     async def occupant_presses_fan(self, on: bool) -> None:
         """The person at the wall switch or RF remote: the fan's physical state changes, no CA command."""
         assert self.fan is not None
         self.fan.press(on)
-        await self.hass.async_block_till_done()
+        await self._drain()
 
     async def set_automation(self, enabled: bool) -> None:
         """Flip Climate Advisor's own automation switch through the real switch service."""
@@ -242,7 +242,7 @@ class House:
         await self.hass.services.async_call(
             "switch", "turn_on" if enabled else "turn_off", {"entity_id": ent.entity_id}, blocking=True
         )
-        await self.hass.async_block_till_done()
+        await self._drain()
 
     # ------------------------------------------------------------------ time
     async def advance(self, *, seconds: float = 0, minutes: float = 0, hours: float = 0) -> None:
@@ -261,17 +261,15 @@ class House:
         await self.advance(seconds=(when - now).total_seconds())
 
     async def _drain(self) -> None:
-        """Let everything runnable finish before the clock moves again.
+        """Let everything runnable finish before the clock moves again (see ``settle.quiesce``).
 
-        ``async_block_till_done`` waits for HA-tracked tasks only. Climate Advisor starts its thermostat calls
-        with ``asyncio.ensure_future`` (so it can time them out), which HA does not track; if the clock jumps
-        while one is in flight its 10 s timeout fires spuriously ("no answer from thermostat"), something a real
-        clock never does because the call completes in milliseconds.
+        ``async_block_till_done`` is not used: it waits for tracked tasks that are merely ``asyncio.sleep``-ing,
+        which on a frozen clock is forever. It also cannot see Climate Advisor's thermostat calls, started with
+        ``asyncio.ensure_future`` (so it can time them out): if the clock jumped while one is in flight its 10 s
+        timeout would fire spuriously, something a real clock never does. ``quiesce`` waits for thread-pool jobs,
+        the ready queue and due timers alike, with no iteration or wall-clock bound that a slow machine can hit.
         """
-        await self.hass.async_block_till_done()
-        for _ in range(5):
-            await asyncio.sleep(0)
-        await self.hass.async_block_till_done()
+        await quiesce(self.hass.loop)
 
     # ------------------------------------------------------------- lifecycle
     async def _setup_ca(self) -> None:
@@ -293,7 +291,7 @@ class House:
         if data_changes:
             self.hass.config_entries.async_update_entry(self.ca_entry, data={**self.ca_entry.data, **data_changes})
         assert await self.hass.config_entries.async_unload(self.ca_entry.entry_id)
-        await self.hass.async_block_till_done()
+        await self._drain()
         await self._setup_ca()
 
     async def restart(self, *, settle: bool = True, down_for_seconds: float = 0) -> None:
@@ -304,7 +302,7 @@ class House:
         """
         assert self.ca_entry is not None
         assert await self.hass.config_entries.async_unload(self.ca_entry.entry_id)
-        await self.hass.async_block_till_done()
+        await self._drain()
         if down_for_seconds:
             await self.advance(seconds=down_for_seconds)
         await self._setup_ca()
@@ -321,7 +319,7 @@ class House:
         for entry in (self.ca_entry, self.sim_entry):
             if entry is not None and entry.state is ConfigEntryState.LOADED:
                 assert await self.hass.config_entries.async_unload(entry.entry_id)
-                await self.hass.async_block_till_done()
+                await self._drain()
 
 
 async def build_house(
@@ -373,6 +371,7 @@ async def build_house(
     hass.config.units = METRIC_SYSTEM if units == "metric" else US_CUSTOMARY_SYSTEM
     freezer.move_to(start)
 
+    track_executor(hass.loop)
     house = House(hass=hass, freezer=freezer, config_dir=config_dir, units=units, profile=profile, startup=startup)
     house.contacts = contacts
     house.recorder = CallRecorder(hass)

@@ -17,6 +17,7 @@ otherwise happily lock a violation in.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +36,16 @@ _DAYS = {
     "cool": {"outdoor_f": 50.0, "high_f": 62.0, "low_f": 44.0, "indoor": 70.0},
     "cold": {"outdoor_f": 30.0, "high_f": 41.0, "low_f": 24.0, "indoor": 68.0},
 }
+
+
+@pytest.fixture(autouse=True)
+def _snapshot_file_is_readable():
+    """syrupy treats a snapshot file it cannot find as 'no snapshots' and reports every test as "does not exist"
+    (it swallows FileNotFoundError). Fail with the resolved path instead, so a CI-only miss is diagnosable."""
+    path = Path(__file__).resolve().parent / "snapshots" / "test_snapshots.ambr"
+    assert path.is_file() and path.stat().st_size > 0, (
+        f"snapshot file missing or empty: {path} (cwd={Path.cwd()}); syrupy would report 'does not exist'"
+    )
 
 
 def _assert_ontology(surfaces: dict) -> None:

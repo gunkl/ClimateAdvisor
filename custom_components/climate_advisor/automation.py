@@ -2968,6 +2968,9 @@ class AutomationEngine:
             current_state = self.hass.states.get(self.climate_entity)
             current_mode = current_state.state if current_state else "unknown"
             cls_mode = self._current_classification.hvac_mode if self._current_classification else None
+            # Issue #1159: read once, used for the split and logged (an Off confirmed on an "off"-labelled
+            # day is explained by this fact; the log would otherwise read "mode=off, classification wants off").
+            ca_plans_hvac_off = self._ca_plans_hvac_off()
             # For setpoint overrides: mode may still match classification, but
             # the user deliberately moved the setpoint — always take PATH A.
             # One definition of the PATH A/B split (override_confirm_split), shared with the FSM.
@@ -2976,16 +2979,17 @@ class AutomationEngine:
                     setpoint_override=source == "setpoint",
                     current_mode=current_mode,
                     classification_mode=cls_mode,
-                    ca_plans_hvac_off=self._ca_plans_hvac_off(),
+                    ca_plans_hvac_off=ca_plans_hvac_off,
                 )
                 is OverrideConfirmPathOutcome.CONFIRM
             ):
                 # PATH A: Still divergent (or deliberate setpoint override) — formally confirm
                 _LOGGER.info(
-                    "Override confirmed after %d minutes (mode=%s, classification wants %s)",
+                    "Override confirmed after %d minutes (mode=%s, classification wants %s, ca_plans_hvac_off=%s)",
                     confirm_seconds // 60,
                     current_mode,
                     cls_mode,
+                    ca_plans_hvac_off,
                 )
                 self._clear_override_confirm_action()
                 self._confirm_override_action(current_mode, source=source)
@@ -3003,9 +3007,10 @@ class AutomationEngine:
             else:
                 # PATH B: State resolved — transient event, no override
                 _LOGGER.info(
-                    "Potential override self-resolved (detected=%s, current=%s) — no action taken",
+                    "Potential override self-resolved (detected=%s, current=%s, ca_plans_hvac_off=%s) — no action",
                     self._override_confirm_mode,
                     current_mode,
+                    ca_plans_hvac_off,
                 )
                 self._clear_override_confirm_action()
                 self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED)

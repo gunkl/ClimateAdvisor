@@ -39,12 +39,22 @@ _DAYS = {
 
 
 @pytest.fixture(autouse=True)
-def _snapshot_file_is_readable():
-    """syrupy treats a snapshot file it cannot find as 'no snapshots' and reports every test as "does not exist"
-    (it swallows FileNotFoundError). Fail with the resolved path instead, so a CI-only miss is diagnosable."""
+def _snapshot_file_is_readable(request):
+    """syrupy treats a snapshot file it cannot find or parse as 'no snapshots' and reports every test as "does not
+    exist". Fail with what syrupy itself resolves and reads instead, so a CI-only miss is diagnosable."""
     path = Path(__file__).resolve().parent / "snapshots" / "test_snapshots.ambr"
     assert path.is_file() and path.stat().st_size > 0, (
         f"snapshot file missing or empty: {path} (cwd={Path.cwd()}); syrupy would report 'does not exist'"
+    )
+    if "snapshot" not in request.fixturenames:
+        return
+    snap = request.getfixturevalue("snapshot")
+    ext, loc = snap.extension, snap.test_location
+    where = ext.get_location(test_location=loc, index=0)
+    names = sorted(s.name for coll in ext.discover_snapshots(test_location=loc) for s in coll)
+    assert Path(where).resolve() == path and names, (
+        f"syrupy resolves {where!r} (test filepath {loc.filepath!r}) and parses {len(names)} snapshot(s) "
+        f"{names[:3]}; expected file {path} (cwd={Path.cwd()}, header={path.read_bytes()[:40]!r})"
     )
 
 

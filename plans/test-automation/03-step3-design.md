@@ -246,7 +246,7 @@ Format per promise: statement, ground-truth data, boundary condition, exclusions
 
 **Boundary (heat clause).** For each consecutive pair `(prev, cur)` where `equipment(prev) != "heating"` and `equipment(cur) == "heating"` (a furnace start; first reading in the window is skipped, no edge is knowable), let `F = floor_hi(cur.ts)` and `dip = F - cur.indoor_f` (positive below the floor). It is a violation when **all** hold:
 
-1. cooling was seen in the last `W_eff` minutes: some `r` with `equipment(r) == "cooling"` and `cur.ts - W_eff <= r.ts < cur.ts`;
+1. cooling was seen in the last `W_eff` minutes: some `r` with `equipment(r) == "cooling"` and `cur.ts - W_eff <= r.ts < cur.ts`, **and no `heating` reading lies between that cooling and `cur`** (the scan back stops at same-side equipment: a flip is opposite, idle*, same-side; a restart after an earlier in-family heat run is a normal cycle, #1150);
 2. `-0.5 <= dip < S_eff - 0.5` (the furnace started in the "shallow dip" zone: at most 0.5 F above the floor, less than 1.5 F below at defaults);
 3. the thermostat was armed to *defend the floor*: `cur.setpoint_f <= F + 0.5` (a start toward a higher setpoint is a deliberate bank, pre-heat or occupant choice, not a floor defense; this one test replaces any need to read TOU or pre-heat labels);
 4. the heat clause applies today: `cur.forecast_high_f >= threshold_mild + P1_NATIVE_MARGIN_F` (K2; no forecast -> the clause is silent);
@@ -254,7 +254,7 @@ Format per promise: statement, ground-truth data, boundary condition, exclusions
 
 **Cool clause (M1).** Mirror: `equipment` goes to `cooling`, heating seen in the window, `dip = cur.indoor_f - ceiling_lo(cur.ts)`, setpoint `>= ceiling - 0.5`, applies only when `forecast_high_f < threshold_warm - P1_NATIVE_MARGIN_F`.
 
-**Excused:** an `occupant_action` on the thermostat within the previous 30 min, an open thermostat `override` episode, thermostat `hvac_mode` unavailable in either reading, `cur.indoor_f is None`.
+**Excused:** an `occupant_action` on the thermostat within the previous 30 min (of `cur.ts`; optionally, behind `P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND`, default off pending owner sign-off per Invariant 2, also within 30 min before the first CA `set_hvac_mode` into the same family inside that window, #1150), an open thermostat `override` episode, thermostat `hvac_mode` unavailable in either reading, `cur.indoor_f is None`.
 
 **Not the algorithm.** It never mentions the margin zone, hysteresis, dwell lock, tolerance by day type, the mode-change ring buffer, `comfort_holds`, the `ran` source, or the selector. It only says "a furnace that starts at the floor right after the AC ran is a bug, whoever armed it": the selector, a restore, a pause resume, TOU, the ODE guard, or a path nobody has written yet. That path-independence is the point, since the same promise would have caught each of the seven fixes. Numbers come from `PromiseNumbers` and are proven looser (3.1). Hit key: `settling_flip:heat@<cur.ts to minute>`.
 
@@ -280,7 +280,7 @@ Format per promise: statement, ground-truth data, boundary condition, exclusions
 
 **Data.** `episodes` (CA's declared word) and `commands`/`readings` (the ground-truth effect).
 
-**Boundary (a, reversal).** For each episode and each CA `Command` to the same `target` with `episode.start_ts < cmd.ts <= (episode.end_ts or now)` that *reverses* the occupant's value and is not excused, report a Hit.
+**Boundary (a, reversal).** For each episode and each CA `Command` to the same `target` with `episode.start_ts < cmd.ts <= (episode.end_ts or now)` that *reverses* the occupant's value and is not excused, report a Hit. One Hit per (episode, `cmd.ts`): a `set_hvac_mode` and a `set_temperature` at the same instant are one reversal (#1151); the key is `override_respected:<episode>:<ts>` (no service). When the episode has no remaining grace the wording is "... while your manual change was still in force."; otherwise minutes are rounded half up.
 
 *Reverses:* thermostat: `set_hvac_mode(m)` or a `mode` bundled in `set_temperature` with `m != episode.value`, or a `setpoint_f` that differs from the occupant's by at least `P4_REVERSAL_SETPOINT_F`. Fan `override` (occupant turned it on): CA `turn_off`. Fan `fan_off` episode (occupant turned it off; semantics inverted per #359): CA `turn_on`. A command equal to the occupant's value is a re-affirm, not a reversal.
 
@@ -366,7 +366,7 @@ Specified in section 8. Tests hard with a ratcheted allow-list; not evaluated at
 | P1 cool | "Your AC started {m} min after the heat ran, while the house was only {d} over your comfort maximum. It should have waited." | same shape, `side=cool` |
 | P2 | existing text | existing CRITICAL line unchanged |
 | P3 | "Climate Advisor sent a command to your thermostat or fan while automation was switched off." | `Household promise broken: promise=observe_only_silence target=fan service=turn_off` (alert: ERROR) |
-| P4 | "Climate Advisor changed your {thermostat/fan} setting {r} min before your manual change was due to end." | `... promise=override_respected target=thermostat remaining_min=14 reversed_to=off` |
+| P4 | "Climate Advisor changed your {thermostat/fan} setting {r} min before your manual change was due to end." (no remaining grace: "... setting while your manual change was still in force.", #1151) | `... promise=override_respected target=thermostat remaining_min=14 reversed_to=off` |
 | P5 | "The fan was started while the indoor temperature could not be read." | `... promise=no_blind_fan_start` |
 | P6 | "The thermostat flipped between heat and cool {n} times in the past hour." | `... promise=mode_flip_rate flips=3 window_min=60` |
 | P7 | "The house stayed {d} outside your comfort range for {m} minutes while Climate Advisor was in control." | `... promise=comfort_kept minutes=52 worst_f=3.4 side=below` |

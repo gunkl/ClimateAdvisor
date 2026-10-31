@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.5] — 2026-10-31
+
+- Internal #1150, #1151: the household-promise checks no longer report two false alarms found by the nightly generated-day runs. A normal furnace restart after an earlier heat run is no longer called "heat started right after the AC", and one reversal of your manual change is reported once rather than twice (and no longer says "0 min before your manual change was due to end" when that change had no end). These checks only note misses; nothing you see on the thermostat changes.
+
 ## [0.8.2] — 2026-10-30
 
 - Feat #1128: Climate Advisor now quietly checks its own behaviour against a set of household promises (for example, it never undoes your manual thermostat change early, never runs the AC while the whole-house fan runs, never touches your equipment while automation is off). A missed promise is only noted, not alerted: the AI Investigator shows it as a "Noted, not alerted" line and the diagnostics report counts how often each promise was missed. The dashboard's Debug tab shows a "Household Promises Missed" line (only when something was missed). The whole-house-fan/AC alert is unchanged.

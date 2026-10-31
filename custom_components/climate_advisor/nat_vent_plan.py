@@ -280,10 +280,18 @@ def compute_nat_vent_plan(
     sleep_heat: float | None = None,
     in_sleep_window_fn: Callable[[datetime], bool] | None = None,
     window_open_time: time | None = None,
+    ceiling: float | None = None,
 ) -> dict:
     """Derive warm/mild-day timing events from ODE predicted curves.
 
     Args:
+        ceiling: optional (Issue #1093) -- the ceiling the thermostat/ODE ceiling guard actually
+            holds, i.e. ``awake_comfort_edges()``' ceiling (``comfort_cool`` plus the Prefer savings
+            margin). ``ceiling_breach_time`` and ``precool_start_time`` -- the plan's twin of the
+            guard's breach scan and lead time -- measure against it, so the briefing and the Next
+            Automation card name the same handoff the guard uses. ``None`` (default) means
+            ``comfort_cool``. Outdoor-vs-``comfort_cool`` comparisons (``evening_open_time``'s
+            reopen gate) are NOT the guard's handoff and keep ``comfort_cool``.
         comfort_heat_raw, sleep_heat, in_sleep_window_fn: optional (Issue #535) — when
             all three are provided, nat_vent_cutoff also scans for the comfort-floor
             crossing the real activation gate (decide_nat_vent_gate() in
@@ -313,7 +321,8 @@ def compute_nat_vent_plan(
           nat-vent-specific cutoff race (the ODE floor guard that once consumed it was
           removed by Issue #1066). Still computed exactly once, here, per Issue
           #817's single-source-of-truth architecture.
-      ceiling_breach_time: datetime | None — first hour indoor > comfort_cool
+      ceiling_breach_time: datetime | None — first hour indoor > ceiling (comfort_cool unless
+          the Issue #1093 ``ceiling`` arg is given)
       precool_start_time: datetime | None — ceiling_breach_time minus computed lead
       any_nat_vent_window: bool — True if outdoor < indoor at any point
       evening_open_time: datetime | None — renamed from ``recovery_time`` (Issue #876;
@@ -390,6 +399,8 @@ def compute_nat_vent_plan(
 
     if not predicted_indoor or not predicted_outdoor:
         return result
+
+    _breach_ceiling = comfort_cool if ceiling is None else ceiling
 
     # Issue #528: each crossing is found via find_temperature_crossing(), which aligns
     # the two curves by matching ISO timestamp — not list position — so a mismatch in
@@ -469,15 +480,15 @@ def compute_nat_vent_plan(
             ts = datetime.fromisoformat(ts_str)
         except ValueError, TypeError:
             continue
-        if float(i_temp) > comfort_cool:
+        if float(i_temp) > _breach_ceiling:
             result["ceiling_breach_time"] = ts
             break
 
     # precool_start_time = ceiling_breach_time - lead_time
     if result["ceiling_breach_time"] is not None:
-        t_in_now = predicted_indoor[0].get("temp", comfort_cool - 2.0)
+        t_in_now = predicted_indoor[0].get("temp", _breach_ceiling - 2.0)
         lead_min = compute_lead_minutes_from_rate(
-            delta_t=comfort_cool - t_in_now,
+            delta_t=_breach_ceiling - t_in_now,
             rate=k_active_cool,
             min_minutes=30.0,
             max_minutes=240.0,

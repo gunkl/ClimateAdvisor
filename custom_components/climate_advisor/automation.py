@@ -11794,22 +11794,49 @@ class AutomationEngine:
         self._arm_comfort_family(resolved_family, now, only_if_changed=True)
         return "heat" if resolved_family == "heating" else "cool"
 
-    def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
+    def _whf_house_sealed_with_known_sensors(self) -> bool:
+        """True only when at least one monitored door/window sensor is configured AND every one is closed.
+
+        Issue #1093. "No sensors configured" is unknown, not sealed, so it is False. The sealed state
+        itself is read from ``_any_monitored_sensor_open()`` -- the same predicate
+        ``_enforce_sealed_house_whf_guard()`` uses -- never a second definition; the configured list is
+        the ``door_window_sensors`` key the coordinator resolves its monitored sensors from.
+        """
+        return bool(self.config.get("door_window_sensors")) and not self._any_monitored_sensor_open()
+
+    def _ceiling_threshold(self, comfort_cool: float | None, *, house_sealed: bool = False) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.
+
+        Issue #1093: this is the ONE ceiling the ODE ceiling guard defends -- its dormancy test,
+        breach scan, lead-time delta and cool-setpoint write all read it. With Prefer savings on it
+        is the savings-widened awake ceiling (``awake_comfort_edges()``), the same number the
+        thermostat's comfort band is armed with.
 
         Returns None for whole-house-fan mode (FAN_MODE_WHOLE_HOUSE / FAN_MODE_BOTH): a WHF
         is guaranteed to keep converging toward outdoor temperature as long as outdoor stays
         below indoor, so there is no ceiling-based handoff point — only the outdoor/indoor
         direction matters (Issue #392 Fix 1). HVAC fan mode coexists with the compressor (band
         stays armed per Issue #249), so the ceiling is a valid handoff signal there.
+
+        Issue #1093: that WHF reasoning only holds while a window is open. With ``house_sealed=True``
+        (``_whf_house_sealed_with_known_sensors()``: sensors configured and all closed) the WHF cannot
+        run -- it never runs on a sealed house -- so the home behaves like a non-WHF home and gets the
+        same ceiling. Only the ODE ceiling guard passes it; the nat-vent gate (``nat_vent_gate.py``,
+        a window-open decision) and the forecast walk keep the archetype-only ``None``.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        if not house_sealed and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return None
         if comfort_cool is None:
             return None
-        aggressive = bool(self.config.get("aggressive_savings", False))
-        return comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive else comfort_cool
+        # Issue #1093: the Prefer savings margin is added in exactly one place --
+        # awake_comfort_edges() -- so this handoff point can never differ from the ceiling the
+        # thermostat is armed with. The caller's comfort_cool overrides the config value (callers
+        # pass the config value; tests pass literals).
+        return awake_comfort_edges(
+            {**self.config, "comfort_cool": comfort_cool},
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )[1]
 
     def _resolve_classification_fsm_state(
         self,
@@ -11857,7 +11884,9 @@ class AutomationEngine:
             comfort_cool=comfort_cool,
             outdoor=self._last_outdoor_temp,
             indoor=self._get_indoor_temp_f(),
-            ceiling_threshold=self._ceiling_threshold(comfort_cool),
+            ceiling_threshold=self._ceiling_threshold(
+                comfort_cool, house_sealed=self._whf_house_sealed_with_known_sensors()
+            ),
             now=dt_util.now(),
         )
         event = ClassificationFsmEvent(kind=ClassificationFsmEventKind.CYCLE_EVALUATED, inputs=inputs)
@@ -11900,6 +11929,9 @@ class AutomationEngine:
         _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
         _k_active_cool = _thermal.get("k_active_cool")
         _comfort_cool_cg = self.config.get("comfort_cool")
+        # Issue #1093: the ceiling the decision was made against (savings-adjusted awake ceiling);
+        # None only on outcomes that return before the shell reads it.
+        _ceiling_cg = outcome_obj.ceiling
         # Issue #1036: use the readings the decision was made from — a second
         # read could be None by now and would crash the %.1f / :.1f formatting below.
         # (Either may be None on MODEL_INELIGIBLE/MISSING_TEMPS, and both on NOT_APPLICABLE; only %s-logged there.)
@@ -11908,10 +11940,11 @@ class AutomationEngine:
         _unit = self._temp_unit
 
         _LOGGER.debug(
-            "ODE ceiling guard eval: %d points, comfort_cool=%s, outdoor=%s, indoor=%s,"
+            "ODE ceiling guard eval: %d points, comfort_cool=%s, ceiling=%s, outdoor=%s, indoor=%s,"
             " k_passive=%s, conf=%s, bridge=%s",
             len(predicted_indoor) if predicted_indoor else 0,
             _comfort_cool_cg,
+            _ceiling_cg,
             _outdoor,
             _indoor_cg,
             _k_passive,
@@ -11933,7 +11966,7 @@ class AutomationEngine:
             )
             return
         if outcome is OdeCeilingGuardOutcome.DORMANT:
-            _ceiling_threshold_val = self._ceiling_threshold(_comfort_cool_cg)
+            _ceiling_threshold_val = _ceiling_cg
             _LOGGER.debug(
                 "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
                 " indoor <= ceiling threshold %s (free cooling viable)",
@@ -11944,7 +11977,7 @@ class AutomationEngine:
             return
         if outcome is OdeCeilingGuardOutcome.NO_BREACH_PREDICTED:
             _tolerance = CEILING_BRIDGE_TOLERANCE_F if _k_via_bridge else 0.0
-            _threshold = _comfort_cool_cg + _tolerance
+            _threshold = _ceiling_cg + _tolerance
             _LOGGER.debug("ODE ceiling guard: dormant — no breach above %.1f°F predicted", _threshold)
             return
 
@@ -12029,7 +12062,7 @@ class AutomationEngine:
         # ESCALATE
         _LOGGER.info(
             "ODE ceiling guard: active — setting HVAC cool, target=%.1f (breach %.1fh, lead=%.0fmin, k_cool=%s)",
-            _comfort_cool_cg,
+            _ceiling_cg,
             _hours_to_breach,
             _lead_min,
             _k_active_cool,
@@ -12038,7 +12071,7 @@ class AutomationEngine:
             _ceiling_escalation_result = await self._deactivate_fan(
                 reason=(
                     f"ceiling guard override — indoor {self._t(_indoor_cg)} approaching"
-                    f" comfort_cool {self._t(_comfort_cool_cg)}, breach predicted in"
+                    f" ceiling {self._t(_ceiling_cg)}, breach predicted in"
                     f" {_hours_to_breach:.1f}h — switching to active cooling"
                 )
             )
@@ -12055,7 +12088,7 @@ class AutomationEngine:
                 _ceiling_escalation_payload = {
                     "indoor": _indoor_cg,
                     "outdoor": _outdoor,
-                    "comfort_cool": _comfort_cool_cg,
+                    "comfort_cool": _ceiling_cg,
                     "hours_to_breach": round(_hours_to_breach, 2),
                     "lead_min": round(_lead_min),
                     "k_active_cool": _k_active_cool,
@@ -12081,8 +12114,8 @@ class AutomationEngine:
                     reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
                 )
             await self._set_temperature(
-                _comfort_cool_cg,
-                reason="ODE ceiling guard — target comfort_cool",
+                _ceiling_cg,
+                reason="ODE ceiling guard — target comfort ceiling",
                 mode="cool",
             )
         # Issue #843: this guard writes mode directly rather than going through
@@ -12100,7 +12133,7 @@ class AutomationEngine:
                     "lead_time_min": round(_lead_min),
                     "old_hvac_mode": _old_mode_cg,
                     "new_hvac_mode": "cool",
-                    "new_setpoint_f": _comfort_cool_cg,
+                    "new_setpoint_f": _ceiling_cg,
                     "old_setpoint_f": _old_setpoint_f_cg,
                 },
             )

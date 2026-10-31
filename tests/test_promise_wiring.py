@@ -460,7 +460,6 @@ class TestRealEntryPointsFeedThePromises:
         c._emit_event = types.MethodType(_coordinator_class()._emit_event, c)
         c._event_log = []
         c._nat_vent_was_active = False
-        c._feed_lifecycle_fsms_from_event = MagicMock()
         with _now_patch():
             c._emit_event("override_detected", {"detected_mode": "heat", "source": "manual"})
         (episode,) = c._promise_journal.window(NOW).episodes
@@ -471,7 +470,6 @@ class TestRealEntryPointsFeedThePromises:
         c._emit_event = types.MethodType(_coordinator_class()._emit_event, c)
         c._event_log = []
         c._nat_vent_was_active = False
-        c._feed_lifecycle_fsms_from_event = MagicMock()
         with _now_patch():
             c._emit_event("briefing_sent", {})
         assert c._promise_journal.window(NOW).marks == ()

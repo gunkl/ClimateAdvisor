@@ -1,4 +1,4 @@
-"""Real-HA test for Issue #1132: a window opened during a manual override must still pause (and restore) HVAC.
+"""Real-HA test for Issue #1132 (amended by #1133): a pause that does happen is always recorded.
 
 Occupant story: it is warm, the person has just turned the cooling down at the thermostat (a manual change,
 with the hold-off after a manual change set to zero), then opens a window. Climate Advisor turns the cooling
@@ -49,19 +49,23 @@ async def _open_window(house, *, manual_change: bool) -> None:
     await house.advance(minutes=3)  # past the sensor debounce
 
 
-async def test_window_during_manual_override_records_pause_and_close_restores(make_house) -> None:
+async def test_window_during_manual_override_leaves_the_occupants_cooling_alone(make_house) -> None:
+    """Superseded by Issue #1133 (owner decision): #1132 recorded the pause for a window opened over a grace-less
+    manual override, but the owner's rule 1 is that the occupant's change wins -- the window must not pause it at
+    all, so there is no pause to record. (The recorded-pause contract still holds for every other route to a
+    pause: see the positive control below and tests_ha/test_protect_manual_change_1133.py.)"""
     house = await make_house(**_HOUSE)
     engine = house.coordinator.automation_engine
     await _open_window(house, manual_change=True)
 
-    assert house.thermostat.mode == "off", "precondition: HVAC was turned off for the open window"
-    assert engine._paused_by_door is True, "HVAC was turned off for the window, so the pause must be recorded"
+    assert house.thermostat.mode == "cool", "the occupant's cooling must survive the open window"
+    assert engine._paused_by_door is False
 
     await house.close_contact("window")
     await house.advance(minutes=3)
 
     assert engine._paused_by_door is False
-    assert house.thermostat.mode != "off", "closing the window must hand the occupant their cooling back"
+    assert house.thermostat.mode == "cool"
 
 
 async def test_positive_control_window_without_manual_change_never_leaves_hvac_off_unexplained(make_house) -> None:

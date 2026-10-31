@@ -553,9 +553,8 @@ class TestEventRenderersCoverage:
     # dedicated renderer.  Add here only with a comment explaining why.
     _DEFAULT_RENDERER_ALLOWLIST: frozenset[str] = frozenset(
         {
-            # Issue #672 (superseded by Issue #913): purely a technical signal feeding
-            # coordinator.py's diagnostic override/grace FSM tracker
-            # (_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP) — the SAME real grace-start
+            # Issue #672 (superseded by Issue #913): purely a technical signal for the event log
+            # (the coordinator override/grace FSM tracker it fed was deleted in Issue #1152) — the SAME real grace-start
             # _start_grace_period_action() already emits as the user-facing
             # "grace_started" event (which has its own dedicated renderer) moments
             # earlier. Issue #913: this type is no longer routed to _default_renderer at

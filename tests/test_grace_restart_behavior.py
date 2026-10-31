@@ -386,7 +386,13 @@ class TestNewOverrideDuringGrace:
         # (was clear_manual_override()'s own second half). See coordinator.py's
         # 'new_override_during_grace' branch docstring for why this is OVERRIDE_SUPERSEDED,
         # not OVERRIDE_CANCELLED (grace must stay untouched here).
-        coord.automation_engine._clear_manual_override_active.assert_called_once()
+        # Issue #1133: the "a new override replaces the old one" steps are now ONE shared engine helper
+        # (``_replace_thermostat_override``), exercised for real in tests/test_override_supersession.py and
+        # tests/test_protect_manual_change.py; here only the coordinator's call into it is pinned.
+        replace = coord.automation_engine._replace_thermostat_override
+        replace.assert_called_once()
+        assert replace.call_args.kwargs["reason"] == "new_override_during_grace"
+        assert replace.call_args.kwargs["clear_fan"] is True
         coord.automation_engine.handle_manual_override.assert_called_once()
 
     def test_same_mode_during_grace_not_refired(self):

@@ -488,7 +488,7 @@ class TestPathBTransientNotification:
         engine.hass.states.get.return_value = divergent_state
 
         fired = _start_confirmation_and_capture(engine, source="normal")
-        engine.hass.async_create_task.reset_mock()
+        engine.hass.async_create_task = MagicMock()  # keep the coroutines un-consumed
 
         resolved_state = MagicMock()
         resolved_state.state = "heat"
@@ -496,5 +496,12 @@ class TestPathBTransientNotification:
 
         fired(None)
 
-        # Notification should NOT be scheduled when gate is off
-        engine.hass.async_create_task.assert_not_called()
+        # Notification should NOT be sent when the gate is off. (Since Issue #1133 F-E the self-resolve
+        # always schedules ONE follow-up task -- the window re-check and reclassify -- so assert on the
+        # notification itself, not on the absence of any task.)
+        from unittest.mock import AsyncMock
+
+        engine._notify = AsyncMock()
+        for call in engine.hass.async_create_task.call_args_list:
+            asyncio.run(call.args[0])
+        engine._notify.assert_not_called()

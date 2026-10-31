@@ -1210,44 +1210,6 @@ class TestCancelViewsGraceCancellation:
         assert coordinator._unsub_listeners == [mock_call_later.return_value]
 
 
-class TestResumeFromPauseViewFeedsOverrideGraceFsm:
-    """Issue #757 Phase 6 Step 8: ClimateAdvisorResumeFromPauseView.post() used to
-    mirror resume_from_pause() onto the now-removed shadow engine — a side effect
-    of that mirror call was feeding the override/grace FSM's DASHBOARD_RESUME entry
-    event via `_mirror_to_shadow()`'s own finally block. With the shadow engine
-    gone, the view now feeds that FSM event directly via
-    `coordinator._feed_override_grace_fsm_on_detect("resume_from_pause")`."""
-
-    def _post(self, coordinator):
-        import asyncio
-
-        from custom_components.climate_advisor.api import ClimateAdvisorResumeFromPauseView
-
-        view = ClimateAdvisorResumeFromPauseView()
-        request = _make_view_request(coordinator)
-        resp = asyncio.run(view.post(request))
-        return resp.json_data
-
-    def test_feeds_override_grace_fsm_when_paused(self):
-        from unittest.mock import AsyncMock
-
-        coordinator = MagicMock()
-        coordinator.automation_engine.is_paused_by_door = True
-        coordinator.automation_engine.resume_from_pause = AsyncMock(return_value="cool")
-
-        self._post(coordinator)
-
-        coordinator._feed_override_grace_fsm_on_detect.assert_called_once_with("resume_from_pause")
-
-    def test_does_not_feed_fsm_when_not_paused(self):
-        coordinator = MagicMock()
-        coordinator.automation_engine.is_paused_by_door = False
-
-        self._post(coordinator)
-
-        coordinator._feed_override_grace_fsm_on_detect.assert_not_called()
-
-
 class TestEventLogAndActivityRecordTruncationSignal:
     """Issue #432: ClimateAdvisorEventLogView and ClimateAdvisorActivityRecordView
     must honestly signal when a time-window response might be incomplete — either

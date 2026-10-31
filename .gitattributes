@@ -5,3 +5,4 @@ tools/simulations/golden/*.json text eol=lf
 tools/simulations/pending/*.json text eol=lf
 tools/simulations/pending-fix/*.json text eol=lf
 tools/simulations/unsupported/*.json text eol=lf
+tests_ha/snapshots/*.ambr text eol=lf

@@ -55,7 +55,7 @@ _CET = timezone(timedelta(hours=1))  # Central European Time (winter)
 # now-relative one — both happen to produce identical output when the offset
 # never changes. A real IANA zone can actually transition mid-scenario, which
 # is what's needed to prove that hazard. Requires the `tzdata` package on
-# platforms without a system tz database (see requirements_test.txt).
+# platforms without a system tz database (see the pyproject.toml test group).
 _LOS_ANGELES = ZoneInfo("America/Los_Angeles")
 
 

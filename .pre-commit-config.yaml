@@ -6,6 +6,8 @@ repos:
       - id: check-json
       - id: end-of-file-fixer
       - id: trailing-whitespace
+        # syrupy snapshots record exact rendered text, including trailing spaces
+        exclude: ^tests_ha/snapshots/.*\.ambr$
       - id: mixed-line-ending
         args: [--fix, lf]
         files: ^tools/simulations/.*\.json$

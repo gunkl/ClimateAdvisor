@@ -1,0 +1,485 @@
+# serializer version: 1
+# name: test_away_day
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Warm (84°F)
+        HVAC Mode: Off — away
+        Occupancy: Away — setback active
+        Windows: Close by 9:00 AM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (84°F)
+      
+      Close up at 9:00 AM before outdoor air warms past indoor.
+      
+      Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+      Reopen windows around 9:00 PM when the evening air cools back down.
+      
+      You're currently away. The HVAC is off today, so not much changes. If it kicks on as a safety net, it'll set back on its own.
+      
+      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      
+      Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Warm (84°F)
+        HVAC Mode: Off — away
+        Occupancy: Away — setback active
+        Windows: Close by 9:00 AM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (84°F)
+    ''',
+    'fan': 'disabled',
+    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_user_action': "You're away — the house says it's fine, promise.",
+    'notifications': list([
+      dict({
+        'message': '''
+            Day Type: Warm (84°F)
+            HVAC Mode: Off — away
+            Occupancy: Away — setback active
+            Windows: Close by 9:00 AM
+            Bedtime Setback: No setback
+            Tomorrow: Stable (84°F)
+        ''',
+        'title': '🏠 Your Home Climate Plan for Today',
+      }),
+    ]),
+    'status': 'active (away)',
+  })
+# ---
+# name: test_celsius_warm_day
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Warm (29°C)
+        HVAC Mode: Off — windows day
+        Windows: Close by 9:00 AM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (29°C)
+      
+      Close up at 9:00 AM before outdoor air warms past indoor.
+      
+      Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 24°C.
+      Reopen windows around 9:00 PM when the evening air cools back down.
+      
+      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      
+      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      
+      Tomorrow looks pretty similar to today — 29°C for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Warm (29°C)
+        HVAC Mode: Off — windows day
+        Windows: Close by 9:00 AM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (29°C)
+    ''',
+    'fan': 'disabled',
+    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_user_action': 'Close windows by 9:00 AM',
+    'notifications': list([
+      dict({
+        'message': '''
+            Day Type: Warm (29°C)
+            HVAC Mode: Off — windows day
+            Windows: Close by 9:00 AM
+            Bedtime Setback: No setback
+            Tomorrow: Stable (29°C)
+        ''',
+        'title': '🏠 Your Home Climate Plan for Today',
+      }),
+    ]),
+    'status': 'active',
+  })
+# ---
+# name: test_mild_day_with_window_open_and_whole_house_fan
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Mild (72°F)
+        HVAC Mode: Off — windows day
+        Windows: Close by 12:00 PM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (72°F)
+      
+      A day where the house practically takes care of itself — it held at or above 70°F on its own overnight, so HVAC stayed off and the weather did the rest.
+      
+      Open south and east windows for a natural cross-breeze that freshens the air and warms the house for free.
+      
+      Close up by 12:00 PM before outdoor air warms past indoor. If it dips below 68°F tonight, I'll bring the heater back on automatically.
+      
+      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      
+      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      
+      Tomorrow looks pretty similar to today — 72°F for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Mild (72°F)
+        HVAC Mode: Off — windows day
+        Windows: Close by 12:00 PM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (72°F)
+    ''',
+    'fan': 'nat-vent (session active, fan idle)',
+    'next_automation': 'Bedtime check @ 10:30 PM',
+    'next_user_action': 'Open windows at 10:00 AM',
+    'status': 'nat-vent',
+  })
+# ---
+# name: test_reference_day_surfaces[cold]
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Cold (41°F)
+        HVAC Mode: Heat at 70°F
+        Windows: Closed all day
+        Bedtime Setback: 66°F at 10:30 PM
+        Tomorrow: Stable (41°F)
+      
+      Cold day — heater runs all day. Help it out: close north-side curtains, open south-facing ones for free solar heat, and minimize time holding exterior doors open.
+      
+      Tonight I'm using a conservative setback — 66°F instead of the usual 60°F. When it's this cold, a deeper setback takes too long to recover from in the morning.
+      
+      If you head out, I'll drop to 60°F after about 15 minutes. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.
+      
+      If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a bit in case you're just airing things out, but if it stays open past 10 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
+      
+      Tomorrow looks pretty similar to today — 41°F for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Cold (41°F)
+        HVAC Mode: Heat at 70°F
+        Windows: Closed all day
+        Bedtime Setback: 66°F at 10:30 PM
+        Tomorrow: Stable (41°F)
+    ''',
+    'fan': 'disabled',
+    'next_automation': 'Morning wake-up — restore heat comfort @ 6:30 AM',
+    'next_user_action': 'Keep doors closed.',
+    'notifications': list([
+      dict({
+        'message': '''
+            Day Type: Cold (41°F)
+            HVAC Mode: Heat at 70°F
+            Windows: Closed all day
+            Bedtime Setback: 66°F at 10:30 PM
+            Tomorrow: Stable (41°F)
+        ''',
+        'title': '🏠 Your Home Climate Plan for Today',
+      }),
+    ]),
+    'status': 'active',
+  })
+# ---
+# name: test_reference_day_surfaces[cool]
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Mild (62°F)
+        HVAC Mode: Off — windows day
+        Windows: Closed all day
+        Bedtime Setback: No setback
+        Tomorrow: Stable (62°F)
+      
+      A day where the house practically takes care of itself — it held at or above 70°F on its own overnight, so HVAC stayed off and the weather did the rest.
+      
+      Close up now since indoor's already down to your comfort floor. If it dips below 68°F tonight, I'll bring the heater back on automatically.
+      
+      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      
+      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      
+      Tomorrow looks pretty similar to today — 62°F for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Mild (62°F)
+        HVAC Mode: Off — windows day
+        Windows: Closed all day
+        Bedtime Setback: No setback
+        Tomorrow: Stable (62°F)
+    ''',
+    'fan': 'disabled',
+    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_user_action': 'Comfortable — no action needed.',
+    'notifications': list([
+      dict({
+        'message': '''
+            Day Type: Mild (62°F)
+            HVAC Mode: Off — windows day
+            Windows: Closed all day
+            Bedtime Setback: No setback
+            Tomorrow: Stable (62°F)
+        ''',
+        'title': '🏠 Your Home Climate Plan for Today',
+      }),
+    ]),
+    'status': 'active',
+  })
+# ---
+# name: test_reference_day_surfaces[hot]
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Hot (96°F)
+        HVAC Mode: Cool at 75°F
+        Windows: Close by 8:00 AM (<78°F) / Open 12:00 AM+
+        Bedtime Setback: 78°F at 10:30 PM
+        Tomorrow: Stable (96°F)
+      
+      Tonight I'll pre-cool the house to about 76°F while outdoor air is still cool — that banking strategy cuts energy use over the course of the day.
+      
+      Once outdoor temps rise above 78°F, close up for the day (around 8:00 AM) — I'll handle the AC transition. Until then, enjoy the cross-breeze.
+      
+      Once closed, keep blinds drawn on sun-facing windows (especially west-facing after noon). I'll hold things at 75°F.
+      
+      Later, once outdoor temps cool back down below indoor (around 12:00 AM), open up again and I'll cut the AC to let natural ventilation take over.
+      
+      If you head out, no worries. After about 15 minutes I'll let the house drift up to 80°F to save energy. When you're back, I'll pull it right back down — give it 20 to 30 minutes to feel normal again.
+      
+      If you want to crack a window for some fresh air, no problem — it's your house. I'll keep the AC running for a bit in case it's just a quick thing, but if it stays open past 10 minutes I'll shut the AC off so you're not cooling the outdoors. Once you close up, I'll fire the AC back up right away. Just know that on a day like today it may take a bit longer to pull back down to 75°F, so if you want to minimize the impact, shorter is better — and try to keep other windows and doors shut while you've got one open.
+      
+      Tomorrow looks pretty similar to today — 96°F for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Hot (96°F)
+        HVAC Mode: Cool at 75°F
+        Windows: Close by 8:00 AM (<78°F) / Open 12:00 AM+
+        Bedtime Setback: 78°F at 10:30 PM
+        Tomorrow: Stable (96°F)
+    ''',
+    'fan': 'disabled',
+    'next_automation': 'Morning wake-up — restore cool comfort @ 6:30 AM',
+    'next_user_action': 'Open windows if outdoor temp is below 78°F (until 8:00 AM)',
+    'notifications': list([
+      dict({
+        'message': '''
+            Day Type: Hot (96°F)
+            HVAC Mode: Cool at 75°F
+            Windows: Close by 8:00 AM (<78°F) / Open 12:00 AM+
+            Bedtime Setback: 78°F at 10:30 PM
+            Tomorrow: Stable (96°F)
+        ''',
+        'title': '🏠 Your Home Climate Plan for Today',
+      }),
+    ]),
+    'status': 'active',
+  })
+# ---
+# name: test_reference_day_surfaces[mild]
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Mild (72°F)
+        HVAC Mode: Off — windows day
+        Windows: Close by 12:00 PM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (72°F)
+      
+      A day where the house practically takes care of itself — it held at or above 70°F on its own overnight, so HVAC stayed off and the weather did the rest.
+      
+      Open south and east windows for a natural cross-breeze that freshens the air and warms the house for free.
+      
+      Close up by 12:00 PM before outdoor air warms past indoor. If it dips below 68°F tonight, I'll bring the heater back on automatically.
+      
+      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      
+      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      
+      Tomorrow looks pretty similar to today — 72°F for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Mild (72°F)
+        HVAC Mode: Off — windows day
+        Windows: Close by 12:00 PM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (72°F)
+    ''',
+    'fan': 'disabled',
+    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_user_action': 'Open windows at 10:00 AM',
+    'notifications': list([
+      dict({
+        'message': '''
+            Day Type: Mild (72°F)
+            HVAC Mode: Off — windows day
+            Windows: Close by 12:00 PM
+            Bedtime Setback: No setback
+            Tomorrow: Stable (72°F)
+        ''',
+        'title': '🏠 Your Home Climate Plan for Today',
+      }),
+    ]),
+    'status': 'active',
+  })
+# ---
+# name: test_reference_day_surfaces[warm]
+  dict({
+    'briefing_full': '''
+      🏠 Your Home Climate Plan for Today
+      ========================================
+      
+        Day Type: Warm (84°F)
+        HVAC Mode: Off — windows day
+        Windows: Close by 9:00 AM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (84°F)
+      
+      Close up at 9:00 AM before outdoor air warms past indoor.
+      
+      Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+      Reopen windows around 9:00 PM when the evening air cools back down.
+      
+      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      
+      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      
+      Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
+    ''',
+    'briefing_tldr': '''
+        Day Type: Warm (84°F)
+        HVAC Mode: Off — windows day
+        Windows: Close by 9:00 AM
+        Bedtime Setback: No setback
+        Tomorrow: Stable (84°F)
+    ''',
+    'fan': 'disabled',
+    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_user_action': 'Close windows by 9:00 AM',
+    'notifications': list([
+      dict({
+        'message': '''
+            Day Type: Warm (84°F)
+            HVAC Mode: Off — windows day
+            Windows: Close by 9:00 AM
+            Bedtime Setback: No setback
+            Tomorrow: Stable (84°F)
+        ''',
+        'title': '🏠 Your Home Climate Plan for Today',
+      }),
+    ]),
+    'status': 'active',
+  })
+# ---
+# name: test_warm_day_through_the_day
+  dict({
+    '06:30': dict({
+      'briefing_full': '''
+        🏠 Your Home Climate Plan for Today
+        ========================================
+        
+          Day Type: Warm (84°F)
+          HVAC Mode: Off — windows day
+          Windows: Close by 9:00 AM
+          Bedtime Setback: No setback
+          Tomorrow: Stable (84°F)
+        
+        Close up at 9:00 AM before outdoor air warms past indoor.
+        
+        Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+        Reopen windows around 9:00 PM when the evening air cools back down.
+        
+        If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+        
+        If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+        
+        Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
+      ''',
+      'briefing_tldr': '''
+          Day Type: Warm (84°F)
+          HVAC Mode: Off — windows day
+          Windows: Close by 9:00 AM
+          Bedtime Setback: No setback
+          Tomorrow: Stable (84°F)
+      ''',
+      'fan': 'disabled',
+      'next_automation': 'Morning wake-up check @ 6:30 AM',
+      'next_user_action': 'Close windows by 9:00 AM',
+      'status': 'active',
+    }),
+    '13:00': dict({
+      'briefing_full': '''
+        🏠 Your Home Climate Plan for Today
+        ========================================
+        
+          Day Type: Warm (84°F)
+          HVAC Mode: Off — windows day
+          Windows: Closed all day
+          Bedtime Setback: No setback
+          Tomorrow: Stable (84°F)
+        
+        HVAC is off this morning.
+        
+        Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+        Reopen windows around 9:00 PM when the evening air cools back down.
+        
+        If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+        
+        If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+        
+        Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
+      ''',
+      'briefing_tldr': '''
+          Day Type: Warm (84°F)
+          HVAC Mode: Off — windows day
+          Windows: Closed all day
+          Bedtime Setback: No setback
+          Tomorrow: Stable (84°F)
+      ''',
+      'fan': 'disabled',
+      'next_automation': 'Bedtime check @ 10:30 PM',
+      'next_user_action': 'Comfortable — no action needed.',
+      'status': 'active',
+    }),
+    '20:00': dict({
+      'briefing_full': '''
+        🏠 Your Home Climate Plan for Today
+        ========================================
+        
+          Day Type: Warm (84°F)
+          HVAC Mode: Off — windows day
+          Windows: Closed all day
+          Bedtime Setback: No setback
+          Tomorrow: Stable (84°F)
+        
+        HVAC is off this morning.
+        
+        Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+        Reopen windows around 9:00 PM when the evening air cools back down.
+        
+        If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+        
+        If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+        
+        Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
+      ''',
+      'briefing_tldr': '''
+          Day Type: Warm (84°F)
+          HVAC Mode: Off — windows day
+          Windows: Closed all day
+          Bedtime Setback: No setback
+          Tomorrow: Stable (84°F)
+      ''',
+      'fan': 'disabled',
+      'next_automation': 'Bedtime check @ 10:30 PM',
+      'next_user_action': 'Comfortable — no action needed.',
+      'status': 'active',
+    }),
+  })
+# ---

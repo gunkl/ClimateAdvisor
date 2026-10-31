@@ -58,6 +58,10 @@ def _refresh_minutes(start: datetime, indoor: float, *, hourly: bool = True, **c
     with scheduler.installed():
         run_coro(coord._async_update_data())
         band = coord._target_band_lower_upper_now()
+        # Tasks the refresh spawned via hass.async_create_task (thermostat listener, background
+        # notify) sit in the scheduler queue; drain them so no coroutine is garbage-collected
+        # unawaited in a later test (Issue #1126).
+        scheduler.advance_by(0)
     assert coord._today_record is not None
     return coord._today_record.comfort_violations_minutes - before, band
 

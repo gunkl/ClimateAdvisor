@@ -305,6 +305,23 @@ class _FakeStates:
         self._states: dict[str, FakeState] = {}
         self._dispatch_fn = dispatch_fn
         self._clock_fn = clock_fn  # callable → current sim datetime, for last_changed
+        # Issue #1128 I2: passive write observers (PromiseProbe). Empty by default; an observer
+        # is called as cb(entity_id) AFTER a write lands and never mutates state.
+        self._observers: list[Any] = []
+
+    def add_observer(self, callback: Any) -> Any:
+        """Register a passive state-write observer; returns a zero-arg cancel function."""
+        self._observers.append(callback)
+
+        def _remove() -> None:
+            with contextlib.suppress(ValueError):
+                self._observers.remove(callback)
+
+        return _remove
+
+    def _notify(self, entity_id: str) -> None:
+        for cb in list(self._observers):
+            cb(entity_id)
 
     def get(self, entity_id: str) -> FakeState | None:
         return self._states.get(entity_id)
@@ -323,6 +340,8 @@ class _FakeStates:
 
     def set(self, entity_id: str, state: FakeState) -> None:
         self._states[entity_id] = state
+        if self._observers:
+            self._notify(entity_id)
 
     def set_simple(
         self,
@@ -340,6 +359,8 @@ class _FakeStates:
         run yet (the exact race _sensor_debounce_pending() must not misread).
         """
         self._states[entity_id] = FakeState(state=state_str, attributes=attributes or {}, last_changed=last_changed)
+        if self._observers:
+            self._notify(entity_id)
 
     def async_set(self, entity_id: str, state_str: str, attributes: dict | None = None, context: Any = None) -> None:
         """Set a new state and dispatch a state-changed event to real listeners.
@@ -361,6 +382,8 @@ class _FakeStates:
             last_changed = self._clock_fn() if self._clock_fn is not None else None
         new_state = FakeState(state=state_str, attributes=attributes or {}, last_changed=last_changed)
         self._states[entity_id] = new_state
+        if self._observers:
+            self._notify(entity_id)
         if self._dispatch_fn is not None:
             self._dispatch_fn(entity_id, old_state, new_state, context=context)
 

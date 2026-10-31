@@ -1,0 +1,58 @@
+name: Weekly FakeHass vs real Home Assistant compare
+
+# Step 2 Increment 9 (02-step2-design.md section 11.3). Not a PR gate: it needs both environments and its
+# output is a report. The PR gate is the real-HA golden ledger ratchet in validate.yml. This job dumps
+# every golden on the FakeHass adapter (unit env), replays them on real Home Assistant (ha env), diffs the
+# pair with tools/sim_harness/divergence.py, and attaches SUMMARY.md plus the per-scenario reports.
+
+on:
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CA_HA_WORKERS: "4"
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Install test dependencies
+        run: uv sync --locked --only-group test
+
+      - name: Dump every golden on the FakeHass adapter
+        run: uv run --locked --only-group test python tools/sim_harness/divergence.py dump-fake
+
+      - name: Replay every golden on real Home Assistant (dumps are the product; the ledger ratchet runs in validate.yml)
+        continue-on-error: true
+        run: python3 scripts/test.py ha -m goldens
+
+      - name: Diff the two worlds
+        run: >
+          uv run --locked --only-group test python tools/sim_harness/divergence.py compare
+          --out .pytest_cache/realha/reports
+
+      - name: Show the summary
+        if: always()
+        run: |
+          if [ -f .pytest_cache/realha/reports/SUMMARY.md ]; then
+            cat .pytest_cache/realha/reports/SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the divergence reports
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: realha-divergence-reports
+          path: .pytest_cache/realha/
+          if-no-files-found: warn
+          retention-days: 30

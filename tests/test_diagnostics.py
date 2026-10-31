@@ -9,6 +9,8 @@ and the legacy `dump_diagnostics` service both build their output through.
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 from unittest.mock import MagicMock
 
 from custom_components.climate_advisor.const import CONFIG_METADATA, DOMAIN
@@ -242,6 +244,53 @@ class TestNativeHook:
         assert payload["config"]["notify_service"] != "notify.mobile_app"
 
 
+# ── coordinate leak detection (rounding-aware, timestamp-safe) ───────────────────────────────────
+_FIXTURE_COORDS = (34.912345, -120.467891)
+# Any ISO date / datetime fragment: its digits (seconds, fractions) are not coordinates.
+_ISO_FRAGMENT = re.compile(
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"|\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+)
+
+
+def _leaf_values(node):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield k
+            yield from _leaf_values(v)
+    elif isinstance(node, (list, tuple, set)):
+        for v in node:
+            yield from _leaf_values(v)
+    else:
+        yield node
+
+
+def _coordinate_leaks(payload, coords, *, tolerance: float = 0.01) -> list:
+    """Leaves of ``payload`` that disclose a coordinate, exactly or rounded.
+
+    * a numeric leaf within ``tolerance`` of a coordinate (so 34.91 and 34.9123 both count);
+    * a string leaf that contains a coordinate to 2+ decimals (rounded or truncated), after
+      removing ISO date/time fragments (a timestamp's seconds are not a location).
+    """
+    patterns = []
+    for c in coords:
+        for places in range(2, 7):
+            for text in (f"{c:.{places}f}", f"{math.trunc(c * 10**places) / 10**places:.{places}f}"):
+                patterns.append(re.compile(r"(?<![\d.])" + re.escape(text)))
+    leaks = []
+    for leaf in _leaf_values(payload):
+        if isinstance(leaf, bool):
+            continue
+        if isinstance(leaf, (int, float)):
+            if any(abs(leaf - c) <= tolerance for c in coords):
+                leaks.append(leaf)
+        elif isinstance(leaf, str):
+            scrubbed = _ISO_FRAGMENT.sub("", leaf)
+            if any(p.search(scrubbed) for p in patterns):
+                leaks.append(leaf)
+    return leaks
+
+
 class TestThermostatSnapshotInPayload:
     """Issue #1049 change 6: thermostat capabilities, last command and what happened."""
 
@@ -284,8 +333,8 @@ class TestThermostatSnapshotInPayload:
             "serial_number": "SN-12345",
             "mac_address": "AA:BB:CC:DD:EE:FF",
             "ip_address": "192.168.1.50",
-            "latitude": 34.9,
-            "longitude": -120.4,
+            "latitude": 34.912345,
+            "longitude": -120.467891,
         }
         hass.states.get.side_effect = lambda eid: (
             MagicMock(state="off", attributes=attrs) if eid == "climate.t" else None
@@ -311,12 +360,43 @@ class TestThermostatSnapshotInPayload:
         entry = _make_entry("entry_a", "Bedroom")
         hass = self._hass_for(self._coordinator_with_thermostat(), entry)
 
-        text = str(asyncio.run(async_get_diagnostics_payload(hass, entry)))
+        payload = asyncio.run(async_get_diagnostics_payload(hass, entry))
+        text = str(payload)
 
-        for leak in ("SN-12345", "SN-999", "AA:BB:CC:DD:EE:FF", "192.168.1.50", "34.9", "-120.4"):
+        # Identifier strings are distinctive enough for a substring check on the whole payload.
+        for leak in ("SN-12345", "SN-999", "AA:BB:CC:DD:EE:FF", "192.168.1.50"):
             assert leak not in text, leak
+        # Coordinates are numbers, so a raw substring check can collide with a timestamp's seconds
+        # fraction ("...:03:34.912+00:00" contains "34.91"; about 1 run in 600). Check structured
+        # leaves instead, with rounding-aware rules (see _coordinate_leaks).
+        assert _coordinate_leaks(payload, _FIXTURE_COORDS) == []
         assert "davids_phone" not in text
         assert "super-secret" not in text
+
+    def test_coordinate_leak_check_catches_rounded_and_embedded_coordinates(self):
+        """Sabotage: inject a rounded latitude into the real payload; the check must flag it."""
+        entry = _make_entry("entry_a", "Bedroom")
+        hass = self._hass_for(self._coordinator_with_thermostat(), entry)
+        clean = asyncio.run(async_get_diagnostics_payload(hass, entry))
+        assert _coordinate_leaks(clean, _FIXTURE_COORDS) == []
+
+        for planted in (34.91, 34.9123, -120.47, -120.46, "34.91", "lat=34.9124", "at -120.4679, somewhere"):
+            sabotaged = {**clean, "recent_hvac_events": [*clean["recent_hvac_events"], {"where": planted}]}
+            assert _coordinate_leaks(sabotaged, _FIXTURE_COORDS) == [planted], planted
+        nested = {**clean, "thermostat_snapshot": {**clean["thermostat_snapshot"], "loc": {"lat": 34.912345}}}
+        assert _coordinate_leaks(nested, _FIXTURE_COORDS) == [34.912345]
+
+    def test_coordinate_leak_check_ignores_timestamps_and_ordinary_numbers(self):
+        benign = {
+            "ts": "2026-10-30T10:03:34.912345+00:00",
+            "also": "2026-10-30 10:03:34.91",
+            "clock": "10:03:34.912",
+            "temp": 72.5,
+            "n": 134,
+            "span": "134.91 minutes",
+            "ok": True,
+        }
+        assert _coordinate_leaks(benign, _FIXTURE_COORDS) == []
 
     def test_automation_enabled_debug_state_still_present(self):
         entry = _make_entry("entry_a", "Bedroom")

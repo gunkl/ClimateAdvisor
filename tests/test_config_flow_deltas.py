@@ -35,12 +35,11 @@ _MOVED_FROM_INITIAL = {
 
 @pytest.fixture(autouse=True)
 def _need_voluptuous():
-    try:
-        import voluptuous as v
-    except ImportError:
-        pytest.skip("voluptuous unavailable")
-    if isinstance(v, MagicMock):
-        pytest.skip("voluptuous is a stub")
+    # voluptuous is a required test dependency (uv group "test"); a stub means a broken
+    # environment and must fail loudly rather than skip.
+    import voluptuous as v
+
+    assert not isinstance(v, MagicMock), "voluptuous is a stub - install the test dependency group"
 
 
 class _CapturedSelector:

@@ -555,8 +555,8 @@ Assistant core (pytest-homeassistant-custom-component), unloads it and ends with
 time; HA's autouse `verify_cleanup` fixture then fails the test on any timer, task or thread
 still alive. It names no resource, so a new leak anywhere in setup fails it. It runs in its own
 CI job (`ha-lifecycle` in `.github/workflows/validate.yml`) and environment
-(`requirements_test_ha.txt`), because `tests/conftest.py` stubs `homeassistant` for the whole
-process: `pytest -c tests_ha/pytest.ini --rootdir=tests_ha tests_ha/`.
+(dependency group `test-ha`), because `tests/conftest.py` stubs `homeassistant` for the whole
+process: `python scripts/test.py ha`.
 
 **Shutdown order (`async_shutdown`).**
 1. If already shut down, return (the second call from on_unload must not re-save: by then

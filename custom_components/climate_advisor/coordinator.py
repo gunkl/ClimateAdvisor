@@ -272,7 +272,14 @@ from .fan_status import (
 from .hvac_action import is_hvac_action_active, is_hvac_compressor_active
 from .incident_payload import build_incident_payload
 from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
-from .invariant_watchdog import run_invariant_checks
+from .invariant_watchdog import (
+    LEVEL_ALERT,
+    PROMISES,
+    SCOPE_HOME,
+    PromiseConfig,
+    run_invariant_checks,
+    run_promise_checks,
+)
 from .learning import (
     SHUTDOWN_KIND_HA_STOP,
     SHUTDOWN_KIND_UNLOAD,
@@ -293,6 +300,17 @@ from .nat_vent_plan import (
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
+from .promise_journal import (
+    Command as _PromiseCommand,
+)
+from .promise_journal import (
+    PromiseJournal,
+    bump_promise_stats,
+    sanitize_promise_stats,
+)
+from .promise_journal import (
+    Reading as _PromiseReading,
+)
 from .scheduler import (
     COST_TAG_HIGH,
     Schedule,
@@ -801,6 +819,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # paths) can pull a pending pre-cool trigger earlier instead of leaving it on
         # the STATIC classification-time schedule.
         self._nat_vent_was_active: bool = False
+
+        # Issue #1128 (Step 3): household promises. The journal is in-memory only (a restart is a
+        # clean slate: no history -> no false alarm); promise_stats is persisted, capped, validated.
+        self._promise_journal: PromiseJournal = PromiseJournal()
+        self._promise_stats: dict[str, dict[str, Any]] = {}
+        self._promise_armed_logged: bool = False
+        self.automation_engine._command_observer = self._promise_observe_command
 
         # Startup coalescing (Issue #321): suppress override detection for 5 min after restart
         self._startup_coalesce_active: bool = True
@@ -1497,6 +1522,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _async_thermal_sample_tick(self, now: datetime) -> None:
         """Sample active thermal observations on the 5-min tick."""
         self._refresh_outdoor_temp()
+        # Issue #1128: the household promises' heartbeat (a 45 minute rule cannot ride a 30 minute poll).
+        self._tick_household_promises()
         # Issue #1033: health monitoring must never abort thermal sampling.
         try:
             self._refresh_indoor_sensor_health()
@@ -1686,6 +1713,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # restart is still the answer to "why did the dashboard freeze last night",
         # and that question doesn't respect the day boundary the rest of this
         # function gates on.
+        # Issue #1128: per-promise counters live across days (the "two quiet weeks" evidence).
+        self._promise_stats = sanitize_promise_stats(state.get("promise_stats"), {p.key for p in PROMISES})
         self.last_update_error = state.get("last_update_error")
         self.last_update_error_time = state.get("last_update_error_time")
         try:
@@ -2025,6 +2054,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._last_solar_phase_fit_date.isoformat() if self._last_solar_phase_fit_date else None
             ),
             "event_log": list(self._event_log),
+            # Issue #1128: capped (<= number of promises) and type-validated again on load.
+            "promise_stats": dict(getattr(self, "_promise_stats", None) or {}),
             # Coordinator health (Issue #480). getattr() defaults, not direct
             # attribute access: several existing tests build a coordinator via
             # object.__new__() (bypassing __init__, which is where these are
@@ -3930,6 +3961,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FAN_RUNNING: fan_running,
             ATTR_HVAC_ACTION: hvac_action,
             "invariant_violations": [{"invariant": v.name, "detail": v.detail} for v in _invariant_violations],
+            "promise_summary": self._promise_summary(),  # Issue #1128 I8: Debug tab, null when none missed
             "hvac_control_issues": _hvac_control_issues,
             "entity_health_issues": [
                 {
@@ -6123,6 +6155,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def _async_thermostat_changed(self, event: Event) -> None:
         """Track thermostat changes for learning (detect manual overrides)."""
+        # Issue #1128: evidence first, before any early return below (sync, no I/O, never raises).
+        self._record_promise_reading()
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
         if not new_state or not old_state:
@@ -6941,6 +6975,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             service,
             fan_entity_id,
         )
+        # Issue #1128: this is the one command path that does not go through the engine's choke
+        # point, so it reports to the promise journal itself (Issue #1129: no Context, by design --
+        # it only runs in command-only mode where fan-entity echoes are never read as overrides).
+        self._promise_observe_command(domain, service, {"entity_id": fan_entity_id}, "fan")
         await self.hass.services.async_call(domain, service, {"entity_id": fan_entity_id})
         return True
 
@@ -7618,8 +7656,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         for violation in violations:
             _LOGGER.critical("Hard invariant violated: %s — %s", violation.name, violation.detail)
+            # Issue #1128 (K4): one dedup slot PER invariant, so two interleaved violations cannot thrash.
             if self.automation_engine is None or self.automation_engine._recent_duplicate(
-                "invariant_violation", (violation.name,), window_seconds=300
+                f"invariant_violation:{violation.name}", (violation.name,), window_seconds=300
             ):
                 continue
             self._emit_event("invariant_violation", {"invariant": violation.name, "detail": violation.detail})
@@ -7630,6 +7669,154 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "invariant_violation",
             )
         return violations
+
+    # ── Household promises (Issue #1128, Step 3) ───────────────────────────────
+    # Pure checks live in invariant_watchdog.py; this block only feeds the journal and reports.
+    # Everything here is synchronous, in-memory and wrapped: a fault in the promise layer must never
+    # abort a thermostat listener, a command, or an update cycle (graceful degradation).
+
+    def _promise_reading_now(self, now: datetime) -> _PromiseReading:
+        """One ground-truth observation for the journal (all temperatures internal degF)."""
+        unit = self.config.get("temp_unit", "fahrenheit")
+        cs = self.hass.states.get(self.config.get("climate_entity", ""))
+        mode = cs.state if cs is not None and cs.state not in ("unavailable", "unknown", "") else None
+        attrs = cs.attributes if cs is not None else {}
+        action = attrs.get("hvac_action") or None
+        classification = self._current_classification
+        contacts: bool | None = None
+        if getattr(self, "_resolved_sensors", None):
+            contacts = bool(self._any_sensor_open())
+        return _PromiseReading(
+            ts=now,
+            hvac_mode=mode,
+            hvac_action=str(action) if action else None,
+            indoor_f=self._get_indoor_temp(),
+            outdoor_f=getattr(self, "_last_outdoor_temp", None),
+            forecast_high_f=classification.today_high if classification is not None else None,
+            setpoint_f=read_state_temp_f(cs, "temperature", unit) if cs is not None else None,
+            fan_on=self._get_fan_physical_state(),
+            contacts_open=contacts,
+        )
+
+    def _record_promise_reading(self) -> None:
+        try:
+            self._promise_journal.record_reading(self._promise_reading_now(dt_util.now()))
+        except Exception:
+            _LOGGER.debug("Household promise reading skipped", exc_info=True)
+
+    def _record_promise_event(self, now: datetime, event_type: str, data: dict) -> None:
+        try:
+            self._promise_journal.on_event(now, event_type, data)
+        except Exception:
+            _LOGGER.debug("Household promise event skipped: type=%s", event_type, exc_info=True)
+
+    def _promise_observe_command(self, domain: str, service: str, data: dict[str, Any], kind: str) -> None:
+        """Journal one command CA is about to send (engine choke point and the fan reconcile path)."""
+        try:
+            unit = self.config.get("temp_unit", "fahrenheit")
+            temp = data.get("temperature")
+            setpoint_f = to_fahrenheit(float(temp), unit) if isinstance(temp, (int, float)) else None
+            if domain == "climate":
+                target, mode, fan_on = "thermostat", data.get("hvac_mode") or data.get("fan_mode"), None
+            else:
+                target, mode, fan_on = "fan", None, service == "turn_on" if service in ("turn_on", "turn_off") else None
+            self._promise_journal.record_command(
+                _PromiseCommand(
+                    ts=dt_util.now(),
+                    target=target,
+                    service=service,
+                    mode=str(mode) if mode is not None else None,
+                    setpoint_f=setpoint_f,
+                    fan_on=fan_on,
+                    origin="ca",
+                    automation_enabled=bool(self._automation_enabled),
+                    indoor_f=self._get_indoor_temp(),
+                    cause=getattr(self.automation_engine, "_mode_change_reason", None),
+                )
+            )
+        except Exception:
+            _LOGGER.debug("Household promise command skipped: kind=%s service=%s", kind, service, exc_info=True)
+
+    def _promise_summary(self) -> dict[str, Any] | None:
+        """Compact, display-safe digest of the household-promise counters (Issue #1128 I8).
+
+        Counts per promise and the last-hit time only -- no evidence, entity ids or settings.
+        ``None`` when no promise has ever missed, so the Debug tab shows nothing (not a row of zeros).
+        """
+        stats = getattr(self, "_promise_stats", None)
+        if not isinstance(stats, dict) or not stats:
+            return None
+        rows = []
+        for spec in PROMISES:
+            entry = stats.get(spec.key)
+            hits = entry.get("hits") if isinstance(entry, dict) else None
+            if not isinstance(hits, int) or isinstance(hits, bool) or hits <= 0:
+                continue
+            last = entry.get("last_ts")
+            rows.append(
+                {
+                    "promise": spec.key,
+                    "label": f"{spec.label}: {spec.key.replace('_', ' ')}",
+                    "hits": hits,
+                    "last_hit": last if isinstance(last, str) else None,
+                }
+            )
+        if not rows:
+            return None
+        return {"promises": rows, "total_hits": sum(r["hits"] for r in rows)}
+
+    def _tick_household_promises(self) -> None:
+        """5-minute heartbeat: record a reading, then evaluate (never raises)."""
+        try:
+            self._record_promise_reading()
+            self._evaluate_household_promises()
+        except Exception:
+            _LOGGER.warning("Household promise evaluation failed; will retry next tick", exc_info=True)
+
+    def _evaluate_household_promises(self) -> list:
+        """Run the home-scope promise checks and report each NEW hit (Issue #1128).
+
+        Promise 2 (the AC/WHF mutex) keeps its existing alerting path in ``_run_invariant_watchdog``
+        and is skipped here. Every other promise is LOG-ONLY today: a WARNING line and an
+        ``invariant_violation`` event with ``severity="log"`` -- no notification, no Status line.
+        Promotion to alert is a one-line ``home_level`` change in ``invariant_watchdog.PROMISES``.
+        """
+        journal = self._promise_journal
+        if not self._promise_armed_logged:
+            self._promise_armed_logged = True
+            _LOGGER.info(
+                "Household promises armed: alert=%s log=%s",
+                ",".join(p.key for p in PROMISES if p.home_level == LEVEL_ALERT),
+                ",".join(p.key for p in PROMISES if p.home_level == "log"),
+            )
+        now = dt_util.now()
+        window = journal.window(now)
+        hits = run_promise_checks(window, PromiseConfig.from_config(self.config), scope=SCOPE_HOME)
+        reported = []
+        for hit in hits:
+            if hit.promise == "ac_whf_mutex":
+                continue  # existing alert path (state promise, 300 s dedup per invariant)
+            if not journal.is_new(hit.key):
+                _LOGGER.debug("Household promise already reported: promise=%s key=%s", hit.promise, hit.key)
+                continue
+            spec = next(p for p in PROMISES if p.key == hit.promise)
+            evidence = " ".join(f"{k}={v}" for k, v in hit.evidence)
+            _LOGGER.warning("Household promise missed (log only): promise=%s %s", hit.promise, evidence)
+            bump_promise_stats(self._promise_stats, hit.promise, hit.ts)
+            self._emit_event(
+                "invariant_violation",
+                {
+                    "invariant": hit.promise,
+                    "detail": hit.detail,
+                    "promise": spec.label,
+                    "severity": spec.home_level,
+                    "episode_ts": hit.ts.isoformat(),
+                },
+            )
+            reported.append(hit)
+        if reported:
+            self._spawn(self._async_save_state())
+        return reported
 
     def _notify_in_background(self, title: str, message: str, notification_type: str, *, email: bool = True) -> None:
         """Fire-and-forget owner notification (Issue #1050, change 26).
@@ -10047,6 +10234,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         self._event_log.append(entry)
         self._event_log = _prune_event_log(self._event_log, _now)
+        # Issue #1128: CA's declared lifecycle words feed promise 4 (and promise 7's exclusions).
+        self._record_promise_event(_now, event_type, data)
 
         # #437 follow-up: detect a genuine nat-vent True->False exit transition (any of
         # the 5 real exit paths — comfort-floor, away-ceiling,
@@ -12030,6 +12219,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         return {
             "automation_enabled": self._automation_enabled,
+            "promise_summary": self._promise_summary(),
             "occupancy_mode": self._occupancy_mode,
             "paused_by_door": ae.is_paused_by_door,
             "pause_suppressed_classification": (

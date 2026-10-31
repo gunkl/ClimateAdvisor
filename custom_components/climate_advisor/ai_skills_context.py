@@ -2856,6 +2856,14 @@ def _render_invariant_violation(p: dict, unit: str) -> tuple[str, str]:
     invariant = p.get("invariant", "")
     detail = p.get("detail", "")
     label = detail or (f"Hard invariant violated: {invariant}" if invariant else "Hard invariant violated")
+    # Issue #1128: household promises reuse this event with extra keys. A log-level hit was noted
+    # but never alerted, and the label says so (the AI Investigator must not call it an alert).
+    if p.get("severity") == "log":
+        label = f"Noted, not alerted: {label}"
+    promise = p.get("promise")
+    if promise is not None and invariant:
+        severity = p.get("severity")
+        return label, f"promise {promise}: {invariant}" + (f" ({severity})" if severity else "")
     return label, (f"invariant: {invariant}" if invariant else "")
 
 

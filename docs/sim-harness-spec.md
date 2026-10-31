@@ -15,12 +15,13 @@
 | How are legacy `expect:` strings matched when production emits different event types? | `outcomes.production_decisions()` maps production event types to the legacy vocabulary (e.g. `bedtime_setback` → `setback_applied`, `sensor_opened result=natural_ventilation` → `natural_ventilation`). Unmapped production-only events are collected in `UNMAPPED_PRODUCTION_EVENTS` and silently skipped. | [outcomes — Event-to-Outcome Mapping](#outcomes--event-to-outcome-mapping) |
 | What custom assertion types exist and what guarantee do they test? | `nat_vent_not_active`, `nat_vent_still_active`, `override_active`, `override_cleared`, `nat_vent_fan_preserved`, `dual_setback_applied`, `ceiling_guard_fires_cool`, `ceiling_guard_dormant*`, `setpoint_consistent_with_mode`. Each tests the occupant-visible guarantee, not a label. | [outcomes — Custom Assertion Types](#outcomes--custom-assertion-types) |
 | How does `ha_stubs.py` avoid metaclass conflicts between MagicMock and HA base classes? | It replaces MagicMock entries with real minimal base classes for `DataUpdateCoordinator`, `CoordinatorEntity`, `SensorEntity`, `RepairsFlow`, `ConfirmRepairFlow`, and enum types. These are the only bases that cause metaclass conflicts when subclassed by production code. | [ha_stubs — Idempotent Stub Installer](#ha_stubs--idempotent-stub-installer) |
+| What is the Session seam, and what do generated days, promises and surfaces add? | One `Session` protocol (`session.py`) is implemented by `FakeHassSession` (fast default) and `RealHASession` (real Home Assistant); `promise_probe.py` judges any run with the production promise registry, `generator.py` draws closed-loop days against a toy house, `surfaces.py` is test-only Promise 8. Three ratchet ledgers record known divergences. | [Session Seam, Generated Days and Promises](#session-seam-generated-days-and-promises-issues-1127-1128) |
 
 ---
 
 ## Scope
 
-This spec covers the five modules in `tools/sim_harness/` and the CLI shell `tools/simulate.py`:
+This section covers the original harness modules in `tools/sim_harness/` and the CLI shell `tools/simulate.py` (the Session seam, generator and promise modules have their own section above):
 
 - **`tools/sim_harness/ha_stubs.py`** — idempotent HA sys.modules stub installer
 - **`tools/sim_harness/fake_hass.py`** — `FakeHass`, `FakeState`, `_FakeServices`, `_FakeStates`
@@ -35,6 +36,58 @@ This spec does NOT cover:
 - `automation.py` production logic (covered by `08-COMPUTATION-REFERENCE.md`)
 - Scenario JSON authoring conventions (see scenario files in `tools/simulations/`)
 - The simulation feedback loop (`tools/simulation_loop.py`; see `simulation-feedback-loop.md`)
+
+
+---
+
+## Session Seam, Generated Days and Promises (Issues #1127, #1128)
+
+Epic #1125. Plans: `plans/test-automation/` (`02-step2-design.md` real-HA tier, `03-step3-design.md` promises, `04-retirement-waves.md` proposal only). Promise definitions live in [household-promises-spec.md](household-promises-spec.md), not here.
+
+### Files
+
+| File | Role |
+|---|---|
+| `tools/sim_harness/session.py` | The ONE runner seam. `Session` protocol (`feed`, `advance_to`, read-only `thermostat` view, `finish` returning a `RunResult`), `drive_scenario`, `make_session(scenario, engine="fakehass" or "realha", probe=None)`. No HA imports, installs no stubs. |
+| `tools/sim_harness/scenario_model.py` | Pure, stub-free helpers lifted from `run_production.py`: `ProductionRunResult` (alias `RunResult`, with an optional `promise_report`), `parse_event_time`, config merge / start-time rule, hand-built `DayClassification`, final engine-state snapshot. |
+| `tools/sim_harness/run_production.py` | `FakeHassSession`, the FakeHass adapter (behavior-preserving extraction of the old `run_production_scenario` body). With a probe attached, time advances in slices of at most 5 min so the probe also sees quiet stretches; `tests/test_goldens_promises.py` proves the logs are identical. |
+| `tests_ha/realha_session.py` | `RealHASession`, the real-Home-Assistant adapter: real core, real config entry and coordinator, dev thermostat sim, frozen clock, service-call recorder. `feed`/`advance_to`/`finish` are coroutines. Returns the same `RunResult`, so `outcomes.py` judges both worlds. Imports no stubs. Real-HA tier only (`python scripts/test.py ha`; WSL on Windows). |
+| `tools/sim_harness/promise_probe.py` | `PromiseProbe` plus `FakeHassPromiseSource`: collects readings, commands and CA events, records them in the production `PromiseJournal`, calls production `run_promise_checks(..., scope="test")`. Owns no promise logic. Installs stubs (tests/tools only). |
+| `tools/sim_harness/generator.py`, `world.py`, `replay.py`, `trial_gate.py` | Seeded random days against a toy house; replay and shrink; the Step 3 trial. |
+| `tools/sim_harness/surfaces.py` | Promise 8 `surfaces_agree` (test-only, not in the production `PROMISES` registry). |
+| `tools/sim_harness/divergence.py` | FakeHass-vs-real-HA comparison, `judge_scenario`, and the real-HA ledger. |
+
+### Two engines
+
+`engine="fakehass"` (default) is the production `AutomationEngine`/coordinator under FakeHass + FakeScheduler: fast, and the engine for `tools/simulate.py` and Tier A. `engine="realha"` runs the same scenario against real Home Assistant (`tests_ha/`). The two are compared, not merged: a golden that fails on real HA must be listed in the ledger. Tier B (HeadlessTarry) is unchanged.
+
+### Generated days
+
+A plan drawn from `random.Random(day_seed)` (config, weather, occupancy, doors, occupant pokes) is walked in 5-minute ticks against a `Session`, with a `ToyHouse` (`world.py`) answering with indoor temperature and `hvac_action`. The realised events are written as an ordinary scenario file, so replay needs no generator. Identity: `day_seed = master_seed * DAYS_PER_MASTER + index` (`DAYS_PER_MASTER = 1_000_000`). Profiles: `coordinator` (default), `engine`, `mixed`. Findings are saved under `tools/simulations/generated/failures/` (gitignored). CI smoke: seeds 101 and 102, 50 days each (`CI_SMOKE_*` in `generator.py`). Nightly (`.github/workflows/nightly.yml`): 12 fresh master seeds x 250 days by default.
+
+### CLI
+
+| Command | Does |
+|---|---|
+| `python tools/simulate.py --generate N --seeds S [S ...] [--profile P]` | N generated days per master seed, judged by the promises |
+| `python tools/simulate.py --generate-day DAY_SEED [--profile P]` | generate and judge ONE day by its seed (replay a seed) |
+| `python tools/simulate.py --replay-generated FILE [--shrink]` | replay a saved finding; `--shrink` also writes a minimal copy |
+| `python tools/simulate.py --surfaces [--generate N --seeds S ...]` | Promise 8 over every golden (and generated days) |
+| `python -m tools.sim_harness.trial_gate --seeds 1 2 3 4 5 --days 200 [--profile P] [--promise settling_flip] [--out F]` | the Step 3 trial; run from the root of the tree under test |
+| `python tools/sim_harness/divergence.py dump-fake [scenario ...] [--out DIR]`, then `compare [--fake DIR] [--real DIR] [--out DIR]` | FakeHass-side dump; diff against the dumps `python scripts/test.py ha -m goldens` writes |
+| `python -m tools.sim_harness.replay [FILE] [--shrink] [--generate-day N] [--generate N] [--seeds ...]` | the module `simulate.py` delegates to |
+
+### Three ratchet ledgers
+
+| Ledger | Records | Rule |
+|---|---|---|
+| `tools/sim_harness/realha_ledger.json` | goldens that fail on real HA, with class, failing assertion indexes, evidence | an unlisted failure fails; a listed scenario that now passes or fails differently fails (stale entry) |
+| `tools/simulations/surface_divergences.json` | known P8 divergences (per golden, or the fixed generated sample: seeds 101/102, 10 days) | same two-way ratchet |
+| `tools/sim_harness/promise_waivers.json` (tolerated hard hits on locked goldens) and `tools/sim_harness/promise_baseline.json` (warning counts per golden) | tolerated promise hits | waivers: two-way as above; baseline: may go down, never up |
+
+Goldens are LOCKED; a divergence is recorded in a ledger, never by editing a scenario.
+
+**Code reference:** `tools/sim_harness/session.py`, `tools/sim_harness/generator.py` (`run_batch`, `run_day`, `replay_scenario`), `tools/sim_harness/surfaces.py` (`cli_surfaces`).
 
 ---
 
@@ -334,7 +387,7 @@ These event types have no clean production entry point and are silently skipped 
 
 **`target_temp` enrichment:** Production emits a decision event (`classification_applied`, `bedtime_setback`, etc.) and the setpoint via a separate `climate.set_temperature` action at the same virtual-clock instant. `_temps_by_timestamp()` builds a map from naive-ISO timestamp to setpoint, and `production_decisions()` fills `target_temp` on each decision from this map.
 
-**Unmapped production-only events** (`UNMAPPED_PRODUCTION_EVENTS`): `warm_day_state_confirmed`, `nat_vent_away_ceiling_exit`, `nat_vent_ceiling_escalation`, `nat_vent_forecast_skip`, `nat_vent_floor_imminent_skip`, `grace_started`, `incident_detected`, and the Issue #1049/#1050 owner-alert rows `hvac_mode_not_applied`, `hvac_mode_applied_recovered`, `hvac_command_recovered`, `hvac_output_stall`, `hvac_output_stall_recovered`, `occupancy_restore_deferred`. These are silently skipped by `_map_event_to_outcome()` (each has a one-line justification at its registration in `outcomes.py`: left mapped it would hit the `unknown:<type>` catch-all and shadow the prior real outcome under last-decision-wins; whether the house ended in band or the mode was applied is asserted through live engine state or `event_emitted`, not these rows). The fake thermostat never sets `hvac_action`, so `hvac_output_stall` could not fire headlessly anyway. (`nat_vent_predicted_floor_exit` — the PROACTIVE_FLOOR event — was in this list until Issue #959, which deleted the mechanism that emitted it; do not re-add it unless the event type returns.)
+**Unmapped production-only events** (`UNMAPPED_PRODUCTION_EVENTS`): `warm_day_state_confirmed`, `nat_vent_away_ceiling_exit`, `nat_vent_ceiling_escalation`, `nat_vent_forecast_skip`, `nat_vent_floor_imminent_skip`, `grace_started`, `incident_detected`, and the Issue #1049/#1050 owner-alert rows `hvac_mode_not_applied`, `hvac_mode_applied_recovered`, `hvac_command_recovered`, `hvac_output_stall`, `hvac_output_stall_recovered`, `occupancy_restore_deferred`. These are silently skipped by `_map_event_to_outcome()` (each has a one-line justification at its registration in `outcomes.py`: left mapped it would hit the `unknown:<type>` catch-all and shadow the prior real outcome under last-decision-wins; whether the house ended in band or the mode was applied is asserted through live engine state or `event_emitted`, not these rows). The fake thermostat never sets `hvac_action` by itself (state feedback reflects mode and setpoint only), so `hvac_output_stall` cannot fire in a hand-written golden that omits it. **Superseded in part (Issue #1128):** a `thermostat_state_changed` event may carry an optional `hvac_action` (Issue #790), and the generator's toy house (`world.py`) reports one on every change of equipment state, so generated days do exercise it; the unmapped-event handling is unchanged. (`nat_vent_predicted_floor_exit` — the PROACTIVE_FLOOR event — was in this list until Issue #959, which deleted the mechanism that emitted it; do not re-add it unless the event type returns.)
 
 ### Assertion Surface
 

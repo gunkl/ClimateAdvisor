@@ -56,14 +56,15 @@ ClimateAdvisor/
 
 **Home Assistant Development:**
 ```bash
-# Run tests
-pytest tests/ -v
+# Run tests (uv-managed; deps in pyproject.toml + uv.lock)
+python scripts/test.py unit      # stub tier
+python scripts/test.py ha        # real Home Assistant tier (WSL on Windows)
 
 # Run a specific test module
-pytest tests/test_classifier.py -v
+python scripts/test.py unit tests/test_classifier.py -v
 
 # Run with coverage
-pytest tests/ --cov=custom_components/climate_advisor
+python scripts/test.py unit --cov=custom_components/climate_advisor
 
 # Lint and type check
 ruff check .

@@ -1305,6 +1305,10 @@ class AutomationEngine:
         # "the last speed the remote reported," not an indicator of which path set it.
         self._fan_remote_speed: str | None = None
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
+        # Issue #1128 (Step 3): household-promise command journal hook. Set by the coordinator to a
+        # sync callable(domain, service, data, kind); called ONLY for commands that really go out
+        # (below the shut-down latch and the observe-only gate). Never allowed to affect a command.
+        self._command_observer: Callable[[str, str, dict[str, Any], str], None] | None = None
         # Issue #530: when a manual grace tied to an RF-remote timer expires, the timer's
         # physical hardware side typically finishes within seconds of CA's software clock —
         # not always before. This deadline marks a short coalescing window during which a
@@ -1977,6 +1981,9 @@ class AutomationEngine:
                         "was_mode": self._manual_override_mode,
                         "active_since": self._manual_override_time,
                         "old_setpoint_f": _old_setpoint_f,
+                        # Issue #1128: the household-promise journal needs WHY an override ended
+                        # (bedtime/wake-up vs user cancel vs occupancy ...); additive key.
+                        "reason": reason,
                     },
                 )
             _LOGGER.info(
@@ -12833,6 +12840,7 @@ class AutomationEngine:
             return
         cmd_context = Context()
         self._record_command_context(kind, cmd_context.id)
+        self._observe_command(domain, service, data, kind)
         _LOGGER.debug(
             "Sending %s.%s entity=%s context_id=%s kind=%s role=%s",
             domain,
@@ -12846,6 +12854,20 @@ class AutomationEngine:
             await self.hass.services.async_call(domain, service, data, blocking=True, context=cmd_context)
         else:
             await self.hass.services.async_call(domain, service, data, context=cmd_context)
+
+    def _observe_command(self, domain: str, service: str, data: dict[str, Any], kind: str) -> None:
+        """Tell the household-promise journal about a command that is about to be sent (Issue #1128).
+
+        Synchronous, no I/O, wrapped so a journal fault can never block or abort a thermostat or
+        fan command (graceful degradation).
+        """
+        observer = getattr(self, "_command_observer", None)
+        if observer is None:
+            return
+        try:
+            observer(domain, service, data, kind)
+        except Exception:
+            _LOGGER.debug("Command observer failed; command proceeds role=%s", self.role, exc_info=True)
 
     async def _call_fan_service_with_context(self, domain: str, service: str, entity_id: str) -> None:
         """Issue a fan/switch service call carrying a fresh HA Context (Issue #482).

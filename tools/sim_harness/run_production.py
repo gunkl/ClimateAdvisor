@@ -100,10 +100,10 @@ No clean production entry points (FINDINGS):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 # Ensure project root on path (support running as a script)
@@ -114,89 +114,30 @@ if _PROJECT_ROOT not in sys.path:
 
 from tools.sim_harness._loop import run_coro  # noqa: E402
 from tools.sim_harness.build_coordinator import build_headless_coordinator  # noqa: E402
-from tools.sim_harness.build_engine import _DEFAULT_CONFIG, build_headless_engine  # noqa: E402
+from tools.sim_harness.build_engine import build_headless_engine  # noqa: E402
 from tools.sim_harness.fake_hass import FakeHass, FakeState  # noqa: E402
 from tools.sim_harness.fake_scheduler import FakeScheduler  # noqa: E402
 from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
+from tools.sim_harness.scenario_model import (  # noqa: E402
+    ProductionRunResult,
+    build_classification_from_event,
+    merged_scenario_config,
+    parse_event_time,
+    scenario_start_time,
+    snapshot_engine_state,
+    sorted_events,
+)
+from tools.sim_harness.session import drive_scenario  # noqa: E402
 
-# Ensure stubs installed before any automation/classifier import
-install_ha_stubs()
+# Issue #1127 Increment 5: the Home Assistant stub install is a property of the FakeHass ADAPTER
+# (FakeHassSession.__init__), not of importing this module, so a real-HA environment can import
+# the runner seam without the stub layer.  The pure helpers moved to scenario_model.py; the old
+# private names stay importable from here.
+_build_classification_from_event = build_classification_from_event
+_snapshot_engine_state = snapshot_engine_state
+_parse_event_time = parse_event_time
 
-
-@dataclass
-class ProductionRunResult:
-    """Result of running a scenario through the production engine."""
-
-    event_log: list[tuple[str, dict, datetime | None]] = field(default_factory=list)
-    action_log: list[dict] = field(default_factory=list)
-    engine_state: dict[str, Any] = field(default_factory=dict)
-    callback_errors: list[tuple[datetime, BaseException]] = field(default_factory=list)
-
-
-# ---------------------------------------------------------------------------
-# DayClassification builder
-# ---------------------------------------------------------------------------
-
-
-def _build_classification_from_event(event: dict) -> Any:
-    """Build a real DayClassification from a scenario classification event.
-
-    Bypasses ``__post_init__`` (which calls ``_compute_recommendations`` and
-    would overwrite hvac_mode, windows_recommended etc. from the scenario JSON)
-    and manually sets fields from the event, using sensible defaults for the
-    required-but-not-scenario-relevant fields.
-
-    Why object.__new__?  DayClassification.__post_init__ derives hvac_mode and
-    window times from day_type — but scenario JSON specifies these explicitly.
-    Using __new__ lets us honour what the scenario author wrote.
-    """
-    from custom_components.climate_advisor.classifier import DayClassification  # noqa: PLC0415
-
-    c = object.__new__(DayClassification)
-
-    # --- Required structural fields (not in scenarios; use sensible defaults) ---
-    c.trend_direction = event.get("trend_direction", "stable")
-    c.trend_magnitude = float(event.get("trend_magnitude", 0.0))
-    c.today_high = float(event.get("today_high", 75.0))
-    c.today_low = float(event.get("today_low", 60.0))
-    c.tomorrow_high = float(event.get("tomorrow_high", 75.0))
-    c.tomorrow_low = float(event.get("tomorrow_low", 60.0))
-
-    # --- Classification fields that scenarios DO specify ---
-    c.day_type = event.get("day_type", "mild")
-    c.hvac_mode = event.get("hvac_mode", "off")
-    c.windows_recommended = bool(event.get("windows_recommended", False))
-    c.setback_modifier = float(event.get("setback_modifier", 0.0))
-
-    # Window times: stored as datetime.time objects in DayClassification
-    # Scenario JSON uses "HH:MM" strings (same as SimClassification)
-    from datetime import time as dt_time  # noqa: PLC0415
-
-    def _parse_time(val: str | None) -> dt_time | None:
-        if not val:
-            return None
-        try:
-            h, m = val.split(":")
-            return dt_time(int(h), int(m))
-        except ValueError, AttributeError:
-            return None
-
-    c.window_open_time = _parse_time(event.get("window_open_time"))
-    c.window_close_time = _parse_time(event.get("window_close_time"))
-
-    # Optional pre-condition fields
-    c.pre_condition = bool(event.get("pre_condition", False))
-    c.pre_condition_target = event.get("pre_condition_target")
-
-    # Window opportunity fields (hot-day economizer)
-    c.window_opportunity_morning = bool(event.get("window_opportunity_morning", False))
-    c.window_opportunity_evening = bool(event.get("window_opportunity_evening", False))
-    c.window_opportunity_morning_start = _parse_time(event.get("window_opportunity_morning_start"))
-    c.window_opportunity_morning_end = _parse_time(event.get("window_opportunity_morning_end"))
-    c.window_opportunity_evening_start = _parse_time(event.get("window_opportunity_evening_start"))
-    c.window_opportunity_evening_end = _parse_time(event.get("window_opportunity_evening_end"))
-
-    return c
+__all__ = ["FakeHassSession", "ProductionRunResult", "run_production_scenario"]
 
 
 # ---------------------------------------------------------------------------
@@ -309,19 +250,274 @@ class _SensorTracker:
 
 
 # ---------------------------------------------------------------------------
-# Core adapter: parse event time
+# FakeHass adapter: the Session implementation
 # ---------------------------------------------------------------------------
 
 
-def _parse_event_time(time_str: str, default: datetime) -> datetime:
-    """Parse ISO timestamp string to a timezone-aware datetime."""
-    try:
-        dt = datetime.fromisoformat(time_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt
-    except ValueError, AttributeError:
-        return default
+class _FakeThermostatView:
+    """Read-only ThermostatView over the FakeHass climate entity."""
+
+    def __init__(self, fake_hass: FakeHass, climate_entity: str) -> None:
+        self._hass = fake_hass
+        self._entity = climate_entity
+
+    def _state(self) -> Any:
+        return self._hass.states.get(self._entity)
+
+    @staticmethod
+    def _num(value: Any) -> float | None:
+        try:
+            return float(value)
+        except TypeError, ValueError:
+            return None
+
+    @property
+    def mode(self) -> str | None:
+        return getattr(self._state(), "state", None)
+
+    @property
+    def setpoint_f(self) -> float | None:
+        st = self._state()
+        return self._num(st.attributes.get("temperature")) if st is not None else None
+
+    @property
+    def action(self) -> str | None:
+        st = self._state()
+        return st.attributes.get("hvac_action") if st is not None else None
+
+    @property
+    def indoor_f(self) -> float | None:
+        st = self._state()
+        return self._num(st.attributes.get("current_temperature")) if st is not None else None
+
+
+class FakeHassSession:
+    """The FakeHass adapter of the Session protocol (``tools/sim_harness/session.py``).
+
+    Behavior-preserving extraction of the original ``run_production_scenario`` body: the same
+    build, the same dispatch table, the same settle, the same final snapshot taken inside the
+    patched clock.  ``install_ha_stubs()`` runs here, and nowhere at import time.
+
+    ``probe`` (optional, ``promise_probe.PromiseProbe``) is called after every settled step and,
+    when attached, time is advanced in slices of at most five minutes so the probe also sees the
+    quiet stretches between events.  Slicing is behavior-neutral (the heap fires callbacks in
+    time order either way); ``tests/test_goldens_promises.py`` proves the logs are identical.
+    """
+
+    PROBE_SLICE = timedelta(minutes=5)
+
+    def __init__(
+        self,
+        scenario: dict,
+        *,
+        use_coordinator: bool = False,
+        role: str = "production",
+        dry_run: bool = False,
+        probe: Any = None,
+    ) -> None:
+        install_ha_stubs()
+        self.scenario = scenario
+        self.probe = probe
+        self._event_index = 0
+        self._closed = False
+        self._result: ProductionRunResult | None = None
+
+        # --- Build merged config ---
+        merged_config: dict[str, Any] = merged_scenario_config(scenario)
+        climate_entity: str = merged_config.get("climate_entity", "climate.test_thermostat")
+        self.config = merged_config
+        self.climate_entity = climate_entity
+
+        # --- Determine start time from first event ---
+        events = sorted_events(scenario)
+        start_dt = scenario_start_time(events)
+
+        # --- Determine initial thermostat mode (mirrors SimState default: "off") ---
+        # Legacy simulator honours config["initial_thermostat_mode"] if present (simulate.py ~line 144).
+        initial_thermostat_mode: str = merged_config.get("initial_thermostat_mode", "off")
+
+        # --- Build headless engine (or real coordinator - Issue #474) ---
+        coordinator: Any | None = None
+        if use_coordinator:
+            # skip_startup_coalesce (scenario field, default False - the honest default,
+            # see build_headless_coordinator's docstring): a freshly built coordinator has
+            # its real 5-minute post-restart override-detection suppression window active,
+            # same as production. A scenario testing steady-state behavior (not startup
+            # itself) must opt out via "skip_startup_coalesce": true, or every dispatched
+            # event vacuously early-returns before reaching any override-detection guard -
+            # this was found and fixed for the #474 proving slice.
+            coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
+                config=merged_config,
+                climate_entity=climate_entity,
+                climate_state=initial_thermostat_mode,
+                start_time=start_dt,
+                skip_startup_coalesce=bool(scenario.get("skip_startup_coalesce", False)),
+            )
+            engine = coordinator.automation_engine
+        else:
+            engine, fake_hass, scheduler, event_log = build_headless_engine(
+                config=merged_config,
+                climate_entity=climate_entity,
+                climate_state=initial_thermostat_mode,
+                start_time=start_dt,
+                role=role,
+                dry_run=dry_run,
+            )
+
+        # --- Issue #1048: opt-in thermostat quirk (scenario config "thermostat_quirk") ---
+        # "sensi_like": set_temperature ignores the hvac_mode kwarg and is rejected while
+        # the thermostat is Off. Absent by default, so all existing scenarios are unchanged.
+        _quirk = merged_config.get("thermostat_quirk")
+        if _quirk:
+            fake_hass.set_entity_quirk(climate_entity, _quirk)
+
+        # --- Sensor tracker - drives engine._sensor_check_callback (engine-only mode) ---
+        # Issue #476: when a coordinator is present, its real __init__ already wired
+        # engine._sensor_check_callback = coordinator._any_sensor_open (production
+        # wiring, reads real fake_hass entity state). Overwriting it here with the
+        # _SensorTracker stub - which coordinator-mode sensor_open/sensor_close
+        # dispatch never updates (it dispatches via states.async_set() through the
+        # real listener instead) - silently breaks any check that depends on "is a
+        # sensor still open" via the engine's callback (e.g. _on_grace_expired's
+        # re-pause-on-expiry-with-sensor-open decision: found returning re_paused=False
+        # even with a sensor genuinely left open, because the callback always reported
+        # False). Only wire the tracker for engine-only scenarios.
+        tracker = _SensorTracker()
+        if coordinator is None:
+            engine._sensor_check_callback = tracker.any_open
+
+        # --- Optional ODE inputs (Issue #236 D - scenario schema extension) ---
+        # A scenario may supply a learned thermal model and/or an hourly forecast so
+        # the production ODE ceiling guard (and the forecast/floor-imminence nat-vent
+        # guards) can be exercised. The LEGACY simulator has no ODE and ignores these
+        # keys entirely, so adding them to a scenario only affects the production run.
+        #   "thermal_model":   dict with keys the engine reads, e.g.
+        #                      {"confidence": "high", "k_passive": -0.18,
+        #                       "k_active_heat": ..., "k_active_cool": ..., "k_vent": ...,
+        #                       "k_solar": ...}
+        #   "hourly_forecast": list of {"datetime": ISO8601, "temperature": float}
+        if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict):
+            engine._thermal_model = scenario["thermal_model"]
+        if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
+            engine._hourly_forecast_temps = scenario["hourly_forecast"]
+
+        self.coordinator = coordinator
+        self.engine = engine
+        self.fake_hass = fake_hass
+        self.scheduler = scheduler
+        self.event_log = event_log
+        self._tracker = tracker
+        self._thermostat = _FakeThermostatView(fake_hass, climate_entity)
+
+        # --- Everything from here runs under scheduler.installed() (patched clock + timers) ---
+        self._stack = contextlib.ExitStack()
+        try:
+            self._stack.enter_context(scheduler.installed())
+            if probe is not None:
+                probe.attach(self)
+        except BaseException:
+            self._stack.close()
+            raise
+
+    # -- Session protocol -----------------------------------------------------
+
+    def now(self) -> datetime:
+        return self.scheduler.now()
+
+    def thermostat(self) -> _FakeThermostatView:
+        return self._thermostat
+
+    def advance_to(self, ts: datetime) -> None:
+        """Advance the clock to ``ts`` (step 1 of the original loop), firing due timers."""
+        if self.probe is None:
+            self.scheduler.advance_to(ts)
+            return
+        # With a probe: the same advance, in slices of at most PROBE_SLICE, probe after each.
+        while self.scheduler.now() + self.PROBE_SLICE < ts:
+            self.scheduler.advance_to(self.scheduler.now() + self.PROBE_SLICE)
+            self.probe.step("tick")
+        self.scheduler.advance_to(ts)
+        self.probe.step("tick")
+
+    def feed(self, event: dict) -> None:
+        """Dispatch one event to its production entry point (step 2), then settle (step 3)."""
+        etype = event.get("type", "")
+        _dispatch_event(
+            event,
+            etype,
+            self.engine,
+            self.fake_hass,
+            self.scheduler,
+            self._tracker,
+            self.climate_entity,
+            self.config,
+            self.coordinator,
+        )
+
+        # 3. Settle (Issue #476 - supersedes the #474 trailing-only fix, which
+        # only caught the LAST event). A coordinator-mode dispatch
+        # (fake_hass.states.async_set(...) in _dispatch_event) enqueues the
+        # real listener (e.g. _async_door_window_changed) as a task via
+        # async_create_task - it does NOT run synchronously. Without settling
+        # here, that task sits queued until the NEXT event's own
+        # advance_to(event_dt) call, which only drains it as an incidental
+        # side effect of firing whatever UNRELATED heap entry happens to be
+        # due first (found via a real scenario: a periodic 5-min thermal-
+        # sampler tick happened to be due mid-way to the next event, so the
+        # queued door/window listener ran at ITS fire time, not the actual
+        # dispatch time - sensor_opened was logged ~5 minutes late). Worse,
+        # if that listener itself schedules a NEW async_call_later() heap
+        # entry (e.g. the debounce timer), that entry is pushed AFTER
+        # advance_to()'s own heap-loop already exited, so it silently sits
+        # unfired for yet another event before it can fire.
+        # advance_to(scheduler.now()) re-enters the same heap-fire ->
+        # drain-tasks -> recheck-heap loop advance_to() already implements,
+        # settling arbitrarily deep chains to a fixed point at the ACTUAL
+        # dispatch time, before any more wall-clock time is allowed to pass.
+        self.scheduler.advance_to(self.scheduler.now())
+
+        if self.probe is not None:
+            if etype == "simulate_restart" and self.coordinator is not None:
+                self.probe.notify_restart(self.scheduler.now())
+            self.probe.step(f"event[{self._event_index}]:{etype}")
+        self._event_index += 1
+
+    def finish(self) -> ProductionRunResult:
+        """Capture the final snapshot (inside the patched clock), close, and return the result."""
+        if self._result is not None:
+            return self._result
+        # Issue #895: must stay inside scheduler.installed() - engine._get_indoor_temp_f()
+        # now evaluates _in_sleep_window(dt_util.now(), ...) for the sleep-sensor swap, so
+        # snapshotting outside the patched clock context hits an unconfigured dt_util.now()
+        # (a bare MagicMock) instead of the scenario's virtual clock. This also makes the
+        # snapshot semantically correct: "final state" should reflect the scenario's own
+        # simulated end time, not real wall-clock time.
+        try:
+            engine_state = snapshot_engine_state(self.engine)
+        finally:
+            self.close()
+        result = ProductionRunResult(
+            event_log=list(self.event_log),
+            action_log=list(self.fake_hass.action_log),
+            engine_state=engine_state,
+            callback_errors=list(self.scheduler.callback_errors),
+        )
+        if self.probe is not None:
+            result.promise_report = self.probe.report()
+        self._result = result
+        return result
+
+    def close(self) -> None:
+        """Leave the patched clock/timer context (idempotent)."""
+        if not self._closed:
+            self._closed = True
+            self._stack.close()
+
+    def __enter__(self) -> FakeHassSession:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +531,7 @@ def run_production_scenario(
     use_coordinator: bool = False,
     role: str = "production",
     dry_run: bool = False,
+    probe: Any = None,
 ) -> ProductionRunResult:
     """Run a scenario dict through the REAL AutomationEngine and return results.
 
@@ -350,155 +547,24 @@ def run_production_scenario(
             of the old hand-approximated mirror. Required for any scenario
             previously tagged ``track: "integration"`` /
             ``simulator_support: false``.
-        role: Issue #611 (Block 5, subtask O) — forwarded to
+        role: Issue #611 (Block 5, subtask O) - forwarded to
             ``build_headless_engine(role=...)``. Only meaningful with
             ``use_coordinator=False``; ``build_headless_coordinator()`` always
             builds its engine as the production role (a coordinator-driven
             shadow engine is Phase 4/Q's scope, not this offline harness's).
-        dry_run: Issue #611 — forwarded to ``build_headless_engine(dry_run=...)``.
+        dry_run: Issue #611 - forwarded to ``build_headless_engine(dry_run=...)``.
             Same coordinator-mode restriction as ``role`` above.
+        probe: Optional ``PromiseProbe`` (Issue #1128 I2). Default None is byte-identical
+            to the pre-seam behavior.
 
     Returns:
         ProductionRunResult with event_log, action_log, engine_state, callback_errors.
     """
-    # --- Build merged config ---
-    scenario_config: dict[str, Any] = scenario.get("config", {})
-    merged_config: dict[str, Any] = {**_DEFAULT_CONFIG, **scenario_config}
-
-    climate_entity: str = merged_config.get("climate_entity", "climate.test_thermostat")
-
-    # --- Determine start time from first event ---
-    events = sorted(scenario.get("events", []), key=lambda e: e["time"])
-    if events:
-        start_dt = _parse_event_time(events[0]["time"], datetime(2024, 1, 15, 8, 0, 0, tzinfo=UTC))
-        # Start the clock a tiny bit before the first event
-        from datetime import timedelta  # noqa: PLC0415
-
-        start_dt = start_dt - timedelta(seconds=1)
-    else:
-        start_dt = datetime(2024, 1, 15, 8, 0, 0, tzinfo=UTC)
-
-    # --- Determine initial thermostat mode (mirrors SimState default: "off") ---
-    # Legacy simulator honours config["initial_thermostat_mode"] if present (simulate.py ~line 144).
-    initial_thermostat_mode: str = merged_config.get("initial_thermostat_mode", "off")
-
-    # --- Build headless engine (or real coordinator — Issue #474) ---
-    coordinator: Any | None = None
-    if use_coordinator:
-        # skip_startup_coalesce (scenario field, default False — the honest default,
-        # see build_headless_coordinator's docstring): a freshly built coordinator has
-        # its real 5-minute post-restart override-detection suppression window active,
-        # same as production. A scenario testing steady-state behavior (not startup
-        # itself) must opt out via "skip_startup_coalesce": true, or every dispatched
-        # event vacuously early-returns before reaching any override-detection guard —
-        # this was found and fixed for the #474 proving slice.
-        coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
-            config=merged_config,
-            climate_entity=climate_entity,
-            climate_state=initial_thermostat_mode,
-            start_time=start_dt,
-            skip_startup_coalesce=bool(scenario.get("skip_startup_coalesce", False)),
-        )
-        engine = coordinator.automation_engine
-    else:
-        engine, fake_hass, scheduler, event_log = build_headless_engine(
-            config=merged_config,
-            climate_entity=climate_entity,
-            climate_state=initial_thermostat_mode,
-            start_time=start_dt,
-            role=role,
-            dry_run=dry_run,
-        )
-
-    # --- Issue #1048: opt-in thermostat quirk (scenario config "thermostat_quirk") ---
-    # "sensi_like": set_temperature ignores the hvac_mode kwarg and is rejected while
-    # the thermostat is Off. Absent by default, so all existing scenarios are unchanged.
-    _quirk = merged_config.get("thermostat_quirk")
-    if _quirk:
-        fake_hass.set_entity_quirk(climate_entity, _quirk)
-
-    # --- Sensor tracker — drives engine._sensor_check_callback (engine-only mode) ---
-    # Issue #476: when a coordinator is present, its real __init__ already wired
-    # engine._sensor_check_callback = coordinator._any_sensor_open (production
-    # wiring, reads real fake_hass entity state). Overwriting it here with the
-    # _SensorTracker stub — which coordinator-mode sensor_open/sensor_close
-    # dispatch never updates (it dispatches via states.async_set() through the
-    # real listener instead) — silently breaks any check that depends on "is a
-    # sensor still open" via the engine's callback (e.g. _on_grace_expired's
-    # re-pause-on-expiry-with-sensor-open decision: found returning re_paused=False
-    # even with a sensor genuinely left open, because the callback always reported
-    # False). Only wire the tracker for engine-only scenarios.
-    tracker = _SensorTracker()
-    if coordinator is None:
-        engine._sensor_check_callback = tracker.any_open
-
-    # --- Optional ODE inputs (Issue #236 D — scenario schema extension) ---
-    # A scenario may supply a learned thermal model and/or an hourly forecast so
-    # the production ODE ceiling guard (and the forecast/floor-imminence nat-vent
-    # guards) can be exercised. The LEGACY simulator has no ODE and ignores these
-    # keys entirely, so adding them to a scenario only affects the production run.
-    #   "thermal_model":   dict with keys the engine reads, e.g.
-    #                      {"confidence": "high", "k_passive": -0.18,
-    #                       "k_active_heat": ..., "k_active_cool": ..., "k_vent": ...,
-    #                       "k_solar": ...}
-    #   "hourly_forecast": list of {"datetime": ISO8601, "temperature": float}
-    if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict):
-        engine._thermal_model = scenario["thermal_model"]
-    if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
-        engine._hourly_forecast_temps = scenario["hourly_forecast"]
-
-    # --- Process events under scheduler.installed() ---
-    with scheduler.installed():
-        for event in events:
-            etype = event.get("type", "")
-            ts_str = event.get("time", "")
-            event_dt = _parse_event_time(ts_str, scheduler.now())
-
-            # 1. Advance clock to event time (fires any due timers)
-            scheduler.advance_to(event_dt)
-
-            # 2. Dispatch event to production entry point
-            _dispatch_event(
-                event, etype, engine, fake_hass, scheduler, tracker, climate_entity, merged_config, coordinator
-            )
-
-            # 3. Settle (Issue #476 — supersedes the #474 trailing-only fix, which
-            # only caught the LAST event). A coordinator-mode dispatch
-            # (fake_hass.states.async_set(...) in _dispatch_event) enqueues the
-            # real listener (e.g. _async_door_window_changed) as a task via
-            # async_create_task — it does NOT run synchronously. Without settling
-            # here, that task sits queued until the NEXT event's own
-            # advance_to(event_dt) call, which only drains it as an incidental
-            # side effect of firing whatever UNRELATED heap entry happens to be
-            # due first (found via a real scenario: a periodic 5-min thermal-
-            # sampler tick happened to be due mid-way to the next event, so the
-            # queued door/window listener ran at ITS fire time, not the actual
-            # dispatch time — sensor_opened was logged ~5 minutes late). Worse,
-            # if that listener itself schedules a NEW async_call_later() heap
-            # entry (e.g. the debounce timer), that entry is pushed AFTER
-            # advance_to()'s own heap-loop already exited, so it silently sits
-            # unfired for yet another event before it can fire.
-            # advance_to(scheduler.now()) re-enters the same heap-fire ->
-            # drain-tasks -> recheck-heap loop advance_to() already implements,
-            # settling arbitrarily deep chains to a fixed point at the ACTUAL
-            # dispatch time, before any more wall-clock time is allowed to pass.
-            scheduler.advance_to(scheduler.now())
-
-        # --- Capture final engine state snapshot ---
-        # Issue #895: must stay inside scheduler.installed() — engine._get_indoor_temp_f()
-        # now evaluates _in_sleep_window(dt_util.now(), ...) for the sleep-sensor swap, so
-        # snapshotting outside the patched clock context hits an unconfigured dt_util.now()
-        # (a bare MagicMock) instead of the scenario's virtual clock. This also makes the
-        # snapshot semantically correct: "final state" should reflect the scenario's own
-        # simulated end time, not real wall-clock time.
-        engine_state = _snapshot_engine_state(engine)
-
-    return ProductionRunResult(
-        event_log=list(event_log),
-        action_log=list(fake_hass.action_log),
-        engine_state=engine_state,
-        callback_errors=list(scheduler.callback_errors),
-    )
+    session = FakeHassSession(scenario, use_coordinator=use_coordinator, role=role, dry_run=dry_run, probe=probe)
+    try:
+        return drive_scenario(session, scenario)
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +1008,36 @@ def _dispatch_event(
         engine._paused_since = None
         engine._natural_vent_active = False
 
+    elif etype == "automation_toggle":
+        # Issue #1128 I3 (additive): the occupant flips the "automation" switch.  Coordinator mode
+        # goes through the real ``set_automation_enabled()`` (which also sets ``engine.dry_run``,
+        # exactly what the switch entity calls); engine-only mode sets the same ``dry_run`` the
+        # observe-only gate in ``_call_service_with_context`` reads.  ``enabled`` defaults to False.
+        enabled = bool(event.get("enabled", False))
+        if coordinator is not None:
+            coordinator.set_automation_enabled(enabled)
+        else:
+            engine.dry_run = not enabled
+
+    elif etype == "indoor_unreadable":
+        # Issue #1128 I3 (additive): the indoor temperature source drops out (``unreadable`` true,
+        # the default) or comes back (``unreadable`` false, optionally with ``indoor_f``).  An outage
+        # clears ``current_temperature`` on the climate entity -- the very attribute the engine
+        # resolves indoor from -- so every engine read returns "no value", as in production.
+        existing = fake_hass.states.get(climate_entity)
+        attrs = dict(existing.attributes) if existing is not None else {}
+        state_str = existing.state if existing is not None else "off"
+        if bool(event.get("unreadable", True)):
+            attrs["current_temperature"] = None
+        elif event.get("indoor_f") is not None:
+            attrs["current_temperature"] = float(event["indoor_f"])
+        else:
+            return  # recovery without a value: the next temp_update restores it
+        if coordinator is not None:
+            fake_hass.states.async_set(climate_entity, state_str, attrs)
+        else:
+            fake_hass.states.set(climate_entity, FakeState(state=state_str, attributes=attrs))
+
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 
 
@@ -1025,60 +1121,3 @@ def _handle_temp_update(
                 indoor_temp=_tu_indoor_f,
             )
         )
-
-
-# ---------------------------------------------------------------------------
-# Engine state snapshot
-# ---------------------------------------------------------------------------
-
-
-def _snapshot_engine_state(engine: Any) -> dict[str, Any]:
-    """Read key engine flag attributes and return a plain dict snapshot."""
-    snap: dict[str, Any] = {}
-
-    for attr in (
-        "_natural_vent_active",
-        "_manual_override_active",
-        "_grace_active",
-        "_paused_by_door",
-        "_fan_active",
-        "_fan_override_active",
-        "_occupancy_mode",
-        "_override_confirm_pending",
-        "_economizer_active",
-        "_economizer_phase",
-        "_pre_condition_achieved",  # Issue #295
-        "_pre_condition_achieved_date",  # Issue #295
-        "_nat_vent_soft_start",  # Issue #606
-        "_nat_vent_outdoor_exit_time",  # Issue #606
-        "_last_outdoor_temp",  # Issue #633
-        "_outdoor_temp_today_peak",  # Issue #633
-        "_outdoor_temp_today_sample_count",  # Issue #633
-        "_comfort_mode_family",  # Issue #821 — "heating"/"cooling"/None
-        "_fan_manual_origin_unclosed",  # Issue #829
-    ):
-        snap[attr] = getattr(engine, attr, None)
-
-    # Issue #633: indoor temp is never cached on the engine itself (always a
-    # live hass state read) — snapshot it explicitly the same way any other
-    # post-run inspection would, using the engine's own reader.
-    get_indoor = getattr(engine, "_get_indoor_temp_f", None)
-    snap["_last_indoor_temp"] = get_indoor() if callable(get_indoor) else None
-
-    # Issue #1048: the thermostat's ACTUAL mode (ground truth, not what CA commanded).
-    _hass = getattr(engine, "hass", None)
-    _st = _hass.states.get(engine.climate_entity) if _hass is not None else None
-    snap["_thermostat_hvac_mode"] = getattr(_st, "state", None)
-
-    # Include classification summary if available
-    c = getattr(engine, "_current_classification", None)
-    if c is not None:
-        snap["_current_classification"] = {
-            "day_type": getattr(c, "day_type", None),
-            "hvac_mode": getattr(c, "hvac_mode", None),
-            "windows_recommended": getattr(c, "windows_recommended", None),
-        }
-    else:
-        snap["_current_classification"] = None
-
-    return snap

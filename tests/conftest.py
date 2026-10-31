@@ -115,3 +115,93 @@ def assert_no_duplicate_events(
             f"distinct decision points, add it to LEGITIMATELY_REPEATING_EVENT_TYPES in "
             f"conftest.py with a comment explaining why."
         )
+
+
+# ---------------------------------------------------------------------------
+# Missing-dependency safety net (Issue #1126)
+#
+# Required packages are installed by `uv sync --only-group test`. A test that
+# skips because a package is absent (or stubbed) would silently stop guarding
+# behaviour on that machine, so such skips are converted into failures.
+# ---------------------------------------------------------------------------
+import re as _re  # noqa: E402
+
+# Matches only messages that say a package/module is absent or stubbed. The bare word
+# "unavailable" is deliberately NOT here: this domain skips legitimately on "sensor unavailable"
+# style conditions, and those must stay skips.
+_MISSING_DEP_SKIP = _re.compile(
+    r"not installed|no module named|is a stub|importorskip|could not import|cannot import name"
+    r"|(?:dependency|module|package|library) (?:is |are )?(?:missing|unavailable|not available)",
+    _re.IGNORECASE,
+)
+
+
+def _missing_dep_reason(report) -> str | None:
+    """Return the skip reason when a skipped report is a missing-dependency skip, else None."""
+    longrepr = report.longrepr
+    reason = longrepr[2] if isinstance(longrepr, tuple) and len(longrepr) == 3 else str(longrepr)
+    return reason if _MISSING_DEP_SKIP.search(reason) else None
+
+
+def _fail_missing_dep(report, reason: str) -> None:
+    report.outcome = "failed"
+    report.longrepr = (
+        f"Skipped for a missing dependency, which is not allowed: {reason!r}. "
+        "Run `python scripts/test.py` (uv sync --only-group test) to install the required packages."
+    )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.skipped and (reason := _missing_dep_reason(report)):
+        _fail_missing_dep(report, reason)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):
+    """Same rule at collection time: module-level ``importorskip`` / ``skip(allow_module_level=True)``."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.skipped and (reason := _missing_dep_reason(report)):
+        _fail_missing_dep(report, reason)
+
+
+# ---------------------------------------------------------------------------
+# Unawaited-coroutine leak guard (Issue #1126)
+#
+# FakeHass.async_create_task() hands coroutines (the thermostat state listener,
+# ``_notify_in_background._send`` ...) to the FakeScheduler queue, which only runs them
+# when the virtual clock is advanced. A test that calls ``run_coro(coord._async_update_data())``
+# without advancing leaves them queued; they are then garbage-collected unawaited during a
+# LATER, unrelated test, where warnings-as-errors fails that victim at random. Closing the
+# never-run coroutines at teardown is what ``_consume_coroutine`` does for MagicMock hosts.
+# A test that needs the queued work's effects must still drain it itself (advance_by(0)).
+# ---------------------------------------------------------------------------
+import weakref as _weakref  # noqa: E402
+
+from tools.sim_harness.fake_scheduler import FakeScheduler as _FakeScheduler  # noqa: E402
+
+_LIVE_SCHEDULERS: _weakref.WeakSet = _weakref.WeakSet()
+_orig_scheduler_init = _FakeScheduler.__init__
+
+
+def _tracking_scheduler_init(self, *args, **kwargs):
+    _orig_scheduler_init(self, *args, **kwargs)
+    _LIVE_SCHEDULERS.add(self)
+
+
+_FakeScheduler.__init__ = _tracking_scheduler_init
+
+
+@pytest.fixture(autouse=True)
+def _close_undrained_scheduler_tasks():
+    yield
+    for scheduler in list(_LIVE_SCHEDULERS):
+        queue = scheduler._task_queue
+        while queue:
+            coro = queue.pop()
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()

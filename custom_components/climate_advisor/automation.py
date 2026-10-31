@@ -402,6 +402,16 @@ class FanCommandResult(Enum):
     SUPPRESSED = "suppressed"  # Issue #835: hvac_fan_restrict_mode blocked activation
 
 
+# Issue #1132: the FanCommandResult values meaning "the fan-ON command did NOT take effect, so the
+# pre-await nat-vent activation decision is stale". ONE definition shared by
+# _apply_nat_vent_fsm_state_after_activation() (decides whether a session is recorded) and
+# _nat_vent_activation_applied() (decides whether a door/window pause may be cleared) so the two can
+# never disagree about "did the activation work".
+_NAT_VENT_ACTIVATION_NOT_APPLIED = frozenset(
+    {FanCommandResult.OVERRIDDEN, FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP}
+)
+
+
 class HvacCommandResult(Enum):
     """Outcome of ``_set_hvac_mode()`` (Issue #1049, Part of #1048).
 
@@ -5380,6 +5390,14 @@ class AutomationEngine:
                 )
             return False
         if mode == "off":
+            # Issue #1132: HVAC was already off when this window opened, so there is nothing to
+            # restore at close. Without this a stale value from an earlier pause that never
+            # recorded (or never restored) survives here and the close would switch on a mode
+            # the occupant had off. Skipped when a pause is already recorded: HVAC is off
+            # *because we paused it*, and _pre_pause_mode is that pause's restore target
+            # (reached via _re_pause_for_open_sensor()'s idempotent re-pause).
+            if not self._paused_by_door:
+                self._pre_pause_mode = None
             _LOGGER.info(
                 "Door/window pause (%s): HVAC already off — pause flag set, no mode change needed",
                 entity_label,
@@ -5748,7 +5766,16 @@ class AutomationEngine:
                 notify_type="door_window_pause",
             )
             if hvac_already_off is not None:
-                self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.SENSOR_OPENED)
+                # Issue #1132: the legacy decision above already chose PAUSE (the nat-vent
+                # gate was rejected, or a Phase 2 guard skipped it, or an override/grace
+                # exemption fell through). The FSM's own simplified SENSOR_OPENED gate can
+                # disagree (e.g. it cannot see the forecast-peak/thermal-floor guards or a
+                # manual override) and would answer NAT_VENT_ELIGIBLE/GRACE_SUPPRESSED,
+                # recording no pause while HVAC was just turned off. Same contract as
+                # _pause_for_door_window(): tell the FSM the gate is ruled out.
+                self._resolve_door_window_pause_flags(
+                    kind=DoorWindowFsmEventKind.SENSOR_OPENED, nat_vent_gate_ruled_out=True
+                )
                 self._paused_entity = entity_id
                 self._paused_since = dt_util.now()
 
@@ -5805,6 +5832,8 @@ class AutomationEngine:
                 )
 
             if not self._paused_by_door:
+                # Issue #1132: no pause recorded -> nothing to restore; never let a stale value survive.
+                self._pre_pause_mode = None
                 return
 
             from .door_window_fsm import DoorWindowFsmEventKind
@@ -6532,14 +6561,20 @@ class AutomationEngine:
                     # _apply_nat_vent_fsm_state_after_activation() — an override
                     # arriving during the await below must not be silently
                     # overwritten by this pre-await _to_state decision.
-                    _activation_result = await self._activate_fan(
+                    # Issue #1132 (mirror of #931): the pause is cleared below ONLY when the
+                    # activation was applied (a nat-vent session is recorded).
+                    _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
+                        _to_state,
                         reason=(
                             f"natural vent activated: outdoor {self._t(outdoor)}"
                             f" < indoor {self._t(indoor)} − {self._td(hysteresis)} hysteresis,"
                             f" outdoor ≤ threshold {self._t(threshold)}"
-                        )
+                        ),
+                        outdoor=outdoor,
+                        indoor=indoor,
                     )
-                    self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
+                    if not _applied:
+                        return
 
                     from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -6563,13 +6598,17 @@ class AutomationEngine:
                 elif _to_state == NatVentLifecycleState.ACTIVE_SOFT_START:
                     # Issue #706 (Bug F): same override-race guard as the
                     # ACTIVE_FULL_GATE branch above.
-                    _activation_result = await self._activate_fan(
+                    _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
+                        _to_state,
                         reason=(
                             f"nat-vent soft-start while paused: outdoor {self._t(outdoor)} at/below"
                             f" indoor {self._t(indoor)} parity, past today's peak and declining"
-                        )
+                        ),
+                        outdoor=outdoor,
+                        indoor=indoor,
                     )
-                    self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
+                    if not _applied:
+                        return
 
                     from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -8793,10 +8832,26 @@ class AutomationEngine:
                 # site's own _fsm_result.to_state == ACTIVE_FULL_GATE is exactly what
                 # _reactivates was computed from above, so ACTIVE_FULL_GATE is the
                 # correct to_state to pass here.
-                _activation_result = await self._activate_fan(reason=nat_vent_reason)
-                self._apply_nat_vent_fsm_state_after_activation(
-                    NatVentLifecycleState.ACTIVE_FULL_GATE, _activation_result
+                # Issue #1132 (mirror of #931): only clear the pause / report a nat-vent
+                # session when the activation was applied. Otherwise fall through to the
+                # re-pause below, which re-records the pause (idempotent when already paused).
+                _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
+                    NatVentLifecycleState.ACTIVE_FULL_GATE,
+                    reason=nat_vent_reason,
+                    outdoor=outdoor,
+                    indoor=indoor,
                 )
+                if not _applied:
+                    _reactivates = False
+                    if _activation_result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+                        # Issue #829 provenance: a rate-limited command is CA's own deferred
+                        # grace-expiry reactivation (it WILL run when the 5-minute floor ends, via a
+                        # later _activate_fan() call that does not pass through this site), so arm the
+                        # marker now exactly as before -- otherwise that eventual run's real off would be
+                        # misread as a fresh manual override (the #829 loop). OVERRIDDEN means the
+                        # occupant owns the fan right now: nothing of CA's is pending, nothing to mark.
+                        self._fan_manual_origin_unclosed = True
+            if _reactivates:
                 # Issue #829: this fan run is CA reactivating on its own initiative right
                 # after a grace expiry, with the monitored sensor still open — not a fresh
                 # user action. Mark provenance so that whenever this run eventually turns
@@ -8856,9 +8911,9 @@ class AutomationEngine:
                     # so "sensor_opened" — the event the golden-scenario harness's
                     # production_outcome_at() already maps to this branch's
                     # "natural_ventilation" outcome — remains the last-emitted event at
-                    # this instant, unchanged from pre-fix behavior; this new event type
-                    # has no outcome mapping of its own (diagnostic-only) and would
-                    # otherwise shadow it.
+                    # this instant, unchanged from pre-fix behavior. Since Issue #1132 this
+                    # event also maps to "natural_ventilation" (outcomes.py), so the order
+                    # no longer changes the outcome; it is kept for readability.
                     self._emit_event_callback(
                         "nat_vent_reactivated_while_paused",
                         {"outdoor": outdoor, "indoor": indoor, "threshold": nat_vent_threshold},
@@ -10038,7 +10093,7 @@ class AutomationEngine:
             )
         )
 
-    def _apply_nat_vent_fsm_state(self, state: NatVentLifecycleState) -> None:
+    def _apply_nat_vent_fsm_state(self, state: NatVentLifecycleState, *, keep_door_pause: bool = False) -> None:
         """Write ``_natural_vent_active``/``_nat_vent_soft_start``/``_paused_by_door``
         from a ``nat_vent_fsm.transition()`` result (Issue #594 Phase R, Phase 2f).
 
@@ -10062,6 +10117,10 @@ class AutomationEngine:
         diff so DOOR_PAUSE_STARTED/ENDED still fires correctly on this path — found the
         same way Phase 1 found ``coordinator.py:5088``: a second real writer of a
         field this issue is already instrumenting.
+
+        ``keep_door_pause`` (Issue #1132): a refused paused-reactivation keeps the door/window
+        pause, so this writer must not clear it -- clearing then re-recording it emitted a
+        spurious DOOR_PAUSE_ENDED/STARTED pair for a pause that never ended.
         """
         _paused_before = bool(self._paused_by_door)
         self._natural_vent_active = state in (
@@ -10069,7 +10128,9 @@ class AutomationEngine:
             NatVentLifecycleState.ACTIVE_SOFT_START,
         )
         self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
-        self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+        self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT or (
+            keep_door_pause and _paused_before
+        )
         self._emit_boolean_transition(
             before=_paused_before,
             after=bool(self._paused_by_door),
@@ -10079,8 +10140,76 @@ class AutomationEngine:
             caller="_apply_nat_vent_fsm_state",
         )
 
+    async def _activate_fan_for_paused_reactivation(
+        self,
+        to_state: NatVentLifecycleState,
+        *,
+        reason: str,
+        outdoor: float | None,
+        indoor: float | None,
+    ) -> tuple[bool, FanCommandResult]:
+        """Issue #1132: fan-ON for a nat-vent reactivation while a door/window pause may be recorded.
+
+        Shared by the three reactivation sites. Captures whether a pause was recorded, runs
+        ``_activate_fan()``, applies the nat-vent FSM state via
+        ``_apply_nat_vent_fsm_state_after_activation()``, and -- when the activation was not applied
+        -- keeps the pause. Returns ``(applied, result)``; callers clear the pause only if ``applied``.
+        """
+        result = await self._activate_fan(reason=reason)
+        self._apply_nat_vent_fsm_state_after_activation(to_state, result, keep_door_pause=True)
+        applied = self._nat_vent_activation_applied(result)
+        if not applied:
+            self._keep_pause_after_refused_reactivation(result, outdoor, indoor)
+        return applied, result
+
+    def _keep_pause_after_refused_reactivation(
+        self,
+        activation_result: FanCommandResult,
+        outdoor: float | None,
+        indoor: float | None,
+    ) -> None:
+        """Issue #1132: a nat-vent reactivation was refused, so the door/window pause stays.
+
+        The pause itself is preserved at the write: ``_activate_fan_for_paused_reactivation()``
+        applies INACTIVE with ``keep_door_pause=True``, so ``_apply_nat_vent_fsm_state()`` (the
+        second ``_paused_by_door`` writer Issue #717 documents) never clears it and no spurious
+        DOOR_PAUSE_ENDED/STARTED pair is emitted. ``_pre_pause_mode``/``_paused_entity``/
+        ``_paused_since``/``_paused_with_hvac_already_off`` are untouched by that writer. This method
+        only reports the refusal.
+        """
+        # RATE_LIMITED_DUP can repeat every tick for up to 5 minutes (same split as
+        # _apply_nat_vent_fsm_state_after_activation()), so it logs at DEBUG.
+        _LOGGER.log(
+            logging.DEBUG if activation_result == FanCommandResult.RATE_LIMITED_DUP else logging.INFO,
+            "Nat-vent reactivation while paused not applied: fan command %s -- door/window pause kept "
+            "(outdoor=%s indoor=%s paused_entity=%s)",
+            activation_result.name,
+            f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+            f"{indoor:.1f}" if indoor is not None else "unavailable",
+            self._paused_entity,
+        )
+
+    @staticmethod
+    def _nat_vent_activation_applied(activation_result: FanCommandResult) -> bool:
+        """True when ``_activate_fan()``'s result means the nat-vent activation was applied
+        (a nat-vent session is recorded; SUPPRESSED/DISABLED/ALREADY_IN_STATE count as applied).
+
+        Issue #1132 (mirror of #931): the "paused-by-door nat-vent reactivation" sites used to
+        clear the door/window pause unconditionally after ``await self._activate_fan(...)``. An
+        OVERRIDDEN or rate-limited command left HVAC off with no pause recorded and no nat-vent
+        session (the occupant's HVAC stays off after the window closes). Those sites now clear the
+        pause only when this returns True -- the exact predicate
+        ``_apply_nat_vent_fsm_state_after_activation()`` uses to decide whether a session is
+        recorded, so "pause cleared" implies "session recorded".
+        """
+        return activation_result not in _NAT_VENT_ACTIVATION_NOT_APPLIED
+
     def _apply_nat_vent_fsm_state_after_activation(
-        self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
+        self,
+        to_state: NatVentLifecycleState,
+        activation_result: FanCommandResult,
+        *,
+        keep_door_pause: bool = False,
     ) -> None:
         """Apply an FSM decision computed BEFORE an ``await self._activate_fan(...)``
         call, guarding against the Issue #706 Bug F race and the Issue #935
@@ -10118,11 +10247,7 @@ class AutomationEngine:
         ``DISABLED``) means no override intervened mid-await and no command was
         deferred, so the pre-await ``to_state`` is still correct to apply.
         """
-        if activation_result in (
-            FanCommandResult.OVERRIDDEN,
-            FanCommandResult.RATE_LIMITED_NEW,
-            FanCommandResult.RATE_LIMITED_DUP,
-        ):
+        if activation_result in _NAT_VENT_ACTIVATION_NOT_APPLIED:
             # Issue #935 verification finding: OVERRIDDEN is a genuine anomaly (worth
             # a WARNING), but RATE_LIMITED_NEW/DUP is routine anti-cycling behavior
             # that can repeat every tick for up to 5 minutes — same INFO/DEBUG split
@@ -10142,7 +10267,7 @@ class AutomationEngine:
                 activation_result.name,
                 to_state,
             )
-            self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)
+            self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE, keep_door_pause=keep_door_pause)
         else:
             self._apply_nat_vent_fsm_state(to_state)
 
@@ -10352,8 +10477,9 @@ class AutomationEngine:
 
         ``nat_vent_gate_ruled_out``: forwarded to ``_build_door_window_fsm_inputs()`` —
         see ``DoorWindowFsmInputs.nat_vent_gate_ruled_out``'s own docstring (Issue #757
-        Phase 6 Step 4 fix). ``_pause_for_door_window()`` is the only real caller that
-        passes ``True``.
+        Phase 6 Step 4 fix). ``_pause_for_door_window()`` and ``handle_door_window_open()``'s
+        pause fall-through (Issue #1132) are the only real callers that pass ``True`` --
+        both have already decided PAUSE on the legacy side before dispatching.
 
         Issue #717: also the single emit point for DOOR_PAUSE_STARTED/ENDED — every
         real door/window pause transition already funnels through here regardless of
@@ -10365,7 +10491,7 @@ class AutomationEngine:
         (each can resolve to either direction depending on the real outcome).
         """
         _paused_before = bool(self._paused_by_door)
-        from .door_window_fsm import DoorWindowFsmEvent
+        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
         from .door_window_fsm import transition as _door_window_transition
 
         state = origin_state if origin_state is not None else self.door_window_lifecycle_state
@@ -10379,6 +10505,21 @@ class AutomationEngine:
             ),
         )
         self._apply_door_window_fsm_state(result.to_state)
+        # Issue #1132: ``_pre_pause_mode`` is the restore target of a RECORDED pause and must not
+        # outlive one. Whenever a dispatch leaves no pause recorded -- the pause was never recorded
+        # (the SENSOR_OPENED defect), or it ended without a restore (nat-vent reactivation, manual
+        # override, grace hand-off) -- a surviving value would make a LATER pause that finds HVAC
+        # already off close by restoring a mode the occupant had off. ALL_SENSORS_CLOSED is the one
+        # kind that consumes the value after this call (handle_all_doors_windows_closed() restores
+        # from it, then clears it itself), so it is exempt.
+        if not self._paused_by_door and kind != DoorWindowFsmEventKind.ALL_SENSORS_CLOSED:
+            if self._pre_pause_mode:
+                _LOGGER.info(
+                    "Door/window pause not recorded after %s -- discarding stale pre_pause_mode=%s",
+                    kind.value,
+                    self._pre_pause_mode,
+                )
+            self._pre_pause_mode = None
         self._emit_boolean_transition(
             before=_paused_before,
             after=bool(self._paused_by_door),

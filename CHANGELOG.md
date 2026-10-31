@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.3] — 2026-10-31
+
+- Fix #1132: when a window opens while you have a manual thermostat change in effect, Climate Advisor now records the pause, so closing the window restores your heating or cooling instead of leaving it off. A pause is no longer dropped when the whole-house fan command could not run, and a leftover "mode before pause" can no longer switch heating or cooling back on at a later window close.
+- Docs (#1139): during the planned window period heating and cooling are already off by plan, so no separate window pause is recorded; natural ventilation still runs.
+
 ## [0.8.2] — 2026-10-30
 
 - Feat #1128: Climate Advisor now quietly checks its own behaviour against a set of household promises (for example, it never undoes your manual thermostat change early, never runs the AC while the whole-house fan runs, never touches your equipment while automation is off). A missed promise is only noted, not alerted: the AI Investigator shows it as a "Noted, not alerted" line and the diagnostics report counts how often each promise was missed. The dashboard's Debug tab shows a "Household Promises Missed" line (only when something was missed). The whole-house-fan/AC alert is unchanged.

@@ -712,6 +712,19 @@ On close: `handle_all_doors_windows_closed()` is only called when ALL monitored 
 
 If `hass.states.get(self.climate_entity)` returns `None` (thermostat entity unavailable), `_pre_pause_mode` stays `None`. The guard at L1168 (`if self._pre_pause_mode and self._pre_pause_mode != "off"`) evaluates to `False`. `_paused_by_door` is NOT set and HVAC is not touched. No notification is sent. The sensor opening is effectively silently ignored in this case.
 
+
+### A Door/Window Pause Is Always Recorded When HVAC Is Turned Off (Issue #1132)
+
+**What the occupant experienced:** a window opened while a manual thermostat change was in effect (or while a forecast-peak / thermal-floor guard had just ruled out natural ventilation). Climate Advisor turned the HVAC off but never recorded the pause, so closing the window restored nothing and the house stayed without heating/cooling until the occupant touched the thermostat. Usually the next periodic refresh (`apply_classification()` -> `_sync_paused_by_door_with_live_sensors()`) repairs this within seconds; it does **not** while a manual override or pending confirmation is active (the #1119 early return), and never when Manual Change Pause is 0.
+
+Three rules now hold:
+
+1. **Pause recorded on every PAUSE decision.** `handle_door_window_open()` decides PAUSE on the legacy side (gate rejected, a Phase 2 guard skipped nat-vent, or a grace/override exemption fell through) *before* it dispatches the FSM event. It now passes `nat_vent_gate_ruled_out=True` to `_resolve_door_window_pause_flags(kind=SENSOR_OPENED)`, exactly like `_pause_for_door_window()`. Without it the FSM re-derived its own simplified nat-vent gate (blind to the forecast-peak guard, the thermal-floor guard and a manual override) and answered NAT_VENT_ELIGIBLE (NORMAL origin, `door_window_fsm.py` `_transition_from_normal`) or GRACE_SUPPRESSED (GRACE origin, `_transition_from_grace`), recording no pause.
+2. **Reactivation clears the pause only on fan success.** The paused-by-door nat-vent reactivation sites (`check_natural_vent_conditions()`, both the full-gate and soft-start branches, and `_re_pause_for_open_sensor()`) clear `_paused_by_door`, emit `nat_vent_reactivated_while_paused` and null `_paused_entity` only when `_nat_vent_activation_applied(result)` is true. That is the predicate `_apply_nat_vent_fsm_state_after_activation()` uses to decide whether a session is recorded (`OVERRIDDEN`, `RATE_LIMITED_NEW`, `RATE_LIMITED_DUP` are "not applied"), so "pause cleared" implies "nat-vent session recorded". Otherwise the pause is kept (`_keep_pause_after_refused_reactivation()` re-records `_paused_by_door`, which `_apply_nat_vent_fsm_state(INACTIVE)` would otherwise have cleared as its second writer, and logs an INFO line). `_re_pause_for_open_sensor()` then falls through to its normal re-pause. Mirror of #931 (exit side) / #935 (entry side).
+3. **`_pre_pause_mode` lifecycle.** It is the restore target of a *recorded* pause and must not outlive one. Written only by `_pause_for_door_window_action()` (HVAC was active -> that mode; HVAC already off and no pause yet recorded -> `None`) and `_exit_nat_vent()`'s sensor-still-open branch. Cleared by: `handle_all_doors_windows_closed()` (after the restore, and also on its `not _paused_by_door` early return), `handle_manual_override_during_pause()`, `resume_from_pause()`, and the shared dispatcher `_resolve_door_window_pause_flags()` whenever a dispatch leaves no pause recorded (any kind except `ALL_SENSORS_CLOSED`, which consumes the value after the call) — this covers a pause that was never recorded and a pause that ended without a restore (nat-vent reactivation, grace hand-off). A later window opened while HVAC is already off therefore never restores a mode the occupant had off.
+
+Tests: `tests/test_door_pause_recorded_1132.py`; real Home Assistant: `tests_ha/test_door_pause_recorded_1132.py`.
+
 ---
 
 ## Override Confirmation Delay

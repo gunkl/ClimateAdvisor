@@ -2836,7 +2836,8 @@ proving the real gate's formula is used, not the cycling-band midpoint), `TestWa
 | During debounce | No HVAC action taken |
 | Debounce expires (sensor still open) | `_hvac_command_pending` set; HVAC mode saved as `pre_pause_mode`; HVAC set to `off`; notification sent |
 | Grace period active at debounce expiry | Pause **blocked** — no HVAC change, log message only |
-| HVAC already `off` at pause time | No action (nothing to pause) |
+| HVAC already `off` at pause time | No HVAC command; the pause flag is still recorded (`_paused_with_hvac_already_off`) and `pre_pause_mode` is reset to `None` — nothing to restore at close (Issue #1132) |
+| Pause decision vs. FSM (Issue #1132) | Whenever `handle_door_window_open()` falls through to pausing (nat-vent gate rejected, forecast-peak / thermal-floor guard skipped nat-vent, override/grace exemption fell through) the pause is **always recorded**: the SENSOR_OPENED FSM dispatch passes `nat_vent_gate_ruled_out=True`, from both NORMAL and GRACE origins. A paused window whose nat-vent reactivation is refused by the fan (overridden / rate-limited, `_nat_vent_activation_applied()` false) keeps the pause; it is cleared only when a nat-vent session is actually recorded. `pre_pause_mode` never outlives a recorded pause (see [grace-periods-spec.md](grace-periods-spec.md) § A Door/Window Pause Is Always Recorded) |
 | All monitored sensors close | Restore HVAC to `pre_pause_mode`; restore comfort temperature; start **automation** grace period. Issue #1068: if there is no `pre_pause_mode` because a nat-vent exit (floor/ceiling) paused with the window still open and the thermostat Off (`_paused_entity == "nat-vent-exit"`), comfort is re-armed immediately via `_set_temperature_for_mode()` on the resolved band (heat at the floor, cool at the ceiling) instead of waiting up to ~30 min; the close handler does not arm a thermostat left Off for any other pause (the next periodic cycle behaves as before). Both paths share `_restore_comfort_after_door_window_close()`. Tests: `tests/test_nat_vent_exit_rearm.py`. |
 | Contact sensor re-reports closed (closed->closed, or unavailable->closed, e.g. after an HA restart) | Skipped with a DEBUG line (Issue #1050, #1048 change 19) unless something could need clearing: a door pause, an active nat-vent session or a live fan session (`_paused_by_door`, `_natural_vent_active`, `_fan_active`, `_fan_override_active`). `old_state=None` always proceeds, and open->unavailable is still processed. Before this, every sensor re-registering after a restart logged an identical "all sensors closed" row (~48 per restart in one household). `_state_is_open()` is the polarity-aware definition shared with `_is_sensor_open()`; an unavailable/unknown state is never open. Tests: `tests/test_door_window_restart_flood.py`. |
 
@@ -3107,6 +3108,8 @@ When `_is_within_planned_window_period()` returns `True`, the following are supp
 - **Pause** — `handle_door_window_open()` logs "not pausing (windows recommended)" and returns without pausing
 - **Re-pause after grace expiry** — `_grace_expired()` and `_re_pause_for_open_sensor()` clear grace and return without re-pausing
 - **Duplicate open notifications** — no notification is sent when the open sensor is expected
+
+During the planned window HVAC is already off by plan (hvac_mode=off on windows-recommended days), so no separate door/window pause is recorded or notified. Natural ventilation is not suppressed (matrix rows C2/C5, golden mild_all_day_nat_vent_only).
 
 ### Where It Is Checked
 

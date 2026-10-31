@@ -2876,13 +2876,16 @@ class TestBriefingShowsSavingsBand:
         assert "above 78" in on
         assert "above 78" in off
 
-    def test_warm_day_ac_step_in_stays_raw(self):
+    def test_warm_day_ac_step_in_follows_the_guard_ceiling(self):
+        # Issue #1093 supersedes the #1091 "stays raw" pin: the ODE ceiling guard now defends the
+        # savings-adjusted awake ceiling, so the sentence naming where the AC takes over quotes it.
         on = self._body("warm", 80)
         off = self._body("warm", 80, savings=False)
         on_ac = [ln for ln in on.splitlines() if "AC" in ln]
         off_ac = [ln for ln in off.splitlines() if "AC" in ln]
         assert on_ac
-        assert on_ac == off_ac
+        assert any("above 77" in ln for ln in on_ac)
+        assert any("above 75" in ln for ln in off_ac)
 
     @pytest.mark.parametrize(("day_type", "high"), [("hot", 92), ("cool", 52), ("mild", 68), ("cold", 30)])
     def test_savings_off_is_identical_to_flag_absent(self, day_type, high):
@@ -2890,3 +2893,52 @@ class TestBriefingShowsSavingsBand:
         explicit_off = _generate(c, runtime_config={**DEFAULT_CONFIG, "aggressive_savings": False})
         absent = _generate(c, runtime_config=DEFAULT_CONFIG)
         assert explicit_off == absent
+
+
+class TestWarmDayAcHandoffQuotesSavingsCeiling:
+    """Issue #1093: the warm-day sentences that name where the AC steps in quote the ceiling the
+    thermostat and the ODE ceiling guard actually hold (comfort 70-75: 77 with Prefer savings, 75 without)."""
+
+    SAVINGS = {**DEFAULT_CONFIG, "aggressive_savings": True}
+
+    def _warm(self, runtime_config, indoor=None, outdoor=None, keep_close_time=True):
+        c = _make_classification("warm", today_high=80, today_low=55)
+        if not keep_close_time:
+            c.window_close_time = None
+        return _generate(
+            c,
+            runtime_config=runtime_config,
+            predicted_indoor_future=indoor,
+            predicted_outdoor_future=outdoor,
+        )
+
+    def test_close_up_sentence_quotes_savings_ceiling(self):
+        text = self._warm(self.SAVINGS)
+        assert "the AC can take over above 77" in text
+        assert "above 75" not in text
+
+    def test_close_up_sentence_unchanged_without_savings(self):
+        text = self._warm(DEFAULT_CONFIG)
+        assert "the AC can take over above 75" in text
+        assert "above 77" not in text
+
+    def test_safety_net_sentence_quotes_savings_ceiling(self):
+        text = self._warm(self.SAVINGS, keep_close_time=False)
+        assert "The AC will step in above 77" in text
+        assert "above 75" not in text
+
+    def test_safety_net_sentence_unchanged_without_savings(self):
+        text = self._warm(DEFAULT_CONFIG, keep_close_time=False)
+        assert "The AC will step in above 75" in text
+        assert "above 77" not in text
+
+    def test_forecast_breach_sentence_names_the_ceiling_the_plan_measured(self):
+        # Indoor sits at 76 for two hours, then reaches 78. Against the savings ceiling (77) the breach is
+        # the later 78 hour, so the sentence names 77 and a LATER time than the plain-75 sentence does.
+        indoor = _make_indoor_curve([72, 74, 76, 76, 78, 79])
+        outdoor = _make_outdoor_curve([60, 62, 64, 66, 68, 70])
+        on = self._warm(self.SAVINGS, indoor, outdoor)
+        off = self._warm(DEFAULT_CONFIG, indoor, outdoor)
+        assert "Indoor temps are forecast to reach 77\u00b0F around" in on
+        assert "Indoor temps are forecast to reach 75\u00b0F around" in off
+        assert on.split("reach 77\u00b0F around")[1][:9] != off.split("reach 75\u00b0F around")[1][:9]

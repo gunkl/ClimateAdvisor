@@ -101,6 +101,7 @@ def _escalate_decision() -> ClassificationDecision:
         should_deactivate_fan=True,
         indoor=76.0,
         outdoor=90.0,
+        ceiling=74.0,
     )
     return ClassificationDecision(
         event_kind=ClassificationFsmEventKind.CYCLE_EVALUATED,

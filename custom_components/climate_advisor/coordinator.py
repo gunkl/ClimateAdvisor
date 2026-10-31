@@ -5491,6 +5491,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._nat_vent_plan = None
             return
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+        # Issue #1093: the plan's AC-handoff time measures against the ceiling the thermostat is armed
+        # with (Prefer savings widens it) -- the engine's single source, not comfort_cool + a margin here.
+        _, _armed_ceiling = awake_comfort_edges(
+            self.config, aggressive_savings=bool(self.config.get("aggressive_savings", False))
+        )
         if c.day_type == DAY_TYPE_HOT:
             # Issue #876: HOT's own open-time field is window_opportunity_morning_start
             # (window_open_time is always None for HOT — see classifier.py) and the
@@ -5501,6 +5506,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                ceiling=_armed_ceiling,
                 window_open_time=c.window_opportunity_morning_start,
             )
         else:
@@ -5510,6 +5516,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                ceiling=_armed_ceiling,
                 comfort_heat_raw=_comfort_heat_raw,
                 sleep_heat=_sleep_heat,
                 in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),

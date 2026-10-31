@@ -13,6 +13,8 @@ hvac mode actually written to the thermostat. Nothing here re-implements product
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from custom_components.climate_advisor.comfort_family_decision import (
@@ -89,15 +91,23 @@ class TestUnknownFamilyHoldsAfterTheOppositeRan:
     def test_reactive_reading_is_held_too(self, mode):
         engine, clock = _scene(day="mild", mode="cool", indoor=71.0, ran="cool", ran_min=30.0)
         engine._test_state.state = mode  # the occupant switched it Off / it went heat_cool / unavailable
+        # Past COMFORT_RECENT_COMMAND_WINDOW_S: CA's own cool command no longer stands in for the live mode,
+        # so the reading really sees an UNKNOWN family (without this the test exercised the known-cool path).
+        clock.advance(minutes=5)
         _reactive(engine, clock, 67.0)
         assert "heat" not in _mode_writes(engine)
+        hold = engine._last_comfort_hold
+        assert hold is not None and hold["candidate_family"] == "heating" and hold["current_family"] == "cooling"
 
     @pytest.mark.parametrize("mode", _UNKNOWN_MODES)
     def test_reactive_mirror_is_held_too(self, mode):
         engine, clock = _scene(day="mild", mode="heat", indoor=71.0, ran="heat", ran_min=30.0)
         engine._test_state.state = mode
+        clock.advance(minutes=5)  # past COMFORT_RECENT_COMMAND_WINDOW_S: the live family is really unknown
         _reactive(engine, clock, 75.0)
         assert "cool" not in _mode_writes(engine)
+        hold = engine._last_comfort_hold
+        assert hold is not None and hold["candidate_family"] == "cooling" and hold["current_family"] == "heating"
 
 
 class TestUnknownFamilyReleases:
@@ -288,3 +298,55 @@ class TestFsmAdoptsTheHold:
         assert result.decision.held
         assert result.to_state is ComfortFamilyState.COOLING
         assert not result.locked_out
+
+
+# ---------------------------------------------------------------------------
+# Other readers of the same inputs: the ODE ceiling-guard write gate and the activity event
+# ---------------------------------------------------------------------------
+
+
+class TestOdeCeilingGuardGateWithUnknownFamily:
+    """The ODE ceiling guard's cool write is skipped only while the selector preview guards the FLOOR
+    (Issue #1066 F3). With the thermostat Off right after the AC ran, the preview now HOLDS cooling, so the
+    gate agrees with the selector instead of leaving the house to be heated: no furnace, cool at the ceiling."""
+
+    _NOW = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+
+    def _fire(self, indoor: float, ran: str | None) -> tuple[list, str, list]:
+        from tests.test_nearest_edge_followups import TestOdeGuardSkipsWhileSelectorGuardsFloor
+
+        f3 = TestOdeGuardSkipsWhileSelectorGuardsFloor()
+        engine = f3._engine(indoor)  # thermostat Off, warm day (plan "off"), ceiling breach predicted
+        if ran is not None:
+            _stamp_ran(engine, ran, 30.0, now=self._NOW)
+        events, mode = f3._fire(engine)
+        return events, mode, _mode_writes(engine)
+
+    @pytest.mark.parametrize("indoor", [70.0, 67.0])  # heat margin zone; 1 F under the floor
+    def test_ac_just_ran_the_cool_write_proceeds_and_the_furnace_stays_off(self, indoor):
+        events, mode, writes = self._fire(indoor, "cool")
+        assert "heat" not in writes, "the AC just ran: a shallow dip must not start the furnace"
+        assert mode == "cool"
+        assert "ceiling_guard_fired" in events
+
+    @pytest.mark.parametrize("ran", [None, "heat"])
+    def test_nothing_or_the_furnace_ran_the_write_is_still_skipped(self, ran):
+        events, mode, _ = self._fire(70.0, ran)
+        assert "ceiling_guard_fired" not in events and mode == "heat"
+
+
+def test_comfort_switch_held_event_is_emitted_once_for_an_unknown_family():
+    engine = _make_engine(indoor=67.0, mode="off")
+    clock = _Clock()
+    _stamp_ran(engine, "cool", 30.0)
+    events: list = []
+    engine._emit_event_callback = lambda name, data: events.append((name, data))
+    _apply(engine, clock, "mild", 67.0)
+    for _ in range(3):
+        clock.advance(minutes=2)
+        _reactive(engine, clock, 67.0)
+    held = [d for n, d in events if n == "comfort_switch_held"]
+    assert len(held) == 1
+    assert held[0]["candidate_family"] == "heating" and held[0]["zone"] == "breach"
+    assert held[0]["depth_f"] == pytest.approx(1.0) and held[0]["tolerance_f"] == pytest.approx(2.0)
+    assert "heat" not in _mode_writes(engine)

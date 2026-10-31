@@ -141,8 +141,9 @@ class ComfortFamilyInputs:
     # comfort_family_recency_window_min; 0.0 (default) disables the guard.
     recency_window_min: float = 0.0
     # Issue #1149: stand-in for "the family being left" while ``current_family`` is None (thermostat Off,
-    # heat_cool, auto or unavailable): the family that ran / was deliberately commanded most recently
-    # inside the window, chosen by the shell. Ignored when ``current_family`` is known. None = nothing ran.
+    # heat_cool, auto or unavailable): the family that ran / was deliberately commanded most recently, chosen
+    # by the shell (the window itself is applied here, via ``opposite_ran_min_ago``). Ignored when
+    # ``current_family`` is known. None = neither family has a known run.
     settling_from_family: str | None = None
 
 

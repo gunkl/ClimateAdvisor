@@ -12008,7 +12008,8 @@ class AutomationEngine:
         # Issue #1066 (F3): this guard's WRITE must not fight the comfort-edge selector. When the
         # selector PREVIEW says the thermostat should guard the FLOOR (heat) right now -- indoor
         # below the floor, in the heat margin zone, or in the hysteresis gap with heat already
-        # armed -- a predicted ceiling breach hours away does not justify flipping to cool: the
+        # armed; NOT while the settling guard holds cooling after the AC ran, Issue #1149 -- a predicted
+        # ceiling breach hours away does not justify flipping to cool: the
         # reactive check would flip straight back. The guard's decision logic is unchanged; only
         # the write is held. The preview ignores nat-vent/WHF/TOU ownership (this guard is the
         # nat-vent -> cool escalator, so those must not suppress the comparison).

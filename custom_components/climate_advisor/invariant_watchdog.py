@@ -441,6 +441,39 @@ def _compute_occupant_actions(inp: PromiseInput) -> list[OccupantAction]:
 
 
 # ── P1 settling_flip ───────────────────────────────────────────────────────────
+# Issue #1150 part B. When True, the 30-min occupant excuse is ALSO measured to the first CA
+# ``set_hvac_mode`` that armed the same-side family (heat / cool) within that window, not only to
+# the equipment edge: the occupant spoke, CA armed in response, and the equipment lagged the
+# command. This WIDENS the excuse (design Invariant 2: loosening needs owner sign-off), so it
+# stays False (the original behaviour) until the owner answers.
+P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND = False
+
+
+def _p1_arming_command_ts(inp: PromiseInput, side: str, cur_ts: datetime, excuse: timedelta) -> datetime | None:
+    """Timestamp of the first CA ``set_hvac_mode`` into the ``side`` family within ``excuse`` before ``cur_ts``."""
+    want = "heat" if side == "heat" else "cool"
+    stamps = [
+        c.ts
+        for c in inp.commands
+        if c.origin == "ca"
+        and c.target == "thermostat"
+        and c.service == "set_hvac_mode"
+        and (c.mode or "").lower() == want
+        and timedelta(0) <= cur_ts - c.ts <= excuse
+    ]
+    return min(stamps) if stamps else None
+
+
+def _p1_start_judged(rs: tuple[Reading, ...] | list[Reading], k: int) -> bool:
+    """True when the equipment start at ``rs[k]`` was evaluable by P1 (same input gates as the main loop)."""
+    if k <= 0:
+        return False
+    prev, cur = rs[k - 1], rs[k]
+    if equipment(prev) is None or prev.hvac_mode is None or cur.hvac_mode is None:
+        return False
+    return cur.indoor_f is not None and cur.setpoint_f is not None and cur.forecast_high_f is not None
+
+
 def check_p1_settling_flip(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
     """After cooling, a shallow dip must not start the heat (and the mirror)."""
     hits: list[Hit] = []
@@ -480,18 +513,39 @@ def check_p1_settling_flip(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
             continue
         if not (-NUMBERS.READING_SLACK_F <= dip < dip_limit):
             continue
+        # A flip is opposite -> idle* -> same-side with NO same-side run in between (#1150 part A):
+        # same-side equipment found first means this is a restart of the family, not a flip -- but
+        # only when that earlier run's own start was judged by this check. If its start could not be
+        # judged (unknown mode/equipment or missing inputs at that edge), keep looking for the opposite
+        # equipment, or a real flip whose first start was unjudgeable would go unreported.
+        same_side = "heating" if side == "heat" else "cooling"
         last_opposite: datetime | None = None
-        for j in range(i - 1, -1, -1):
+        j = i - 1
+        while j >= 0:
             r = rs[j]
             if (cur.ts - r.ts) > timedelta(minutes=window):
                 break
-            if equipment(r) == opposite:
+            eq = equipment(r)
+            if eq == same_side:
+                k = j
+                while k > 0 and equipment(rs[k - 1]) == same_side:
+                    k -= 1
+                if _p1_start_judged(rs, k):
+                    break
+                j = k - 1
+                continue
+            if eq == opposite:
                 last_opposite = r.ts
                 break
+            j -= 1
         if last_opposite is None:
             continue
         if _any_in_span(occ_ts, cur.ts, excuse, inclusive=True):
             continue
+        if P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND:
+            armed = _p1_arming_command_ts(inp, side, cur.ts, excuse)
+            if armed is not None and _any_in_span(occ_ts, armed, excuse, inclusive=True):
+                continue
         if any(
             e.target == "thermostat"
             and e.kind == "override"
@@ -638,6 +692,14 @@ def _p4_reverses(cmd: Command, ep: Episode) -> bool:
     return cmd.fan_on is True if occupant_wants_off else cmd.fan_on is False
 
 
+def _p4_when(remaining_min: float) -> str:
+    """Wording for a reversal: minutes of grace left (round half up), or 'still in force' when none."""
+    whole = int(remaining_min + 0.5)
+    if whole <= 0:
+        return "while your manual change was still in force"
+    return f"{whole} min before your manual change was due to end"
+
+
 def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
     """A manual override is never undone before its grace ends, except by a listed event.
 
@@ -650,6 +712,7 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
     start_slack = timedelta(seconds=NUMBERS.P4_START_SLACK_S)
     end_slack = timedelta(seconds=NUMBERS.P4_END_SLACK_S)
     for ep in inp.episodes:
+        reported_ts: set[datetime] = set()  # one hit per reversal instant (#1151)
         listed = ep.end_ts is not None and _p4_end_is_listed(ep)
         if ep.end_ts is None:
             until = inp.now
@@ -667,19 +730,19 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
                 continue
             if not _p4_reverses(cmd, ep):
                 continue
+            if cmd.ts in reported_ts:
+                continue
             first_after = bisect_right(occ_ts, ep.start_ts + start_slack)
             if first_after < len(occ_ts) and occ_ts[first_after] <= cmd.ts:
                 continue
+            reported_ts.add(cmd.ts)
             remaining = _mins(cmd.ts, ep.grace_end_ts) if ep.grace_end_ts and ep.grace_end_ts > cmd.ts else 0.0
             hits.append(
                 Hit(
                     promise="override_respected",
                     ts=cmd.ts,
-                    key=f"override_respected:{ep.id}:{cmd.ts.isoformat()}:{cmd.service}",
-                    detail=(
-                        f"Climate Advisor changed your {label} setting {remaining:.0f} min before your manual "
-                        "change was due to end."
-                    ),
+                    key=f"override_respected:{ep.id}:{cmd.ts.isoformat()}",
+                    detail=(f"Climate Advisor changed your {label} setting {_p4_when(remaining)}."),
                     evidence=_ev(
                         target=ep.target,
                         remaining_min=remaining,
@@ -702,7 +765,7 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
                     ts=ep.end_ts,
                     key=f"override_respected:early_end:{ep.id}",
                     detail=(
-                        f"Climate Advisor ended your manual {label} change {remaining:.0f} min early, "
+                        f"Climate Advisor ended your manual {label} change {int(remaining + 0.5)} min early, "
                         "so nothing protects it any more."
                     ),
                     evidence=_ev(target=ep.target, remaining_min=remaining, end_reason=ep.end_reason),

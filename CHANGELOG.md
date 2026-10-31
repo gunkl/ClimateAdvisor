@@ -3,6 +3,9 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.5] — 2026-10-31
+
+- Internal #1150, #1151: the household-promise checks no longer report two false alarms found by the nightly generated-day runs. A normal furnace restart after an earlier heat run is no longer called "heat started right after the AC", and one reversal of your manual change is reported once rather than twice (and no longer says "0 min before your manual change was due to end" when that change had no end). These checks only note misses; nothing you see on the thermostat changes.
 ## [0.8.3] — 2026-10-31
 
 - Fix #1132: when a window opens while you have a manual thermostat change in effect, Climate Advisor now records the pause, so closing the window restores your heating or cooling instead of leaving it off. A pause is no longer dropped when the whole-house fan command could not run, and a leftover "mode before pause" can no longer switch heating or cooling back on at a later window close.

@@ -39,6 +39,12 @@ Tests: severity from `PromiseSpec.test_severity`. Home: `PromiseSpec.home_level`
 | 7 | `comfort_kept` | While CA is in control, the house is not outside the comfort range for more than 45 min. | warning | log | event |
 | 8 | `surfaces_agree` | What CA shows (Status API, chart band, briefing, Next User Action, ODE ceiling, nat-vent target, fan and status cards) matches the band the engine arms. Test-only; **not in the registry** (it needs live coordinator objects, see [P8](#p8-surfaces_agree-test-only)). | hard (ratcheted) | none | n/a |
 
+### P1 and P4 judging details (Issues #1150, #1151)
+
+- **P1 lookback stops at same-side equipment (#1150).** A flip is opposite, then idle, then same-side, with no same-side run in between. Scanning back from a heat start, the first `heating` reading ends the search with no hit (the mirror for a cool start). A furnace restart after an earlier in-family heat run is a normal cycle, not a flip.
+- **P1 excuse anchor (#1150, owner sign-off pending).** The 30 min occupant excuse is measured to the equipment start. `P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND` (default `False`) additionally measures it to the first CA `set_hvac_mode` into the same family within 30 min before the start (the occupant spoke, CA armed in response, the equipment lagged). It widens the excuse (design Invariant 2), so it stays off until the owner approves; flipping it is a one-line change.
+- **P4 reports one hit per reversal instant (#1151).** A `set_hvac_mode` and a `set_temperature` in the same tick are one reversal: dedupe by (episode, ts); the hit key is `override_respected:<episode>:<ts>` with no service. Wording: "... {N} min before your manual change was due to end." (N rounded half up) when grace remained, otherwise "... while your manual change was still in force."
+
 Tunable numbers live in `PromiseNumbers` (e.g. `P5_BLIND_CONTINUE_MIN=35`, `P6_MAX_FLIPS=2`, `P7_MAX_MIN=45`); each is deliberately looser than production's own allowance and `tests/test_promise_numbers.py` walks the legal configuration grid to prove it.
 
 ## Home behaviour and severity

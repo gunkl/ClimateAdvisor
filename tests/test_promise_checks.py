@@ -18,6 +18,7 @@ if "homeassistant" not in sys.modules:
 
     install_ha_stubs()
 
+from custom_components.climate_advisor import invariant_watchdog as _iw  # noqa: E402
 from custom_components.climate_advisor.const import FAN_MODE_HVAC, FAN_MODE_WHOLE_HOUSE  # noqa: E402
 from custom_components.climate_advisor.invariant_watchdog import (  # noqa: E402
     LEVEL_ALERT,
@@ -267,6 +268,112 @@ class TestP1SettlingFlip:
         inp = make_input(rs, [Command(ts=base + timedelta(minutes=119, seconds=58), target="thermostat", service="x")])
         assert hits_for("settling_flip", inp, cfg) == []
 
+    # ── Issue #1150 part A: the lookback stops at same-side equipment ──
+    def _restart_after_earlier_heat(self, *, heat_run_between=True):
+        """Seed 1012000093 shape: the AC ran, then a long in-family heat run, then idle, then a furnace restart.
+
+        The restart is a normal furnace cycle: the opposite (cooling) run is behind a full heat run,
+        so the 'flip' was already made (and was the occupant's) 100 minutes earlier.
+        """
+        run = "heating" if heat_run_between else "idle"
+        rs = [
+            rd(0, hvac_action="cooling", indoor_f=75.0),
+            rd(13, hvac_action="cooling", indoor_f=72.0),
+            rd(18, hvac_mode="heat", hvac_action=run, indoor_f=67.0, setpoint_f=68.0),
+            rd(60, hvac_mode="heat", hvac_action=run, indoor_f=68.0, setpoint_f=68.0),
+            rd(73, hvac_mode="heat", hvac_action="idle", indoor_f=68.5, setpoint_f=68.0),
+            rd(100, hvac_mode="heat", hvac_action="idle", indoor_f=68.5, setpoint_f=68.0),
+            rd(105, hvac_mode="heat", hvac_action="heating", indoor_f=67.5, setpoint_f=68.0),
+        ]
+        # The occupant (no CA command) started the first heat run, so only the restart is under test.
+        return make_input(rs, [])
+
+    def test_twin_1150_heat_restart_after_an_earlier_in_family_heat_run_is_not_a_flip(self):
+        assert hits_for("settling_flip", self._restart_after_earlier_heat()) == []
+
+    def test_1150_same_shape_without_the_intervening_heat_run_is_still_a_flip(self):
+        """Revert-test: remove the heat run and the identical restart is a real flip, so part A is what silences it."""
+        (h,) = hits_for("settling_flip", self._restart_after_earlier_heat(heat_run_between=False))
+        assert dict(h.evidence)["side"] == "heat"
+
+    def test_mirror_1150_ac_restart_after_an_earlier_cooling_run_is_not_a_flip(self):
+        kw = {"forecast_high_f": 50.0}
+        rs = [
+            rd(0, hvac_mode="heat", hvac_action="heating", indoor_f=66.0, setpoint_f=68.0, **kw),
+            rd(13, hvac_mode="heat", hvac_action="heating", indoor_f=68.0, setpoint_f=68.0, **kw),
+            rd(18, hvac_mode="cool", hvac_action="cooling", indoor_f=75.0, setpoint_f=74.0, **kw),
+            rd(60, hvac_mode="cool", hvac_action="cooling", indoor_f=74.0, setpoint_f=74.0, **kw),
+            rd(73, hvac_mode="cool", hvac_action="idle", indoor_f=73.5, setpoint_f=74.0, **kw),
+            rd(100, hvac_mode="cool", hvac_action="idle", indoor_f=73.5, setpoint_f=74.0, **kw),
+            rd(105, hvac_mode="cool", hvac_action="cooling", indoor_f=74.5, setpoint_f=74.0, **kw),
+        ]
+        assert hits_for("settling_flip", make_input(rs, [])) == []
+
+    def test_1150_a_same_side_run_whose_start_was_unjudgeable_does_not_hide_a_real_flip(self):
+        """Verification finding: if the first furnace start after the AC could not be judged (forecast missing
+        at that edge), the lookback must not stop at it -- the later restart still reports the flip."""
+        rs = [
+            rd(0, hvac_action="cooling", indoor_f=75.0),
+            rd(13, hvac_action="idle", indoor_f=72.0),
+            rd(20, hvac_mode="heat", hvac_action="heating", indoor_f=67.5, setpoint_f=68.0, forecast_high_f=None),
+            rd(21, hvac_mode="heat", hvac_action="idle", indoor_f=67.6, setpoint_f=68.0),
+            rd(50, hvac_mode="heat", hvac_action="heating", indoor_f=67.5, setpoint_f=68.0),
+        ]
+        (h,) = hits_for("settling_flip", make_input(rs, [cmd(19.97, mode="heat")]))
+        assert dict(h.evidence)["side"] == "heat"
+
+    def test_mirror_1150_unjudgeable_cooling_start_does_not_hide_a_real_flip(self):
+        kw = {"forecast_high_f": 50.0}
+        rs = [
+            rd(0, hvac_mode="heat", hvac_action="heating", indoor_f=66.0, setpoint_f=68.0, **kw),
+            rd(13, hvac_mode="heat", hvac_action="idle", indoor_f=70.0, **kw),
+            rd(20, hvac_mode="cool", hvac_action="cooling", indoor_f=75.0, setpoint_f=74.0, forecast_high_f=None),
+            rd(21, hvac_mode="cool", hvac_action="idle", indoor_f=74.9, setpoint_f=74.0, **kw),
+            rd(50, hvac_mode="cool", hvac_action="cooling", indoor_f=75.0, setpoint_f=74.0, **kw),
+        ]
+        (h,) = hits_for("settling_flip", make_input(rs, [cmd(19.97, mode="cool")]))
+        assert dict(h.evidence)["side"] == "cool"
+
+    # ── Issue #1150 part B: occupant excuse anchored to CA's arming command (flag-gated, owner sign-off) ──
+    def _occupant_then_ca_arms_then_furnace(self, *, arm_gap=25.0, occupant_to_furnace=37.0):
+        """Seed 1012000221 shape: the occupant switched the thermostat off, CA armed heat ``arm_gap`` min
+        later, and the furnace started ``occupant_to_furnace`` min after the occupant (outside the 30 min
+        excuse measured to the furnace start)."""
+        occupant = 25.0
+        arm = occupant + arm_gap
+        start = occupant + occupant_to_furnace
+        assert start > arm
+        rs = [
+            rd(0, hvac_action="cooling", indoor_f=75.0),
+            rd(15, hvac_action="idle", indoor_f=72.0),
+            rd(occupant, hvac_mode="off", hvac_action="off", indoor_f=70.0, setpoint_f=68.0),
+            rd(arm, hvac_mode="heat", hvac_action="idle", indoor_f=67.5, setpoint_f=68.0),
+            rd(start, hvac_mode="heat", hvac_action="heating", indoor_f=67.0, setpoint_f=68.0),
+        ]
+        return make_input(rs, [cmd(arm, mode="heat")])
+
+    def test_1150_anchor_flag_defaults_off_and_keeps_the_original_excuse(self):
+        assert _iw.P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND is False
+        (h,) = hits_for("settling_flip", self._occupant_then_ca_arms_then_furnace())
+        assert dict(h.evidence)["side"] == "heat"
+
+    def test_1150_anchor_flag_on_excuses_when_the_occupant_spoke_within_30_min_of_the_arming_command(self, monkeypatch):
+        monkeypatch.setattr(_iw, "P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND", True)
+        assert hits_for("settling_flip", self._occupant_then_ca_arms_then_furnace()) == []
+
+    def test_1150_anchor_flag_on_does_not_excuse_when_the_occupant_was_over_30_min_before_the_command(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(_iw, "P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND", True)
+        inp = self._occupant_then_ca_arms_then_furnace(arm_gap=31.0, occupant_to_furnace=40.0)
+        assert len(hits_for("settling_flip", inp)) == 1
+
+    def test_1150_anchor_flag_on_only_a_set_hvac_mode_into_the_family_counts_as_arming(self, monkeypatch):
+        monkeypatch.setattr(_iw, "P1_EXCUSE_ANCHOR_ON_ARMING_COMMAND", True)
+        base = self._occupant_then_ca_arms_then_furnace()
+        other = make_input(base.readings, [cmd(50, service="set_temperature", mode="heat", setpoint_f=68.0)])
+        assert len(hits_for("settling_flip", other)) == 1
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # P2 ac_whf_mutex  (#739, #748, #1057)
@@ -442,6 +549,40 @@ class TestP4OverrideRespected:
         )
         inp = make_input([rd(0, fan_on=False)], [], marks, now=at(10))
         assert [h.key.split(":")[1] for h in hits_for("override_respected", inp)] == ["early_end"]
+
+    # ── Issue #1151: one hit per reversal instant; wording for overrides with no end ──
+    def test_1151_mode_and_setpoint_reversal_in_the_same_tick_is_one_hit(self):
+        inp = _thermostat_override(
+            commands=[cmd(5, mode="off"), cmd(5, service="set_temperature", mode="off", setpoint_f=60.0)]
+        )
+        (h,) = hits_for("override_respected", inp)
+        assert h.ts == at(5)
+
+    def test_1151_reversals_at_different_instants_are_separate_hits(self):
+        inp = _thermostat_override(
+            commands=[cmd(5, mode="off"), cmd(8, mode="off"), cmd(8, service="set_temperature", mode="off")]
+        )
+        assert [h.ts for h in hits_for("override_respected", inp)] == [at(5), at(8)]
+
+    def test_1151_hit_key_no_longer_depends_on_the_service(self):
+        a = _thermostat_override(commands=[cmd(5, mode="off")])
+        b = _thermostat_override(commands=[cmd(5, service="set_temperature", mode="off", setpoint_f=60.0)])
+        assert hits_for("override_respected", a)[0].key == hits_for("override_respected", b)[0].key
+
+    def test_1151_an_override_with_no_end_does_not_claim_minutes_before_it_was_due_to_end(self):
+        rs = [rd(-1, setpoint_f=74.0), rd(0, hvac_mode="cool", hvac_action="cooling", setpoint_f=70.0)]
+        marks = events((0, "override_detected", {"detected_mode": "cool"}))
+        inp = make_input(rs, [cmd(5, service="set_temperature", mode="cool", setpoint_f=75.0)], marks, now=at(10))
+        (h,) = hits_for("override_respected", inp)
+        assert (
+            h.detail == "Climate Advisor changed your thermostat setting while your manual change was still in force."
+        )
+
+    def test_1151_minutes_remaining_round_half_up(self):
+        # grace is 30 min from t=0; a command at t=5.5 leaves 24.5 min, which must read 25 (not banker's 24).
+        inp = _thermostat_override(commands=[cmd(5.5, mode="off")])
+        (h,) = hits_for("override_respected", inp)
+        assert "25 min before your manual change was due to end" in h.detail
 
 
 # ─────────────────────────────────────────────────────────────────────────────

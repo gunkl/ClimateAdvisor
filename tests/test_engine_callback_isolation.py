@@ -1,8 +1,8 @@
 """Tests for Issue #604 (Block 5, subtask N2): callback-bundle isolation on AutomationEngine.
 
 Covers:
-  - Back-compat characterization: no ``callbacks`` arg → all 9 attributes stay None.
-  - Bundle application: passing ``AutomationEngineCallbacks`` sets exactly those 9.
+  - Back-compat characterization: no ``callbacks`` arg → all 10 attributes stay None.
+  - Bundle application: passing ``AutomationEngineCallbacks`` sets exactly those 10.
   - Coordinator regression: ``_build_production_automation_callbacks()`` is a
     behavior-preserving refactor of the old post-hoc assignment block.
 
@@ -28,6 +28,7 @@ from custom_components.climate_advisor.automation import (  # noqa: E402
 _CALLBACK_ATTRS = (
     "_revisit_callback",
     "_sensor_check_callback",
+    "_sensors_known_closed_callback",
     "_sensor_debounce_pending_callback",
     "_emit_event_callback",
     "_request_refresh_callback",
@@ -50,7 +51,7 @@ def _make_bare_engine() -> AutomationEngine:
 
 
 class TestBackCompatDefault:
-    def test_no_callbacks_arg_leaves_all_nine_none(self) -> None:
+    def test_no_callbacks_arg_leaves_all_ten_none(self) -> None:
         engine = _make_bare_engine()
         for attr in _CALLBACK_ATTRS:
             assert getattr(engine, attr) is None, f"{attr} should default to None"
@@ -58,11 +59,14 @@ class TestBackCompatDefault:
 
 
 class TestCallbackBundleApplication:
-    def test_bundle_sets_exactly_the_nine_attributes(self) -> None:
+    def test_bundle_sets_exactly_the_ten_attributes(self) -> None:
         def _revisit():
             return None
 
         def _sensor_check():
+            return True
+
+        def _sensors_closed():
             return True
 
         def _sensor_debounce():
@@ -89,6 +93,7 @@ class TestCallbackBundleApplication:
         bundle = AutomationEngineCallbacks(
             revisit=_revisit,
             sensor_check=_sensor_check,
+            sensors_known_closed=_sensors_closed,
             sensor_debounce_pending=_sensor_debounce,
             emit_event=_emit,
             request_refresh=_refresh,
@@ -109,6 +114,7 @@ class TestCallbackBundleApplication:
         )
         assert engine._revisit_callback is _revisit
         assert engine._sensor_check_callback is _sensor_check
+        assert engine._sensors_known_closed_callback is _sensors_closed
         assert engine._sensor_debounce_pending_callback is _sensor_debounce
         assert engine._emit_event_callback is _emit
         assert engine._request_refresh_callback is _refresh
@@ -147,6 +153,7 @@ class TestCoordinatorRefactorIsBehaviorPreserving:
         assert ae.role == "production"
         assert ae._revisit_callback == coordinator.async_request_refresh
         assert ae._sensor_check_callback == coordinator._any_sensor_open
+        assert ae._sensors_known_closed_callback == coordinator._all_sensors_known_closed
         # build_headless_coordinator() intentionally overrides _emit_event_callback
         # post-construction (see its own docstring) to redirect into the flat
         # scenario event_log instead of coordinator._emit_event — so this one

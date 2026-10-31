@@ -1036,7 +1036,7 @@ def _real_hvac_mode(value: Any) -> str | None:
 
 @dataclass
 class AutomationEngineCallbacks:
-    """Bundle of the 9 callbacks the coordinator wires onto an AutomationEngine.
+    """Bundle of the 10 callbacks the coordinator wires onto an AutomationEngine.
 
     Issue #604 (Block 5, subtask N2): named-bundle form of the callback wiring the
     coordinator has always done post-construction, so a future second ("shadow")
@@ -1048,6 +1048,8 @@ class AutomationEngineCallbacks:
 
     revisit: Callable[[], Any] | None = None
     sensor_check: Callable[[], bool] | None = None
+    # Issue #1093: True only when >=1 sensor is configured and every one reads a real closed state.
+    sensors_known_closed: Callable[[], bool] | None = None
     sensor_debounce_pending: Callable[[], bool] | None = None
     emit_event: Callable[..., None] | None = None
     request_refresh: Callable[[], None] | None = None
@@ -1079,6 +1081,12 @@ class AutomationEngine:
     _hvac_cmd_fail_since: datetime | None = None
     _hvac_cmd_fail_mode: str | None = None  # last attempted mode of the open failure episode
     _request_refresh_callback: Any | None = None
+    # Issue #1093: class-level default for engines built via object.__new__ in tests.
+    _sensors_known_closed_callback: Any | None = None
+    # Issue #1120: the pre-cool band the thermostat is holding, and when it was armed (see
+    # _pre_cool_band_in_force_now()). Class-level defaults for engines built via object.__new__ in tests.
+    _pre_cool_band_in_force: ComfortBand | None = None
+    _pre_cool_band_since: datetime | None = None
     # Issue #1049 change 1: (mode, when) of the last mode command that went out successfully;
     # dedupes the explicit set_hvac_mode that would otherwise follow in the same cycle.
     _mode_switch_marker: tuple[str, datetime] | None = None
@@ -1235,6 +1243,10 @@ class AutomationEngine:
         # re-deriving the band itself (which stays this call's job, via a full
         # apply_classification() re-entry — see that method's own docstring).
         self._last_comfort_band: ComfortBand | None = None
+        # Issue #1120: the pre-cool band the thermostat is holding (None = none), and when it was armed.
+        # In memory only on purpose: a restart forgets it, and rows then quote the clock-resolved band.
+        self._pre_cool_band_in_force: ComfortBand | None = None
+        self._pre_cool_band_since: datetime | None = None
 
         # Economizer state (two-phase window cooling per Issue #27)
         # Phase "cool-down": AC runs to cool to set temp (outdoor air assists)
@@ -1500,6 +1512,7 @@ class AutomationEngine:
         self._comfort_hold_episode: dict[str, Any] | None = None
         self._comfort_mode_changes: deque[dict[str, Any]] = deque(maxlen=COMFORT_MODE_CHANGE_LOG_CAP)
         self._mode_change_reason: str = "other"
+        self._mode_change_band: ComfortBand | None = None  # Issue #1120: band armed for the write in flight
         # Issue #1066 (F1): TOU banking window. Set by the coordinator each cycle
         # (set_tou_precondition_window) from the resolved scheduler phase: while now < until the
         # TOU precondition owns the thermostat and the comfort-edge selector defers. ``mode`` is
@@ -1726,6 +1739,9 @@ class AutomationEngine:
         # Resume-from-pause tracking (Issue #47)
         self._resumed_from_pause: bool = False
         self._sensor_check_callback: Any | None = None  # Set by coordinator: returns True if any sensor open
+        # Issue #1093: Set by coordinator: True only when >=1 sensor is configured and every one reads a
+        # real closed state. None/unset (no coordinator wired) means "unknown", i.e. NOT sealed.
+        self._sensors_known_closed_callback: Any | None = None
         # Issue #504: Set by coordinator: returns True if any currently-open monitored sensor
         # is still within its CONF_SENSOR_DEBOUNCE settle window. None/unset (e.g. tests that
         # don't wire a coordinator) is treated as "not pending", matching pre-#504 behavior.
@@ -1765,7 +1781,7 @@ class AutomationEngine:
         # Occupancy mode — synced by coordinator (Issue #85)
         self._occupancy_mode: str = OCCUPANCY_HOME
 
-        # Issue #604: seed the 9 callback attributes from the bundle, if one was given.
+        # Issue #604: seed the 10 callback attributes from the bundle, if one was given.
         # Omitted (None) → every _x_callback attribute stays None, exactly as before this
         # dataclass existed. Applied last so it can't be shadowed by any of the plain
         # `self._x_callback: Any | None = None` assignments above.
@@ -1784,6 +1800,7 @@ class AutomationEngine:
         """
         self._revisit_callback = callbacks.revisit
         self._sensor_check_callback = callbacks.sensor_check
+        self._sensors_known_closed_callback = callbacks.sensors_known_closed
         self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
         self._emit_event_callback = callbacks.emit_event
         self._request_refresh_callback = callbacks.request_refresh
@@ -3683,7 +3700,7 @@ class AutomationEngine:
         _effective_active = {"cool": "ceiling", "heat": "floor"}.get(_resolved_mode, band.active)
 
         if _effective_active == "ceiling" and caps.supports_cool:
-            with self._mode_change_context("selector"):
+            with self._mode_change_context("selector", band=band):
                 _write_result = await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
@@ -3695,7 +3712,7 @@ class AutomationEngine:
             # to preserve, unlike _set_temperature_for_mode()'s two equivalent
             # branches below.)
         elif _effective_active == "floor" and caps.supports_heat:
-            with self._mode_change_context("selector"):
+            with self._mode_change_context("selector", band=band):
                 _write_result = await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
@@ -3824,14 +3841,24 @@ class AutomationEngine:
         return ClimateCallResult(ClimateCallOutcome.OK)
 
     @contextlib.contextmanager
-    def _mode_change_context(self, reason: str) -> Iterator[None]:
-        """Issue #1066: label the commanded-mode changes made inside the block (ring buffer)."""
+    def _mode_change_context(self, reason: str, *, band: ComfortBand | None = None) -> Iterator[None]:
+        """Issue #1066: label the commanded-mode changes made inside the block (ring buffer).
+
+        Issue #1120: ``band`` is the comfort band ``_apply_comfort_band()`` has just armed for the
+        write inside the block (pre-cool's lowered ceiling, nat-vent AC assist's full band...); the
+        ring-buffer row quotes it instead of the clock-resolved band. Every other writer (pause,
+        restore, ODE guard, TOU, nat-vent...) passes none, and a nested block resets it, so a row is
+        only ever stamped with a band armed for THAT write.
+        """
         prior = getattr(self, "_mode_change_reason", "other")
+        prior_band = getattr(self, "_mode_change_band", None)
         self._mode_change_reason = reason
+        self._mode_change_band = band
         try:
             yield
         finally:
             self._mode_change_reason = prior
+            self._mode_change_band = prior_band
 
     def _record_commanded_mode(self, mode: str, reason_text: str | None = None) -> None:
         """Single writer of ``_last_commanded_hvac_mode`` (Issue #1066).
@@ -3879,7 +3906,13 @@ class AutomationEngine:
         # The "from" side is CA's last command when it differs; when CA is reversing an occupant's change
         # (prev == mode) the thermostat was really in the live mode.
         _from = _live if (prev == mode and _live is not None) else prev
-        self._append_mode_change(_from, mode, getattr(self, "_mode_change_reason", "other"), reason_text)
+        self._append_mode_change(
+            _from,
+            mode,
+            getattr(self, "_mode_change_reason", "other"),
+            reason_text,
+            armed_band=getattr(self, "_mode_change_band", None),
+        )
 
     def _live_hvac_state(self) -> str | None:
         """The thermostat's reported HVAC mode, or None when unreadable or not a real mode (unavailable/unknown)."""
@@ -3890,7 +3923,39 @@ class AutomationEngine:
         live = getattr(state, "state", None) if state is not None else None
         return _real_hvac_mode(live)
 
-    def _append_mode_change(self, prev: str | None, mode: str, reason: str, reason_text: str | None = None) -> None:
+    def _pre_cool_band_in_force_now(self) -> ComfortBand | None:
+        """The pre-cool band the thermostat is holding right now, or None (Issue #1120).
+
+        Authoritative state for "pre-cool is in force": ``handle_pre_cool()`` records the band once its
+        write is sent; every later setpoint write (``_set_temperature()``) clears it, and a restart never
+        has it (in memory only). Backstop for the case no write follows: pre-cool is a night state, so it
+        ends at the first wake time after it was armed -- a wake-up skipped by an override must not leave
+        the night band quoted all day (the original #1120 bug).
+        """
+        band = self._pre_cool_band_in_force
+        since = self._pre_cool_band_since
+        if band is None or since is None:
+            return None
+        try:
+            _wp = str(self.config.get("wake_time")).split(":")
+            wake = since.replace(hour=int(_wp[0]), minute=int(_wp[1]), second=0, microsecond=0)
+            if wake <= since:
+                wake += timedelta(days=1)
+            if dt_util.now() >= wake:
+                return None
+        except ValueError, IndexError, TypeError:  # no usable wake time or mixed naive/aware: do not guess
+            return None
+        return band
+
+    def _append_mode_change(
+        self,
+        prev: str | None,
+        mode: str,
+        reason: str,
+        reason_text: str | None = None,
+        *,
+        armed_band: ComfortBand | None = None,
+    ) -> None:
         """Append one entry to the capped mode-change ring buffer (the one mode-change clock).
 
         Issue #1073 (S3): shared by the commanded-mode choke point (``_record_commanded_mode``)
@@ -3901,7 +3966,21 @@ class AutomationEngine:
         if changes is None:
             changes = deque(maxlen=COMFORT_MODE_CHANGE_LOG_CAP)
             self._comfort_mode_changes = changes
-        band = getattr(self, "_last_comfort_band", None)
+        # Issue #1120: record the band in force NOW, not the last one ARMED -- a skipped wake-up or
+        # bedtime (override, open window) leaves ``_last_comfort_band`` on the previous period's band.
+        # ``_last_comfort_band`` is only the fallback before any classification exists.
+        # The one exception: a write ``_apply_comfort_band()`` itself just armed (pre-cool's lowered
+        # ceiling) quotes that band (``armed_band``) -- it is fresh by construction for this write.
+        _cls = getattr(self, "_current_classification", None)
+        _held_pre_cool = self._pre_cool_band_in_force_now()
+        if armed_band is not None:
+            band = armed_band
+        elif _held_pre_cool is not None:
+            # Issue #1120: the pre-cool band is what the thermostat is actually holding until something
+            # supersedes it (next setpoint write, wake time) -- every row quotes it, not the clock band.
+            band = _held_pre_cool
+        else:
+            band = self._resolved_comfort_band(_cls) if _cls is not None else getattr(self, "_last_comfort_band", None)
         try:
             indoor = self._get_indoor_temp_f()
         except Exception:  # noqa: BLE001 - bookkeeping must never break a mode write
@@ -4480,7 +4559,13 @@ class AutomationEngine:
         failed, rejected, WHF-blocked, dry-run, superseded) lands in ``_hvac_write_record.result``
         so incident context and diagnostics report what happened to the SETPOINT write, not just
         the last mode command.
+
+        Issue #1120: every setpoint write supersedes a held pre-cool band (``_pre_cool_band_in_force``);
+        ``handle_pre_cool()`` records it again after ITS write is sent, so the only writer that leaves it
+        set is pre-cool itself.
         """
+        self._pre_cool_band_in_force = None
+        self._pre_cool_band_since = None
         result = await self._set_temperature_impl(
             temperature,
             reason=reason,
@@ -9412,6 +9497,10 @@ class AutomationEngine:
             )
 
         if _pre_cool_outcome == "sent":
+            # Issue #1120: the thermostat now holds the pre-cool band (set AFTER the write, which cleared
+            # any earlier one); rows written while it is held quote it.
+            self._pre_cool_band_in_force = _pre_cool_band
+            self._pre_cool_band_since = dt_util.now()
             _LOGGER.info(
                 "Pre-cool setpoint applied: cool ceiling %.1f°F (heat floor unchanged at %.1f°F)",
                 pre_cool_target,
@@ -11809,22 +11898,64 @@ class AutomationEngine:
         self._arm_comfort_family(resolved_family, now, only_if_changed=True)
         return "heat" if resolved_family == "heating" else "cool"
 
-    def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
+    def _whf_house_sealed_with_known_sensors(self) -> bool:
+        """True only when at least one monitored door/window sensor is configured AND every one reads closed.
+
+        Issue #1093. "Sealed" must be a positive, known state: no sensors configured, or any sensor
+        unavailable/unknown/missing (a Zigbee hub down), is unknown -- not sealed -- so the compressor is
+        never handed a house whose windows may be open. Read from the coordinator's sensors-known-closed
+        callback (``_all_sensors_known_closed()``, next to ``_state_is_open``); without it wired this is
+        False. This is deliberately NOT ``not _any_monitored_sensor_open()``: that predicate treats an
+        unreadable sensor as not-open, which is right for the WHF safety stop
+        (``_enforce_sealed_house_whf_guard()`` -- an offline sensor must not block it) and wrong here.
+        """
+        return bool(self._sensors_known_closed_callback and self._sensors_known_closed_callback())
+
+    def _whf_unsealed_reason(self) -> str:
+        """Why a WHF/BOTH home is not treated as sealed (log text only; Issue #1093).
+
+        Order matters: no sensors configured, a sensor open, otherwise a sensor whose state cannot be read.
+        """
+        if not self.config.get("door_window_sensors"):
+            return "no door/window sensors configured"
+        if self._any_monitored_sensor_open():
+            return "a door/window is open"
+        return "a door/window sensor state is unknown or unavailable"
+
+    def _ceiling_threshold(self, comfort_cool: float | None, *, house_sealed: bool = False) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.
+
+        Issue #1093: this is the ONE ceiling the ODE ceiling guard defends -- its dormancy test,
+        breach scan, lead-time delta and cool-setpoint write all read it. With Prefer savings on it
+        is the savings-widened awake ceiling (``awake_comfort_edges()``) -- the number the thermostat's
+        comfort band is armed with while awake. At night the band is armed with the sleep range, but this
+        guard still defends the awake ceiling (it has never read the sleep band; unchanged).
 
         Returns None for whole-house-fan mode (FAN_MODE_WHOLE_HOUSE / FAN_MODE_BOTH): a WHF
         is guaranteed to keep converging toward outdoor temperature as long as outdoor stays
         below indoor, so there is no ceiling-based handoff point — only the outdoor/indoor
         direction matters (Issue #392 Fix 1). HVAC fan mode coexists with the compressor (band
         stays armed per Issue #249), so the ceiling is a valid handoff signal there.
+
+        Issue #1093: that WHF reasoning only holds while a window is open. With ``house_sealed=True``
+        (``_whf_house_sealed_with_known_sensors()``: sensors configured and all closed) the WHF cannot
+        run -- it never runs on a sealed house -- so the home behaves like a non-WHF home and gets the
+        same ceiling. Only the ODE ceiling guard passes it; the nat-vent gate (``nat_vent_gate.py``,
+        a window-open decision) and the forecast walk keep the archetype-only ``None``.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        if not house_sealed and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return None
         if comfort_cool is None:
             return None
-        aggressive = bool(self.config.get("aggressive_savings", False))
-        return comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive else comfort_cool
+        # Issue #1093: the Prefer savings margin is added in exactly one place --
+        # awake_comfort_edges() -- so this handoff point can never differ from the ceiling the
+        # thermostat is armed with. The caller's comfort_cool overrides the config value (callers
+        # pass the config value; tests pass literals).
+        return awake_comfort_edges(
+            {**self.config, "comfort_cool": comfort_cool},
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )[1]
 
     def _resolve_classification_fsm_state(
         self,
@@ -11872,7 +12003,9 @@ class AutomationEngine:
             comfort_cool=comfort_cool,
             outdoor=self._last_outdoor_temp,
             indoor=self._get_indoor_temp_f(),
-            ceiling_threshold=self._ceiling_threshold(comfort_cool),
+            ceiling_threshold=self._ceiling_threshold(
+                comfort_cool, house_sealed=self._whf_house_sealed_with_known_sensors()
+            ),
             now=dt_util.now(),
         )
         event = ClassificationFsmEvent(kind=ClassificationFsmEventKind.CYCLE_EVALUATED, inputs=inputs)
@@ -11915,6 +12048,9 @@ class AutomationEngine:
         _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
         _k_active_cool = _thermal.get("k_active_cool")
         _comfort_cool_cg = self.config.get("comfort_cool")
+        # Issue #1093: the ceiling the decision was made against (savings-adjusted awake ceiling);
+        # None only on outcomes that return before the shell reads it.
+        _ceiling_cg = outcome_obj.ceiling
         # Issue #1036: use the readings the decision was made from — a second
         # read could be None by now and would crash the %.1f / :.1f formatting below.
         # (Either may be None on MODEL_INELIGIBLE/MISSING_TEMPS, and both on NOT_APPLICABLE; only %s-logged there.)
@@ -11923,10 +12059,12 @@ class AutomationEngine:
         _unit = self._temp_unit
 
         _LOGGER.debug(
-            "ODE ceiling guard eval: %d points, comfort_cool=%s, outdoor=%s, indoor=%s,"
-            " k_passive=%s, conf=%s, bridge=%s",
+            "ODE ceiling guard eval: %d points, comfort_cool=%s, ceiling=%s, house_sealed=%s, outdoor=%s,"
+            " indoor=%s, k_passive=%s, conf=%s, bridge=%s",
             len(predicted_indoor) if predicted_indoor else 0,
             _comfort_cool_cg,
+            _ceiling_cg,
+            self._whf_house_sealed_with_known_sensors(),
             _outdoor,
             _indoor_cg,
             _k_passive,
@@ -11943,12 +12081,13 @@ class AutomationEngine:
             return
         if outcome is OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD:
             _LOGGER.debug(
-                "ODE ceiling guard: dormant — no ceiling-based compressor handoff for this"
-                " fan archetype (WHOLE_HOUSE/BOTH); free cooling is direction-only"
+                "ODE ceiling guard: dormant — no ceiling-based compressor handoff: whole-house-fan archetype"
+                " (WHOLE_HOUSE/BOTH) and the house is not known sealed (%s); free cooling is direction-only",
+                self._whf_unsealed_reason(),
             )
             return
         if outcome is OdeCeilingGuardOutcome.DORMANT:
-            _ceiling_threshold_val = self._ceiling_threshold(_comfort_cool_cg)
+            _ceiling_threshold_val = _ceiling_cg
             _LOGGER.debug(
                 "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
                 " indoor <= ceiling threshold %s (free cooling viable)",
@@ -11959,7 +12098,7 @@ class AutomationEngine:
             return
         if outcome is OdeCeilingGuardOutcome.NO_BREACH_PREDICTED:
             _tolerance = CEILING_BRIDGE_TOLERANCE_F if _k_via_bridge else 0.0
-            _threshold = _comfort_cool_cg + _tolerance
+            _threshold = _ceiling_cg + _tolerance
             _LOGGER.debug("ODE ceiling guard: dormant — no breach above %.1f°F predicted", _threshold)
             return
 
@@ -12045,7 +12184,7 @@ class AutomationEngine:
         # ESCALATE
         _LOGGER.info(
             "ODE ceiling guard: active — setting HVAC cool, target=%.1f (breach %.1fh, lead=%.0fmin, k_cool=%s)",
-            _comfort_cool_cg,
+            _ceiling_cg,
             _hours_to_breach,
             _lead_min,
             _k_active_cool,
@@ -12054,7 +12193,7 @@ class AutomationEngine:
             _ceiling_escalation_result = await self._deactivate_fan(
                 reason=(
                     f"ceiling guard override — indoor {self._t(_indoor_cg)} approaching"
-                    f" comfort_cool {self._t(_comfort_cool_cg)}, breach predicted in"
+                    f" ceiling {self._t(_ceiling_cg)}, breach predicted in"
                     f" {_hours_to_breach:.1f}h — switching to active cooling"
                 )
             )
@@ -12071,7 +12210,11 @@ class AutomationEngine:
                 _ceiling_escalation_payload = {
                     "indoor": _indoor_cg,
                     "outdoor": _outdoor,
-                    "comfort_cool": _comfort_cool_cg,
+                    # Issue #1093: the guard ceiling (comfort_cool, or comfort_cool + the Prefer savings
+                    # margin). "comfort_cool" is kept, carrying the same value, only because persisted
+                    # events and older readers use that name; new readers use "ceiling".
+                    "ceiling": _ceiling_cg,
+                    "comfort_cool": _ceiling_cg,
                     "hours_to_breach": round(_hours_to_breach, 2),
                     "lead_min": round(_lead_min),
                     "k_active_cool": _k_active_cool,
@@ -12097,8 +12240,8 @@ class AutomationEngine:
                     reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
                 )
             await self._set_temperature(
-                _comfort_cool_cg,
-                reason="ODE ceiling guard — target comfort_cool",
+                _ceiling_cg,
+                reason="ODE ceiling guard — target comfort ceiling",
                 mode="cool",
             )
         # Issue #843: this guard writes mode directly rather than going through
@@ -12116,7 +12259,7 @@ class AutomationEngine:
                     "lead_time_min": round(_lead_min),
                     "old_hvac_mode": _old_mode_cg,
                     "new_hvac_mode": "cool",
-                    "new_setpoint_f": _comfort_cool_cg,
+                    "new_setpoint_f": _ceiling_cg,
                     "old_setpoint_f": _old_setpoint_f_cg,
                 },
             )

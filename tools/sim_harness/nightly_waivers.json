@@ -1,0 +1,4 @@
+{
+  "_comment": "Issue #1153. Short-lived, strict waivers for the nightly generated days. Each entry is tied to an OPEN issue, has added/expires dates (max 45 days apart), matches a hit on promise + mechanism fields (never a seed - nightly seeds are fresh), and must still match a hit in the run or the gate fails (stale). A closed issue or a passed expiry also fails. Prefer landing the fix. Fields: id, issue, promise, match{mechanism fields from tools/sim_harness/mechanism.py MATCHABLE_FIELDS}, reason, added, expires.",
+  "entries": []
+}

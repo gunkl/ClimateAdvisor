@@ -205,6 +205,7 @@ def generate_briefing(
                 predicted_indoor=predicted_indoor_future,
                 predicted_outdoor=predicted_outdoor_future,
                 comfort_cool=comfort_cool,
+                ceiling=awake_cool,
                 comfort_heat_raw=_comfort_heat_raw,
                 sleep_heat=_sleep_heat,
                 in_sleep_window_fn=_in_sleep_window_fn,
@@ -225,6 +226,7 @@ def generate_briefing(
                 predicted_indoor=predicted_indoor_future,
                 predicted_outdoor=predicted_outdoor_future,
                 comfort_cool=comfort_cool,
+                ceiling=awake_cool,
                 comfort_heat_raw=_comfort_heat_raw,
                 sleep_heat=_sleep_heat,
                 in_sleep_window_fn=_in_sleep_window_fn,
@@ -248,6 +250,7 @@ def generate_briefing(
                 predicted_indoor=predicted_indoor_future,
                 predicted_outdoor=predicted_outdoor_future,
                 comfort_cool=comfort_cool,
+                ceiling=awake_cool,
                 window_open_time=c.window_opportunity_morning_start,
             )
             if c.day_type == DAY_TYPE_HOT and predicted_indoor_future and predicted_outdoor_future
@@ -313,6 +316,7 @@ def generate_briefing(
                 current_indoor_temp=current_indoor_temp,
                 current_outdoor_temp=current_outdoor_temp,
                 overnight_heat_engaged=overnight_heat_engaged,
+                armed_cool=awake_cool,
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
@@ -764,6 +768,7 @@ def _warm_day_plan(
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
     overnight_heat_engaged: bool = False,
+    armed_cool: float | None = None,
 ) -> list[str]:
     """Conversational plan for warm days (75-85\u00b0F).
 
@@ -793,6 +798,9 @@ def _warm_day_plan(
     don't pass the signal.
     """
     lines = []
+    # Issue #1093: the AC-handoff sentences quote the ceiling the thermostat is armed with (Prefer
+    # savings widens it), read from awake_comfort_edges() by the caller -- never comfort_cool + margin here.
+    _hold = comfort_cool if armed_cool is None else armed_cool
 
     _events = warm_events
     _nat_vent_cutoff = _events["nat_vent_cutoff"] if _events else None
@@ -878,7 +886,7 @@ def _warm_day_plan(
         breach_t = _ceiling_breach.strftime(_FMT_HOUR)
         lines.append(
             f"Indoor temps are forecast to reach"
-            f" {format_temp(comfort_cool, temp_unit)} around {breach_t}."
+            f" {format_temp(_hold, temp_unit)} around {breach_t}."
             f" Once windows are closed, the AC will step in automatically if it's"
             f" needed to hold that ceiling."
         )
@@ -886,11 +894,11 @@ def _warm_day_plan(
         close_t = c.window_close_time.strftime(_FMT_HOUR)
         lines.append(
             f"Close up by {close_t} before outdoor temps climb \u2014 seal the cool"
-            f" air inside so the AC can take over above {format_temp(comfort_cool, temp_unit)}."
+            f" air inside so the AC can take over above {format_temp(_hold, temp_unit)}."
         )
     else:
         lines.append(
-            f"The AC will step in above {format_temp(comfort_cool, temp_unit)} as a safety net if"
+            f"The AC will step in above {format_temp(_hold, temp_unit)} as a safety net if"
             f" needed, but with good airflow you probably won't need it."
         )
 

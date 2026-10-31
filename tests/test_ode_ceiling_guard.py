@@ -393,3 +393,41 @@ class TestStandingByVsEscalate:
         )
         # fallback lead_min = 120 (clamped [30,240]) > 30min breach -> escalate
         assert decision.outcome == OdeCeilingGuardOutcome.ESCALATE
+
+
+class TestBreachAndLeadMeasureAgainstResolvedCeiling:
+    """Issue #1093: the breach scan, lead time and decision.ceiling all read ceiling_threshold, not comfort_cool."""
+
+    _SAVINGS_CURVE = _curve(("2026-07-15T12:30:00+00:00", 76.0), ("2026-07-15T13:30:00+00:00", 78.0))
+
+    def test_breach_of_comfort_cool_only_is_not_a_breach_of_the_resolved_ceiling(self) -> None:
+        curve = _curve(("2026-07-15T12:30:00+00:00", 76.0))
+        decision = decide_ode_ceiling_guard(
+            _inputs(predicted_indoor=curve, comfort_cool=75.0, ceiling_threshold=77.0, indoor=74.0)
+        )
+        assert decision.outcome == OdeCeilingGuardOutcome.NO_BREACH_PREDICTED
+        assert decision.ceiling == 77.0
+
+    def test_breach_of_the_resolved_ceiling_escalates_with_lead_from_that_ceiling(self) -> None:
+        decision = decide_ode_ceiling_guard(
+            _inputs(
+                predicted_indoor=self._SAVINGS_CURVE,
+                comfort_cool=75.0,
+                ceiling_threshold=77.0,
+                indoor=74.0,
+                k_active_cool=-2.0,
+            )
+        )
+        assert decision.outcome == OdeCeilingGuardOutcome.ESCALATE
+        assert decision.breach_ts == datetime(2026, 7, 15, 13, 30, tzinfo=UTC)
+        assert decision.lead_min == 117.0
+        assert decision.ceiling == 77.0
+
+    def test_plain_ceiling_keeps_the_old_behaviour(self) -> None:
+        curve = _curve(("2026-07-15T12:30:00+00:00", 76.0))
+        decision = decide_ode_ceiling_guard(
+            _inputs(predicted_indoor=curve, comfort_cool=75.0, ceiling_threshold=75.0, indoor=74.0, k_active_cool=-2.0)
+        )
+        assert decision.outcome == OdeCeilingGuardOutcome.ESCALATE
+        assert decision.lead_min == 39.0
+        assert decision.ceiling == 75.0

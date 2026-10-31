@@ -591,6 +591,7 @@ def save_finding(rec: RunRecord, out_dir: Path | None = None) -> Path:
                 "ts": h.ts.isoformat(),
                 "detail": h.detail,
                 "evidence": dict(h.evidence),
+                "mechanism": h.mechanism,
             }
             for h in rec.report.hard
         ],

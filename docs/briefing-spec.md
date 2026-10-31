@@ -200,10 +200,13 @@ Two changes keep this from recurring:
    shown. Since Issue #1091 the row and the day-plan sentences that state the held
    temperature (hot-day "hold things at", cool-day "hold X", mild-day "warmed to" / "held at or
    above", cooling-day fresh-air "pull back down to") read `awake_comfort_edges()`, so they
-   include the Prefer savings margin. These deliberately stay raw: the economizer/window
+   include the Prefer savings margin. Since Issue #1093 the warm-day AC-handoff sentences
+   ("forecast to reach X around T", "the AC can take over above X", "The AC will step in above X")
+   read the same `awake_comfort_edges()` ceiling, because the ODE ceiling guard now defends that
+   ceiling (breach scan, lead time and cool setpoint), and `compute_nat_vent_plan(ceiling=...)`
+   times the breach against it. These deliberately stay raw: the economizer/window
    thresholds (`comfort_cool` + delta; that gate does not widen), the bedtime/setback fallbacks,
-   the warm-day "AC will step in above X" (the ODE ceiling guard cools at the raw
-   `comfort_cool`), and the away/vacation rows.
+   and the away/vacation rows.
 2. **Truncation remains a safety net**, not the primary fix: `ClimateAdvisorBaseSensor._capped_state()`
    (`sensor.py`) caps any sensor state at 250 chars (`text[:247] + "..."`), logging a
    one-time `WARNING` if it ever actually fires, so a future regression degrades to a

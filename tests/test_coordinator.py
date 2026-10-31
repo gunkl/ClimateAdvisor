@@ -22,6 +22,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from custom_components.climate_advisor.automation import ComfortBand
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_BRIEFING_NOTIFICATIONS_ENABLED,
@@ -490,6 +491,10 @@ class TestComputeNextAction:
         """Nat-vent/economizer already active → nothing for the occupant to do (Issue #527 regression)."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         ae = _make_ae_stub(_natural_vent_active=True)
+        # The card reads the engine's resolved band (Issue #1136/#1094); the stub arms 68-75.
+        ae._resolved_comfort_band = MagicMock(
+            return_value=ComfortBand(floor=68.0, ceiling=75.0, active="ceiling", reason="test")
+        )
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=78.0, outdoor_temp=70.0, ae=ae)
         assert result == "-"
 

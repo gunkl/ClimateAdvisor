@@ -140,14 +140,85 @@ class TestPreCoolRowQuotesArmedBand1120:
         assert entry["to_mode"] == "cool"
         assert (entry["floor_f"], entry["ceiling_f"]) == (64.0, 69.0)
 
-    def test_row_after_pre_cool_goes_back_to_clock_band(self):
+    @staticmethod
+    def _at(hour, minute=0):
+        return patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime.datetime(2026, 10, 28, hour, minute, tzinfo=datetime.UTC),
+        )
+
+    def _pre_cooled(self):
         engine = self._hot_tomorrow_engine()
-        now = datetime.datetime(2026, 10, 28, 3, 0, tzinfo=datetime.UTC)
-        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=now):
+        with self._at(3, 0):
+            asyncio.run(engine.handle_pre_cool(75.0, False))
+        return engine
+
+    @staticmethod
+    def _quoted(engine):
+        entry = engine.comfort_mode_changes[-1]
+        return (entry["floor_f"], entry["ceiling_f"])
+
+    def test_user_change_while_pre_cool_is_held_quotes_the_pre_cool_band(self):
+        engine = self._pre_cooled()
+        with self._at(4, 0):
+            engine._append_mode_change("cool", "heat", "user")
+        assert self._quoted(engine) == (64.0, 69.0)
+
+    def test_door_pause_while_pre_cool_is_held_quotes_the_pre_cool_band(self):
+        engine = self._pre_cooled()
+        with self._at(4, 0):
+
+            async def _pause():
+                with engine._mode_change_context("pause"):
+                    await engine._set_hvac_mode("off", reason="door open")
+
+            asyncio.run(_pause())
+        entry = engine.comfort_mode_changes[-1]
+        assert (entry["to_mode"], entry["reason"]) == ("off", "pause")
+        assert self._quoted(engine) == (64.0, 69.0)
+
+    def test_after_the_wake_up_re_arm_rows_quote_the_day_band(self):
+        engine = self._pre_cooled()
+        with self._at(6, 30):
+            asyncio.run(engine.handle_morning_wakeup(70.0))
+            engine._append_mode_change("cool", "heat", "user")
+        assert self._quoted(engine) == (68.0, 74.0)
+
+    def test_any_later_setpoint_write_supersedes_the_pre_cool_band(self):
+        engine = self._pre_cooled()
+        with self._at(4, 0):
+            asyncio.run(engine._set_temperature(72.0, reason="selector", mode="cool"))
+            engine._append_mode_change("cool", "heat", "user")
+        assert self._quoted(engine) == (64.0, 72.0)
+
+    def test_skipped_wake_up_after_pre_cool_does_not_leave_the_night_band_all_day(self):
+        # Override active at wake time: the wake-up is skipped, so no setpoint write clears the pre-cool band.
+        # Pre-cool is a night state: from the wake time on rows quote the day band (the original #1120 bug).
+        engine = self._pre_cooled()
+        engine._manual_override_active = True
+        with self._at(6, 30):
+            asyncio.run(engine.handle_morning_wakeup(70.0))
+        with self._at(4, 0):
+            engine._append_mode_change("cool", "heat", "user")
+        assert self._quoted(engine) == (64.0, 69.0)  # before the wake time it is still what is held
+        with self._at(7, 0):
+            engine._append_mode_change("heat", "cool", "user")
+        assert self._quoted(engine) == (68.0, 74.0)
+
+    def test_restart_during_pre_cool_has_no_stale_band(self):
+        self._pre_cooled()
+        fresh = self._hot_tomorrow_engine()  # a restart builds a new engine: nothing remembered
+        with self._at(4, 0):
+            fresh._append_mode_change("cool", "heat", "user")
+        assert self._quoted(fresh) == (64.0, 72.0)
+
+    def test_pre_cool_that_was_not_sent_is_not_remembered(self):
+        engine = self._hot_tomorrow_engine()
+        engine._whf_owns_hvac = lambda: True  # the fan owns the thermostat: the write is blocked
+        with self._at(3, 0):
             asyncio.run(engine.handle_pre_cool(75.0, False))
             engine._append_mode_change("cool", "heat", "user")
-        entry = engine.comfort_mode_changes[-1]
-        assert (entry["floor_f"], entry["ceiling_f"]) == (64.0, 72.0)
+        assert self._quoted(engine) == (64.0, 72.0)
 
     def test_door_pause_row_shows_clock_band_even_with_stale_armed_cache(self):
         engine = _make_engine(indoor=75.0, mode="cool")
@@ -165,3 +236,33 @@ class TestPreCoolRowQuotesArmedBand1120:
         entry = engine.comfort_mode_changes[-1]
         assert (entry["to_mode"], entry["reason"]) == ("off", "pause")
         assert (entry["floor_f"], entry["ceiling_f"]) == (68.0, 74.0)
+
+
+class TestNextActionReadsTheEnginesResolvedBand:
+    """The card reads the band through the engine's ``_resolved_comfort_band()`` (the call restore, override
+    matching and the status API use), so any future input that resolver gains reaches the card too.
+    Away/vacation return a flavor line before the band comparison, so the TOU away expansion
+    (``tou_expansion_f``) cannot change this card today; this pins the single source, not that case."""
+
+    @staticmethod
+    def _card(indoor: float, engine_band: ComfortBand | None) -> str:
+        coord_cls = importlib.import_module("custom_components.climate_advisor.coordinator").ClimateAdvisorCoordinator
+        coord = object.__new__(coord_cls)
+        coord.config = dict(_CFG)
+        coord._occupancy_mode = "home"
+        engine = None
+        if engine_band is not None:
+            engine = _make_engine(indoor=indoor, mode="off")
+            engine._resolved_comfort_band = lambda _c: engine_band
+        now = datetime.datetime(2026, 10, 28, 14, 0)
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
+            return coord_cls._compute_next_action(
+                coord, _cls(), indoor_temp=indoor, outdoor_temp=60.0, windows_physically_open=False, ae=engine
+            )
+
+    def test_card_uses_the_engines_band(self):
+        wide = ComfortBand(floor=60.0, ceiling=80.0, active="ceiling", reason="engine")
+        assert self._card(77.0, wide) == "Comfortable — no action needed."
+
+    def test_without_an_engine_the_bare_resolver_is_used(self):
+        assert self._card(77.0, None) != "Comfortable — no action needed."

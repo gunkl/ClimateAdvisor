@@ -20,6 +20,10 @@ particular ``in_sleep_window`` replaces the real code's internal
 ``dt_util.now()`` read: the caller resolves wall-clock time once, the pure core
 never touches it.
 
+The savings margin is imported from ``const.py`` (``CEILING_ESCALATION_SAVINGS_MARGIN_F``), the single
+source -- ``const.py`` is a leaf (it imports only ``typing``), so this module stays free of any
+engine/coordinator import while no longer carrying its own copy of the number (Issue #1093 review).
+
 Validated via differential replay against the real production method — see
 ``tools/nat_vent_gate_diff.py`` and the Step-2 status report for results.
 """
@@ -28,11 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Mirrors custom_components.climate_advisor.const.CEILING_ESCALATION_SAVINGS_MARGIN_F —
-# duplicated here (a plain float constant, not logic) rather than imported, to keep this
-# module import-independent of the rest of the integration during the proof-slice phase.
-# TODO(step 3+): import from const.py once this module is wired into production.
-_CEILING_ESCALATION_SAVINGS_MARGIN_F = 2.0
+from .const import CEILING_ESCALATION_SAVINGS_MARGIN_F
 
 FAN_MODE_DISABLED = "disabled"
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
@@ -101,7 +101,7 @@ def _resolve_ceiling_threshold(inputs: NatVentGateInputs) -> float | None:
     if inputs.fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
         return None
     if inputs.aggressive_savings:
-        return inputs.comfort_cool + _CEILING_ESCALATION_SAVINGS_MARGIN_F
+        return inputs.comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F
     return inputs.comfort_cool
 
 

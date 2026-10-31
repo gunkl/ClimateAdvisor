@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.8] — 2026-10-31
+
+- Fix #1149: right after the AC has cooled the house, a thermostat you switched Off (or one in heat/cool auto mode, or one that just came back online) is no longer switched to heat for a shallow dip under your comfort minimum. Climate Advisor keeps the cooling side armed (the AC stays idle because the house is below your maximum) until the recency window passes or the house drops more than your tolerance below the minimum, and then it heats. Likewise, right after the furnace has run, a slight overshoot just above your maximum no longer starts the AC. The natural side for the day (heating on a cool or cold day, cooling on a hot or warm day) is never delayed, and if neither side ran recently nothing changes.
+
 ## [0.8.5] — 2026-10-31
 
 - Internal #1150, #1151: the household-promise checks no longer report two false alarms found by the nightly generated-day runs. A normal furnace restart after an earlier heat run is no longer called "heat started right after the AC", and one reversal of your manual change is reported once rather than twice (and no longer says "0 min before your manual change was due to end" when that change had no end). These checks only note misses; nothing you see on the thermostat changes.

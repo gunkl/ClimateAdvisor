@@ -34,7 +34,6 @@ def decide_override_matches_decision(
     current_setpoint_f: float | None,
     target_setpoint_f: float | None,
     tolerance_f: float = OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-    ca_paused_hvac: bool = False,
 ) -> bool:
     """Pure reimplementation of ``_override_matches_current_decision()``.
 
@@ -56,9 +55,9 @@ def decide_override_matches_decision(
       1. No active mode override, or setpoint-only override -> False.
       2. No classification, or mode mismatch -> False.
       3. Non-heat/cool mode match -> True (no setpoint to compare), EXCEPT an "off" override,
-         which (Issue #1159) matches only once CA has actually paused HVAC for a door/window
-         (``ca_paused_hvac``): on a mild day the classification label "off" is not a plan to
-         keep HVAC off (CA arms the band), so the occupant's Off is a real override.
+         which (Issue #1159) NEVER matches: the classification label "off" is not a plan to keep
+         HVAC off (CA arms the band on a mild day), so an occupant's Off is always a real manual
+         change, never adopted.
       4. Heat/cool: no live setpoint reading -> True (mode match is the best evidence
          available).
       5. Heat/cool with a live setpoint -> True iff within ``tolerance_f`` of target.
@@ -72,9 +71,7 @@ def decide_override_matches_decision(
     if manual_override_mode != classification_mode:
         return False
     if classification_mode not in ("heat", "cool"):
-        if manual_override_mode == "off":
-            return ca_paused_hvac
-        return True
+        return manual_override_mode != "off"
     if current_setpoint_f is None:
         return True
     if target_setpoint_f is None:

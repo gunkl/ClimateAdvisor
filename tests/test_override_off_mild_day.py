@@ -3,8 +3,7 @@
 Occupant framing: on a mild day the day label is "off", yet Climate Advisor arms the comfort band
 (heat or cool). If you switch the thermostat Off, that is a decision you made -- exactly as on a hot
 or cold day. Climate Advisor must confirm it, keep it for the manual-change pause, and only then resume;
-it must not switch heating or cooling back on at the next half-hourly refresh. The one exception is
-when Climate Advisor itself is holding HVAC off (an open door/window).
+it must not switch heating or cooling back on at the next half-hourly refresh. There is no exception.
 
 Real ``AutomationEngine`` + a fake thermostat that follows the engine's commands (helpers shared with
 tests/test_comfort_settling_guard.py); assertions are on what the thermostat is told, the emitted
@@ -28,6 +27,7 @@ from tests.test_comfort_settling_guard import (
     _make_engine,
     _mode,
     _mode_writes,
+    _run,
 )
 
 
@@ -225,30 +225,70 @@ class TestOffWithOpenWindowIsTreatedAsOnHotDays:
         assert _mode(s.engine) == "off"
 
 
-class TestOffAfterCaPausedHvac:
-    """CA has actually paused HVAC for a door/window (``_paused_by_door``): the occupant's Off agrees with it.
+class TestOffWithCaDoorWindowPauseIsTreatedAsOnHotDays:
+    """An occupant's Off is always a manual change, even when CA's own door/window pause is in force.
 
-    The pause is reached while the Off is still unconfirmed (a window opens and settles inside the confirm
-    window), or during the grace when handle_door_window_open()'s nat-vent gate passes but the lockout or a
-    Phase 2 guard then rejects it; the tests set the flag directly.
+    Two routes to ``_paused_by_door`` with an Off in play: the window opens inside the confirm window
+    (the pause engages before the confirm fires), or ``handle_door_window_open`` runs while the override is
+    active. In both the Off is kept, never adopted, and nothing is written; the hot row is the control.
     """
 
-    def test_off_while_window_pause_in_force_self_resolves(self):
-        s = _Scene(day="mild", indoor=72.0, ca_first="cool")
-        s.occupant_sets("off", old_mode="cool")
-        s.engine._paused_by_door = True  # CA's door/window pause is in force
-        s.confirm_elapses()
-        assert "override_self_resolved" in s.events
-        assert "override_confirmed" not in s.events
-        assert not s.engine._manual_override_active
-        assert not s.engine._grace_active
+    _DAYS = TestOffWithOpenWindowIsTreatedAsOnHotDays._DAYS
 
-    def test_confirmed_off_is_adopted_once_ca_has_paused_hvac(self):
-        s = _Scene(day="mild", indoor=72.0, ca_first="cool")
-        s.occupant_sets("off", old_mode="cool")
+    def _open_window(self, s: _Scene) -> None:
+        e = s.engine
+        e._last_outdoor_temp = 65.0
+        e.config["fan_entity"] = "fan.whf"
+        s.window(open_=True)
+        with (
+            s._patch_all(),
+            patch(f"{_AUTOMATION}.is_reactivation_locked_out", return_value=True),
+            patch.object(type(e), "_nat_vent_may_reactivate", return_value=True),
+        ):
+            _run(e.handle_door_window_open("binary_sensor.window"))
+
+    @_DAYS
+    def test_pause_engaged_before_confirm_keeps_off_until_grace_expiry(self, day, indoor, ca_first):
+        s = _Scene(day=day, indoor=indoor, ca_first=ca_first)
+        s.occupant_sets("off", old_mode=ca_first)  # 12:00
+        s.clock.advance(minutes=5)
+        self._open_window(s)  # 12:05: CA pauses (override still unconfirmed)
+        assert s.engine._paused_by_door
+        s.clock.advance(minutes=5)
         s.confirm_elapses()
+        assert "override_confirmed" in s.events
+        assert "override_self_resolved" not in s.events
         assert s.engine._manual_override_active
-        s.engine._paused_by_door = True  # CA's pause is now in force as well
-        s.refresh()
-        assert "override_adopted" in s.events
+        assert s.engine._manual_override_mode == "off"
+
+        s.window(open_=False)  # 12:25
+        with s._patch_all():
+            _run(s.engine.handle_all_doors_windows_closed())
+        assert s.refresh() == []  # 12:30-ish refresh
+        assert s.engine._manual_override_active
+        assert "override_adopted" not in s.events
+        assert _mode(s.engine) == "off"
+
+        s.grace_expires()
         assert not s.engine._manual_override_active
+        s.refresh()
+        assert _mode(s.engine) == ca_first
+
+    @_DAYS
+    def test_pause_during_grace_does_not_adopt_the_off(self, day, indoor, ca_first):
+        s = _Scene(day=day, indoor=indoor, ca_first=ca_first)
+        s.occupant_sets("off", old_mode=ca_first)
+        s.confirm_elapses()
+        n0 = len(_mode_writes(s.engine))
+        self._open_window(s)  # handle_door_window_open while the override is active
+        assert s.refresh() == []
+        s.window(open_=False)
+        with s._patch_all():
+            _run(s.engine.handle_all_doors_windows_closed())
+        assert s.refresh() == []
+        assert len(_mode_writes(s.engine)) == n0
+        assert s.engine._manual_override_active
+        assert s.engine._manual_override_mode == "off"
+        assert "override_adopted" not in s.events
+        assert "override_cleared" not in s.events
+        assert _mode(s.engine) == "off"

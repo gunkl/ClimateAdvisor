@@ -295,8 +295,9 @@ class DoorWindowFsmInputs:
                                              confirmation) owns the thermostat; the
                                              SYNC_RECONCILE copy below mirrors that guard.
       now                                  -> caller-resolved wall-clock time
-      nat_vent_gate_ruled_out               -> True only for _pause_for_door_window()'s
-                                             own SENSOR_OPENED dispatch (Issue #757
+      nat_vent_gate_ruled_out               -> True for _pause_for_door_window()'s and
+                                             handle_door_window_open()'s pause fall-through
+                                             SENSOR_OPENED dispatches (Issue #757
                                              Phase 6 Step 4) — see that field's own
                                              comment below for the full incident this
                                              closes.
@@ -349,6 +350,13 @@ class DoorWindowFsmInputs:
     # decide_scheduled_band_gate()'s DEFER_PAUSED never engaged). When True, both of
     # SENSOR_OPENED's re-derived conditions are forced False rather than independently
     # recomputed — this field is never read by any other event kind.
+    #
+    # Issue #1132: handle_door_window_open()'s pause fall-through is the second real caller
+    # that passes True. By the time it dispatches, the legacy decision has already chosen
+    # PAUSE (and turned HVAC off) — for reasons this FSM's simplified gate cannot see (the
+    # forecast-peak guard, the thermal-floor guard, a manual override). Without it the FSM
+    # answered NAT_VENT_ELIGIBLE (NORMAL origin) / GRACE_SUPPRESSED (GRACE origin) and no
+    # pause was recorded.
     nat_vent_gate_ruled_out: bool = False
 
 

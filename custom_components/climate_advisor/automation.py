@@ -2083,6 +2083,15 @@ class AutomationEngine:
         if self._override_confirm_pending:
             self._deferred_while_pending = True
 
+    def _occupant_blower_override_active(self) -> bool:
+        """True while the occupant's own press of the THERMOSTAT blower is the active fan override (Issue #1180).
+
+        The one predicate for "leave the blower running": CA turning HVAC off for its own reasons must not
+        reset the thermostat fan to auto over it. CA's own blower use is never this (``_activate_fan()`` refuses
+        while any override is active), and a later whole-house-fan press replaces the record (Issue #1133).
+        """
+        return bool(self._fan_override_active and self._fan_override_is_hvac_fan)
+
     def _is_whf_press(self, hvac_fan: bool) -> bool:
         """Whether a manual fan press is a press of the WHOLE-HOUSE fan -- the one fan-identity predicate.
 
@@ -4811,9 +4820,19 @@ class AutomationEngine:
             # command actually executes, not the instant the exit is decided) — this
             # guard is unaffected either way, since _deactivate_fan() unconditionally
             # re-commands fan_mode=auto itself once the real command does go through.
+            # Issue #1180: not while the OCCUPANT has the thermostat blower on for circulation --
+            # turning the heating/cooling off must not stop the fan they asked for.
             if mode == "off" and not self._natural_vent_active:
                 _fan_cfg = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-                if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH):
+                if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH) and self._occupant_blower_override_active():
+                    _LOGGER.info(
+                        "Fan auto-assert skipped with hvac_mode=off: occupant thermostat-blower override active"
+                        " since %s (fan_mode=%s) — leaving the blower running — %s",
+                        self._fan_override_time,
+                        _fan_cfg,
+                        reason,
+                    )
+                elif _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                     # Stamp _fan_command_time BEFORE the service call so the race guard
                     # suppresses the cloud-thermostat echo that arrives >30 s later
                     # (Issue #277 Fix A1).

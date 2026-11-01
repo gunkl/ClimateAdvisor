@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import NamedTuple
 
-from .const import UNAVAILABLE_STATES
+from .const import ECONOMIZER_TEMP_DELTA, UNAVAILABLE_STATES, WINDOWS_RECOMMENDED_HYSTERESIS_F
 
 FAHRENHEIT = "fahrenheit"
 CELSIUS = "celsius"
@@ -287,6 +287,69 @@ def free_cooling_direction_ok(outdoor_temp: float | None, indoor_temp: float | N
     Unknown readings default to True (caller decides whether to act on an unknown).
     """
     return indoor_temp is None or outdoor_temp is None or outdoor_temp < indoor_temp
+
+
+def outdoor_direction_ok(
+    outdoor: float | None,
+    indoor: float | None,
+    comfort_heat: float,
+    comfort_cool: float,
+) -> bool:
+    """Stage B of the shared "would outside air help?" rule (Issue #1211): direction.
+
+    Outside air only helps when it moves the house the right way:
+      * indoor above the comfort ceiling -> outdoor must be cooler than indoor
+        (the existing ``free_cooling_direction_ok``);
+      * indoor below the comfort floor   -> outdoor must be warmer than indoor;
+      * indoor inside the band           -> nothing to correct, so direction does not veto.
+
+    Unknown readings do not veto (same convention as ``free_cooling_direction_ok``): the caller
+    decides what to do with an unknown. Used by the live gate and the Next User Action card,
+    which have a live outdoor and indoor reading; the forecast-range stage lives in
+    ``outdoor_air_helps``.
+    """
+    if outdoor is None or indoor is None:
+        return True
+    if indoor > comfort_cool:
+        return free_cooling_direction_ok(outdoor, indoor)
+    if indoor < comfort_heat:
+        return outdoor > indoor
+    return True
+
+
+def outdoor_air_helps(
+    outdoor_low: float | None,
+    outdoor_high: float | None,
+    comfort_heat: float,
+    comfort_cool: float,
+    *,
+    low_is_estimated: bool = False,
+    was_helping: bool = False,
+    delta: float = ECONOMIZER_TEMP_DELTA,
+    hysteresis: float = WINDOWS_RECOMMENDED_HYSTERESIS_F,
+) -> bool | None:
+    """Stage A of the shared "would outside air help?" rule (Issue #1211): forecast range.
+
+    Outside air helps on a day when the outdoor range overlaps the comfort band usefully:
+
+        outdoor_high >= comfort_heat            (it gets warm enough to warm a cold house)
+        outdoor_low  <= comfort_cool - delta    (it gets cool enough to cool a warm house)
+
+    ``outdoor_high`` should already be ``max(forecast high, observed so far)`` -- the forecast
+    ran 5-10 F low on every recorded flip day. One formula serves mild and warm days; the
+    configured comfort values are used (the old warm rule used the DEFAULT ceiling).
+
+    ``was_helping`` applies ``hysteresis`` degrees of slack in the direction that keeps an
+    already-recommended day recommended, so a forecast sitting on a threshold does not flip
+    every cycle.
+
+    Returns None when a needed reading is missing, or when the low is only an estimate
+    (``low_is_estimated``): the caller says nothing / does not recommend. Never invents a value.
+    """
+    if outdoor_high is None or outdoor_low is None or low_is_estimated:
+        return None
+    slack = hysteresis if was_helping else 0.0
+    return outdoor_high >= comfort_heat - slack and outdoor_low <= comfort_cool - delta + slack
 
 
 def find_temperature_crossing(

@@ -5,7 +5,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.8.21] — 2026-11-01
 
-- Fix #1158: if a window or door is open and you turn the heat or cooling on at the thermostat (for example while the whole-house fan is running), Climate Advisor no longer switches it off again on its next check, and no longer drops it ten minutes later when it happens to match the day's plan (heat on a cold day, cooling on a hot day). Your change stays as you set it, and the whole-house fan stops because your newest action wins. A press of yours that is still being confirmed also survives the fan's own pause ending.
+- Fix #1158: if a window or door is open and you turn the heat or cooling on at the thermostat (for example while the whole-house fan is running), Climate Advisor no longer switches it off again on its next check, and no longer drops it ten minutes later when it happens to match the day's plan (heat on a cold day, cooling on a hot day). Your change stays as you set it, and the whole-house fan stops because your newest action wins. A press of yours that is still being confirmed also survives the fan's own pause ending. That includes the case where the fan missed Climate Advisor's first off command and its pause was then ended by the stuck-pause check.
 
 ## [0.8.19] — 2026-11-01
 

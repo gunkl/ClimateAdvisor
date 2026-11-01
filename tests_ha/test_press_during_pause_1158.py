@@ -129,3 +129,44 @@ async def test_press_survives_the_fan_grace_expiring_before_its_confirmation_end
     await house.advance(minutes=6)  # past the confirmation
     assert ae._manual_override_active, "the press never confirmed"
     assert house.thermostat.mode == "heat"
+
+
+async def test_press_survives_the_orphaned_fan_grace_check_when_the_fan_misses_its_first_off(make_house) -> None:
+    """The fan ignores Climate Advisor's first turn-off (a flaky RF/Z-Wave fan). The later stop clears the fan
+    override, so the coordinator's stuck-grace check (#508) ends the fan's grace. That grace is the fan's, not the
+    occupant's thermostat grace: the occupant's pending heat press must survive and HVAC must not be re-paused."""
+    house = await make_house(**_house_cfg(_COLD, "window", fan="whf"))
+    ae = house.coordinator.automation_engine
+    await house.advance(minutes=6)
+    await house.open("window")
+    await house.advance(minutes=2)
+    await house.coordinator.async_request_refresh()
+    await house.hass.async_block_till_done()
+    await house.advance(seconds=3)
+    await house.occupant_presses_fan(True)
+    for _ in range(30):
+        await house.advance(seconds=1)
+
+    real_set = house.fan._set
+    missed = {"n": 0}
+
+    def _ignores_first_off(on, context=None):
+        if not on and missed["n"] == 0:
+            missed["n"] += 1
+            return
+        real_set(on, context)
+
+    house.fan._set = _ignores_first_off
+    await house.occupant_sets_thermostat(mode="heat")
+    for _ in range(95):
+        await house.advance(seconds=1)
+
+    assert missed["n"] == 1, "precondition: the fan missed one turn-off"
+    assert not house.fan.is_on, "rule 2: the newest occupant action (the press) wins, the fan must have stopped"
+    assert ae._override_confirm_pending, "the stuck-grace check dropped the occupant's pending press"
+    assert house.thermostat.mode == "heat", "the window pause was re-applied over the occupant's press"
+
+    await house.advance(minutes=12)  # past the confirmation
+    assert ae._manual_override_active, "the press never confirmed"
+    assert house.thermostat.mode == "heat"
+    assert not house.fan.is_on

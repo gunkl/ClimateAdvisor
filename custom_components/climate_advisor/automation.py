@@ -2132,10 +2132,35 @@ class AutomationEngine:
         unavailable are not active modes (an occupant's Off is protected by NOT writing, not by restoring
         anything).
         """
+        mode = self._protected_change_mode()
+        return mode if mode not in (None, "off", "unavailable", "unknown") else None
+
+    def _protected_change_mode(self) -> str | None:
+        """The raw mode of the occupant's protected change (Off included), else None (Issue #1165).
+
+        ``_manual_override_mode`` while confirmed, ``_override_confirm_mode`` while pending. The one reader of that
+        pair: ``_protected_active_mode()`` filters it down to active modes, ``_protected_change_is_occupant_off()``
+        asks whether it is the occupant's own Off.
+        """
         mode = self._manual_override_mode if self._manual_override_active else None
         if mode is None and self._override_confirm_pending:
             mode = self._override_confirm_mode
-        return mode if mode not in (None, "off", "unavailable", "unknown") else None
+        return mode
+
+    def _protected_change_source(self) -> str | None:
+        """How the occupant's protected change was made ("normal" / "pause" / "setpoint"), else None (Issue #1165)."""
+        if self._manual_override_active:
+            return self._manual_override_source
+        return self._override_confirm_source if self._override_confirm_pending else None
+
+    def _protected_change_is_occupant_off(self) -> bool:
+        """Whether the occupant's protected change is their own Off (Issue #1165).
+
+        A mode change to Off is the occupant's choice, and the newest occupant action wins (an Off is protected by
+        NOT writing). A SETPOINT-only change recorded as ``off`` is not a choice of Off: the thermostat reads Off
+        because Climate Advisor's pause put it there, and the occupant only moved the number (Issues #1131, #1157).
+        """
+        return self._protected_change_mode() == "off" and self._protected_change_source() != "setpoint"
 
     def _occupant_mode_when_ca_holds_off(self, live_mode: str, detected_mode: str | None = None) -> str:
         """The mode an occupant change means when the thermostat's live Off is Climate Advisor's door pause.
@@ -2146,10 +2171,10 @@ class AutomationEngine:
         mode detected when the change was made. Anything else (a live mode that is not Off, no pause, HVAC
         already Off before the pause) is returned unchanged. Every substitution is logged at WARNING.
 
-        Deliberately NOT applied to the whole-house fan: an occupant's fan press REPLACES any earlier thermostat
-        change (owner principle 2026-10-31 -- the latest manual change is the latest override and replaces the
-        old one), and a temperature-only change while the fan owns HVAC is ignored, so a pending change can
-        never be confirmed against the fan's Off.
+        Callers apply it to SETPOINT-only changes only (Issue #1165): a mode change to Off is the occupant's own Off,
+        never Climate Advisor's. When the pause is a nat-vent exit with the window still open there is no
+        ``_pre_pause_mode`` (the thermostat was Off), so the comfort family the selector would arm now stands in for
+        it (Issue #1157; a side-effect-free preview, mild days included).
         """
         if live_mode != "off" or not self._paused_by_door:
             return live_mode
@@ -2157,6 +2182,20 @@ class AutomationEngine:
             substitute = detected_mode
         elif self._pre_pause_mode:
             substitute = self._pre_pause_mode
+        elif self._paused_entity == "nat-vent-exit" and self._current_classification is not None:
+            # Issue #1157: a nat-vent exit with the window still open records NO pre-pause mode (the thermostat
+            # was Off), so there is nothing to judge the occupant's setpoint change against. Judge it against the
+            # comfort family the selector would arm now, so the close resumes HVAC at the occupant's setpoint
+            # instead of leaving it Off until their override ends. Same gate as #1068: only this pause; a
+            # thermostat the occupant left Off before an ordinary pause stays Off. Pure preview: this runs when the
+            # occupant speaks, no HVAC write follows, so it must not commit selector state or emit a family switch.
+            # Away/vacation: unchanged (the live Off stays; the unprotected close redirects to the setback instead).
+            if should_defer_to_occupancy_setback(self._occupancy_mode):
+                return live_mode
+            _family = self._preview_comfort_family(self._current_classification)[0]
+            if _family is None:
+                return live_mode
+            substitute = _family
         else:
             return live_mode
         _LOGGER.warning(
@@ -3304,7 +3343,10 @@ class AutomationEngine:
                 return
             current_state = self.hass.states.get(self.climate_entity)
             current_mode = current_state.state if current_state else "unknown"
-            current_mode = self._occupant_mode_when_ca_holds_off(current_mode, detected_mode)  # #1131 / #1133 M1
+            if source == "setpoint":
+                # #1131 / #1133 M1. Only a SETPOINT change reads the live Off as Climate Advisor's pause; a mode change
+                # to Off is the occupant's own Off and is kept as Off (Issue #1165).
+                current_mode = self._occupant_mode_when_ca_holds_off(current_mode, detected_mode)
             cls_mode = self._current_classification.hvac_mode if self._current_classification else None
             # For setpoint overrides: mode may still match classification, but
             # the user deliberately moved the setpoint — always take PATH A.
@@ -3502,6 +3544,21 @@ class AutomationEngine:
             any_sensor_open=self._any_monitored_sensor_holding_open(),
         ):
             return None, None
+        mode, band = self._preview_comfort_family(classification)
+        if mode is None or band is None:
+            return None, None
+        return mode, (band.floor if mode == "heat" else band.ceiling)
+
+    def _preview_comfort_family(self, classification: DayClassification) -> tuple[str | None, ComfortBand | None]:
+        """The comfort family ("heat" / "cool") the selector would arm now, and the band, WITHOUT mutating anything.
+
+        The ONE pure preview shared by override adoption (``_override_decision_mode_and_target()``) and the mode an
+        occupant's setpoint change means after a nat-vent exit (``_occupant_mode_when_ca_holds_off()``, Issue #1157).
+        The day's default family comes from the band's active edge, so a warm/mild day (classification mode "off")
+        still resolves. Reads through ``_comfort_family_would_switch()``, never ``_resolve_comfort_family_via_fsm()``
+        (which commits dwell state, emits ``comfort_family_switch`` and arms the family). ``(None, None)`` when the
+        selector does not apply or the preview fails.
+        """
         band = self._resolved_comfort_band(classification)
         day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, "cool")
         now = dt_util.now()
@@ -3510,15 +3567,14 @@ class AutomationEngine:
                 day_mode, floor=band.floor, ceiling=band.ceiling, now=now, day_type=classification.day_type
             )
         except Exception:  # noqa: BLE001 - adoption must degrade to "not adopted", never raise
-            _LOGGER.debug("Override adoption selector preview failed", exc_info=True)
+            _LOGGER.debug("Comfort family preview failed", exc_info=True)
             return None, None
         family = result.to_state
         if result.locked_out or family is None:
             family = result.from_state if result.from_state is not None else family
         if family is None:
             return None, None
-        mode = "heat" if family is ComfortFamilyState.HEATING else "cool"
-        return mode, (band.floor if mode == "heat" else band.ceiling)
+        return ("heat" if family is ComfortFamilyState.HEATING else "cool"), band
 
     def _override_match_inputs(self, classification: DayClassification | None) -> tuple[str | None, float | None]:
         """``(decision_mode, target_f)`` exactly as ``_override_matches_current_decision()`` compares them.
@@ -5935,7 +5991,11 @@ class AutomationEngine:
 
         from .door_window_fsm import DoorWindowFsmEventKind
 
-        self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.SENSOR_OPENED, nat_vent_gate_ruled_out=True)
+        self._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.SENSOR_OPENED,
+            nat_vent_gate_ruled_out=True,
+            hvac_already_off=hvac_already_off,
+        )
         # _paused_entity/_paused_since aren't part of _apply_door_window_fsm_state()'s
         # 2-field derivation (see its own docstring) — direct writes here, matching
         # what _set_door_window_pause_fields() would have written on the removed
@@ -6284,7 +6344,9 @@ class AutomationEngine:
                 # recording no pause while HVAC was just turned off. Same contract as
                 # _pause_for_door_window(): tell the FSM the gate is ruled out.
                 self._resolve_door_window_pause_flags(
-                    kind=DoorWindowFsmEventKind.SENSOR_OPENED, nat_vent_gate_ruled_out=True
+                    kind=DoorWindowFsmEventKind.SENSOR_OPENED,
+                    nat_vent_gate_ruled_out=True,
+                    hvac_already_off=hvac_already_off,
                 )
                 self._paused_entity = entity_id
                 self._paused_since = dt_util.now()
@@ -6396,16 +6458,31 @@ class AutomationEngine:
             # setpoint. Mode only; no comfort write, no automation grace. (Assumes a thermostat
             # keeps its target temperature across a mode change, which the integration cannot
             # verify; if one resets it, the override_respected promise exposes it.)
-            if restore_mode:
+            #
+            # Issue #1165: the occupant's OWN Off (a mode change to Off, pending or confirmed) is the newest word and
+            # is kept: no mode comes back (the write used to turn heat/cool on over it, minutes before their manual
+            # pause ended). Issue #1157: a nat-vent exit recorded no pre-pause mode (restore_mode None); the
+            # occupant's setpoint change was judged against the comfort family at the time they made it
+            # (``_occupant_mode_when_ca_holds_off()``), and that recorded mode is what resumes here.
+            occupant_off = self._protected_change_is_occupant_off()
+            target_mode = None
+            if not occupant_off:
+                target_mode = restore_mode or (
+                    self._protected_active_mode() if self._protected_change_source() == "setpoint" else None
+                )
+            if target_mode:
                 with self._mode_change_context("restore"):
                     await self._set_hvac_mode(
-                        restore_mode,
-                        reason=f"door/window closed — restoring {restore_mode} mode (occupant's setpoint kept)",
+                        target_mode,
+                        reason=f"door/window closed — restoring {target_mode} mode (occupant's setpoint kept)",
                     )
             _LOGGER.info(
                 "Comfort restore skipped: occupant's manual change protected (mode restored only, no setpoint "
-                "or automation grace) restore_mode=%s override_active=%s confirm_pending=%s grace_active=%s",
+                "or automation grace) restore_mode=%s target_mode=%s occupant_off=%s override_active=%s "
+                "confirm_pending=%s grace_active=%s",
                 restore_mode,
+                target_mode,
+                occupant_off,
                 self._manual_override_active,
                 self._override_confirm_pending,
                 self._grace_active,
@@ -11381,7 +11458,13 @@ class AutomationEngine:
         else:
             self._apply_nat_vent_fsm_state(to_state)
 
-    def _build_door_window_fsm_inputs(self, *, now: datetime, nat_vent_gate_ruled_out: bool = False):
+    def _build_door_window_fsm_inputs(
+        self,
+        *,
+        now: datetime,
+        nat_vent_gate_ruled_out: bool = False,
+        hvac_already_off: bool | None = None,
+    ):
         """Build the door/window FSM's input snapshot from current engine state
         (Issue #594 Phase R, Step 2).
 
@@ -11450,6 +11533,7 @@ class AutomationEngine:
             manual_override_owns_hvac=self._manual_change_protected(),
             now=now,
             nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
+            hvac_already_off=hvac_already_off,
         )
 
     @property
@@ -11571,6 +11655,7 @@ class AutomationEngine:
         kind: DoorWindowFsmEventKind,
         origin_state: DoorWindowLifecycleState | None = None,
         nat_vent_gate_ruled_out: bool = False,
+        hvac_already_off: bool | None = None,
     ) -> None:
         """Single dispatch point for every door/window flag-derivation call site
         (Issue #594 Phase R / #660). Each of the 8 real trigger methods supplies its own
@@ -11584,6 +11669,12 @@ class AutomationEngine:
         state *before* ``_cancel_grace_timers()`` clears ``_grace_active`` and pass it
         explicitly here (grace has already been cleared by the time this function
         would otherwise read it live).
+
+        ``hvac_already_off`` (Issue #1143): the pause action's authoritative pre-command answer
+        (``_pause_for_door_window_action()``'s return value), forwarded to
+        ``_build_door_window_fsm_inputs()``. Pass it on every SENSOR_OPENED dispatch that follows a
+        pause action: the live thermostat mode read inside the builder is taken after CA itself
+        commanded it off, so it cannot tell an active pause from an idle one.
 
         ``nat_vent_gate_ruled_out``: forwarded to ``_build_door_window_fsm_inputs()`` —
         see ``DoorWindowFsmInputs.nat_vent_gate_ruled_out``'s own docstring (Issue #757
@@ -11610,7 +11701,9 @@ class AutomationEngine:
             DoorWindowFsmEvent(
                 kind=kind,
                 inputs=self._build_door_window_fsm_inputs(
-                    now=dt_util.now(), nat_vent_gate_ruled_out=nat_vent_gate_ruled_out
+                    now=dt_util.now(),
+                    nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
+                    hvac_already_off=hvac_already_off,
                 ),
             ),
         )

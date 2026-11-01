@@ -34,9 +34,18 @@ class PauseEntryInputs:
                  string ``"unavailable"``/``"unknown"`` — the real code checks
                  ``mode and mode not in (...)`` so ``None`` also falls to the
                  not-applicable branch)
+    hvac_already_off -> Issue #1143: the AUTHORITATIVE "was HVAC already off when this
+                 pause started" answer, when the caller has one.
+                 ``_pause_for_door_window_action()`` returns it; it is the only reading
+                 taken BEFORE Climate Advisor itself commanded the thermostat off. The
+                 live ``hvac_mode`` read afterwards says "off" for every pause (the
+                 climate entity updates inside the blocking ``set_hvac_mode`` call), so
+                 an active pause from NORMAL was recorded as idle. ``None`` (default) =
+                 the caller has no pre-command reading, fall back to ``hvac_mode``.
     """
 
     hvac_mode: str | None
+    hvac_already_off: bool | None = None
 
 
 _NOT_ACTIVE_MODES = ("off", "unavailable", "unknown")
@@ -50,6 +59,12 @@ def decide_pause_entry(inputs: PauseEntryInputs) -> PauseEntryOutcome:
     pause; ``"unavailable"``/``"unknown"`` is a no-op (the real method's implicit
     fall-through — neither branch's condition matches, so nothing is set).
     """
+    if inputs.hvac_already_off is not None:
+        # Issue #1143: the caller already took the pre-command reading and a pause is
+        # happening; the live mode below could have been written by this very pause.
+        if inputs.hvac_already_off:
+            return PauseEntryOutcome.PAUSE_IDLE
+        return PauseEntryOutcome.PAUSE_ACTIVE
     mode = inputs.hvac_mode
     if mode and mode not in _NOT_ACTIVE_MODES:
         return PauseEntryOutcome.PAUSE_ACTIVE

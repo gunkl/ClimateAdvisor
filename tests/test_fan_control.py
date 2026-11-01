@@ -5296,11 +5296,14 @@ class TestHvacOffKeepsOccupantBlower:
         assert engine._fan_override_active is True
         assert engine._fan_override_is_hvac_fan is True
 
-    def test_mild_day_off_keeps_blower(self):
+    def test_mild_day_off_keeps_blower(self, caplog):
         """The mild-day switch-off (and every other CA-initiated off) funnels through ``_set_hvac_mode("off")``."""
         engine = self._engine(FAN_MODE_HVAC)
         self._press_blower(engine)
-        asyncio.run(engine._set_hvac_mode("off", reason="mild day — no heating or cooling needed"))
+        with caplog.at_level("INFO", logger="custom_components.climate_advisor.automation"):
+            asyncio.run(engine._set_hvac_mode("off", reason="mild day — no heating or cooling needed"))
+
+        assert "Fan auto-assert skipped with hvac_mode=off: occupant thermostat-blower override active" in caplog.text
 
         assert [c[0][2]["hvac_mode"] for c in _get_service_calls(engine, "climate", "set_hvac_mode")] == ["off"]
         assert self._auto_asserts(engine) == []

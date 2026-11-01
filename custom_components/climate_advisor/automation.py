@@ -4777,9 +4777,17 @@ class AutomationEngine:
             # re-commands fan_mode=auto itself once the real command does go through.
             # Issue #1180: not while the OCCUPANT has the thermostat blower on for circulation --
             # turning the heating/cooling off must not stop the fan they asked for.
-            if mode == "off" and not self._natural_vent_active and not self._occupant_blower_override_active():
+            if mode == "off" and not self._natural_vent_active:
                 _fan_cfg = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-                if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH):
+                if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH) and self._occupant_blower_override_active():
+                    _LOGGER.info(
+                        "Fan auto-assert skipped with hvac_mode=off: occupant thermostat-blower override active"
+                        " since %s (fan_mode=%s) — leaving the blower running — %s",
+                        self._fan_override_time,
+                        _fan_cfg,
+                        reason,
+                    )
+                elif _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                     # Stamp _fan_command_time BEFORE the service call so the race guard
                     # suppresses the cloud-thermostat echo that arrives >30 s later
                     # (Issue #277 Fix A1).

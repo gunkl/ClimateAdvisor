@@ -5,7 +5,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.8.14] — 2026-11-01
 
-- Fix #1180: if you turn your thermostat's fan to On for air circulation, Climate Advisor no longer switches it back to Auto when it turns heating or cooling off (for example when a door or window opens, or on a mild day). The fan keeps running until you turn it off; Once your manual-change period ends, the next time Climate Advisor turns heating or cooling off it sets the fan back to Auto, as before.
+- Fix #1180: if you turn your thermostat's fan to On for air circulation, Climate Advisor no longer switches it back to Auto when it turns heating or cooling off (for example when a door or window opens, or on a mild day). The fan keeps running until you turn it off. Once your manual-change period ends, the next time Climate Advisor turns heating or cooling off it sets the fan back to Auto, as before.
 
 ## [0.8.12] — 2026-10-31
 

@@ -28,7 +28,12 @@ if "homeassistant" not in sys.modules:
 
 # Provide a stable dt_util.now so isoformat() calls work
 _NOW_BASE = datetime(2026, 4, 10, 10, 0, 0, tzinfo=UTC)
-sys.modules["homeassistant.util.dt"].now = lambda: _NOW_BASE
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return _NOW_BASE
+
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
@@ -634,3 +639,9 @@ class TestCascadingSideEffectsNotCountedAsOverride:
             f"_hvac_command_pending=True, got {coord._today_record.manual_overrides}. "
             "The temp guard must check _hvac_command_pending (not just _temp_command_pending)."
         )
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

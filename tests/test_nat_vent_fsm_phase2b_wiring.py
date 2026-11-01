@@ -19,7 +19,6 @@ project's doctrine against mirror tests.
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,25 +30,17 @@ from custom_components.climate_advisor.const import (
 )
 
 _NOW = datetime(2026, 7, 15, 14, 0, 0)
-sys.modules["homeassistant.util.dt"].now = lambda: _NOW
+import pytest  # noqa: E402
 
-import custom_components.climate_advisor.automation as _automation_mod  # noqa: E402
 
-# automation.py's own `dt_util` reference is a child mock of homeassistant.util,
-# distinct from sys.modules["homeassistant.util.dt"] — tests that exercise the
-# reactivation-lockout datetime math (elapsed = now - outdoor_exit_time) must
-# patch this exact path, mirroring test_nat_vent_activation.py's _DT_NOW_PATH.
+def _frozen_now_value():
+    return _NOW
+
+
+# automation.py's `dt_util` is the shared stub dt module — tests that exercise the
+# reactivation-lockout datetime math (elapsed = now - outdoor_exit_time) patch this
+# exact path, mirroring test_nat_vent_activation.py's _DT_NOW_PATH.
 _DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
-
-
-def _real_parse_datetime(dt_str: str):
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
-
-
-_automation_mod.dt_util.parse_datetime = _real_parse_datetime
 
 
 def _make_engine(
@@ -455,3 +446,9 @@ class TestSite4ReconcileFanOnStartup:
             with patch(_DT_NOW_PATH, return_value=_NOW):
                 self._run_reconcile(engine, indoor=72.0, outdoor=68.0)
             assert engine._natural_vent_active is True, f"authoritative={authoritative}"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

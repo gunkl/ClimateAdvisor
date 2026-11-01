@@ -31,7 +31,6 @@ reality in agreement.
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -39,19 +38,14 @@ from custom_components.climate_advisor.automation import AutomationEngine, FanCo
 from custom_components.climate_advisor.const import CONF_FAN_MODE, FAN_MODE_WHOLE_HOUSE
 
 _NOW = datetime(2026, 7, 15, 14, 0, 0)
-sys.modules["homeassistant.util.dt"].now = lambda: _NOW
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return _NOW
+
 
 import custom_components.climate_advisor.automation as _automation_mod  # noqa: E402
-
-
-def _real_parse_datetime(dt_str: str):
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
-
-
-_automation_mod.dt_util.parse_datetime = _real_parse_datetime
 
 
 def _make_engine(
@@ -332,3 +326,9 @@ class TestOverheatDuringGraceIntegration:
         engine._last_outdoor_temp = 65.0
         asyncio.run(engine.check_natural_vent_conditions())
         assert engine._natural_vent_active is False
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

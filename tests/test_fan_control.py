@@ -20,15 +20,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
-import sys
 import types
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 3, 19, 14, 30, 0)
+def _frozen_now_value():
+    return datetime(2026, 3, 19, 14, 30, 0)
+
 
 from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
@@ -5353,3 +5355,9 @@ class TestHvacOffKeepsOccupantBlower:
         assert len(self._auto_asserts(engine)) == 1
         asyncio.run(engine._set_hvac_mode("off", reason="mild day"))
         assert len(self._auto_asserts(engine)) == 2
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

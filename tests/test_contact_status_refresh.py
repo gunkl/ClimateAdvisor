@@ -23,7 +23,11 @@ if "homeassistant" not in sys.modules:
 
 from datetime import datetime
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 4, 5, 10, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 4, 5, 10, 0, 0)
 
 
 def _get_coordinator_class():
@@ -152,3 +156,9 @@ class TestPostDecisionRefreshOnClose:
 
         coord.automation_engine.handle_all_doors_windows_closed.assert_called_once()
         assert coord.async_request_refresh.call_count == 2
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

@@ -34,7 +34,12 @@ if "homeassistant" not in sys.modules:
 
     install_ha_stubs()
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 7, 12, 20, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 7, 12, 20, 0, 0)
+
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
@@ -1648,3 +1653,9 @@ class TestEchoBeforeFlushDualEntity1198:
         warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert warnings and all("no override, grace or HVAC suppression recorded" not in m for m in warnings), warnings
         assert any("already active from another source" in m for m in warnings)
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

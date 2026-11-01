@@ -12,36 +12,10 @@ ImportError), NOT for import-level failures.
 
 from __future__ import annotations
 
-import sys
-import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Stub homeassistant before importing chart_log
-# The same pattern used in test_chart_log.py — use setdefault so conftest
-# MagicMocks are respected if already installed.
-# ---------------------------------------------------------------------------
-
-
-def _build_ha_stubs() -> None:
-    if "homeassistant" in sys.modules:
-        return
-
-    ha = types.ModuleType("homeassistant")
-    ha_util = types.ModuleType("homeassistant.util")
-    ha_util_dt = types.ModuleType("homeassistant.util.dt")
-    ha_util_dt.now = lambda: datetime.now(UTC)
-    ha_util.dt = ha_util_dt
-    ha.util = ha_util
-
-    sys.modules.setdefault("homeassistant", ha)
-    sys.modules.setdefault("homeassistant.util", ha_util)
-    sys.modules.setdefault("homeassistant.util.dt", ha_util_dt)
-
-
-_build_ha_stubs()
-
+# conftest installs the shared homeassistant stubs (Issue #1186: real, aware dt defaults).
 from custom_components.climate_advisor.chart_log import ChartStateLog  # noqa: E402
 
 # ---------------------------------------------------------------------------

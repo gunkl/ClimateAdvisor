@@ -22,6 +22,33 @@ import pytest  # noqa: E402
 from custom_components.climate_advisor.classifier import ForecastSnapshot  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_ha_dt():
+    """Issue #1186: restore the shared ``homeassistant.util.dt`` stub's real defaults around
+    every test so a clock frozen (or an attribute assigned) by one test/file never leaks."""
+    dt_mod = sys.modules["homeassistant.util.dt"]
+    dt_mod.reset()
+    yield
+    dt_mod.reset()
+
+
+@pytest.fixture
+def frozen_now():
+    """Freeze ``dt_util.now()``/``utcnow()`` for the test: ``frozen_now(datetime(...))``.
+
+    The value is returned as given (naive stays naive, so a test keeps its intended
+    semantics); ``utcnow`` returns it made aware in UTC. Reset by ``_reset_ha_dt``.
+    """
+    dt_mod = sys.modules["homeassistant.util.dt"]
+
+    def _freeze(value):
+        dt_mod.now = lambda time_zone=None: value
+        dt_mod.utcnow = lambda: value if value.tzinfo else value.replace(tzinfo=dt_mod.UTC)
+        return value
+
+    return _freeze
+
+
 @pytest.fixture
 def basic_forecast() -> ForecastSnapshot:
     """A typical mid-season ForecastSnapshot with stable trend."""

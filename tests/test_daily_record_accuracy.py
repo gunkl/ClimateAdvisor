@@ -28,7 +28,12 @@ if "homeassistant" not in sys.modules:
 # Patch dt_util.now to return a fixed datetime so isoformat() calls are stable
 from datetime import datetime
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 4, 5, 10, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 4, 5, 10, 0, 0)
+
 
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord  # noqa: E402
@@ -770,3 +775,9 @@ class TestIssue912ThermostatFanOnlyRuntimeField:
         assert coord._today_record.date == "2026-04-05"
         assert coord._today_record.thermostat_fan_only_runtime_minutes == 0.0
         assert coord._today_record.hvac_runtime_minutes == 0.0
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

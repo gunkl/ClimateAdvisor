@@ -18,12 +18,18 @@ import sys
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# Patch dt_util.now before importing automation
-if "homeassistant.util.dt" in sys.modules:
-    sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 12, 14, 0, 0)
-else:
-    # conftest will have installed the stubs; patch after import
-    pass
+import pytest
+
+
+def _frozen_now_value():
+    return datetime(2026, 6, 12, 14, 0, 0)
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())
+
 
 if "homeassistant" not in sys.modules:
     from conftest import _install_ha_stubs

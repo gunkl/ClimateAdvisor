@@ -32,7 +32,12 @@ if "homeassistant" not in sys.modules:
     install_ha_stubs()
 
 # Patch dt_util.now to a stable datetime
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 12, 14, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 6, 12, 14, 0, 0)
+
 
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord  # noqa: E402
@@ -240,9 +245,8 @@ def _run_restore_with_state(state_data: dict, ae: MagicMock) -> MagicMock:
 
     Returns the coord so callers can inspect it.
 
-    dt_util.now must be patched on the coordinator module object — the HA stubs
-    install dt as a MagicMock on homeassistant.util, so the sys.modules["homeassistant.util.dt"]
-    assignment used elsewhere does NOT affect dt_util inside coordinator.py after import.
+    dt_util.now is patched via the coordinator module's dt_util, which is the shared
+    stub dt module (the same object as sys.modules["homeassistant.util.dt"]).
     """
     coord = _make_restore_coord_stub(ae_mock=ae)
 
@@ -454,3 +458,9 @@ class TestNewOverrideDuringGrace:
 
         coord.automation_engine.clear_manual_override.assert_not_called()
         coord.automation_engine.handle_manual_override.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

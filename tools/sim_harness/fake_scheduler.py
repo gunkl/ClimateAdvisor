@@ -317,21 +317,11 @@ class FakeScheduler:
           - ``dt_util.now``/``utcnow``/``as_local`` → same as automation
           - ``dt_util.parse_datetime``      → real ISO8601 parse (Issue #476)
 
-        Issue #476: ``dt_util.parse_datetime`` was NOT previously patched —
-        it comes from ``ha_stubs.py``'s mocked ``homeassistant.util.dt``
-        module, so any call returned a ``MagicMock``. Subtracting that from a
-        real ``dt_util.now()`` datetime silently produces another
-        ``MagicMock`` (Python tries ``MagicMock.__rsub__``), which then
-        crashes with ``TypeError: '>' not supported between instances of
-        'MagicMock' and 'int'`` the moment code compares the "elapsed"
-        result against a real number — found via
-        ``_check_hvac_stabilization`` crashing during a coordinator-mode
-        scenario. This function is called at 19+ sites in coordinator.py
-        alone, including the stuck-grace detection logic
-        (``coordinator.py:1668,6623-6624``) that grace-period scenarios
-        depend on directly — unpatched, any such scenario risks silently
-        wrong behavior or a swallowed exception (``FakeScheduler`` catches
-        broadly and records to ``callback_errors``), not just this one crash.
+        Issue #476: ``parse_datetime`` is patched too, since it is called at 19+ sites in
+        coordinator.py (including stuck-grace detection that grace-period scenarios depend
+        on); an unpatched call used to return a ``MagicMock`` and crash elapsed-time
+        comparisons. The ha_stubs dt module is now a real tz-aware module (#1186), so this
+        patch makes parse_datetime follow the harness's virtual clock/zone consistently.
         """
         # We need to patch the dt_util *object* that automation.py/coordinator.py
         # imported, not the original module.  Both modules do:

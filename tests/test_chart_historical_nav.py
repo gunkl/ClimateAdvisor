@@ -29,10 +29,11 @@ if "homeassistant" not in sys.modules:
 
 # Patch dt_util stubs so coordinator imports resolve correctly.
 _FAKE_NOW = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
-sys.modules["homeassistant.util.dt"].now = lambda: _FAKE_NOW
-sys.modules["homeassistant.util.dt"].parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
-sys.modules["homeassistant.util.dt"].as_local = lambda x: x
-sys.modules["homeassistant.util.dt"].DEFAULT_TIME_ZONE = UTC
+
+
+def _frozen_now_value():
+    return _FAKE_NOW
+
 
 from custom_components.climate_advisor.chart_log import ChartStateLog  # noqa: E402
 
@@ -91,22 +92,6 @@ class TestGetEntriesBeforeAnchor:
     Expected: only entries strictly before the anchor are returned.
     FAILS before implementation because get_entries() has no before= param.
     """
-
-    @pytest.fixture(autouse=True)
-    def _freeze_chart_log_now(self):
-        """Freeze chart_log.dt_util.now() to _FAKE_NOW for all tests in this class.
-
-        chart_log.py binds dt_util via `from homeassistant.util import dt as dt_util`.
-        In full-suite runs, earlier test files can overwrite sys.modules["homeassistant.util"].dt.now
-        to return real wall-clock time, which breaks time-relative assertions here.
-        Patching the attribute on the already-bound module object ensures isolation.
-        """
-        from custom_components.climate_advisor import chart_log as _chart_log_mod
-
-        orig = _chart_log_mod.dt_util.now
-        _chart_log_mod.dt_util.now = lambda: _FAKE_NOW
-        yield
-        _chart_log_mod.dt_util.now = orig
 
     def test_get_entries_before_anchor_filters_past_window(self, tmp_path):
         """Entries after the anchor must be excluded.
@@ -485,3 +470,9 @@ class TestGetChartDataHistoricalTargetBand:
             f"(empty here — no forecast timestamps), not the persisted historical "
             f"entries; got {target_band!r}"
         )
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

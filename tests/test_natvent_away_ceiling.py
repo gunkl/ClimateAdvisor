@@ -13,7 +13,6 @@ Three cases:
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,19 +26,12 @@ _DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
 # Module-level HA stubs
 # ---------------------------------------------------------------------------
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 7, 14, 0, 0)
-
-import custom_components.climate_advisor.automation as _automation_mod  # noqa: E402
+import pytest  # noqa: E402
 
 
-def _real_parse_datetime(dt_str: str):
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
+def _frozen_now_value():
+    return datetime(2026, 6, 7, 14, 0, 0)
 
-
-_automation_mod.dt_util.parse_datetime = _real_parse_datetime
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -157,3 +149,9 @@ class TestNatVentAwayCeilingExit:
         assert engine._natural_vent_active is True, "nat_vent should remain active — ceiling exit is away-only"
         ceiling_events = [e for e in events if e[0] == "nat_vent_away_ceiling_exit"]
         assert not ceiling_events, "ceiling exit must not fire when occupancy is home"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

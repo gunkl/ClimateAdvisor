@@ -24,9 +24,11 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+
 # Patch dt_util.now before importing coordinator or activity modules
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 5, 17, 14, 0, 0)
-sys.modules["homeassistant.util.dt"].parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
+def _frozen_now_value():
+    return datetime(2026, 5, 17, 14, 0, 0)
+
 
 import pytest  # noqa: E402
 
@@ -471,3 +473,9 @@ class TestSetpointEventFieldClarity:
         assert "74" in settings and "76" in settings, (
             f"#330: Settings cell must contain both old and new setpoint values. Got: {settings!r}"
         )
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

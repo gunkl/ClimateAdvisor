@@ -16,7 +16,6 @@ EXECUTED result still emits it normally.
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,19 +29,11 @@ from custom_components.climate_advisor.ode_ceiling_guard import OdeCeilingGuardD
 
 _DT_NOW = datetime(2026, 7, 15, 14, 0, 0)
 
-sys.modules["homeassistant.util.dt"].now = lambda: _DT_NOW
-
-import custom_components.climate_advisor.automation as _automation_mod  # noqa: E402
+import pytest  # noqa: E402
 
 
-def _real_parse_datetime(dt_str: str):
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
-
-
-_automation_mod.dt_util.parse_datetime = _real_parse_datetime
+def _frozen_now_value():
+    return _DT_NOW
 
 
 def _make_engine(indoor_f: float = 76.0, comfort_cool: float = 74.0) -> AutomationEngine:
@@ -165,3 +156,9 @@ class TestCeilingEscalationEventGate:
 
         escalation_events = [e for e in events if e[0] == "nat_vent_ceiling_escalation"]
         assert len(escalation_events) == 1, f"expected 1 event for RATE_LIMITED_NEW, got {escalation_events}"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

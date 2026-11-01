@@ -15,7 +15,6 @@ Mirrors the fixture pattern from test_nat_vent_activation.py.
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,19 +29,11 @@ from custom_components.climate_advisor.nat_vent_exit import NatVentExitReason
 
 _DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 7, 29, 18, 0, 0)
-
-import custom_components.climate_advisor.automation as _automation_mod  # noqa: E402
+import pytest  # noqa: E402
 
 
-def _real_parse_datetime(dt_str: str):
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
-
-
-_automation_mod.dt_util.parse_datetime = _real_parse_datetime
+def _frozen_now_value():
+    return datetime(2026, 7, 29, 18, 0, 0)
 
 
 def _make_engine(
@@ -291,3 +282,9 @@ class TestSoftStartExitHierarchy:
 
         assert engine._natural_vent_active is False
         assert engine._nat_vent_soft_start is False
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

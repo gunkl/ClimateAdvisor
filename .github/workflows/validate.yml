@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0  # the isolated-file step diffs against origin/main
 
       - name: Set up uv (uv reads the Python version from .python-version)
         uses: astral-sh/setup-uv@v10.2.0
@@ -35,6 +37,11 @@ jobs:
 
       - name: Run unit tests
         run: python3 scripts/test.py unit
+
+      # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
+      # No-op when no tests/test_*.py changed (e.g. a push to main).
+      - name: Run changed unit test files in isolation
+        run: python3 scripts/test_changed_isolated.py --base origin/main --strict
 
   # Real Home Assistant tier (Issue #1102 follow-up S1). Its own job and its own
   # environment: tests/ stubs homeassistant for the whole process, and this plugin

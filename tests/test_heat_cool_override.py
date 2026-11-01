@@ -30,7 +30,12 @@ if "homeassistant" not in sys.modules:
 
 # Provide a stable dt_util.now so isoformat() calls work
 _NOW_BASE = datetime(2026, 6, 11, 14, 0, 0, tzinfo=UTC)
-sys.modules["homeassistant.util.dt"].now = lambda: _NOW_BASE
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return _NOW_BASE
+
 
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord  # noqa: E402
@@ -986,3 +991,9 @@ class TestHeatCoolOverrideMagnitude:
         detail = coord._today_record.override_details[-1]
         assert detail["magnitude"] == 4.0 and detail["direction"] == "down"
         assert detail["old_temp"] == 68.0 and detail["new_temp"] == 64.0
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

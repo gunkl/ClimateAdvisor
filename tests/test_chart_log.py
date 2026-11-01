@@ -3,50 +3,10 @@
 from __future__ import annotations
 
 import json
-import sys
-import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Stub out homeassistant before importing chart_log
-# ---------------------------------------------------------------------------
-
-
-def _build_ha_stubs() -> None:
-    """Insert minimal HA stubs into sys.modules so chart_log imports cleanly."""
-    if "homeassistant" in sys.modules:
-        return  # already loaded by another test file — use what's there
-
-    ha = types.ModuleType("homeassistant")
-    ha_util = types.ModuleType("homeassistant.util")
-    ha_util_dt = types.ModuleType("homeassistant.util.dt")
-
-    # dt_util.now() returns a timezone-aware datetime
-    ha_util_dt.now = lambda: datetime.now(UTC)
-
-    ha_util.dt = ha_util_dt
-    ha.util = ha_util
-
-    sys.modules.setdefault("homeassistant", ha)
-    sys.modules.setdefault("homeassistant.util", ha_util)
-    sys.modules.setdefault("homeassistant.util.dt", ha_util_dt)
-
-
-_build_ha_stubs()
-
-# chart_log.py binds dt_util via `from homeassistant.util import dt as dt_util`, which
-# resolves to sys.modules["homeassistant.util"].dt.  When conftest MagicMock stubs are
-# installed first (full suite run), _build_ha_stubs() exits early and that attribute is
-# a MagicMock whose .now() returns another MagicMock — incompatible with datetime math.
-# Unconditionally set a real now() on the actual bound object so _maybe_prune() works.
-# Uses datetime.now(UTC) — real wall-clock time — because test_chart_log.py helpers
-# also use real wall-clock via _ago(hours=...) so no fixed fake time is needed.
-import custom_components.climate_advisor.chart_log as _chart_log_mod_init  # noqa: E402
-
-_chart_log_mod_init.dt_util.now = lambda: datetime.now(UTC)
-
-# Now it's safe to import the module under test
+# conftest installs the shared homeassistant stubs (Issue #1186: real, aware dt defaults).
 from custom_components.climate_advisor.chart_log import ChartStateLog  # noqa: E402
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,10 @@ if "homeassistant" not in sys.modules:
 
     install_ha_stubs()
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 28, 8, 0, 0)
+
+def _frozen_now_value():
+    return datetime(2026, 6, 28, 8, 0, 0)
+
 
 from custom_components.climate_advisor.const import (  # noqa: E402
     CONF_FAN_ENTITY,
@@ -888,3 +891,9 @@ class TestOverrideActiveFanOffStillDispatches:
         coord.async_request_refresh.assert_called_once()
         ae.on_fan_turned_off.assert_not_called()
         ae.handle_fan_manual_override.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

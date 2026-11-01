@@ -526,3 +526,29 @@ class TestObserveOnly:
         _run(engine)
         assert len(_fan_off(engine)) == 1
         assert "whf_sealed_observe_notified" not in events
+
+
+class TestOnlyAWholeHouseFanPressIsAnOccupantWhfAction:
+    """Owner decision (Issue #1133): a press of the thermostat's own blower is not a WHF action, so rule 2 never
+    counts it as the occupant's newest fan-on."""
+
+    def _press(self, clock, *, hvac_fan):
+        engine, _ = _engine()
+        engine._start_grace_period = MagicMock()
+        engine._suppress_hvac_for_whf = AsyncMock()
+        engine.hass.async_create_task = MagicMock(side_effect=_consume)
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.parse_datetime", side_effect=datetime.fromisoformat
+        ):
+            engine.handle_fan_manual_override("auto", "on", hvac_fan=hvac_fan)
+            engine._stamp = engine._occupant_fan_on_at()
+        return engine
+
+    def test_a_whole_house_fan_press_is_stamped(self, clock):
+        engine = self._press(clock, hvac_fan=False)
+        assert engine._stamp == clock.now()
+
+    def test_a_thermostat_blower_press_is_not(self, clock):
+        engine = self._press(clock, hvac_fan=True)
+        assert engine._fan_override_active is True
+        assert engine._stamp is None

@@ -10338,7 +10338,11 @@ class AutomationEngine:
         )
         result = await self._deactivate_fan(
             reason=reason_text,
-            restore_hvac=False,
+            # Owner principle (Issue #1133): no hand-back. A sealed-house stop restores what the fan paused through
+            # the ordinary restore path (which itself declines while the occupant's own change is protected), then
+            # CA's plan resumes (reclassify below). A mutex stop must NOT restore: the thermostat is already in the
+            # mode the occupant just chose, and a restore would overwrite it.
+            restore_hvac=sealed,
             release_suppression=True,
             emit_event=emit_event,
             safety=True,

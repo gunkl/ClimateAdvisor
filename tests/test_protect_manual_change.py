@@ -669,7 +669,11 @@ class TestFanSessionEndRestoresThePreFanModeAndResumesCaPlan:
     def test_sealed_house_stop_restores_what_the_fan_paused(self, timers, grace_s):
         engine, _tasks = self._pressed(grace_s)
         engine._window_open = False
-        _run(engine._enforce_sealed_house_whf_guard(reason="sealed", emit_event=False))
+        engine.hass.async_create_task = MagicMock(
+            side_effect=lambda coro: coro.close()
+        )  # stop's notify + cycle restart
+        # Issue #1144: the sealed-house stop is the WHF safety enforcer (the old event-driven guard is gone).
+        _run(engine.enforce_whf_safety("sealed", sealed_confirmed=True))
         assert engine._test_state.state == "heat", "the normal pre-fan restore ran"
         assert engine._pre_fan_hvac_mode is None and engine._whf_owns_hvac() is False
         assert engine._manual_change_protected() is False, "no earlier change was revived as an override"

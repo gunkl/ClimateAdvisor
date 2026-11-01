@@ -248,6 +248,20 @@ def _grace_expiry_outcome_str(inputs: OverrideGraceFsmInputs) -> str:
     return outcome.value
 
 
+def unprotected_grace_expiry_keeps_pending(
+    *, confirm_pending: bool, manual_override_active: bool, grace_protects_override: bool
+) -> bool:
+    """Whether a grace expiring leaves a pending confirmation (and its timer) alone (Issue #1156).
+
+    Only for a change that is the ONLY thing the occupant has done: no confirmed override
+    (``manual_override_active``) and a grace that is not the occupant's own. With a confirmed override
+    behind it, that grace expiring ends the override, so a second pending change is cleared with it
+    (timer included); keeping it would leave a pending change with no confirmation timer.
+    The engine's expiry branch and this FSM both call this, so they cannot disagree.
+    """
+    return confirm_pending and not manual_override_active and not grace_protects_override
+
+
 def _transition_from_no_grace(
     current_state: OverrideGraceLifecycleState, event: OverrideGraceFsmEvent
 ) -> OverrideGraceTransition:
@@ -357,8 +371,14 @@ def _transition_from_grace_unprotected(
     if kind == OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED:
         outcome_str = _grace_expiry_outcome_str(inputs)
         # Issue #1156: this grace is not the occupant's own, so its expiry ends the grace only; a change
-        # still inside its confirmation window keeps waiting (the protecting-grace branch clears it).
-        next_state = (confirm, GraceState.NONE)
+        # still inside its confirmation window keeps waiting -- but only under the one rule the engine's
+        # ``_on_grace_expired()`` also uses (``unprotected_grace_expiry_keeps_pending``).
+        keep = unprotected_grace_expiry_keeps_pending(
+            confirm_pending=confirm == OverrideConfirmState.PENDING,
+            manual_override_active=inputs.manual_override_active,
+            grace_protects_override=False,
+        )
+        next_state = (confirm if keep else OverrideConfirmState.IDLE, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome_str, inputs.now)
 
     if kind == OverrideGraceFsmEventKind.OVERRIDE_DETECTED:

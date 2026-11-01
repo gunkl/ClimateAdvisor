@@ -213,3 +213,48 @@ class TestRePauseEarlyReturnLeavesNoStalePauseRecord:
         assert engine._pre_pause_mode is None
         assert _off_writes(engine) == []
         assert engine._test_state.state == "heat"
+
+
+class TestSecondPendingChangeBehindAConfirmedOverride:
+    """confirmed override -> fan off (protecting grace replaced) -> the occupant changes the thermostat AGAIN
+    (pending, override still live) -> the replacement grace expires. The expiry ends the override AND the second
+    pending change together; a pending change must never be left without its confirmation timer."""
+
+    @staticmethod
+    def _scenario(timers, *, window_open):  # noqa: F811
+        engine = _engine("heat", override_confirm_seconds=600, manual_grace_seconds=1800)
+        _occupant_overrides(engine)
+        timers.fire(600)  # first change confirmed, protecting grace running
+        assert engine._manual_override_active and engine._grace_protects_override
+        engine._clear_fan_flags_and_start_grace(reason="occupant switched the thermostat fan off")
+        assert engine._grace_active and not engine._grace_protects_override
+        engine._window_open = window_open
+        _occupant_overrides(engine)  # second change while the override is live
+        assert engine._override_confirm_pending and engine._manual_override_active
+        return engine
+
+    @staticmethod
+    def _pending_always_has_its_timer(engine):
+        assert not engine._override_confirm_pending or engine._override_confirm_cancel is not None, (
+            "a pending change without a confirmation timer is protected forever"
+        )
+
+    @pytest.mark.parametrize("window_open", [True, False], ids=["window_open", "window_closed"])
+    def test_expiry_ends_both_and_leaves_no_timerless_pending_change(self, timers, window_open):  # noqa: F811
+        engine = self._scenario(timers, window_open=window_open)
+
+        engine._on_grace_expired("manual", 1800, False)
+
+        self._pending_always_has_its_timer(engine)
+        assert engine._override_confirm_pending is False
+        assert engine._manual_override_active is False
+        assert not engine._manual_change_protected()
+
+    def test_with_a_window_open_the_house_is_then_paused(self, timers):  # noqa: F811
+        engine = self._scenario(timers, window_open=True)
+
+        engine._on_grace_expired("manual", 1800, False)
+        _run(engine._re_pause_for_open_sensor())
+
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"

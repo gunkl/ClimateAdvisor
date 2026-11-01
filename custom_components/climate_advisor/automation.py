@@ -9053,6 +9053,7 @@ class AutomationEngine:
         _origin_state = self.door_window_lifecycle_state
 
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+        from .override_grace_fsm import unprotected_grace_expiry_keeps_pending
 
         # Issue #1156: an expiring grace that is NOT the occupant's own (window-close resume, fan-off
         # cooldown, dashboard resume, ...) must not drop a thermostat change that is still awaiting its
@@ -9063,7 +9064,11 @@ class AutomationEngine:
         # open is then honoured by the re-pause below, rule 3); keeping the override here would leave it
         # with no timer and no end. The occupant's own grace (``_grace_protects_override``) likewise
         # falls through to the branches below unchanged.
-        if self._override_confirm_pending and not self._manual_override_active and not self._grace_protects_override:
+        if unprotected_grace_expiry_keeps_pending(
+            confirm_pending=bool(self._override_confirm_pending),
+            manual_override_active=bool(self._manual_override_active),
+            grace_protects_override=bool(self._grace_protects_override),
+        ):
             _LOGGER.info(
                 "%s grace expired while the occupant's thermostat change is awaiting confirmation"
                 " -- ending the grace only; not re-pausing, not clearing the change",

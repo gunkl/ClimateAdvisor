@@ -20,6 +20,7 @@ class OverrideCancelOutcome(Enum):
     HAD_MANUAL = "had_manual"
     HAD_FAN_ONLY = "had_fan_only"
     HAD_GRACE_ONLY = "had_grace_only"
+    HAD_PENDING_ONLY = "had_pending_only"
 
 
 def decide_override_cancel_outcome(
@@ -27,6 +28,7 @@ def decide_override_cancel_outcome(
     manual_override_active: bool,
     fan_override_active: bool,
     grace_active: bool,
+    confirm_pending: bool = False,
 ) -> OverrideCancelOutcome:
     """Pure reimplementation of ``cancel_override()``'s had_manual/had_fan/had_grace
     classification.
@@ -35,6 +37,7 @@ def decide_override_cancel_outcome(
       manual_override_active -> self._manual_override_active (snapshotted before clearing)
       fan_override_active     -> self._fan_override_active (snapshotted before clearing)
       grace_active             -> self._grace_active (snapshotted before clearing)
+      confirm_pending          -> self._override_confirm_pending (Issue #1154)
 
     NOOP: nothing was active — real method returns False, no-op.
     HAD_MANUAL: a thermostat-mode override was active — clear_manual_override() will emit
@@ -44,11 +47,16 @@ def decide_override_cancel_outcome(
     HAD_GRACE_ONLY: neither override flag was active, only a bare grace period (e.g. a
       fan-off cooldown or window-close grace with no override behind it) — caller emits no
       supplemental event, same as HAD_MANUAL (no override was ever active to announce).
+    HAD_PENDING_ONLY (Issue #1154): the occupant's change is still inside its confirmation window and
+      nothing else is active. That change is already protected (``_manual_change_protected()``), so
+      Cancel Override must be able to end it; before this it classified as NOOP and the change stayed.
     """
-    if not (manual_override_active or fan_override_active or grace_active):
+    if not (manual_override_active or fan_override_active or grace_active or confirm_pending):
         return OverrideCancelOutcome.NOOP
     if manual_override_active:
         return OverrideCancelOutcome.HAD_MANUAL
     if fan_override_active:
         return OverrideCancelOutcome.HAD_FAN_ONLY
-    return OverrideCancelOutcome.HAD_GRACE_ONLY
+    if grace_active:
+        return OverrideCancelOutcome.HAD_GRACE_ONLY
+    return OverrideCancelOutcome.HAD_PENDING_ONLY

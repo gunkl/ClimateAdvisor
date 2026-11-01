@@ -5902,7 +5902,11 @@ class AutomationEngine:
 
         from .door_window_fsm import DoorWindowFsmEventKind
 
-        self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.SENSOR_OPENED, nat_vent_gate_ruled_out=True)
+        self._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.SENSOR_OPENED,
+            nat_vent_gate_ruled_out=True,
+            hvac_already_off=hvac_already_off,
+        )
         # _paused_entity/_paused_since aren't part of _apply_door_window_fsm_state()'s
         # 2-field derivation (see its own docstring) — direct writes here, matching
         # what _set_door_window_pause_fields() would have written on the removed
@@ -6251,7 +6255,9 @@ class AutomationEngine:
                 # recording no pause while HVAC was just turned off. Same contract as
                 # _pause_for_door_window(): tell the FSM the gate is ruled out.
                 self._resolve_door_window_pause_flags(
-                    kind=DoorWindowFsmEventKind.SENSOR_OPENED, nat_vent_gate_ruled_out=True
+                    kind=DoorWindowFsmEventKind.SENSOR_OPENED,
+                    nat_vent_gate_ruled_out=True,
+                    hvac_already_off=hvac_already_off,
                 )
                 self._paused_entity = entity_id
                 self._paused_since = dt_util.now()
@@ -11199,7 +11205,13 @@ class AutomationEngine:
         else:
             self._apply_nat_vent_fsm_state(to_state)
 
-    def _build_door_window_fsm_inputs(self, *, now: datetime, nat_vent_gate_ruled_out: bool = False):
+    def _build_door_window_fsm_inputs(
+        self,
+        *,
+        now: datetime,
+        nat_vent_gate_ruled_out: bool = False,
+        hvac_already_off: bool | None = None,
+    ):
         """Build the door/window FSM's input snapshot from current engine state
         (Issue #594 Phase R, Step 2).
 
@@ -11268,6 +11280,7 @@ class AutomationEngine:
             manual_override_owns_hvac=self._manual_change_protected(),
             now=now,
             nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
+            hvac_already_off=hvac_already_off,
         )
 
     @property
@@ -11389,6 +11402,7 @@ class AutomationEngine:
         kind: DoorWindowFsmEventKind,
         origin_state: DoorWindowLifecycleState | None = None,
         nat_vent_gate_ruled_out: bool = False,
+        hvac_already_off: bool | None = None,
     ) -> None:
         """Single dispatch point for every door/window flag-derivation call site
         (Issue #594 Phase R / #660). Each of the 8 real trigger methods supplies its own
@@ -11402,6 +11416,12 @@ class AutomationEngine:
         state *before* ``_cancel_grace_timers()`` clears ``_grace_active`` and pass it
         explicitly here (grace has already been cleared by the time this function
         would otherwise read it live).
+
+        ``hvac_already_off`` (Issue #1143): the pause action's authoritative pre-command answer
+        (``_pause_for_door_window_action()``'s return value), forwarded to
+        ``_build_door_window_fsm_inputs()``. Pass it on every SENSOR_OPENED dispatch that follows a
+        pause action: the live thermostat mode read inside the builder is taken after CA itself
+        commanded it off, so it cannot tell an active pause from an idle one.
 
         ``nat_vent_gate_ruled_out``: forwarded to ``_build_door_window_fsm_inputs()`` —
         see ``DoorWindowFsmInputs.nat_vent_gate_ruled_out``'s own docstring (Issue #757
@@ -11428,7 +11448,9 @@ class AutomationEngine:
             DoorWindowFsmEvent(
                 kind=kind,
                 inputs=self._build_door_window_fsm_inputs(
-                    now=dt_util.now(), nat_vent_gate_ruled_out=nat_vent_gate_ruled_out
+                    now=dt_util.now(),
+                    nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
+                    hvac_already_off=hvac_already_off,
                 ),
             ),
         )

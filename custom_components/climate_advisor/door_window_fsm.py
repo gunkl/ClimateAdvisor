@@ -295,6 +295,10 @@ class DoorWindowFsmInputs:
                                              confirmation) owns the thermostat; the
                                              SYNC_RECONCILE copy below mirrors that guard.
       now                                  -> caller-resolved wall-clock time
+      hvac_already_off                      -> the pause action's own pre-command answer
+                                             (``_pause_for_door_window_action()`` return value)
+                                             on the SENSOR_OPENED dispatches that follow it;
+                                             ``None`` elsewhere (Issue #1143).
       nat_vent_gate_ruled_out               -> True for _pause_for_door_window()'s and
                                              handle_door_window_open()'s pause fall-through
                                              SENSOR_OPENED dispatches (Issue #757
@@ -358,6 +362,13 @@ class DoorWindowFsmInputs:
     # answered NAT_VENT_ELIGIBLE (NORMAL origin) / GRACE_SUPPRESSED (GRACE origin) and no
     # pause was recorded.
     nat_vent_gate_ruled_out: bool = False
+    # Issue #1143: the authoritative "HVAC was already off when this pause started" reading, for
+    # the SENSOR_OPENED dispatches that follow a pause ACTION (``_pause_for_door_window_action()``
+    # returns it). ``hvac_mode`` above is read AFTER that action has already commanded the
+    # thermostat off, so on its own it records every active pause from NORMAL as idle (PAUSED_IDLE)
+    # -- which skips the paused-by-door nat-vent reactivation branch (``_actively_paused``).
+    # ``None`` = the caller has no pre-command reading; ``hvac_mode`` decides, as before.
+    hvac_already_off: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -394,6 +405,14 @@ def _nat_vent_gate_inputs(inputs: DoorWindowFsmInputs) -> NatVentGateInputs:
         fan_mode=inputs.fan_mode,
         aggressive_savings=inputs.aggressive_savings,
     )
+
+
+def _pause_entry_outcome(inputs: DoorWindowFsmInputs) -> PauseEntryOutcome:
+    """The one place this module turns its inputs into a ``PauseEntryOutcome`` (Issue #1143).
+
+    Passes the caller's authoritative ``hvac_already_off`` through when it has one
+    (``None`` otherwise -> the live ``hvac_mode`` split, unchanged)."""
+    return decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode, hvac_already_off=inputs.hvac_already_off))
 
 
 def _pause_sub_state(outcome: PauseEntryOutcome) -> DoorWindowLifecycleState | None:
@@ -440,7 +459,7 @@ def _transition_from_normal(current_state: DoorWindowLifecycleState, event: Door
             )
         )
         if response == DoorOpenResponse.PAUSE:
-            next_state = _pause_sub_state(decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode)))
+            next_state = _pause_sub_state(_pause_entry_outcome(inputs))
             next_state = next_state or current_state
         else:
             next_state = current_state
@@ -512,7 +531,7 @@ def _sync_reconcile_next_state(
     ):
         return current_state
 
-    sub_state = _pause_sub_state(decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode)))
+    sub_state = _pause_sub_state(_pause_entry_outcome(inputs))
     if sub_state is None:
         return current_state
     if current_state == DoorWindowLifecycleState.GRACE:
@@ -620,7 +639,7 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
         if response == DoorOpenResponse.PAUSE:
             # _pause_for_door_window() runs with grace untouched — the
             # confirmed-reachable violation path #1 (see module docstring).
-            sub = decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode))
+            sub = _pause_entry_outcome(inputs)
             next_state = (
                 DoorWindowLifecycleState.PAUSED_DURING_GRACE
                 if sub != PauseEntryOutcome.NOOP_NOT_APPLICABLE
@@ -661,7 +680,7 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
             if decide_nat_vent_gate(_nat_vent_gate_inputs(inputs)):
                 next_state = DoorWindowLifecycleState.NORMAL
             else:
-                sub = _pause_sub_state(decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode)))
+                sub = _pause_sub_state(_pause_entry_outcome(inputs))
                 next_state = sub or DoorWindowLifecycleState.NORMAL
         else:
             next_state = DoorWindowLifecycleState.NORMAL
@@ -696,7 +715,7 @@ def _transition_from_paused_during_grace(
                 override_matches_current_decision=inputs.override_matches_current_decision,
             )
         )
-        sub = _pause_sub_state(decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode)))
+        sub = _pause_sub_state(_pause_entry_outcome(inputs))
         next_state = sub or DoorWindowLifecycleState.PAUSED_ACTIVE
         return DoorWindowTransition(current_state, next_state, kind, outcome.value, inputs.now)
 

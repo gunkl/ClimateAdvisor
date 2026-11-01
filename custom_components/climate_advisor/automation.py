@@ -11016,8 +11016,9 @@ class AutomationEngine:
             # (#931; the fan is still on), and starting "nat_vent_exit_resume" grace now left session and
             # grace both active with the fan running. The completion is not lost: with the house sealed,
             # the WHF safety enforcer (#1144, run right after this by handle_all_doors_windows_closed())
-            # stops the fan, ends the session and reclassifies; otherwise the still-true exit condition
-            # re-enters this branch on the next tick, once the fan-off can run.
+            # stops the fan, ends the session and reclassifies. KNOWN GAP (pre-existing on main): for a
+            # non-WHF fan (hvac_fan) nothing retries this exit -- window-closed is not an exit reason in
+            # decide_nat_vent_exit(), so the session and blower can stay on after the floor ends.
             if self._end_nat_vent_session(result):
                 # Issue #821 follow-up (project owner's own fix, confirmed by reading
                 # _deactivate_fan()'s restore branches directly): _deactivate_fan() above

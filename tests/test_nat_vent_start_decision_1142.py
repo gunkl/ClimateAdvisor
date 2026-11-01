@@ -292,6 +292,25 @@ class TestGuardsAreOnlyOnStarts:
         assert guarded.start_veto is not None
         assert guarded.start_veto.forecast_peak_2h == 95.0
 
+    def test_startup_adoption_keeps_a_running_fan_despite_a_forecast_peak(self):
+        """The real ``reconcile_fan_on_startup`` adopts a running fan even when a start guard would veto a start.
+
+        A start guard decides whether to START nat-vent; it must not turn off a fan that is already running
+        when HA restarts (owner decision D2 excludes startup adoption).
+        """
+        engine = _engine(mode="off")
+        _forecast_peak_ahead(engine)
+        with (
+            patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY),
+            patch(f"{_AUTOMATION}.dt_util.parse_datetime", side_effect=datetime.fromisoformat),
+        ):
+            _run(
+                engine.reconcile_fan_on_startup(
+                    indoor=72.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+                )
+            )
+        assert engine._natural_vent_active is True
+
 
 # ---------------------------------------------------------------------------
 # pure pieces

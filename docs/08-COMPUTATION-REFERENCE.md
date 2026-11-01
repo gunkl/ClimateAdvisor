@@ -2071,6 +2071,8 @@ The fix replaces the comparison target with `ae._last_commanded_hvac_mode or cla
 
 This ensures mode overrides are correctly detected regardless of whether the thermostat is single- or dual-setpoint capable.
 
+**Confirming an "off" (Issue #1159).** Detection can fire on an Off whose value equals the classification label `off` (mild/warm days; CA does not write Off on those days since #249, it arms the band). At confirmation expiry `decide_override_confirm_path()` therefore always treats an occupant `off` as a real, divergent change (PATH A, manual grace, notice), and `decide_override_matches_decision()` never adopts an `off` override as matching: an occupant Off is always a manual change. See `grace-periods-spec.md` § State Machine.
+
 #### Dual Setpoint Override Detection — `heat_cool` Mode (Issue #269 Bug D)
 
 Setpoint override detection reads the thermostat's temperature attributes to determine whether the user has manually changed a setpoint. When the thermostat is in `heat_cool` mode, `temperature` (the single-setpoint attribute) is `None` — only `target_temp_low` and `target_temp_high` are populated.

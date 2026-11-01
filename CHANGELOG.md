@@ -18,6 +18,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.8.9] — 2026-10-31
 
+- Fix #1159: if you switch the thermostat Off on a mild day, Climate Advisor now keeps it off for your manual-change pause, the same as on hot or cold days, instead of switching heating or cooling back on within half an hour.
 - Fix #1136: the Next User Action card now judges the room against the comfort range your thermostat is actually holding. At night it uses your sleep range, so it no longer tells you to act at 66°F when your sleep range is 64–72°F, and it now speaks up at 73°F when that is above your sleep ceiling.
 - Fix #1094: with Prefer savings on, the Next User Action card no longer suggests cooling or heating while the house is still inside the wider range the thermostat is deliberately holding (for example 75–77°F). It now uses the same range as the chart and the briefing.
 - Fix #1093: with Prefer savings on, Climate Advisor holds the same cooling limit on every day. On a warm "AC off" day it now waits until the house is forecast to pass your savings ceiling (for example 77°F, not 75°F) before starting the AC early, holds that ceiling, and the morning briefing quotes that number. Homes with a whole-house fan now also get this early cooling when every monitored door and window is confirmed closed, because the fan can't run on a closed-up house. With any window open, a window sensor offline or unreadable, or no window sensors set up, nothing changes.

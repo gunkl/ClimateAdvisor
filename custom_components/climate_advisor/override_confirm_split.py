@@ -44,13 +44,23 @@ def decide_override_confirm_path(
 
     PATH A (CONFIRM): setpoint override, or the mode is still divergent from what
     classification wants (and not unavailable/unknown) — formally confirm the override.
+    Issue #1159: an "off" is also ALWAYS confirmed when classification's label is "off". Since #249 an
+    "off"-classified (mild) day arms the comfort band, so the occupant's Off is a real, divergent change
+    exactly as on a hot/cold day; "off" equals the classification only as a label.
     PATH B (DISCARD_SELF_RESOLVED): the state has resolved back to what classification
     wants on its own — no real override, treated as transient.
     """
     if setpoint_override:
         return OverrideConfirmPathOutcome.CONFIRM
 
-    if not is_unavailable_state(current_mode) and current_mode != classification_mode:
+    if is_unavailable_state(current_mode):
+        return OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
+
+    if current_mode != classification_mode:
+        return OverrideConfirmPathOutcome.CONFIRM
+
+    # Label match only: classification "off" is not a plan to keep HVAC off.
+    if current_mode == "off":
         return OverrideConfirmPathOutcome.CONFIRM
 
     return OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED

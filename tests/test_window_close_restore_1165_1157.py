@@ -172,15 +172,58 @@ class TestSetpointChangeAfterANatVentExitResumesHvac:
         assert engine._override_confirm_mode == "cool"
         assert [d["detected_mode"] for n, d in emitted if n == "override_detected"] == ["cool"]
 
-    def test_mild_day_has_no_family_and_stays_off_like_the_unprotected_1068_rearm(self, timers):  # noqa: F811
-        engine = _nat_vent_exit_pause(live_mode="off", day="mild", indoor=70.0, confirm_s=0)
+    @pytest.mark.parametrize(
+        "indoor,expected",
+        [(77.0, "cool"), (60.0, "heat")],
+        ids=["mild_hot_indoor_cool", "mild_cold_indoor_heat"],
+    )
+    @pytest.mark.parametrize("grace_s", [1800, 0], ids=["grace", "no_grace"])
+    def test_mild_day_resolves_the_family_from_the_armed_band(self, timers, indoor, expected, grace_s):  # noqa: F811
+        """A mild day's classification is 'off' (no family of its own); the armed band's active edge decides, so the
+        occupant who nudged the setpoint is not left Off until bedtime/wake (grace 0)."""
+        engine = _nat_vent_exit_pause(live_mode="off", day="mild", indoor=indoor, confirm_s=0, grace_s=grace_s)
         _occupant_moves_setpoint(engine, 71.0)
+        assert engine._manual_override_mode == expected
         engine.hass.services.async_call.reset_mock()
 
         _close_window(engine)
 
+        assert engine._test_state.state == expected
+        assert engine._test_state.attributes["temperature"] == 71.0
+        assert [w for w in _climate_writes(engine) if w[0] == "set_temperature"] == []
+
+    def test_the_setpoint_change_commits_no_selector_state_and_emits_no_family_switch(self, timers):  # noqa: F811
+        """Judging the occupant's change is a pure preview: no phantom comfort_family_switch, no dwell/arming state,
+        no HVAC write while the window is still open."""
+        engine = _nat_vent_exit_pause(live_mode="off", day="hot", indoor=76.0, confirm_s=0)
+        emitted = []
+        engine._emit_event_callback = lambda name, data: emitted.append(name)
+        before = (
+            engine._comfort_mode_family,
+            engine._comfort_family_dwell_state,
+            engine._last_comfort_switch,
+            engine._last_selector_write_attempt,
+        )
+        engine.hass.services.async_call.reset_mock()
+
+        _occupant_moves_setpoint(engine, 71.0)
+
+        assert engine._manual_override_mode == "cool"
+        assert "comfort_family_switch" not in emitted
+        assert (
+            engine._comfort_mode_family,
+            engine._comfort_family_dwell_state,
+            engine._last_comfort_switch,
+            engine._last_selector_write_attempt,
+        ) == before
         assert _mode_or_setpoint_writes(engine) == []
-        assert engine._test_state.state == "off"
+
+    def test_away_keeps_the_live_off_the_setback_owns_the_close(self, timers):  # noqa: F811
+        """Documented asymmetry: away/vacation is not given a family here; the override stays 'off'."""
+        engine = _nat_vent_exit_pause(live_mode="off", day="hot", indoor=76.0, confirm_s=0)
+        engine._occupancy_mode = "away"
+        _occupant_moves_setpoint(engine, 71.0)
+        assert engine._manual_override_mode == "off"
 
     def test_control_a_thermostat_left_off_before_an_ordinary_pause_stays_off(self, timers):  # noqa: F811
         """The #1068 gate stands: only a nat-vent-exit pause resumes; an ordinary pause over Off does not."""

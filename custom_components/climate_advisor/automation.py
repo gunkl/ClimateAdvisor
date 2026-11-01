@@ -2155,13 +2155,8 @@ class AutomationEngine:
 
         Callers apply it to SETPOINT-only changes only (Issue #1165): a mode change to Off is the occupant's own Off,
         never Climate Advisor's. When the pause is a nat-vent exit with the window still open there is no
-        ``_pre_pause_mode`` (the thermostat was Off), so the comfort family the door-close re-arm would pick (the
-        Issue #1068 resolution) stands in for it (Issue #1157).
-
-        Deliberately NOT applied to the whole-house fan: an occupant's fan press REPLACES any earlier thermostat
-        change (owner principle 2026-10-31 -- the latest manual change is the latest override and replaces the
-        old one), and a temperature-only change while the fan owns HVAC is ignored, so a pending change can
-        never be confirmed against the fan's Off.
+        ``_pre_pause_mode`` (the thermostat was Off), so the comfort family the selector would arm now stands in for
+        it (Issue #1157; a side-effect-free preview, mild days included).
         """
         if live_mode != "off" or not self._paused_by_door:
             return live_mode
@@ -2172,13 +2167,15 @@ class AutomationEngine:
         elif self._paused_entity == "nat-vent-exit" and self._current_classification is not None:
             # Issue #1157: a nat-vent exit with the window still open records NO pre-pause mode (the thermostat
             # was Off), so there is nothing to judge the occupant's setpoint change against. Judge it against the
-            # comfort family the door-close re-arm would pick (the Issue #1068 resolution), so the close resumes
-            # HVAC at the occupant's setpoint instead of leaving it Off until their override ends. Same gate as
-            # #1068: only this pause; a thermostat the occupant left Off before an ordinary pause stays Off.
+            # comfort family the selector would arm now, so the close resumes HVAC at the occupant's setpoint
+            # instead of leaving it Off until their override ends. Same gate as #1068: only this pause; a
+            # thermostat the occupant left Off before an ordinary pause stays Off. Pure preview: this runs when the
+            # occupant speaks, no HVAC write follows, so it must not commit selector state or emit a family switch.
+            # Away/vacation: unchanged (the live Off stays; the unprotected close redirects to the setback instead).
             if should_defer_to_occupancy_setback(self._occupancy_mode):
                 return live_mode
-            _family = self._resolve_restore_band_and_mode(self._current_classification)[1]
-            if _family not in ("heat", "cool"):
+            _family = self._preview_comfort_family(self._current_classification)[0]
+            if _family is None:
                 return live_mode
             substitute = _family
         else:
@@ -3529,6 +3526,21 @@ class AutomationEngine:
             any_sensor_open=self._any_monitored_sensor_open(),
         ):
             return None, None
+        mode, band = self._preview_comfort_family(classification)
+        if mode is None or band is None:
+            return None, None
+        return mode, (band.floor if mode == "heat" else band.ceiling)
+
+    def _preview_comfort_family(self, classification: DayClassification) -> tuple[str | None, ComfortBand | None]:
+        """The comfort family ("heat" / "cool") the selector would arm now, and the band, WITHOUT mutating anything.
+
+        The ONE pure preview shared by override adoption (``_override_decision_mode_and_target()``) and the mode an
+        occupant's setpoint change means after a nat-vent exit (``_occupant_mode_when_ca_holds_off()``, Issue #1157).
+        The day's default family comes from the band's active edge, so a warm/mild day (classification mode "off")
+        still resolves. Reads through ``_comfort_family_would_switch()``, never ``_resolve_comfort_family_via_fsm()``
+        (which commits dwell state, emits ``comfort_family_switch`` and arms the family). ``(None, None)`` when the
+        selector does not apply or the preview fails.
+        """
         band = self._resolved_comfort_band(classification)
         day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, "cool")
         now = dt_util.now()
@@ -3537,15 +3549,14 @@ class AutomationEngine:
                 day_mode, floor=band.floor, ceiling=band.ceiling, now=now, day_type=classification.day_type
             )
         except Exception:  # noqa: BLE001 - adoption must degrade to "not adopted", never raise
-            _LOGGER.debug("Override adoption selector preview failed", exc_info=True)
+            _LOGGER.debug("Comfort family preview failed", exc_info=True)
             return None, None
         family = result.to_state
         if result.locked_out or family is None:
             family = result.from_state if result.from_state is not None else family
         if family is None:
             return None, None
-        mode = "heat" if family is ComfortFamilyState.HEATING else "cool"
-        return mode, (band.floor if mode == "heat" else band.ceiling)
+        return ("heat" if family is ComfortFamilyState.HEATING else "cool"), band
 
     def _override_match_inputs(self, classification: DayClassification | None) -> tuple[str | None, float | None]:
         """``(decision_mode, target_f)`` exactly as ``_override_matches_current_decision()`` compares them.
@@ -5357,23 +5368,6 @@ class AutomationEngine:
             abs(edge - flat) > 1e-6,
         )
 
-    def _resolve_restore_band_and_mode(self, c: DayClassification) -> tuple[ComfortBand, str]:
-        """The band in force and the comfort family a restore arms for ``c`` (Issues #1073, #1157).
-
-        The ONE resolution shared by ``_set_temperature_for_mode()`` (which then writes the band edge) and by the
-        mode-only decision for an occupant's setpoint change on a thermostat Climate Advisor holds Off
-        (``_occupant_mode_when_ca_holds_off()``). "off" (a mild day) has no family and comes back unchanged.
-        """
-        band = self._resolved_comfort_band(c)
-        mode = self._resolve_comfort_family_via_fsm(
-            c.hvac_mode,
-            floor=band.floor,
-            ceiling=band.ceiling,
-            now=dt_util.now(),
-            day_type=c.day_type,
-        )
-        return band, mode
-
     async def _set_temperature_for_mode(
         self,
         c: DayClassification,
@@ -5443,10 +5437,23 @@ class AutomationEngine:
         # flat comfort_heat/comfort_cool. The selector (and with it the settling guard, R6) therefore
         # sees the real edges, and the setpoint written is the resolved band's edge for the family.
         _band: ComfortBand | None = None
+        _resolved_floor: float | None = None
+        _resolved_ceiling: float | None = None
         if target_override is None:
-            _band, _resolved_mode = self._resolve_restore_band_and_mode(c)
-        else:
-            _resolved_mode = c.hvac_mode
+            _band = self._resolved_comfort_band(c)
+            _resolved_floor = _band.floor
+            _resolved_ceiling = _band.ceiling
+        _resolved_mode = (
+            c.hvac_mode
+            if target_override is not None
+            else self._resolve_comfort_family_via_fsm(
+                c.hvac_mode,
+                floor=_resolved_floor,
+                ceiling=_resolved_ceiling,
+                now=dt_util.now(),
+                day_type=c.day_type,
+            )
+        )
         if _band is not None:
             self._log_restore_via_selector(c, _band, _resolved_mode, reason)
 

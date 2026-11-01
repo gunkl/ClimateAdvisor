@@ -14,6 +14,7 @@ from .const import (
     DAY_TYPE_MILD,
     DAY_TYPE_WARM,
     DEFAULT_COMFORT_COOL,
+    DEFAULT_COMFORT_HEAT,
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_MORNING_START_HOUR,
@@ -69,6 +70,12 @@ class DayClassification:
     threshold_margin_f: float | None = None  # today_high - applied_threshold_f
     low_is_estimated: bool = False  # Issue #1211: today_low is a stand-in, not a forecast
     tomorrow_low_is_estimated: bool = False
+    # Issue #1211: the occupant's configured comfort band, used by the shared "would outside air
+    # help?" rule when deciding windows_recommended (the old warm rule used the DEFAULT ceiling).
+    comfort_heat: float = DEFAULT_COMFORT_HEAT
+    comfort_cool: float = DEFAULT_COMFORT_COOL
+    # Hysteresis seed: whether the previous classification of this day recommended windows.
+    windows_hysteresis_seed: bool = False
 
     # Computed recommendations
     hvac_mode: str = ""  # "heat", "cool", "off", "auto"
@@ -213,6 +220,9 @@ def classify_day(
     threshold_warm: float = THRESHOLD_WARM,
     threshold_mild: float = THRESHOLD_MILD,
     threshold_cool: float = THRESHOLD_COOL,
+    comfort_heat: float = DEFAULT_COMFORT_HEAT,
+    comfort_cool: float = DEFAULT_COMFORT_COOL,
+    previous_windows_recommended: bool = False,
 ) -> DayClassification:
     """Classify the day type and trend from forecast data.
 
@@ -224,6 +234,11 @@ def classify_day(
         threshold_warm: Forecast high at/above which the day is "warm" (°F).
         threshold_mild: Forecast high at/above which the day is "mild" (°F).
         threshold_cool: Forecast high at/above which the day is "cool" (°F).
+        comfort_heat / comfort_cool: The occupant's configured comfort band (°F), used by the shared
+            outside-air rule that decides ``windows_recommended`` (Issue #1211).
+        previous_windows_recommended: Whether the previous classification of this day recommended
+            windows; gives that decision hysteresis so a forecast sitting on a threshold does not
+            flip it every cycle.
 
     Returns:
         DayClassification with day type, trend, and recommendations.
@@ -316,4 +331,7 @@ def classify_day(
         threshold_margin_f=round(threshold_margin, 1),
         low_is_estimated=forecast.low_is_estimated,
         tomorrow_low_is_estimated=forecast.tomorrow_low_is_estimated,
+        comfort_heat=comfort_heat,
+        comfort_cool=comfort_cool,
+        windows_hysteresis_seed=previous_windows_recommended,
     )

@@ -1,0 +1,94 @@
+{
+  "name": "issue_1181_dark_window_sensor_keeps_cooling_paused",
+  "description": "Hot afternoon (indoor 78F, outdoor 93F, cool day). At 14:00 a window opens and Climate Advisor pauses cooling. At 14:20 the window sensor goes unavailable while the window stays open. Climate Advisor must not read the dead sensor as 'closed' and switch cooling back on into the open window. The 14:30 classification refresh must leave cooling off too.",
+  "source": "Issue #1181 (since the first sensor handling: an unreadable door/window sensor counted as closed and ended a pause it did not cause the end of)",
+  "issue": 1181,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant: a window left open on a hot afternoon, the cooling paused. When the window sensor drops off the network the house must not start cooling the street; before the fix the dead sensor read as closed, the pause ended and the air conditioner came back on with the window still open.",
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Effectiveness: tests/test_unreadable_sensors_1181.py is revert-proven. With the fix reverted the 14:20 sensor_unavailable event ends the pause and cool is commanded, so paused_by_door and hvac_mode_never_commanded both fail here.",
+    "(b) Docs<->production: docs/grace-periods-spec.md 'Door/Window Sensor Goes Unavailable During Grace' (owner decision D1: a sensor that last read open and goes dark keeps its pause until it reports again or the occupant changes the thermostat).",
+    "(c) User outcome if this regresses: cooling or heating runs into an open window whenever the window sensor drops off the network.",
+    "Uses the sensor_unavailable harness event, which now dispatches the real _async_door_window_changed listener (it was a silent state set; Issue #645's scenario is unchanged).",
+    "No tools/sim_harness/outcomes.py change: uses existing paused_by_door and hvac_mode_never_commanded."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "initial_thermostat_mode": "cool",
+    "door_window_sensors": ["binary_sensor.living_room_window"]
+  },
+  "events": [
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 93.0
+    },
+    {
+      "time": "2026-07-15T13:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: cooling is running."
+    },
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens and stays open (harness debounce 0s) -> cooling paused."
+    },
+    {
+      "time": "2026-07-15T14:20:00",
+      "type": "sensor_unavailable",
+      "entity": "binary_sensor.living_room_window",
+      "note": "The window sensor drops off the network. The window is still open. Cooling must stay paused."
+    },
+    {
+      "time": "2026-07-15T14:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "30-minute refresh with the sensor still dark: must not switch cooling back on."
+    },
+    {
+      "time": "2026-07-15T14:35:00",
+      "type": "temp_update",
+      "indoor_f": 79.0,
+      "outdoor_f": 93.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T14:35:00",
+      "expect": "paused_by_door",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "The pause the open window caused is still held while its sensor is dark."
+    },
+    {
+      "at": "2026-07-15T14:35:00",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["cool", "heat"],
+      "since": "2026-07-15T14:00:00",
+      "reason": "Neither the sensor going dark nor the refresh switches cooling back on into the open window.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A window sensor that goes unavailable while its window is open keeps cooling paused until it reports again.",
+    "observed_behavior": "Window opens 14:00 -> cooling paused -> sensor unavailable 14:20 -> pause held -> no cool command at 14:30 or 14:35.",
+    "expected_behavior": "grace-periods-spec 'Door/Window Sensor Goes Unavailable During Grace': a sensor dark after last reading open holds its pause (rule 3)."
+  }
+}

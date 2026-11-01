@@ -36,7 +36,7 @@ class GraceExpiryInputs:
     """Field-by-field correspondence to ``_on_grace_expired()``:
 
     within_planned_window            -> self._is_within_planned_window_period()
-    any_sensor_open                   -> self._any_monitored_sensor_open()
+    any_sensor_open                   -> self._any_monitored_sensor_holding_open() (Issue #1181)
     source                             -> the grace's own source ("manual" | "automation")
     override_matches_current_decision -> self._override_matches_current_decision(
                                           self._current_classification), only ever

@@ -23,6 +23,8 @@ import types
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 if "homeassistant" not in sys.modules:
     from tools.sim_harness.ha_stubs import install_ha_stubs
 
@@ -756,6 +758,42 @@ class TestOverrideActiveRequestsRefresh:
         coord.async_request_refresh.assert_called_once()
         # The override-detection logic below the refresh must still run unaffected.
         ae.handle_fan_manual_override.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("before", "after", "fan_active", "recorder"),
+        [
+            ("off", "on", False, "handle_fan_manual_override"),  # the person turns the fan on
+            ("on", "off", True, "on_fan_turned_off"),  # the person turns the fan off
+        ],
+    )
+    def test_press_is_recorded_before_the_refresh_is_requested(self, before, after, fan_active, recorder):
+        """Issue #1130: the refresh runs _async_update_data() immediately (eager task, immediate debouncer), so the
+        person's press (override on / fan-off grace) must already be recorded when it is requested, in both directions.
+        """
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+        }
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_active = fan_active
+        ae._fan_override_active = False
+        order: list[str] = []
+        getattr(ae, recorder).side_effect = lambda **_kw: order.append("recorded")
+
+        async def _noop():
+            return None
+
+        coord.async_request_refresh = MagicMock(side_effect=lambda: order.append("refresh") or _noop())
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+        event = MagicMock()
+        event.data = {"old_state": _make_fake_state(before), "new_state": _make_fake_state(after)}
+
+        asyncio.run(method(event))
+
+        assert order == ["recorded", "refresh"]
 
     def test_override_active_no_longer_double_refreshes(self):
         """Issue #510 0.1a: the override-already-active branch no longer issues its OWN

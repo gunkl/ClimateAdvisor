@@ -636,17 +636,14 @@ def _dispatch_event(
             run_coro(engine.handle_door_window_open(entity_id))
 
     elif etype == "sensor_unavailable" and coordinator is not None:
-        # Issue #645: silently sets the entity to "unavailable" (no listener dispatch —
-        # states.set_simple(), same primitive seed_fresh/seed use above) so that a SUBSEQUENT
-        # plain sensor_open event's states.async_set(entity_id, "on") correctly computes
-        # old_state.state == "unavailable" and dispatches through the real
-        # _async_door_window_changed() listener — modeling a group/helper sensor entity
-        # going briefly unavailable during an HA restart/integration reload, then
-        # re-registering "on", exactly as confirmed via live REST state history around a
-        # real redeploy. Coordinator-only (no engine-only equivalent — this event exists
-        # purely to set up old_state for the listener path).
+        # Issue #1181: real state-change dispatch through the coordinator's actual
+        # _async_door_window_changed() listener, like sensor_open / sensor_close -- so a window sensor that
+        # goes dark mid-pause exercises the real "dark sensor holds a pause it caused" path. It still leaves
+        # the entity "unavailable" with old_state populated, which is what Issue #645's scenario needs for the
+        # SUBSEQUENT plain sensor_open (a group/helper sensor re-registering "on" after an HA restart).
+        # Coordinator-only (no engine-only equivalent).
         entity_id = event.get("entity", "binary_sensor.window")
-        fake_hass.states.set_simple(entity_id, "unavailable")
+        fake_hass.states.async_set(entity_id, "unavailable", {})
 
     elif etype == "sensor_close":
         entity_id = event.get("entity", "binary_sensor.window")

@@ -52,7 +52,6 @@ def _inputs(**overrides) -> OverrideGraceFsmInputs:
         current_setpoint_f=None,
         target_setpoint_f=None,
         tolerance_f=1.0,
-        within_planned_window=False,
         any_sensor_open=False,
         grace_source="automation",
         now=_NOW,
@@ -158,13 +157,6 @@ class TestFromGraceProtecting:
         t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED))
         assert t.to_state == _IDLE_NONE
         assert t.outcome == "clear_normal"  # grace_source default "automation" never adopts
-
-    def test_grace_timer_expired_planned_window_still_lands_idle_none(self):
-        """Confirms GraceExpiryOutcome does NOT branch this FSM's next state —
-        every outcome converges on (IDLE, NONE) per the module docstring."""
-        t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED, within_planned_window=True))
-        assert t.to_state == _IDLE_NONE
-        assert t.outcome == "clear_planned_window"
 
     def test_grace_timer_expired_adopt_override_still_lands_idle_none(self):
         t = transition(

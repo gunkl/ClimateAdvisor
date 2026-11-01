@@ -147,7 +147,13 @@ def _make_dt(hour: int, minute: int = 0) -> datetime:
 
 
 class TestWindowsRecommendedPauseSuppression:
-    """Validate that door/window open events do NOT pause HVAC when the
+    """Issue #1211 (A3, owner decision O8b): the planned window period is no longer an exemption in the
+    door/window EVENT handlers. A window opened (past the debounce) inside the period gets the same decision as
+    any other: the nat-vent entry gate starts nat-vent when it passes, and the HVAC pauses right there when it
+    refuses. (These engines have no fan, so the gate refuses.) The planned window only exempts the lazy
+    ``_sync_paused_by_door_with_live_sensors()`` reconcile. The history below describes the pre-#1211 design.
+
+    Original design note: validate that door/window open events do NOT pause HVAC when the
     classifier has recommended windows and the current time falls within
     the planned window period.
 
@@ -166,7 +172,7 @@ class TestWindowsRecommendedPauseSuppression:
     # Test 1 — warm day, HVAC=cool (manual override), inside window period
     # ------------------------------------------------------------------
 
-    def test_no_pause_when_windows_recommended_warm_day(self):
+    def test_pauses_inside_warm_planned_window_when_gate_refuses(self):
         """Warm day, windows_recommended=True, HVAC currently 'cool' (manual override),
         time inside window period (8 AM, window is 6–10 AM).
 
@@ -200,18 +206,23 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        # Suppression must have prevented the pause
-        assert engine._paused_by_door is False, (
-            "HVAC should NOT be paused during a planned warm-day window period "
-            "even when the thermostat is in 'cool' mode"
+        # Issue #1211: no exemption -- the open window pauses the cooling (rule 3), nat-vent being refused
+        assert engine._paused_by_door is True, (
+            "HVAC must be paused by an open window inside a planned warm-day period when nat-vent is refused"
         )
-        engine.hass.services.async_call.assert_not_called()
+        engine.hass.services.async_call.assert_any_call(
+            "climate",
+            "set_hvac_mode",
+            {"entity_id": "climate.thermostat", "hvac_mode": "off"},
+            blocking=True,
+            context=ANY,
+        )
 
     # ------------------------------------------------------------------
     # Test 2 — mild day, HVAC=heat (manual override), inside window period
     # ------------------------------------------------------------------
 
-    def test_no_pause_when_windows_recommended_mild_day(self):
+    def test_pauses_inside_mild_planned_window_when_gate_refuses(self):
         """Mild day, windows_recommended=True, HVAC currently 'heat' (manual override),
         time inside window period (12 PM, window is 10 AM–5 PM).
 
@@ -236,11 +247,9 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is False, (
-            "HVAC should NOT be paused during a planned mild-day window period "
-            "even when the thermostat is in 'heat' mode"
+        assert engine._paused_by_door is True, (
+            "HVAC must be paused by an open window inside a planned mild-day period when nat-vent is refused"
         )
-        engine.hass.services.async_call.assert_not_called()
 
     # ------------------------------------------------------------------
     # Test 3 — hot day (regression guard): pause DOES fire
@@ -286,7 +295,7 @@ class TestWindowsRecommendedPauseSuppression:
     # Test 4 — warm day, HVAC=cool, inside window period: _grace_active stays False
     # ------------------------------------------------------------------
 
-    def test_no_grace_when_windows_recommended(self):
+    def test_pause_without_grace_inside_planned_window(self):
         """When suppression is active, handle_door_window_open must NOT start
         a grace period (since it never paused in the first place).
 
@@ -305,14 +314,14 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is False, "No pause should occur during the planned window period"
-        assert engine._grace_active is False, "No grace period should be started when window suppression is active"
+        assert engine._paused_by_door is True, "Issue #1211: the planned window period no longer suppresses the pause"
+        assert engine._grace_active is False, "A pause does not start a grace period"
 
     # ------------------------------------------------------------------
     # Test 5 — grace expiry with sensor open during window period: no re-pause
     # ------------------------------------------------------------------
 
-    def test_grace_expiry_no_repause_during_window_period(self):
+    def test_grace_expiry_repauses_during_window_period(self):
         """When grace expires and sensor is still open, _re_pause_for_open_sensor
         must NOT re-pause if _is_within_planned_window_period() is True.
 
@@ -370,18 +379,16 @@ class TestWindowsRecommendedPauseSuppression:
         # Grace should be cleared (callback ran to completion)
         assert engine._grace_active is False
 
-        # Must NOT have enqueued _re_pause_for_open_sensor
-        assert engine._paused_by_door is False, (
-            "_re_pause_for_open_sensor must be suppressed during a planned window period"
-        )
-        # _apply_current_scheduled_state is allowed (grace expiry convergence fix #230).
-        # What must NOT be called is _re_pause_for_open_sensor.
+        # Issue #1211 (A3): the re-pause IS enqueued inside the planned window period (it runs the nat-vent gate
+        # and pauses when it refuses); the planned window is no longer a grace-expiry exemption.
+        names = []
         for call_args in engine.hass.async_create_task.call_args_list:
             coro = call_args[0][0]
-            coro_name = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "")
-            assert "_re_pause_for_open_sensor" not in coro_name, (
-                "_re_pause_for_open_sensor must be suppressed during a planned window period"
-            )
+            names.append(getattr(coro, "__qualname__", "") or getattr(coro, "__name__", ""))
+            close = getattr(coro, "close", None)
+            if close:
+                close()  # never awaited here; avoid the "never awaited" warning
+        assert any("_re_pause_for_open_sensor" in n for n in names), names
 
     # ------------------------------------------------------------------
     # Test 6 — classification changes warm→hot: pause re-enabled
@@ -410,9 +417,11 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now_inside
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is False, (
-            "Part A: Should NOT pause on warm day inside window period when thermostat is 'cool'"
+        assert engine._paused_by_door is True, (
+            "Part A: Issue #1211 -- pauses on a warm day inside the window period when nat-vent is refused"
         )
+        engine._paused_by_door = False  # reset for part B
+        engine._pre_pause_mode = None
 
         # --- Part B: Hot day, suppression inactive ---
         hot_cls = _hot_day_classification()

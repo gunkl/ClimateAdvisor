@@ -168,7 +168,8 @@ class TestGraceExpiryTriggersRefreshCallback:
         refresh_mock.assert_called_once()
 
     def test_planned_window_path_calls_refresh_callback(self):
-        """Planned-window path: callback fires after clearing grace."""
+        """Issue #1211 (A3): the planned window is no longer a special expiry branch. Inside the period, with no
+        sensor open, grace expiry clears like any other (callback fires, no ``within_planned_window`` marker)."""
         engine = _minimal_engine()
         # A manual override's grace always protects it (Issue #1156 keys the expiry on that flag).
         engine._grace_protects_override = True
@@ -191,11 +192,8 @@ class TestGraceExpiryTriggersRefreshCallback:
             engine._on_grace_expired(source="manual", duration=1800, should_notify=False)
 
         refresh_mock.assert_called_once()
-        # Shadow-feed completion (door/window Step 3, #637): this was the one
-        # GRACE_TIMER_EXPIRED outcome that never emitted an event at all, leaving the
-        # shadow FSM's tracked state stale for this specific expiry outcome. Reuses
-        # the existing "grace_expired" event type with a distinguishing payload key.
-        assert ("grace_expired", {"source": "manual", "within_planned_window": True, "re_paused": False}) in events
+        assert ("grace_expired", {"source": "manual", "re_paused": False}) in events
+        assert not any(data.get("within_planned_window") for name, data in events if name == "grace_expired")
 
     def test_sensor_still_open_path_calls_refresh_callback(self):
         """Re-pause path (sensor still open): callback fires after clearing grace."""

@@ -42,7 +42,6 @@ from enum import Enum
 class DoorOpenResponse(Enum):
     ALREADY_PAUSED_NOOP = "already_paused_noop"
     GRACE_SUPPRESSED = "grace_suppressed"
-    PLANNED_WINDOW_NOOP = "planned_window_noop"
     NAT_VENT_ELIGIBLE = "nat_vent_eligible"
     PAUSE = "pause"
 
@@ -56,7 +55,6 @@ class DoorOpenResponseInputs:
     outdoor                 -> self._last_outdoor_temp
     comfort_cool            -> config comfort_cool
     nat_vent_delta          -> config CONF_NATURAL_VENT_DELTA
-    within_planned_window   -> self._is_within_planned_window_period()
     nat_vent_gate_entered   -> self._nat_vent_may_reactivate(..., hysteresis=0.0) —
                                 caller-resolved via nat_vent_gate.decide_nat_vent_gate()
     """
@@ -66,7 +64,6 @@ class DoorOpenResponseInputs:
     outdoor: float | None
     comfort_cool: float
     nat_vent_delta: float
-    within_planned_window: bool
     nat_vent_gate_entered: bool
 
 
@@ -80,8 +77,9 @@ def decide_door_open_response(inputs: DoorOpenResponseInputs) -> DoorOpenRespons
     # else (grace_active and gate entered): real reactivation gate says viable —
     # fall through to the same chain below, matching production's fallthrough.
 
-    if inputs.within_planned_window:
-        return DoorOpenResponse.PLANNED_WINDOW_NOOP
+    # Issue #1211 (A3): a window opened inside the planned window period is NOT exempt here any more.
+    # The nat-vent entry gate decides (start nat-vent when it passes, pause when it refuses); the
+    # planned window now only exempts the lazy ``_sync_paused_by_door_with_live_sensors`` reconcile.
 
     if inputs.nat_vent_gate_entered:
         return DoorOpenResponse.NAT_VENT_ELIGIBLE

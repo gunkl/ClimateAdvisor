@@ -49,7 +49,6 @@ async def _house_in_period(make_house, *, suppress_refresh: bool = True, **overr
     return house, engine
 
 
-@pytest.mark.xfail(strict=True, reason="Issue #1211: fixed by the A3 handler commit")
 async def test_window_in_period_starts_natvent_from_the_handler(make_house) -> None:
     house, engine = await _house_in_period(make_house)
     await house.open("window")
@@ -71,7 +70,6 @@ async def test_positive_control_with_refresh_allowed_natvent_also_starts(make_ho
     assert house.fan.is_on
 
 
-@pytest.mark.xfail(strict=True, reason="Issue #1211: fixed by the A3 handler commit")
 async def test_window_in_period_with_gate_refusing_pauses_in_the_handler(make_house) -> None:
     """Indoor 67 is below the 68 comfort floor, so nat-vent is refused: the handler pauses right there."""
     house, engine = await _house_in_period(make_house, initial_indoor_f=67.0)

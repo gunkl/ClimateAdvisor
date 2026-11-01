@@ -35,22 +35,6 @@
    }
   },
   {
-   "scenario": "warm_day_planned_window_no_pause",
-   "failing_assertions": [
-    1
-   ],
-   "first_difference": "a1@2026-07-15T08:00 expected classification_applied, real comfort_restored (morning_wakeup at 06:30:00)",
-   "evidence": "Same mechanism as cool_all_day_heat_all_day: engine-only scenario without wake_time config; real HA fires the default 06:30 wakeup, mapped to comfort_restored, so the 08:00 'last decision' is not the 06:01 classification.",
-   "occupant_view": "No occupant impact; the morning wake-up restore is intended behavior.",
-   "issue_or_justification": "Trigger divergence (daily schedule not modeled by an engine-only scenario).",
-   "class": "T",
-   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
-   "date": "2026-10-30",
-   "failing_outcomes": {
-    "1": "comfort_restored"
-   }
-  },
-  {
    "scenario": "issue-392-natvent-ceiling-oscillation",
    "failing_assertions": [
     2,

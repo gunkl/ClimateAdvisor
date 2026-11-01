@@ -1,15 +1,14 @@
 {
   "name": "mild_day_planned_window_no_pause",
-  "description": "Mild day with windows_recommended=True and planned window 10:00–17:00. Outdoor is cooler than indoor. Sensor opens at 12:00 (inside the window). The planned-window gate fires — production returns silently with no new event. The last observable decision at 12:00 remains classification_applied.",
+  "description": "Mild day with windows_recommended=True and planned window 10:00–17:00. Outdoor is cooler than indoor but no fan is configured. Sensor opens at 12:00 (inside the window). Issue #1211 (A3): the planned window is no longer an exemption in the handler — the nat-vent entry gate runs and, with no working fan, refuses, so the handler pauses right there (the HVAC was already off; the pause is recorded and the occupant notified).",
   "source": "synthetic",
   "issue": 229,
   "notes": [
-    "_handle_sensor_open() checks: paused? → grace? → _is_within_planned_window_period() → _apply_nat_vent_or_pause().",
-    "The planned-window gate at position 3 fires BEFORE nat-vent evaluation when within window.",
-    "When the gate fires, production simply returns — no event is emitted. The last visible decision",
-    "stays at classification_applied. This is correct: planned window tells CA to stay out of the way.",
-    "outdoor=65F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor < threshold — nat-vent conditions met,",
-    "but gate takes priority and the return happens before any event emission.",
+    "_handle_sensor_open() checks: paused? → grace? → nat-vent entry gate → pause. Issue #1211 (A3, owner decision O8b): the planned-window early return that used to sit before the gate is gone.",
+    "Before #1211 production returned silently inside the planned window and the pause (or the nat-vent start) happened only a refresh later, through the comfort-band guard. Now the handler decides.",
+    "outdoor=65F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor < threshold — the temperature gate passes, but no fan is configured (fan_mode defaults to disabled), so there is no working fan and nat-vent is refused; the handler pauses.",
+    "Nat-vent starting from the handler inside the period is covered by the pending scenario mild_day_planned_window_natvent_start_1211 (fan configured).",
+    "Name kept for the manifest; 'no_pause' describes the pre-#1211 behaviour (rename is an owner call).",
     "Covers Priority 6 mild_day_planned_window from plan abundant-mapping-clarke.md (C5×E1 cell)."
   ],
   "config": {
@@ -41,7 +40,7 @@
       "time": "2026-04-22T12:00:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens at 12:00 inside the 10:00–17:00 planned window — gate fires, production returns silently"
+      "note": "Window opens at 12:00 inside the 10:00–17:00 planned window — Issue #1211: the handler runs the nat-vent gate (refused: no fan) and pauses"
     }
   ],
   "assertions": [
@@ -52,14 +51,14 @@
     },
     {
       "at": "2026-04-22T12:00:00",
-      "expect": "classification_applied",
-      "reason": "sensor_open during planned window period — production _is_within_planned_window_period() returns True and handle_door_window_open() returns silently with no event emitted. No pause, no nat-vent event. Last observable decision remains classification_applied. CA stays hands-off during the occupant's planned window period."
+      "expect": "paused",
+      "reason": "sensor_open during the planned window period with no working fan: the nat-vent entry gate refuses and handle_door_window_open() pauses right there (Issue #1211 A3 / O8b). Before #1211 it returned silently and the pause waited for the next refresh."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Planned window gate suppresses sensor_open response on mild day — production returns silently, no event emitted",
-    "observed_behavior": "classification_applied (off, windows recommended) → sensor_open at 12:00 → no new event; last decision stays classification_applied",
-    "expected_behavior": "Sensor open inside planned window suppressed entirely; CA stays hands-off during window period"
+    "summary": "Window opened inside the planned period with no fan: the handler pauses itself (no refresh dependency)",
+    "observed_behavior": "classification_applied (off, windows recommended) → sensor_open at 12:00 → paused",
+    "expected_behavior": "A window left open past the debounce pauses the HVAC even inside the planned window when nat-vent cannot run (household rule 3)"
   }
 }

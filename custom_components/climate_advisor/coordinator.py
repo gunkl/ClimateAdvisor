@@ -1542,6 +1542,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _async_thermal_sample_tick(self, now: datetime) -> None:
         """Sample active thermal observations on the 5-min tick."""
         self._refresh_outdoor_temp()
+        # Issue #1211 (O4): the planned window period can end with the clock; nothing else fires then.
+        self._schedule_planned_window_exit_check()
         # Issue #1128: the household promises' heartbeat (a 45 minute rule cannot ride a 30 minute poll).
         self._tick_household_promises()
         # Issue #1033: health monitoring must never abort thermal sampling.
@@ -2887,6 +2889,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return True
         return False
 
+    def _schedule_planned_window_exit_check(self) -> None:
+        """Pause for a window left open when the planned window period ends (Issue #1211, owner decision O4).
+
+        The period ends silently (clock past ``window_close_time``/the ODE cutoff, or the flag cleared by the
+        live gate or a reclassification); the engine detects that edge and runs its pause-only reconcile.
+        Scheduled as a task because the callers are synchronous (the 5-minute tick, ``_apply_outdoor_temp``).
+        """
+        engine = getattr(self, "automation_engine", None)
+        if engine is None or engine.consume_planned_window_exit_edge() is not True:
+            return
+        self._spawn(self._async_planned_window_exit_sync())
+
+    async def _async_planned_window_exit_sync(self) -> None:
+        try:
+            await self.automation_engine.async_sync_after_planned_window_exit()
+        except Exception:
+            _LOGGER.warning("Planned-window exit reconcile failed; the next cycle retries", exc_info=True)
+
     def _apply_outdoor_windows_gate(self) -> None:
         """Gate windows_recommended against current outdoor temp (Issue #111).
 
@@ -2918,6 +2938,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 comfort_cool,
             )
             c.windows_recommended = False
+            self._schedule_planned_window_exit_check()
         elif outdoor < comfort_heat - _WINDOWS_EXTREME_COLD_MARGIN:
             _LOGGER.debug(
                 "windows_recommended → False: outdoor %.1f°F below extreme-cold threshold %.1f°F",
@@ -2925,6 +2946,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 comfort_heat - _WINDOWS_EXTREME_COLD_MARGIN,
             )
             c.windows_recommended = False
+            self._schedule_planned_window_exit_check()
 
     def _apply_outdoor_temp(self, value: float | None, *, record_history: bool) -> None:
         """Propagate a newly-read outdoor temperature to every downstream consumer.

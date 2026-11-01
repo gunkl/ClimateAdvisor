@@ -148,7 +148,6 @@ class OverrideGraceFsmInputs:
       target_setpoint_f         -> band.floor/ceiling from select_comfort_band() for
                                    classification's mode
       tolerance_f               -> OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
-      within_planned_window     -> self._is_within_planned_window_period()
       any_sensor_open            -> self._any_monitored_sensor_holding_open() (Issue #1181)
       grace_source               -> self._last_resume_source of the EXPIRING grace
                                     ("manual" | "automation")
@@ -176,7 +175,6 @@ class OverrideGraceFsmInputs:
     current_setpoint_f: float | None
     target_setpoint_f: float | None
     tolerance_f: float
-    within_planned_window: bool
     any_sensor_open: bool
     grace_source: str
     now: datetime
@@ -251,7 +249,6 @@ def _grace_expiry_outcome_str(inputs: OverrideGraceFsmInputs) -> str:
     )
     outcome = decide_grace_expiry_outcome(
         GraceExpiryInputs(
-            within_planned_window=inputs.within_planned_window,
             any_sensor_open=inputs.any_sensor_open,
             source=inputs.grace_source,
             override_matches_current_decision=override_matches,

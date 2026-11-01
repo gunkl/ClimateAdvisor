@@ -145,6 +145,12 @@ class FakeScheduler:
         """
         return sorted(e for e in self._heap if not e._cancelled)
 
+    def next_due(self) -> datetime | None:
+        """The earliest pending, non-cancelled deadline, or None (read-only; Issue #1179)."""
+        while self._heap and self._heap[0]._cancelled:
+            heapq.heappop(self._heap)  # a cancelled head is skipped by advance_to anyway
+        return self._heap[0].fire_at if self._heap else None
+
     def _schedule_daily(self, hour: int | None, minute: int | None, second: int | None, callback: Any) -> Any:
         """Fire ``callback`` when local time matches hour/minute/second, then reschedule +1 day.
 

@@ -33,7 +33,7 @@ from tools.sim_harness.promise_probe import PromiseProbe, PromiseReport
 from tools.sim_harness.session import make_session
 from tools.sim_harness.world import TICK_MIN, HouseParams, ToyHouse, Weather
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 # Calibrated default for the unit-tier smoke run (Issue #1128 I5): fixed master seeds (derandomized, so an
 # unrelated PR is never blocked by a newly lucky seed) x days.  ~0.43 s/day => ~45 s.  On the pre-fix #1073
 # tree P1 was found within 50 days on 5 of 5 master seeds (first hits at day index 0, 26, 28, 34, 48).
@@ -103,17 +103,48 @@ def _hhmm(minute_of_day: int) -> str:
 # Issue #1144: share of coordinator days that carry a whole-house fan, and the occupant orders drawn for it.
 WHF_DAY_RATE = 0.35
 WHF_ENTITY = "fan.whf"
-# Seconds of AC/fan overlap the generated-day mutex check tolerates: one toy-thermostat reporting interval.  The
-# toy house reports its equipment state on its own five-minute tick (and right after an exogenous event), so a
-# command CA sends from a timer between ticks (a grace expiry re-arming the fan and turning HVAC off) shows as
-# AC still running until the next tick.  Production thermostats report within seconds.
-WHF_P2_OVERLAP_S = float(TICK_MIN * 60)
+# Issue #1179: AC/fan overlap is judged at production's own tolerance (``AC_WHF_OVERLAP_TOLERANCE_S``, 30 s), not
+# at a toy-thermostat reporting interval.  The toy thermostat therefore reports its equipment state
+# ``REPORT_LAG_S`` after every timer deadline of the engine (see ``run_plan``): a real thermostat reports within
+# seconds, well inside the tolerance, and does not wait for the next five-minute tick.
+# Note: an overlap that starts on a scheduler deadline and ends on an external event can be measured up to
+# ``REPORT_LAG_S`` SHORT (the start is reported late); it is never measured long, so no false breach arises.
+REPORT_LAG_S = 5.0
 WHF_ORDERS = (
     "sealed_then_fan_on",  # every sensor closed, then the occupant switches the fan on
     "fan_on_then_sealed",  # the fan runs with a window open, then every sensor closes
     "fan_on_then_open_fast",  # sealed, fan on, a window opens within 10 s (one motion: must not be fought)
     "fan_on_then_open_late",  # sealed, fan on, a window opens 10-30 s later
 )
+# Issue #1179: occupant orders that put rule 2 (newest action wins) and the thermostat blower on the table.
+# Drawn from SEPARATE rolls after the original ones, so a seed that does not fire one keeps its original order.
+OCCUPANT_ORDERS = (
+    "fan_on_then_occupant_hvac_on",  # WHF: fan on, then the occupant turns the AC/heat on 1-25 min later
+    "fan_on_then_occupant_hvac_on_fast",  # WHF: AC running, fan on, the occupant presses HVAC 1-3 s after CA's stop
+    "hvac_on_then_fan_on",  # WHF: the AC is already running, then the occupant switches the fan on
+    "blower_press_hvac_fan",  # hvac_fan: the occupant presses the thermostat blower (tracked as a fan override)
+    "blower_press_whf_mode",  # whole_house_fan: the same press is NOT tracked (no override, no grace, no stop)
+)
+OCCUPANT_HVAC_RELATIVE_F = 3.0  # the occupant asks for a setpoint this far past the current reading
+OCCUPANT_ORDER_RATE = 0.5  # share of fan-hazard days that take an occupant order instead of an original one
+COMMAND_ONLY_RATE = 0.2  # share of whole-house-fan days whose fan reports no state (command only: "no crash")
+
+
+def _blower_events(
+    put: Any, t0: float, hvac_mode: str, lag_roll: float, record: dict[str, Any], *, with_hvac: bool = True
+) -> None:
+    """The occupant presses the thermostat's own blower on at ``t0`` and back to auto 20-90 min later.
+
+    The thermostat reports ``fan_mode: auto`` first (a real one always carries the attribute), so the press is a
+    change of it.  With ``with_hvac`` the AC/heat is switched on by the occupant first.
+    """
+    if with_hvac:
+        put(t0 - 2.0, "occupant_hvac_on", {"hvac_mode": hvac_mode})
+    put(t0 - 1.0, "blower", {"fan_mode": "auto"})
+    put(t0, "blower", {"fan_mode": "on"})
+    off_min = 20.0 + float(int(lag_roll * 70))
+    put(t0 + off_min, "blower", {"fan_mode": "auto"})
+    record["blower_off_after_min"] = off_min
 
 
 def _apply_whf_hazard(
@@ -124,85 +155,134 @@ def _apply_whf_hazard(
     order_roll: float,
     when_roll: float,
     lag_roll: float,
+    occupant_roll: float = 1.0,
+    occupant_pick_roll: float = 0.0,
+    occupant_lag_roll: float = 0.0,
+    occupant_mode_roll: float = 0.0,
+    command_only_roll: float = 1.0,
+    window_open_roll: float = 1.0,
 ) -> dict[str, Any]:
-    """Turn the day into a whole-house-fan day (mutates ``config`` and ``timed``); return what it replaced.
+    """Turn the day into a fan-hazard day (mutates ``config`` and ``timed``); return what it replaced.
 
     The fan is switched on by the occupant (HomeKit / wall switch: an external state change with no CA
-    context), in one of the ``WHF_ORDERS``.  The house always has at least one door/window sensor here:
-    with none, sealed-ness cannot be judged and the safety rule does not apply.
+    context), in one of the ``WHF_ORDERS`` or, Issue #1179, one of the ``OCCUPANT_ORDERS``.  A whole-house-fan day
+    always has at least one door/window sensor: with none, sealed-ness cannot be judged and the safety rule does
+    not apply.  ``mode_roll`` is still drawn by the caller but picks nothing any more: fan mode ``both`` is
+    unsupported (Issue #1175), so a whole-house-fan day is always ``whole_house_fan``.
     """
-    record = {
+    del mode_roll
+    # Issue #1179: judged at production's own tolerance (one definition).  Imported here, not at module level: the
+    # package needs the Home Assistant stubs that ``promise_probe`` installs, and import sorting would hoist it.
+    from custom_components.climate_advisor.const import AC_WHF_OVERLAP_TOLERANCE_S  # noqa: PLC0415
+
+    record: dict[str, Any] = {
         "pre_fan_mode": config["fan_mode"],
         "pre_sensors": list(config["door_window_sensors"]),
     }
-    config["fan_mode"] = "whole_house_fan" if mode_roll < 0.6 else "both"
+    added: list[list] = []
+
+    def put(minute: float, kind: str, args: dict[str, Any]) -> None:
+        timed.append((minute, kind, args))
+        added.append([minute, kind, args])
+
+    t0 = 120.0 + float(int(when_roll * (1200 - 120)))  # whole minute, 02:00 .. 20:00 into the day
+    hvac_mode = "cool" if occupant_mode_roll < 0.6 else "heat"
+    occupant_order = (
+        OCCUPANT_ORDERS[min(int(occupant_pick_roll * len(OCCUPANT_ORDERS)), len(OCCUPANT_ORDERS) - 1)]
+        if occupant_roll < OCCUPANT_ORDER_RATE
+        else None
+    )
+
+    if occupant_order == "blower_press_hvac_fan":
+        # a thermostat-blower day: no whole-house fan at all, so the fan mode is the other supported one
+        config["fan_mode"] = "hvac_fan"
+        record["order"] = occupant_order
+        record["hvac_mode"] = hvac_mode
+        _blower_events(put, t0, hvac_mode, occupant_lag_roll, record)
+        record["events"] = added
+        return record
+
+    config["fan_mode"] = "whole_house_fan"
     config["fan_entity"] = WHF_ENTITY
-    config["fan_state_feedback"] = True
-    config["promise_p2_min_overlap_s"] = WHF_P2_OVERLAP_S
+    config["fan_state_feedback"] = command_only_roll >= COMMAND_ONLY_RATE
+    config["promise_p2_min_overlap_s"] = AC_WHF_OVERLAP_TOLERANCE_S
+    record["command_only"] = not config["fan_state_feedback"]
     if not config["door_window_sensors"]:
         config["door_window_sensors"] = ["binary_sensor.door_window_1"]
     sensors = list(config["door_window_sensors"])
+    fan_on = {"entity": WHF_ENTITY, "state": "on"}
+
+    if occupant_order is not None:
+        record["order"] = occupant_order
+        record["hvac_mode"] = hvac_mode
+        put(0.0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "off"})
+        # Rule 1 stops a fan on a sealed house within seconds, which would mask rule 2 (the newest action wins), so
+        # most of the HVAC/fan days keep a window open for the whole episode; the blower press stays sealed (an open
+        # window would pause the HVAC by rule 3 and confound "the press did not suppress it").
+        window_open = occupant_order != "blower_press_whf_mode" and window_open_roll < 0.7
+        record["window_open"] = window_open
+        for entity in sensors:
+            put(t0 - 3.0, "sensor_open" if window_open and entity == sensors[0] else "sensor_close", {"entity": entity})
+        if window_open:
+            put(t0 + 45.0, "sensor_close", {"entity": sensors[0]})
+        if occupant_order == "fan_on_then_occupant_hvac_on":
+            put(t0, "external_fan_state_change", dict(fan_on))
+            lag_min = 1.0 + float(int(occupant_lag_roll * 25))  # 1 .. 25 min
+            put(t0 + lag_min, "occupant_hvac_on", {"hvac_mode": hvac_mode})
+            record["occupant_after_min"] = lag_min
+        elif occupant_order == "fan_on_then_occupant_hvac_on_fast":
+            put(t0 - 2.0, "occupant_hvac_on", {"hvac_mode": hvac_mode})  # the AC runs when the fan starts
+            put(t0, "external_fan_state_change", dict(fan_on))
+            lag_s = 1.0 + float(int(occupant_lag_roll * 3))  # 1 .. 3 s after CA's own suppression
+            put(t0 + lag_s / 60.0, "occupant_hvac_on", {"hvac_mode": hvac_mode})
+            record["occupant_after_s"] = lag_s
+        elif occupant_order == "hvac_on_then_fan_on":
+            put(t0 - 2.0, "occupant_hvac_on", {"hvac_mode": hvac_mode})
+            put(t0, "external_fan_state_change", dict(fan_on))
+        else:  # blower_press_whf_mode: the AC runs, then the thermostat's blower is pressed (not CA's fan)
+            _blower_events(put, t0, hvac_mode, occupant_lag_roll, record)
+        record["events"] = added
+        return record
+
     order = WHF_ORDERS[min(int(order_roll * len(WHF_ORDERS)), len(WHF_ORDERS) - 1)]
     record["order"] = order
-    t0 = 120.0 + float(int(when_roll * (1200 - 120)))  # whole minute, 02:00 .. 20:00 into the day
-
-    timed.append((0.0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "off"}))
+    put(0.0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "off"})
     if order == "fan_on_then_sealed":
-        timed.append((t0 - 1.0, "sensor_open", {"entity": sensors[0]}))
-        timed.append((t0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "on"}))
+        put(t0 - 1.0, "sensor_open", {"entity": sensors[0]})
+        put(t0, "external_fan_state_change", dict(fan_on))
         lag_min = 1.0 + float(int(lag_roll * 30))
         for entity in sensors:
-            timed.append((t0 + lag_min, "sensor_close", {"entity": entity}))
+            put(t0 + lag_min, "sensor_close", {"entity": entity})
         record["sealed_after_min"] = lag_min
+        record["events"] = added
         return record
     for entity in sensors:
-        timed.append((t0 - 1.0, "sensor_close", {"entity": entity}))
-    timed.append((t0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "on"}))
+        put(t0 - 1.0, "sensor_close", {"entity": entity})
+    put(t0, "external_fan_state_change", dict(fan_on))
     if order == "fan_on_then_open_fast":
         lag_s = 1.0 + float(int(lag_roll * 9))  # 1 .. 9 s
-        timed.append((t0 + lag_s / 60.0, "sensor_open", {"entity": sensors[0]}))
+        put(t0 + lag_s / 60.0, "sensor_open", {"entity": sensors[0]})
         record["window_open_after_s"] = lag_s
     elif order == "fan_on_then_open_late":
         lag_s = 10.0 + float(int(lag_roll * 20))  # 10 .. 29 s
-        timed.append((t0 + lag_s / 60.0, "sensor_open", {"entity": sensors[0]}))
+        put(t0 + lag_s / 60.0, "sensor_open", {"entity": sensors[0]})
         record["window_open_after_s"] = lag_s
+    record["events"] = added
     return record
 
 
 def strip_whf_hazard(plan_dict: dict) -> dict:
-    """Undo the whole-house-fan hazard in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digest)."""
+    """Undo the fan hazard in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digest)."""
     whf = plan_dict.pop("whf", None)
     if whf is None:
         return plan_dict
     plan_dict["config"]["fan_mode"] = whf["pre_fan_mode"]
     plan_dict["config"]["door_window_sensors"] = whf["pre_sensors"]
-    plan_dict["config"].pop("fan_entity", None)
-    plan_dict["config"].pop("fan_state_feedback", None)
-    plan_dict["config"].pop("promise_p2_min_overlap_s", None)
-    # the hazard's own events: the fan switches and the extra sensor events it appended
-    n_pre = len(whf["pre_sensors"])
-    plan_dict["timed"] = _strip_whf_events(plan_dict["timed"], whf, n_pre)
+    for key in ("fan_entity", "fan_state_feedback", "promise_p2_min_overlap_s"):
+        plan_dict["config"].pop(key, None)
+    for event in whf["events"]:  # the hazard recorded exactly the events it appended
+        plan_dict["timed"].remove(event)
     return plan_dict
-
-
-def _strip_whf_events(timed: list, whf: dict, n_pre: int) -> list:
-    """Remove exactly the events ``_apply_whf_hazard`` appended (they are the trailing ones by construction)."""
-    marker = [t for t in timed if t[1] == "external_fan_state_change"]
-    out = [t for t in timed if t[1] != "external_fan_state_change"]
-    order = whf["order"]
-    sensors = whf["pre_sensors"] or ["binary_sensor.door_window_1"]
-    drop: list = []
-    t_on = next(t[0] for t in marker if t[2]["state"] == "on")
-    if order == "fan_on_then_sealed":
-        drop.append([t_on - 1.0, "sensor_open", {"entity": sensors[0]}])
-        drop += [[t_on + whf["sealed_after_min"], "sensor_close", {"entity": e}] for e in sensors]
-    else:
-        drop += [[t_on - 1.0, "sensor_close", {"entity": e}] for e in sensors]
-        if "window_open_after_s" in whf:
-            drop.append([t_on + whf["window_open_after_s"] / 60.0, "sensor_open", {"entity": sensors[0]}])
-    for d in drop:
-        out.remove(d)
-    return out
 
 
 def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
@@ -323,6 +403,10 @@ def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
     # Issue #1144 whole-house-fan hazards: drawn LAST (after the hazards above) so every earlier draw of
     # every seed is unchanged.  A fixed number of draws is consumed whether or not the hazard fires.
     whf_roll, whf_mode_roll, whf_order_roll, whf_when_roll, whf_lag_roll = (rng.random() for _ in range(5))
+    # Issue #1179: occupant orders and command-only days, from further rolls drawn after the five above.
+    occ_roll, occ_pick_roll, occ_lag_roll, occ_mode_roll, cmd_only_roll, occ_open_roll = (
+        rng.random() for _ in range(6)
+    )
     whf: dict[str, Any] | None = None
     if use_coordinator and whf_roll < WHF_DAY_RATE:
         whf = _apply_whf_hazard(
@@ -332,6 +416,12 @@ def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
             order_roll=whf_order_roll,
             when_roll=whf_when_roll,
             lag_roll=whf_lag_roll,
+            occupant_roll=occ_roll,
+            occupant_pick_roll=occ_pick_roll,
+            occupant_lag_roll=occ_lag_roll,
+            occupant_mode_roll=occ_mode_roll,
+            command_only_roll=cmd_only_roll,
+            window_open_roll=occ_open_roll,
         )
     timed.sort(key=lambda x: x[0])
 
@@ -362,6 +452,10 @@ class RunRecord:
     report: PromiseReport
     seconds: float
     callback_errors: int = 0
+    # what production did on the day (Issue #1179): its event log and every climate/fan service call, with the
+    # engine's end-of-day state; lets a test assert on a decision, not only on a promise
+    event_log: list = field(default_factory=list)
+    action_log: list = field(default_factory=list)
 
     @property
     def hard(self):
@@ -508,6 +602,7 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
             return None if sp is None else _from_unit(sp, unit)
 
         indoor_down = [False]
+        blower_on = [False]  # the occupant pressed the thermostat's own blower on (Issue #1179)
 
         def report_indoor(t: datetime) -> None:
             if indoor_down[0]:
@@ -526,6 +621,8 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
             prev = house.running
             action = house.decide_action(view.mode, setpoint_f())
             house.coast(prev)
+            if blower_on[0] and action in ("off", "idle"):
+                action = "fan"  # equipment idle, blower running: what a real thermostat reports
             if action != last_action:
                 last_action = action
                 feed(
@@ -536,6 +633,23 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                         "hvac_action": action,
                     }
                 )
+
+        def advance(target: datetime) -> None:
+            """Advance to ``target``; on a fan-hazard day the thermostat reports shortly after each engine timer.
+
+            Issue #1179: a command CA sends from a timer between ticks (a grace expiry re-arming the fan and
+            turning HVAC off) is reported by a real thermostat within seconds, so the toy house reports
+            ``REPORT_LAG_S`` after each deadline instead of waiting for the next five-minute tick.
+            """
+            if plan.whf is not None:
+                aware = target.replace(tzinfo=UTC)
+                while True:
+                    due = session.scheduler.next_due()
+                    if due is None or due >= aware or due < session.now():
+                        break
+                    session.advance_to(due)
+                    report_action(min(due.replace(tzinfo=None) + timedelta(seconds=REPORT_LAG_S), target))
+            session.advance_to(target.replace(tzinfo=UTC))
 
         weather_now = [weather.outdoor_f(DAY0)]
         # The thermostat reports its equipment state from the first moment (a real one always does);
@@ -553,6 +667,7 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                 minute, kind, args = timed[ti]
                 ti += 1
                 et = DAY0 + timedelta(minutes=minute)
+                advance(et)
                 if kind in ("sensor_open", "sensor_close"):
                     (open_sensors.add if kind == "sensor_open" else open_sensors.discard)(args["entity"])
                     feed({"time": _iso(et), "type": kind, "entity": args["entity"]})
@@ -572,6 +687,40 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                             }
                         )
                         last_action = None  # re-report the equipment state after the poke
+                elif kind == "occupant_hvac_on":
+                    # the occupant asks for a setpoint past the current reading, so the equipment runs (Issue #1179)
+                    if plan.use_coordinator:
+                        shown = house.reported_f()
+                        sp = (
+                            shown - OCCUPANT_HVAC_RELATIVE_F
+                            if args["hvac_mode"] == "cool"
+                            else shown + OCCUPANT_HVAC_RELATIVE_F
+                        )
+                        feed(
+                            {
+                                "time": _iso(et),
+                                "type": "thermostat_state_changed",
+                                "hvac_mode": args["hvac_mode"],
+                                "temperature": _to_unit(sp, unit, fine=fine),
+                                "hvac_action": house.decide_action(args["hvac_mode"], sp) or "idle",
+                            }
+                        )
+                        last_action = None
+                elif kind == "blower":
+                    if plan.use_coordinator:
+                        blower_on[0] = args["fan_mode"] == "on"
+                        feed(
+                            {
+                                "time": _iso(et),
+                                "type": "thermostat_state_changed",
+                                "hvac_mode": view.mode or "off",
+                                "hvac_action": "fan"
+                                if blower_on[0] and not house.running
+                                else (house.running or "idle"),
+                                "thermostat_fan_mode": args["fan_mode"],
+                            }
+                        )
+                        last_action = None
                 elif kind == "automation_toggle":
                     feed({"time": _iso(et), "type": kind, "enabled": bool(args["enabled"])})
                 elif kind == "indoor_unreadable":
@@ -590,6 +739,7 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                     # otherwise reports it on the next five-minute tick, which would read as minutes of AC running
                     # beside the whole-house fan that the occupant never had (Issue #1144).
                     report_action(et)
+            advance(t)
             if plan.reclassify_every_min and (i * TICK_MIN) % plan.reclassify_every_min == 0:
                 feed(_classification_event(plan, t, house.reported_f()))
             weather_now[0] = weather.outdoor_f(t)
@@ -600,10 +750,11 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
         result = session.finish()
         report = result.promise_report if result.promise_report is not None else PromiseReport()
         errors = len(result.callback_errors)
+        event_log, action_log = list(result.event_log), list(result.action_log)
     finally:
         session.close()
     scenario["events"] = events
-    return RunRecord(plan, scenario, report, time.perf_counter() - t_wall, errors)
+    return RunRecord(plan, scenario, report, time.perf_counter() - t_wall, errors, event_log, action_log)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

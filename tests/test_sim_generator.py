@@ -13,6 +13,7 @@ here re-implements a promise.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import random
@@ -25,6 +26,7 @@ from tools.sim_harness.generator import (
     CI_SMOKE_DAYS,
     CI_SMOKE_SEEDS,
     DAYS_PER_MASTER,
+    OCCUPANT_ORDERS,
     SIM_HOURS,
     WHF_ORDERS,
     build_plan,
@@ -248,6 +250,83 @@ def test_run_plan_is_the_same_as_run_day() -> None:
 # ``override_respected`` hit is a failure.
 _UNTRIAGED_ON_HEAD: set[str] = set()
 
+
+_FAST_ORDER = "fan_on_then_occupant_hvac_on_fast"
+# Real #1203 hits (seeds 21000027, 21000052, 102000001, 102000030, 102000039) all read command_age_s == 44.0;
+# 60 s leaves one reporting interval of headroom and still excludes a slow-order or stale-command regression.
+_ECHO_MAX_COMMAND_AGE_S = 60.0
+
+
+@functools.lru_cache(maxsize=32)
+def _day_events(day_seed: int) -> tuple:
+    return tuple(run_day(day_seed).event_log)
+
+
+def _events_near(events, kind: str, ts, *, before_s: float = 1.0, after_s: float = 1.0) -> list:
+    return [e for e in events if e[0] == kind and -before_s <= (e[2] - ts).total_seconds() <= after_s]
+
+
+def _excused(hit, plan, events) -> str | None:
+    """Issue #1179 calibration: the production findings the new generated orders surfaced (#1203, #1204).
+
+    Matched on the MECHANISM the hit carries plus the day's own order / event log, never on a seed; every other
+    hit still fails the smoke run.  #1203 is a documented limitation (closed, accepted); #1204 is open - remove
+    its two branches when it lands (a fixed defect must not stay tolerated).
+    """
+    m = hit.mechanism or {}
+    whf = plan.whf or {}
+    if (
+        hit.promise == "ac_whf_mutex"
+        and whf.get("order") == _FAST_ORDER
+        and m.get("command_reason") == "natural ventilation"
+        and m.get("command_origin") == "ca"
+        and m.get("command_age_s") is not None
+        and m["command_age_s"] <= _ECHO_MAX_COMMAND_AGE_S
+        # production's echo guard is ``_is_recent_hvac_command(3.0)``: only a press strictly inside it is the echo
+        and (whf.get("occupant_after_s") or 99.0) < 3.0
+    ):
+        return (
+            "Documented limitation (closed #1203), rule 2: a press within ~3 s of CA's own suppression reads as an echo"
+        )
+    if hit.promise != "override_respected":
+        return None
+    if m.get("episode_end_reason") == "superseded_unreplaced":
+        # The journal does not record the replacing grace's trigger, so read it from the day's own event log: the
+        # cancellation at the hit must be followed at once by the fan_manual_override grace.
+        cancelled = [
+            e
+            for e in _events_near(events, "grace_cancelled", hit.ts)
+            if e[1].get("reason") == "superseded" and e[1].get("protects_override") is True
+        ]
+        replaced = [
+            e
+            for e in _events_near(events, "grace_started", hit.ts, before_s=0.0, after_s=5.0)
+            if e[1].get("trigger") == "fan_manual_override"
+        ]
+        if cancelled and replaced:
+            return "Issue #1204, P4 false positive: a fan press (blower or whole-house fan) replaces the setpoint grace"
+    if (
+        m.get("command_service") == "turn_off"
+        and m.get("command_target") == "fan"
+        and m.get("command_origin") == "ca"
+        and [
+            e
+            for e in _events_near(events, "nat_vent_manual_override_exit", hit.ts)
+            if e[1].get("source") == "override_detected"
+        ]
+        and _events_near(events, "override_detected", hit.ts)
+    ):
+        # The hit carries no end reason for this stop (episode_end_reason is None); the exit event is the evidence.
+        return "Issue #1204, P4 vs rule 2: the newer HVAC press stops the older fan override via the nat-vent exit path"
+    return None
+
+
+def _open_defect(day_seed: int, hit) -> str | None:
+    if hit.promise not in ("ac_whf_mutex", "override_respected"):
+        return None
+    return _excused(hit, build_plan(day_seed), _day_events(day_seed))
+
+
 # Nightly / epic-#1125 seeds that each broke ``override_respected`` before the "protect the occupant's manual
 # change" fixes (#1131 #1133 #1146 #1147 #1148); the issue named in each entry is the one the issue text
 # attributes it to, the rest are nightly seeds the family clears together.
@@ -285,7 +364,12 @@ def test_smoke_generated_days_keep_the_household_promises(master_seed: int) -> N
     """
     res = run_batch(master_seed, CI_SMOKE_DAYS)
     assert res.errors == [] and res.callback_error_days == []
-    broken = {k: [(d, h.detail) for d, h in v[:2]] for k, v in res.hits.items() if k not in _UNTRIAGED_ON_HEAD}
+    broken = {
+        k: [(d, h.detail) for d, h in v if _open_defect(d, h) is None][:2]
+        for k, v in res.hits.items()
+        if k not in _UNTRIAGED_ON_HEAD
+    }
+    broken = {k: v for k, v in broken.items() if v}
     assert not broken, f"a hard household promise broke on generated days (replay: --generate-day <seed>): {broken}"
 
 
@@ -559,15 +643,20 @@ def test_whf_days_are_drawn_at_the_set_rate_and_cover_every_order() -> None:
     plans = [build_plan(day_seed_of(21, i), "coordinator") for i in range(300)]
     whf = [p for p in plans if p.whf]
     assert 0.2 * len(plans) <= len(whf) <= 0.5 * len(plans)
-    assert {p.whf["order"] for p in whf} == set(WHF_ORDERS)
-    assert {p.config["fan_mode"] for p in whf} == {"whole_house_fan", "both"}
-    assert all(p.config["door_window_sensors"] and p.config["fan_state_feedback"] for p in whf)
+    assert {p.whf["order"] for p in whf} == set(WHF_ORDERS) | set(OCCUPANT_ORDERS)
+    # Issue #1179: fan mode "both" is unsupported (#1175); the only modes drawn are the two supported ones
+    assert {p.config["fan_mode"] for p in whf} == {"whole_house_fan", "hvac_fan"}
+    whf_mode = [p for p in whf if p.config["fan_mode"] == "whole_house_fan"]
+    assert all(p.config["door_window_sensors"] for p in whf_mode)
+    assert {p.config["fan_state_feedback"] for p in whf_mode} == {True, False}  # command-only days exist too
     # the engine-only profile has no fan-entity listener: never drawn there
     assert not [p for p in (build_plan(day_seed_of(21, i), "engine") for i in range(100)) if p.whf]
 
 
 def test_whf_order_timing_matches_the_order_name() -> None:
     for p in _whf_plans():
+        if p.whf["order"] not in WHF_ORDERS:
+            continue  # the occupant orders (Issue #1179) are timed in test_the_new_orders_are_timed_as_named
         on = next(m for m, k, a in p.timed if k == "external_fan_state_change" and a["state"] == "on")
         closes = [m for m, k, _ in p.timed if k == "sensor_close" and abs(m - (on - 1.0)) < 1e-9]
         opens_after = [m for m, k, _ in p.timed if k == "sensor_open" and 0.0 < m - on <= 0.5 + 1e-9]
@@ -604,3 +693,303 @@ def test_seed_7000031_fan_pressed_inside_the_restart_window_no_longer_overlaps_t
     rec = run_day(7000031)
     assert rec.plan.whf is not None
     assert [h for h in rec.report.hard if h.promise == "ac_whf_mutex"] == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+# Issue #1179: rule 2 (newest action wins), the thermostat blower, and judging at production's tolerance
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+_DAY0_TS = datetime(2026, 5, 12, 5, 0, tzinfo=UTC).timestamp()
+
+
+def _plans_for(order: str, *, n: int = 600, **match):
+    out = []
+    for p in (build_plan(day_seed_of(21, i), "coordinator") for i in range(n)):
+        if p.whf and p.whf["order"] == order and all(p.whf.get(k) == v for k, v in match.items()):
+            out.append(p)
+    return out
+
+
+def test_fan_mode_both_is_never_drawn_on_any_profile() -> None:
+    """Occupant: "both" is not a supported install (#1175); a day that exercised it reports non-defects."""
+    for profile in ("coordinator", "engine", "mixed"):
+        modes = {build_plan(day_seed_of(7, i), profile).config["fan_mode"] for i in range(400)}
+        assert "both" not in modes, profile
+
+
+def test_the_generated_mutex_is_judged_at_the_production_tolerance_not_a_tick() -> None:
+    import tools.sim_harness.generator as gen
+    from custom_components.climate_advisor.const import AC_WHF_OVERLAP_TOLERANCE_S
+
+    assert AC_WHF_OVERLAP_TOLERANCE_S == 30.0
+    assert not hasattr(gen, "WHF_P2_OVERLAP_S")  # the old five-minute copy of the number is gone
+    assert gen.REPORT_LAG_S < AC_WHF_OVERLAP_TOLERANCE_S  # a thermostat reports well inside the tolerance
+    whf_mode = [p for p in _whf_plans() if p.config["fan_mode"] == "whole_house_fan"]
+    assert whf_mode
+    assert {p.config["promise_p2_min_overlap_s"] for p in whf_mode} == {AC_WHF_OVERLAP_TOLERANCE_S}
+
+
+def test_the_new_orders_are_timed_as_named() -> None:
+    for order in OCCUPANT_ORDERS:
+        plans = _plans_for(order)
+        assert plans, order
+        for p in plans:
+            fan_on = [m for m, k, a in p.timed if k == "external_fan_state_change" and a["state"] == "on"]
+            presses = sorted(m for m, k, _ in p.timed if k == "occupant_hvac_on")
+            blower_on = [m for m, k, a in p.timed if k == "blower" and a["fan_mode"] == "on"]
+            if order == "fan_on_then_occupant_hvac_on":
+                assert len(fan_on) == 1 and len(presses) == 1 and 1.0 <= presses[0] - fan_on[0] <= 25.0
+            elif order == "fan_on_then_occupant_hvac_on_fast":
+                assert len(presses) == 2 and presses[0] < fan_on[0] < presses[1]
+                assert 0.0 < (presses[1] - fan_on[0]) * 60 <= 3.0 + 1e-6
+            elif order == "hvac_on_then_fan_on":
+                assert presses == [fan_on[0] - 2.0]
+            elif order == "blower_press_hvac_fan":
+                assert p.config["fan_mode"] == "hvac_fan" and not fan_on and len(blower_on) == 1
+            else:  # blower_press_whf_mode
+                assert p.config["fan_mode"] == "whole_house_fan" and not fan_on and len(blower_on) == 1
+                assert p.whf["window_open"] is False
+
+
+def _acts(rec, domain: str, service: str, **data) -> list:
+    return [
+        a
+        for a in rec.action_log
+        if a["domain"] == domain and a["service"] == service and all(a["data"].get(k) == v for k, v in data.items())
+    ]
+
+
+def test_an_occupant_hvac_press_after_the_fan_stops_the_fan_and_keeps_the_hvac() -> None:
+    p = _plans_for("fan_on_then_occupant_hvac_on", window_open=True, command_only=False)[0]
+    rec = run_plan(p)
+    assert rec.callback_errors == 0
+    assert not [h for h in rec.report.hard if h.promise == "ac_whf_mutex"], [h.detail for h in rec.report.hard]
+    press = next(m for m, k, _ in p.timed if k == "occupant_hvac_on")
+    t_press = _DAY0_TS + press * 60
+    stops = _acts(rec, "fan", "turn_off")
+    assert any(0 <= a["ts"].timestamp() - t_press <= 30.0 for a in stops), "the fan was not stopped within 30 s"
+
+
+def test_a_fan_pressed_while_the_ac_runs_suppresses_the_hvac() -> None:
+    p = _plans_for("hvac_on_then_fan_on", window_open=True, command_only=False)[0]
+    rec = run_plan(p)
+    assert rec.callback_errors == 0
+    assert not [h for h in rec.report.hard if h.promise == "ac_whf_mutex"], [h.detail for h in rec.report.hard]
+    assert any(e[0] == "whf_hvac_suppressed" for e in rec.event_log)
+    assert _acts(rec, "climate", "set_hvac_mode", hvac_mode="off")
+
+
+_FAST_PRESS_CLEAN_SEEDS = (21000038, 21000152)
+_FAST_PRESS_RACE_SEEDS = (21000027, 21000052, 21000080, 21000087)  # 4 of the first 6 drawn days break rule 2
+
+
+def _fast_press_day(day_seed: int):
+    p = build_plan(day_seed)
+    assert p.whf["order"] == "fan_on_then_occupant_hvac_on_fast" and p.whf["window_open"]
+    return p
+
+
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_CLEAN_SEEDS)
+def test_an_hvac_press_seconds_after_climate_advisors_own_suppression_is_the_newest_action(day_seed) -> None:
+    rec = run_plan(_fast_press_day(day_seed))
+    assert rec.callback_errors == 0
+    assert any(e[0] == "whf_hvac_suppressed" for e in rec.event_log)  # CA suppressed the AC when the fan started
+    assert not [h for h in rec.report.hard if h.promise == "ac_whf_mutex"], [h.detail for h in rec.report.hard]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "accepted limitation #1203; if this starts passing, the limitation is gone, so update the docs "
+        "(08-COMPUTATION-REFERENCE.md known-limitation note) and remove the excuse"
+    ),
+)
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_RACE_SEEDS)
+def test_known_limitation_hvac_press_seconds_after_suppression_leaves_ac_and_fan_running_together(day_seed) -> None:
+    rec = run_plan(_fast_press_day(day_seed))
+    assert not [h for h in rec.report.hard if h.promise == "ac_whf_mutex"]
+
+
+_P4_OPEN_DEFECT_SEEDS = (303000022, 102000023)  # nat-vent exit stops the older fan override; blower press
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issue #1204 (found by Issue #1179 calibration): override_respected (P4) reports Climate Advisor ending an "
+        "occupant's fan override when the stop is rule 2's newest-action-wins, or when a blower press replaces the "
+        "setpoint grace with the longer fan grace.  Remove this xfail and the two #1204 excuses when it is fixed."
+    ),
+)
+@pytest.mark.parametrize("day_seed", _P4_OPEN_DEFECT_SEEDS)
+def test_open_defect_1204_override_respected_false_positive(day_seed) -> None:
+    assert not [h for h in run_day(day_seed).report.hard if h.promise == "override_respected"]
+
+
+def _hits_of(day_seed: int, promise: str) -> list:
+    return [h for h in run_day(day_seed).report.hard if h.promise == promise]
+
+
+@pytest.mark.parametrize("day_seed", (21000027, 21000052))
+def test_the_1203_excuse_still_covers_the_real_hits(day_seed) -> None:
+    hits = _hits_of(day_seed, "ac_whf_mutex")
+    assert hits and all(_open_defect(day_seed, h) for h in hits)
+
+
+def test_the_1203_excuse_does_not_cover_a_slow_order_or_a_stale_command(mutex_enforcement_removed) -> None:
+
+    # a slow-order regression (rule 2 removed) must hit ac_whf_mutex and stay unexcused
+    plans = _plans_for("fan_on_then_occupant_hvac_on", window_open=True, command_only=False)[:3]
+    hits = [(p, h) for p in plans for h in run_plan(p).report.hard if h.promise == "ac_whf_mutex"]
+    assert hits
+    assert all(_excused(h, p, ()) is None for p, h in hits)
+
+
+def test_the_1203_excuse_needs_the_fast_order_and_a_fresh_command() -> None:
+    from types import SimpleNamespace
+
+    # the real fast-order mechanism with an old command, or under a slow order, is a different defect shape
+    plan = build_plan(21000027)
+    real = next(h for h in _hits_of(21000027, "ac_whf_mutex") if _excused(h, plan, ()) is not None)
+    assert _excused(real, plan, ()) is not None
+    assert (
+        _excused(
+            SimpleNamespace(promise=real.promise, ts=real.ts, mechanism={**real.mechanism, "command_age_s": 300.0}),
+            plan,
+            (),
+        )
+        is None
+    )
+    slow_plan = SimpleNamespace(whf={**plan.whf, "order": "fan_on_then_occupant_hvac_on"})
+    assert _excused(real, slow_plan, ()) is None
+
+
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_CLEAN_SEEDS)
+def test_the_1203_excuse_does_not_follow_a_widened_echo_guard(day_seed, monkeypatch) -> None:
+    """The clean seeds press at 3.0 s.  If production's echo guard (3 s) is widened to 5 s they start to break
+    rule 2; that regression must fail loudly, not be excused as the documented limitation."""
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    real = ClimateAdvisorCoordinator._is_recent_hvac_command
+    monkeypatch.setattr(
+        ClimateAdvisorCoordinator, "_is_recent_hvac_command", lambda self, threshold_seconds=3.0: real(self, 5.0)
+    )
+    plan = _fast_press_day(day_seed)
+    hits = [h for h in run_plan(plan).report.hard if h.promise == "ac_whf_mutex"]
+    assert hits, "a 5 s echo guard no longer breaks rule 2 on this seed; pick another clean seed"
+    assert all(_excused(h, plan, ()) is None for h in hits)
+
+
+def test_the_1204_excuses_still_cover_the_real_hits_and_nothing_broader() -> None:
+    from types import SimpleNamespace
+
+    for seed in (303000022, 102000023):
+        hits = _hits_of(seed, "override_respected")
+        assert hits and all("#1204" in (_open_defect(seed, h) or "") for h in hits)
+    plan = build_plan(102000023)
+    blower = _hits_of(102000023, "override_respected")[0]
+    events = list(_day_events(102000023))
+    assert _excused(blower, plan, events) is not None
+    # the same hit, but the replacing grace is some other grace: not the #1204 mechanism
+    other = [
+        (e[0], {**e[1], "trigger": "override_confirmed"} if e[0] == "grace_started" else e[1], e[2]) for e in events
+    ]
+    assert _excused(blower, plan, other) is None
+    assert _excused(blower, plan, []) is None
+    # a fan turn_off by CA on an override without the nat-vent manual-override exit is not excused
+    stop = _hits_of(303000022, "override_respected")[0]
+    stop_events = list(_day_events(303000022))
+    assert _excused(stop, build_plan(303000022), stop_events) is not None
+    no_exit = [e for e in stop_events if e[0] != "nat_vent_manual_override_exit"]
+    assert _excused(stop, build_plan(303000022), no_exit) is None
+    assert (
+        _excused(
+            SimpleNamespace(promise="override_respected", ts=stop.ts, mechanism=stop.mechanism),
+            build_plan(303000022),
+            no_exit,
+        )
+        is None
+    )
+
+
+def test_a_blower_press_under_whole_house_fan_is_not_a_fan_override_and_does_not_suppress_the_hvac() -> None:
+    """Owner decision 2026-11-01 (#1197): the thermostat's blower is the occupant's own equipment under WHF."""
+    p = _plans_for("blower_press_whf_mode")[0]
+    rec = run_plan(p)
+    assert rec.callback_errors == 0
+    press = next(m for m, k, a in p.timed if k == "blower" and a["fan_mode"] == "on")
+    lo, hi = _DAY0_TS + press * 60 - 5, _DAY0_TS + (press + p.whf["blower_off_after_min"]) * 60
+    events = [e for e in rec.event_log if lo <= e[2].timestamp() <= hi]  # while the blower is pressed on
+    kinds = [e[0] for e in events]
+    assert "fan_manual_override" not in kinds and "fan_activated" not in kinds
+    assert "grace_started" not in kinds  # no grace of any kind starts during the blower press
+    assert "whf_hvac_suppressed" not in kinds
+    during = [a for a in rec.action_log if a["ts"] is not None and lo <= a["ts"].timestamp() <= hi]
+    assert not [a for a in during if a["domain"] == "fan"]
+    assert not [a for a in during if a["service"] == "set_hvac_mode" and a["data"].get("hvac_mode") == "off"]
+
+
+def test_a_blower_press_under_hvac_fan_is_a_tracked_fan_override() -> None:
+    p = _plans_for("blower_press_hvac_fan")[0]
+    rec = run_plan(p)
+    assert rec.callback_errors == 0
+    overrides = [e for e in rec.event_log if e[0] == "fan_manual_override"]
+    assert overrides and overrides[0][1]["fan_device"] == "hvac_fan"
+    assert any(e[0] == "grace_started" and e[1].get("trigger") == "fan_manual_override" for e in rec.event_log)
+
+
+def test_command_only_whole_house_fan_days_run_without_a_crash() -> None:
+    """Owner decision: the fan reports no state, so P2/P9 are blind; the verdict is 'no crash, no stuck state'."""
+    for order in (*WHF_ORDERS, "fan_on_then_occupant_hvac_on", "hvac_on_then_fan_on"):
+        plans = _plans_for(order, command_only=True)
+        assert plans, order
+        rec = run_plan(plans[0])
+        assert rec.callback_errors == 0, order
+        assert "ac_whf_mutex" not in rec.found and "whf_sealed" not in rec.found, order
+
+
+@pytest.fixture()
+def mutex_enforcement_removed(monkeypatch):
+    """Test-only: Climate Advisor never stops the fan and never suppresses HVAC on the occupant's behalf.
+
+    Rule 2 (newest action wins) is kept by several paths (the safety enforcer, the manual-override handlers); removing
+    one leaves the others standing, so the mutation removes the two commands every path ends in.  Real code untouched.
+    """
+    from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
+
+    async def no_suppress(self, *args, **kwargs):
+        return None
+
+    async def no_stop(self, *args, **kwargs):
+        return FanCommandResult.EXECUTED
+
+    monkeypatch.setattr(AutomationEngine, "_suppress_hvac_for_whf", no_suppress)
+    monkeypatch.setattr(AutomationEngine, "_deactivate_fan", no_stop)
+
+
+@pytest.mark.parametrize(
+    "order", ["fan_on_then_occupant_hvac_on", "fan_on_then_occupant_hvac_on_fast", "hvac_on_then_fan_on"]
+)
+def test_the_rule_2_orders_catch_a_broken_newest_action_wins(order, mutex_enforcement_removed) -> None:
+    """Exercise (a): delete the behaviour from production and the day must fail ac_whf_mutex."""
+    if order == _FAST_ORDER:  # clean seeds: they do not already break the rule unmutated (see the race seeds)
+        plans = [_fast_press_day(s) for s in _FAST_PRESS_CLEAN_SEEDS]
+    else:
+        plans = _plans_for(order, window_open=True, command_only=False)[:3]
+    hits = []
+    for p in plans:
+        hits += [h for h in run_plan(p).report.hard if h.promise == "ac_whf_mutex"]
+    assert hits, f"{order}: removing rule 2 went unnoticed on every drawn day"
+
+
+def test_the_toy_thermostat_reports_within_seconds_so_the_30_second_tolerance_is_meaningful(monkeypatch) -> None:
+    """Exercise (a) for the harness: a thermostat that reports two minutes late looks like a rule-2 breach.
+
+    Seed 21000228 (hvac_on_then_fan_on) is clean when the toy thermostat reports 5 s after Climate Advisor's
+    command and breaks ac_whf_mutex when it reports 120 s after -- proof that the 30 s judgement is real and that
+    the old five-minute reporting cadence could not have separated the two.
+    """
+    import tools.sim_harness.generator as gen
+
+    assert run_day(21000228).found == []
+    monkeypatch.setattr(gen, "REPORT_LAG_S", 120.0)
+    assert "ac_whf_mutex" in run_day(21000228).found

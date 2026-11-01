@@ -527,7 +527,7 @@ def read_cards(session: Any) -> list[str]:
     return problems
 
 
-def read_fan_cards(session: Any) -> list[str]:
+def read_fan_cards(session: Any) -> list[str] | None:
     """The three fan cards must agree with the physical fan (ground truth wins, design section 8).
 
     Skips the 30 s settling window after CA's own fan command.  Returns problem sentences.
@@ -545,6 +545,18 @@ def read_fan_cards(session: Any) -> list[str]:
         if a.get("domain") in ("fan", "switch") and ts is not None and now - ts < timedelta(seconds=60):
             return []
     physically_on = str(st.state).lower() == "on"
+    # Accepted blind spot (#361 decision 8, Issue #1179: the generator now draws command-only days): with no state
+    # feedback CA has no reading of the fan, and with none of its own flags set it has no record of starting it
+    # either, so its cards honestly say "inactive".  That is not a card defect; the reader does not flag it and
+    # reports the sample as skipped (None) so the coverage count shows the loss.  Every other command-only
+    # sample (CA commanded the fan, a session or override is recorded) is still checked.
+    ae = coord.automation_engine
+    if (
+        not bool(coord.config.get("fan_state_feedback", False))
+        and physically_on
+        and not any(getattr(ae, f, False) for f in ("_fan_active", "_fan_override_active", "_natural_vent_active"))
+    ):
+        return None
     problems: list[str] = []
     try:
         whf = coord._compute_whf_status()
@@ -739,9 +751,11 @@ class SurfaceProbe(PromiseProbe):
         for problem in read_cards(s):
             self._record("cards", label, now, problem, armed, Shown("cards"))
         self.compared["cards"] = self.compared.get("cards", 0) + 1
-        for problem in read_fan_cards(s):
+        fan_problems = read_fan_cards(s)
+        for problem in fan_problems or ():
             self._record("fan_cards", label, now, problem, armed, Shown("fan_cards"))
-        self.compared["fan_cards"] = self.compared.get("fan_cards", 0) + 1
+        if fan_problems is not None:  # None = the accepted command-only blind spot, not compared
+            self.compared["fan_cards"] = self.compared.get("fan_cards", 0) + 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

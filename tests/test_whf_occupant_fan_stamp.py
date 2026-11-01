@@ -38,8 +38,9 @@ def test_occupant_fan_on_during_coalescing_is_stamped_at_the_physical_on_time():
     assert _stamp(_coord()) == NOW - timedelta(seconds=20)
 
 
-def test_outside_coalescing_the_override_stamp_is_authoritative():
-    assert _stamp(_coord(coalescing=False)) is None
+def test_the_stamp_also_applies_outside_coalescing_when_event_detection_was_skipped():
+    """Issue #1168: another fan override made the listener ignore the WHF ON; the state backstop still dates it."""
+    assert _stamp(_coord(coalescing=False)) == NOW - timedelta(seconds=20)
 
 
 def test_a_fan_climate_advisor_owns_is_never_an_occupant_action():
@@ -216,3 +217,110 @@ class TestSafetyTickBody:
             coord = self._coord(fan_mode=mode, fan_on=on)
             coord._body()
             coord._request_whf_safety_check.assert_not_called()
+
+
+def _both_mode_scenario(*, window_open, events):
+    """Both mode: the occupant sets cool (a protected change), then the thermostat blower On (a fan override whose
+    15 min grace is still running when ``events`` fire at 14:22). ``window_open`` opens the window at 14:15."""
+    return {
+        "name": "both_mode_blower_then_whf",
+        "use_coordinator": True,
+        "skip_startup_coalesce": True,
+        "config": {
+            "comfort_heat": 68,
+            "comfort_cool": 74,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "fan_mode": "both",
+            "fan_entity": "fan.whf",
+            "fan_state_feedback": True,
+            "door_window_sensors": ["binary_sensor.window"],
+        },
+        "events": [
+            _event("14:00:00", type="external_fan_state_change", entity="fan.whf", state="off"),
+            _event("14:00:01", type="sensor_close", entity="binary_sensor.window"),
+            _event("14:00:05", type="temp_update", indoor_f=78.0, outdoor_f=85.0),
+            _event(
+                "14:00:10",
+                type="classification",
+                day_type="hot",
+                hvac_mode="cool",
+                windows_recommended=False,
+                today_high=95,
+                today_low=70,
+                tomorrow_high=95,
+                tomorrow_low=70,
+                trend_direction="stable",
+                trend_magnitude=0,
+                setback_modifier=0,
+            ),
+            _event("14:02:00", type="thermostat_state_changed", hvac_mode="cool", hvac_action="cooling"),
+            _event(
+                "14:10:00",
+                type="thermostat_state_changed",
+                hvac_mode="cool",
+                hvac_action="cooling",
+                thermostat_fan_mode="on",
+            ),
+            *([_event("14:15:00", type="sensor_open", entity="binary_sensor.window")] if window_open else []),
+            *events,
+        ],
+    }
+
+
+def _acts(scenario):
+    import logging
+
+    from tools.sim_harness.session import drive_scenario, make_session
+
+    logging.disable(logging.CRITICAL)
+    try:
+        session = make_session(scenario, engine="fakehass", use_coordinator=True)
+        try:
+            drive_scenario(session, scenario)
+            engine = session.engine
+            acts = [
+                (str(a["ts"])[11:19], a["domain"], a["service"], a["data"].get("hvac_mode"))
+                for a in session.fake_hass.action_log
+            ]
+            return acts, engine._fan_override_active, engine._whf_press_time
+        finally:
+            session.close()
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_issue_1168_a_whf_pressed_after_a_blower_override_still_suppresses_hvac():
+    """Both mode, window open, the blower is switched On (a fan override), AC cooling, then the WHF turns on.
+
+    The listener ignores the WHF ON while any fan override is active (#1168, out of scope); the state backstop must
+    still make the newer WHF win: HVAC is suppressed within the 30 s bound and the fan keeps running.
+    """
+    scenario = _both_mode_scenario(
+        window_open=True,
+        events=[
+            _event("14:22:00", type="external_fan_state_change", entity="fan.whf", state="on"),
+            _event("14:23:00", type="temp_update", indoor_f=78.0, outdoor_f=85.0),
+        ],
+    )
+    acts, override, press = _acts(scenario)
+    assert override is True and press is None, (
+        "setup: a blower override is active and the listener recorded no WHF press"
+    )
+    late = [a for a in acts if a[0] >= "14:22:00"]
+    assert any(a[2] == "set_hvac_mode" and a[3] == "off" and a[0] <= "14:22:30" for a in late), late
+    assert not any(a[1] == "fan" and a[2] == "turn_off" for a in late), "the newer WHF press must keep running"
+
+
+def test_issue_1169_a_whf_running_on_a_sealed_house_is_stopped_even_with_a_blower_override_active():
+    """Rule 1 holds through physical state: sealed house, blower override active, the WHF turns on and stays on."""
+    scenario = _both_mode_scenario(
+        window_open=False,
+        events=[
+            _event("14:22:00", type="external_fan_state_change", entity="fan.whf", state="on"),
+            _event("14:23:00", type="temp_update", indoor_f=78.0, outdoor_f=85.0),
+        ],
+    )
+    acts, _override, _press = _acts(scenario)
+    stops = [a for a in acts if a[1] == "fan" and a[2] == "turn_off" and a[0] >= "14:22:00"]
+    assert stops and stops[0][0] <= "14:22:30", f"the sealed-house WHF was not stopped within the bound: {acts}"

@@ -1427,17 +1427,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _occupant_fan_on_at_from_ground_truth(self, fan_on: bool | None, fan_on_for_s: float | None) -> datetime | None:
         """When the occupant turned the whole-house fan on, from its physical on-time (Issue #1144).
 
-        Fan-override detection is suppressed while startup coalescing is active (Issue #491), so an
-        occupant who switches the fan on in the first minutes after a restart leaves no override stamp and
-        the enforcer's newest-action-wins rule 2 could not see the fan-on as newer than the AC (seed 7000031:
-        5 minutes of AC beside the fan). Outside coalescing the override stamp is authoritative and this
-        returns None. Climate Advisor's own fan activity never counts (owner decision 7): a CA-owned fan
+        Event-based fan-override detection can be skipped -- startup coalescing (Issue #491, seed 7000031: 5
+        minutes of AC beside the fan) or another fan override already active (Issue #1168: a blower override
+        under ``both`` makes the fan listener ignore the WHF turning on) -- and then no WHF-press stamp exists, so
+        the enforcer's newest-action-wins rule 2 could not see the fan-on as newer than the AC. This ground-truth
+        stamp is the state-based backstop for every such case; the engine prefers its own press stamp when it has
+        one. Climate Advisor's own fan activity never counts (owner decision 7): a CA-owned fan
         (``_fan_active`` / nat-vent) or an on-transition within ``WHF_OWN_COMMAND_ECHO_S`` of CA's last real
         fan command is not an occupant action. A fan that was already on when Home Assistant started has no
         transition to date, so it yields no stamp.
         """
         ae = self.automation_engine
-        if not getattr(self, "_startup_coalesce_active", False) or ae is None:
+        if ae is None:
             return None
         if fan_on is not True or fan_on_for_s is None or ae._fan_active or ae._natural_vent_active:
             return None

@@ -825,7 +825,9 @@ class TestFullNatVentCycle:
 
         # Step 1: 18:00 — sensor opens, outdoor 70F < indoor 76F → nat_vent activates
         engine._last_outdoor_temp = 70.0
-        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+        # the (now real) fan command stamps its toggle time from the clock: keep every step on one fake clock
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 18, 0, 0)):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
         assert engine._natural_vent_active is True
         assert engine._paused_by_door is False
 

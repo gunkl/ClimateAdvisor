@@ -117,23 +117,6 @@
    "failing_outcomes": {
     "0": "classification_applied"
    }
-  },
-  {
-   "scenario": "ceiling_guard_fires_when_outdoor_stays_below_indoor",
-   "failing_assertions": [
-    -2
-   ],
-   "first_difference": "both assertions pass; after unload a 10 s timer 'AutomationEngine._set_temperature_impl.<locals>._schedule_check' is still armed (HA verify_cleanup: Lingering timer)",
-   "evidence": "At 15:30 one apply_classification pass calls _set_temperature twice (daily classification 74F, then ODE ceiling guard 74F) within the same instant. automation.py:4792 does self._setpoint_retry_cancel = async_call_later(hass, 10, _schedule_check) without cancelling the previous handle, so the first handle is orphaned and cleanup() (automation.py:15134) cancels only the last. Sibling sites with the same overwrite-without-cancel shape: automation.py:4766 and :4779 (same field), :13299 (_fan_on_verify_cancel) and :14436 (_fan_off_verify_cancel); the correct pattern already exists at :4251 (_mode_align_recheck_cancel).",
-   "occupant_view": "After the person saves settings or HA reloads the zone, a stale copy of the setpoint check can still wake up about 10 s later (the Issue #1102 ghost-timer class). The shutdown latch refuses any new command, so the visible effect is a late setpoint check and log noise, not a wrong thermostat command; confirmed only for the 10 s timer here.",
-   "issue_or_justification": "New finding, no issue filed yet (production code is out of scope for this step). Replay: python scripts/test.py ha tests_ha/test_goldens_realha.py -k ceiling_guard_fires_when_outdoor_stays_below_indoor. Remove this entry when the overwrite sites cancel the prior handle.",
-   "class": "P",
-   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
-   "date": "2026-10-30",
-   "issue": 1135,
-   "failing_outcomes": {
-    "-2": "timer:_run_async_call_action"
-   }
   }
  ]
 }

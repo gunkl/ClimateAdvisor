@@ -286,6 +286,7 @@ def _transition_from_no_grace(
             manual_override_active=inputs.manual_override_active,
             fan_override_active=inputs.fan_override_active,
             grace_active=False,
+            confirm_pending=current_state[0] == OverrideConfirmState.PENDING,
         )
         next_state = (
             current_state if outcome == OverrideCancelOutcome.NOOP else (OverrideConfirmState.IDLE, GraceState.NONE)
@@ -350,7 +351,9 @@ def _transition_from_grace_unprotected(
 
     if kind == OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED:
         outcome_str = _grace_expiry_outcome_str(inputs)
-        next_state = (OverrideConfirmState.IDLE, GraceState.NONE)
+        # Issue #1156: this grace is not the occupant's own, so its expiry ends the grace only; a change
+        # still inside its confirmation window keeps waiting (the protecting-grace branch clears it).
+        next_state = (confirm, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome_str, inputs.now)
 
     if kind == OverrideGraceFsmEventKind.OVERRIDE_DETECTED:

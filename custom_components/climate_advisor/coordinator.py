@@ -514,13 +514,6 @@ def _prune_event_log(event_log: list[dict], now: datetime) -> list[dict]:
     return pruned
 
 
-# Issue #1152: the coordinator's third copy of the override/grace FSM -- a diagnostic tracker
-# (``_override_grace_fsm_state``) fed by ``_evaluate_override_grace_fsm()`` from ~15 call sites,
-# keyed by ``_OVERRIDE_GRACE_FSM_EVENT_KINDS`` / ``_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP`` -- was
-# deleted. Nothing in production ever read the tracker (one test did), and its input builder
-# carried the same stale-confirm-source defect as the engine's (Issue #1146). The engine's
-# ``_resolve_override_grace_fsm_state()`` is the sole override/grace FSM dispatch.
-
 # Issue #757 Phase 6 Step 4: _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES (Issue #647) and
 # _DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES (Issue #668) were removed here — both
 # fed only the now-deleted door/window shadow-comparison axes via

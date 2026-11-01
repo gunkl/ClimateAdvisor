@@ -866,7 +866,7 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
             # Issue #1095: snapshot before cancel_override() clears the flags — a grace with no
             # override behind it (e.g. fan_off) is ended by this same call, but "Override
             # cancelled" would misdescribe it.
-            had_override = bool(ae._manual_change_protected() or ae._fan_override_active)
+            had_override = ae._occupant_override_active()
             cancelled = ae.cancel_override(reason="user_cancel_override")
             if not cancelled:
                 return self.json({"status": "ok", "message": "No active override or grace period to cancel"})

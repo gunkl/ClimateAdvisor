@@ -257,7 +257,13 @@ def unprotected_grace_expiry_keeps_pending(
     (``manual_override_active``) and a grace that is not the occupant's own. With a confirmed override
     behind it, that grace expiring ends the override, so a second pending change is cleared with it
     (timer included); keeping it would leave a pending change with no confirmation timer.
-    The engine's expiry branch and this FSM both call this, so they cannot disagree.
+    The engine's expiry branch and both FSM expiry branches call this, so they cannot disagree.
+
+    ``grace_protects_override`` stands for "this grace is the occupant's own thermostat grace". A
+    whole-house-fan override grace also sets ``_grace_protects_override`` without being the occupant's
+    thermostat change; a caller that can tell them apart (e.g. by ``_last_grace_trigger``) passes the
+    narrower fact here -- engine call site (``_on_grace_expired``) and the FSM input builder are the only
+    two places to feed it -- and a pending change then survives a fan grace expiring.
     """
     return confirm_pending and not manual_override_active and not grace_protects_override
 
@@ -326,7 +332,14 @@ def _transition_from_grace_protecting(
 
     if kind == OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED:
         outcome_str = _grace_expiry_outcome_str(inputs)
-        next_state = (OverrideConfirmState.IDLE, GraceState.NONE)
+        # Same shared rule as the unprotected branch (and the engine's ``_on_grace_expired()``). Today
+        # every protecting grace counts as the occupant's own, so a pending change is cleared with it.
+        keep = unprotected_grace_expiry_keeps_pending(
+            confirm_pending=current_state[0] == OverrideConfirmState.PENDING,
+            manual_override_active=inputs.manual_override_active,
+            grace_protects_override=True,
+        )
+        next_state = (current_state[0] if keep else OverrideConfirmState.IDLE, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome_str, inputs.now)
 
     if kind == OverrideGraceFsmEventKind.OVERRIDE_SUPERSEDED:

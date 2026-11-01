@@ -124,6 +124,13 @@ class TestFromNoGrace:
         assert t.outcome == "noop"
         assert not t.changed
 
+    def test_override_cancelled_from_pending_clears_the_confirmation(self):
+        """Issue #1154: Cancel Override ends a change still inside its confirmation window."""
+        t = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.OVERRIDE_CANCELLED))
+        assert t.to_state == _IDLE_NONE
+        assert t.outcome == "had_pending_only"
+        assert t.changed
+
     def test_override_cancelled_had_manual_clears(self):
         t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.OVERRIDE_CANCELLED, manual_override_active=True))
         assert t.to_state == _IDLE_NONE
@@ -239,6 +246,24 @@ class TestFromGraceUnprotected:
         t = transition(_IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED))
         assert t.to_state == _IDLE_NONE
         assert t.outcome == "clear_normal"
+
+    def test_unprotected_grace_expiring_keeps_a_pending_confirmation(self):
+        """Issue #1156: a grace that is not the occupant's own ends alone; the pending change keeps waiting."""
+        t = transition(_PENDING_UNPROTECTED, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED))
+        assert t.to_state == _PENDING_NONE
+
+    def test_unprotected_grace_expiring_clears_a_second_pending_change_behind_a_confirmed_override(self):
+        """The engine clears the confirm timer here, so the FSM must not keep the flag (no timerless pending)."""
+        t = transition(
+            _PENDING_UNPROTECTED,
+            _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED, manual_override_active=True),
+        )
+        assert t.to_state == _IDLE_NONE
+
+    def test_protecting_grace_expiring_still_clears_a_pending_confirmation(self):
+        """Control: the occupant's own grace expiring is unchanged by #1156."""
+        t = transition(_PENDING_PROTECTING, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED))
+        assert t.to_state == _IDLE_NONE
 
     def test_override_detected_confirm_enabled_lands_pending(self):
         t = transition(_IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.OVERRIDE_DETECTED, confirm_seconds=600.0))

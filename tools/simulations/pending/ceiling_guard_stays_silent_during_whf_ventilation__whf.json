@@ -1,0 +1,119 @@
+{
+  "name": "ceiling_guard_stays_silent_during_whf_ventilation__whf",
+  "description": "[whole-house-fan twin of golden 'ceiling_guard_fires_when_outdoor_stays_below_indoor'; Issue #1193] Whole-house fan install: windows open, fan running, outdoor (68F) stays below indoor all afternoon but sun/internal gains push indoor to 76F, 2F over comfort_cool 74F. Owner decision 2026-11-01 (Issue #392 design confirmed): during WHF ventilation the ceiling guard must NOT escalate to air conditioning -- rule 2 (fan and HVAC never together) and rule 3 (no cooling with a window open). The fan keeps running and HVAC stays off. This replaces the hvac_fan 'guard fires AC' expectation, which is not created because it violates rule 3 (tracked in #1142).",
+  "source": "Issue #1193: whole-house-fan twin of golden 'ceiling_guard_fires_when_outdoor_stays_below_indoor' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 247,
+  "notes": [
+    "Occupant experience this guards: on a mild/warm day CA opened the windows, the afternoon sun warmed the",
+    "house faster than the breeze cooled it, indoor sat at 76F (2F over the 74F ceiling) for hours, and the AC",
+    "never ran. This scenario fails on pre-fix code (ceiling guard goes dormant whenever outdoor<=indoor) and",
+    "passes once the dormancy requires outdoor<=indoor AND nat_vent_active AND indoor<=ceiling.",
+    "Distinct from warm_day_ceiling_breach_ac_defense (#136), where outdoor RISES above indoor and the guard",
+    "already fired correctly — that scenario masked the omission because its breach path crosses outdoor>indoor.",
+    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together).",
+    "The hvac_fan mirror of this behaviour is NOT created: hvac_fan escalation to AC with windows open is the known rule-3 violation tracked in #1142 (D4/D7)."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "With a whole-house fan running and outdoor below indoor, indoor above comfort_cool does not make the ceiling guard escalate to AC; the fan session continues and HVAC is never commanded to cool",
+    "observed_behavior": "Production (v0.8.22): no ceiling_guard_fired / nat_vent_ceiling_escalation event at 15:30; fan stays on; last HVAC command is off",
+    "expected_behavior": "Fan keeps running, AC is not started while the house is ventilated with windows open (Issue #392: for a WHF the guard has no ceiling term; switching to AC while outdoor < indoor caused an off/cool/off oscillation every ~5 minutes)"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Warm-day classification: HVAC off. Indoor will be checked for nat-vent eligibility on sensor open.",
+      "today_high": 80,
+      "today_low": 66,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
+    },
+    {
+      "time": "2026-07-10T14:01:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 68.0,
+      "note": "Early afternoon: outdoor 68F below indoor 72F, indoor > comfort_heat 70F — nat-vent eligible."
+    },
+    {
+      "time": "2026-07-10T14:02:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "User opens window per recommendation: outdoor 68F < indoor 72F, indoor > comfort_heat 70F, outdoor <= threshold 77F — nat-vent activates."
+    },
+    {
+      "time": "2026-07-10T15:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "90 min later: outdoor STILL 68F (below indoor) but solar/internal gains drove indoor to 76F — 2F above comfort_cool=74F. ODE predicts indoor stays above the ceiling under continued nat-vent. Free cooling is losing; guard must escalate to AC.",
+      "predicted_indoor": [
+        {
+          "ts": "2026-07-10T15:30:00",
+          "temp": 76.0
+        },
+        {
+          "ts": "2026-07-10T16:30:00",
+          "temp": 76.8
+        },
+        {
+          "ts": "2026-07-10T17:30:00",
+          "temp": 77.2
+        }
+      ]
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T14:02:00",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "reason": "sensor_open: outdoor 68F < indoor 72F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F -- the whole-house fan starts and nat-vent activates (HVAC suppressed for the fan session)."
+    },
+    {
+      "at": "2026-07-10T15:30:00",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "reason": "Indoor 76F is 2F over comfort_cool 74F but outdoor is still 68F: the whole-house fan is still removing heat, so the decision stays natural_ventilation. An AC escalation would instead surface as ceiling_guard_fires_cool (the hvac_fan expectation), which Issue #392 and rules 2/3 forbid while the fan runs with windows open."
+    },
+    {
+      "at": "2026-07-10T15:30:00",
+      "expect": "nat_vent_still_active",
+      "track": "logic",
+      "reason": "The ceiling guard must not clear the whole-house-fan session (it would on an hvac_fan install); the session is still active at the end of the scenario (final-state check)."
+    },
+    {
+      "at": "2026-07-10T15:30:00",
+      "expect": "hvac_mode_never_commanded",
+      "since": "2026-07-10T14:02:00",
+      "forbidden_modes": [
+        "cool",
+        "heat"
+      ],
+      "track": "logic",
+      "reason": "Rule 2/3 guarantee: from the moment the fan starts (14:02) to the end of the run no climate command may select cool or heat -- the compressor never runs against the fan or an open window."
+    }
+  ],
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "confidence_k_hvac": "high",
+    "k_passive": -0.15,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  },
+  "issue_followup": 1193
+}

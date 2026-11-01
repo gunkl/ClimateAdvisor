@@ -1,6 +1,6 @@
 {
   "name": "guest_mode_maintains_comfort",
-  "description": "Warm day with occupancy=guest. Classification applies comfort setpoints (not away setback). Sensor open triggers pause (guest mode does not suppress pausing). Verifies guest mode runs automation normally without away-mode setback.",
+  "description": "Warm day with occupancy=guest. Guest collapses to home inside the engine (handle_occupancy_home), so this tests that an occupied home gets the comfort band, not the away setback. Sensor open triggers pause (guest mode does not suppress pausing). Verifies guest mode runs automation normally without away-mode setback.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -31,8 +31,7 @@
       "time": "2026-07-15T09:01:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
-      "note": "Warm-day classification with guest at home — should apply comfort_cool=74F (not setback)"
+      "note": "Warm-day classification with guest at home (hvac_mode left to classifier.py) — occupied, so the comfort band (ceiling comfort_cool=74F) is armed, not setback"
     },
     {
       "time": "2026-07-15T11:00:00",

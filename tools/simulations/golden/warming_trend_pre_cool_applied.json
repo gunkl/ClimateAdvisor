@@ -45,7 +45,6 @@
       "time": "2026-07-16T14:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
       "setback_modifier": -3.0,
       "note": "Strong warming trend classification. Tomorrow +15F above today. Modifier=-3.0 seeds handle_pre_cool target."
     },

@@ -22,8 +22,10 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
-      "note": "Hot day: hvac_mode=cool."
+      "windows_recommended": false,
+      "today_high": 90,
+      "today_low": 70,
+      "note": "Hot day (forecast high 90 / low 70, consistent with the 72-78F readings): hvac_mode=cool; the classifier never recommends windows on a hot day, so windows_recommended=false."
     },
     {
       "time": "2026-07-10T07:00:00",

@@ -16,7 +16,8 @@ Returned ``ProductionRunResult`` carries:
 
 Event-type → production-method mapping (mirrors simulate.py process_event):
 
-  temp_update             → engine.update_outdoor_temp(outdoor_f)
+  temp_update             → _feed_outdoor_temp(): coordinator._apply_outdoor_temp(outdoor_f)
+                              in coordinator mode, else engine.update_outdoor_temp(outdoor_f)
                             + inject indoor temp via climate entity attribute
                             + IF indoor changed: run_coro(engine.nat_vent_temperature_check())
                               (if nat-vent active) + run_coro(engine.fan_thermostat_check())
@@ -400,6 +401,10 @@ class FakeHassSession:
             engine._thermal_model = scenario["thermal_model"]
         if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
             engine._hourly_forecast_temps = scenario["hourly_forecast"]
+            if coordinator is not None:
+                # Production's coordinator owns the forecast and pushes it to the engine
+                # (_refresh_hourly_forecast); keep both copies identical.
+                coordinator._hourly_forecast_temps = scenario["hourly_forecast"]
 
         self.coordinator = coordinator
         self.engine = engine
@@ -740,7 +745,7 @@ def _dispatch_event(
         if indoor_temp is not None:
             indoor_temp = float(indoor_temp)
             _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
-        engine.update_outdoor_temp(outdoor_temp)
+        _feed_outdoor_temp(engine, coordinator, outdoor_temp)
         windows_open = bool(event.get("windows_open", False))
         hour = int(event.get("hour", -1))
         run_coro(engine.check_window_cooling_opportunity(outdoor_temp, indoor_temp, windows_open, hour))
@@ -759,7 +764,7 @@ def _dispatch_event(
         # "classification"/"economizer_check"/"pre_cool" events.
         outdoor_f = event.get("outdoor_f")
         if outdoor_f is not None:
-            engine.update_outdoor_temp(float(outdoor_f))
+            _feed_outdoor_temp(engine, coordinator, float(outdoor_f))
         indoor_f = event.get("indoor_f")
         if indoor_f is not None:
             _inject_indoor_temp(fake_hass, climate_entity, float(indoor_f))
@@ -1038,6 +1043,32 @@ def _dispatch_event(
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 
 
+def _feed_outdoor_temp(engine: Any, coordinator: Any | None, outdoor_f: float) -> None:
+    """Deliver an outdoor reading the way production does.
+
+    Issue #1193 (C7, test-infrastructure change) — semantic justification: the
+    previous semantics (engine.update_outdoor_temp() only) were WRONG in coordinator
+    mode because they modelled a house where the engine knows the outdoor temperature
+    but the coordinator's _last_outdoor_temp is still None. Production never produces
+    that state: the outdoor sensor / weather listener reaches
+    coordinator._apply_outdoor_temp(), which sets coordinator._last_outdoor_temp AND
+    calls engine.update_outdoor_temp() from the same reading. With the split state, the
+    coordinator's indoor-change checks (_async_run_temp_reactive_checks ->
+    nat_vent_temperature_check(indoor, outdoor=None)) cleared an armed OUTDOOR_RISE
+    nat-vent exit that production fires, and fan_backstop_tick read a stale
+    coordinator outdoor after economizer_check / reconcile_fan_on_startup. Could this
+    let a real failure pass silently? No: the engine still receives the identical
+    reading (via the same call production makes). The coordinator now sees it too,
+    which also runs production's outdoor windows gate (_apply_outdoor_windows_gate may
+    clear windows_recommended on the shared classification) and updates its data
+    attribute, exactly as the real listener does. Engine-only scenarios are unchanged.
+    """
+    if coordinator is not None:
+        coordinator._apply_outdoor_temp(outdoor_f, record_history=False)
+    else:
+        engine.update_outdoor_temp(outdoor_f)
+
+
 def _handle_temp_update(
     event: dict,
     engine: Any,
@@ -1075,7 +1106,16 @@ def _handle_temp_update(
     old_indoor = existing.attributes.get("current_temperature") if existing is not None else None
 
     if outdoor_f is not None:
-        engine.update_outdoor_temp(float(outdoor_f))
+        _feed_outdoor_temp(engine, coordinator, float(outdoor_f))
+
+    # Issue #1193 (same class as _feed_outdoor_temp): in production the coordinator
+    # owns the predicted-indoor curve (_last_predicted_indoor, rebuilt each cycle) and
+    # its indoor-change listener passes it to comfort_family_temperature_check(). The
+    # old harness gave the event's curve only to the engine, so in coordinator mode the
+    # listener ran with an empty curve, a state production never has once a curve
+    # exists. Give the coordinator the same curve the engine gets.
+    if coordinator is not None and event.get("predicted_indoor"):
+        coordinator._last_predicted_indoor = event["predicted_indoor"]
 
     if indoor_f is not None:
         _inject_indoor_temp(fake_hass, climate_entity, float(indoor_f), dispatch=coordinator is not None)

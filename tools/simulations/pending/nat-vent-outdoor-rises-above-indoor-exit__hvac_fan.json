@@ -1,0 +1,56 @@
+{
+  "name": "nat-vent-outdoor-rises-above-indoor-exit__hvac_fan",
+  "description": "[hvac_fan twin of golden 'nat-vent-outdoor-rises-above-indoor-exit'; Issue #1193] Nat vent active; outdoor rises above indoor — new directional exit fires before threshold is crossed",
+  "source": "Issue #1193: hvac_fan twin of golden 'nat-vent-outdoor-rises-above-indoor-exit' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "[hvac_fan twin] When outdoor warms above indoor during active nat vent, exits to pause even if still below threshold",
+    "observed_behavior": "nat_vent_outdoor_rise_exit when outdoor >= indoor",
+    "expected_behavior": "nat_vent_outdoor_rise_exit when outdoor >= indoor"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "note": "evening: outdoor well below indoor — nat vent eligible. comfort_cool raised to 76 (Issue #392: reactivation gates now also require indoor <= ceiling_threshold for the default/HVAC-fan archetype used here — this scenario tests the directional outdoor-rise exit, not the ceiling gate)"
+    },
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "nat vent activates"
+    },
+    {
+      "time": "2026-04-20T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 74.5,
+      "note": "outdoor has risen just above indoor (74.5F > 74.0F); still below threshold 75F — directional exit fires before threshold exit would"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T18:00:00",
+      "expect": "natural_ventilation",
+      "reason": "[hvac_fan twin] outdoor 70F < indoor 76F and below threshold 79F; indoor 76F <= ceiling_threshold 76F — nat vent activates"
+    },
+    {
+      "at": "2026-04-20T20:00:00",
+      "expect": "nat_vent_outdoor_rise_exit",
+      "reason": "[hvac_fan twin] outdoor 74.5F >= indoor 74.0F — directional exit fires; outdoor still below threshold 79F but airflow no longer beneficial"
+    }
+  ],
+  "issue_followup": 1193,
+  "notes": [
+    "hvac_fan twin (Issue #1193): with the HVAC fan configured, an open window with usable outdoor air is ventilation (fan on), not a pause. This scenario pins the ventilation/exit/setback decision only; it deliberately does NOT assert the cool setpoint that production also arms during hvac_fan ventilation (nat_vent_ac_assist_armed), which is the rule-3 question tracked in #1142."
+  ]
+}

@@ -51,7 +51,6 @@
       "time": "2026-01-20T13:01:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
       "windows_recommended": false,
       "note": "Midday classification switches to cool at comfort_cool=76F. Thermostat: mode=cool, temperature=76 -- this leftover 76F is what proves the later match is keyed on the override's OWN explicit setpoint, not stale state."
     },

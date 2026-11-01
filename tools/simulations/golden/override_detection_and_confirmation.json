@@ -1,6 +1,6 @@
 {
   "name": "override_detection_and_confirmation",
-  "description": "Warm day, HVAC in cool mode at comfort_cool (74F). User bumps thermostat to heat mode at 14:00. After 10-minute confirm period passes (14:10), override is confirmed. Classification cycle at 14:30 is suppressed by active override.",
+  "description": "Hot day, HVAC in cool mode at comfort_cool (74F). User bumps thermostat to heat mode at 14:00. After 10-minute confirm period passes (14:10), override is confirmed. Warm-day classification cycle at 14:30 is suppressed by active override.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -19,7 +19,7 @@
     "('Classification cycle at 14:30 is suppressed by ACTIVE override'). The legacy simulator never",
     "modeled the grace timer here, so this premise gap was invisible until real timers ran. Extending",
     "the grace window keeps the override genuinely active through 14:30, matching the designed narrative.",
-    "14:30's classification hvac_mode was changed from 'cool' (same as 13:01) to 'off': a first revert",
+    "14:30's classification was changed from the same hot/cool as 13:01 to day_type 'warm' (classifier-true hvac_mode 'off'): a first revert",
     "test with the ORIGINAL identical classification passed even with the override-suppression guard",
     "(automation.py:1265-1271) fully disabled — because apply_classification()'s SEPARATE",
     "day_type/hvac_mode dedup (automation.py:1355-1356) coincidentally produced the same 'no new",
@@ -49,15 +49,16 @@
       "type": "temp_update",
       "indoor_f": 74.0,
       "outdoor_f": 85.0,
-      "note": "Warm summer afternoon. Indoor at comfort_cool=74F. HVAC holding cool mode."
+      "note": "Hot summer afternoon. Indoor at comfort_cool=74F. HVAC holding cool mode."
     },
     {
       "time": "2026-07-15T13:01:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
+      "today_high": 90,
       "windows_recommended": false,
-      "note": "Warm-day classification: HVAC cool at comfort_cool=74F."
+      "note": "Hot-day classification: HVAC cool at comfort_cool=74F."
     },
     {
       "time": "2026-07-15T14:00:00",
@@ -76,9 +77,8 @@
       "time": "2026-07-15T14:30:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "off",
       "windows_recommended": false,
-      "note": "Scheduled 30-min classification cycle — deliberately a DIFFERENT hvac_mode (off, not cool) from the 13:01 classification, so that if suppression were bypassed a genuinely NEW classification_applied event would fire (breaking the separate day_type/hvac_mode dedup in automation.py:1355-1356) — making the 14:30 assertion below actually discriminating rather than passing vacuously regardless of whether the override guard works. Override is active — should be suppressed."
+      "note": "Scheduled 30-min classification cycle — deliberately a DIFFERENT day type (warm, whose classifier-derived hvac_mode is off, not cool) from the 13:01 classification, so that if suppression were bypassed a genuinely NEW classification_applied event would fire (breaking the separate day_type/hvac_mode dedup in automation.py:1355-1356) — making the 14:30 assertion below actually discriminating rather than passing vacuously regardless of whether the override guard works. Override is active — should be suppressed."
     }
   ],
   "assertions": [
@@ -86,7 +86,7 @@
       "at": "2026-07-15T13:01:00",
       "expect": "classification_applied",
       "expect_temp": 74.0,
-      "reason": "Initial warm-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "reason": "Initial hot-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
       "track": "integration"
     },
     {

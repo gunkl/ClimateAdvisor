@@ -38,8 +38,7 @@
       "time": "2026-07-15T08:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
-      "note": "Morning classification — cool mode at comfort_cool=74F"
+      "note": "Morning warm-day classification — hvac_mode left to classifier.py (off for a warm day); comfort band armed at comfort_cool=74F"
     },
     {
       "time": "2026-07-15T10:00:00",

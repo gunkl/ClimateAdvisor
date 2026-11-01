@@ -1,13 +1,13 @@
 {
   "name": "hot_all_day_no_nat_vent_window",
-  "description": "Outdoor is already above indoor from the start of the day. Warm-day classification fires at 6 AM with outdoor=76F > indoor=72F. A sensor_open event immediately enters pause (not nat vent) because outdoor >= indoor would add heat. No natural_ventilation outcome fires at any point.",
+  "description": "Outdoor is already above indoor from the start of the day. Hot-day classification (forecast high 92 / low 74, consistent with the 72-79F readings) fires at 6 AM with outdoor=76F > indoor=72F. A sensor_open event immediately enters pause (not nat vent) because outdoor >= indoor would add heat. No natural_ventilation outcome fires at any point.",
   "source": "synthetic",
   "issue": 136,
   "notes": [
     "Covers the 'no nat-vent window' pattern: outdoor above indoor all day.",
     "On days where outdoor is already warmer than indoor, opening windows adds heat rather than cooling.",
     "The nat-vent activation guard (outdoor < indoor) prevents nat vent even when windows are opened.",
-    "HVAC off is applied by classification; the user has no beneficial window-open time.",
+    "The hot-day classification (hvac_mode=cool) is applied; indoor stays inside the comfort band so no cooling is needed, and the user has no beneficial window-open time.",
     "Pairs with hot_all_day cases where ceiling guard would fire (modeled in Group B)."
   ],
   "config": {
@@ -28,10 +28,12 @@
     {
       "time": "2026-06-20T06:01:00",
       "type": "classification",
-      "day_type": "warm",
-      "hvac_mode": "off",
+      "day_type": "hot",
+      "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Warm-day classification: hvac_mode=off, windows not recommended (outdoor already above indoor)."
+      "today_high": 92,
+      "today_low": 74,
+      "note": "Hot-day classification (forecast high 92 / low 74): the classifier gives hvac_mode=cool and never recommends windows on a hot day (outdoor already above indoor)."
     },
     {
       "time": "2026-06-20T09:00:00",
@@ -44,20 +46,20 @@
       "time": "2026-06-20T09:05:00",
       "type": "sensor_open",
       "entity": "binary_sensor.kitchen_window",
-      "note": "User opens a window despite warm outdoor \u00e2\u20ac\u201d outdoor 79F > indoor 73F should trigger pause, not nat vent."
+      "note": "User opens a window despite warm outdoor \u2014 outdoor 79F > indoor 73F should trigger pause, not nat vent."
     },
     {
       "time": "2026-06-20T09:30:00",
       "type": "sensor_close",
       "entity": "binary_sensor.kitchen_window",
-      "note": "User closes window \u00e2\u20ac\u201d automation resumes."
+      "note": "User closes window \u2014 automation resumes."
     }
   ],
   "assertions": [
     {
       "at": "2026-06-20T06:01:00",
       "expect": "classification_applied",
-      "reason": "Warm-day classification applied: hvac_mode=off. Indoor=72F is above comfort_heat=70F so no comfort-floor guard fires."
+      "reason": "Hot-day classification applied: hvac_mode=cool. Indoor=72F is inside the comfort band (70-74F)."
     },
     {
       "at": "2026-06-20T09:05:00",
@@ -67,13 +69,13 @@
     {
       "at": "2026-06-20T09:30:00",
       "expect": "resumed",
-      "reason": "All sensors closed \u00e2\u20ac\u201d automation resumes from pause."
+      "reason": "All sensors closed \u2014 automation resumes from pause."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "When outdoor is above indoor all day, window-open events enter pause not nat vent; no natural_ventilation fires",
-    "observed_behavior": "classification_applied (off) \u00e2\u2020\u2019 paused on window open \u00e2\u2020\u2019 resumed on window close",
+    "observed_behavior": "classification_applied (hot, cool) \u2192 paused on window open \u2192 resumed on window close",
     "expected_behavior": "Pause when outdoor >= indoor; nat vent guard correctly suppressed all day"
   }
 }

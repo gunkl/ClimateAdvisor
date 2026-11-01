@@ -1,0 +1,95 @@
+{
+  "name": "away_setback_deferred_until_whf_stops_and_window_closes__whf",
+  "description": "[whole-house-fan; Issue #1193] Away setback during whole-house-fan ventilation. The house is ventilated by the fan from 10:00; the occupant leaves at 15:00 (setback refused by rule 2, the fan keeps cooling the empty house); at 16:00 outdoor air turns warmer than indoor so the fan session ends -- the window is still open, so HVAC stays paused (rule 3, nothing is commanded); at 17:00 the window is closed and the away setback (79F cool edge) lands. Occupant outcome: no AC is run against an open window, and the empty house is not held at the comfort ceiling once sealed.",
+  "source": "Issue #1193: whole-house-fan extension of golden 'away_with_active_natvent_transition' (pre-#1140 version, fan configured) pinning the deferral of the away setback.",
+  "issue": 229,
+  "notes": [
+    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together)."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T09:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.5,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 73.5F, outdoor 65F — nat-vent favorable"
+    },
+    {
+      "time": "2026-07-15T09:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "note": "Hot-day classification at home (classifier derives cool for a hot day)",
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60
+    },
+    {
+      "time": "2026-07-15T10:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: nat-vent activates (outdoor 65F < indoor 73.5F, below threshold 77F)"
+    },
+    {
+      "time": "2026-07-15T15:00:00",
+      "type": "occupancy_away",
+      "note": "User leaves. Production: only setpoint changes to setback_cool. Nat-vent continues."
+    },
+    {
+      "time": "2026-07-15T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 78.0,
+      "note": "Outdoor (78F) now warmer than indoor (75F): free cooling is over, the whole-house-fan session ends. Window still open."
+    },
+    {
+      "time": "2026-07-15T17:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window closed while away: the door/window pause ends and the away setback can finally apply."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T10:00:00",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "reason": "sensor_open: outdoor 65F < indoor 73.5F, indoor > comfort_heat 70F, outdoor within threshold -- whole-house fan starts, HVAC suppressed (rule 2)."
+    },
+    {
+      "at": "2026-07-15T15:00:00",
+      "expect": "hvac_write_blocked_whf_active",
+      "track": "logic",
+      "reason": "Rule 2: the away setback is refused while the whole-house fan runs. It is deferred, not applied."
+    },
+    {
+      "at": "2026-07-15T16:00:00",
+      "expect": "nat_vent_outdoor_rise_exit",
+      "track": "logic",
+      "reason": "Outdoor 78F > indoor 75F: the fan session ends. The window is still open, so the thermostat is not given a cool command (rule 3); the exit is paused, not restored."
+    },
+    {
+      "at": "2026-07-15T17:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "track": "logic",
+      "reason": "Window closed at 17:00 while away: the pause ends and the deferred away setback (setback_cool=79F) is applied -- the setback lands once the fan has stopped and the house is sealed, not at the comfort ceiling 74F."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Away setback refused while a whole-house fan runs (rule 2), HVAC stays paused while the window is open after the fan stops (rule 3), and the 79F setback lands when the window closes",
+    "observed_behavior": "Production v0.8.22: hvac_write_blocked_whf_active at 15:00; nat_vent_outdoor_rise_exit at 16:00 with _paused_by_door True and no climate command; set_temperature 79F at 17:00",
+    "expected_behavior": "Same"
+  },
+  "issue_followup": 1193
+}

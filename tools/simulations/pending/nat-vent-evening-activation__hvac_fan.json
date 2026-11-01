@@ -1,0 +1,44 @@
+{
+  "name": "nat-vent-evening-activation__hvac_fan",
+  "description": "[hvac_fan twin of golden 'nat-vent-evening-activation'; Issue #1193] Evening cool-down: outdoor 70F < indoor 76F — nat vent activates for free cooling",
+  "source": "Issue #1193: hvac_fan twin of golden 'nat-vent-evening-activation' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "[hvac_fan twin] When outdoor is cooler than indoor and below threshold, nat vent activates",
+    "observed_behavior": "natural_ventilation with outdoor < indoor and outdoor < threshold",
+    "expected_behavior": "natural_ventilation with outdoor < indoor and outdoor < threshold"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "note": "evening: indoor at comfort_cool ceiling, outdoor 6F cooler — nat vent eligible. comfort_cool raised to 76 (Issue #392: reactivation gates now also require indoor <= ceiling_threshold for the default/HVAC-fan archetype used here — this scenario tests directional activation, not the ceiling gate)"
+    },
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "sensor opens during eligible conditions"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T18:00:00",
+      "expect": "natural_ventilation",
+      "reason": "[hvac_fan twin] outdoor 70F < indoor 76F (beneficial direction); outdoor 70F < threshold 79F; indoor 76F > comfort_heat 70F; indoor 76F <= ceiling_threshold 76F — nat vent activates"
+    }
+  ],
+  "issue_followup": 1193,
+  "notes": [
+    "hvac_fan twin (Issue #1193): with the HVAC fan configured, an open window with usable outdoor air is ventilation (fan on), not a pause. This scenario pins the ventilation/exit/setback decision only; it deliberately does NOT assert the cool setpoint that production also arms during hvac_fan ventilation (nat_vent_ac_assist_armed), which is the rule-3 question tracked in #1142."
+  ]
+}

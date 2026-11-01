@@ -1,0 +1,44 @@
+{
+  "name": "nat-vent-indoor-hot-outdoor-near-comfort__hvac_fan",
+  "description": "[hvac_fan twin of golden 'nat-vent-indoor-hot-outdoor-near-comfort'; Issue #1193] Hot interior (78F) with outdoor near comfort (74F) — activates since outdoor < indoor and outdoor < threshold",
+  "source": "Issue #1193: hvac_fan twin of golden 'nat-vent-indoor-hot-outdoor-near-comfort' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "[hvac_fan twin] When indoor is at or below the ceiling and outdoor is below both indoor and threshold, nat vent activates",
+    "observed_behavior": "natural_ventilation: outdoor(74) < indoor(78), outdoor(74) < threshold(81), indoor(78) <= ceiling(78)",
+    "expected_behavior": "natural_ventilation: outdoor(74) < indoor(78), outdoor(74) < threshold(81), indoor(78) <= ceiling(78)"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 78,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-04-20T17:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 74.0,
+      "note": "hot interior; outdoor 74F is below indoor(78) and below threshold(81). comfort_cool raised to 78 (== indoor) so Issue #392's archetype-aware ceiling gate (default/HVAC-fan archetype) does not block this directional-activation scenario."
+    },
+    {
+      "time": "2026-04-20T17:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "sensor opens on hot afternoon"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T17:00:00",
+      "expect": "natural_ventilation",
+      "reason": "[hvac_fan twin] outdoor 74F < indoor 78F (beneficial); outdoor 74F < threshold 81F; indoor 78F > comfort_heat 70F; indoor 78F <= ceiling_threshold 78F — nat vent activates for hot-day free cooling"
+    }
+  ],
+  "issue_followup": 1193,
+  "notes": [
+    "hvac_fan twin (Issue #1193): with the HVAC fan configured, an open window with usable outdoor air is ventilation (fan on), not a pause. This scenario pins the ventilation/exit/setback decision only; it deliberately does NOT assert the cool setpoint that production also arms during hvac_fan ventilation (nat_vent_ac_assist_armed), which is the rule-3 question tracked in #1142."
+  ]
+}

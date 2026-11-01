@@ -1,10 +1,10 @@
 {
   "name": "away_natvent_exits_at_comfort_ceiling",
-  "description": "Nat-vent while away uses free cooling until indoor reaches comfort_cool (74F), then should exit and let HVAC setback handle it. The ceiling exit while away requires Issue #231 production fix to add a comfort_cool exit gate in check_natural_vent_conditions() for away occupancy. [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
+  "description": "Away mode, warm day, whole-house fan configured: nat-vent keeps free-cooling the house after the occupant leaves, until indoor reaches comfort_cool (74F); then it exits (Issue #231 away-ceiling exit in check_natural_vent_conditions()), so the empty home is not over-cooled below comfort_heat. The configured fan is the opt-in for nat-vent (Issue #1140); the no-fan pause is covered by the scenarios #1140 added.",
   "source": "synthetic",
   "issue": 231,
   "notes": [
-    "Production behavior (single-engine harness): nat-vent activates while home, continues after the away transition (setpoint-only change).",
+    "Production behavior (single-engine harness): with a whole-house fan configured, nat-vent activates while home and continues after the away transition (the away setpoint write is blocked while the fan runs, household rule 2).",
     "While away with nat-vent active, free cooling keeps indoor below setback_cool=79F.",
     "When indoor reaches the comfort_cool=74F ceiling, the away-ceiling-exit (Issue #231, check_natural_vent_conditions Priority-2b) exits nat-vent \u2014 further open-window cooling risks dropping below comfort_heat and accumulating violations.",
     "The nat_vent_not_active assertion captures the Issue #231 away-ceiling-exit (live in production)."
@@ -14,29 +14,44 @@
     "comfort_cool": 74,
     "setback_heat": 62,
     "setback_cool": 79,
-    "natural_vent_delta": 3.0
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
       "time": "2026-07-10T09:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
-      "windows_recommended": false,
-      "note": "Warm-day classification: HVAC in cool mode"
+      "windows_recommended": true,
+      "note": "Warm-day classification (hvac_mode left to classifier.py, which derives off for a warm day)",
+      "today_low": 60,
+      "today_high": 80,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
     },
     {
       "time": "2026-07-10T09:01:00",
       "type": "temp_update",
       "indoor_f": 72.0,
       "outdoor_f": 65.0,
-      "note": "Morning: indoor 72F within band [70F, 74F], outdoor 65F \u00e2\u20ac\u201d nat-vent favorable"
+      "note": "Morning: indoor 72F within band [70F, 74F], outdoor 65F \u2014 nat-vent favorable"
     },
     {
       "time": "2026-07-10T09:01:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F \u00e2\u20ac\u201d nat-vent activates"
+      "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F \u2014 nat-vent activates"
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 65.0,
+      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
     },
     {
       "time": "2026-07-10T10:00:00",
@@ -61,17 +76,17 @@
   "assertions": [
     {
       "at": "2026-07-10T09:01:00",
-      "expect": "paused",
+      "expect": "natural_ventilation",
       "track": "logic",
       "simulator_support": true,
-      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': sensor_open: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor 65F <= threshold 77F \u00e2\u20ac\u201d nat-vent activates while occupancy is home"
+      "reason": "Window opens with outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor under the 77F threshold and a whole-house fan configured (the opt-in for nat-vent, Issue #1140): nat-vent activates while occupancy is home."
     },
     {
       "at": "2026-07-10T10:00:00",
-      "expect": "unknown:occupancy_setback_suppressed_paused",
+      "expect": "hvac_write_blocked_whf_active",
       "track": "logic",
       "simulator_support": true,
-      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'setback_applied': Away transition: setback_cool=79F applied. This is the only change production makes on occupancy_away \u00e2\u20ac\u201d nat-vent is not exited."
+      "reason": "Away transition at 10:00 while the whole-house fan is running nat-vent: the setback_cool=79F write to the thermostat is blocked because the whole-house fan and HVAC never run together (household rule 2). handle_occupancy_away() does not exit nat-vent; only the setpoint write is held off."
     },
     {
       "at": "2026-07-10T14:01:35",
@@ -86,5 +101,7 @@
     "summary": "Nat-vent uses free cooling while away, exits at comfort_cool ceiling (74F) via Issue #231 away-ceiling-exit path",
     "observed_behavior": "nat-vent activates while home, persists through away transition (setback applied), exits when indoor reaches comfort_cool=74F",
     "expected_behavior": "Free cooling opportunity exploited while away; ceiling exit at comfort_cool prevents over-cooling and accumulating comfort violations in the band"
-  }
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
 }

@@ -1,0 +1,75 @@
+{
+  "name": "setback_suppressed_while_window_paused_on_leaving_home",
+  "description": "No fan installed, hot afternoon. A window has been open past the 10-minute debounce, so Climate Advisor has paused the air conditioner. The occupant then leaves home. The away setback must NOT be applied while the window pause owns the thermostat (the pause restores the right mode when the window closes); the system reports the setback as suppressed because of the pause.",
+  "source": "Issue #1193 (C8): restores the coverage lost when the two goldens that asserted setback_suppressed_paused (away_natvent_exits_at_comfort_ceiling, away_with_active_natvent_transition) were given a whole-house fan. Unit coverage exists at engine level (tests/test_door_window.py), this is the only scenario-level pin.",
+  "issue": 1193,
+  "notes": [
+    "Occupant outcome: someone leaves for work with a window open on a hot afternoon. With the pause holding the AC off, applying the away setback anyway would write a setpoint over the paused state; when the window later closes the house would resume from the wrong setpoint (and with a regression that re-enables cooling it would cool the street).",
+    "Setup: fan_mode is unset (no fan), so the open window is a pause (household rule 3), never nat-vent. The classifier gives a hot day (forecast high 90 / low 72) hvac_mode=cool windows_recommended=false (confirmed by calling classify_day), so the open window is not a planned window either.",
+    "Engine-only mode: sensor_open calls handle_door_window_open directly, which in production runs only AFTER the 600 s door/window debounce, so the occupant_away event at 14:11 is >600 s after the window opened at 14:00.",
+    "Three-exercise protocol (CLAUDE.md #10): (a) Effectiveness: revert-checked in a scratch copy - disabling the setback suppression while paused makes occupancy_away apply the setback, so the setback_suppressed_paused assertion fails. (b) Docs<->production: the pause owns HVAC while a window is open (docs/grace-periods-spec.md / door-window pause rules); production emits occupancy_setback_suppressed_paused. (c) User outcome if it regresses: the away setback is written over an active window pause.",
+    "No outcomes.py logic change: uses the existing occupancy_setback_suppressed_paused -> setback_suppressed_paused mapping (Issue #1193 comment only)."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
+  },
+  "events": [
+    {
+      "time": "2026-07-10T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 86.0,
+      "note": "Hot afternoon: outdoor 86F above indoor 75F."
+    },
+    {
+      "time": "2026-07-10T13:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 90,
+      "today_low": 72,
+      "note": "Hot-day classification (forecast high 90 / low 72, matching the readings): classify_day gives hot / cool / windows not recommended."
+    },
+    {
+      "time": "2026-07-10T14:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens. No fan is installed, so this is a pause, not nat-vent."
+    },
+    {
+      "time": "2026-07-10T14:11:00",
+      "type": "occupancy_away",
+      "note": "11 minutes after the window opened (past the 600 s debounce, HVAC paused): the occupant leaves home. The setback must be held off while the window pause owns the thermostat."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T14:00:00",
+      "expect": "paused",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "No fan installed: an open window pauses HVAC (household rule 3); outdoor 86F is not usable for ventilation anyway."
+    },
+    {
+      "at": "2026-07-10T14:11:00",
+      "expect": "setback_suppressed_paused",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Leaving home while the window pause is active: the away setback is intentionally NOT applied (setback_suppressed_paused); the pause owns the thermostat until the window closes."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Leaving home while an open window has HVAC paused suppresses the away setback instead of writing it over the pause",
+    "observed_behavior": "window open past debounce -> paused -> occupancy_away -> occupancy_setback_suppressed_paused (no setback write)",
+    "expected_behavior": "The door/window pause owns HVAC while a window is open; the away setback is deferred (setback_suppressed_paused), never applied"
+  }
+}

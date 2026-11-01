@@ -35,9 +35,8 @@
       "time": "2026-07-02T18:01:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Warm-day classification: hvac_mode=cool (normal daytime baseline before nat-vent takes over)."
+      "note": "Warm-day classification (hvac_mode left to classifier.py, off for a warm day; comfort band is the normal daytime baseline before nat-vent takes over)."
     },
     {
       "time": "2026-07-02T18:10:00",

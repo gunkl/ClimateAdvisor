@@ -1,0 +1,98 @@
+{
+  "name": "override_cleared_on_restart",
+  "description": "A confirmed manual thermostat override is in force when Home Assistant restarts. The restart wipes it: after the restart the override is cleared and no grace is active, so the automation resumes control instead of staying frozen on the occupant's old manual setting (restore_state() is an unconditional clean slate, Issues #199 / #226 / #327).",
+  "source": "synthetic",
+  "issue": 1193,
+  "notes": [
+    "Replaces grace_timer_expired_on_restart, whose only assertion was the carried-forward classification_applied outcome. That scenario never created an override, so it could not detect a restart that kept one (Issue #1193 review).",
+    "Occupant outcome: after a restart the home returns to the automation's comfort schedule instead of staying stuck on a manual override the occupant set hours earlier.",
+    "Mechanism: automation.restore_state() unconditionally clears _manual_override_active, _grace_active and _grace_end_time on every restart, not only when the grace had already expired (Issues #199, #226, #327; confirmed by the earlier standalone two-coordinator check recorded in the retired scenario).",
+    "manual_grace_seconds is 6000 so the override is still live (grace not expired) at the 21:12 restart: the clear at 21:13 is therefore caused by the restart, not by the grace running out on its own.",
+    "The 14:01 classification sets hvac_mode=cool explicitly because build_classification_from_event defaults a missing hvac_mode to off, while classifier.py derives cool for a hot day.",
+    "simulate_restart re-runs the engine's restore_state() on the SAME live engine (see run_production.py); the 21:13 temp_update is a no-op reading that advances the scheduler so the clear is emitted.",
+    "Revert test: made restore_state() keep _manual_override_active in a scratch copy; override_cleared at 21:13 and the _grace_active/override assertions failed. See the issue #1193 report."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 6000,
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-06-10T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon, indoor above comfort_cool."
+    },
+    {
+      "time": "2026-06-10T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "today_high": 90,
+      "hvac_mode": "cool",
+      "note": "Hot-day classification: hvac_mode=cool set explicitly (harness default is off; classifier.py derives cool for a hot day)."
+    },
+    {
+      "time": "2026-06-10T21:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "Occupant switches the thermostat to heat — override detection starts the confirm window."
+    },
+    {
+      "time": "2026-06-10T21:10:00",
+      "type": "temp_update",
+      "hvac_mode": "heat",
+      "indoor_f": 72.0,
+      "outdoor_f": 72.0,
+      "note": "Confirm window passes with the thermostat still diverging — override confirmed, grace period begins (6000s)."
+    },
+    {
+      "time": "2026-06-10T21:12:00",
+      "type": "simulate_restart",
+      "note": "Home Assistant restarts mid-override: restore_state() runs on the engine."
+    },
+    {
+      "time": "2026-06-10T21:13:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 72.0,
+      "note": "No-op re-assertion of the same readings so the scheduler advances past the restart."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T21:10:00",
+      "expect": "override_confirmed",
+      "track": "integration",
+      "reason": "Thermostat still on heat 10 minutes after the occupant changed it on a hot day — the manual override is confirmed, which is the state the restart must wipe."
+    },
+    {
+      "at": "2026-06-10T21:13:00",
+      "expect": "override_cleared",
+      "track": "integration",
+      "reason": "An HA restart mid-override clears it: restore_state() is an unconditional clean slate (Issues #199, #226, #327), so the automation resumes instead of being held off by a stale override."
+    },
+    {
+      "at": "2026-06-10T21:13:00",
+      "expect": "field_equals",
+      "field": "engine_state._grace_active",
+      "value": false,
+      "track": "integration",
+      "reason": "The override's grace period does not survive the restart either (Issues #199, #226, #327): after restore_state() no grace is active, even though 6000s had not elapsed."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A Home Assistant restart clears a confirmed manual override and its grace period",
+    "observed_behavior": "override_confirmed (21:10) -> simulate_restart (21:12) -> override_cleared and no active grace (21:13)",
+    "expected_behavior": "restore_state() is a clean slate: no override or grace survives a restart, whether or not the grace had expired (Issues #199, #226, #327)"
+  }
+}

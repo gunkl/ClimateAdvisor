@@ -1,6 +1,6 @@
 {
   "name": "nat-vent-at-comfort-floor-no-activate",
-  "description": "Indoor at comfort_heat floor (70F); sensor opens \u00e2\u20ac\u201d floor guard prevents activation even though outdoor is cooler",
+  "description": "Indoor at comfort_heat floor (70F); sensor opens \u2014 floor guard prevents activation even though outdoor is cooler",
   "source": "synthetic",
   "issue": 115,
   "verdict": {

@@ -28,7 +28,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "Hot-day classification, HVAC in cool mode — comfort band arms at the ceiling. This is the mode _pre_fan_hvac_mode will capture when nat-vent activates a moment later."
     },
     {
@@ -62,7 +64,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "First classification cycle with indoor below the floor by more than comfort_deadband_hot_f (6F breach > 5F deadband). _apply_comfort_band()'s resolver call arms the fallback candidate (first evaluation, not yet confirmed — stays \"cool\" this tick, also re-affirming the \"cooling\" family; per Issue #827, the FSM's dwell clock only advances on a genuine transition, so this reassertion cannot reset a lockout the way pre-#827 code could)."
     },
     {
@@ -70,7 +74,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "The 08:05:01 restore-adjacent grace period (armed by _exit_nat_vent()'s own _start_grace_period() call) expires at 08:10:01 and its own resume-cycle re-affirms \"cool\" one more time (the fallback candidate is not yet confirmed relative to ITS clock at that point either) — under Issue #827's FSM this reassertion still does not move dwell_since, since dwell_since only advances on a genuine transition (the structural #823 fix). 08:21:00 is well past both the 90s COMFORT_FALLBACK_CONFIRM_S sustain window (measured from the 08:05:01 arm) and the 600s comfort_mode_switch_min_interval_s dwell floor (measured from whichever prior genuine transition last moved dwell_since — cold start here, so the very first transition is unconditionally allowed). Indoor is still 62F, 6F below the floor. The fallback path sustain-confirms and escalates: comfort family switches to heating, engine commands heat at comfort_heat."
     }
   ],

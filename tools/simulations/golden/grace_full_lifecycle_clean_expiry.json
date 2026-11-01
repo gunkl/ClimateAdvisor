@@ -1,6 +1,6 @@
 {
   "name": "grace_full_lifecycle_clean_expiry",
-  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). Sensor stays closed. Grace expires at 13:15 with all sensors closed → automation resumes cleanly. Classification cycle at 13:30 applies normally.",
+  "description": "Hot day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). Sensor stays closed. Grace expires at 13:15 with all sensors closed → automation resumes cleanly. Classification cycle at 13:30 applies normally.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -51,10 +51,11 @@
     {
       "time": "2026-07-15T12:31:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Warm-day classification: HVAC cool at 74F."
+      "note": "Hot-day classification: HVAC cool at 74F (classifier.py derives cool for a hot day)."
     },
     {
       "time": "2026-07-15T13:00:00",
@@ -71,7 +72,8 @@
     {
       "time": "2026-07-15T13:30:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "windows_recommended": false,
       "note": "30-min classification cycle. Grace is gone, no sensors open — classification applies normally."
@@ -93,7 +95,23 @@
     {
       "at": "2026-07-15T13:30:00",
       "expect": "comfort_band_armed",
-      "reason": "Grace expired cleanly (sensors stayed closed). Classification cycle at 13:30 applies normally (not blocked by a stuck pause) — real apply_classification() runs and re-arms the comfort band. Corrected from 'classification_applied' during #476 migration: real apply_classification() dedupes (automation.py:1355-1356) and only emits classification_applied when (day_type, hvac_mode) differs from the last applied classification — since this scenario dispatches the SAME classification (warm/cool) both at 12:31 and 13:30, the second call correctly suppresses the redundant event while still re-arming the band (comfort_band_applied does fire). The legacy simulator apparently did not model this dedup. comfort_band_armed is the correct assertion for 'classification cycle ran, unblocked' without requiring a specific (possibly deduped) event.",
+      "reason": "Grace expired cleanly (sensors stayed closed). Classification cycle at 13:30 applies normally (not blocked by a stuck pause) — real apply_classification() runs and re-arms the comfort band. Corrected from 'classification_applied' during #476 migration: real apply_classification() dedupes (automation.py:1355-1356) and only emits classification_applied when (day_type, hvac_mode) differs from the last applied classification — since this scenario dispatches the SAME classification (hot/cool) both at 12:31 and 13:30, the second call correctly suppresses the redundant event while still re-arming the band (comfort_band_applied does fire). The legacy simulator apparently did not model this dedup. comfort_band_armed is the correct assertion for 'classification cycle ran, unblocked' without requiring a specific (possibly deduped) event.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._paused_by_door",
+      "value": false,
+      "reason": "No sensor open at grace expiry, so no re-pause: _on_grace_expired() took the clean branch and the door/window pause flag is cleared.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._grace_active",
+      "value": false,
+      "reason": "The 5-minute grace ended at 13:15 with all sensors closed, so no grace is active by 13:30 and the 13:30 classification cycle is not being held off by one.",
       "track": "integration"
     }
   ],

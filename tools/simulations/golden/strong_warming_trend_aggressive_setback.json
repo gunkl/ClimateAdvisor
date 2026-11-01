@@ -1,6 +1,6 @@
 {
   "name": "strong_warming_trend_aggressive_setback",
-  "description": "Strong warming trend: tomorrow +15F above today. setback_modifier=-3.0 passed via classification event. Bedtime fires at 22:30. Production handle_bedtime() uses select_comfort_band() with DEFAULT_SLEEP_COOL=72F — the band ceiling is unchanged at bedtime. The pre-cool phase (Issue #258) fires separately at wake_time-4h (~02:30) and lowers the cool ceiling further to bank cold thermal mass before the hot day. This scenario covers classification + bedtime only; warming_trend_pre_cool_applied covers the pre-cool trigger.",
+  "description": "Strong warming trend: tomorrow +15F above today. setback_modifier=-3.0 passed via classification event. Bedtime fires at 22:30. The warming modifier (setback_modifier=-3.0) is NOT exercised by this scenario: production handle_bedtime() uses select_comfort_band() with the standard DEFAULT_SLEEP_COOL=72F sleep ceiling, which the modifier does not move. The pre-cool phase (Issue #258) fires separately at wake_time-4h (~02:30) and lowers the cool ceiling further to bank cold thermal mass before the hot day. This scenario covers classification + bedtime only; warming_trend_pre_cool_applied covers the pre-cool trigger.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -10,7 +10,7 @@
     "  sleep_heat = config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT) = 64.0F (not in scenario config).",
     "  Sleep band = [64/72]. Bedtime applies normal sleep setpoints; the setback_modifier is carried",
     "  in the bedtime_setback event payload for observability but does not change the bedtime ceiling.",
-    "Classification at 14:00: single-setpoint cool mode, temperature=comfort_cool=74F.",
+    "Classification at 14:00: warm day (hvac_mode left to classifier.py, off); comfort band armed with ceiling comfort_cool=74F.",
     "  production_temp_at reads the temperature field from the set_temperature action.",
     "Bedtime at 22:30: sleep band [64/72]. production_temp_at returns ceiling (72F) for cool mode",
     "  (active='ceiling' → outcomes.py reads ceiling from bedtime_setback payload).",
@@ -34,7 +34,6 @@
       "time": "2026-07-15T14:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
       "setback_modifier": -3.0,
       "note": "Warm-day classification with strong warming trend modifier (-3.0). Tomorrow forecast +15F above today."
     },
@@ -56,7 +55,7 @@
       "at": "2026-07-15T14:00:00",
       "expect": "classification_applied",
       "expect_temp": 74.0,
-      "reason": "Warm-day classification applied: cool mode single-setpoint temperature=74 (comfort_cool). setback_modifier=-3.0 stored in classification for downstream use by handle_pre_cool at 02:30."
+      "reason": "Warm-day classification applied: comfort band armed, active ceiling temperature=74 (comfort_cool). setback_modifier=-3.0 stored in classification for downstream use by handle_pre_cool at 02:30."
     },
     {
       "at": "2026-07-15T22:30:00",

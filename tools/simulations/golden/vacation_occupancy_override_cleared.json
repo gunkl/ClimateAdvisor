@@ -18,7 +18,8 @@
     {
       "time": "2026-07-15T08:00:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "note": "Morning classification at home, before vacation begins — needed so handle_occupancy_vacation() has a classification to arm a band against."
     },
@@ -37,7 +38,8 @@
     {
       "time": "2026-07-16T00:30:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "note": "Issue #602: models the real production regular 30-min classification cycle re-confirming the (unchanged) classification after the midnight day rollover — this is what recreates coordinator._today_record for the new day (via _ensure_today_record()), the same way a real install's weather-retrying refresh cycle does. Without an event here, the harness (which doesn't auto-tick a periodic cycle the way production does) never recreates the day-2 record before the override below fires."
     },

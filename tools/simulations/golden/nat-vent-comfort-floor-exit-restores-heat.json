@@ -1,13 +1,13 @@
 {
     "name": "nat-vent-comfort-floor-exit-restores-heat",
-    "description": "Natural ventilation fan shuts off and heat restores when indoor temp drops to comfort_heat floor (Issue #99)",
+    "description": "Natural ventilation (fan_mode hvac_fan) stops when indoor drops to the comfort_heat floor on a cool day (Issue #99): the comfort-floor exit fires, so the house is not ventilated below comfort. The scenario checks the exit only; it does not assert a heat restore.",
     "source": "synthetic",
     "issue": 99,
     "verdict": {
         "type": "positive",
-        "summary": "When _natural_vent_active=True and indoor drops to comfort_heat, fan deactivates and HVAC restores to heat without entering pause",
-        "observed_behavior": "nat_vent_comfort_floor_exit with hvac_mode restored to heat, paused_by_door=False",
-        "expected_behavior": "nat_vent_comfort_floor_exit with hvac_mode restored to heat, paused_by_door=False"
+        "summary": "When _natural_vent_active=True and indoor drops to comfort_heat, the comfort-floor exit fires (nat-vent ends)",
+        "observed_behavior": "nat_vent_comfort_floor_exit when indoor reaches comfort_heat on a cool day",
+        "expected_behavior": "nat_vent_comfort_floor_exit when indoor reaches comfort_heat; the scenario does not check a heat restore"
     },
     "config": {
         "comfort_heat": 70,
@@ -19,16 +19,20 @@
         {
             "time": "2026-04-11T08:00:00",
             "type": "classification",
-            "day_type": "mild",
+            "day_type": "cool",
             "hvac_mode": "heat",
-            "note": "Morning classification — heat day, comfort_heat=70F"
+            "note": "Morning classification — cool day (high 58F, low 42F), hvac_mode heat, comfort_heat=70F",
+            "today_high": 58.0,
+            "today_low": 42.0,
+            "tomorrow_high": 58.0,
+            "tomorrow_low": 42.0
         },
         {
             "time": "2026-04-11T09:00:00",
             "type": "temp_update",
             "indoor_f": 73.5,
-            "outdoor_f": 62.0,
-            "note": "Indoor above floor, outdoor 62F well below threshold 78F — nat vent eligible"
+            "outdoor_f": 56,
+            "note": "Indoor above floor, outdoor 56F well below threshold 78F — nat vent eligible"
         },
         {
             "time": "2026-04-11T09:05:00",
@@ -40,7 +44,7 @@
             "time": "2026-04-11T11:00:00",
             "type": "temp_update",
             "indoor_f": 70.0,
-            "outdoor_f": 62.0,
+            "outdoor_f": 56,
             "note": "Indoor dropped to comfort_heat=70F. Outdoor still cool — no outdoor exit. Comfort-floor exit must fire."
         }
     ],
@@ -48,12 +52,12 @@
         {
             "at": "2026-04-11T09:05:00",
             "expect": "natural_ventilation",
-            "reason": "door opened; outdoor 62F <= threshold 78F — nat vent activated"
+            "reason": "door opened; outdoor 56F <= threshold 78F — nat vent activated"
         },
         {
             "at": "2026-04-11T11:00:00",
             "expect": "nat_vent_comfort_floor_exit",
-            "reason": "indoor 70F <= comfort_heat 70F — fan stops, heat restores, paused_by_door stays False"
+            "reason": "indoor 70F <= comfort_heat 70F — comfort-floor exit fires and the fan stops"
         }
     ]
 }

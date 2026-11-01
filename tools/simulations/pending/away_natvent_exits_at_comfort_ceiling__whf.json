@@ -1,0 +1,96 @@
+{
+  "name": "away_natvent_exits_at_comfort_ceiling__whf",
+  "description": "[whole-house-fan twin of golden 'away_natvent_exits_at_comfort_ceiling'; Issue #1193] Nat-vent while away uses free cooling until indoor reaches comfort_cool (74F), then should exit and let HVAC setback handle it. The ceiling exit while away is the Issue #231 comfort_cool exit gate in check_natural_vent_conditions() for away occupancy (live in production). WHF specifics: the away setback (79F) is attempted at 10:00 while the fan runs and is refused by rule 2 (hvac_write_blocked_whf_active); the fan then stops at the 74F ceiling exit. NOTE: production does not re-apply the setback after the fan stops and restores HVAC cool at the comfort ceiling with the window still open -- reported as a finding on Issue #1193 and deliberately NOT asserted here.",
+  "source": "Issue #1193: whole-house-fan twin of golden 'away_natvent_exits_at_comfort_ceiling' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 231,
+  "notes": [
+    "Production behavior (single-engine harness): nat-vent activates while home, continues after the away transition (setpoint-only change).",
+    "While away with nat-vent active, free cooling keeps indoor below setback_cool=79F.",
+    "When indoor reaches the comfort_cool=74F ceiling, the away-ceiling-exit (Issue #231, check_natural_vent_conditions Priority-2b) exits nat-vent — further open-window cooling risks dropping below comfort_heat and accumulating violations.",
+    "The nat_vent_not_active assertion captures the Issue #231 away-ceiling-exit (live in production).",
+    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together)."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T09:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot-day classification: HVAC in cool mode (classifier derives cool for a hot day)",
+      "today_high": 88,
+      "today_low": 60
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 72F within band [70F, 74F], outdoor 65F — nat-vent favorable"
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F — nat-vent activates"
+    },
+    {
+      "time": "2026-07-10T10:00:00",
+      "type": "occupancy_away",
+      "note": "User leaves. Production: only setpoint changes to setback_cool=79F. Nat-vent continues running."
+    },
+    {
+      "time": "2026-07-10T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 68.0,
+      "note": "Afternoon: indoor has risen to 74F (comfort_cool ceiling). Outdoor 68F still cooler than indoor. In production (Issue #231 fix): the AWAY_CEILING exit candidate arms via decide_nat_vent_exit() but is NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s) — session still active this tick."
+    },
+    {
+      "time": "2026-07-10T14:01:35",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 68.0,
+      "note": "95s after the ceiling was first reached (> 90s NAT_VENT_EXIT_SUSTAIN_S) — indoor still at/above comfort_cool, outdoor still cooler than indoor. AWAY_CEILING exit sustain-confirms and commits: nat-vent exits at comfort_cool ceiling to prevent further warming risk."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T09:01:00",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "[whole-house-fan twin] sensor_open: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor 65F <= threshold 77F — nat-vent activates while occupancy is home"
+    },
+    {
+      "at": "2026-07-10T10:00:00",
+      "expect": "hvac_write_blocked_whf_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "[whole-house-fan twin] Rule 2 (WHF and HVAC never together): the occupant leaves at 10:00 while the whole-house fan runs; the away setback (setback_cool=79F) is evaluated but the thermostat write is refused (hvac_write_blocked_whf_active) because the fan owns the house. The hvac_fan expectation (setback_applied 79F) is not the truth for a WHF install."
+    },
+    {
+      "at": "2026-07-10T14:01:35",
+      "expect": "nat_vent_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "[whole-house-fan twin] Issue #231 fix is live in production: when indoor reaches comfort_cool=74F ceiling while away and nat-vent is active, check_natural_vent_conditions() Priority-2b path exits nat-vent. Free cooling has done its job; further outdoor air risks over-cooling below the comfort band. Issue #821 retiming: the exit is sustain-confirmed (NAT_VENT_EXIT_SUSTAIN_S=90s) rather than committing on the instantaneous tick the ceiling was first reached — this assertion now sits 95s after that tick, on the follow-up temp_update that confirms indoor genuinely held at/above the ceiling. The nat_vent_still_active assertion at 10:00 was removed — it used the final engine snapshot (which captures the 14:01:35 exit), making it impossible to assert mid-run state. The continue-through-away behavior is covered by away_with_active_natvent_transition."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "[whole-house-fan twin] Nat-vent uses free cooling while away, exits at comfort_cool ceiling (74F) via Issue #231 away-ceiling-exit path",
+    "observed_behavior": "nat-vent activates while home, persists through away transition (setback applied), exits when indoor reaches comfort_cool=74F",
+    "expected_behavior": "Free cooling opportunity exploited while away; ceiling exit at comfort_cool prevents over-cooling and accumulating comfort violations in the band"
+  },
+  "issue_followup": 1193
+}

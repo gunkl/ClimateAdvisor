@@ -33,8 +33,7 @@
       "time": "2026-07-13T22:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
-      "note": "Evening classification — warm day, comfort band armed at [68/74]."
+      "note": "Evening classification — warm day (hvac_mode left to classifier.py), comfort band armed at [68/74]."
     },
     {
       "time": "2026-07-13T23:05:00",

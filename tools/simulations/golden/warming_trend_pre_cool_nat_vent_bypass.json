@@ -35,7 +35,6 @@
       "time": "2026-07-16T14:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
       "setback_modifier": -3.0,
       "note": "Strong warming trend. Modifier=-3.0 seeds a pre-cool target of 69F."
     },

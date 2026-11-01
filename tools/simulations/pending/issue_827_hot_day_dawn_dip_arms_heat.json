@@ -5,7 +5,7 @@
   "issue": 827,
   "notes": [
     "Occupant impact: a 65F house at dawn (3F below the 68F floor) must be heated within the first reading. The old energy-saving bet that the day would warm the house meant coasting below comfort; the cost of the new rule is a few minutes of furnace time.",
-    "Design D rule exercised: indoor < floor -> heating immediately on any day type, ignoring the dwell lock. Hot-day classification (hvac_mode=cool, windows_recommended=true, as classifier.py derives for DAY_TYPE_HOT) does not make heat 'against grain' any more. Duplicate note: this scenario and issue_827_missing_forecast_fallback_escalates.json differ only by day type and the (now irrelevant) thermal_model block.",
+    "Design D rule exercised: indoor < floor -> heating immediately on any day type, ignoring the dwell lock. Hot-day classification (hvac_mode=cool, windows_recommended=false, as classifier.py derives for DAY_TYPE_HOT) does not make heat 'against grain' any more. Duplicate note: this scenario and issue_827_missing_forecast_fallback_escalates.json differ only by day type and the (now irrelevant) thermal_model block.",
     "Assertion time bounds are the first breach reading (06:15).",
     "Three-exercise protocol (CLAUDE.md section 10):",
     "(a) Scenario effectiveness: with nearest-edge arming deleted (origin/main) the hot-day deadband (5F, comfort_deadband_hot_f) holds a 3F breach indefinitely under the #827 rule, and even under the #843 recency rule heat needs a 90 s sustain across two evaluations, so at 06:15 comfort_family=heating and last_hvac_mode=heat fail.",
@@ -23,8 +23,10 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
-      "note": "Hot-day classification at dawn (classifier derives hvac_mode=cool, windows recommended). Indoor 71F is inside the band, no breach."
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
+      "note": "Hot-day classification at dawn (classifier derives hvac_mode=cool, windows_recommended false). Indoor 71F is inside the band, no breach."
     },
     {
       "time": "2026-09-01T06:00:00",
@@ -45,7 +47,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "Periodic re-evaluation with indoor 65F: below the floor, so heat is armed and commanded at comfort_heat(68)."
     }
   ],

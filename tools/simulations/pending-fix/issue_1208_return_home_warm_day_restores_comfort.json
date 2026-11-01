@@ -1,0 +1,102 @@
+{
+  "name": "issue_1208_return_home_warm_day_restores_comfort",
+  "description": "Issue #1208: warm day (classifier derives hvac_mode=off, comfort band armed). User leaves and the away setback is held; on returning at 14:00 the comfort ceiling must be restored on arrival, not up to 30 minutes later when the next classification cycle runs. Currently FAILS on production: the occupant who comes home to a warm house still has the 80F away ceiling until the 14:30 cycle.",
+  "source": "issue-report",
+  "issue": 1208,
+  "notes": [
+    "Reproduces Issue #1208 (bug-reproducing scenario, expected to FAIL until production is fixed; verdict.type=negative so simulate.py reports EXPECTED FAIL).",
+    "Occupant outcome: the occupant returns home on a warm afternoon and the thermostat still holds the away setback ceiling (80F) instead of the comfort ceiling (75F), so the home stays warm until the next 30-minute classification cycle.",
+    "Two assertions: (1) at 14:00 the arrival must restore comfort (comfort_restored, 75F); (2) at 14:30 the armed band ceiling must equal comfort_cool (75F).",
+    "Before Issue #85, apply_classification() would overwrite away setback with comfort temps every 30 minutes; this scenario's earlier steps (10:00/10:30 setback held) still verify that fix.",
+    "Promote to golden/ once Issue #1208 is fixed and this scenario passes."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80
+  },
+  "events": [
+    {
+      "time": "2026-04-05T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "note": "morning classification — cool mode at 75F comfort"
+    },
+    {
+      "time": "2026-04-05T09:30:00",
+      "type": "occupancy_change",
+      "mode": "away",
+      "note": "user leaves home — should apply cool setback (80F) after delay"
+    },
+    {
+      "time": "2026-04-05T10:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "note": "30-min classification cycle fires while away — must NOT overwrite setback with comfort"
+    },
+    {
+      "time": "2026-04-05T10:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "note": "another classification cycle — should still maintain setback"
+    },
+    {
+      "time": "2026-04-05T14:00:00",
+      "type": "occupancy_change",
+      "mode": "home",
+      "note": "user returns — should restore comfort (75F)"
+    },
+    {
+      "time": "2026-04-05T14:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "note": "next 30-min cycle"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T08:00:00",
+      "expect": "classification_applied",
+      "reason": "initial classification at home — cool mode applied (comfort_cool=75F)"
+    },
+    {
+      "at": "2026-04-05T09:45:00",
+      "expect": "setback_applied",
+      "expect_temp": 80.0,
+      "reason": "occupancy_change to away — setback_cool (80F) applied"
+    },
+    {
+      "at": "2026-04-05T10:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 80.0,
+      "reason": "classification while away — setback reapplied (80F), comfort NOT restored"
+    },
+    {
+      "at": "2026-04-05T10:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 80.0,
+      "reason": "another classification while away — setback maintained (80F)"
+    },
+    {
+      "at": "2026-04-05T14:00:00",
+      "expect": "comfort_restored",
+      "expect_temp": 75.0,
+      "reason": "occupancy_change to home — comfort_cool (75F) restored"
+    },
+    {
+      "at": "2026-04-05T14:30:00",
+      "expect": "expect_band",
+      "expect_band": {
+        "ceiling": 75.0
+      },
+      "reason": "Issue #1208: by the 14:30 classification cycle the occupant is home, so the armed comfort band ceiling must equal comfort_cool (75F), not the 80F away setback."
+    }
+  ],
+  "verdict": {
+    "type": "negative",
+    "summary": "Issue #1208: on return home on a warm day the comfort ceiling is not restored on arrival (the away setback persists)",
+    "observed_behavior": "setback_applied (80F) at 14:00 after the occupant returns home",
+    "expected_behavior": "comfort_restored (75F) at 14:00, and the comfort band ceiling equals comfort_cool (75F) at 14:30"
+  }
+}

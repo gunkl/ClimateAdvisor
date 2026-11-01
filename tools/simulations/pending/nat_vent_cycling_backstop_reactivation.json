@@ -27,7 +27,6 @@
       "time": "2026-08-01T13:30:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
       "note": "Daytime classification — warm day, comfort band armed at [68/74]."
     },
     {
@@ -51,10 +50,10 @@
     },
     {
       "time": "2026-08-01T14:12:00",
-      "type": "temp_update",
+      "type": "indoor_unreadable",
+      "unreadable": false,
       "indoor_f": 72.0,
-      "outdoor_f": 69.0,
-      "note": "Indoor has drifted back up to 72°F (>= on_threshold 72) — injects the value the still-armed backstop will read at its next tick. Deliberately NOT paired with an explicit nat_vent_temperature_check event: this scenario only supplies the raw temperature the way a live sensor would. The intervening 14:10:00 backstop tick (fired automatically by this event's own advance_to()) is a no-op — indoor was still 70°F at that point, below on_threshold."
+      "note": "Silent injection (no listener dispatch, no direct nat_vent_temperature_check): the thermostat's current_temperature rose to 72F but nothing pushed it to the engine. The still-armed backstop is the only thing that can notice."
     },
     {
       "time": "2026-08-01T14:16:00",

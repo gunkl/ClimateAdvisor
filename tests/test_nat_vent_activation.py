@@ -26,6 +26,7 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
+    FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
     MIN_VIABLE_NAT_VENT_HOURS,
     NAT_VENT_REACTIVATION_LOCKOUT_S,
@@ -72,6 +73,13 @@ _automation_mod.dt_util.parse_datetime = _real_parse_datetime
 _DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
 
 
+def _with_whole_house_fan(engine: AutomationEngine) -> AutomationEngine:
+    """Switch a ``_make_engine()`` engine to a whole-house fan (Issue #1140: nat-vent needs a working fan)."""
+    engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+    engine.config[CONF_FAN_ENTITY] = "fan.whf"
+    return engine
+
+
 def _make_engine(
     comfort_heat: float = 70.0,
     comfort_cool: float = 72.0,
@@ -113,6 +121,12 @@ def _make_engine(
         "setback_cool": 80,
         "natural_vent_delta": nat_vent_delta,
         "notify_service": "notify.notify",
+        # Issue #1140: nat-vent needs a working fan -- without one an open window pauses HVAC instead.
+        # HVAC-fan archetype: the same ceiling rule these tests were written against (a disabled fan used to
+        # share it), and the fixture's fan_modes below ("auto"/"on") are that archetype's vocabulary.
+        # Tests that need a start to actually succeed against this fixture's static thermostat state use
+        # ``_with_whole_house_fan()``; tests of the no-fan install pop the key.
+        CONF_FAN_MODE: FAN_MODE_HVAC,
         # No indoor_temp_source override — falls through to climate entity
     }
 
@@ -798,7 +812,9 @@ class TestFullNatVentCycle:
         ceiling gate (default/HVAC-fan archetype) does not block this pure directional/lockout
         integration test — ceiling-specific behavior is covered separately.
         """
-        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        engine = _with_whole_house_fan(
+            _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        )
         # Issue #411: the outdoor-rise exit at Step 2 now routes through _exit_nat_vent(),
         # which checks the monitored sensor before pausing vs. restoring. The window opened
         # in Step 1 and nobody closes it in this scenario, so the sensor stays open throughout.
@@ -1127,6 +1143,7 @@ class TestIssue641ExitReactivationFlipFlop:
         engine = self._make_active_nat_vent_engine(
             indoor_f=74.0, outdoor_f=65.0, comfort_heat=68.0, comfort_cool=74.0, occupancy_mode=OCCUPANCY_AWAY
         )
+        _with_whole_house_fan(engine)
         exit_time = datetime(2026, 8, 15, 6, 36, 0)
         _arm_sustained_exit(engine, NatVentExitReason.AWAY_CEILING, exit_time)
         with patch(_DT_NOW_PATH, return_value=exit_time):
@@ -2851,6 +2868,7 @@ class TestNoSpuriousFanCyclingEventWhenNoFanConfigured:
     def test_no_fan_on_event_when_indoor_crosses_on_threshold_with_fan_disabled(self):
         # comfort_heat=70, comfort_cool=74 -> midpoint 72, hysteresis 1.0 -> on_threshold=73
         engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine.config.pop(CONF_FAN_MODE)  # the no-fan install (a session can still exist from restored state)
         engine._natural_vent_active = True
         engine._fan_active = False  # natural resting state with no fan device configured
         engine._last_outdoor_temp = 60.0  # well below indoor -> outdoor-warm guard doesn't skip
@@ -2872,6 +2890,7 @@ class TestNoSpuriousFanCyclingEventWhenNoFanConfigured:
     def test_no_fan_off_event_when_indoor_crosses_off_threshold_with_fan_disabled(self):
         # comfort_heat=70, comfort_cool=74 -> midpoint 72, hysteresis 1.0 -> off_threshold=71
         engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine.config.pop(CONF_FAN_MODE)  # the no-fan install (a session can still exist from restored state)
         engine._natural_vent_active = True
         # Edge state: _fan_active=True with fan_mode disabled shouldn't occur naturally
         # (fan_mode disabled means _activate_fan() never sets it), but guards the branch

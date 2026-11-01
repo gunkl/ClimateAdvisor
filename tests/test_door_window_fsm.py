@@ -64,10 +64,21 @@ class TestFromNormal:
         assert t.to_state == DoorWindowLifecycleState.PAUSED_IDLE
 
     def test_sensor_opened_nat_vent_eligible_stays_normal(self):
-        # outdoor 60 < indoor 76, outdoor < threshold 80 -> nat-vent gate passes
-        t = transition(DoorWindowLifecycleState.NORMAL, _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0))
+        # outdoor 60 < indoor 76, outdoor < threshold 80 -> nat-vent gate passes (with a fan, Issue #1140)
+        t = transition(
+            DoorWindowLifecycleState.NORMAL,
+            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0, fan_mode="whole_house_fan"),
+        )
         assert t.to_state == DoorWindowLifecycleState.NORMAL
         assert t.outcome == "nat_vent_eligible"
+
+    def test_sensor_opened_same_window_without_a_fan_pauses(self):
+        # Issue #1140 mirror: identical temperatures, no working fan -> an open window is just an open window
+        t = transition(
+            DoorWindowLifecycleState.NORMAL,
+            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0, fan_mode="disabled"),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
 
     def test_sensor_opened_planned_window_noop(self):
         t = transition(
@@ -298,7 +309,7 @@ class TestFromGrace:
     def test_sensor_opened_falls_through_to_nat_vent_eligible_stays_grace(self):
         t = transition(
             DoorWindowLifecycleState.GRACE,
-            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0, indoor=76.0),
+            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0, indoor=76.0, fan_mode="whole_house_fan"),
         )
         assert t.to_state == DoorWindowLifecycleState.GRACE
         assert t.outcome == "nat_vent_eligible"
@@ -336,10 +347,19 @@ class TestFromGrace:
                 any_sensor_open=True,
                 outdoor=60.0,
                 indoor=76.0,
+                fan_mode="whole_house_fan",
             ),
         )
         assert t.to_state == DoorWindowLifecycleState.NORMAL
         assert t.outcome == "re_pause"
+
+    def test_grace_timer_expired_re_pause_without_a_fan_goes_to_the_pause(self):
+        # Issue #1140 mirror: same temperatures, no working fan -> the re-pause is a real pause
+        t = transition(
+            DoorWindowLifecycleState.GRACE,
+            _ev(DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED, any_sensor_open=True, outdoor=60.0, indoor=76.0),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
 
     def test_grace_timer_expired_adopt_override(self):
         t = transition(

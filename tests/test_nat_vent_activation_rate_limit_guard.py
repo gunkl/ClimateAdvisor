@@ -70,9 +70,9 @@ def _make_engine() -> AutomationEngine:
 
 
 class TestAppliesInactiveWhenCommandDidNotReachTheFan:
-    """OVERRIDDEN (Issue #706) and RATE_LIMITED_NEW/RATE_LIMITED_DUP (Issue #935)
-    all mean the same thing for this purpose: the real fan-ON command never
-    actually reached the fan, so the pre-await ACTIVE_* decision is stale and
+    """OVERRIDDEN (Issue #706), RATE_LIMITED_NEW/RATE_LIMITED_DUP (Issue #935) and
+    DISABLED/SUPPRESSED (Issue #1140) all mean the same thing for this purpose: the
+    real fan-ON command never actually reached a working fan, so the pre-await ACTIVE_* decision is stale and
     must not be applied — INACTIVE is applied instead so the entry retry loop
     can try again on its own next cycle."""
 
@@ -82,6 +82,8 @@ class TestAppliesInactiveWhenCommandDidNotReachTheFan:
             FanCommandResult.OVERRIDDEN,
             FanCommandResult.RATE_LIMITED_NEW,
             FanCommandResult.RATE_LIMITED_DUP,
+            FanCommandResult.DISABLED,  # Issue #1140: no working fan -> no session
+            FanCommandResult.SUPPRESSED,
         ],
     )
     @pytest.mark.parametrize(
@@ -107,6 +109,8 @@ class TestAppliesInactiveWhenCommandDidNotReachTheFan:
             FanCommandResult.OVERRIDDEN,
             FanCommandResult.RATE_LIMITED_NEW,
             FanCommandResult.RATE_LIMITED_DUP,
+            FanCommandResult.DISABLED,
+            FanCommandResult.SUPPRESSED,
         ],
     )
     def test_does_not_leave_a_stale_active_flag_set(self, result: FanCommandResult) -> None:
@@ -124,7 +128,7 @@ class TestAppliesInactiveWhenCommandDidNotReachTheFan:
 
 
 class TestAppliesDecisionWhenCommandActuallyReachedTheFan:
-    """EXECUTED, ALREADY_IN_STATE, and DISABLED all mean no override intervened
+    """EXECUTED and ALREADY_IN_STATE mean no override intervened
     mid-await and no command was deferred — the pre-await to_state decision is
     still correct and must be applied normally. Control group proving the
     widened RATE_LIMITED guard doesn't suppress the normal case."""
@@ -134,7 +138,6 @@ class TestAppliesDecisionWhenCommandActuallyReachedTheFan:
         [
             FanCommandResult.EXECUTED,
             FanCommandResult.ALREADY_IN_STATE,
-            FanCommandResult.DISABLED,
         ],
     )
     def test_applies_active_full_gate(self, result: FanCommandResult) -> None:
@@ -152,7 +155,6 @@ class TestAppliesDecisionWhenCommandActuallyReachedTheFan:
         [
             FanCommandResult.EXECUTED,
             FanCommandResult.ALREADY_IN_STATE,
-            FanCommandResult.DISABLED,
         ],
     )
     def test_applies_active_soft_start(self, result: FanCommandResult) -> None:

@@ -592,6 +592,15 @@ def _load_scenario(path: Path) -> dict:
         return json.load(f)
 
 
+def _with_working_fan(scenario: dict) -> dict:
+    """Issue #1140: nat-vent needs a working fan. These ground-truth tests assert the nat-vent SESSION state
+    machine, so they run the scenario's events against an install that has a whole-house fan (the golden
+    files themselves, which have no fan, now assert the pause instead)."""
+    scenario = dict(scenario)
+    scenario["config"] = {**scenario.get("config", {}), "fan_mode": "whole_house_fan", "fan_entity": "fan.whf"}
+    return scenario
+
+
 def _all_golden_and_pending_scenarios() -> list[Path]:
     paths = [p for p in _GOLDEN_DIR.glob("*.json") if p.name != "MANIFEST.json"]
     paths += [p for p in _PENDING_DIR.glob("*.json") if p.name != "MANIFEST.json"]
@@ -714,7 +723,7 @@ class TestGroundTruthScenarios:
         """Verdict: 'nat vent persists all day, no HVAC fired' — outdoor stays
         well below indoor throughout, never approaches the ceiling threshold.
         Re-evaluating with production's own final reading must not exit."""
-        scenario = _load_scenario(_GOLDEN_DIR / "mild_all_day_nat_vent_only.json")
+        scenario = _with_working_fan(_load_scenario(_GOLDEN_DIR / "mild_all_day_nat_vent_only.json"))
         result = run_production_scenario(scenario, use_coordinator=bool(scenario.get("use_coordinator", False)))
         snap = result.engine_state
         assert snap.get("_natural_vent_active") is True

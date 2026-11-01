@@ -124,12 +124,6 @@ async def _person_turns_the_fan_on(make_house):
     await house.open("window")
     await house.advance(minutes=2)
     assert not house.fan.is_on, "precondition: nothing but the person should be running the fan"
-    # A refresh just ran, so the coordinator's 10 s refresh cooldown is open. Without this, the press is
-    # raced by an immediate reconcile that switches the fan off before the override is recorded; that is a
-    # separate production finding (test_press_is_not_raced_by_immediate_reconcile below).
-    await house.coordinator.async_request_refresh()
-    await house.hass.async_block_till_done()
-    await house.advance(seconds=3)
     await house.occupant_presses_fan(True)
     await house.advance(seconds=90)  # CA's own listener records the manual override and persists its grace
     ae = house.coordinator.automation_engine
@@ -273,22 +267,10 @@ async def test_person_switching_fan_off_is_respected_by_the_new_instance(make_ho
 
 
 # --------------------------------------------------------------------------------------------------
-# Production finding surfaced while building the #1045 flow (not a fix; a strict xfail that flips when fixed)
+# #1130: the person's press is recorded before the Issue #510 immediate refresh runs
 # --------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,  # a hang (pytest-timeout) or a settle error must stay a real failure, not satisfy the xfail
-    reason=(
-        "Issue #1130: the person turning the whole-house fan on "
-        "is raced by the Issue #510 immediate refresh. _async_fan_entity_changed() schedules async_request_refresh() "
-        "BEFORE it evaluates the override; HA starts tasks eagerly and the coordinator's refresh debouncer is "
-        "immediate unless a refresh ran in the last 10 s, so _async_update_data() runs the untracked-fan backstop "
-        "reconcile first and switches the fan off ('backstop_30min reconcile - fan running without CA warrant') in "
-        "the same event-loop tick. Delete this marker when fixed."
-    ),
-)
 async def test_press_is_not_raced_by_immediate_reconcile(make_house) -> None:
     """The person turns the fan on at the wall (no refresh happened in the last 10 s): CA must not turn it off."""
     house = await make_house(**_QUIET_WHF_HOUSE)
@@ -302,3 +284,4 @@ async def test_press_is_not_raced_by_immediate_reconcile(make_house) -> None:
     fan_off = [c for c in _ca(house.calls[calls_before:]) if c.domain == "fan" and c.service == "turn_off"]
     assert fan_off == [], f"CA switched off the fan the person had just turned on: {fan_off}"
     assert house.fan.is_on
+

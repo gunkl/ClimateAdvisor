@@ -6762,19 +6762,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #510: refresh immediately on every genuine physical transition, regardless of
         # whether an override is currently active or what caused it -- so the displayed status
         # never waits on the next scheduled coordinator poll (up to 30 min) to reflect reality.
-        # Display-only: does not affect the override-detection/decision logic below. Previously
-        # this refresh only fired from inside the "override already active" branch further down,
+        # Display-only: does not affect the override-detection/decision logic. Previously
+        # this refresh only fired from inside the "override already active" branch,
         # leaving the display stale whenever a physical transition happened with NO override
-        # active (the exact mechanism behind Issue #510's reported staleness — a nat-vent
-        # session flag masked a confirmed-running WHF for hours because nothing prompted a
-        # recompute). Mirrors the identical Issue #489 pattern already used for door/window.
+        # active (the exact mechanism behind Issue #510's reported staleness). Mirrors the
+        # identical Issue #489 pattern already used for door/window.
+        #
+        # Issue #1130: the refresh is requested only AFTER the transition has been classified
+        # (override / grace recorded), never before. HA starts the refresh task eagerly and the
+        # debouncer runs it immediately, so scheduling it first let _async_update_data()'s
+        # untracked-fan backstop switch off a fan the occupant had just turned on (and, for an
+        # off press, let nat-vent re-engage before the grace period started). `finally` keeps
+        # the display refresh on every exit path of the classification, as before.
         _LOGGER.debug(
-            "fan_entity physical transition %s -> %s — requesting refresh so displayed status stays live",
+            "fan_entity physical transition %s -> %s — requesting refresh (after override detection)"
+            " so displayed status stays live",
             old_state.state,
             new_state.state,
         )
-        self.hass.async_create_task(self.async_request_refresh())
+        try:
+            self._classify_fan_entity_transition(event, old_state, new_state)
+        finally:
+            self.hass.async_create_task(self.async_request_refresh())
 
+    def _classify_fan_entity_transition(self, event: Event, old_state: Any, new_state: Any) -> None:
+        """Attribute a genuine fan-entity transition and record any override / grace (Issue #37).
+
+        Split out of _async_fan_entity_changed() (Issue #1130) so that handler can request its
+        display refresh strictly after this has run.
+        """
         # Issue #482: HA attaches the originating service call's Context to every
         # state-changed Event. When CA itself issued the fan command (via
         # automation.py's _call_fan_service_with_context), it records that Context's id.
@@ -6879,7 +6895,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             is_on = new_state.state in {"on"}
 
         # Skip if fan override is already active AND this is not the fan turning off — the
-        # display refresh already happened unconditionally above (Issue #510); an "on"
+        # display refresh is requested by the caller after this classification (Issue #510); an "on"
         # transition here is a redundant re-announcement, already accounted for. An "off"
         # transition, however, is the override's own defining condition ending and must not
         # be swallowed here (Issue #774) — it falls through to the direction-aware dispatch
@@ -6887,7 +6903,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self.automation_engine._fan_override_active and is_on:
             _LOGGER.info(
                 "Fan/state entity changed while override already active (%s -> %s) — "
-                "skipping override re-detection (display already refreshed above)",
+                "skipping override re-detection (display refresh follows in the caller)",
                 old_state.state,
                 new_state.state,
             )

@@ -52,3 +52,16 @@ class TestDecideOverrideCancelOutcome:
             manual_override_active=False, fan_override_active=False, grace_active=True
         )
         assert result == OverrideCancelOutcome.HAD_GRACE_ONLY
+
+    def test_pending_confirmation_alone_had_pending_only(self):
+        """Issue #1154: an unconfirmed change is protected, so cancelling it is not a no-op."""
+        result = decide_override_cancel_outcome(
+            manual_override_active=False, fan_override_active=False, grace_active=False, confirm_pending=True
+        )
+        assert result == OverrideCancelOutcome.HAD_PENDING_ONLY
+
+    def test_pending_does_not_change_the_label_when_something_else_is_active(self):
+        result = decide_override_cancel_outcome(
+            manual_override_active=False, fan_override_active=False, grace_active=True, confirm_pending=True
+        )
+        assert result == OverrideCancelOutcome.HAD_GRACE_ONLY

@@ -1149,6 +1149,27 @@ class TestCancelViewsGraceCancellation:
         assert ae._manual_override_active is False
         assert ae._grace_active is False
 
+    def test_cancel_override_view_ends_an_unconfirmed_change(self):
+        """Issue #1154: Cancel Override within the confirmation window ends the change and says "Override cancelled"."""
+        from custom_components.climate_advisor.api import ClimateAdvisorCancelOverrideView
+        from custom_components.climate_advisor.const import CONF_OVERRIDE_CONFIRM_PERIOD
+
+        ae = self._make_engine()
+        ae.config[CONF_OVERRIDE_CONFIRM_PERIOD] = 600
+        ae.handle_manual_override(source="normal", old_mode="heat", new_mode="cool", classification_mode="heat")
+        assert ae._override_confirm_pending is True
+        assert ae._manual_override_active is False
+
+        coordinator = MagicMock()
+        coordinator.automation_engine = ae
+        coordinator._current_classification = None
+
+        response = self._post(ClimateAdvisorCancelOverrideView, coordinator)
+
+        assert ae._override_confirm_pending is False
+        assert ae._manual_change_protected() is False
+        assert response.json_data["message"].startswith("Override cancelled")
+
     def test_cancel_fan_override_view_cancels_grace(self):
         """The Issue #508 regression: cancelling a FAN-only override must also cancel grace.
 

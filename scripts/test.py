@@ -7,6 +7,11 @@
 * ``ha``:   ``tests_ha/`` against the real Home Assistant (dependency group ``test-ha``).
 * ``all``:  both, in that order (default).
 
+Environment knobs for the unit tier:
+
+* ``CA_UNIT_WORKERS``: number of pytest-xdist workers (``auto`` for all cores). Unset or ``0`` runs
+  serially (the local default).
+
 Environment knobs for the ha tier:
 
 * ``CA_HA_WORKERS``: number of pytest-xdist workers (``auto`` for all cores). Unset or ``0``
@@ -71,8 +76,9 @@ def _ha_env_passthrough() -> dict[str, str]:
     return {k: os.environ[k] for k in ("CA_COMPONENT_ROOT",) if os.environ.get(k)}
 
 
-def _worker_args() -> list[str]:
-    workers = os.environ.get("CA_HA_WORKERS", "").strip()
+def _worker_args(env_var: str = "CA_HA_WORKERS") -> list[str]:
+    """``-n <workers>`` from an environment knob; unset or ``0`` means serial."""
+    workers = os.environ.get(env_var, "").strip()
     return [] if workers in ("", "0") else ["-n", workers]
 
 
@@ -144,7 +150,7 @@ def run_ha(extra: list[str]) -> int:
 def run_unit(extra: list[str]) -> int:
     # Default to the whole suite unless the caller named a test path or node id.
     targets = [] if any(a.startswith("tests") or a.endswith(".py") or "::" in a for a in extra) else ["tests/"]
-    return _run_local("test", ".venv-test", [*targets, *UNIT_ARGS, *extra])
+    return _run_local("test", ".venv-test", [*targets, *UNIT_ARGS, *_worker_args("CA_UNIT_WORKERS"), *extra])
 
 
 def main(argv: list[str]) -> int:

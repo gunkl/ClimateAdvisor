@@ -11,6 +11,8 @@ on:
 jobs:
   validate-and-test:
     runs-on: ubuntu-latest
+    env:
+      CA_UNIT_WORKERS: "4"
     permissions:
       contents: read
 

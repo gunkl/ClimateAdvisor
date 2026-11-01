@@ -278,6 +278,8 @@ design). Because `handle_fan_manual_override()` is sync and `_suppress_hvac_for_
 async (it awaits `_set_hvac_mode()`), it is dispatched via `hass.async_create_task()` rather
 than awaited directly.
 
+**Whole-house fan only (Issues #1163/#1164).** The suppression is a consequence of a press of the WHOLE-HOUSE fan, decided by the one predicate `AutomationEngine._is_whf_press(hvac_fan)`: the thermostat's own blower (its `fan_mode` attribute -- the coordinator passes `hvac_fan=True`) never triggers it, under `whole_house_fan` or `both`; RF-remote and fan-entity presses do. The same predicate decides whether the press replaces the occupant's thermostat change. An off report is also fan-specific: the thermostat blower going On->Auto (`on_fan_turned_off(hvac_fan=True)`) does not end a WHF override or its RF timer, and a WHF-entity off does not end a blower override.
+
 **Exit is reclassify, not restore.** `_activate_fan()`'s counterpart, `_deactivate_fan()`,
 restores the HVAC mode captured at activation time. That is appropriate for CA's own short
 nat-vent cycles, but a manual/remote WHF session can run for hours — the captured mode is

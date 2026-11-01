@@ -1,0 +1,60 @@
+{
+  "name": "mild_cold_forecast_window_open_pauses_1211",
+  "description": "Mild day whose forecast (high 65 / low 49) never reaches the 70 F comfort floor, so the real classifier does NOT recommend windows (the scenario states no windows_recommended: the harness fills it from classify_day). Whole-house fan configured, but the house is cool (indoor 69, below the 70 floor) so nat-vent is refused. A window opens at 12:00 inside the static 10:00-17:00 period: the handler pauses right there, never a silent no-op (Issue #1211, three-exercise scenario from the evaluation report).",
+  "source": "Issue #1211 pending scenario (promote only with owner review)",
+  "issue": 1211,
+  "notes": [
+    "Issue #1211: classifier-driven classification (high 65 / low 49 -> windows_recommended False; times still set 10:00/17:00). Window open inside the static period.",
+    "Three-exercise protocol: (a) effectiveness: with the A3 handler change reverted this still pauses (the refresh-free engine run returns silently then and the 12:00 assertion fails); with the old always-True mild rule the harness would hand the engine an exemption that no longer matters to the handler, so this scenario guards the handler, not the classifier; (b) docs: docs/08 C2/C5 rows say the open window pauses when the gate refuses; (c) occupant: if it regressed the HVAC would keep heating into an open window until the next refresh."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-04-22T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 60.0,
+      "note": "Late morning: indoor 69F (below the 70F floor), outdoor 60F"
+    },
+    {
+      "time": "2026-04-22T10:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "note": "Mild day, forecast high 65 / low 49: the real classifier decides (no windows recommended)",
+      "today_high": 65,
+      "today_low": 49
+    },
+    {
+      "time": "2026-04-22T12:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens at 12:00 inside the static period; nat-vent gate refuses (indoor below the floor) -> pause"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-22T10:01:00",
+      "expect": "classification_applied",
+      "reason": "Mild-day classification applied"
+    },
+    {
+      "at": "2026-04-22T12:00:00",
+      "expect": "paused",
+      "reason": "Window left open, nat-vent refused (indoor 69 < floor 70): the handler pauses (Issue #1211)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A window opened on a mild day whose forecast never reaches the floor pauses the HVAC; no silent no-op",
+    "observed_behavior": "classification_applied -> sensor_open 12:00 -> paused",
+    "expected_behavior": "Pause (rule 3) because nat-vent cannot run"
+  }
+}

@@ -538,8 +538,12 @@ def _make_gate_coord_stub(
     today_low=55.0,
     comfort_cool=75.0,
     comfort_heat=70.0,
+    indoor=None,
 ):
-    """Create a minimal coordinator stub for _apply_outdoor_windows_gate() tests."""
+    """Create a minimal coordinator stub for _apply_outdoor_windows_gate() tests.
+
+    ``indoor`` is the live indoor reading (None = no sensor): Issue #1211 made the gate indoor-aware.
+    """
     coord_mod = _importlib.import_module("custom_components.climate_advisor.coordinator")
     coord = object.__new__(coord_mod.ClimateAdvisorCoordinator)
 
@@ -556,6 +560,8 @@ def _make_gate_coord_stub(
 
     coord._current_classification = cls_obj
     coord._last_outdoor_temp = outdoor_temp
+    coord._get_indoor_temp = MagicMock(return_value=indoor)
+    coord._schedule_planned_window_exit_check = MagicMock()
     coord.config = {
         "comfort_cool": comfort_cool,
         "comfort_heat": comfort_heat,
@@ -643,3 +649,74 @@ class TestOutdoorTempGate:
         assert coord._current_classification.windows_recommended is False, (
             "WARM day with outdoor=80 > comfort_cool=75 should disable windows_recommended"
         )
+
+
+class TestOutdoorGateIsIndoorAware:
+    """Issue #1211 (owner decision O3): with an indoor reading the gate asks which way the air moves the house,
+    instead of only "outdoor more than 15 F below the floor"."""
+
+    def test_cold_house_and_colder_outdoor_clears(self):
+        # indoor 65 < floor 70; outdoor 60 is colder -> windows would chill it further. (60 is not under the old
+        # floor-15 = 55 cutoff, so this is the new behaviour.)
+        coord = _make_gate_coord_stub(60.0, comfort_heat=70.0, indoor=65.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is False
+        coord._schedule_planned_window_exit_check.assert_called_once()
+
+    def test_cold_house_and_warmer_outdoor_keeps(self):
+        coord = _make_gate_coord_stub(68.0, comfort_heat=70.0, indoor=65.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is True
+        coord._schedule_planned_window_exit_check.assert_not_called()
+
+    def test_hot_house_and_warmer_outdoor_clears(self):
+        coord = _make_gate_coord_stub(74.0, comfort_cool=75.0, indoor=78.0 + 1.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is True  # 74 < 79: cooler, helps
+        coord = _make_gate_coord_stub(74.0, comfort_cool=72.0, indoor=73.0 - 0.5)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is False  # outdoor 74 > comfort_cool 72
+
+    def test_in_band_house_is_not_vetoed_by_cold_outdoor(self):
+        coord = _make_gate_coord_stub(45.0, comfort_heat=70.0, comfort_cool=75.0, indoor=72.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is True
+
+    def test_no_indoor_reading_keeps_the_extreme_cold_cutoff(self):
+        coord = _make_gate_coord_stub(52.0, comfort_heat=70.0, indoor=None)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is False
+
+
+class TestClassifyKwargs:
+    """Issue #1211: every classify_day() call passes the configured comfort band and a same-day hysteresis seed."""
+
+    def _coord(self, *, forecast_flag, fetched):
+        coord_mod = _importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = object.__new__(coord_mod.ClimateAdvisorCoordinator)
+        coord.config = {"comfort_heat": 66, "comfort_cool": 78}
+        cls_obj = _mild_day_classification()
+        cls_obj.forecast_windows_recommended = forecast_flag
+        coord._current_classification = cls_obj
+        coord._classification_fetched_at = fetched
+        return coord
+
+    def test_passes_the_configured_comfort_band(self):
+        coord = self._coord(forecast_flag=False, fetched=None)
+        kwargs = coord._classify_kwargs()
+        assert kwargs["comfort_heat"] == 66.0
+        assert kwargs["comfort_cool"] == 78.0
+
+    def test_seeds_hysteresis_from_todays_previous_classification(self):
+        now = datetime(2026, 4, 22, 12, 0, tzinfo=UTC)
+        coord = self._coord(forecast_flag=True, fetched=now)
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as dt:
+            dt.now.return_value = now
+            assert coord._classify_kwargs()["previous_windows_recommended"] is True
+            assert coord._classify_kwargs(seed_hysteresis=False)["previous_windows_recommended"] is False
+
+    def test_yesterdays_answer_is_never_carried_over(self):
+        coord = self._coord(forecast_flag=True, fetched=datetime(2026, 4, 21, 12, 0, tzinfo=UTC))
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as dt:
+            dt.now.return_value = datetime(2026, 4, 22, 6, 0, tzinfo=UTC)
+            assert coord._classify_kwargs()["previous_windows_recommended"] is False

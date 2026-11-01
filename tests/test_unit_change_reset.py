@@ -315,6 +315,39 @@ def _run_restore(coord, state: dict) -> None:
         asyncio.run(coord.async_restore_state())
 
 
+class TestRestoredWindowsFlag:
+    """Issue #1211: ``DayClassification.__post_init__`` recomputes ``windows_recommended`` from the forecast, so a
+    flag the live outdoor gate had cleared used to come back True after a restart (planned-window exemption
+    briefly on mid open window)."""
+
+    def test_gate_cleared_flag_stays_cleared_after_restore(self):
+        coord = _make_coordinator(FAHRENHEIT)
+        state = _saved_state()
+        # a warm day with a 59.5 F low: the classifier alone would say True; the gate had cleared it
+        state["classification"]["windows_recommended"] = False
+        state["classification"]["forecast_windows_recommended"] = True
+        _run_restore(coord, state)
+        c = coord._current_classification
+        assert c.windows_recommended is False
+        assert c.forecast_windows_recommended is True
+
+    def test_flag_and_estimated_low_round_trip_through_the_saved_state(self):
+        coord = _make_coordinator(FAHRENHEIT)
+        state = _saved_state()
+        state["classification"].update(
+            {"windows_recommended": True, "forecast_windows_recommended": True, "low_is_estimated": True}
+        )
+        _run_restore(coord, state)
+        c = coord._current_classification
+        assert c.windows_recommended is True
+        assert c.low_is_estimated is True
+        with patch(f"{_COORD_LOGGER}.dt_util", _make_dt_mock()):
+            saved = coord._build_state_dict()["classification"]
+        assert saved["windows_recommended"] is True
+        assert saved["forecast_windows_recommended"] is True
+        assert saved["low_is_estimated"] is True
+
+
 class TestSaveIncludesUnit:
     @pytest.mark.parametrize("unit", [FAHRENHEIT, CELSIUS])
     def test_build_state_dict_has_temp_unit(self, unit):

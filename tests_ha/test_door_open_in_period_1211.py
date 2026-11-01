@@ -71,8 +71,9 @@ async def test_positive_control_with_refresh_allowed_natvent_also_starts(make_ho
 
 
 async def test_window_in_period_with_gate_refusing_pauses_in_the_handler(make_house) -> None:
-    """Indoor 67 is below the 68 comfort floor, so nat-vent is refused: the handler pauses right there."""
-    house, engine = await _house_in_period(make_house, initial_indoor_f=67.0)
+    """Outdoor 71 is warmer than indoor 70 (both inside the 68-74 band, so the windows day stands), so nat-vent is
+    refused: the handler pauses right there."""
+    house, engine = await _house_in_period(make_house, initial_indoor_f=70.0, outdoor_f=71.0)
     await house.open("window")
     await house.advance(seconds=_DEBOUNCE_S + 30)
 
@@ -96,3 +97,20 @@ async def test_manual_override_still_prevents_the_start(make_house) -> None:
     assert engine._natural_vent_active is False
     assert engine._paused_by_door is False
     assert house.thermostat.mode == "cool"
+
+
+async def test_cool_morning_in_a_cold_house_clears_the_windows_recommendation(make_house) -> None:
+    """Issue #1211 (O3): indoor 66 is below the 68 floor and outdoor 58 is colder, so opening windows would chill
+    the house further. Outdoor 58 is NOT under the old 'floor minus 15' cutoff (53), so only the indoor-aware gate
+    clears the recommendation."""
+    house = await make_house(**{**_HOUSE, "initial_indoor_f": 66.0, "outdoor_f": 58.0})
+    await house.advance(minutes=6)  # includes a 5-minute outdoor tick, which runs the live gate
+    engine = house.coordinator.automation_engine
+    assert engine._current_classification.windows_recommended is False
+    assert engine._current_classification.forecast_windows_recommended is True, "the forecast still says windows"
+
+
+async def test_positive_control_cold_house_with_warmer_outdoor_keeps_the_recommendation(make_house) -> None:
+    house = await make_house(**{**_HOUSE, "initial_indoor_f": 60.0, "outdoor_f": 62.0})
+    await house.advance(minutes=6)
+    assert house.coordinator.automation_engine._current_classification.windows_recommended is True

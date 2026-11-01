@@ -12,7 +12,10 @@
   "config": {
     "comfort_heat": 70,
     "comfort_cool": 74,
-    "natural_vent_delta": 3.0
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
@@ -27,8 +30,12 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
-      "note": "Warm-day classification"
+      "windows_recommended": true,
+      "note": "Warm-day classification [Issue #1211: classifier-true setup -- high 80 / low 60 on a warm day means windows ARE recommended 06:00-10:00 (classify_day); the open window below is therefore inside the planned period]",
+      "today_high": 80,
+      "today_low": 60,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
     },
     {
       "time": "2026-05-25T08:05:00",
@@ -55,5 +62,10 @@
       "expect": "paused",
       "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': REGRESSION GUARD: temp_update with nat_vent_active and indoor 73F within band [70F, 74F] — ceiling guard dormant, nat vent continues. No HVAC change. This guards against broken ceiling guard logic that incorrectly fires when nat vent is already handling cooling."
     }
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Issue #1211 (C1): this scenario used to hand-set windows_recommended=false on a warm day with a 60 F low, which classify_day never produces; with A3 the planned-window period no longer exempts the handler, so the setup is made classifier-true (flag, 06:00-10:00 times, forecast high 80 / low 60) and the outcomes are unchanged: with no fan configured the handler pauses at the open window."
   ]
 }

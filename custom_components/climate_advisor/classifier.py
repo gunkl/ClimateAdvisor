@@ -18,7 +18,6 @@ from .const import (
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_MORNING_START_HOUR,
-    ECONOMIZER_TEMP_DELTA,
     MILD_WINDOW_CLOSE_HOUR,
     MILD_WINDOW_OPEN_HOUR,
     THRESHOLD_COOL,
@@ -31,6 +30,7 @@ from .const import (
     WARM_WINDOW_OPEN_HOUR,
     WINDOW_OPPORTUNITY_MAX_LOW_F,
 )
+from .temperature import outdoor_air_helps
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,6 +82,9 @@ class DayClassification:
     pre_condition: bool = False  # Should we pre-heat or pre-cool?
     pre_condition_target: float | None = None
     windows_recommended: bool = False
+    # Issue #1211: the classifier's own windows answer, before the coordinator's live outdoor gate clears
+    # ``windows_recommended``. Hysteresis seed for the next cycle and the briefing drift trigger key on it.
+    forecast_windows_recommended: bool = False
     window_open_time: time | None = None
     window_close_time: time | None = None
     setback_modifier: float = 0.0  # Degrees to adjust setback based on trend
@@ -95,6 +98,26 @@ class DayClassification:
     def __post_init__(self):
         """Compute recommendations based on classification."""
         self._compute_recommendations()
+
+    def _set_windows_recommended(self) -> None:
+        """Set ``windows_recommended`` from the shared rule (Issue #1211).
+
+        ``today_high`` is already ``max(forecast high, observed so far)`` and ``today_low`` the min (the
+        coordinator folds the observed extremes in), so the recommendation recovers on its own as the day
+        warms. A missing/estimated low (``None``) is "no recommendation" -- never an invented one.
+        ``forecast_windows_recommended`` keeps the classifier's own answer: the live outdoor gate may clear
+        ``windows_recommended`` later, but hysteresis and the briefing drift trigger key on this one.
+        """
+        helps = outdoor_air_helps(
+            self.today_low,
+            self.today_high,
+            self.comfort_heat,
+            self.comfort_cool,
+            low_is_estimated=self.low_is_estimated,
+            was_helping=self.windows_hysteresis_seed,
+        )
+        self.forecast_windows_recommended = bool(helps)
+        self.windows_recommended = self.forecast_windows_recommended
 
     def _compute_recommendations(self):
         """Derive actionable recommendations from the day type and trend."""
@@ -125,15 +148,16 @@ class DayClassification:
             self.hvac_mode = "off"
             self.window_open_time = time(WARM_WINDOW_OPEN_HOUR, 0)
             self.window_close_time = time(WARM_WINDOW_CLOSE_HOUR, 0)
-            # Only recommend windows if morning low is cool enough to help —
-            # same delta the HOT-day economizer uses.
-            if self.today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA:
-                self.windows_recommended = True
+            # Issue #1211: the shared "would outside air help?" rule, with the occupant's configured
+            # comfort band (this used the DEFAULT ceiling, so a 78 F ceiling or a 70 F floor was ignored).
+            self._set_windows_recommended()
         elif self.day_type == DAY_TYPE_MILD:
             self.hvac_mode = "off"
-            self.windows_recommended = True
             self.window_open_time = time(MILD_WINDOW_OPEN_HOUR, 0)
             self.window_close_time = time(MILD_WINDOW_CLOSE_HOUR, 0)
+            # Issue #1211: was unconditionally True. Times stay set either way (pre-cool scheduling and the
+            # nat-vent plan read them); only the recommendation is conditional.
+            self._set_windows_recommended()
         elif self.day_type == DAY_TYPE_COOL or self.day_type == DAY_TYPE_COLD:
             self.hvac_mode = "heat"
 

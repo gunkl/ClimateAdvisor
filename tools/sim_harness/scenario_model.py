@@ -64,40 +64,74 @@ def scenario_start_time(events: list[dict]) -> datetime:
     return _FALLBACK_START
 
 
-def build_classification_from_event(event: dict) -> Any:
+# A forecast typical of each day type, used ONLY for classification events that do not state their own
+# ``today_high`` / ``today_low``. (Issue #1211) These replace the old blanket 75 / 60 default, which was a
+# "warm" high for every day type. Hot days get a warm night (low above the window-opportunity cutoff) so a
+# scenario that never mentions the economizer does not silently gain one.
+_REPRESENTATIVE_LOW_F = {"hot": 82.0, "warm": 60.0, "mild": 50.0, "cool": 40.0, "cold": 25.0}
+
+
+def _representative_high_f(day_type: str, comfort_heat: float) -> float:
+    """A high that classifies as ``day_type`` (default thresholds); a mild one also reaches the comfort floor."""
+    from custom_components.climate_advisor.const import (  # noqa: PLC0415
+        THRESHOLD_COOL,
+        THRESHOLD_HOT,
+        THRESHOLD_MILD,
+        THRESHOLD_WARM,
+    )
+
+    if day_type == "hot":
+        return float(THRESHOLD_HOT + 5)
+    if day_type == "warm":
+        return float(THRESHOLD_WARM + 5)
+    if day_type == "mild":
+        return float(min(max(comfort_heat + 2.0, THRESHOLD_MILD), THRESHOLD_WARM - 1))
+    if day_type == "cool":
+        return float(THRESHOLD_COOL + 7)
+    return float(THRESHOLD_COOL - 10)
+
+
+def build_classification_from_event(event: dict, config: dict | None = None) -> Any:
     """Build a real DayClassification from a scenario classification event.
 
-    Bypasses ``__post_init__`` (which calls ``_compute_recommendations`` and
-    would overwrite hvac_mode, windows_recommended etc. from the scenario JSON)
-    and manually sets fields from the event, using sensible defaults for the
-    required-but-not-scenario-relevant fields.
+    Issue #1211 (C6): every recommendation field the scenario does NOT state is filled by the REAL
+    classifier -- ``DayClassification.__post_init__`` -- from the scenario's day type, forecast and comfort
+    band (``config``), instead of the old hand-built defaults (high 75 / low 60, hvac_mode "off",
+    windows_recommended False, no window times). A field the scenario DOES state still wins, so every
+    hand-authored classification keeps meaning exactly what its author wrote.
 
-    Why object.__new__?  DayClassification.__post_init__ derives hvac_mode and
-    window times from day_type - but scenario JSON specifies these explicitly.
-    Using __new__ lets us honour what the scenario author wrote.
+    Why the old default was wrong (semantic justification, per the test-infrastructure rule): it made an
+    event that said ``day_type: warm`` and nothing else describe a day production's classifier would never
+    produce (a warm day whose low is 60 gets windows recommended and window times; a mild day whose high
+    is 75 is a warm day). Scenarios therefore exercised a state production cannot reach, and could not
+    notice when the classifier changed. It cannot make a real failure pass silently: it only makes unstated
+    inputs match the classifier; every stated field is applied after, unchanged.
     """
-    from custom_components.climate_advisor.classifier import DayClassification  # noqa: PLC0415
-
-    c = object.__new__(DayClassification)
-
-    # --- Required structural fields (not in scenarios; use sensible defaults) ---
-    c.trend_direction = event.get("trend_direction", "stable")
-    c.trend_magnitude = float(event.get("trend_magnitude", 0.0))
-    c.today_high = float(event.get("today_high", 75.0))
-    c.today_low = float(event.get("today_low", 60.0))
-    c.tomorrow_high = float(event.get("tomorrow_high", 75.0))
-    c.tomorrow_low = float(event.get("tomorrow_low", 60.0))
-
-    # --- Classification fields that scenarios DO specify ---
-    c.day_type = event.get("day_type", "mild")
-    c.hvac_mode = event.get("hvac_mode", "off")
-    c.windows_recommended = bool(event.get("windows_recommended", False))
-    c.setback_modifier = float(event.get("setback_modifier", 0.0))
-
-    # Window times: stored as datetime.time objects in DayClassification
-    # Scenario JSON uses "HH:MM" strings (same as SimClassification)
     from datetime import time as dt_time  # noqa: PLC0415
 
+    from custom_components.climate_advisor.classifier import DayClassification  # noqa: PLC0415
+    from custom_components.climate_advisor.const import DEFAULT_COMFORT_COOL, DEFAULT_COMFORT_HEAT  # noqa: PLC0415
+
+    cfg = config or {}
+    comfort_heat = float(cfg.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+    comfort_cool = float(cfg.get("comfort_cool", DEFAULT_COMFORT_COOL))
+    day_type = event.get("day_type", "mild")
+    today_high = float(event.get("today_high", _representative_high_f(day_type, comfort_heat)))
+    today_low = float(event.get("today_low", _REPRESENTATIVE_LOW_F.get(day_type, 50.0)))
+
+    c = DayClassification(
+        day_type=day_type,
+        trend_direction=event.get("trend_direction", "stable"),
+        trend_magnitude=float(event.get("trend_magnitude", 0.0)),
+        today_high=today_high,
+        today_low=today_low,
+        tomorrow_high=float(event.get("tomorrow_high", today_high)),
+        tomorrow_low=float(event.get("tomorrow_low", today_low)),
+        comfort_heat=comfort_heat,
+        comfort_cool=comfort_cool,
+    )
+
+    # Scenario JSON uses "HH:MM" strings; DayClassification stores datetime.time objects.
     def _parse_time(val: str | None) -> dt_time | None:
         if not val:
             return None
@@ -107,22 +141,53 @@ def build_classification_from_event(event: dict) -> Any:
         except ValueError, AttributeError:
             return None
 
-    c.window_open_time = _parse_time(event.get("window_open_time"))
-    c.window_close_time = _parse_time(event.get("window_close_time"))
-
-    # Optional pre-condition fields
-    c.pre_condition = bool(event.get("pre_condition", False))
-    c.pre_condition_target = event.get("pre_condition_target")
-
-    # Window opportunity fields (hot-day economizer)
-    c.window_opportunity_morning = bool(event.get("window_opportunity_morning", False))
-    c.window_opportunity_evening = bool(event.get("window_opportunity_evening", False))
-    c.window_opportunity_morning_start = _parse_time(event.get("window_opportunity_morning_start"))
-    c.window_opportunity_morning_end = _parse_time(event.get("window_opportunity_morning_end"))
-    c.window_opportunity_evening_start = _parse_time(event.get("window_opportunity_evening_start"))
-    c.window_opportunity_evening_end = _parse_time(event.get("window_opportunity_evening_end"))
+    # --- Stated fields win over the classifier's ---
+    if "hvac_mode" in event:
+        c.hvac_mode = event["hvac_mode"]
+    if "windows_recommended" in event:
+        c.windows_recommended = bool(event["windows_recommended"])
+        c.forecast_windows_recommended = c.windows_recommended
+    if "setback_modifier" in event:
+        c.setback_modifier = float(event["setback_modifier"])
+    if "window_open_time" in event:
+        c.window_open_time = _parse_time(event.get("window_open_time"))
+    if "window_close_time" in event:
+        c.window_close_time = _parse_time(event.get("window_close_time"))
+    if "pre_condition" in event:
+        c.pre_condition = bool(event["pre_condition"])
+    if "pre_condition_target" in event:
+        c.pre_condition_target = event.get("pre_condition_target")
+    for flag in ("window_opportunity_morning", "window_opportunity_evening"):
+        if flag in event:
+            setattr(c, flag, bool(event[flag]))
+    for key in (
+        "window_opportunity_morning_start",
+        "window_opportunity_morning_end",
+        "window_opportunity_evening_start",
+        "window_opportunity_evening_end",
+    ):
+        if key in event:
+            setattr(c, key, _parse_time(event.get(key)))
 
     return c
+
+
+def pin_scenario_thermal_model(coordinator: Any, model: dict) -> None:
+    """Make a coordinator-mode run use the scenario's ``thermal_model`` through every refresh (Issue #1211).
+
+    A scenario's ``thermal_model`` used to be written only to ``engine._thermal_model``. In production that
+    attribute is whatever ``learning.get_thermal_model()`` last returned, and ``_async_update_data_impl``
+    rewrites it from that call every 30-minute cycle -- so in coordinator mode the first refresh silently
+    replaced the scenario's model with the harness's empty learning store, and the two runner modes diverged.
+    The scenario's model IS the learned model for that run, so the coordinator's learning store answers with it.
+
+    Why the old semantics were wrong (test-infrastructure rule): a scenario asserting a decision that depends
+    on the ODE model passed or failed depending on whether a refresh had run yet. This cannot let a real
+    failure pass silently: the engine sees the same model as before, now also after the first refresh.
+    """
+    learning = getattr(coordinator, "learning", None)
+    if learning is not None:
+        learning.get_thermal_model = lambda *args, **kwargs: model
 
 
 def snapshot_engine_state(engine: Any) -> dict[str, Any]:

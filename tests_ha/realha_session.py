@@ -64,6 +64,7 @@ from tools.sim_harness.scenario_model import (
     build_classification_from_event,
     merged_scenario_config,
     parse_event_time,
+    pin_scenario_thermal_model,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
@@ -337,6 +338,7 @@ class RealHASession:
         """Optional ODE inputs the scenario supplies (set on the live engine, as FakeHass does)."""
         if isinstance(self.scenario.get("thermal_model"), dict):
             self.engine._thermal_model = self.scenario["thermal_model"]
+            pin_scenario_thermal_model(self.coordinator, self.scenario["thermal_model"])
         if isinstance(self.scenario.get("hourly_forecast"), list):
             self.engine._hourly_forecast_temps = self.scenario["hourly_forecast"]
 
@@ -500,7 +502,7 @@ class RealHASession:
             return await self._thermostat_state_changed(event)
 
         if etype == "classification":
-            classification = build_classification_from_event(event)
+            classification = build_classification_from_event(event, cfg)
             coordinator._current_classification = classification
             coordinator._ensure_today_record(classification)
             await engine.apply_classification(classification, indoor_temp=house.thermostat.indoor_f)

@@ -8,6 +8,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 - Fix #1165: if you turn the thermostat Off while a window is open and then close the window, Climate Advisor no longer turns heating or cooling back on over your Off. Your Off stays until your manual-change pause ends.
 - Fix #1157: if natural ventilation ends with a window still open (thermostat Off) and you change the temperature on the thermostat, closing the window now starts heating or cooling at your temperature instead of leaving the thermostat Off until your manual-change pause ends. This includes mild days, where Climate Advisor picks heating or cooling from your comfort range and the current indoor temperature.
 
+## [0.8.16] — 2026-11-01
+
+- Fix #1156: a change you made on the thermostat is no longer dropped, and heating or cooling is no longer switched off over it, when an unrelated waiting period (for example the few minutes after a window closes) runs out while a window is open again. Your own change's pause still ends the normal way.
+- Fix #1154: Cancel Override now works on a thermostat change that is still waiting for its confirmation, instead of saying there is nothing to cancel.
+- Fix #1135: saving settings or reloading Climate Advisor no longer leaves a stale thermostat check running a few seconds later.
+
 ## [0.8.15] — 2026-11-01
 
 - Fix #1130: turning the whole-house fan on or off at the wall no longer gets undone by Climate Advisor's own status refresh. Your switch-on is recorded as your choice before anything else runs, so the fan keeps running, and your switch-off starts its pause before anything can start the fan again. A sealed house still stops the fan, as before.

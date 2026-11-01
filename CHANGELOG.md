@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.17] — 2026-11-01
+
+- Fix #1183: restarting Home Assistant (an update, a deploy, a manual restart) no longer sends a false "entities aren't responding" email about your whole-house fan, and Climate Advisor no longer sends a thermostat command that fails while Home Assistant shuts down. Once Home Assistant starts stopping, Climate Advisor stops commanding and alerting; it still records that the restart was clean.
+
 ## [0.8.16] — 2026-11-01
 
 - Fix #1156: a change you made on the thermostat is no longer dropped, and heating or cooling is no longer switched off over it, when an unrelated waiting period (for example the few minutes after a window closes) runs out while a window is open again. Your own change's pause still ends the normal way.

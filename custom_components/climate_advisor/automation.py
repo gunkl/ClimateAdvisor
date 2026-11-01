@@ -379,20 +379,33 @@ def _sanitize_comfort_hold(item: Any) -> dict[str, Any] | None:
     }
 
 
-def _refuse_if_shut_down(obj: Any, action: str, *, label: Callable[[Any], str] | None = None) -> bool:
-    """Issue #1102 latch: True (with one WARNING) if ``obj`` was shut down.
+def _latched(obj: Any) -> bool:
+    """True once ``obj`` may no longer act: shut down (Issue #1102) or Home Assistant is stopping (Issue #1183).
 
-    The one shut-down check for both the engine and the coordinator (which passes its own
-    ``label``). A shut-down instance belongs to a config entry a reload/unload has
-    replaced; any call still reaching it comes from a leaked timer or listener. Unlike
-    dry_run, a refusal never pretends the action happened: each caller returns its
-    existing no-op result so nothing retries, re-arms or notifies. Module-level with
-    ``is True`` so MagicMock-based test stubs (truthy attributes and methods) pass.
+    The silent form of ``_refuse_if_shut_down`` for callers that skip without logging. ``is True`` so
+    MagicMock-based test stubs (truthy attributes) are not latched.
     """
-    if getattr(obj, "_shut_down", False) is not True:
+    return getattr(obj, "_shut_down", False) is True or getattr(obj, "_ha_stopping", False) is True
+
+
+def _refuse_if_shut_down(obj: Any, action: str, *, label: Callable[[Any], str] | None = None) -> bool:
+    """Issue #1102 latch: True (with one log line) if ``obj`` may no longer act.
+
+    The one refusal check for both the engine and the coordinator (which passes its own
+    ``label``). A shut-down instance belongs to a config entry a reload/unload has
+    replaced; any call still reaching it comes from a leaked timer or listener (WARNING).
+    Issue #1183: a restart never unloads the entry, so the coordinator's STOP listener sets
+    ``_ha_stopping`` instead; refusals then are expected (devices go unavailable as HA unloads
+    them) and log at INFO. Unlike dry_run, a refusal never pretends the action happened: each
+    caller returns its existing no-op result so nothing retries, re-arms or notifies.
+    """
+    if not _latched(obj):
         return False
     who = label(obj) if label is not None else f"automation engine {id(obj):x} ({getattr(obj, 'climate_entity', '?')})"
-    _LOGGER.warning("Shut-down %s asked to %s — refused (stale after reload/unload)", who, action)
+    if getattr(obj, "_shut_down", False) is True:
+        _LOGGER.warning("Shut-down %s asked to %s — refused (stale after reload/unload)", who, action)
+    else:
+        _LOGGER.info("Home Assistant is stopping: %s asked to %s — skipped", who, action)
     return True
 
 
@@ -1095,6 +1108,9 @@ class AutomationEngine:
     # Issue #1102: shut-down latch (see _refuse_if_shut_down). Class-level default for
     # engines built via object.__new__ in tests; __init__ sets the instance attribute.
     _shut_down: bool = False
+    # Issue #1183: set (never cleared) by the coordinator's EVENT_HOMEASSISTANT_STOP listener.
+    # Honoured by the same refusal check; separate from _shut_down so a later unload still saves.
+    _ha_stopping: bool = False
 
     # Issue #1144: WHF safety enforcer state. Class-level defaults for engines built via
     # object.__new__ in tests (the runtime source of truth is whatever the methods assign).
@@ -10323,7 +10339,7 @@ class AutomationEngine:
         queues the next one, which waits on the decision lock.
         """
         # The post-stop verify is never coalesced away: it is what ends a command-only fan's wait (Issue #1176).
-        if self._shut_down or (self._whf_safety_queued and trigger != "stop_verify"):
+        if _latched(self) or (self._whf_safety_queued and trigger != "stop_verify"):
             return
         if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return
@@ -10356,7 +10372,7 @@ class AutomationEngine:
 
     async def enforce_whf_safety(self, trigger: str, *, sealed_confirmed: bool = False) -> FanCommandResult | None:
         """Public entry: take the decision lock, then run the check. Not for callers already under the lock."""
-        if self._shut_down:
+        if _latched(self):
             return None
         async with self._decision_pass("enforce_whf_safety"):
             return await self._enforce_whf_safety_locked(trigger, sealed_confirmed=sealed_confirmed)
@@ -10395,7 +10411,7 @@ class AutomationEngine:
         deferred, or HVAC suppressed instead). ``assume_running`` is for the restart reconcile, which
         has already established the fan is running even when ground truth is unreadable.
         """
-        if self._shut_down:
+        if _latched(self):
             return None
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):

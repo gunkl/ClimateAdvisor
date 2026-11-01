@@ -674,6 +674,10 @@ class TestFanSessionEndRestoresThePreFanModeAndResumesCaPlan:
         )  # the stop's notify and cycle restart
         # Issue #1144: the sealed-house stop is the WHF safety enforcer (the old event-driven guard is gone).
         _run(engine.enforce_whf_safety("sealed", sealed_confirmed=True))
+        # Issue #1176: this fan's physical state is unreadable (command-only), so the restore waits for the
+        # stop's verify window instead of starting heating in the same instant as the off command.
+        assert engine._test_state.state == "off", "heating was restored before the fan was confirmed off"
+        _run(engine.enforce_whf_safety("stop_verify"))
         assert engine._test_state.state == "heat", "the normal pre-fan restore ran"
         assert engine._pre_fan_hvac_mode is None and engine._whf_owns_hvac() is False
         assert engine._manual_change_protected() is False, "no earlier change was revived as an override"

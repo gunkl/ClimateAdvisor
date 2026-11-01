@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import logging
@@ -257,7 +258,12 @@ from .const import (
     is_availability_recovery,
     is_unavailable_state,
 )
-from .entity_health import run_entity_health_sweep
+from .entity_health import (
+    THERMOSTAT_CONFIG_KEY,
+    EntityHealthIssue,
+    entity_health_consequence,
+    run_entity_health_sweep,
+)
 from .fan_mode_resolver import fan_control_enabled, is_thermostat_fan_physically_active
 from .fan_status import (
     FAN_STATUS_THERMOSTAT,
@@ -342,6 +348,8 @@ from .whf_safety_decision import (
     WHF_SENSOR_UNKNOWN_GRACE_S,
     SensorReading,
     WhfSafetySnapshot,
+    house_is_sealed,
+    sensor_reading,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1003,9 +1011,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return AutomationEngineCallbacks(
             revisit=self.async_request_refresh,
             sensor_check=self._any_sensor_open,
-            # Issue #1093: the sealed-house read for the ODE ceiling guard -- "every configured
-            # sensor reports a real closed state" (unavailable/unknown is NOT closed).
-            sensors_known_closed=self._all_sensors_known_closed,
+            # Issue #1181: the pause-ENDING read -- open, or dark with its last real reading open.
+            sensor_hold_check=self._any_sensor_holding_open,
             # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell
             # whether any currently-open monitored sensor is still within its
             # CONF_SENSOR_DEBOUNCE settle window. Issue #623: _door_open_timers alone
@@ -1378,6 +1385,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.warning("WHF safety check request failed: trigger=%s", trigger, exc_info=True)
 
+    def _whf_sensor_readings(self) -> tuple[tuple[SensorReading, ...], list[str]]:
+        """The one reading of the door/window sensors for every "is the house sealed" judge (Issue #1177).
+
+        Feeds the WHF safety enforcer's snapshot, Climate Advisor's own fan-start gate, the ceiling guard's
+        "the fan cannot run" test and the P9 promise reading, so they cannot disagree. A sensor that is
+        unavailable/unknown carries ``unknown_for_s`` (``house_is_sealed`` counts it open for 60 s, closed
+        after); a MISSING entity is aged from ``_whf_safety_started_at`` the same way (an unknown start counts as
+        past the grace). Returns the readings and the ids of sensors that have been unreadable past the grace.
+        """
+        now = dt_util.utcnow()
+        started = getattr(self, "_whf_safety_started_at", None)
+        since_start = max(0.0, (now - started).total_seconds()) if isinstance(started, datetime) else None
+        readings: list[SensorReading] = []
+        stale: list[str] = []
+        for sensor_id in getattr(self, "_resolved_sensors", []) or []:
+            state = self.hass.states.get(sensor_id)
+            changed = getattr(state, "last_changed", None)
+            age = max(0.0, (now - changed).total_seconds()) if isinstance(changed, datetime) else None
+            reading = sensor_reading(
+                state=state.state if state is not None else None,
+                is_open=self._state_is_open(state),
+                age_s=age,
+                since_start_s=since_start,
+            )
+            readings.append(reading)
+            if reading.unknown_for_s is not None and reading.unknown_for_s > WHF_SENSOR_UNKNOWN_GRACE_S:
+                stale.append(sensor_id)
+        return tuple(readings), stale
+
     def _build_whf_safety_snapshot(self) -> WhfSafetySnapshot:
         """Ground truth for the WHF safety enforcer (Issue #1144): fan state and age, sensor readings.
 
@@ -1393,21 +1429,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return max(0.0, (now - changed).total_seconds())
             return None
 
-        readings: list[SensorReading] = []
-        stale: list[str] = []
-        for sensor_id in getattr(self, "_resolved_sensors", []) or []:
-            state = self.hass.states.get(sensor_id)
-            if state is None or state.state in ("unavailable", "unknown"):
-                started = getattr(self, "_whf_safety_started_at", None)
-                since = _age(state) if state is not None else None
-                if since is None and isinstance(started, datetime):
-                    since = max(0.0, (now - started).total_seconds())
-                unknown_for = since if since is not None else 0.0
-                readings.append(SensorReading(is_open=False, unknown_for_s=unknown_for, stable_for_s=unknown_for))
-                if unknown_for > WHF_SENSOR_UNKNOWN_GRACE_S:
-                    stale.append(sensor_id)
-            else:
-                readings.append(SensorReading(is_open=self._state_is_open(state), stable_for_s=_age(state)))
+        readings, stale = self._whf_sensor_readings()
 
         fan_state_id = self.config.get(CONF_FAN_STATE_ENTITY) or self.config.get(CONF_FAN_ENTITY)
         fan_state = self.hass.states.get(fan_state_id) if fan_state_id else None
@@ -1418,7 +1440,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return WhfSafetySnapshot(
             fan_on=fan_on,
             fan_on_for_s=fan_on_for_s,
-            sensors=tuple(readings),
+            sensors=readings,
             stale_names=tuple(stale),
             occupant_fan_on_at=self._occupant_fan_on_at_from_ground_truth(fan_on, fan_on_for_s),
             occupant_hvac_on_at=self._occupant_hvac_on_at_from_ground_truth(),
@@ -1691,6 +1713,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # function gates on.
         # Issue #1128: per-promise counters live across days (the "two quiet weeks" evidence).
         self._promise_stats = sanitize_promise_stats(state.get("promise_stats"), {p.key for p in PROMISES})
+        # Issue #1181: restored regardless of date, like the health fields below -- a sensor that has been
+        # dark since yesterday still holds whatever it last read.
+        _persisted_readings = state.get("sensor_last_real_reading")
+        if isinstance(_persisted_readings, dict):
+            self._sensor_last_readings().update(
+                {str(k): v for k, v in _persisted_readings.items() if v in ("open", "closed")}
+            )
         self.last_update_error = state.get("last_update_error")
         self.last_update_error_time = state.get("last_update_error_time")
         try:
@@ -2039,6 +2068,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "last_update_error": getattr(self, "last_update_error", None),
             "last_update_error_time": getattr(self, "last_update_error_time", None),
             "consecutive_failure_count": getattr(self, "consecutive_failure_count", 0),
+            # Issue #1181: last REAL reading per door/window sensor, so a pause held by a sensor that went
+            # dark survives a restart. Kept across the date boundary (restored before the same-day check).
+            "sensor_last_real_reading": dict(self._sensor_last_readings()),
         }
 
     async def _async_save_state(self) -> None:
@@ -2689,32 +2721,72 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return state.state == "off"
         return state.state == "on"
 
-    def _state_is_known_closed(self, state: Any) -> bool:
-        """Return True only when a contact-sensor State positively reads 'closed', respecting polarity.
+    def _sensor_real_reading(self, state: Any) -> str | None:
+        """The one definition of a door/window sensor's REAL reading: ``"open"``, ``"closed"``, or ``None``.
 
-        Issue #1093. The complement of ``_state_is_open`` over the two real states only: an
-        unavailable/unknown/missing state is neither open nor known-closed. ``_state_is_open``
-        stays the one definition of "open" (an unreadable sensor must not block the WHF safety
-        stop); this is the one definition of "known closed" (an unreadable sensor must not count
-        as a sealed house).
+        Issue #1181. ``None`` means the sensor is dark (unavailable, unknown or missing): it says nothing
+        about the door or window. ``_state_is_open`` stays the one definition of what "open" means (polarity);
+        this adds only the dark case on top of it.
         """
         if not state or state.state not in ("on", "off"):
+            return None
+        return "open" if self._state_is_open(state) else "closed"
+
+    def _sensor_last_readings(self) -> dict[str, str]:
+        """Last REAL reading (``"open"``/``"closed"``) per door/window sensor; persisted (Issue #1181).
+
+        Created lazily so the partially-built coordinators several tests use keep working.
+        """
+        return self.__dict__.setdefault("_sensor_last_real_reading", {})
+
+    def _record_sensor_reading(self, entity_id: str, state: Any) -> bool:
+        """Remember a sensor's last real reading. Dark states are ignored. True when the record changed."""
+        reading = self._sensor_real_reading(state)
+        last = self._sensor_last_readings()
+        if reading is None or last.get(entity_id) == reading:
             return False
-        return not self._state_is_open(state)
+        _LOGGER.debug(
+            "Contact sensor last real reading recorded: %s — %s (was %s)", entity_id, reading, last.get(entity_id)
+        )
+        last[entity_id] = reading
+        return True
+
+    def _sync_sensor_last_readings(self) -> bool:
+        """Record every configured sensor's live real reading and drop records of removed sensors.
+
+        A dark sensor keeps its old record. True when anything changed (the caller persists).
+        """
+        last = self._sensor_last_readings()
+        changed = False
+        for sensor_id in list(last):
+            if sensor_id not in self._resolved_sensors:
+                del last[sensor_id]
+                changed = True
+        for sensor_id in self._resolved_sensors:
+            changed = self._record_sensor_reading(sensor_id, self.hass.states.get(sensor_id)) or changed
+        return changed
+
+    def _sensor_holds_open(self, entity_id: str) -> bool:
+        """True when this sensor must keep a door/window pause alive (Issue #1181, owner decision D1).
+
+        The ONE authoritative question for every pause-ending / HVAC-restoring decision: a sensor holds the
+        pause when it reads open, or when it is dark and its last real reading was open. A dark sensor whose
+        last real reading was closed, or that never reported, does not hold anything -- and no dark sensor
+        ever STARTS a pause (starting asks ``_is_sensor_open``, which keeps counting a dark sensor closed).
+        """
+        if self._is_sensor_open(entity_id):
+            return True
+        if self._sensor_real_reading(self.hass.states.get(entity_id)) is not None:
+            return False  # readable and not open: closed
+        return self._sensor_last_readings().get(entity_id) == "open"
+
+    def _any_sensor_holding_open(self) -> bool:
+        """True when any monitored sensor holds a door/window pause (see ``_sensor_holds_open``)."""
+        return any(self._sensor_holds_open(s) for s in self._resolved_sensors)
 
     def _is_sensor_open(self, entity_id: str) -> bool:
         """Check if a door/window sensor is in the 'open' state, respecting polarity."""
         return self._state_is_open(self.hass.states.get(entity_id))
-
-    def _all_sensors_known_closed(self) -> bool:
-        """True when at least one door/window sensor is configured AND every one reads a real closed state.
-
-        Issue #1093: the sealed-house predicate behind ``AutomationEngine._whf_house_sealed_with_known_sensors()``.
-        No sensors configured, or any sensor unavailable/unknown/missing, is unknown -- not sealed.
-        """
-        return bool(self._resolved_sensors) and all(
-            self._state_is_known_closed(self.hass.states.get(s)) for s in self._resolved_sensors
-        )
 
     def _is_recent_hvac_command(self, threshold_seconds: float = 3.0) -> bool:
         """Check if an HVAC command was issued very recently (race guard)."""
@@ -3628,6 +3700,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # service) that would otherwise degrade silently at every one of its own read
         # sites. Returns transition-debounced issues and fires at most one notification
         # per outage-start (plus a daily reminder) — see _run_entity_health_check().
+        # Issue #1181: refresh each door/window sensor's last real reading first (a dark sensor keeps its
+        # record), so the sweep's rule-aware text and the pause-holding read use the same record.
+        if self._sync_sensor_last_readings():
+            await self._async_save_state()
         _entity_health_issues = self._run_entity_health_check()
 
         # Emit a structured warning event when the HVAC entity reports an active action
@@ -3921,6 +3997,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "friendly_name": i.friendly_name,
                     "criticality": i.criticality,
                     "status": i.status,
+                    "detail": i.detail,  # Issue #1181: what Climate Advisor is doing about it
                 }
                 for i in _entity_health_issues
             ],
@@ -5894,6 +5971,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # gates the HVAC pause/resume and nat-vent decision.
         self.hass.async_create_task(self.async_request_refresh())
 
+        # Issue #1181: remember the last REAL reading (old state first, so a missed earlier event still
+        # leaves the right record). A sensor that goes dark keeps this record; it is what lets a pause the
+        # sensor caused outlive the outage. Persisted so a restart during the outage keeps it.
+        _record_changed = self._record_sensor_reading(entity_id, event.data.get("old_state"))
+        _record_changed = self._record_sensor_reading(entity_id, new_state) or _record_changed
+        if _record_changed:
+            await self._async_save_state()
+
         if self._is_sensor_open(entity_id):
             # Issue #645: a group/helper sensor re-reporting "on" after being unavailable
             # (e.g. re-registering during an HA restart/integration reload) is not a genuine
@@ -6015,8 +6100,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 return
 
-            # Check if ALL monitored sensors are now closed
-            all_closed = all(not self._is_sensor_open(s) for s in self._resolved_sensors)
+            # Check if ALL monitored sensors are now closed. Issue #1181: a sensor that is dark after last
+            # reading OPEN is not closed -- it holds the pause until it reports again (owner decision D1).
+            all_closed = not self._any_sensor_holding_open()
+            if not all_closed and self._sensor_real_reading(new_state) is None:
+                _LOGGER.info(
+                    "Contact sensor unreadable: %s (state=%r) — last real reading %s; any door/window pause it caused"
+                    " holds until it reports again or the thermostat is changed",
+                    entity_id,
+                    getattr(new_state, "state", "none"),
+                    self._sensor_last_readings().get(entity_id, "none"),
+                )
             if all_closed:
                 # Track window close time if we were tracking compliance
                 if (
@@ -7711,23 +7805,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         classification = self._current_classification
         contacts: bool | None = None
         if getattr(self, "_resolved_sensors", None):
-            contacts = bool(self._any_sensor_open())
-            if not contacts:
-                # Issue #1144: the same benefit of the doubt the WHF safety enforcer gives -- a sensor that is
-                # unavailable/unknown (a state exists, it is just unreadable) for under 60 s counts as open, so
-                # the whf_sealed promise never disagrees with the enforcer. A MISSING state is not extended.
-                now_utc = dt_util.utcnow()
-                for sensor_id in self._resolved_sensors:
-                    st = self.hass.states.get(sensor_id)
-                    changed = getattr(st, "last_changed", None) if st is not None else None
-                    if (
-                        st is not None
-                        and st.state in ("unavailable", "unknown")
-                        and isinstance(changed, datetime)
-                        and (now_utc - changed).total_seconds() <= WHF_SENSOR_UNKNOWN_GRACE_S
-                    ):
-                        contacts = True
-                        break
+            # Issue #1177: the enforcer's own reading (``_whf_sensor_readings``) and verdict
+            # (``house_is_sealed``), so the whf_sealed promise can never disagree with it -- including for a
+            # MISSING sensor, which gets the same 60 s from start-up instead of counting closed at once.
+            contacts = not house_is_sealed(self._whf_sensor_readings()[0])
         return _PromiseReading(
             ts=now,
             hvac_mode=mode,
@@ -7928,22 +8009,49 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._startup_coalesce_active:
             return []
         try:
-            issues = run_entity_health_sweep(self.hass, self.config)
+            issues = [self._with_entity_health_detail(i) for i in run_entity_health_sweep(self.hass, self.config)]
             self._process_entity_health_transitions(issues)
             return issues
         except Exception:
             _LOGGER.error("Entity health sweep failed internally", exc_info=True)
             return []
 
+    def _with_entity_health_detail(self, issue: EntityHealthIssue) -> EntityHealthIssue:
+        """Attach the rule-aware consequence text (Issue #1181 D2, Issue #1181 D5) to a sweep issue.
+
+        The wording lives in ``entity_health.entity_health_consequence``; this only gathers the two facts it
+        needs: a door/window sensor's last real reading, and whether the whole-house fan is running (or Climate
+        Advisor believes it is) while the thermostat cannot be read.
+        """
+        whf_running = False
+        if issue.config_key == THERMOSTAT_CONFIG_KEY:
+            ae = getattr(self, "automation_engine", None)
+            whf_running = bool(
+                ae is not None and (self._get_fan_physical_state() is True or ae._fan_active or ae._fan_override_active)
+            )
+        return dataclasses.replace(
+            issue,
+            detail=entity_health_consequence(
+                issue,
+                door_last_reading=self._sensor_last_readings().get(issue.entity_id),
+                whf_running=whf_running,
+            ),
+        )
+
     def _process_entity_health_transitions(self, issues: list) -> None:
-        """Diff the current sweep result against tracked state and notify on new/stale outages."""
+        """Diff the current sweep result against tracked state and notify on new/stale outages.
+
+        Tracked per ``EntityHealthIssue.state_key``: one slot per entity, so a second door/window sensor that
+        fails during the first one's outage is announced too (Issue #1181).
+        """
         now = dt_util.now()
         current_keys = set()
         to_notify: list = []
 
         for issue in issues:
-            current_keys.add(issue.config_key)
-            tracked = self._entity_health_state.get(issue.config_key)
+            key = issue.state_key
+            current_keys.add(key)
+            tracked = self._entity_health_state.get(key)
             step = next_fallback_episode(
                 issue.status,
                 tracked["status"] if tracked else None,
@@ -7952,7 +8060,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             if step.kind == "fallback":
                 # ok -> missing/unavailable transition — a brand new outage.
-                self._entity_health_state[issue.config_key] = {
+                self._entity_health_state[key] = {
                     "status": issue.status,
                     "first_seen": now,
                     "last_notified": now,
@@ -7965,10 +8073,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     tracked["last_notified"] = now
                     to_notify.append(issue)
 
-        for config_key in list(self._entity_health_state.keys()):
-            if config_key not in current_keys:
-                _LOGGER.info("Entity health: %s is available again", config_key)
-                del self._entity_health_state[config_key]
+        for key in list(self._entity_health_state.keys()):
+            if key not in current_keys:
+                _LOGGER.info("Entity health: %s is available again", key)
+                del self._entity_health_state[key]
 
         if to_notify:
             self._notify_entity_health_issues(to_notify)
@@ -7979,25 +8087,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The unconditional log happens regardless of whether the push/email call below
         succeeds — ``notify_service`` is itself one of the monitored entities (Issue
         #805), so a broken notify target must not mean the failure goes unrecorded
-        anywhere. The HA log is the fallback channel of last resort.
+        anywhere. The HA log is the fallback channel of last resort. An issue's ``detail`` (Issue #1181:
+        what Climate Advisor is doing about a dark door/window sensor or an unreadable thermostat) replaces
+        the generic "may not be able to control your HVAC" sentence.
         """
         for issue in issues:
             log_fn = _LOGGER.error if issue.criticality == "critical" else _LOGGER.warning
-            log_fn("Entity health: %s (%s) is %s", issue.friendly_name, issue.entity_id, issue.status)
+            log_fn(
+                "Entity health: %s (%s) is %s%s",
+                issue.friendly_name,
+                issue.entity_id,
+                issue.status,
+                f" — {issue.detail}" if issue.detail else "",
+            )
 
+        generic = "Climate Advisor may not be able to control your HVAC correctly until {}."
         if len(issues) == 1:
             issue = issues[0]
+            consequence = issue.detail or generic.format("it's fixed")
             message = (
-                f"{issue.friendly_name} ('{issue.entity_id}') isn't responding. Climate Advisor "
-                "may not be able to control your HVAC correctly until it's fixed. Check "
-                "Settings > Devices & Services."
+                f"{issue.friendly_name} ('{issue.entity_id}') isn't responding. {consequence} "
+                "Check Settings > Devices & Services."
             )
         else:
             names = ", ".join(f"{i.friendly_name} ({i.entity_id})" for i in issues)
+            details = " ".join(f"{i.friendly_name} ({i.entity_id}): {i.detail}" for i in issues if i.detail)
             message = (
-                f"{len(issues)} entities aren't responding: {names}. Climate Advisor may not be "
-                "able to control your HVAC correctly until they're fixed. Check Settings > "
-                "Devices & Services."
+                f"{len(issues)} entities aren't responding: {names}. "
+                f"{details or generic.format("they're fixed")} Check Settings > Devices & Services."
             )
 
         self._notify_in_background("Climate Advisor — entity not found", message, "entity_health")
@@ -11427,24 +11544,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return "inactive"
 
     def _compute_contact_status(self) -> str:
-        """Compute the contact sensor summary string."""
+        """Compute the contact sensor summary string.
+
+        Issue #1181: a sensor that cannot be read is never summarised as closed -- it is called out with
+        what Climate Advisor is doing about it ("held open" when its last real reading was open).
+        """
         if not self._resolved_sensors:
             return "no sensors"
         open_count = sum(1 for s in self._resolved_sensors if self._is_sensor_open(s))
-        if open_count == 0:
+        dark = [s for s in self._resolved_sensors if self._sensor_real_reading(self.hass.states.get(s)) is None]
+        if open_count == 0 and not dark:
             return "all closed"
-        return f"{open_count} open"
+        parts = [f"{open_count} open"] if open_count else []
+        if dark:
+            held = sum(1 for s in dark if self._sensor_holds_open(s))
+            parts.append(f"{len(dark)} not responding" + (f" ({held} last read open, held open)" if held else ""))
+        return ", ".join(parts)
 
     def _compute_contact_details(self) -> list[dict[str, Any]]:
-        """Return per-sensor details for contact status attributes."""
+        """Return per-sensor details for contact status attributes.
+
+        Issue #1181: ``unreadable`` / ``last_reading`` / ``treated_as`` say what a dark sensor reads as.
+        """
         details = []
         for sensor_id in self._resolved_sensors:
             friendly = sensor_id.split(".")[-1].replace("_", " ").title()
+            unreadable = self._sensor_real_reading(self.hass.states.get(sensor_id)) is None
             details.append(
                 {
                     "entity_id": sensor_id,
                     "friendly_name": friendly,
                     "open": self._is_sensor_open(sensor_id),
+                    "unreadable": unreadable,
+                    "last_reading": self._sensor_last_readings().get(sensor_id),
+                    "treated_as": "open" if self._sensor_holds_open(sensor_id) else "closed",
                 }
             )
         return details

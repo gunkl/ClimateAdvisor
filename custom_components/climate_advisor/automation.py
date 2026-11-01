@@ -6066,56 +6066,50 @@ class AutomationEngine:
                 )
                 return
 
-            if self._grace_active:
-                # Issue #1006: a fan_off grace's entire contract is "the user just stopped
-                # this, leave it stopped regardless of conditions" (see on_fan_turned_off()'s
-                # docstring and docs/grace-periods-spec.md's "Fan-Off Grace" section) — the
-                # same unconditional-respect treatment Issue #620 already gave the sibling
-                # _idle_open path in check_natural_vent_conditions() (`and not
-                # self._grace_active`, no real-gate exception). The Issue #655 real-gate
-                # bypass below was never evaluated against a fan_off grace specifically — it
-                # predates the fan_off grace's own Issue #359 contract being written down —
-                # and is the wrong shape for it: it exists so a genuinely-stale HVAC-override
-                # grace doesn't block a real comfort opportunity, not so a fan the user just
-                # switched off gets switched back on. Confirmed live 2026-09-28/29: this is
-                # the second half of the mechanism that let a restart-coalescing pass
-                # (_do_startup_coalesce() -> this method, for a sensor already open before
-                # the restart) reactivate nat-vent through an Issue #1006-restored fan_off
-                # grace — restoring `_grace_active` alone was not sufficient without this.
-                if self._last_grace_trigger != "fan_off":
-                    # Issue #655: this used to short-circuit on a coarse outdoor-only
-                    # proxy (outdoor < comfort_cool + nat_vent_delta) instead of the real
-                    # 4-variable reactivation gate computed a few lines below — the two
-                    # could disagree, letting a "cool enough" outdoor reading fall through
-                    # the grace suppression only to still hit a pause moments later when
-                    # the real gate (which also needs indoor/comfort_heat) said no. Reuse
-                    # the same shared gate here instead of a hand-copied proxy.
-                    _outdoor_g = self._last_outdoor_temp
-                    _comfort_cool_g = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-                    _nat_vent_delta_g = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-                    _grace_gate_entered = self._nat_vent_may_reactivate(
-                        outdoor=_outdoor_g,
-                        indoor=self._get_indoor_temp_f(),
-                        comfort_heat=self._nat_vent_reactivation_floor(),
-                        comfort_cool=_comfort_cool_g,
-                        nat_vent_delta=_nat_vent_delta_g,
-                    )
-                    if not _grace_gate_entered:
-                        _LOGGER.info(
-                            "Door/window open (%s) but %s grace period active — not pausing",
-                            entity_id,
-                            self._last_resume_source,
-                        )
-                        return
-                    # else: real gate says reactivation is viable — fall through to the
-                    # nat-vent-vs-pause decision below, same as before.
-                else:
+            # Issue #1201: a fan_off grace keeps the fan OFF (Issue #1006) but not HVAC running -- the pause
+            # proceeds and the nat-vent start below is refused for as long as that grace runs.
+            _fan_off_hold = self._grace_is_fan_off_grace()
+            if self._grace_active and self._grace_protects_no_hvac_on_change():
+                # Issue #1172: the occupant's blower press turns no HVAC on, so its grace is no reason to
+                # hold off the pause (owner rule 3, after the sensor debounce). The blower keeps running (#1180).
+                # Issue #1201: same for a fan_off grace -- stopping a fan turns no HVAC on.
+                _LOGGER.info(
+                    "Door/window open (%s): %s grace does not hold off the pause — "
+                    "HVAC stays off while a window is open (trigger=%s)",
+                    entity_id,
+                    "fan-off" if _fan_off_hold else "blower override",
+                    self._last_grace_trigger,
+                )
+            elif self._grace_active:
+                # Issue #655: this used to short-circuit on a coarse outdoor-only
+                # proxy (outdoor < comfort_cool + nat_vent_delta) instead of the real
+                # 4-variable reactivation gate computed a few lines below — the two
+                # could disagree, letting a "cool enough" outdoor reading fall through
+                # the grace suppression only to still hit a pause moments later when
+                # the real gate (which also needs indoor/comfort_heat) said no. Reuse
+                # the same shared gate here instead of a hand-copied proxy.
+                # (A fan_off grace never reaches here: Issue #1201 -- it holds the fan off, not the pause;
+                # see the branch above and the nat-vent refusal below. A *protected* occupant change
+                # returned at the top.)
+                _outdoor_g = self._last_outdoor_temp
+                _comfort_cool_g = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+                _nat_vent_delta_g = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+                _grace_gate_entered = self._nat_vent_may_reactivate(
+                    outdoor=_outdoor_g,
+                    indoor=self._get_indoor_temp_f(),
+                    comfort_heat=self._nat_vent_reactivation_floor(),
+                    comfort_cool=_comfort_cool_g,
+                    nat_vent_delta=_nat_vent_delta_g,
+                )
+                if not _grace_gate_entered:
                     _LOGGER.info(
-                        "Door/window open (%s) but fan_off grace period active — "
-                        "respecting unconditionally, not evaluating reactivation (Issue #1006)",
+                        "Door/window open (%s) but %s grace period active — not pausing",
                         entity_id,
+                        self._last_resume_source,
                     )
                     return
+                # else: real gate says reactivation is viable — fall through to the
+                # nat-vent-vs-pause decision below, same as before.
 
             if self._is_within_planned_window_period():
                 _LOGGER.info(
@@ -6207,6 +6201,16 @@ class AutomationEngine:
             _nat_vent_gate_entered = (
                 _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE or _start_veto is not None
             )
+            if _fan_off_hold and _nat_vent_gate_entered:
+                # Issue #1201 / #1006: the occupant just stopped the fan -- leave it stopped. The grace passes
+                # grace_active=False to the FSM above, so refuse the start here explicitly.
+                _LOGGER.info(
+                    "Nat vent not started (%s): fan_off grace active — fan stays off (Issue #1006), "
+                    "pausing HVAC for the open window instead",
+                    entity_id,
+                )
+                _nat_vent_gate_entered = False
+                _start_veto = None
 
             # Issue #699: this call site never consulted the reactivation lockout at
             # all — unlike check_natural_vent_conditions()'s idle-open path (both its
@@ -8419,6 +8423,10 @@ class AutomationEngine:
                 remote_timer_hours=_token_hours,
                 is_remote_event=_rearm_source == "rf_timer",
                 restored_from=_rearm_source,
+                # Issue #1170: the override's fan identity is not persisted -- derive it from the configured fan.
+                # hvac_fan: only the thermostat blower can be overridden; whole_house_fan: only the WHF (the
+                # thermostat blower is not CA's fan there, Issue #1197). `both` keeps the prior default.
+                hvac_fan=fan_mode == FAN_MODE_HVAC,
             )
             self._reconcile_rearmed_override = True
             return
@@ -10722,14 +10730,18 @@ class AutomationEngine:
         self._whf_safety_seen_off_since_stop = False
 
         if not in_episode:
+            # Issue #1178: the two stops say different things. A sealed-house stop waits for a window; a rule-2 stop
+            # (the fan and the heating/cooling never run together, the newer action wins) does not.
             self._notify_whf_safety(
                 "Climate Advisor — whole-house fan stopped",
                 (
                     "Climate Advisor turned off the whole-house fan because every monitored door and window is closed."
+                    " It will not restart the fan until a window opens."
                     if sealed
-                    else "Climate Advisor turned off the whole-house fan because the heating/cooling was turned on."
-                )
-                + " It will not restart the fan until a window opens.",
+                    else "Climate Advisor turned off the whole-house fan because the heating/cooling was turned on"
+                    " after it. The fan and the heating/cooling are never run together, and the most recent change"
+                    " wins."
+                ),
             )
         if len(stops) >= 3 and not self._recent_duplicate(
             "whf_safety_oscillation", (len(stops) >= 3,), window_seconds=600
@@ -11899,6 +11911,25 @@ class AutomationEngine:
         and the FSM input builder feed ``unprotected_grace_expiry_keeps_pending``.
         """
         return bool(self._grace_protects_override) and self._last_grace_trigger != "fan_manual_override"
+
+    def _grace_is_fan_off_grace(self) -> bool:
+        """Whether the running grace is the occupant stopping a fan (``fan_off``, Issues #1006/#359)."""
+        return bool(self._grace_active and self._last_grace_trigger == "fan_off")
+
+    def _grace_protects_no_hvac_on_change(self) -> bool:
+        """Whether the running grace protects NO heating/cooling change of the occupant (Issues #1172, #1201).
+
+        Two graces answer to the fan, not to the heating/cooling, so neither holds off the door/window pause
+        (owner rule 3, after the sensor debounce): the occupant's THERMOSTAT-BLOWER override grace (a blower press
+        turns no HVAC on; #1172) and the ``fan_off`` grace (stopping a fan turns no HVAC on; #1201). False whenever
+        the occupant's thermostat change is protected (that change is the manual override owner rule 3 exempts)
+        and for every other grace (manual, automation, whole-house-fan override).
+        """
+        if not self._grace_active or self._manual_change_protected():
+            return False
+        if self._grace_is_fan_off_grace():
+            return True
+        return bool(self._last_grace_trigger == "fan_manual_override" and self._fan_override_is_hvac_fan)
 
     def _build_override_grace_fsm_inputs(self, *, confirm_source: str | None = None):
         """Build the override/grace FSM's input snapshot from current engine state

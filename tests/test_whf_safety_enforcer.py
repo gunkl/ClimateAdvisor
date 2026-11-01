@@ -552,3 +552,27 @@ class TestOnlyAWholeHouseFanPressIsAnOccupantWhfAction:
         engine = self._press(clock, hvac_fan=True)
         assert engine._fan_override_active is True
         assert engine._stamp is None
+
+
+class TestStopNotificationWording:
+    """Issue #1178: a sealed-house stop waits for a window; a rule-2 (fan vs heating/cooling) stop does not."""
+
+    @staticmethod
+    def _message(clock, *, sealed: bool) -> str:
+        engine, _ = _engine()
+        sent: list[str] = []
+        engine._notify_whf_safety = lambda title, message: sent.append(message)
+        engine._after_whf_safety_stop(FanCommandResult.EXECUTED, sealed=sealed, reason="test", trigger="tick")
+        assert len(sent) == 1, sent
+        return sent[0]
+
+    def test_sealed_house_stop_says_it_waits_for_a_window(self, clock):
+        msg = self._message(clock, sealed=True)
+        assert "every monitored door and window is closed" in msg
+        assert "will not restart the fan until a window opens" in msg
+
+    def test_heating_cooling_stop_does_not_claim_to_wait_for_a_window(self, clock):
+        msg = self._message(clock, sealed=False)
+        assert "heating/cooling was turned on" in msg
+        assert "never run together" in msg
+        assert "window" not in msg

@@ -196,6 +196,8 @@ from .const import (
     REJECT_TOO_FEW_SAMPLES,
     REJECT_WINDOW_TOO_SHORT,
     REMOTE_BURST_WINDOW_SECONDS,
+    REMOTE_CONFIRM_SECONDS,
+    REMOTE_EVENT_MAX_AGE_SECONDS,
     REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -264,7 +266,11 @@ from .entity_health import (
     entity_health_consequence,
     run_entity_health_sweep,
 )
-from .fan_mode_resolver import fan_control_enabled, is_thermostat_fan_physically_active
+from .fan_mode_resolver import (
+    fan_control_enabled,
+    is_thermostat_fan_physically_active,
+    thermostat_blower_is_ca_fan,
+)
 from .fan_status import (
     FAN_STATUS_THERMOSTAT,
     fan_entity_on,
@@ -913,6 +919,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # check re-runs once it has been unknown for the 60 s benefit of the doubt (cancelled on shutdown).
         self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
         self._whf_safety_started_at: datetime | None = None
+        # Issue #1178: when the whole-house-fan entity last woke from unavailable/unknown (a reconnect, not a press).
+        self._whf_reconnect_changed_at: datetime | None = None
         # Issue #805: transient (not persisted) entity-health transition tracker, keyed by
         # config_key -> {"status": str, "first_seen": datetime, "last_notified": datetime}.
         # Not persisted across restarts by design — a restart re-evaluates from scratch,
@@ -931,6 +939,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # one decision. None when no burst is pending. Session-only, never persisted.
         self._fan_remote_burst: _PendingFanRemoteBurst | None = None
         self._fan_remote_burst_cancel: Callable[[], None] | None = None
+        # Issue #1198: a flushed press whose fan still reads off waits REMOTE_CONFIRM_SECONDS for the
+        # fan to report on before it is recorded as an override. One slot, last press wins.
+        self._fan_remote_confirm_burst: _PendingFanRemoteBurst | None = None
+        self._fan_remote_confirm_cancel: Callable[[], None] | None = None
         # Issue #519: resolved sibling ambient-speed sensor entity_id (via entity/device
         # registry, keyed off CONF_FAN_REMOTE_ENTITY). Cached once found; a miss is NEVER
         # cached (the registry can populate asynchronously at startup — see
@@ -1182,6 +1194,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # feature existed. See docs/fan-remote-spec.md for the firmware event contract.
         fan_remote_entity = self.config.get(CONF_FAN_REMOTE_ENTITY)
         if fan_remote_entity:
+            # Issue #1198: seed the last-seen event timestamp from the entity's current state, so a
+            # later unavailable -> restored re-announcement of the SAME press is a duplicate even if
+            # no event was acted on since this coordinator started (memory-only; never persisted).
+            _remote_now = self.hass.states.get(fan_remote_entity)
+            if _remote_now is not None and not is_unavailable_state(_remote_now.state):
+                self._last_fan_remote_event_ts = _remote_now.state
             self._unsub_listeners.append(
                 async_track_state_change_event(
                     self.hass,
@@ -1469,6 +1487,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
         own = ae._fan_toggle_command_time
         if isinstance(own, datetime) and abs((on_at - own).total_seconds()) <= WHF_OWN_COMMAND_ECHO_S:
+            return None
+        # Issue #1178: an entity that woke from unavailable/unknown already on was reconnected, not pressed.
+        reconnected = getattr(self, "_whf_reconnect_changed_at", None)
+        if isinstance(reconnected, datetime) and abs((on_at - reconnected).total_seconds()) <= WHF_OWN_COMMAND_ECHO_S:
             return None
         return on_at
 
@@ -6972,12 +6994,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         new_fan_mode = new_state.attributes.get("fan_mode")
         old_fan_mode = old_state.attributes.get("fan_mode")
         _fan_ctl_37 = fan_control_enabled(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
+        _fan_cfg_37 = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        _blower_is_ca_fan_37 = thermostat_blower_is_ca_fan(_fan_cfg_37)
         if not _fan_ctl_37 and new_fan_mode is not None and old_fan_mode is not None and new_fan_mode != old_fan_mode:
             _LOGGER.info(
                 "HVAC fan_mode changed outside CA control: %s -> %s (fan_mode=disabled)", old_fan_mode, new_fan_mode
             )
+        elif (
+            _fan_ctl_37
+            and not _blower_is_ca_fan_37
+            and new_fan_mode is not None
+            and old_fan_mode is not None
+            and new_fan_mode != old_fan_mode
+        ):
+            # Issue #1197 (owner decision 2026-11-01): under whole_house_fan the thermostat's blower is the
+            # occupant's own equipment, not Climate Advisor's fan -- no override, no grace, no fan-off handling.
+            _LOGGER.info(
+                "Thermostat blower change ignored: not Climate Advisor's fan (fan_mode=%s) %s -> %s",
+                _fan_cfg_37,
+                old_fan_mode,
+                new_fan_mode,
+            )
         if (
             _fan_ctl_37
+            and _blower_is_ca_fan_37
             and new_fan_mode is not None
             and old_fan_mode is not None
             and new_fan_mode != old_fan_mode
@@ -7098,6 +7138,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         old_state = event.data.get("old_state")
         if not new_state or not old_state:
             return
+
+        # Issue #1178: the fan entity waking from unavailable/unknown stamps a fresh last_changed that nobody
+        # pressed -- the same reconnect filter the thermostat listener applies (Issue #1049). Recorded before every
+        # early return so the ground-truth occupant stamp can tell the wake-up from an occupant turning the fan on.
+        # Only a wake-up INTO on matters: a reconnect to off must not keep a later real turn-on from its stamp.
+        if is_availability_recovery(old_state) and new_state.state == "on":
+            _reconnected_at = getattr(new_state, "last_changed", None)
+            if isinstance(_reconnected_at, datetime):
+                self._whf_reconnect_changed_at = _reconnected_at
+                _LOGGER.info(
+                    "Fan entity reconnected (%s -> %s): not an occupant action for the safety-rule stamp",
+                    old_state.state,
+                    new_state.state,
+                )
 
         # Issue #491: suppress fan-entity override detection during startup coalescing —
         # a real WHF entity can report a transient state blip while HA is still settling
@@ -7233,6 +7287,37 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else:
                 is_on = new_state.state in {"on"}
 
+            # Issue #1198: a remote press is waiting for the fan to report on. The configured state entity
+            # (a power detector) lags the RF press by 8-15 s, so the press is applied HERE, the moment the
+            # fan's ground truth reads on, rather than at a fixed deadline. While it still reads off, the
+            # command entity's echo of the same press must not record its own separate (token-less)
+            # override: that would defeat the gate and double-record the press.
+            _remote_pending = getattr(self, "_fan_remote_confirm_burst", None) is not None
+            _remote_burst_open = getattr(self, "_fan_remote_burst", None) is not None
+            if is_on and (_remote_pending or _remote_burst_open):
+                _ground_truth = self._get_fan_physical_state()
+                if _ground_truth is True and _remote_pending:
+                    pending = self._take_pending_fan_remote_confirm()
+                    _LOGGER.info(
+                        "Fan remote press confirmed by the fan (%s -> %s): recording override",
+                        old_state.state,
+                        new_state.state,
+                    )
+                    self._apply_fan_remote_override(pending)
+                    return
+                if _remote_pending or _ground_truth is False:
+                    # Dual-entity installs: the transmitter (command entity) echoes the press within ~1-2 s,
+                    # before the burst flushes and long before the detector reports. The remote press owns
+                    # this turn-on; recording a token-less override here would hold HVAC off for the default
+                    # grace even if the fan never runs.
+                    _LOGGER.info(
+                        "Fan entity on deferred to the remote press (%s -> %s): waiting for the fan to report running",
+                        old_state.state,
+                        new_state.state,
+                    )
+                    return
+                # Burst open and the fan already reads running: fall through to the normal path.
+
             # Skip if fan override is already active AND this is not the fan turning off — the
             # display refresh is requested in the finally below, after this classification (Issue #510); an "on"
             # transition here is a redundant re-announcement, already accounted for. An "off"
@@ -7306,6 +7391,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state or is_unavailable_state(new_state.state):
             return
 
+        # Issue #1198: remember the timestamp of EVERY event this listener sees (acted on or not:
+        # suppressed by startup coalescing or the echo guard, off, bare on, unknown tokens), so
+        # the same timestamp re-announced later is always recognised as a duplicate. Recording only
+        # acted-on events let a stale restore after an ESPHome reconnect through as a new press.
+        previous_event_ts = self._last_fan_remote_event_ts
+        self._last_fan_remote_event_ts = new_state.state
+
         # Issue #495: dedup on the event's own timestamp (the entity's `state` field IS the
         # firmware event timestamp — confirmed via live history: e.g. state=
         # "2026-07-13T03:48:40.960+00:00"). The QuietCool event.* entity flaps to
@@ -7316,10 +7408,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # {remote_timer_hours: 2.0}`) fired at 16:58:02 with zero user action, exactly when
         # the entity restored to its stale timer_2h (frozen since 06:41). This generalizes
         # Issue #491's restart-only stale-event guard to every unavailable->restore flap.
-        if new_state.state == self._last_fan_remote_event_ts:
-            _LOGGER.debug(
-                "Fan RF remote event ignored — already acted on this event (ts=%s, stale unavailable->restore)",
+        if new_state.state == previous_event_ts:
+            if is_availability_recovery(event.data.get("old_state")):
+                # Issue #1198: the device reconnected and re-announced its last press.
+                _LOGGER.info(
+                    "Fan remote event ignored: re-announced after reconnect (ts=%s, event_type=%s)",
+                    new_state.state,
+                    new_state.attributes.get("event_type"),
+                )
+            else:
+                _LOGGER.debug(
+                    "Fan RF remote event ignored — already seen this event (ts=%s, repeat state write)",
+                    new_state.state,
+                )
+            return
+
+        # Issue #1198: a timestamp we have not seen but that is old is still a re-announcement (the
+        # first one after a restart where the entity was unavailable, so nothing could be seeded).
+        # A real press is stamped when the device's event reaches HA, seconds at most before now.
+        event_age_s = self._fan_remote_event_age_seconds(new_state.state)
+        if event_age_s is not None and event_age_s > REMOTE_EVENT_MAX_AGE_SECONDS:
+            _LOGGER.info(
+                "Fan remote event ignored: stale event time, restored on reconnect"
+                " (age=%.0fs max=%.0fs ts=%s event_type=%s)",
+                event_age_s,
+                REMOTE_EVENT_MAX_AGE_SECONDS,
                 new_state.state,
+                new_state.attributes.get("event_type"),
             )
             return
 
@@ -7348,7 +7463,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         speed = parse_remote_speed_event(event_type)
 
         if is_timer or speed is not None:
-            self._last_fan_remote_event_ts = new_state.state
             is_new_burst = self._fan_remote_burst is None
             burst = self._fan_remote_burst or _PendingFanRemoteBurst()
             if is_new_burst:
@@ -7391,6 +7505,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "_fan_remote_burst", None) is not None:
             _LOGGER.info("Fan remote burst cancelled — %s", reason)
             self._fan_remote_burst = None
+        # Issue #1198: a press still waiting for the fan to confirm is superseded the same way.
+        if getattr(self, "_fan_remote_confirm_cancel", None) is not None:
+            self._fan_remote_confirm_cancel()
+            self._fan_remote_confirm_cancel = None
+        if getattr(self, "_fan_remote_confirm_burst", None) is not None:
+            _LOGGER.info("Fan remote press awaiting confirmation cancelled — %s", reason)
+            self._fan_remote_confirm_burst = None
+
+    def _take_pending_fan_remote_confirm(self) -> _PendingFanRemoteBurst | None:
+        """Claim the press awaiting fan confirmation (cancelling its give-up timer), or None (Issue #1198)."""
+        burst = getattr(self, "_fan_remote_confirm_burst", None)
+        if getattr(self, "_fan_remote_confirm_cancel", None) is not None:
+            self._fan_remote_confirm_cancel()
+            self._fan_remote_confirm_cancel = None
+        self._fan_remote_confirm_burst = None
+        return burst
+
+    def _fan_remote_event_age_seconds(self, timestamp: str) -> float | None:
+        """Age of a remote event's state time (HA's receive time of the press) vs now, or None (Issue #1198).
+
+        Never raises: an unparseable or timezone-mismatched value degrades to None, which the caller
+        treats as "cannot judge" (the event is then processed as before).
+        """
+        try:
+            stamp = dt_util.parse_datetime(timestamp)
+            if not isinstance(stamp, datetime):
+                return None
+            return float((dt_util.now() - stamp).total_seconds())
+        except Exception:
+            return None
 
     def _arm_fan_remote_burst(self) -> None:
         """(Re-)arm the burst-combining window (Issue #519).
@@ -7455,17 +7599,82 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             reason,
         )
         if is_override:
-            duration_seconds = burst.timer_hours * 3600 if burst.timer_hours is not None else None
-            self.automation_engine.handle_fan_manual_override(
-                fan_before="?",
-                fan_after="on",
-                duration_override=duration_seconds,
-                remote_timer_hours=burst.timer_hours if burst.has_timer else None,
-                remote_speed=burst.speed,
-                is_remote_event=True,
-            )
+            # Issue #1198 ground-truth gate: a press the fan does not act on is not a manual override.
+            # False only when state feedback exists and the fan reads off; None (command-only install,
+            # unavailable entity) cannot be checked and keeps the pre-#1198 behaviour of trusting the press.
+            if self._get_fan_physical_state() is False:
+                self._defer_fan_remote_override(burst)
+                return
+            self._apply_fan_remote_override(burst)
         else:
             self.automation_engine.handle_fan_speed_observed(burst.speed, is_remote_event=True)
+        await self.async_request_refresh()
+
+    def _apply_fan_remote_override(self, burst: _PendingFanRemoteBurst) -> None:
+        """Record a flushed remote press as a manual fan override (the pre-#1198 flush body)."""
+        duration_seconds = burst.timer_hours * 3600 if burst.timer_hours is not None else None
+        self.automation_engine.handle_fan_manual_override(
+            fan_before="?",
+            fan_after="on",
+            duration_override=duration_seconds,
+            remote_timer_hours=burst.timer_hours if burst.has_timer else None,
+            remote_speed=burst.speed,
+            is_remote_event=True,
+        )
+
+    def _defer_fan_remote_override(self, burst: _PendingFanRemoteBurst) -> None:
+        """Hold a press the fan has not yet confirmed; re-check after REMOTE_CONFIRM_SECONDS (Issue #1198).
+
+        The burst flushes ~1.5 s after the last packet, but a real fan's state entity can lag the RF
+        command by several seconds, so a single check at flush time would drop genuine presses.
+        """
+        if self._fan_remote_confirm_cancel is not None:
+            self._fan_remote_confirm_cancel()  # a newer press replaces the pending one (last wins)
+        self._fan_remote_confirm_burst = burst
+        _LOGGER.info(
+            "Fan remote press awaiting fan confirmation: fan reads off, giving up in %.0fs (timer_hours=%s speed=%s)",
+            REMOTE_CONFIRM_SECONDS,
+            burst.timer_hours,
+            burst.speed,
+        )
+
+        @callback
+        def _confirm_window_elapsed(_now: Any) -> None:
+            self._fan_remote_confirm_cancel = None
+            pending = self._fan_remote_confirm_burst
+            if pending is not None:
+                self._spawn(self._confirm_fan_remote_override(pending))
+
+        self._fan_remote_confirm_cancel = async_call_later(
+            self.hass, REMOTE_CONFIRM_SECONDS, self._zone_scoped_sync(_confirm_window_elapsed)
+        )
+
+    @_whf_safety_after_call("rf_burst")
+    async def _confirm_fan_remote_override(self, burst: _PendingFanRemoteBurst | None) -> None:
+        """Decide a deferred remote press once the fan has had time to report (Issue #1198)."""
+        if burst is None or burst is not self._fan_remote_confirm_burst:
+            return  # superseded, cancelled, or already applied by the fan listener
+        self._fan_remote_confirm_burst = None
+        if self._get_fan_physical_state() is False:
+            engine = self.automation_engine
+            if engine._fan_override_active or engine._grace_active:
+                outcome = (
+                    "the press itself recorded nothing, but a fan override/grace is already active from another"
+                    f" source (fan_override_active={engine._fan_override_active} grace_active={engine._grace_active})"
+                )
+            else:
+                outcome = "no override, grace or HVAC suppression recorded"
+            _LOGGER.warning(
+                "Fan remote press not confirmed by the fan: %s"
+                " (fan still reads off %.0fs after the press, timer_hours=%s speed=%s)",
+                outcome,
+                REMOTE_CONFIRM_SECONDS,
+                burst.timer_hours,
+                burst.speed,
+            )
+            return
+        _LOGGER.info("Fan remote press confirmed by the fan: recording override")
+        self._apply_fan_remote_override(burst)
         await self.async_request_refresh()
 
     def _resolve_fan_remote_speed_sensor(self) -> str | None:

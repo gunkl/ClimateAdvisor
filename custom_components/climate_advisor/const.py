@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.21"
+VERSION = "0.8.22"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -152,6 +152,8 @@ CONF_BRIEFING_NOTIFICATIONS_ENABLED = "briefing_notifications_enabled"
 STARTUP_COALESCE_SECONDS: int = 300  # 5 minutes (Issue #321)
 
 # Debounce and grace period defaults (seconds)
+# Owner rule 3 ("HVAC stays off while a window is open") applies only after this debounce: a door/window open for
+# less than this never pauses HVAC, by design, so brief openings don't thrash it (Issue #1197).
 DEFAULT_SENSOR_DEBOUNCE_SECONDS = 600  # 10 minutes (Issue #504 — was 5 min)
 DEFAULT_MANUAL_GRACE_SECONDS = 1800  # 30 minutes
 DEFAULT_AUTOMATION_GRACE_SECONDS = 300  # 5 minutes
@@ -251,6 +253,8 @@ CONF_FAN_MODE = "fan_mode"
 FAN_MODE_DISABLED = "disabled"
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
 FAN_MODE_HVAC = "hvac_fan"
+# NOT SUPPORTED (owner decision, Issue #1175): hidden from the config flow, kept only so an old config entry
+# still loads. Defects that occur only under "both" are out of scope -- see CLAUDE.md "Scope Facts" (#1197).
 FAN_MODE_BOTH = "both"
 # Issue #1144: production ignores an AC/whole-house-fan overlap shorter than this (seconds). The occupant's newest
 # action wins, so a fan pressed while the AC runs always overlaps for the seconds the thermostat takes to report
@@ -300,6 +304,23 @@ REMOTE_SPEED_TOKENS = frozenset({"low", "medium", "high"})
 # the firmware change ships -- see the Verification step that tunes this against real capture
 # data, same status as the firmware's own SELF_ECHO_WINDOW_MS.
 REMOTE_BURST_WINDOW_SECONDS: float = 1.5
+
+# Issue #1198: an RF-remote event whose state time is older than this, measured against HA's
+# clock when the event is handled, is a re-announcement of an old press (an ESPHome reconnect
+# restores the entity's last state), not a press happening now. An EventEntity's state is HA's
+# own receive time of the event (not a device clock), restored unchanged on reconnect, so there
+# is no device-clock skew; only the delay between the press and HA handling it (normally well
+# under 1 s, a few seconds on a congested Wi-Fi link) separates a real press from this check.
+# 30 s is far above that and far below the shortest stale re-announcement ever observed (hours).
+REMOTE_EVENT_MAX_AGE_SECONDS: float = 30.0
+
+# Issue #1198: give-up deadline for a remote press whose fan (with state feedback) still reads
+# off at the burst flush. The press is applied the moment the fan reports on (event-driven, see
+# coordinator._async_fan_entity_changed); only if it never does within this window is it dropped.
+# The configured fan_state_entity is a power detector that lags the RF press: measured on the
+# owner's house on 2026-10-25, 10-31 and 11-01 as 14.8 s, 13.1 s, 13.5 s and 8.4 s (max 14.8 s),
+# so 45 s is roughly three times the worst case seen.
+REMOTE_CONFIRM_SECONDS: float = 45.0
 
 # Issue #519: object_id substring hint used to find the sibling ambient-speed text_sensor on
 # the same ESPHome device as CONF_FAN_REMOTE_ENTITY, via the entity/device registry. Kept

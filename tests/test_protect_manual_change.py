@@ -27,6 +27,7 @@ flags where a real path exists. Nothing here re-implements production logic.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -1495,3 +1496,208 @@ def test_a_mode_change_event_still_skips_the_fan_on_press():
     ae = _mode_change_plus_fan_event(new_fan_mode="on")
     assert ae.handle_manual_override.call_count == 1
     assert ae.handle_fan_manual_override.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #1197 decision 1: under whole_house_fan the thermostat's blower is not Climate Advisor's fan
+# ---------------------------------------------------------------------------
+def _thermostat_fan_event(*, fan_mode_config: str, old_fan: str, new_fan: str):
+    """One thermostat fan_mode change through the REAL coordinator handler; returns the (mock) engine."""
+    from tests.test_heat_cool_override import (
+        _NOW_BASE,
+        _PATCH_CALLBACK,
+        _PATCH_DT_UTIL,
+        _make_coordinator_stub,
+        _make_event,
+    )
+
+    coord = _make_coordinator_stub()
+    coord.config["fan_mode"] = fan_mode_config
+    event = _make_event(old_hvac_mode="heat", new_hvac_mode="heat", old_fan_mode=old_fan, new_fan_mode=new_fan)
+    mock_dt = MagicMock()
+    mock_dt.now.return_value = _NOW_BASE
+    with patch(_PATCH_CALLBACK, side_effect=lambda fn: fn), patch(_PATCH_DT_UTIL, mock_dt):
+        asyncio.run(coord._async_thermostat_changed(event))
+    return coord.automation_engine
+
+
+class TestWholeHouseFanHouseIgnoresTheThermostatBlower:
+    """The occupant presses the thermostat's own fan button in a house whose Climate Advisor fan is the whole-house
+    fan: that blower is not CA's fan, so nothing is recorded, no grace starts, no whole-house-fan command follows."""
+
+    def test_blower_on_creates_no_override(self, caplog):
+        with caplog.at_level("INFO"):
+            ae = _thermostat_fan_event(fan_mode_config="whole_house_fan", old_fan="auto", new_fan="on")
+        assert ae.handle_fan_manual_override.call_count == 0
+        assert "Thermostat blower change ignored: not Climate Advisor's fan (fan_mode=whole_house_fan)" in caplog.text
+
+    def test_blower_off_does_not_start_a_fan_off_grace(self):
+        ae = _thermostat_fan_event(fan_mode_config="whole_house_fan", old_fan="on", new_fan="auto")
+        assert ae.on_fan_turned_off.call_count == 0
+
+    @pytest.mark.parametrize("fan_mode_config", ["hvac_fan", "both"])
+    def test_control_blower_on_is_still_an_override_where_the_blower_is_ca_fan(self, fan_mode_config):
+        ae = _thermostat_fan_event(fan_mode_config=fan_mode_config, old_fan="auto", new_fan="on")
+        assert ae.handle_fan_manual_override.call_args.kwargs.get("hvac_fan") is True
+
+    @pytest.mark.parametrize("fan_mode_config", ["hvac_fan", "both"])
+    def test_control_blower_off_still_routes_to_the_fan_off_handler(self, fan_mode_config):
+        ae = _thermostat_fan_event(fan_mode_config=fan_mode_config, old_fan="on", new_fan="auto")
+        assert ae.on_fan_turned_off.call_args.kwargs.get("hvac_fan") is True
+
+    def test_the_one_predicate(self):
+        from custom_components.climate_advisor.fan_mode_resolver import thermostat_blower_is_ca_fan
+
+        assert thermostat_blower_is_ca_fan("hvac_fan") is True
+        assert thermostat_blower_is_ca_fan("both") is True
+        assert thermostat_blower_is_ca_fan("whole_house_fan") is False
+        assert thermostat_blower_is_ca_fan("disabled") is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #1172 / #1180: an occupant's blower-override grace does not block the (debounced) window pause
+# ---------------------------------------------------------------------------
+def _blower_override_house(*, grace_s: int = 1800, fan_mode: str = "hvac_fan") -> AutomationEngine:
+    """Hot afternoon, AC on, the occupant presses the thermostat blower On (an hvac_fan house)."""
+    engine = _engine("cool", indoor=78.0, setpoint=75.0, day="hot", outdoor=95.0, manual_grace_seconds=grace_s)
+    engine.config[CONF_FAN_MODE] = fan_mode
+    engine._test_state.attributes.update(fan_mode="on", fan_modes=["auto", "on"])
+    engine.hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    engine.handle_fan_manual_override(fan_before="auto", fan_after="on", hvac_fan=True)
+    engine.hass.services.async_call.reset_mock()
+    return engine
+
+
+def _fan_mode_writes(engine: AutomationEngine) -> list[dict]:
+    return [d for svc, d in _climate_writes(engine) if svc == "set_fan_mode"]
+
+
+class TestBlowerOverrideGraceDoesNotBlockTheWindowPause:
+    """The occupant ran the blower for circulation; a window then stays open past the debounce. Owner rule 3: HVAC
+    stays off while a window is open unless a manual override turns it ON -- a blower press does not."""
+
+    def test_the_blower_grace_is_what_is_running(self, timers):
+        engine = _blower_override_house()
+        assert engine._grace_active and engine._last_grace_trigger == "fan_manual_override"
+        assert engine._fan_override_is_hvac_fan is True
+        assert engine._manual_change_protected() is False
+
+    def test_open_window_pauses_hvac_despite_the_blower_grace(self, timers, caplog):
+        engine = _blower_override_house()
+        with caplog.at_level("INFO"):
+            _open_window(engine)
+        assert engine._paused_by_door is True
+        assert _off_writes(engine), "HVAC was switched off for the open window"
+        assert "blower override grace does not hold" in caplog.text
+
+    def test_the_occupants_blower_keeps_running_after_the_pause(self, timers):
+        engine = _blower_override_house()
+        _open_window(engine)
+        assert engine._fan_override_active is True and engine._fan_override_is_hvac_fan is True
+        assert _fan_mode_writes(engine) == [], "no set_fan_mode(auto) over the occupant's blower (#1180)"
+
+    @pytest.mark.parametrize("grace_s", [0, 1800], ids=["grace0", "grace30m"])
+    def test_pause_happens_at_any_grace_setting(self, timers, grace_s):
+        engine = _blower_override_house(grace_s=grace_s)
+        _open_window(engine)
+        assert engine._paused_by_door is True
+
+    def test_the_live_sensor_recheck_also_pauses(self, timers):
+        engine = _blower_override_house()
+        engine._window_open = True
+        _run(engine._sync_paused_by_door_with_live_sensors())
+        assert engine._paused_by_door is True
+
+    def test_control_the_occupants_thermostat_change_still_wins_over_the_window(self, timers):
+        engine = _blower_override_house()
+        _occupant_overrides(engine, source="normal", new_mode="cool")
+        _open_window(engine)
+        assert engine._paused_by_door is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #1201: a fan_off grace keeps the FAN off (#1006) but does not hold off the debounced window pause
+# ---------------------------------------------------------------------------
+def _fan_off_house(
+    *, fan_mode: str = "hvac_fan", favourable: bool = False, with_grace: bool = True
+) -> AutomationEngine:
+    """AC on, the occupant switches the fan OFF (fan_off grace running).
+
+    ``favourable``: mild outside and a nat-vent-viable gate (same shape as the nat-vent control above), so
+    only the grace stands between the open window and a fan start.
+    """
+    if favourable:
+        engine = _engine("heat", indoor=72.0, setpoint=70.0, outdoor=60.0, manual_grace_seconds=1800)
+    else:
+        engine = _engine("cool", indoor=78.0, setpoint=75.0, day="hot", outdoor=95.0, manual_grace_seconds=1800)
+    engine.config[CONF_FAN_MODE] = fan_mode
+    if fan_mode == FAN_MODE_WHOLE_HOUSE:
+        engine.config[CONF_FAN_ENTITY] = "switch.whf"
+    else:
+        engine._test_state.attributes.update(fan_mode="auto", fan_modes=["auto", "on"])
+    engine.hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    if with_grace:
+        engine.on_fan_turned_off(fan_before="on", fan_after="auto", hvac_fan=fan_mode != FAN_MODE_WHOLE_HOUSE)
+    engine.hass.services.async_call.reset_mock()
+    return engine
+
+
+@pytest.mark.parametrize("fan_mode", ["hvac_fan", FAN_MODE_WHOLE_HOUSE])
+class TestFanOffGraceDoesNotBlockTheWindowPause:
+    """The occupant stops the fan; a window then stays open past the debounce. Turning a fan off turns no HVAC on,
+    so cooling must not keep running with the window open (owner rule 3) -- in either supported fan mode."""
+
+    def test_open_window_pauses_hvac_despite_the_fan_off_grace(self, timers, fan_mode, caplog):
+        engine = _fan_off_house(fan_mode=fan_mode)
+        assert engine._last_grace_trigger == "fan_off" and engine._grace_active
+        assert engine._manual_change_protected() is False
+        with caplog.at_level("INFO"):
+            _open_window(engine)
+        assert engine._paused_by_door is True
+        assert engine._paused_entity == _WINDOW
+        assert engine._pre_pause_mode == "cool"
+        assert _off_writes(engine), "HVAC was switched off for the open window"
+        assert "fan-off grace does not hold off the pause" in caplog.text
+
+    def test_the_fan_stays_off_even_when_ventilation_is_favoured(self, timers, fan_mode, caplog):
+        """Issue #1006 contract: nat-vent must not restart the fan the occupant just stopped."""
+        control = _fan_off_house(fan_mode=fan_mode, favourable=True, with_grace=False)
+        _open_window(control)
+        assert control._natural_vent_active is True, "control: without the grace this window starts nat-vent"
+
+        engine = _fan_off_house(fan_mode=fan_mode, favourable=True)
+        assert engine._last_grace_trigger == "fan_off" and engine._grace_active
+        with caplog.at_level("INFO"):
+            _open_window(engine)
+        assert engine._natural_vent_active is False
+        assert engine._fan_active is False
+        assert engine._paused_by_door is True
+        assert _off_writes(engine)
+        starts = [
+            (svc, d)
+            for svc, d in (
+                (c.args[1], dict(c.args[2]))
+                for c in engine.hass.services.async_call.call_args_list
+                if c.args[0] in ("switch", "fan", "climate")
+            )
+            if svc in ("turn_on",) or d.get("fan_mode") == "on"
+        ]
+        assert starts == [], "no fan start command during the fan_off grace"
+        assert "fan_off grace active" in caplog.text
+
+    def test_window_close_restores_hvac(self, timers, fan_mode):
+        engine = _fan_off_house(fan_mode=fan_mode)
+        _open_window(engine)
+        engine._test_state.state = "off"
+        engine.hass.services.async_call.reset_mock()
+        _close_window(engine)
+        assert engine._paused_by_door is False
+        restores = [d for _svc, d in _climate_writes(engine) if d.get("hvac_mode") == "cool"]
+        assert restores, "HVAC restored to the pre-pause mode on close"
+
+    def test_control_the_occupants_thermostat_change_still_wins(self, timers, fan_mode):
+        engine = _fan_off_house(fan_mode=fan_mode)
+        _occupant_overrides(engine, source="normal", new_mode="cool")
+        assert engine._manual_change_protected()
+        _open_window(engine)
+        assert engine._paused_by_door is False

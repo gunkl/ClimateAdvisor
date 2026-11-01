@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.22] — 2026-11-01
+
+- Fix #1197: with a whole-house fan set up, switching your thermostat's own blower on or off is now left alone. Climate Advisor no longer treats it as a fan override or starts a grace period for it.
+- Fix #1172: with the HVAC-fan setting, turning the thermostat blower on no longer stops an open window from pausing the heating or cooling. After the door/window delay (10 minutes by default) the heat or cooling pauses as it should, and your blower keeps running.
+- Fix #1170: with the HVAC-fan setting, a blower override you made before a Home Assistant restart still ends when you switch the blower off afterwards.
+- Fix #1178: when Climate Advisor stops the whole-house fan because the heating or cooling was turned on after it, the notification now says so, instead of wrongly saying the fan waits for a window to open. A whole-house fan that briefly drops off the network and reconnects is no longer counted as you turning it on when Climate Advisor decides whether the fan or the heating/cooling was the newer choice.
+- Fix #1198: when your whole-house fan's remote receiver briefly drops off the network and reconnects, Climate Advisor no longer mistakes the old button press it reports on reconnecting for a new one. Your heating is no longer switched off for 3 hours over a fan that never ran, and a remote press only counts as taking over the fan when the fan actually turns on.
+- Fix #1201: if you switch a fan off and then leave a window open, the heating or cooling now pauses after the door/window delay (10 minutes by default), as it does for any open window. Climate Advisor still won't restart the fan you just switched off.
+
 ## [0.8.21] — 2026-11-01
 
 - Fix #1158: if a window or door is open and you turn the heat or cooling on at the thermostat (for example while the whole-house fan is running), Climate Advisor no longer switches it off again on its next check, and no longer drops it ten minutes later when it happens to match the day's plan (heat on a cold day, cooling on a hot day). Your change stays as you set it, and the whole-house fan stops because your newest action wins. A press of yours that is still being confirmed also survives the fan's own pause ending. That includes the case where the fan missed Climate Advisor's first off command and its pause was then ended by the stuck-pause check.

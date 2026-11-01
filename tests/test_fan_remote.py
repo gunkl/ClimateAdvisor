@@ -123,13 +123,19 @@ def _make_fake_state(state_str: str, attributes: dict | None = None) -> MagicMoc
     return s
 
 
-def _make_fake_event(new_state) -> MagicMock:
+def _make_fake_event(new_state, old_state=None) -> MagicMock:
     ev = MagicMock()
-    ev.data = {"new_state": new_state}
+    ev.data = {"new_state": new_state, "old_state": old_state}
     return ev
 
 
-def _make_coordinator_stub(config: dict | None = None, *, physical_on: bool | None = None) -> MagicMock:
+def _make_coordinator_stub(
+    config: dict | None = None,
+    *,
+    physical_on: bool | None = None,
+    fan_on_at_flush: bool = False,
+    real_age: bool = False,
+) -> MagicMock:
     """Minimal coordinator stub sufficient for _async_fan_remote_changed (mirrors test_fan_cancel.py).
 
     Issue #519: binds the REAL burst-combining methods (not auto-mocked) so dispatch tests
@@ -156,6 +162,11 @@ def _make_coordinator_stub(config: dict | None = None, *, physical_on: bool | No
     coord._fan_remote_burst = None
     coord._fan_remote_burst_cancel = None
     coord._get_fan_physical_state = MagicMock(return_value=physical_on)
+    if fan_on_at_flush:
+        # Issue #1198: a genuine press turns the fan on. The first read (burst open) sees the pre-press
+        # state; every later read (the flush-time ground-truth gate) sees the fan running.
+        _reads = iter([physical_on])
+        coord._get_fan_physical_state = MagicMock(side_effect=lambda: next(_reads, True))
 
     mod = importlib.import_module("custom_components.climate_advisor.coordinator")
     coord._async_fan_remote_changed = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
@@ -166,6 +177,26 @@ def _make_coordinator_stub(config: dict | None = None, *, physical_on: bool | No
     # truthy and silently swallow every dispatch in this file) so it reads
     # automation_engine._fan_command_time exactly as production does.
     coord._is_recent_fan_command = types.MethodType(mod.ClimateAdvisorCoordinator._is_recent_fan_command, coord)
+    # Issue #1198: the stale-timestamp helper and the fan-confirmation gate's real methods.
+    coord._spawn = MagicMock(side_effect=_consume_coroutine)
+    coord._fan_remote_confirm_cancel = None
+    coord._fan_remote_confirm_burst = None
+    # The firmware-timestamp age check depends on the wall clock; most tests here use fixed timestamps from
+    # July 2026 and must not depend on it. Tests that exercise the check opt in with real_age=True.
+    coord._fan_remote_event_age_seconds = MagicMock(return_value=None)
+    if real_age:
+        coord._fan_remote_event_age_seconds = types.MethodType(
+            mod.ClimateAdvisorCoordinator._fan_remote_event_age_seconds, coord
+        )
+    for _name in (
+        "_take_pending_fan_remote_confirm",
+        "_apply_fan_remote_override",
+        "_defer_fan_remote_override",
+        "_confirm_fan_remote_override",
+    ):
+        _fn = getattr(mod.ClimateAdvisorCoordinator, _name, None)
+        if _fn is not None:
+            setattr(coord, _name, types.MethodType(_fn, coord))
     return coord
 
 
@@ -573,7 +604,7 @@ class TestFanRemoteBurstClassification:
     """
 
     def test_timer_alone_is_override(self):
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_4h"})
         asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
@@ -591,7 +622,7 @@ class TestFanRemoteBurstClassification:
     def test_timer_and_speed_together_is_one_override_call(self):
         """A single physical interaction carrying both fields (speed + timer, transmitted
         as separate packets moments apart) must produce exactly ONE decision, not two."""
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         speed_state = _make_fake_state("2026-07-12T20:00:00.100+00:00", {"event_type": "high"})
         timer_state = _make_fake_state("2026-07-12T20:00:00.300+00:00", {"event_type": "timer_4h"})
@@ -612,7 +643,7 @@ class TestFanRemoteBurstClassification:
         ae.handle_fan_speed_observed.assert_not_called()
 
     def test_bare_speed_press_fan_was_off_is_override(self):
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "high"})
         asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
@@ -684,7 +715,7 @@ class TestFanRemoteBurstWindow:
     def test_mid_window_event_extends_without_double_flushing(self):
         """A second event within the window must extend the burst, not flush the first
         one prematurely — flushing happens exactly once, when explicitly triggered."""
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         first = _make_fake_state("2026-07-12T20:00:00.100+00:00", {"event_type": "high"})
         second = _make_fake_state("2026-07-12T20:00:00.300+00:00", {"event_type": "timer_2h"})
@@ -697,7 +728,7 @@ class TestFanRemoteBurstWindow:
         ae.handle_fan_manual_override.assert_called_once()
 
     def test_off_mid_burst_cancels_without_flushing(self):
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         speed_state = _make_fake_state("2026-07-12T20:00:00.100+00:00", {"event_type": "high"})
         off_state = _make_fake_state("2026-07-12T20:00:00.300+00:00", {"event_type": "off"})
@@ -717,7 +748,7 @@ class TestFanRemoteBurstWindow:
         is_remote_event=True (clears any previously-stored value) — not be confused with
         "no timer packet arrived at all" (which must NOT clear a stored value, per
         handle_fan_manual_override's own guarded-overwrite logic)."""
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_none"})
         asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
@@ -1027,7 +1058,7 @@ class TestFanRemoteEchoGuard:
     def test_event_outside_30s_window_still_classifies_normally(self):
         """Proves the guard doesn't over-suppress -- a remote press well clear of any CA
         command still drives the shared override entry point as before."""
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         ae._fan_command_time = _FIXED_NOW - timedelta(seconds=45)
 
@@ -1047,7 +1078,7 @@ class TestFanRemoteEchoGuard:
     def test_no_recent_command_still_classifies_normally(self):
         """Default state (no CA command ever issued) must behave exactly as before this
         fix -- the guard is opt-in via a real recent timestamp, not opt-out."""
-        coord = _make_coordinator_stub(physical_on=False)
+        coord = _make_coordinator_stub(physical_on=False, fan_on_at_flush=True)
         ae = coord.automation_engine
         assert ae._fan_command_time is None
 
@@ -1260,6 +1291,8 @@ class TestReconcileFanOnStartupRemoteTimerProvenance:
             # Issue #1045: the re-arm is now tagged so the log line/Activity event can tell a
             # restored override from a fresh press. Override/grace semantics are unchanged.
             restored_from="rf_timer",
+            # Issue #1170: the fan identity is derived from the configured fan (whole-house fan here).
+            hvac_fan=False,
         )
 
     def test_provenance_present_but_fan_off_takes_no_special_action(self):
@@ -1302,3 +1335,316 @@ class TestReconcileFanOnStartupRemoteTimerProvenance:
         )
 
         ae.handle_fan_manual_override.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 10. Issue #1198: a remote event re-announced after a device reconnect is not a press
+# ---------------------------------------------------------------------------
+
+_STALE_TS = "2026-07-11T17:24:49.340"  # hours before _FIXED_NOW (naive: the stub clock is naive)
+_FRESH_TS = "2026-07-12T19:59:59.000"  # one second before _FIXED_NOW
+
+
+def _unavailable_old_state() -> MagicMock:
+    return _make_fake_state("unavailable")
+
+
+def _dt_patches():
+    now_patch, parse_patch = _patched_dt()
+    return now_patch, parse_patch
+
+
+class TestRemoteReannounceAfterReconnect1198:
+    """Occupant story: an ESPHome reconnect makes the remote's event entity go unavailable and come back with
+    its last (hours-old) press. Climate Advisor must not read that as a press: no 3 h "manual" hold-off, no
+    heating switched off while the fan never ran (Issue #1198, seen 2026-11-01 01:01)."""
+
+    def test_event_seen_while_startup_coalescing_is_remembered(self):
+        """Layer 1: a press (or re-announcement) dropped during startup coalescing still records its
+        timestamp, so the same timestamp restored after a reconnect is a duplicate, not a new press."""
+        coord = _make_coordinator_stub(real_age=True)
+        coord._suppress_during_startup_coalescing = MagicMock(side_effect=[True, False])
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            seen = _make_fake_state(_FRESH_TS, {"event_type": "low"})
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(seen)))  # dropped: coalescing
+            restored = _make_fake_state(_FRESH_TS, {"event_type": "low"})
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(restored, _unavailable_old_state())))
+        assert coord._last_fan_remote_event_ts == _FRESH_TS
+        assert coord._fan_remote_burst is None
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_every_event_type_records_its_timestamp(self):
+        """Layer 1 symmetry: `off`, a bare `on` and an unknown token record their timestamps too, so a
+        stale-restored `off`/`on` is never processed as new."""
+        for event_type in ("off", "on", "mystery_token"):
+            coord = _make_coordinator_stub(real_age=True)
+            now_patch, parse_patch = _dt_patches()
+            with now_patch, parse_patch:
+                asyncio.run(
+                    coord._async_fan_remote_changed(
+                        _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": event_type}))
+                    )
+                )
+            assert coord._last_fan_remote_event_ts == _FRESH_TS, event_type
+
+    def test_restored_same_timestamp_after_reconnect_logs_and_is_ignored(self, caplog):
+        """Layer 1: the reconnect re-announcement is logged at INFO, outcome first."""
+        coord = _make_coordinator_stub(real_age=True)
+        coord._last_fan_remote_event_ts = _FRESH_TS
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch, caplog.at_level("INFO"):
+            asyncio.run(
+                coord._async_fan_remote_changed(
+                    _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "low"}), _unavailable_old_state())
+                )
+            )
+        assert coord._fan_remote_burst is None
+        assert any(
+            r.levelname == "INFO"
+            and r.getMessage().startswith("Fan remote event ignored: re-announced after reconnect")
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_stale_firmware_timestamp_is_rejected(self, caplog):
+        """Layer 2: a never-seen timestamp that is hours old (the first re-announcement after a restart
+        where the entity was unavailable, so nothing was seeded) is not a press."""
+        coord = _make_coordinator_stub(real_age=True)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch, caplog.at_level("INFO"):
+            asyncio.run(
+                _dispatch_and_flush(
+                    coord,
+                    _make_fake_event(_make_fake_state(_STALE_TS, {"event_type": "low"}), _unavailable_old_state()),
+                )
+            )
+        assert coord._fan_remote_burst is None
+        ae.handle_fan_manual_override.assert_not_called()
+        assert any(
+            r.levelname == "INFO" and r.getMessage().startswith("Fan remote event ignored: stale event time")
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_stale_off_cannot_cancel_a_real_pending_burst(self):
+        """Symmetry: a stale-restored `off` is rejected before it can cancel a genuine pending press."""
+        coord = _make_coordinator_stub(real_age=True)
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            asyncio.run(
+                coord._async_fan_remote_changed(_make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "low"})))
+            )
+            assert coord._fan_remote_burst is not None
+            asyncio.run(
+                coord._async_fan_remote_changed(
+                    _make_fake_event(_make_fake_state(_STALE_TS, {"event_type": "off"}), _unavailable_old_state())
+                )
+            )
+        assert coord._fan_remote_burst is not None, "a stale off must not cancel a real press"
+
+    def test_fresh_press_just_inside_the_age_bound_is_processed(self):
+        """Layer 2 positive control: a press a few seconds old (transport latency) still counts."""
+        coord = _make_coordinator_stub(real_age=True, physical_on=True)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            asyncio.run(
+                _dispatch_and_flush(
+                    coord, _make_fake_event(_make_fake_state("2026-07-12T19:59:45.000", {"event_type": "timer_2h"}))
+                )
+            )
+        ae.handle_fan_manual_override.assert_called_once()
+
+    def test_press_with_fan_still_off_is_deferred_then_dropped(self, caplog):
+        """Layer 3: the fan (with state feedback) reads off at flush and still off after the confirm delay:
+        no override, no grace, no HVAC suppression, WARNING logged."""
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch, caplog.at_level("INFO"):
+            asyncio.run(
+                _dispatch_and_flush(coord, _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+            )
+            ae.handle_fan_manual_override.assert_not_called()  # deferred, not applied at flush
+            asyncio.run(coord._confirm_fan_remote_override(coord._fan_remote_confirm_burst))
+        ae.handle_fan_manual_override.assert_not_called()
+        assert any(
+            r.levelname == "WARNING" and r.getMessage().startswith("Fan remote press not confirmed by the fan")
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_press_with_fan_reporting_on_after_flush_is_applied(self):
+        """Layer 3 positive control: the fan reports on a few seconds after the flush (power sensor lag):
+        the genuine press is still recorded as an override once the confirm delay elapses."""
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            asyncio.run(
+                _dispatch_and_flush(coord, _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+            )
+            ae.handle_fan_manual_override.assert_not_called()
+            coord._get_fan_physical_state = MagicMock(return_value=True)  # the fan came on
+            asyncio.run(coord._confirm_fan_remote_override(coord._fan_remote_confirm_burst))
+        ae.handle_fan_manual_override.assert_called_once()
+
+    def test_command_only_install_keeps_current_behaviour(self):
+        """Layer 3: no state feedback (`_get_fan_physical_state()` is None) cannot be checked, so the
+        press is applied at flush exactly as before."""
+        coord = _make_coordinator_stub(real_age=True, physical_on=None)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            asyncio.run(
+                _dispatch_and_flush(coord, _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+            )
+        ae.handle_fan_manual_override.assert_called_once()
+
+    def test_off_press_cancels_a_pending_confirmation(self):
+        """Symmetry: an `off` press supersedes a press still awaiting fan confirmation."""
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            asyncio.run(
+                _dispatch_and_flush(coord, _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+            )
+            cancelled = MagicMock()
+            coord._fan_remote_confirm_cancel = cancelled
+            asyncio.run(
+                coord._async_fan_remote_changed(
+                    _make_fake_event(_make_fake_state("2026-07-12T19:59:59.500", {"event_type": "off"}))
+                )
+            )
+        cancelled.assert_called_once()
+        assert coord._fan_remote_confirm_burst is None
+
+
+def _bind_fan_listener(coord: MagicMock) -> None:
+    """Bind the REAL fan-entity listener onto the remote stub (Issue #1198 event-driven confirmation)."""
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    coord._fan_state_feedback_enabled = MagicMock(return_value=True)
+    coord.automation_engine.fan_command_context_matches = MagicMock(return_value=False)
+    coord.automation_engine._fan_command_pending = False
+    coord._async_fan_entity_changed = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+
+def _fan_event(old: str, new: str) -> MagicMock:
+    return _make_fake_event(_make_fake_state(new), _make_fake_state(old))
+
+
+class TestEventDrivenFanConfirmation1198:
+    """Occupant story: the house's fan power detector reports on 8-15 s after the RF press (measured). The press must
+    be recorded the moment the fan reports on, not dropped by a short fixed wait, and not recorded twice."""
+
+    def test_deadline_covers_the_measured_detector_lag(self):
+        from custom_components.climate_advisor.const import REMOTE_CONFIRM_SECONDS
+
+        assert REMOTE_CONFIRM_SECONDS >= 3 * 14.8
+
+    def test_fan_reporting_on_14s_after_the_press_applies_it_once_with_the_timer_token(self):
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        _bind_fan_listener(coord)
+        ae = coord.automation_engine
+        cancel = MagicMock()
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            asyncio.run(
+                _dispatch_and_flush(coord, _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+            )
+            coord._fan_remote_confirm_cancel = cancel
+            ae.handle_fan_manual_override.assert_not_called()
+            coord._get_fan_physical_state = MagicMock(return_value=True)  # the detector reports on, 14 s later
+            asyncio.run(coord._async_fan_entity_changed(_fan_event("off", "on")))
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=7200.0,
+            remote_timer_hours=2.0,
+            remote_speed=None,
+            is_remote_event=True,
+        )
+        cancel.assert_called_once()
+        assert coord._fan_remote_confirm_burst is None
+        # the give-up deadline firing afterwards finds nothing pending and records nothing more
+        asyncio.run(coord._confirm_fan_remote_override(None))
+        assert ae.handle_fan_manual_override.call_count == 1
+
+    def test_command_entity_echo_before_the_detector_reports_records_nothing(self):
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        _bind_fan_listener(coord)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            asyncio.run(
+                _dispatch_and_flush(coord, _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+            )
+            asyncio.run(coord._async_fan_entity_changed(_fan_event("off", "on")))  # echo; detector still off
+        ae.handle_fan_manual_override.assert_not_called()
+        assert coord._fan_remote_confirm_burst is not None, "still awaiting the detector"
+
+    def test_without_a_pending_press_the_listener_behaves_as_before(self):
+        coord = _make_coordinator_stub(real_age=True, physical_on=True)
+        _bind_fan_listener(coord)
+        asyncio.run(coord._async_fan_entity_changed(_fan_event("off", "on")))
+        coord.automation_engine.handle_fan_manual_override.assert_called_once()
+
+
+class TestEchoBeforeFlushDualEntity1198:
+    """Dual-entity install: the transmitter (command entity) echoes the press in ~1-2 s, BEFORE the burst flushes
+    (1.5 s after the last packet) and long before the power detector reports (8-15 s). The echo must not record a
+    token-less override that holds HVAC off for the default grace even if the fan never runs."""
+
+    def _open_burst_and_echo(self, coord):
+        asyncio.run(
+            coord._async_fan_remote_changed(_make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+        )
+        asyncio.run(coord._async_fan_entity_changed(_fan_event("off", "on")))  # echo; detector still off
+
+    def test_echo_before_flush_then_detector_on_gives_exactly_one_override_with_the_token(self):
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        _bind_fan_listener(coord)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch:
+            self._open_burst_and_echo(coord)
+            ae.handle_fan_manual_override.assert_not_called()  # the echo recorded nothing
+            asyncio.run(coord._flush_fan_remote_burst())
+            ae.handle_fan_manual_override.assert_not_called()  # deferred, detector off
+            coord._get_fan_physical_state = MagicMock(return_value=True)  # detector reports, 13 s later
+            asyncio.run(coord._async_fan_entity_changed(_fan_event("off", "on")))
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=7200.0,
+            remote_timer_hours=2.0,
+            remote_speed=None,
+            is_remote_event=True,
+        )
+
+    def test_echo_before_flush_and_detector_never_on_records_nothing_and_logs_truthfully(self, caplog):
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        _bind_fan_listener(coord)
+        ae = coord.automation_engine
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch, caplog.at_level("INFO"):
+            self._open_burst_and_echo(coord)
+            asyncio.run(coord._flush_fan_remote_burst())
+            asyncio.run(coord._confirm_fan_remote_override(coord._fan_remote_confirm_burst))
+        ae.handle_fan_manual_override.assert_not_called()
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("no override, grace or HVAC suppression recorded" in m for m in warnings), warnings
+
+    def test_give_up_warning_does_not_claim_nothing_is_recorded_when_an_override_is_active(self, caplog):
+        coord = _make_coordinator_stub(real_age=True, physical_on=False)
+        _bind_fan_listener(coord)
+        coord.automation_engine._fan_override_active = True  # something else recorded an override
+        now_patch, parse_patch = _dt_patches()
+        with now_patch, parse_patch, caplog.at_level("INFO"):
+            asyncio.run(
+                _dispatch_and_flush(coord, _make_fake_event(_make_fake_state(_FRESH_TS, {"event_type": "timer_2h"})))
+            )
+            asyncio.run(coord._confirm_fan_remote_override(coord._fan_remote_confirm_burst))
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert warnings and all("no override, grace or HVAC suppression recorded" not in m for m in warnings), warnings
+        assert any("already active from another source" in m for m in warnings)

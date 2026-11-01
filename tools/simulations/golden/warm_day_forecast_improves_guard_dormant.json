@@ -1,6 +1,6 @@
 {
   "name": "warm_day_forecast_improves_guard_dormant",
-  "description": "Warm morning with a ceiling breach predicted at the 8 AM classification cycle. Weather improves (cool front arrives) by noon \u00e2\u20ac\u201d outdoor drops 12F, ODE no longer predicts a breach. Guard goes dormant on the noon cycle. HVAC stays off. If a window is opened in the afternoon when outdoor drops below indoor, nat vent activates normally.",
+  "description": "Warm morning with a ceiling breach predicted at the 8 AM classification cycle. Weather improves (cool front arrives) by noon \u00e2\u20ac\u201d outdoor drops 12F, ODE no longer predicts a breach. Guard goes dormant on the noon cycle. HVAC stays off. If a window is opened in the afternoon when outdoor drops below indoor, nat vent activates normally. [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 136,
   "notes": [
@@ -108,8 +108,8 @@
     },
     {
       "at": "2026-05-25T14:05:00",
-      "expect": "natural_ventilation",
-      "reason": "sensor_open: outdoor=61F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor=61F <= threshold 77F \u00e2\u20ac\u201d nat vent activates normally after guard goes dormant."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': sensor_open: outdoor=61F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor=61F <= threshold 77F \u00e2\u20ac\u201d nat vent activates normally after guard goes dormant."
     }
   ],
   "verdict": {

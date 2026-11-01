@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .const import CEILING_ESCALATION_SAVINGS_MARGIN_F
+from .const import CEILING_ESCALATION_SAVINGS_MARGIN_F, MIN_VIABLE_NAT_VENT_HOURS
 
 FAN_MODE_DISABLED = "disabled"
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
@@ -231,3 +231,92 @@ def decide_nat_vent_soft_start_gate(inputs: NatVentSoftStartGateInputs) -> bool:
     declining. See Issue #540 (scoped from #533's soft-start hypothesis).
     """
     return not explain_nat_vent_soft_start_gate(inputs)
+
+
+# ---------------------------------------------------------------------------
+# Start-decision rules shared by every site that can START nat-vent (Issue #1142)
+# ---------------------------------------------------------------------------
+
+NO_WORKING_FAN = "no_working_fan"
+FORECAST_PEAK_ABOVE_THRESHOLD = "forecast_peak_above_threshold"
+FLOOR_IMMINENT = "floor_imminent"
+
+
+def fan_available_for_nat_vent(fan_mode: str) -> bool:
+    """Whether Climate Advisor has a fan to run for nat-vent at all (Issue #1140).
+
+    Owner decision (#1142 D1): with no working fan an open window is just an open window --
+    HVAC is paused like any other (household rule 3). A disabled ``fan_mode`` owns no fan, so
+    nat-vent may not start. (A configured fan that refuses the command at run time is the
+    ``SUPPRESSED`` result, handled by the caller.)
+    """
+    return fan_mode != FAN_MODE_DISABLED
+
+
+@dataclass(frozen=True)
+class NatVentStartVetoInputs:
+    """Inputs for the forecast-peak and thermal-floor start guards (Issue #1138, moved out of
+    ``handle_door_window_open()``'s inline code so every start site shares one definition).
+
+      comfort_heat       -> the caller's sleep-resolved reactivation floor
+      forecast_peak_2h   -> highest hourly-forecast temperature in the next 2 hours (None = no
+                            forecast data; the caller resolves the clock and the parsing)
+      thermal_confidence -> ``thermal_model["confidence"]`` ("none" when there is no model)
+      thermal_k_passive  -> ``thermal_model["k_passive"]``
+    """
+
+    outdoor: float | None
+    indoor: float | None
+    comfort_heat: float
+    comfort_cool: float
+    nat_vent_delta: float
+    forecast_peak_2h: float | None
+    thermal_confidence: str
+    thermal_k_passive: float | None
+
+
+@dataclass(frozen=True)
+class NatVentStartVeto:
+    """Why a start was vetoed, with the numbers the Activity Report events carry."""
+
+    reason: str
+    forecast_peak: float | None = None
+    threshold: float | None = None
+    time_to_floor_hr: float | None = None
+    k_passive: float | None = None
+    indoor: float | None = None
+    comfort_heat: float | None = None
+
+
+def decide_nat_vent_start_veto(inputs: NatVentStartVetoInputs) -> NatVentStartVeto | None:
+    """Pure forecast-peak then thermal-floor start guards (the former inline Phase 2 guards).
+
+    Guard 1: a hourly-forecast peak within 2 h above ``comfort_cool + nat_vent_delta`` means the
+    window of useful outdoor air is about to close. Guard 2: a medium/high-confidence thermal
+    model predicting the indoor comfort floor within ``MIN_VIABLE_NAT_VENT_HOURS`` means a session
+    would end almost immediately. Guard 1 wins when both hold. None = no veto.
+    """
+    threshold = inputs.comfort_cool + inputs.nat_vent_delta
+    if inputs.forecast_peak_2h is not None and inputs.forecast_peak_2h > threshold:
+        return NatVentStartVeto(
+            FORECAST_PEAK_ABOVE_THRESHOLD, forecast_peak=inputs.forecast_peak_2h, threshold=threshold
+        )
+    if (
+        inputs.thermal_confidence in ("medium", "high")
+        and inputs.thermal_k_passive is not None
+        and inputs.thermal_k_passive < 0
+        and inputs.indoor is not None
+        and inputs.outdoor is not None
+    ):
+        passive_rate = inputs.thermal_k_passive * (inputs.indoor - inputs.outdoor)  # F/hr, negative
+        if passive_rate < 0:
+            time_to_floor = (inputs.indoor - inputs.comfort_heat) / abs(passive_rate)
+            if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
+                return NatVentStartVeto(
+                    FLOOR_IMMINENT,
+                    time_to_floor_hr=time_to_floor,
+                    k_passive=inputs.thermal_k_passive,
+                    indoor=inputs.indoor,
+                    comfort_heat=inputs.comfort_heat,
+                )
+    return None

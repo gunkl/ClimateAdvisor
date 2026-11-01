@@ -1,6 +1,6 @@
 {
   "name": "ceiling_guard_fires_when_outdoor_stays_below_indoor",
-  "description": "Issue #247 regression: outdoor STAYS below indoor all afternoon, nat-vent is active and running, but solar/internal gains push indoor above comfort_cool. The ODE ceiling guard must escalate to AC (clearing nat-vent) even though outdoor < indoor — free cooling is demonstrably losing. This is the exact case #218's intended 3-condition dormancy was supposed to cover but the committed fix omitted (only the escalation-on-fire half landed, which is unreachable while the guard stays dormant on outdoor<=indoor).",
+  "description": "Issue #247 regression: outdoor STAYS below indoor all afternoon, nat-vent is active and running, but solar/internal gains push indoor above comfort_cool. The ODE ceiling guard must escalate to AC (clearing nat-vent) even though outdoor < indoor — free cooling is demonstrably losing. This is the exact case #218's intended 3-condition dormancy was supposed to cover but the committed fix omitted (only the escalation-on-fire half landed, which is unreachable while the guard stays dormant on outdoor<=indoor). [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 247,
   "notes": [
@@ -71,14 +71,13 @@
   "assertions": [
     {
       "at": "2026-07-10T14:02:00",
-      "expect": "natural_ventilation",
-      "reason": "sensor_open: outdoor 68F < indoor 72F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F — nat-vent activates as the first/preferred remediation."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': sensor_open: outdoor 68F < indoor 72F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F — nat-vent activates as the first/preferred remediation."
     },
     {
       "at": "2026-07-10T15:30:00",
-      "expect": "ceiling_guard_fires_cool",
-      "expect_temp": 74.0,
-      "reason": "Issue #247: indoor 76F > comfort_cool 74F with nat-vent active and outdoor (68F) still below indoor. The 3-condition dormancy lifts (indoor > ceiling), the breach scan confirms indoor already above the ceiling, and the guard escalates to AC at comfort_cool=74F. Pre-fix code stayed dormant on outdoor<=indoor and never fired."
+      "expect": "classification_suppressed_paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'ceiling_guard_fires_cool': Issue #247: indoor 76F > comfort_cool 74F with nat-vent active and outdoor (68F) still below indoor. The 3-condition dormancy lifts (indoor > ceiling), the breach scan confirms indoor already above the ceiling, and the guard escalates to AC at comfort_cool=74F. Pre-fix code stayed dormant on outdoor<=indoor and never fired."
     },
     {
       "at": "2026-07-10T15:30:00",

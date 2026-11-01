@@ -637,6 +637,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # instance (left reachable by a timer or listener after a reload) refuses to act.
     # Class-level default so coordinators built via object.__new__ in tests still work.
     _shut_down: bool = False
+    # Issue #1183: set (never cleared) by _async_homeassistant_stop. A restart never unloads the
+    # entry, so _shut_down never engages then; the same refusal check honours this flag instead.
+    _ha_stopping: bool = False
 
     def __init__(self, hass: HomeAssistant, config: dict[str, Any], entry_id: str = "") -> None:
         """Initialize the coordinator."""
@@ -1318,7 +1321,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Issue #1102 (F1): keep the handle so unload cancels it. Discarding it let a
         # reload inside this 300 s window revive the dead instance when it fired.
-        self._unsub_listeners.append(async_call_later(self.hass, 300, _on_startup_coalesce_timer))
+        self._unsub_listeners.append(
+            async_call_later(self.hass, 300, self._zone_scoped_sync(_on_startup_coalesce_timer))
+        )
         _LOGGER.info(
             "Startup coalescing window started — override detection suppressed for 300s, coalescing at %s",
             _coalesce_expiry.strftime("%H:%M:%S"),
@@ -1347,11 +1352,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # this listener, clean_shutdown/last_shutdown_version/user_initiated_restart were only
         # ever written on the rare entry-unload path, so the restart-cause classifier in
         # async_restore_state() fell through to "unknown" on every real-world restart.
+        # The handler is a plain method (the unit-test stubs turn @callback-decorated methods into mocks);
+        # this closure is what marks it as an event-loop callback for HA.
         @callback
-        def _async_homeassistant_stop(_event: Event) -> None:
-            self.hass.async_create_task(self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP))
+        def _on_homeassistant_stop(event: Event) -> None:
+            self._async_homeassistant_stop(event)
 
-        self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _async_homeassistant_stop))
+        self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _on_homeassistant_stop))
 
         _LOGGER.info("Climate Advisor v%s coordinator setup complete", VERSION)
 
@@ -2670,7 +2677,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._occupancy_away_timer_cancel = async_call_later(
                 self.hass,
                 delay_seconds,
-                _occupancy_away_timer_expired,
+                self._zone_scoped_sync(_occupancy_away_timer_expired),
             )
         elif new_mode in present_modes:
             self._cancel_occupancy_away_timer()
@@ -3598,7 +3605,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.hass.async_create_task(self.async_request_refresh())
 
                 # Issue #1102 (F2): keep the handle so unload cancels it (at most 5 retries).
-                self._unsub_listeners.append(async_call_later(self.hass, delay, _schedule_retry))
+                self._unsub_listeners.append(
+                    async_call_later(self.hass, delay, self._zone_scoped_sync(_schedule_retry))
+                )
             else:
                 _LOGGER.warning(
                     "Weather entity still unavailable after startup retries; will try again at next scheduled update"
@@ -6061,7 +6070,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
                 self.hass.async_create_task(_do_debounce())
 
-            cancel = async_call_later(self.hass, debounce_sec, _debounce_expired)
+            cancel = async_call_later(self.hass, debounce_sec, self._zone_scoped_sync(_debounce_expired))
             self._door_open_timers[entity_id] = cancel
         else:
             # Sensor transitioned to closed — cancel any pending debounce timer
@@ -12588,6 +12597,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._user_initiated_shutdown,
                 kind,
             )
+
+    def _async_homeassistant_stop(self, _event: Event) -> None:
+        """EVENT_HOMEASSISTANT_STOP: stop acting, then persist the restart-cause diagnostics.
+
+        Issue #1183: HA keeps firing state changes while it unloads integrations, and each
+        device going unavailable used to start a full update cycle (a false "entities aren't
+        responding" alert, a thermostat command that failed with "Connection lost"). Setting
+        ``_ha_stopping`` on this coordinator and its engine makes every refusal site of the
+        #1102 latch (update cycle, wrapped timers/listeners, commands, notifications) skip.
+        The diagnostics write is not latched and still runs.
+        """
+        self._ha_stopping = True
+        engine = getattr(self, "automation_engine", None)
+        if engine is not None:
+            engine._ha_stopping = True
+        _LOGGER.info(
+            "Home Assistant is stopping: Climate Advisor stops commanding and notifying (instance %s)",
+            _instance_tag(self),
+        )
+        self.hass.async_create_task(self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP))
 
     async def async_shutdown(self) -> None:
         """Tear this instance down for good (Issue #1102: latched, idempotent).

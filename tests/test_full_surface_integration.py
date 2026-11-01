@@ -42,7 +42,11 @@ _PROBE_GOLDEN = "2026-03-28-overnight"
 
 
 def _load(name: str) -> dict:
-    return json.loads((GOLDEN_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    scen = json.loads((GOLDEN_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    # Issue #1140: nat-vent needs a working fan, and the probe golden has none (its assertions now describe the
+    # pause). Give the probe run a whole-house fan so it still exercises the nat-vent decision surface.
+    scen["config"] = {**scen.get("config", {}), "fan_mode": "whole_house_fan", "fan_entity": "fan.whf"}
+    return scen
 
 
 def test_baseline_is_clean_old_vs_old():

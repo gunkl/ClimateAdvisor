@@ -1,6 +1,6 @@
 {
   "name": "cold_morning_warm_day_no_breach",
-  "description": "Cold night (65F) into a warm day (72F peak) that stays within the comfort band. Issue #249: the comfort band [comfort_heat, comfort_cool] is armed at classification, so the thermostat itself pre-heats the cold morning up to comfort_heat (70F) and would cool the afternoon at comfort_cool (74F). Windows open when outdoor drops below indoor in the evening; nat-vent keeps the band armed.",
+  "description": "Cold night (65F) into a warm day (72F peak) that stays within the comfort band. Issue #249: the comfort band [comfort_heat, comfort_cool] is armed at classification, so the thermostat itself pre-heats the cold morning up to comfort_heat (70F) and would cool the afternoon at comfort_cool (74F). Windows open when outdoor drops below indoor in the evening; nat-vent keeps the band armed. [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 249,
   "notes": [
@@ -86,8 +86,8 @@
     },
     {
       "at": "2026-05-15T18:05:00",
-      "expect": "natural_ventilation",
-      "reason": "Evening sensor_open: outdoor=65F < indoor=72F, indoor=72F > comfort_heat=70F, outdoor=65F <= threshold 74+3=77F — nat vent activates and the band stays armed (fan-only; no HVAC off).",
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': Evening sensor_open: outdoor=65F < indoor=72F, indoor=72F > comfort_heat=70F, outdoor=65F <= threshold 74+3=77F — nat vent activates and the band stays armed (fan-only; no HVAC off).",
       "track": "logic"
     }
   ],

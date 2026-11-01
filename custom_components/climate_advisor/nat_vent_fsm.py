@@ -100,10 +100,15 @@ from enum import Enum
 from .nat_vent_cycling import NatVentCyclingInputs, decide_nat_vent_cycling
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import (
+    NO_WORKING_FAN,
     NatVentGateInputs,
     NatVentSoftStartGateInputs,
+    NatVentStartVeto,
+    NatVentStartVetoInputs,
     decide_nat_vent_gate,
     decide_nat_vent_soft_start_gate,
+    decide_nat_vent_start_veto,
+    fan_available_for_nat_vent,
 )
 from .nat_vent_lifecycle import NatVentLifecycleState
 from .nat_vent_reactivation_lockout import is_reactivation_locked_out
@@ -188,6 +193,13 @@ class NatVentFsmInputs:
     # default precedent for every field added after the original construction.
     manual_override_active: bool = False
     manual_override_mode: str | None = None
+    # Issue #1138 (#1142 D2): the forecast-peak / thermal-floor start guards, as FSM context.
+    # ``None`` (default) = guards not applied: the caller is not asking a START question with
+    # them (the exit chain, the startup adoption of an already-running fan, diagnostics). The
+    # four start sites (window-open handler, paused-by-door reactivation, idle-open re-entry,
+    # grace-expiry re-check) pass a value, so each gets the guards by calling the FSM it
+    # already calls, every tick.
+    start_veto: NatVentStartVetoInputs | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +223,11 @@ class NatVentTransition:
     # that don't care about mid-session cycling (every call site wired before
     # Phase 2d) simply never read this field.
     fan_should_be_active: bool | None = None
+    # Issue #1138/#1140: set when ``_transition_from_inactive()`` would have started nat-vent
+    # (``vetoed_state``) but a start rule said no -- no working fan, forecast peak, imminent
+    # floor. ``to_state`` is INACTIVE in that case.
+    veto: NatVentStartVeto | None = None
+    vetoed_state: NatVentLifecycleState | None = None
 
     @property
     def changed(self) -> bool:
@@ -412,6 +429,26 @@ def _transition_from_inactive(current_state: NatVentLifecycleState, event: NatVe
         next_state = NatVentLifecycleState.ACTIVE_SOFT_START
     else:
         next_state = NatVentLifecycleState.INACTIVE
+
+    # Issue #1138/#1140 (#1142 D1+D2): the start rules that are not temperature-gate rules.
+    # Evaluated only when the gates above WOULD start nat-vent, so ``veto`` always means
+    # "start refused", never "conditions not met". Re-evaluated every tick: a forecast peak ages
+    # out of the 2 h window and the thermal estimate moves, so a veto is not sticky.
+    veto: NatVentStartVeto | None = None
+    if next_state != NatVentLifecycleState.INACTIVE:
+        if not fan_available_for_nat_vent(inputs.fan_mode):
+            veto = NatVentStartVeto(NO_WORKING_FAN)
+        elif inputs.start_veto is not None:
+            veto = decide_nat_vent_start_veto(inputs.start_veto)
+    if veto is not None:
+        return NatVentTransition(
+            from_state=current_state,
+            to_state=NatVentLifecycleState.INACTIVE,
+            event_kind=event.kind,
+            at=inputs.now,
+            veto=veto,
+            vetoed_state=next_state,
+        )
 
     return NatVentTransition(from_state=current_state, to_state=next_state, event_kind=event.kind, at=inputs.now)
 

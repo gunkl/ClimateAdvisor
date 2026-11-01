@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -24,6 +24,7 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import FAN_MODE_BOTH, FAN_MODE_HVAC, FAN_MODE_WHOLE_HOUSE
 from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan
 from custom_components.climate_advisor.ode_ceiling_guard import OdeCeilingGuardOutcome
+from custom_components.climate_advisor.whf_safety_decision import SensorReading, WhfSafetySnapshot
 from tests.test_forecast_chart_integration import (
     _classification as _fc_classification,
 )
@@ -82,9 +83,11 @@ def _make_engine(
         config=config,
     )
     engine._sensor_check_callback = lambda: sensor_open
-    # Sealed = sensors configured and none open (the coordinator's real predicate is pinned separately
-    # in TestSealedNeedsKnownClosedSensors, which wires the real callback).
-    engine._sensors_known_closed_callback = lambda: bool(sensors) and not sensor_open
+    # Sealed = the enforcer's snapshot has a reading per configured sensor and none is open (the coordinator's
+    # real reading is pinned separately in TestSealedFollowsTheEnforcer, which wires the real helper).
+    engine._whf_safety_snapshot_callback = lambda: WhfSafetySnapshot(
+        fan_on=None, fan_on_for_s=None, sensors=tuple(SensorReading(is_open=sensor_open) for _ in sensors or [])
+    )
     engine._thermal_model = {"k_passive": -0.5, "confidence_k_passive": "high", "k_active_cool": -2.0}
     engine._natural_vent_active = False
     engine._last_outdoor_temp = 90.0
@@ -218,12 +221,17 @@ class TestWholeHouseFanHomeFollowsTheSealedState:
 
 
 def _wired_whf_engine(states: dict[str, str | None], *, inverted: bool = False):
-    """A WHF engine whose sealed-house callback is the coordinator's REAL ``_all_sensors_known_closed``
-    reading a fake HA state table (``None`` = entity missing from HA)."""
-    coordinator_cls = _get_coordinator_module().ClimateAdvisorCoordinator
+    """A WHF engine whose enforcer snapshot reads the coordinator's REAL ``_whf_sensor_readings`` over a fake
+    HA state table (``None`` = entity missing from HA). Every state changed just now and the integration started
+    10 s ago, so a dark sensor is inside the enforcer's 60 s grace (the past-the-grace case is pinned in
+    tests/test_unreadable_sensors_1181.py)."""
+    coordinator_mod = _get_coordinator_module()
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    coordinator_cls = coordinator_mod.ClimateAdvisorCoordinator
     coord = object.__new__(coordinator_cls)
     coord.config = {"sensor_polarity_inverted": inverted}
     coord._resolved_sensors = list(states)
+    coord._whf_safety_started_at = now - timedelta(seconds=10)
 
     def _get(entity_id):
         raw = states[entity_id]
@@ -231,19 +239,27 @@ def _wired_whf_engine(states: dict[str, str | None], *, inverted: bool = False):
             return None
         st = MagicMock()
         st.state = raw
+        st.last_changed = now
         return st
+
+    def _readings():
+        with patch.object(coordinator_mod.dt_util, "utcnow", return_value=now):
+            return coord._whf_sensor_readings()[0]
 
     coord.hass = MagicMock()
     coord.hass.states.get = _get
     engine = _make_engine(savings=True, fan_mode=FAN_MODE_WHOLE_HOUSE, sensors=list(states))
-    engine._sensors_known_closed_callback = coord._all_sensors_known_closed
+    engine._whf_safety_snapshot_callback = lambda: WhfSafetySnapshot(
+        fan_on=None, fan_on_for_s=None, sensors=_readings()
+    )
     engine._sensor_check_callback = coord._any_sensor_open
     return engine
 
 
 class TestSealedNeedsKnownClosedSensors:
-    """A sensor the integration cannot read (Zigbee hub down: unavailable/unknown/missing) is NOT closed,
-    so a WHF home with it stays on the no-handoff path instead of starting the AC with windows maybe open."""
+    """A sensor the integration cannot read (Zigbee hub down: unavailable/unknown/missing) is not closed for its
+    first 60 s (the enforcer's grace), so a WHF home with a briefly dark sensor stays on the no-handoff path.
+    Past the grace the fan cannot run and the home is sealed (Issue #1177: tests/test_unreadable_sensors_1181.py)."""
 
     _TWO = ["binary_sensor.front_door", "binary_sensor.office_window"]
 
@@ -290,7 +306,8 @@ class TestSealedNeedsKnownClosedSensors:
 
     def test_without_the_callback_wired_the_house_is_not_sealed(self):
         engine = _make_engine(savings=True, fan_mode=FAN_MODE_WHOLE_HOUSE, sensors=self._TWO)
-        engine._sensors_known_closed_callback = None
+        engine._whf_safety_snapshot_callback = None
+        engine._sensor_check_callback = None
         assert engine._whf_house_sealed_with_known_sensors() is False
 
 
@@ -312,7 +329,7 @@ class TestGuardLoggingAndEventPayload:
         engine = _wired_whf_engine({"binary_sensor.a": "off", "binary_sensor.b": "unavailable"})
         with caplog.at_level("DEBUG"):
             asyncio.run(_run(engine, _BREACH_77))
-        assert any("a door/window sensor state is unknown or unavailable" in r.getMessage() for r in caplog.records)
+        assert any("a door/window sensor was unreadable for under a minute" in r.getMessage() for r in caplog.records)
 
     def test_no_ceiling_line_says_why_window_open(self, caplog):
         engine = _wired_whf_engine({"binary_sensor.a": "off", "binary_sensor.b": "on"})

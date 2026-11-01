@@ -40,6 +40,10 @@ from custom_components.climate_advisor.promise_journal import (  # noqa: E402
     PromiseJournal,
     Reading,
 )
+from custom_components.climate_advisor.whf_safety_decision import (  # noqa: E402
+    house_is_sealed,
+    sensor_reading,
+)
 
 WAIVERS_PATH = Path(__file__).with_name("promise_waivers.json")
 BASELINE_PATH = Path(__file__).with_name("promise_baseline.json")
@@ -452,11 +456,28 @@ class FakeHassPromiseSource:
         fan_on = self._fan_physical_state(states)
         contacts_open: bool | None = None
         if self._contacts:
+            # Issue #1177: the enforcer's own reading and verdict (one definition for the WHF safety snapshot,
+            # the production promise reading and this adapter): an unavailable/unknown/MISSING sensor counts
+            # open for 60 s and closed after.
             inverted = bool(s.config.get("sensor_polarity_inverted", False))
             open_state = "off" if inverted else "on"
-            contacts_open = any(
-                (cs := states.get(e)) is not None and str(cs.state).lower() == open_state for e in self._contacts
-            )
+            coord = s.coordinator
+            started = getattr(coord, "_whf_safety_started_at", None) if coord is not None else None
+            since_start = max(0.0, (ts - started).total_seconds()) if isinstance(started, datetime) else None
+            readings = []
+            for e in self._contacts:
+                cs = states.get(e)
+                changed = getattr(cs, "last_changed", None) if cs is not None else None
+                age = max(0.0, (ts - changed).total_seconds()) if isinstance(changed, datetime) else None
+                readings.append(
+                    sensor_reading(
+                        state=str(cs.state).lower() if cs is not None else None,
+                        is_open=cs is not None and str(cs.state).lower() == open_state,
+                        age_s=age,
+                        since_start_s=since_start,
+                    )
+                )
+            contacts_open = not house_is_sealed(tuple(readings))
         classification = getattr(s.engine, "_current_classification", None)
         high = getattr(classification, "today_high", None)
         outdoor = getattr(s.engine, "_last_outdoor_temp", None)

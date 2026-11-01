@@ -101,3 +101,31 @@ async def test_press_during_a_pause_with_a_fan_grace_is_confirmed(make_house, da
     assert ae._manual_override_active, "the press was discarded as self-resolved instead of confirmed"
     assert house.thermostat.mode == press
     assert not house.fan.is_on, "rule 2: the newest occupant action (the press) wins, the fan must have stopped"
+
+
+async def test_press_survives_the_fan_grace_expiring_before_its_confirmation_ends(make_house) -> None:
+    """The fan-override grace (5 min) ends while the heat press (10 min confirmation) is still pending. The fan's
+    grace is not the occupant's own: its expiry must neither clear the pending press nor re-apply the window pause."""
+    cfg = _house_cfg(_COLD, "window", fan="whf")
+    cfg["ca_config"] = {**cfg["ca_config"], "manual_grace_seconds": 300}
+    house = await make_house(**cfg)
+    ae = house.coordinator.automation_engine
+    await house.advance(minutes=6)
+    await house.open("window")
+    await house.advance(minutes=2)
+    await house.coordinator.async_request_refresh()
+    await house.hass.async_block_till_done()
+    await house.advance(seconds=3)
+    await house.occupant_presses_fan(True)
+    for _ in range(30):
+        await house.advance(seconds=1)
+    await house.occupant_sets_thermostat(mode="heat")
+
+    await house.advance(minutes=6)  # the 5 minute fan grace has ended, the 10 minute confirmation has not
+    assert not ae._grace_active, "precondition: the fan grace has expired"
+    assert ae._override_confirm_pending, "the fan grace expiring dropped the occupant's pending press"
+    assert house.thermostat.mode == "heat", "the fan grace expiring re-applied the window pause over the press"
+
+    await house.advance(minutes=6)  # past the confirmation
+    assert ae._manual_override_active, "the press never confirmed"
+    assert house.thermostat.mode == "heat"

@@ -265,6 +265,14 @@ class TestFromGraceUnprotected:
         t = transition(_PENDING_PROTECTING, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED))
         assert t.to_state == _IDLE_NONE
 
+    def test_fan_override_grace_expiring_keeps_a_pending_press(self):
+        """Issue #1158 (M1): a whole-house-fan override grace protects but is not the occupant's thermostat grace."""
+        t = transition(
+            _PENDING_PROTECTING,
+            _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED, grace_is_occupants_own=False),
+        )
+        assert t.to_state == (OverrideConfirmState.PENDING, GraceState.NONE)
+
     def test_override_detected_confirm_enabled_lands_pending(self):
         t = transition(_IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.OVERRIDE_DETECTED, confirm_seconds=600.0))
         assert t.to_state == _PENDING_UNPROTECTED

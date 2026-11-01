@@ -161,6 +161,7 @@ class OverrideGraceFsmInputs:
                                     GraceState.NONE in that case instead of unconditionally
                                     assuming grace starts, matching what
                                     ``_start_grace_period_action()`` actually does)
+      grace_is_occupants_own      -> AutomationEngine._grace_is_occupants_thermostat_grace()
       now                        -> caller-resolved wall-clock time
     """
 
@@ -180,6 +181,10 @@ class OverrideGraceFsmInputs:
     grace_source: str
     now: datetime
     grace_would_start: bool = True
+    # Issue #1158 (M1): False while the running protecting grace is a whole-house-fan override grace (it protects
+    # the FAN session, not a thermostat change). From ``AutomationEngine._grace_is_occupants_thermostat_grace()``,
+    # the same fact the engine's ``_on_grace_expired()`` feeds ``unprotected_grace_expiry_keeps_pending``.
+    grace_is_occupants_own: bool = True
     # Issue #1073 (S6): what production's ``_override_matches_current_decision()`` actually compares
     # against -- the comfort-edge selector's family and the resolved band edge, NOT
     # ``classification_mode`` (which is "off" on warm/mild days). Resolved by the caller via
@@ -339,12 +344,13 @@ def _transition_from_grace_protecting(
 
     if kind == OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED:
         outcome_str = _grace_expiry_outcome_str(inputs)
-        # Same shared rule as the unprotected branch (and the engine's ``_on_grace_expired()``). Today
-        # every protecting grace counts as the occupant's own, so a pending change is cleared with it.
+        # Same shared rule as the unprotected branch (and the engine's ``_on_grace_expired()``). A
+        # whole-house-fan override grace protects too but is not the occupant's thermostat grace (Issue
+        # #1158 M1), so a press still awaiting confirmation survives it expiring.
         keep = unprotected_grace_expiry_keeps_pending(
             confirm_pending=current_state[0] == OverrideConfirmState.PENDING,
             manual_override_active=inputs.manual_override_active,
-            grace_protects_override=True,
+            grace_protects_override=inputs.grace_is_occupants_own,
         )
         next_state = (current_state[0] if keep else OverrideConfirmState.IDLE, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome_str, inputs.now)

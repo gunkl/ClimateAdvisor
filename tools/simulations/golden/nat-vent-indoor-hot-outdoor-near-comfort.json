@@ -1,6 +1,6 @@
 {
   "name": "nat-vent-indoor-hot-outdoor-near-comfort",
-  "description": "Hot interior (78F) with outdoor near comfort (74F) — activates since outdoor < indoor and outdoor < threshold",
+  "description": "Hot interior (78F) with outdoor near comfort (74F) — activates since outdoor < indoor and outdoor < threshold [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 115,
   "verdict": {
@@ -32,8 +32,8 @@
   "assertions": [
     {
       "at": "2026-04-20T17:00:00",
-      "expect": "natural_ventilation",
-      "reason": "outdoor 74F < indoor 78F (beneficial); outdoor 74F < threshold 81F; indoor 78F > comfort_heat 70F; indoor 78F <= ceiling_threshold 78F — nat vent activates for hot-day free cooling"
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': outdoor 74F < indoor 78F (beneficial); outdoor 74F < threshold 81F; indoor 78F > comfort_heat 70F; indoor 78F <= ceiling_threshold 78F — nat vent activates for hot-day free cooling"
     }
   ]
 }

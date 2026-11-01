@@ -180,7 +180,7 @@ from .door_window_open_response import (
     decide_door_open_response,
 )
 from .door_window_pause_entry import PauseEntryInputs, PauseEntryOutcome, decide_pause_entry
-from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate, fan_available_for_nat_vent
 
 
 class DoorWindowFsmEventKind(Enum):
@@ -407,6 +407,18 @@ def _nat_vent_gate_inputs(inputs: DoorWindowFsmInputs) -> NatVentGateInputs:
     )
 
 
+def _nat_vent_may_start(inputs: DoorWindowFsmInputs) -> bool:
+    """This module's prediction of the nat-vent start decision (Issue #1140).
+
+    The temperature gate plus the "a fan exists" rule the nat-vent FSM applies to every start
+    (``nat_vent_gate.fan_available_for_nat_vent``). The forecast-peak / thermal-floor guards are
+    NOT modeled here: every caller that needs the real answer already ran the nat-vent FSM and
+    either passes ``nat_vent_gate_ruled_out`` or corrects this prediction when the real
+    reactivation outcome arrives (``PAUSED_NAT_VENT_REACTIVATED`` / the idempotent re-pause).
+    """
+    return fan_available_for_nat_vent(inputs.fan_mode) and decide_nat_vent_gate(_nat_vent_gate_inputs(inputs))
+
+
 def _pause_entry_outcome(inputs: DoorWindowFsmInputs) -> PauseEntryOutcome:
     """The one place this module turns its inputs into a ``PauseEntryOutcome`` (Issue #1143).
 
@@ -453,9 +465,7 @@ def _transition_from_normal(current_state: DoorWindowLifecycleState, event: Door
                 comfort_cool=inputs.comfort_cool,
                 nat_vent_delta=inputs.nat_vent_delta,
                 within_planned_window=False if inputs.nat_vent_gate_ruled_out else inputs.within_planned_window,
-                nat_vent_gate_entered=(
-                    False if inputs.nat_vent_gate_ruled_out else decide_nat_vent_gate(_nat_vent_gate_inputs(inputs))
-                ),
+                nat_vent_gate_entered=(False if inputs.nat_vent_gate_ruled_out else _nat_vent_may_start(inputs)),
             )
         )
         if response == DoorOpenResponse.PAUSE:
@@ -631,9 +641,7 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
                 comfort_cool=inputs.comfort_cool,
                 nat_vent_delta=inputs.nat_vent_delta,
                 within_planned_window=False if inputs.nat_vent_gate_ruled_out else inputs.within_planned_window,
-                nat_vent_gate_entered=(
-                    False if inputs.nat_vent_gate_ruled_out else decide_nat_vent_gate(_nat_vent_gate_inputs(inputs))
-                ),
+                nat_vent_gate_entered=(False if inputs.nat_vent_gate_ruled_out else _nat_vent_may_start(inputs)),
             )
         )
         if response == DoorOpenResponse.PAUSE:
@@ -677,7 +685,7 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
             # _re_pause_for_open_sensor() genuinely decides NORMAL (nat-vent
             # handoff) vs a plain paused state — unlike from
             # PAUSED_DURING_GRACE, see _transition_from_paused_during_grace().
-            if decide_nat_vent_gate(_nat_vent_gate_inputs(inputs)):
+            if _nat_vent_may_start(inputs):
                 next_state = DoorWindowLifecycleState.NORMAL
             else:
                 sub = _pause_sub_state(_pause_entry_outcome(inputs))

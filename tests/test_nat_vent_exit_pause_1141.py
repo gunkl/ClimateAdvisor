@@ -69,12 +69,24 @@ class TestDeferredFanOffRecordsNoPauseYet:
         assert engine._paused_by_door is True
         assert engine._paused_entity == "nat-vent-exit"
 
-    def test_no_window_open_branch_unchanged(self):
-        """Mirror: sensors closed + deferred off -> still no pause (unchanged), session kept."""
+    def test_sensors_closed_deferred_off_starts_no_grace_until_the_fan_stops(self):
+        """Mirror (sensors-closed branch): a deferred fan-off keeps the session, so the
+        "nat_vent_exit_resume" automation grace must not start while the fan is still on."""
         engine = _ventilating_engine(sensor_open=False)
         _exit(engine)
         assert engine._natural_vent_active is True
         assert engine._paused_by_door is False
+        assert engine._grace_active is False, "session and grace must not both be active"
+        assert engine._pre_fan_hvac_mode == "cool", "WHF still owns the thermostat until the fan stops"
+
+    def test_sensors_closed_retry_after_floor_ends_session_and_starts_grace(self):
+        """Positive control / completion: once the fan-off can run, session ends and grace starts."""
+        engine = _ventilating_engine(sensor_open=False)
+        _exit(engine)
+        _floor_over(engine)
+        _exit(engine, at=_DAY + timedelta(minutes=6))
+        assert engine._natural_vent_active is False
+        assert engine._grace_active is True
 
 
 class TestBothOrders:

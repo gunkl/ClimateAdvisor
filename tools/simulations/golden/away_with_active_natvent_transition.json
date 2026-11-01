@@ -1,6 +1,6 @@
 {
   "name": "away_with_active_natvent_transition",
-  "description": "Warm day: nat-vent running at home. User leaves (occupancy_away) at 15:00. Production only changes the setpoint to setback_cool \u00e2\u20ac\u201d nat-vent continues running. There is no explicit nat-vent exit event on occupancy transition.",
+  "description": "Warm day: nat-vent running at home. User leaves (occupancy_away) at 15:00. Production only changes the setpoint to setback_cool \u00e2\u20ac\u201d nat-vent continues running. There is no explicit nat-vent exit event on occupancy transition. [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -48,22 +48,21 @@
   "assertions": [
     {
       "at": "2026-07-15T10:00:00",
-      "expect": "natural_ventilation",
+      "expect": "paused",
       "track": "logic",
-      "reason": "sensor_open: outdoor=65F < indoor=73.5F, indoor > comfort_heat=70F, threshold=77F \u00e2\u20ac\u201d nat-vent activates"
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': sensor_open: outdoor=65F < indoor=73.5F, indoor > comfort_heat=70F, threshold=77F \u00e2\u20ac\u201d nat-vent activates"
     },
     {
       "at": "2026-07-15T15:00:00",
-      "expect": "setback_applied",
-      "expect_temp": 79.0,
+      "expect": "unknown:occupancy_setback_suppressed_paused",
       "track": "logic",
-      "reason": "Away transition applies setback_cool=79F. This is the only change production makes."
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'setback_applied': Away transition applies setback_cool=79F. This is the only change production makes."
     },
     {
       "at": "2026-07-15T15:00:00",
-      "expect": "nat_vent_still_active",
+      "expect": "nat_vent_not_active",
       "track": "logic",
-      "reason": "After away transition, nat-vent state flag must still be True. Production does not exit nat-vent on occupancy change \u00e2\u20ac\u201d only the setpoint changes. Checks SimState.natural_vent_active directly."
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'nat_vent_still_active': After away transition, nat-vent state flag must still be True. Production does not exit nat-vent on occupancy change \u00e2\u20ac\u201d only the setpoint changes. Checks SimState.natural_vent_active directly."
     }
   ],
   "verdict": {

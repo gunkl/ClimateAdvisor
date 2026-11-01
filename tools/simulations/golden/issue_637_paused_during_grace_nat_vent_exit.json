@@ -4,11 +4,11 @@
   "source": "synthetic",
   "issue": 637,
   "notes": [
-    "Exercises violation path #2 from the Phase 2 plan's five-whys analysis: _exit_nat_vent()'s sensor-still-open branch (automation.py ~L5325-5347) sets _paused_by_door=True directly, with no read or write of _grace_active at all -- if a nat-vent session was entered while an earlier grace period was still running (a real, separately-evidenced path in its own right: handle_door_window_open()'s SENSOR_OPENED-during-GRACE case can hand off to nat-vent without clearing grace, matching this scenario's own 13:07 event), grace survives the whole nat-vent session and is still active when nat-vent later exits.",
+    "Exercises violation path #2 from the Phase 2 plan's five-whys analysis: _exit_nat_vent()'s sensor-still-open branch (automation.py ~L5325-5347) sets _paused_by_door=True directly, with no read or write of _grace_active at all -- if a nat-vent session was entered while an earlier grace period was still running (a real, separately-evidenced path in its own right: handle_door_window_open()'s SENSOR_OPENED-during-GRACE case can hand off to nat-vent without clearing grace, matching this scenario's own 13:02 event), grace survives the whole nat-vent session and is still active when nat-vent later exits.",
     "use_coordinator=true for the same reason as the sibling scenario (issue_637_paused_during_grace_open_fallthrough.json) -- real debounce/pause/resume/grace/listener wiring, not an approximation.",
-    "Issue #821 retiming note (verified by reading tools/sim_harness/run_production.py's _handle_temp_update() directly, not by empirical trial-and-error -- an earlier draft of this note made an unverified 'found empirically' claim that Verification correctly flagged): _handle_temp_update()'s own trailing `run_coro(engine.check_natural_vent_conditions())` call is UNCONDITIONAL -- it runs on every temp_update dispatch regardless of whether use_coordinator is set and regardless of whether indoor/outdoor actually changed (see that function's own docstring, point 2: 'dispatched unconditionally below regardless of mode'). This directly drives decide_nat_vent_exit() against the outdoor spike on every temp_update. Under Issue #821's sustain-confirmation, a single temp_update alone does not commit an exit by itself -- it only arms the candidate; a SECOND temp_update >= NAT_VENT_EXIT_SUSTAIN_S (90s) later is required to confirm it, so two ordinary temp_update events (13:07:05, 13:08:45 -- same indoor/outdoor values, 95s apart) are used. This scenario originally used a single coordinator_refresh event for this purpose (before Issue #821, when a single instantaneous evaluation was sufficient) -- coordinator_refresh (coordinator.async_request_refresh() -> the coordinator's own _async_update_data() cycle) is a heavier, less-precisely-timed trigger than is needed once two evaluations at exact 95s-apart timestamps are required, so the two temp_update events replace it; the scenario's 'track: integration' tag is preserved because both temp_update calls still exercise the REAL, unmocked AutomationEngine.check_natural_vent_conditions() method (the identical method a real coordinator_refresh cycle would itself call, per that method's own 'Production: coordinator calls check_natural_vent_conditions() on each update' comment) with use_coordinator=true's real debounce/pause/resume/grace/listener wiring still in effect for the indoor-temp injection itself (dispatch=coordinator is not None). This matches the same mechanism the sibling non-grace goldens (nat_vent_thermostat_cycling, issue-359-fan-state-machine, window_close_stops_whole_house_fan) use for their own sustain-confirmation retiming.",
-    "automation_grace_seconds=600 (10 min, grace starts 13:00, expires 13:10) is sized so the sustain-confirmed 13:08:45 nat-vent exit lands 75s before natural expiry -- confirms this is a genuine race between the grace timer and the outdoor-swing/nat-vent-exit sequence, not an artifact of an unrealistically long grace window. The outdoor reversal itself was moved from 13:08:00 to 13:07:05 (immediately after the reopen) specifically to leave room for the 90s NAT_VENT_EXIT_SUSTAIN_S sustain window while still clearing the 13:10:00 deadline with margin.",
-    "Assertion at 13:08:45 uses the same 'paused_during_grace' custom assertion type introduced for the sibling scenario."
+    "Issue #821 retiming note (verified by reading tools/sim_harness/run_production.py's _handle_temp_update() directly, not by empirical trial-and-error -- an earlier draft of this note made an unverified 'found empirically' claim that Verification correctly flagged): _handle_temp_update()'s own trailing `run_coro(engine.check_natural_vent_conditions())` call is UNCONDITIONAL -- it runs on every temp_update dispatch regardless of whether use_coordinator is set and regardless of whether indoor/outdoor actually changed (see that function's own docstring, point 2: 'dispatched unconditionally below regardless of mode'). This directly drives decide_nat_vent_exit() against the outdoor spike on every temp_update. Under Issue #821's sustain-confirmation, a single temp_update alone does not commit an exit by itself -- it only arms the candidate; a SECOND temp_update >= NAT_VENT_EXIT_SUSTAIN_S (90s) later is required to confirm it, so two ordinary temp_update events (13:02:05, 13:03:40 -- same indoor/outdoor values, 95s apart) are used. This scenario originally used a single coordinator_refresh event for this purpose (before Issue #821, when a single instantaneous evaluation was sufficient) -- coordinator_refresh (coordinator.async_request_refresh() -> the coordinator's own _async_update_data() cycle) is a heavier, less-precisely-timed trigger than is needed once two evaluations at exact 95s-apart timestamps are required, so the two temp_update events replace it; the scenario's 'track: integration' tag is preserved because both temp_update calls still exercise the REAL, unmocked AutomationEngine.check_natural_vent_conditions() method (the identical method a real coordinator_refresh cycle would itself call, per that method's own 'Production: coordinator calls check_natural_vent_conditions() on each update' comment) with use_coordinator=true's real debounce/pause/resume/grace/listener wiring still in effect for the indoor-temp injection itself (dispatch=coordinator is not None). This matches the same mechanism the sibling non-grace goldens (nat_vent_thermostat_cycling, issue-359-fan-state-machine, window_close_stops_whole_house_fan) use for their own sustain-confirmation retiming.",
+    "automation_grace_seconds=600 (10 min, grace starts 13:00, expires 13:10) is sized so the nat-vent exit, sustain-confirmed at 13:03:40 and completed at 13:07:30 once the fan-toggle floor has passed, lands 150s before natural expiry -- confirms this is a genuine race between the grace timer and the outdoor-swing/nat-vent-exit sequence, not an artifact of an unrealistically long grace window. The reopen (13:02:00) and outdoor reversal (13:02:05) were moved earlier (Issue #1141: the reopen was 13:07:00, the reversal 13:07:05, the cool front 13:05:00 and now 13:01:00) so the 5-minute fan-toggle floor (fan on 13:02:00 until 13:07:00) AND the 90s sustain window both fit before the 13:10:00 grace expiry.",
+    "Assertion at 13:07:30 (the retry tick; the pause is recorded only once the fan-off has run, Issue #1141) uses the same 'paused_during_grace' custom assertion type introduced for the sibling scenario."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -52,31 +52,38 @@
       "note": "Door closes. All sensors closed -- automation resumes (restores cool mode) and a 10-min automation grace period begins (expires 13:10)."
     },
     {
-      "time": "2026-08-14T13:05:00",
+      "time": "2026-08-14T13:01:00",
       "type": "temp_update",
       "indoor_f": 76.0,
       "outdoor_f": 60.0,
       "note": "A cool front moves in. Outdoor drops to 60F -- now nat-vent-favorable (below indoor, below the 77F threshold, indoor still above comfort_heat=68F)."
     },
     {
-      "time": "2026-08-14T13:07:00",
+      "time": "2026-08-14T13:02:00",
       "type": "sensor_open",
       "entity": "binary_sensor.back_door",
-      "note": "Door reopens at 13:07, while the 13:00 grace period is still active (expires 13:10). Grace's outdoor-too-warm guard does not suppress (60F < 77F threshold) -- falls through. The nat-vent gate now passes (indoor 76F > comfort_heat 68F), so handle_door_window_open() hands off to nat-vent (fan on, band armed) WITHOUT clearing the still-active grace period."
+      "note": "Door reopens at 13:02, while the 13:00 grace period is still active (expires 13:10). Grace's outdoor-too-warm guard does not suppress (60F < 77F threshold) -- falls through. The nat-vent gate now passes (indoor 76F > comfort_heat 68F), so handle_door_window_open() hands off to nat-vent (fan on, band armed) WITHOUT clearing the still-active grace period."
     },
     {
-      "time": "2026-08-14T13:07:05",
+      "time": "2026-08-14T13:02:05",
       "type": "temp_update",
       "indoor_f": 76.0,
       "outdoor_f": 85.0,
-      "note": "Outdoor swings back warm (85F), reversing the airflow direction nat-vent depends on (outdoor now above indoor). Moved to immediately after the 13:07:00 reopen (was 13:08:00) to leave enough runway for the Issue #821 sustain-confirmation retiming below, still well before the 13:10:00 grace expiry. This temp_update's own unconditional check_natural_vent_conditions() re-evaluation is the FIRST evaluation of the OUTDOOR_RISE exit candidate -- it arms via decide_nat_vent_exit() but is NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s), so nat-vent is still active after this tick."
+      "note": "Outdoor swings back warm (85F), reversing the airflow direction nat-vent depends on (outdoor now above indoor). Moved to immediately after the reopen to leave enough runway for the Issue #821 sustain-confirmation and the Issue #1141 fan-toggle floor below, still well before the 13:10:00 grace expiry. This temp_update's own unconditional check_natural_vent_conditions() re-evaluation is the FIRST evaluation of the OUTDOOR_RISE exit candidate -- it arms via decide_nat_vent_exit() but is NOT yet sustain-confirmed (Issue #821, NAT_VENT_EXIT_SUSTAIN_S=90s), so nat-vent is still active after this tick."
     },
     {
-      "time": "2026-08-14T13:08:45",
+      "time": "2026-08-14T13:03:40",
       "type": "temp_update",
       "indoor_f": 76.0,
       "outdoor_f": 85.0,
-      "note": "95s after the outdoor reversal was first evaluated (> 90s NAT_VENT_EXIT_SUSTAIN_S) -- outdoor still above indoor (unchanged values; this temp_update exists purely to re-trigger check_natural_vent_conditions()'s unconditional per-update re-evaluation, same as the first one at 13:07:05 did), and still 75s before the 13:00 grace period's 13:10:00 expiry. The outdoor-rise exit sustain-confirms and commits: _exit_nat_vent() runs, sees the back door sensor is STILL open (it was never closed after the 13:07 reopen), and pauses HVAC via its unconditional _paused_by_door=True set. The 13:00 grace period has not yet elapsed, so it is still active -- production reaches _paused_by_door=True AND _grace_active=True simultaneously via this second, structurally distinct path."
+      "note": "95s after the outdoor reversal was first evaluated (> 90s NAT_VENT_EXIT_SUSTAIN_S) -- outdoor still above indoor (unchanged values; this temp_update exists purely to re-trigger check_natural_vent_conditions()'s unconditional per-update re-evaluation). The outdoor-rise exit sustain-confirms, but the whole-house fan was switched on only 100s ago (13:02:00), inside the 5-minute fan-toggle floor (Issue #641), so the fan-off is DEFERRED: the nat-vent session stays (Issue #931; the fan is physically still on) and, as of Issue #1141, no door/window pause is recorded yet -- session and pause are never both recorded."
+    },
+    {
+      "time": "2026-08-14T13:07:30",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 85.0,
+      "note": "The 5-minute fan-toggle floor has passed (13:07:00) and the outdoor-rise exit is still true, so this tick retries the deferred exit: the fan actually stops, the session ends, and _exit_nat_vent() -- seeing the back door sensor STILL open -- records the pause (Issue #1141). The 13:00 grace period has not yet elapsed (150s of margin before its 13:10:00 expiry), so production reaches _paused_by_door=True AND _grace_active=True simultaneously via this second, structurally distinct path."
     }
   ],
   "assertions": [
@@ -93,9 +100,9 @@
       "track": "integration"
     },
     {
-      "at": "2026-08-14T13:08:45",
+      "at": "2026-08-14T13:07:30",
       "expect": "paused_during_grace",
-      "reason": "Nat-vent exits (outdoor-rise reversal, sustained 95s per Issue #821's NAT_VENT_EXIT_SUSTAIN_S=90s) while the monitored sensor is still open and the 13:00 grace period has not yet expired (75s of margin remains before its 13:10:00 expiry). _exit_nat_vent()'s sensor-still-open branch sets _paused_by_door=True without ever reading or clearing _grace_active, so production genuinely reaches PAUSED_DURING_GRACE a second, structurally distinct way from the sibling scenario.",
+      "reason": "Nat-vent exits (outdoor-rise reversal, sustained 95s per Issue #821's NAT_VENT_EXIT_SUSTAIN_S=90s; the first attempt at 13:03:40 is deferred by the 5-minute fan-toggle floor and retried here, Issue #1141) while the monitored sensor is still open and the 13:00 grace period has not yet expired (150s of margin remains before its 13:10:00 expiry). Once the fan-off has actually run, _exit_nat_vent()'s sensor-still-open branch sets _paused_by_door=True without ever reading or clearing _grace_active, so production genuinely reaches PAUSED_DURING_GRACE a second, structurally distinct way from the sibling scenario. HVAC stays off while the door is open (household rule 3).",
       "track": "integration"
     }
   ]

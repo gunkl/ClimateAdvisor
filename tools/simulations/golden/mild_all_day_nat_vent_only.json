@@ -1,6 +1,6 @@
 {
   "name": "mild_all_day_nat_vent_only",
-  "description": "All-day mild conditions: outdoor stays 65-70F, always below indoor 72-74F. Mild classification sets hvac_mode=off. Windows open mid-morning and nat vent runs all day without exiting. No heating or AC fires at any point.",
+  "description": "All-day mild conditions: outdoor stays 65-70F, always below indoor 72-74F. Mild classification sets hvac_mode=off. Windows open mid-morning and nat vent runs all day without exiting. No heating or AC fires at any point. [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 136,
   "notes": [
@@ -69,23 +69,23 @@
     },
     {
       "at": "2026-04-22T08:00:00",
-      "expect": "natural_ventilation",
-      "reason": "sensor_open: outdoor=65F < indoor=72F, indoor=72F > comfort_heat=70F, outdoor=65F <= threshold 74+3=77F — nat vent activates."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': sensor_open: outdoor=65F < indoor=72F, indoor=72F > comfort_heat=70F, outdoor=65F <= threshold 74+3=77F — nat vent activates."
     },
     {
       "at": "2026-04-22T12:00:00",
-      "expect": "natural_ventilation",
-      "reason": "temp_update: outdoor=68F < indoor=73F — nat vent exit conditions not met; nat vent continues. Most recent decision is still natural_ventilation."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': temp_update: outdoor=68F < indoor=73F — nat vent exit conditions not met; nat vent continues. Most recent decision is still natural_ventilation."
     },
     {
       "at": "2026-04-22T15:00:00",
-      "expect": "natural_ventilation",
-      "reason": "Afternoon peak: outdoor=70F still below indoor=74F, still below threshold 77F — nat vent continues uninterrupted."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': Afternoon peak: outdoor=70F still below indoor=74F, still below threshold 77F — nat vent continues uninterrupted."
     },
     {
       "at": "2026-04-22T19:00:00",
-      "expect": "natural_ventilation",
-      "reason": "Evening: outdoor=65F < indoor=72.5F — nat vent persists all day, no HVAC fired."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': Evening: outdoor=65F < indoor=72.5F — nat vent persists all day, no HVAC fired."
     }
   ],
   "verdict": {

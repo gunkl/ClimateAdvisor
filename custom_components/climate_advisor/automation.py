@@ -221,8 +221,12 @@ from .nat_vent_exit import (
     decide_nat_vent_exit,
 )
 from .nat_vent_gate import (
+    FLOOR_IMMINENT,
+    FORECAST_PEAK_ABOVE_THRESHOLD,
     NatVentGateInputs,
     NatVentSoftStartGateInputs,
+    NatVentStartVeto,
+    NatVentStartVetoInputs,
     decide_nat_vent_gate,
     decide_nat_vent_soft_start_gate,
     explain_nat_vent_gate,
@@ -420,8 +424,13 @@ class FanCommandResult(Enum):
 # _apply_nat_vent_fsm_state_after_activation() (decides whether a session is recorded) and
 # _nat_vent_activation_applied() (decides whether a door/window pause may be cleared) so the two can
 # never disagree about "did the activation work".
-_NAT_VENT_ACTIVATION_NOT_APPLIED = frozenset(
-    {FanCommandResult.OVERRIDDEN, FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP}
+# Issue #1140 (#1142 D1): the fan never started because there is no working fan (not configured, or the
+# command was refused at run time: read-back gave up #1050, HVAC-fan restriction #835, no "on" fan mode
+# #893). No session is recorded; an open window then pauses HVAC like any other (household rule 3).
+_NAT_VENT_NO_WORKING_FAN_RESULTS = frozenset({FanCommandResult.DISABLED, FanCommandResult.SUPPRESSED})
+_NAT_VENT_ACTIVATION_NOT_APPLIED = (
+    frozenset({FanCommandResult.OVERRIDDEN, FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP})
+    | _NAT_VENT_NO_WORKING_FAN_RESULTS
 )
 
 
@@ -6068,13 +6077,31 @@ class AutomationEngine:
             # re-block on the still-True self._grace_active via the unrelated
             # overheat-exception rule. See _build_nat_vent_fsm_inputs()'s
             # grace_active docstring for the full incident.
+            #
+            # Issue #1138/#1140 (#1142): ``start_guards=True`` -- the forecast-peak and thermal-floor
+            # guards and the "a fan exists" rule are part of the FSM's start decision (this used to be
+            # inline code here, so only this site had the guards). ``_fsm_result.veto`` is set when the
+            # temperature gate passed but the start was refused.
             _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                now=dt_util.now(), indoor=indoor, outdoor=outdoor, hysteresis=0.0, grace_active=False
+                now=dt_util.now(),
+                indoor=indoor,
+                outdoor=outdoor,
+                hysteresis=0.0,
+                grace_active=False,
+                start_guards=True,
             )
             _fsm_result = _nat_vent_transition(
                 _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
             )
-            _nat_vent_gate_entered = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+            # Full-gate only, as before: a vetoed soft start is "not entered" for this site.
+            _start_veto = (
+                _fsm_result.veto if _fsm_result.vetoed_state == NatVentLifecycleState.ACTIVE_FULL_GATE else None
+            )
+            # "Entered" keeps its meaning (the temperature gate passed) so the lockout check below
+            # applies to a vetoed start exactly as it did to a guard-skipped one.
+            _nat_vent_gate_entered = (
+                _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE or _start_veto is not None
+            )
 
             # Issue #699: this call site never consulted the reactivation lockout at
             # all — unlike check_natural_vent_conditions()'s idle-open path (both its
@@ -6100,101 +6127,49 @@ class AutomationEngine:
                     entity_id,
                 )
                 _nat_vent_gate_entered = False
+                _start_veto = None
 
-            if _nat_vent_gate_entered:
-                _skip_nat_vent = False
+            if _nat_vent_gate_entered and _start_veto is not None:
+                self._report_nat_vent_start_veto(_start_veto, entity_id=entity_id)
+            elif _nat_vent_gate_entered:
+                # Capture mode before nat_vent changes
+                _old_mode_nv = self.hass.states.get(self.climate_entity)
+                _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
 
-                # Phase 2 Guard 1: rising outdoor forecast
-                hourly = self._hourly_forecast_temps or []
-                if hourly:
-                    now_dt = dt_util.now()
-                    # Ensure timezone-aware for comparison with forecast datetimes
-                    if now_dt.tzinfo is None:
-                        now_dt = now_dt.replace(tzinfo=UTC)
-                    lookahead_temps = [
-                        h["temperature"]
-                        for h in hourly
-                        if h.get("temperature") is not None
-                        and (parsed := _parse_forecast_dt(h.get("datetime"))) is not None
-                        and now_dt < parsed <= now_dt + timedelta(hours=2)
-                    ]
-                    if lookahead_temps and max(lookahead_temps) > nat_vent_threshold:
-                        _skip_nat_vent = True
-                        _LOGGER.info(
-                            "Nat vent skipped: forecast peak %.1f°F > threshold %.1f°F within 2 hr",
-                            max(lookahead_temps),
-                            nat_vent_threshold,
-                        )
-                        if self._emit_event_callback:
-                            self._emit_event_callback(
-                                "nat_vent_forecast_skip",
-                                {
-                                    "forecast_peak": max(lookahead_temps),
-                                    "threshold": nat_vent_threshold,
-                                    "fan_device": _fan_device_label(self.config),
-                                },
-                            )
-
-                # Phase 2 Guard 2: thermal model floor imminence
-                if not _skip_nat_vent:
-                    thermal = self._thermal_model or {}
-                    confidence = thermal.get("confidence", "none")
-                    if confidence in ("medium", "high"):
-                        k_passive = thermal.get("k_passive")
-                        if k_passive is not None and k_passive < 0:
-                            passive_rate = k_passive * (indoor - outdoor)  # °F/hr, negative
-                            if passive_rate < 0:
-                                time_to_floor = (indoor - comfort_heat) / abs(passive_rate)
-                                if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
-                                    _skip_nat_vent = True
-                                    _LOGGER.info(
-                                        "Nat vent skipped: floor predicted in %.2f hr < %.1f hr"
-                                        " threshold (k_passive=%.3f)",
-                                        time_to_floor,
-                                        MIN_VIABLE_NAT_VENT_HOURS,
-                                        k_passive,
-                                    )
-                                    if self._emit_event_callback:
-                                        self._emit_event_callback(
-                                            "nat_vent_floor_imminent_skip",
-                                            {
-                                                "time_to_floor_hr": round(time_to_floor, 2),
-                                                "indoor_temp": round(indoor, 1),
-                                                "comfort_heat": round(comfort_heat, 1),
-                                                "k_passive": round(k_passive, 4),
-                                                "fan_device": _fan_device_label(self.config),
-                                            },
-                                        )
-
-                if not _skip_nat_vent:
-                    # Capture mode before nat_vent changes
-                    _old_mode_nv = self.hass.states.get(self.climate_entity)
-                    _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
-
-                    nat_vent_reason = (
-                        f"natural ventilation: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
-                        f" outdoor {self._t(outdoor)} <= {self._t(nat_vent_threshold)}"
+                nat_vent_reason = (
+                    f"natural ventilation: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
+                    f" outdoor {self._t(outdoor)} <= {self._t(nat_vent_threshold)}"
+                )
+                _activation_result = await self._activate_fan(reason=nat_vent_reason)
+                # Project onto the FSM state that matches legacy's writes at this
+                # site exactly: legacy only ever set _natural_vent_active = True
+                # here, leaving _nat_vent_soft_start unchanged and _paused_by_door
+                # untouched (guaranteed False already — this method returns early
+                # at the top if _paused_by_door is True). Hardcoding
+                # ACTIVE_FULL_GATE regardless of _fsm_result.to_state would
+                # silently demote an in-flight soft-start session to full-gate on
+                # a second window opening, which legacy never did.
+                #
+                # Issue #706 (Bug F): routed through
+                # _apply_nat_vent_fsm_state_after_activation() rather than applying
+                # this pre-await decision directly — a manual override arriving
+                # during the await above must not be silently overwritten.
+                self._apply_nat_vent_fsm_state_after_activation(
+                    NatVentLifecycleState.ACTIVE_SOFT_START
+                    if self._nat_vent_soft_start
+                    else NatVentLifecycleState.ACTIVE_FULL_GATE,
+                    _activation_result,
+                )
+                if _activation_result in _NAT_VENT_NO_WORKING_FAN_RESULTS:
+                    # Issue #1140 (#1142 D1): no working fan (not configured, or refused at run time) ->
+                    # no session was recorded; fall through to the HVAC pause below like any other open
+                    # window (household rule 3).
+                    _LOGGER.info(
+                        "Nat vent not started (%s): fan command %s — no working fan, pausing HVAC instead",
+                        entity_id,
+                        _activation_result.name,
                     )
-                    _activation_result = await self._activate_fan(reason=nat_vent_reason)
-                    # Project onto the FSM state that matches legacy's writes at this
-                    # site exactly: legacy only ever set _natural_vent_active = True
-                    # here, leaving _nat_vent_soft_start unchanged and _paused_by_door
-                    # untouched (guaranteed False already — this method returns early
-                    # at the top if _paused_by_door is True). Hardcoding
-                    # ACTIVE_FULL_GATE regardless of _fsm_result.to_state would
-                    # silently demote an in-flight soft-start session to full-gate on
-                    # a second window opening, which legacy never did.
-                    #
-                    # Issue #706 (Bug F): routed through
-                    # _apply_nat_vent_fsm_state_after_activation() rather than applying
-                    # this pre-await decision directly — a manual override arriving
-                    # during the await above must not be silently overwritten.
-                    self._apply_nat_vent_fsm_state_after_activation(
-                        NatVentLifecycleState.ACTIVE_SOFT_START
-                        if self._nat_vent_soft_start
-                        else NatVentLifecycleState.ACTIVE_FULL_GATE,
-                        _activation_result,
-                    )
+                else:
                     _LOGGER.info(
                         "Natural ventilation mode: outdoor %.1f°F < indoor %.1f°F,"
                         " outdoor ≤ target %.1f°F — fan on, applying nat-vent HVAC state",
@@ -6203,16 +6178,19 @@ class AutomationEngine:
                         nat_vent_threshold,
                     )
                     await self._apply_nat_vent_hvac_state()
+                    _sensor_opened_payload = {
+                        "entity": entity_id,
+                        "result": "natural_ventilation",
+                        "hvac_mode_change": f"{_old_mode_nv}→band-armed",
+                    }
+                    # Issue #1140: claim a fan transition only when the fan command really ran. A deferred
+                    # (rate-limited) or overridden command still reports the window hand-off as before -- the
+                    # golden issue-392-natvent-ceiling-oscillation asserts on that event; whether those two
+                    # should stop reporting is a follow-up owner decision (plans/1142-door-window-decision.md).
+                    if _activation_result is FanCommandResult.EXECUTED:
+                        _sensor_opened_payload["fan_mode_change"] = _fan_transition_text(self.config, activating=True)
                     if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "sensor_opened",
-                            {
-                                "entity": entity_id,
-                                "result": "natural_ventilation",
-                                "hvac_mode_change": f"{_old_mode_nv}→band-armed",
-                                "fan_mode_change": _fan_transition_text(self.config, activating=True),
-                            },
-                        )
+                        self._emit_event_callback("sensor_opened", _sensor_opened_payload)
                     return
 
             if not _nat_vent_gate_entered:
@@ -6594,7 +6572,7 @@ class AutomationEngine:
                 # outdoor_exit_time/lockout_seconds are unaffected by this parameter and
                 # were already correctly populated either way.
                 _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                    now=dt_util.now(), indoor=_indoor, outdoor=outdoor, apply_reactivation_floor=True
+                    now=dt_util.now(), indoor=_indoor, outdoor=outdoor, apply_reactivation_floor=True, start_guards=True
                 )
                 _fsm_result = _nat_vent_transition(
                     _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
@@ -6643,18 +6621,21 @@ class AutomationEngine:
                     _pre_paused_by_door = self._paused_by_door
                     self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                     self._paused_by_door = _pre_paused_by_door
-                    await self._apply_nat_vent_hvac_state()
-                    # Issue #244: emit so the re-evaluation activation is visible in the
-                    # event log / timeline / AI report (previously this path was silent).
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "sensor_opened",
-                            {
-                                "entity": "natural_vent_reeval",
-                                "result": "natural_ventilation",
-                                "trigger": "open_door_reeval",
-                            },
-                        )
+                    # Issue #1140: no working fan -> no session and nothing to report. (Deferred and
+                    # overridden commands keep their pre-#1140 reporting; see handle_door_window_open().)
+                    if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS:
+                        await self._apply_nat_vent_hvac_state()
+                        # Issue #244: emit so the re-evaluation activation is visible in the
+                        # event log / timeline / AI report (previously this path was silent).
+                        if self._emit_event_callback:
+                            self._emit_event_callback(
+                                "sensor_opened",
+                                {
+                                    "entity": "natural_vent_reeval",
+                                    "result": "natural_ventilation",
+                                    "trigger": "open_door_reeval",
+                                },
+                            )
                 elif _to_state == NatVentLifecycleState.ACTIVE_SOFT_START:
                     _LOGGER.info(
                         "Nat-vent soft-start entered: outdoor %.1f°F <= indoor %.1f°F,"
@@ -6678,18 +6659,19 @@ class AutomationEngine:
                     _pre_paused_by_door = self._paused_by_door
                     self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                     self._paused_by_door = _pre_paused_by_door
-                    await self._apply_nat_vent_hvac_state()
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_soft_start_entered",
-                            {
-                                "outdoor": outdoor,
-                                "indoor": _indoor,
-                                "outdoor_today_peak": self._outdoor_temp_today_peak,
-                                "comfort_heat": _comfort_heat,
-                                "decline_margin_f": PEAK_DECLINE_MARGIN_F,
-                            },
-                        )
+                    if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS:
+                        await self._apply_nat_vent_hvac_state()
+                        if self._emit_event_callback:
+                            self._emit_event_callback(
+                                "nat_vent_soft_start_entered",
+                                {
+                                    "outdoor": outdoor,
+                                    "indoor": _indoor,
+                                    "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                    "comfort_heat": _comfort_heat,
+                                    "decline_margin_f": PEAK_DECLINE_MARGIN_F,
+                                },
+                            )
                 else:
                     # Issue #1095: the FSM said no — previously silent.
                     self._log_nat_vent_not_engaged(
@@ -6701,6 +6683,7 @@ class AutomationEngine:
                         nat_vent_delta=nat_vent_delta,
                         hysteresis=_hysteresis,
                         threshold=threshold,
+                        veto=_fsm_result.veto,
                     )
                 return
 
@@ -7045,7 +7028,7 @@ class AutomationEngine:
 
                 _fsm_current_state = self.nat_vent_lifecycle_state
                 _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                    now=dt_util.now(), indoor=indoor, outdoor=outdoor, apply_reactivation_floor=True
+                    now=dt_util.now(), indoor=indoor, outdoor=outdoor, apply_reactivation_floor=True, start_guards=True
                 )
                 _fsm_result = _nat_vent_transition(
                     _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
@@ -7179,6 +7162,7 @@ class AutomationEngine:
                         nat_vent_delta=float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
                         hysteresis=hysteresis,
                         threshold=threshold,
+                        veto=_fsm_result.veto,
                     )
                 return
 
@@ -9347,6 +9331,7 @@ class AutomationEngine:
                 hysteresis=0.0,
                 paused_by_door=False,
                 apply_reactivation_floor=True,
+                start_guards=True,
             )
             _fsm_result = _nat_vent_transition(
                 NatVentLifecycleState.INACTIVE,
@@ -10578,8 +10563,12 @@ class AutomationEngine:
 
         self._spawn_whf_task(_send())
 
-    def _end_nat_vent_session(self, result: FanCommandResult) -> None:
+    def _end_nat_vent_session(self, result: FanCommandResult) -> bool:
         """Clear nat-vent session bookkeeping only once the paired fan command actually ran.
+
+        Returns True when the session was ended, False when it was preserved because the fan
+        command was deferred (Issue #1141: ``_exit_nat_vent()`` records the window pause only on
+        True -- a pause and a live session must never both be recorded).
 
         The sole place ``_natural_vent_active``/``_nat_vent_soft_start`` are cleared in
         connection with a fan-stop command — every call site that used to hand-write
@@ -10607,9 +10596,10 @@ class AutomationEngine:
                 "Nat-vent session preserved — fan command deferred: result=%s retry=next_tick",
                 result.name,
             )
-            return
+            return False
         self._natural_vent_active = False
         self._nat_vent_soft_start = False
+        return True
 
     def _deferred_fan_mode_change_marker(self) -> str:
         """Issue #936: the "deferred (5-min floor...)" fan_mode_change payload string,
@@ -10731,66 +10721,90 @@ class AutomationEngine:
             result = await self._deactivate_fan(
                 reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
             )
-            self._end_nat_vent_session(result)
-            state = self.hass.states.get(self.climate_entity)
-            self._pre_pause_mode = state.state if state and state.state != "off" else None
-            # Write-shape divergence fix (found while scoping #637 Step 3): this branch
-            # used to set only _paused_by_door, unlike _pause_for_door_window()'s full
-            # field set. _pre_pause_mode's own truthiness (nothing to restore means the
-            # FSM-visible state is equivalent to "already off"/PAUSED_IDLE) is what the
-            # FSM's own inputs read, matching decide_door_close_response()'s own
-            # truthiness test on pre_pause_mode.
-            #
-            # Issue #660 Step 4 / #757 Phase 6 Step 4: routed through the shared,
-            # unconditionally FSM-authoritative dispatcher for the 2 fields it derives
-            # (_paused_by_door/_paused_with_hvac_already_off — Issue #709 removed
-            # _grace_active from this derivation, see that method's docstring).
-            # _paused_entity/_paused_since aren't part of that derivation (see
-            # _apply_door_window_fsm_state()'s own docstring), so they stay direct
-            # writes below.
-            from .door_window_fsm import DoorWindowFsmEventKind
+            # Issue #1141: the pause is recorded only if the session actually ended. A fan-off deferred
+            # by the 5-minute floor KEEPS the session (#931, the fan is still on), and recording the
+            # window pause too would leave session and pause both set -- a combination the
+            # door/window and nat-vent FSMs document as unreachable. The exit conditions still hold,
+            # so the next tick's retry re-enters this branch and records the pause once the fan-off
+            # ran; if the window closes first, the sensors-closed branch below completes the session.
+            if self._end_nat_vent_session(result):
+                state = self.hass.states.get(self.climate_entity)
+                self._pre_pause_mode = state.state if state and state.state != "off" else None
+                # Write-shape divergence fix (found while scoping #637 Step 3): this branch
+                # used to set only _paused_by_door, unlike _pause_for_door_window()'s full
+                # field set. _pre_pause_mode's own truthiness (nothing to restore means the
+                # FSM-visible state is equivalent to "already off"/PAUSED_IDLE) is what the
+                # FSM's own inputs read, matching decide_door_close_response()'s own
+                # truthiness test on pre_pause_mode.
+                #
+                # Issue #660 Step 4 / #757 Phase 6 Step 4: routed through the shared,
+                # unconditionally FSM-authoritative dispatcher for the 2 fields it derives
+                # (_paused_by_door/_paused_with_hvac_already_off — Issue #709 removed
+                # _grace_active from this derivation, see that method's docstring).
+                # _paused_entity/_paused_since aren't part of that derivation (see
+                # _apply_door_window_fsm_state()'s own docstring), so they stay direct
+                # writes below.
+                from .door_window_fsm import DoorWindowFsmEventKind
 
-            self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN)
-            self._paused_entity = "nat-vent-exit"
-            self._paused_since = dt_util.now()
-            # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
-            # this is the exact "one retry tick after another while still blocked" pattern
-            # that produced unbounded duplicate INFO lines before this fix.
-            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
-            _log(
-                "Nat-vent exit (%s): monitored sensor still open — pausing HVAC (pre_pause_mode=%s)",
-                reason,
-                self._pre_pause_mode,
-            )
+                self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN)
+                self._paused_entity = "nat-vent-exit"
+                self._paused_since = dt_util.now()
+                _LOGGER.info(
+                    "Nat-vent exit (%s): monitored sensor still open — pausing HVAC (pre_pause_mode=%s)",
+                    reason,
+                    self._pre_pause_mode,
+                )
+            else:
+                # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
+                # one retry tick after another while still blocked.
+                _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+                _log(
+                    "Nat-vent exit (%s): monitored sensor still open but fan-off deferred — "
+                    "window pause not recorded until the fan-off runs",
+                    reason,
+                )
         else:
             result = await self._deactivate_fan(reason=reason, emit_event=False)
-            self._end_nat_vent_session(result)
-            # Issue #821 follow-up (project owner's own fix, confirmed by reading
-            # _deactivate_fan()'s restore branches directly): _deactivate_fan() above
-            # restores via self._set_hvac_mode(self._pre_fan_hvac_mode, ...) — a blind
-            # replay of whatever mode was active BEFORE nat-vent started, never
-            # consulting the shared family resolver. Since nat-vent only ever starts on
-            # a cooling day, this almost always restores "cool" — reproducing the
-            # original comfort-floor-defense bug through nat-vent's own most common
-            # exit paths (OUTDOOR_RISE/CEILING_THRESHOLD route through this method, and so
-            # does nat_vent_temperature_check()'s fast-path COMFORT_FLOOR exit — only
-            # check_natural_vent_conditions()'s own slow-loop COMFORT_FLOOR branch avoids
-            # this, since it already gets this right via its own follow-up
-            # _set_temperature_for_mode() call). Mirrors the exact pattern already used
-            # at the door/window-all-closed restore site and resume_from_pause():
-            # restore the old mode first
-            # (already done, above, by _deactivate_fan()), then call
-            # _set_temperature_for_mode() so the resolver can correct it if conditions
-            # (e.g. indoor now below comfort_heat) call for a different family.
-            if self._current_classification:
-                with self._mode_change_context("nat_vent"):
-                    await self._set_temperature_for_mode(
-                        self._current_classification,
-                        reason=f"nat-vent exit resume — {reason}",
-                    )
-            self._start_grace_period("automation", trigger="nat_vent_exit_resume")
-            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
-            _log("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
+            # Issue #1141 (mirror, found during #1142): restore and the automation grace belong to a
+            # session that actually ended. A fan-off deferred by the 5-minute floor KEEPS the session
+            # (#931; the fan is still on), and starting "nat_vent_exit_resume" grace now left session and
+            # grace both active with the fan running. The completion is not lost: with the house sealed,
+            # the WHF safety enforcer (#1144, run right after this by handle_all_doors_windows_closed())
+            # stops the fan, ends the session and reclassifies; otherwise the still-true exit condition
+            # re-enters this branch on the next tick, once the fan-off can run.
+            if self._end_nat_vent_session(result):
+                # Issue #821 follow-up (project owner's own fix, confirmed by reading
+                # _deactivate_fan()'s restore branches directly): _deactivate_fan() above
+                # restores via self._set_hvac_mode(self._pre_fan_hvac_mode, ...) — a blind
+                # replay of whatever mode was active BEFORE nat-vent started, never
+                # consulting the shared family resolver. Since nat-vent only ever starts on
+                # a cooling day, this almost always restores "cool" — reproducing the
+                # original comfort-floor-defense bug through nat-vent's own most common
+                # exit paths (OUTDOOR_RISE/CEILING_THRESHOLD route through this method, and so
+                # does nat_vent_temperature_check()'s fast-path COMFORT_FLOOR exit — only
+                # check_natural_vent_conditions()'s own slow-loop COMFORT_FLOOR branch avoids
+                # this, since it already gets this right via its own follow-up
+                # _set_temperature_for_mode() call). Mirrors the exact pattern already used
+                # at the door/window-all-closed restore site and resume_from_pause():
+                # restore the old mode first
+                # (already done, above, by _deactivate_fan()), then call
+                # _set_temperature_for_mode() so the resolver can correct it if conditions
+                # (e.g. indoor now below comfort_heat) call for a different family.
+                if self._current_classification:
+                    with self._mode_change_context("nat_vent"):
+                        await self._set_temperature_for_mode(
+                            self._current_classification,
+                            reason=f"nat-vent exit resume — {reason}",
+                        )
+                self._start_grace_period("automation", trigger="nat_vent_exit_resume")
+                _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+                _log("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
+            else:
+                _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+                _log(
+                    "Nat-vent exit (%s): sensors closed but fan-off deferred — restore and grace wait for the fan-off",
+                    reason,
+                )
 
         if event_type and self._emit_event_callback and result is not FanCommandResult.RATE_LIMITED_DUP:
             payload = dict(event_payload or {})
@@ -10852,6 +10866,7 @@ class AutomationEngine:
         fan_hardware_active: bool | None = None,
         grace_active: bool | None = None,
         apply_reactivation_floor: bool = False,
+        start_guards: bool = False,
     ):
         """Build the FSM's input snapshot from current engine state (Issue #594
         Phase R, Step 2). Issue #757 Phase 6 Step 5: this was previously also shared
@@ -10861,6 +10876,11 @@ class AutomationEngine:
         axes, so this is now the sole builder.
 
         Args:
+            start_guards: Issue #1138 (#1142 D2). ``True`` at the four sites that can START
+                nat-vent (window-open handler, paused-by-door reactivation, idle-open re-entry,
+                grace-expiry re-check) fills ``NatVentFsmInputs.start_veto`` so the FSM applies
+                the forecast-peak and thermal-floor guards. ``False`` (default) for the exit
+                chain and startup adoption of an already-running fan, which must not be vetoed.
             grace_active: Overrides ``self._grace_active`` when provided. Issue #757
                 Phase 6 Step 5 fix: ``handle_door_window_open()``'s own grace-period
                 bypass (Fix 2/#249 — "is outdoor cool enough that grace shouldn't
@@ -10997,7 +11017,92 @@ class AutomationEngine:
             grace_active=_grace_active,
             manual_override_active=bool(self._manual_override_active),
             manual_override_mode=self._manual_override_mode,
+            start_veto=self._build_nat_vent_start_veto_inputs(now=now, indoor=indoor, outdoor=outdoor)
+            if start_guards
+            else None,
         )
+
+    def _forecast_peak_next_2h(self, now: datetime) -> float | None:
+        """Highest hourly-forecast temperature in the next 2 hours, or None (Issue #1138).
+
+        The shell half of the forecast-peak start guard: clock and datetime parsing live here, the
+        comparison lives in ``nat_vent_gate.decide_nat_vent_start_veto``.
+        """
+        hourly = self._hourly_forecast_temps or []
+        if not hourly:
+            return None
+        now_dt = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        temps = [
+            h["temperature"]
+            for h in hourly
+            if h.get("temperature") is not None
+            and (parsed := _parse_forecast_dt(h.get("datetime"))) is not None
+            and now_dt < parsed <= now_dt + timedelta(hours=2)
+        ]
+        return max(temps) if temps else None
+
+    def _build_nat_vent_start_veto_inputs(
+        self, *, now: datetime, indoor: float | None, outdoor: float | None
+    ) -> NatVentStartVetoInputs:
+        """Inputs for the forecast-peak / thermal-floor start guards (Issue #1138)."""
+        thermal = self._thermal_model or {}
+        return NatVentStartVetoInputs(
+            outdoor=outdoor,
+            indoor=indoor,
+            comfort_heat=self._nat_vent_reactivation_floor(),
+            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            nat_vent_delta=float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
+            forecast_peak_2h=self._forecast_peak_next_2h(now),
+            thermal_confidence=str(thermal.get("confidence", "none")),
+            thermal_k_passive=thermal.get("k_passive"),
+        )
+
+    def _report_nat_vent_start_veto(self, veto: NatVentStartVeto, *, entity_id: str) -> None:
+        """Log (and for the two guards, emit the Activity Report event for) a refused nat-vent start.
+
+        Moved verbatim from the inline Phase 2 guards of ``handle_door_window_open()`` (Issue #1138):
+        same log lines, same event types and payloads.
+        """
+        if veto.reason == FORECAST_PEAK_ABOVE_THRESHOLD:
+            _LOGGER.info(
+                "Nat vent skipped: forecast peak %.1f°F > threshold %.1f°F within 2 hr",
+                veto.forecast_peak,
+                veto.threshold,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_forecast_skip",
+                    {
+                        "forecast_peak": veto.forecast_peak,
+                        "threshold": veto.threshold,
+                        "fan_device": _fan_device_label(self.config),
+                    },
+                )
+        elif veto.reason == FLOOR_IMMINENT:
+            _LOGGER.info(
+                "Nat vent skipped: floor predicted in %.2f hr < %.1f hr threshold (k_passive=%.3f)",
+                veto.time_to_floor_hr,
+                MIN_VIABLE_NAT_VENT_HOURS,
+                veto.k_passive,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_floor_imminent_skip",
+                    {
+                        "time_to_floor_hr": round(veto.time_to_floor_hr, 2),
+                        "indoor_temp": round(veto.indoor, 1),
+                        "comfort_heat": round(veto.comfort_heat, 1),
+                        "k_passive": round(veto.k_passive, 4),
+                        "fan_device": _fan_device_label(self.config),
+                    },
+                )
+        else:
+            _LOGGER.info(
+                "Nat vent not started (%s): %s (fan_mode=%s) — an open window pauses HVAC like any other",
+                entity_id,
+                veto.reason,
+                self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            )
 
     @property
     def nat_vent_lifecycle_state(self) -> NatVentLifecycleState:
@@ -11126,7 +11231,8 @@ class AutomationEngine:
     @staticmethod
     def _nat_vent_activation_applied(activation_result: FanCommandResult) -> bool:
         """True when ``_activate_fan()``'s result means the nat-vent activation was applied
-        (a nat-vent session is recorded; SUPPRESSED/DISABLED/ALREADY_IN_STATE count as applied).
+        (a nat-vent session is recorded; ALREADY_IN_STATE counts as applied; DISABLED and SUPPRESSED do
+        not -- Issue #1140: no working fan means no session).
 
         Issue #1132 (mirror of #931): the "paused-by-door nat-vent reactivation" sites used to
         clear the door/window pause unconditionally after ``await self._activate_fan(...)``. An
@@ -11177,8 +11283,9 @@ class AutomationEngine:
         retry on its own next cycle — the two directions need opposite fallback
         states, do not copy #931's "preserve active" pattern onto this method.
 
-        Every other ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``,
-        ``DISABLED``) means no override intervened mid-await and no command was
+        ``DISABLED``/``SUPPRESSED`` (Issue #1140: no working fan, so no session either) are
+        applied as INACTIVE like the three results above. ``EXECUTED`` and
+        ``ALREADY_IN_STATE`` mean no override intervened mid-await and no command was
         deferred, so the pre-await ``to_state`` is still correct to apply.
         """
         if activation_result in _NAT_VENT_ACTIVATION_NOT_APPLIED:
@@ -11831,8 +11938,12 @@ class AutomationEngine:
         nat_vent_delta: float,
         hysteresis: float,
         threshold: float,
+        veto: NatVentStartVeto | None = None,
     ) -> None:
         """Log why the nat-vent FSM declined to engage, in the order the FSM itself decides (Issue #1095).
+
+        ``veto`` (Issue #1138/#1140): the start rule that refused an otherwise-passing gate (no
+        working fan, forecast peak, imminent floor); the temperature reasons are then empty.
 
         ``nat_vent_fsm._transition_from_inactive()`` checks override/grace FIRST, then the
         reactivation lockout, then the temperature gate, so reasons are listed in that
@@ -11849,6 +11960,8 @@ class AutomationEngine:
             reasons.append("grace_active")
         if to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT:
             reasons.append("reactivation_lockout")
+        if veto is not None:
+            reasons.append(veto.reason)
         reasons.extend(
             self._nat_vent_gate_rejections(
                 outdoor=outdoor,

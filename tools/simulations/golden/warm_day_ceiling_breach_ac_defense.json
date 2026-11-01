@@ -1,6 +1,6 @@
 {
   "name": "warm_day_ceiling_breach_ac_defense",
-  "description": "Core Issue #136 scenario. Warm day starts with outdoor below indoor (nat vent window). By mid-morning outdoor crosses above indoor and nat vent exits. User closes the window at 10:05 AM. ODE predicts indoor will reach comfort_cool=74F by 2 PM. The ceiling guard fires AC when predicted breach is within lead time and no window is open.",
+  "description": "Core Issue #136 scenario. Warm day starts with outdoor below indoor (nat vent window). By mid-morning outdoor crosses above indoor and nat vent exits. User closes the window at 10:05 AM. ODE predicts indoor will reach comfort_cool=74F by 2 PM. The ceiling guard fires AC when predicted breach is within lead time and no window is open. [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 136,
   "notes": [
@@ -117,13 +117,13 @@
     },
     {
       "at": "2026-05-20T08:05:00",
-      "expect": "natural_ventilation",
-      "reason": "sensor_open: outdoor=65F < indoor=72.5F, indoor=72.5F > comfort_heat=70F, outdoor=65F <= threshold 77F — nat vent activates."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': sensor_open: outdoor=65F < indoor=72.5F, indoor=72.5F > comfort_heat=70F, outdoor=65F <= threshold 77F — nat vent activates."
     },
     {
       "at": "2026-05-20T10:00:00",
-      "expect": "nat_vent_outdoor_rise_exit",
-      "reason": "temp_update: outdoor=73.5F >= indoor=73.0F — directional exit fires; airflow would now add heat rather than cool."
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'nat_vent_outdoor_rise_exit': temp_update: outdoor=73.5F >= indoor=73.0F — directional exit fires; airflow would now add heat rather than cool."
     },
     {
       "at": "2026-05-20T12:30:00",

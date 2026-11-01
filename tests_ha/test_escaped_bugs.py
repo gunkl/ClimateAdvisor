@@ -284,4 +284,3 @@ async def test_press_is_not_raced_by_immediate_reconcile(make_house) -> None:
     fan_off = [c for c in _ca(house.calls[calls_before:]) if c.domain == "fan" and c.service == "turn_off"]
     assert fan_off == [], f"CA switched off the fan the person had just turned on: {fan_off}"
     assert house.fan.is_on
-

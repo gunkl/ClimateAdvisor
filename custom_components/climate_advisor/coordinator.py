@@ -6785,166 +6785,158 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             new_state.state,
         )
         try:
-            self._classify_fan_entity_transition(event, old_state, new_state)
-        finally:
-            self.hass.async_create_task(self.async_request_refresh())
+            # Issue #482: HA attaches the originating service call's Context to every
+            # state-changed Event. When CA itself issued the fan command (via
+            # automation.py's _call_fan_service_with_context), it records that Context's id.
+            # If this event's own context.id (or its parent_id, for cases where the target
+            # integration wraps CA's context in a child context) matches a recently-issued
+            # CA command, that is an authoritative "CA caused this" signal — logged here on
+            # EVERY change (matched or not) so a future investigation has direct evidence
+            # instead of needing cross-source timestamp archaeology (the gap this issue
+            # closes).
+            #
+            # Issue #561: matches against a short-lived set of recently-issued command
+            # contexts (automation_engine.fan_command_context_matches()) rather than a
+            # single last-write-wins id — two fan commands issued in close succession (e.g.
+            # a duplicate reactivation attempt from a since-fixed reentrancy gap) could
+            # otherwise have the second command's context overwrite the first's before this
+            # listener evaluated the first command's resulting event, misattributing CA's
+            # own action to the user.
+            #
+            # This is treated as an ADDITIONAL/corroborating signal alongside the
+            # existing _fan_command_pending/timing checks below, not a replacement for
+            # them: context propagation through third-party fan/switch integrations
+            # (especially a one-way RF transmitter entity with no feedback of its own)
+            # is not guaranteed reliable by HA core, so a non-match here does not prove
+            # the change was external — it only fails to prove it was CA's. A match,
+            # however, is conclusive.
+            event_context = getattr(event, "context", None)
+            event_context_id = getattr(event_context, "id", None) if event_context is not None else None
+            event_context_parent_id = getattr(event_context, "parent_id", None) if event_context is not None else None
+            # Issue #561: matches against a short-lived set of recently-issued CA command
+            # contexts rather than a single last-write-wins id — a second overlapping fan
+            # command could otherwise overwrite the first's id before this listener saw the
+            # first command's resulting event, causing CA's own action to be misattributed
+            # as a manual override.
+            context_confirms_ca = self.automation_engine.fan_command_context_matches(
+                event_context_id, event_context_parent_id
+            )
+            _LOGGER.debug(
+                "fan_entity state change provenance: %s -> %s event_context_id=%s"
+                " event_context_parent_id=%s context_confirms_ca=%s",
+                old_state.state,
+                new_state.state,
+                event_context_id,
+                event_context_parent_id,
+                context_confirms_ca,
+            )
 
-    def _classify_fan_entity_transition(self, event: Event, old_state: Any, new_state: Any) -> None:
-        """Attribute a genuine fan-entity transition and record any override / grace (Issue #37).
+            # Skip if this change was initiated by us — either the transient
+            # command-pending bookkeeping (existing guard) or a confirmed event.context
+            # match (Issue #482, additional signal).
+            if self.automation_engine._fan_command_pending or context_confirms_ca:
+                if context_confirms_ca and not self.automation_engine._fan_command_pending:
+                    _LOGGER.info(
+                        "Fan entity change attributed to CA via event.context match (id=%s) —"
+                        " suppressing (would otherwise have been evaluated as external)",
+                        event_context_id,
+                    )
+                return
 
-        Split out of _async_fan_entity_changed() (Issue #1130) so that handler can request its
-        display refresh strictly after this has run.
-        """
-        # Issue #482: HA attaches the originating service call's Context to every
-        # state-changed Event. When CA itself issued the fan command (via
-        # automation.py's _call_fan_service_with_context), it records that Context's id.
-        # If this event's own context.id (or its parent_id, for cases where the target
-        # integration wraps CA's context in a child context) matches a recently-issued
-        # CA command, that is an authoritative "CA caused this" signal — logged here on
-        # EVERY change (matched or not) so a future investigation has direct evidence
-        # instead of needing cross-source timestamp archaeology (the gap this issue
-        # closes).
-        #
-        # Issue #561: matches against a short-lived set of recently-issued command
-        # contexts (automation_engine.fan_command_context_matches()) rather than a
-        # single last-write-wins id — two fan commands issued in close succession (e.g.
-        # a duplicate reactivation attempt from a since-fixed reentrancy gap) could
-        # otherwise have the second command's context overwrite the first's before this
-        # listener evaluated the first command's resulting event, misattributing CA's
-        # own action to the user.
-        #
-        # This is treated as an ADDITIONAL/corroborating signal alongside the
-        # existing _fan_command_pending/timing checks below, not a replacement for
-        # them: context propagation through third-party fan/switch integrations
-        # (especially a one-way RF transmitter entity with no feedback of its own)
-        # is not guaranteed reliable by HA core, so a non-match here does not prove
-        # the change was external — it only fails to prove it was CA's. A match,
-        # however, is conclusive.
-        event_context = getattr(event, "context", None)
-        event_context_id = getattr(event_context, "id", None) if event_context is not None else None
-        event_context_parent_id = getattr(event_context, "parent_id", None) if event_context is not None else None
-        # Issue #561: matches against a short-lived set of recently-issued CA command
-        # contexts rather than a single last-write-wins id — a second overlapping fan
-        # command could otherwise overwrite the first's id before this listener saw the
-        # first command's resulting event, causing CA's own action to be misattributed
-        # as a manual override.
-        context_confirms_ca = self.automation_engine.fan_command_context_matches(
-            event_context_id, event_context_parent_id
-        )
-        _LOGGER.debug(
-            "fan_entity state change provenance: %s -> %s event_context_id=%s"
-            " event_context_parent_id=%s context_confirms_ca=%s",
-            old_state.state,
-            new_state.state,
-            event_context_id,
-            event_context_parent_id,
-            context_confirms_ca,
-        )
-
-        # Skip if this change was initiated by us — either the transient
-        # command-pending bookkeeping (existing guard) or a confirmed event.context
-        # match (Issue #482, additional signal).
-        if self.automation_engine._fan_command_pending or context_confirms_ca:
-            if context_confirms_ca and not self.automation_engine._fan_command_pending:
-                _LOGGER.info(
-                    "Fan entity change attributed to CA via event.context match (id=%s) —"
-                    " suppressing (would otherwise have been evaluated as external)",
-                    event_context_id,
-                )
-            return
-
-        # Issue #787: `unavailable` on this entity can reflect a transient connectivity/API
-        # dropout (e.g. an ESPHome encryption-handshake hiccup between Home Assistant and the
-        # device) rather than a real physical change. The sibling remote listener
-        # (_async_fan_remote_changed, Issue #495) already guards `unavailable` for the same
-        # physical device family; this listener never had the equivalent treatment, so a brief
-        # connectivity blip was misread as a manual override (going unavailable->on) followed
-        # immediately by a manual cancel (on->unavailable), each starting its own bogus grace
-        # period. Cross-check the ground-truth fan_state_entity (when fan_state_feedback is
-        # enabled) before trusting either direction of an `unavailable` transition.
-        if new_state.state == "unavailable" or old_state.state == "unavailable":
-            ground_truth_on = self._get_fan_physical_state()
-            if ground_truth_on is not None:
-                # Use the ground-truth reading in place of the (possibly bogus) raw
-                # entity state for the dispatch decision below. The existing dispatch
-                # conditions already produce "no dispatch" whenever this matches what
-                # CA currently believes (_fan_active) — no separate early-return needed
-                # here, and none should be added: an `unavailable->on` recovery must
-                # still correctly dispatch handle_fan_manual_override() if ground truth
-                # shows a real state CA doesn't already expect (e.g. a genuine override
-                # that happens to coincide with a connectivity blip).
-                _LOGGER.info(
-                    "Fan entity availability blip (%s -> %s) — using ground truth"
-                    " (fan_state_entity) instead of the raw transition: physically %s",
-                    old_state.state,
-                    new_state.state,
-                    "on" if ground_truth_on else "off",
-                )
-                is_on = ground_truth_on
+            # Issue #787: `unavailable` on this entity can reflect a transient connectivity/API
+            # dropout (e.g. an ESPHome encryption-handshake hiccup between Home Assistant and the
+            # device) rather than a real physical change. The sibling remote listener
+            # (_async_fan_remote_changed, Issue #495) already guards `unavailable` for the same
+            # physical device family; this listener never had the equivalent treatment, so a brief
+            # connectivity blip was misread as a manual override (going unavailable->on) followed
+            # immediately by a manual cancel (on->unavailable), each starting its own bogus grace
+            # period. Cross-check the ground-truth fan_state_entity (when fan_state_feedback is
+            # enabled) before trusting either direction of an `unavailable` transition.
+            if new_state.state == "unavailable" or old_state.state == "unavailable":
+                ground_truth_on = self._get_fan_physical_state()
+                if ground_truth_on is not None:
+                    # Use the ground-truth reading in place of the (possibly bogus) raw
+                    # entity state for the dispatch decision below. The existing dispatch
+                    # conditions already produce "no dispatch" whenever this matches what
+                    # CA currently believes (_fan_active) — no separate early-return needed
+                    # here, and none should be added: an `unavailable->on` recovery must
+                    # still correctly dispatch handle_fan_manual_override() if ground truth
+                    # shows a real state CA doesn't already expect (e.g. a genuine override
+                    # that happens to coincide with a connectivity blip).
+                    _LOGGER.info(
+                        "Fan entity availability blip (%s -> %s) — using ground truth"
+                        " (fan_state_entity) instead of the raw transition: physically %s",
+                        old_state.state,
+                        new_state.state,
+                        "on" if ground_truth_on else "off",
+                    )
+                    is_on = ground_truth_on
+                else:
+                    # No ground-truth fan_state_entity configured (Type-1 install) — there is no
+                    # way to confidently distinguish a connectivity blip from a real physical
+                    # change here. Do not dispatch a manual override/cancel off an `unavailable`
+                    # transition with no corroborating signal; a debounce-based mitigation for
+                    # this case is tracked as a follow-up (see Issue #787).
+                    _LOGGER.warning(
+                        "Fan entity unavailable transition (%s -> %s) with no fan_state_entity"
+                        " configured — cannot confirm this is a real change; skipping"
+                        " override/cancel classification",
+                        old_state.state,
+                        new_state.state,
+                    )
+                    return
             else:
-                # No ground-truth fan_state_entity configured (Type-1 install) — there is no
-                # way to confidently distinguish a connectivity blip from a real physical
-                # change here. Do not dispatch a manual override/cancel off an `unavailable`
-                # transition with no corroborating signal; a debounce-based mitigation for
-                # this case is tracked as a follow-up (see Issue #787).
-                _LOGGER.warning(
-                    "Fan entity unavailable transition (%s -> %s) with no fan_state_entity"
-                    " configured — cannot confirm this is a real change; skipping"
-                    " override/cancel classification",
+                is_on = new_state.state in {"on"}
+
+            # Skip if fan override is already active AND this is not the fan turning off — the
+            # display refresh is requested in the finally below, after this classification (Issue #510); an "on"
+            # transition here is a redundant re-announcement, already accounted for. An "off"
+            # transition, however, is the override's own defining condition ending and must not
+            # be swallowed here (Issue #774) — it falls through to the direction-aware dispatch
+            # below instead of returning.
+            if self.automation_engine._fan_override_active and is_on:
+                _LOGGER.info(
+                    "Fan/state entity changed while override already active (%s -> %s) — "
+                    "skipping override re-detection (display refresh follows in the finally below)",
                     old_state.state,
                     new_state.state,
                 )
                 return
-        else:
-            is_on = new_state.state in {"on"}
 
-        # Skip if fan override is already active AND this is not the fan turning off — the
-        # display refresh is requested by the caller after this classification (Issue #510); an "on"
-        # transition here is a redundant re-announcement, already accounted for. An "off"
-        # transition, however, is the override's own defining condition ending and must not
-        # be swallowed here (Issue #774) — it falls through to the direction-aware dispatch
-        # below instead of returning.
-        if self.automation_engine._fan_override_active and is_on:
-            _LOGGER.info(
-                "Fan/state entity changed while override already active (%s -> %s) — "
-                "skipping override re-detection (display refresh follows in the caller)",
-                old_state.state,
-                new_state.state,
-            )
-            return
+            # Skip if a fan command was issued recently (cloud thermostat echo guard)
+            if self._is_recent_fan_command(threshold_seconds=30.0):
+                return
 
-        # Skip if a fan command was issued recently (cloud thermostat echo guard)
-        if self._is_recent_fan_command(threshold_seconds=30.0):
-            return
-
-        if is_on and not self.automation_engine._fan_active:
-            # Fan turned on externally — manual override
-            _LOGGER.info(
-                "Manual fan override detected: %s -> %s (integration expected fan off)",
-                old_state.state,
-                new_state.state,
-            )
-            self.automation_engine.handle_fan_manual_override(
-                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
-            )
-        elif not is_on and (self.automation_engine._fan_active or self.automation_engine._fan_override_active):
-            # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
-            # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
-            # the "user turned fan ON" path and must NOT be called here.
-            #
-            # Issue #774: the `_fan_override_active` half of this condition matters when an
-            # active fan override (user turned the fan on, CA backed off) ends because the
-            # fan turns back off — `_fan_active` stays False for the whole life of an override
-            # (CA never "owns" that run), so checking `_fan_active` alone would silently drop
-            # this dispatch for exactly the case an override protects.
-            _LOGGER.info(
-                "Fan turned off externally: %s -> %s (integration expected fan on)",
-                old_state.state,
-                new_state.state,
-            )
-            self.automation_engine.on_fan_turned_off(
-                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
-            )
+            if is_on and not self.automation_engine._fan_active:
+                # Fan turned on externally — manual override
+                _LOGGER.info(
+                    "Manual fan override detected: %s -> %s (integration expected fan off)",
+                    old_state.state,
+                    new_state.state,
+                )
+                self.automation_engine.handle_fan_manual_override(
+                    fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+                )
+            elif not is_on and (self.automation_engine._fan_active or self.automation_engine._fan_override_active):
+                # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
+                # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
+                # the "user turned fan ON" path and must NOT be called here.
+                #
+                # Issue #774: the `_fan_override_active` half of this condition matters when an
+                # active fan override (user turned the fan on, CA backed off) ends because the
+                # fan turns back off — `_fan_active` stays False for the whole life of an override
+                # (CA never "owns" that run), so checking `_fan_active` alone would silently drop
+                # this dispatch for exactly the case an override protects.
+                _LOGGER.info(
+                    "Fan turned off externally: %s -> %s (integration expected fan on)",
+                    old_state.state,
+                    new_state.state,
+                )
+                self.automation_engine.on_fan_turned_off(
+                    fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+                )
+        finally:
+            self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_fan_remote_changed(self, event: Event) -> None:
         """Handle a QuietCool RF wall remote event (Issue #486, extended by Issue #519).

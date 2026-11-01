@@ -397,3 +397,18 @@ class TestUnprotectedGraceStarted:
         existing confirm-axis behavior."""
         t = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED))
         assert t.to_state[0] == OverrideConfirmState.IDLE
+
+
+class TestHvacFanOverrideDetected:
+    """Issue #1133 / #1163: a press of the THERMOSTAT's own fan has FAN_OVERRIDE_DETECTED's grace landing but keeps the
+    confirm axis -- the pinned FAN_OVERRIDE_DETECTED tests above are unchanged (that kind is the whole-house-fan
+    press, which replaces a pending thermostat change)."""
+
+    def test_pending_stays_pending_while_grace_protects(self):
+        t = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.HVAC_FAN_OVERRIDE_DETECTED, confirm_seconds=600.0))
+        assert t.to_state == (OverrideConfirmState.PENDING, GraceState.ACTIVE_PROTECTING_OVERRIDE)
+        assert t.outcome == "hvac_fan_override_keeps_confirm"
+
+    def test_idle_lands_protecting_like_the_whf_press(self):
+        t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.HVAC_FAN_OVERRIDE_DETECTED, confirm_seconds=600.0))
+        assert t.to_state == _IDLE_PROTECTING

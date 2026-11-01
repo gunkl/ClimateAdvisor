@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.11] — 2026-10-31
+
+- Fix #1163: switching on your thermostat's own fan for air circulation no longer turns your heating or cooling off on a home that also has a whole-house fan. Only the whole-house fan does that.
+- Fix #1164: switching your thermostat's own fan from On back to Auto no longer cancels a whole-house fan you started with its remote timer (and the reverse). A change you made that is still waiting for confirmation also stays pending when you switch on the thermostat fan.
+
 ## [0.8.10] — 2026-10-31
 
 - Fix #1133: if you change the thermostat (with "Manual Change Pause" set to 0 minutes) and a window is opened later, Climate Advisor no longer switches your heating or cooling off over your change. It stays as you set it until you, Cancel Override, away mode or a restart ends it. Where there is a grace period, an open window still pauses heating or cooling when the grace ends. This replaces the 0.8.3 behaviour for a window opened over a grace-less manual change (the pause is no longer needed there).

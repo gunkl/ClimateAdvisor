@@ -113,6 +113,11 @@ class OverrideGraceFsmEventKind(Enum):
     # immediately at the dispatcher level without touching the thermostat path's
     # shared confirm-delay logic at all.
     FAN_OVERRIDE_DETECTED = "fan_override_detected"
+    # Issue #1133 / #1163: a press of the THERMOSTAT's own fan (the HVAC-fan leg). Same grace landing as
+    # FAN_OVERRIDE_DETECTED, but it is not a decision about the heat/cool setting, so a thermostat change
+    # still awaiting confirmation stays pending (its timer keeps running). Only a whole-house-fan press
+    # replaces a pending thermostat change.
+    HVAC_FAN_OVERRIDE_DETECTED = "hvac_fan_override_detected"
     # Issue #672: _start_grace_period()'s "every other trigger" callers (fan-off,
     # window-close, nat-vent-exit, drift-correction) were deliberately never modeled at
     # all — production genuinely starts a real, non-override-protecting grace for these,
@@ -435,6 +440,13 @@ def transition(current_state: OverrideGraceLifecycleState, event: OverrideGraceF
         next_state = (OverrideConfirmState.IDLE, grace_next)
         return OverrideGraceTransition(
             current_state, next_state, event.kind, "fan_override_immediate", event.inputs.now
+        )
+
+    if event.kind == OverrideGraceFsmEventKind.HVAC_FAN_OVERRIDE_DETECTED:
+        grace_next = GraceState.ACTIVE_PROTECTING_OVERRIDE if event.inputs.grace_would_start else GraceState.NONE
+        next_state = (current_state[0], grace_next)  # confirm axis preserved
+        return OverrideGraceTransition(
+            current_state, next_state, event.kind, "hvac_fan_override_keeps_confirm", event.inputs.now
         )
 
     if event.kind == OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED:

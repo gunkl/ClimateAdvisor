@@ -1208,9 +1208,12 @@ class TestOnlyAWholeHouseFanPressReplacesAThermostatChange:
         assert engine._test_state.attributes["temperature"] == 74.0
 
     @pytest.mark.parametrize("fan_mode", ["hvac_fan", "both", "whole_house_fan"])
-    def test_a_thermostat_fan_press_keeps_a_pending_heat_change(self, timers, fan_mode):
-        engine = _heat_change_then_press(fan_mode=fan_mode, confirmed=False, grace_s=0, hvac_fan=True)
-        assert engine._override_confirm_pending is True
+    @pytest.mark.parametrize("grace_s", [0, 1800], ids=["grace0", "grace30m"])
+    def test_a_thermostat_fan_press_keeps_a_pending_heat_change(self, timers, fan_mode, grace_s):
+        engine = _heat_change_then_press(fan_mode=fan_mode, confirmed=False, grace_s=grace_s, hvac_fan=True)
+        assert engine._override_confirm_pending is True, "still pending at any grace"
+        assert engine._override_confirm_cancel is not None, "its confirmation timer is intact (not orphaned)"
+        assert engine._override_confirm_mode == "heat"
         _run(engine.apply_classification(engine._current_classification))
         assert [w for w in _climate_writes(engine) if w[0] == "set_temperature"] == []
         assert engine._test_state.attributes["temperature"] == 74.0
@@ -1301,3 +1304,185 @@ def test_the_shared_replace_helper_for_mode_to_mode_supersession_keeps_the_grace
     assert engine._manual_override_active is False and engine._manual_override_mode is None
     assert engine._fan_override_active is False, "mode-to-mode supersession clears the fan override too"
     assert engine._grace_active is True, "OVERRIDE_SUPERSEDED leaves the running grace in place"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1163 / #1164: tell the thermostat fan from the whole-house fan (one predicate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("grace_s", [0, 1800], ids=["grace0", "grace30m"])
+def test_a_pending_change_survives_a_thermostat_fan_press_and_still_confirms(timers, grace_s):
+    """The confirmation timer keeps running through a thermostat-fan press (hot day: heat diverges from the plan)."""
+    from custom_components.climate_advisor.const import CONF_FAN_MODE
+
+    engine = _engine("heat", day="hot", manual_grace_seconds=grace_s, override_confirm_seconds=600)
+    engine.config[CONF_FAN_MODE] = "hvac_fan"
+    _occupant_overrides(engine, source="normal", new_mode="heat")
+    engine.handle_fan_manual_override(fan_before="auto", fan_after="on", hvac_fan=True)
+    assert engine._override_confirm_pending is True
+
+    timers.fire(600)
+
+    assert engine._manual_override_active is True and engine._manual_override_mode == "heat"
+
+
+def _capture(engine) -> list:
+    """Record the qualnames of the tasks the engine schedules and close each coroutine at once (never awaited)."""
+    names: list = []
+
+    def _record(coro):
+        names.append(coro.__qualname__)
+        coro.close()
+
+    engine.hass.async_create_task = MagicMock(side_effect=_record)
+    return names
+
+
+def _suppressed(names) -> bool:
+    return any("_suppress_hvac_for_whf" in n for n in names)
+
+
+class TestOnePredicateGatesTheWhfConsequences:
+    """Replacing the occupant's change AND suppressing HVAC are both consequences of a WHOLE-HOUSE-fan press."""
+
+    @pytest.mark.parametrize(
+        ("fan_mode", "hvac_fan", "is_whf_press"),
+        [
+            ("whole_house_fan", False, True),
+            ("both", False, True),
+            ("whole_house_fan", True, False),
+            ("both", True, False),
+            ("hvac_fan", False, False),
+            ("hvac_fan", True, False),
+            ("disabled", False, False),
+        ],
+    )
+    def test_the_predicate(self, timers, fan_mode, hvac_fan, is_whf_press):
+        from custom_components.climate_advisor.const import CONF_FAN_MODE
+
+        engine = _engine("heat", day="cold")
+        engine.config[CONF_FAN_MODE] = fan_mode
+        assert engine._is_whf_press(hvac_fan) is is_whf_press
+
+    @pytest.mark.parametrize("fan_mode", ["whole_house_fan", "both"])
+    def test_a_thermostat_blower_press_does_not_suppress_hvac(self, timers, fan_mode):
+        from custom_components.climate_advisor.const import CONF_FAN_MODE
+
+        engine = _engine("heat", day="cold", manual_grace_seconds=1800)
+        engine.config[CONF_FAN_MODE] = fan_mode
+        tasks = _capture(engine)
+        engine.handle_fan_manual_override(fan_before="auto", fan_after="on", hvac_fan=True)
+        assert _suppressed(tasks) is False, "the blower does not fight the compressor"
+
+    @pytest.mark.parametrize("fan_mode", ["whole_house_fan", "both"])
+    @pytest.mark.parametrize("kind", ["entity", "rf"])
+    def test_a_whole_house_fan_press_still_suppresses_hvac(self, timers, fan_mode, kind):
+        from custom_components.climate_advisor.const import CONF_FAN_MODE
+
+        engine = _engine("heat", day="cold", manual_grace_seconds=1800)
+        engine.config[CONF_FAN_MODE] = fan_mode
+        tasks = _capture(engine)
+        if kind == "entity":
+            engine.handle_fan_manual_override(fan_before="off", fan_after="on")
+        else:
+            engine.handle_fan_manual_override(
+                fan_before="off", fan_after="on", duration_override=7200.0, remote_timer_hours=2.0, is_remote_event=True
+            )
+        assert _suppressed(tasks) is True
+
+    def test_fan_mode_hvac_never_suppresses(self, timers):
+        engine = _engine("heat", day="cold", manual_grace_seconds=1800)
+        engine.config["fan_mode"] = "hvac_fan"
+        tasks = _capture(engine)
+        engine.handle_fan_manual_override(fan_before="auto", fan_after="on", hvac_fan=True)
+        assert _suppressed(tasks) is False
+
+
+class TestAFanOffReportOnlyEndsItsOwnFansOverride:
+    """#1164: the thermostat blower going On->Auto must not end a WHF override or its RF timer (and vice versa)."""
+
+    def _whf_on_rf_timer(self):
+        engine = _engine("heat", day="cold", manual_grace_seconds=1800)
+        engine.config["fan_mode"] = "both"
+        engine.config[CONF_FAN_ENTITY] = "switch.whf"
+        _capture(engine)
+        engine.handle_fan_manual_override(
+            fan_before="off", fan_after="on", duration_override=7200.0, remote_timer_hours=2.0, is_remote_event=True
+        )
+        assert engine._fan_override_active and engine._fan_remote_timer_hours == 2.0
+        return engine
+
+    def test_blower_off_does_not_end_a_whf_rf_timer_override(self, timers):
+        engine = self._whf_on_rf_timer()
+        engine.on_fan_turned_off(fan_before="on", fan_after="auto", hvac_fan=True)
+        assert engine._fan_override_active is True
+        assert engine._fan_remote_timer_hours == 2.0, "the 2 h RF timer is intact"
+        assert engine._last_grace_trigger != "fan_off", "no fan-off cooldown replaced the override's grace"
+
+    def test_the_whf_going_off_does_end_the_whf_override(self, timers):
+        engine = self._whf_on_rf_timer()
+        engine.on_fan_turned_off(fan_before="on", fan_after="off", hvac_fan=False)
+        assert engine._fan_override_active is False
+
+    def test_blower_off_still_ends_a_thermostat_fan_override(self, timers):
+        engine = _engine("heat", day="cold", manual_grace_seconds=1800)
+        engine.config["fan_mode"] = "hvac_fan"
+        _capture(engine)
+        engine.handle_fan_manual_override(fan_before="auto", fan_after="on", hvac_fan=True)
+        assert engine._fan_override_active is True
+        engine.on_fan_turned_off(fan_before="on", fan_after="auto", hvac_fan=True)
+        assert engine._fan_override_active is False
+
+    def test_symmetry_a_whf_off_report_does_not_end_a_thermostat_fan_override(self, timers):
+        engine = _engine("heat", day="cold", manual_grace_seconds=1800)
+        engine.config["fan_mode"] = "both"
+        engine.config[CONF_FAN_ENTITY] = "switch.whf"
+        _capture(engine)
+        engine.handle_fan_manual_override(fan_before="auto", fan_after="on", hvac_fan=True)
+        engine.on_fan_turned_off(fan_before="on", fan_after="off", hvac_fan=False)
+        assert engine._fan_override_active is True
+
+
+def _mode_change_plus_fan_event(*, new_fan_mode):
+    import asyncio
+
+    from tests.test_heat_cool_override import (
+        _NOW_BASE,
+        _PATCH_CALLBACK,
+        _PATCH_DT_UTIL,
+        _make_coordinator_stub,
+        _make_event,
+    )
+
+    coord = _make_coordinator_stub(last_commanded_hvac_mode="heat")
+    coord.automation_engine._whf_owns_hvac = MagicMock(return_value=False)
+    old_fan = "auto" if new_fan_mode == "on" else "on"
+    event = _make_event(
+        old_hvac_mode="heat",
+        new_hvac_mode="cool",
+        old_temp=68.0,
+        new_temp=68.0,
+        old_fan_mode=old_fan,
+        new_fan_mode=new_fan_mode,
+    )
+    mock_dt = MagicMock()
+    mock_dt.now.return_value = _NOW_BASE
+    with patch(_PATCH_CALLBACK, side_effect=lambda fn: fn), patch(_PATCH_DT_UTIL, mock_dt):
+        asyncio.run(coord._async_thermostat_changed(event))
+    return coord.automation_engine
+
+
+def test_a_mode_change_event_still_processes_the_fan_off_direction():
+    """Only the fan-ON press is gated by the mode-change override; fan-off/cancel must still end a thermostat-fan
+    override (found by code reading; verified here)."""
+    ae = _mode_change_plus_fan_event(new_fan_mode="auto")
+    assert ae.handle_manual_override.call_count == 1
+    ae.on_fan_turned_off.assert_called_once()
+    assert ae.on_fan_turned_off.call_args.kwargs.get("hvac_fan") is True
+
+
+def test_a_mode_change_event_still_skips_the_fan_on_press():
+    ae = _mode_change_plus_fan_event(new_fan_mode="on")
+    assert ae.handle_manual_override.call_count == 1
+    assert ae.handle_fan_manual_override.call_count == 0

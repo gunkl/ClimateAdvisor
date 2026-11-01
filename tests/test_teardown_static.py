@@ -14,6 +14,10 @@ the whole-house fan back on after the occupant switched it off.
 - T7c (Issue #1108): the same service-call sites must each honour observe-only mode
   (reference ``dry_run`` or ``_automation_enabled``), so a new command site cannot act
   while the automation switch is off.
+- T7e (Issue #1183): every timer/listener coordinator.py registers goes through
+  ``_zone_scoped``/``_zone_scoped_sync``, the wrapper that refuses once the instance is shut
+  down or Home Assistant is stopping. An unwrapped door-debounce timer could otherwise record
+  a pause (and save it) during a restart while its HVAC-off command was refused.
 """
 
 from __future__ import annotations
@@ -264,3 +268,40 @@ def test_no_new_bare_hass_async_create_task():
                 "— lower the ratchet entry (converted sites must not be re-addable)"
             )
     assert problems == [], "\n".join(problems)
+
+
+# T7e (Issue #1183): registrations that must stay unwrapped, each with its reason.
+_UNWRAPPED_REGISTRATION_ALLOWLIST = {
+    # The briefing body latches itself (_async_send_briefing, see the #1102 latch table).
+    "_async_send_briefing_scheduled",
+    # Records an occupant-requested restart; it must run before EVENT_HOMEASSISTANT_STOP.
+    "_async_call_service_event",
+    # The STOP listener sets the stopping flag the wrapper reads.
+    "_on_homeassistant_stop",
+}
+
+
+def _registered_callback_name(arg: ast.AST) -> str | None:
+    if isinstance(arg, ast.Name):
+        return arg.id
+    if isinstance(arg, ast.Attribute):
+        return arg.attr
+    return None
+
+
+def test_every_coordinator_timer_and_listener_is_zone_wrapped():
+    tree = ast.parse((_PKG / "coordinator.py").read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _returns_handle(_call_name(node))):
+            continue
+        callbacks = node.args[1:]  # args[0] is hass (or the event type for bus.async_listen)
+        if _call_name(node) in ("async_listen", "async_listen_once"):
+            callbacks = node.args[1:2]
+        wrapped = any(
+            isinstance(a, ast.Call) and _call_name(a) in ("_zone_scoped", "_zone_scoped_sync") for a in callbacks
+        )
+        names = {_registered_callback_name(a) for a in callbacks}
+        if not wrapped and not names & _UNWRAPPED_REGISTRATION_ALLOWLIST:
+            offenders.append(f"coordinator.py:{node.lineno} {ast.unparse(node)[:100]}")
+    assert offenders == [], "register through self._zone_scoped/_zone_scoped_sync:\n" + "\n".join(offenders)

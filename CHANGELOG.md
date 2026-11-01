@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.20] — 2026-11-01
+
+- Fix #1183: restarting Home Assistant (an update, a deploy, a manual restart) no longer sends a false "entities aren't responding" email about your whole-house fan, and Climate Advisor no longer sends a thermostat command that fails while Home Assistant shuts down. Once Home Assistant starts stopping, Climate Advisor stops commanding and alerting; it still records that the restart was clean.
+
 ## [0.8.19] — 2026-11-01
 
 - Fix #1143: when a window or door opens while your heating or cooling is running and Climate Advisor turns it off for the window, it now remembers that it interrupted a running cycle, including after the automatic grace period ends with the window still open. Before, it noted the system as already off, so when the outdoor air later became suitable for natural ventilation the fan was started by the idle-open path, which does not clear the window pause, and the pause stayed on while the fan ran. Now the paused path runs, which clears the pause as it starts the fan.

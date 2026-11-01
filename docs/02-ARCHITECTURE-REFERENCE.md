@@ -517,7 +517,8 @@ restart. HA's `ConfigEntry.async_unload` calls `async_unload_entry()` (which cal
 `DataUpdateCoordinator` takes `config_entry` from the setup ContextVar and registers
 `async_shutdown` there, **`async_shutdown()` runs twice per unload**. A restart fires
 `EVENT_HOMEASSISTANT_STOP` instead, so the STOP listener (`_persist_shutdown_diagnostics`)
-remains the only restart-time save.
+remains the only restart-time save; it also stops the instance acting (see "Home Assistant
+stopping" below).
 
 **Release rule.** Every resource is released by the mechanism that owns it:
 
@@ -590,6 +591,25 @@ success.
 | `_call_service_with_context` (every CA fan/climate command; Issue #1109) | return, before `_record_command_context` |
 | `_release_orphaned_hvac_fan`, `_notify` | return |
 | `_start_fan_thermo_backstop` (stops an in-flight tick re-arming), `_start_grace_period_action` | no timer; grace returns `False` ("grace disabled") |
+
+**Home Assistant stopping (Issue #1183).** A restart never unloads the entry, so `_shut_down`
+never engages then. While HA unloads other integrations their entities go unavailable, and each
+change used to start a full update cycle: a false "entities aren't responding" email and a
+thermostat command failing with "Connection lost". The STOP listener
+(`coordinator._async_homeassistant_stop`) therefore sets a second one-way flag, `_ha_stopping`, on
+the coordinator and its engine before it schedules the diagnostics write. Every site in the table
+honours it through the same check (`automation._latched` / `_refuse_if_shut_down`), logging at
+INFO ("Home Assistant is stopping: ... skipped") instead of the leak WARNING. It is kept apart from
+`_shut_down` because `async_shutdown()`'s run-once gate reads `_shut_down` only, so an unload after
+a stop still saves and releases. HA's own `hass.is_stopping` is not used: it covers only the
+`stopping`/`final_write` states, and `not_running` is also the boot state. The startup mirror
+(alerts before entities load) is the startup-coalesce gate in `_run_entity_health_check()`.
+Real-HA test: `tests_ha/test_shutdown_1183.py`. A restart never cancels timers armed before it,
+so every coordinator timer/listener registers through `_zone_scoped`/`_zone_scoped_sync` (the
+startup-coalesce, occupancy-away, weather-retry and door-debounce timers were not; an unwrapped door
+debounce could record and save a pause whose HVAC-off command was refused).
+`tests/test_teardown_static.py` (T7e) fails on a new unwrapped registration; its allowlist holds
+the three that must stay unwrapped (briefing, restart-service listener, STOP listener).
 
 `tests/test_teardown_static.py` also fails if a `hass.services.async_call` in
 `automation.py` or `coordinator.py` sits in a function without the latch (allowlist: the two

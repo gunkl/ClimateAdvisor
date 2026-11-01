@@ -1044,3 +1044,26 @@ class TestAppliedThresholdAndMargin:
         """If standard threshold gives same as previous, no hysteresis needed."""
         result = classify_day(make_forecast(90), previous_day_type=DAY_TYPE_HOT)
         assert result.day_type == DAY_TYPE_HOT
+
+
+class TestLowIsEstimatedPropagation:
+    """Issue #1211: the provenance flag rides from the snapshot onto the classification."""
+
+    def test_flag_propagates(self):
+        snap = ForecastSnapshot(
+            today_high=65,
+            today_low=50,
+            tomorrow_high=65,
+            tomorrow_low=50,
+            current_outdoor_temp=65,
+            low_is_estimated=True,
+            tomorrow_low_is_estimated=True,
+        )
+        c = classify_day(snap)
+        assert c.low_is_estimated is True
+        assert c.tomorrow_low_is_estimated is True
+
+    def test_flag_defaults_false(self):
+        snap = ForecastSnapshot(today_high=65, today_low=50, tomorrow_high=65, tomorrow_low=50, current_outdoor_temp=65)
+        c = classify_day(snap)
+        assert c.low_is_estimated is False

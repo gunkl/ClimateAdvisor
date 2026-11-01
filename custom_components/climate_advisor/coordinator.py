@@ -1830,6 +1830,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     window_open_time=(time.fromisoformat(wot) if wot else None),
                     window_close_time=(time.fromisoformat(wct) if wct else None),
                     setback_modifier=cls_data.get("setback_modifier", 0.0),
+                    low_is_estimated=bool(cls_data.get("low_is_estimated", False)),
+                    tomorrow_low_is_estimated=bool(cls_data.get("tomorrow_low_is_estimated", False)),
                 )
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.warning("Failed to restore classification: %s", err)
@@ -2011,6 +2013,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "window_open_time": (c.window_open_time.isoformat() if c.window_open_time else None),
                 "window_close_time": (c.window_close_time.isoformat() if c.window_close_time else None),
                 "setback_modifier": c.setback_modifier,
+                "low_is_estimated": c.low_is_estimated,
+                "tomorrow_low_is_estimated": c.tomorrow_low_is_estimated,
                 "window_opportunity_morning": c.window_opportunity_morning,
                 "window_opportunity_evening": c.window_opportunity_evening,
                 "window_opportunity_morning_start": (
@@ -4724,6 +4728,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         today_low = _resolve_forecast_temp_f(today_fc, "templow", "tempLow", current_outdoor - 15)
         tomorrow_high = _resolve_forecast_temp_f(tomorrow_fc, "temperature", "tempHigh", current_outdoor)
         tomorrow_low = _resolve_forecast_temp_f(tomorrow_fc, "templow", "tempLow", current_outdoor - 15)
+        # Issue #1211: remember when a low is the (outdoor - 15) stand-in above, so nothing claims
+        # "windows help" or trains the weather bias from an invented number. The value is unchanged.
+        low_is_estimated = not (
+            today_fc and _first_non_none(today_fc.get("templow"), today_fc.get("tempLow")) is not None
+        )
+        tomorrow_low_is_estimated = not (
+            tomorrow_fc and _first_non_none(tomorrow_fc.get("templow"), tomorrow_fc.get("tempLow")) is not None
+        )
 
         # The forecast API returns "remaining period" data — as the day
         # progresses, today's high drops to the current temp and today's low
@@ -4767,6 +4779,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         observed_high - today_high,
                     )
             today_high = max(today_high, observed_high)
+            if observed_low < today_low:
+                # A sensor reading is a real upper bound on the day's low, unlike the stand-in.
+                low_is_estimated = False
             today_low = min(today_low, observed_low)
 
         # Apply learned weather bias correction to tomorrow's forecast
@@ -4812,6 +4827,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             current_indoor_temp=float(current_indoor) if current_indoor is not None else None,
             current_humidity=attrs.get("humidity"),
             timestamp=dt_util.now(),
+            low_is_estimated=low_is_estimated,
+            tomorrow_low_is_estimated=tomorrow_low_is_estimated,
         )
 
     def _maybe_regenerate_briefing_for_drift(self) -> bool:
@@ -5034,7 +5051,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Capture raw forecast high/low for weather bias learning
         if self.config.get("learning_enabled", True):
             self._today_record.forecast_high_f = classification.today_high
-            self._today_record.forecast_low_f = classification.today_low
+            # Issue #1211: never train the weather bias from the (outdoor - 15) stand-in.
+            self._today_record.forecast_low_f = None if classification.low_is_estimated else classification.today_low
 
     async def _async_send_briefing(
         self,
@@ -12165,6 +12183,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             tomorrow_high=c.tomorrow_high,
             tomorrow_low=c.tomorrow_low,
             current_outdoor_temp=c.today_low,
+            low_is_estimated=c.tomorrow_low_is_estimated,
+            tomorrow_low_is_estimated=c.tomorrow_low_is_estimated,
         )
         tomorrow_class = classify_day(
             tomorrow_forecast,

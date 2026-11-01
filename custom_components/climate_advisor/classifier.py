@@ -46,6 +46,12 @@ class ForecastSnapshot:
     current_indoor_temp: float | None = None
     current_humidity: float | None = None
     timestamp: datetime | None = None
+    # Issue #1211: True when the forecast provided no low and ``today_low`` / ``tomorrow_low``
+    # holds a stand-in (outdoor - 15) instead. The value is kept so the ODE and the outdoor
+    # curve keep working; consumers that make a claim from the low (windows_recommended, the
+    # learning record) must not trust it.
+    low_is_estimated: bool = False
+    tomorrow_low_is_estimated: bool = False
 
 
 @dataclass
@@ -61,6 +67,8 @@ class DayClassification:
     tomorrow_low: float
     applied_threshold_f: float | None = None  # Threshold that produced day_type
     threshold_margin_f: float | None = None  # today_high - applied_threshold_f
+    low_is_estimated: bool = False  # Issue #1211: today_low is a stand-in, not a forecast
+    tomorrow_low_is_estimated: bool = False
 
     # Computed recommendations
     hvac_mode: str = ""  # "heat", "cool", "off", "auto"
@@ -306,4 +314,6 @@ def classify_day(
         tomorrow_low=forecast.tomorrow_low,
         applied_threshold_f=applied_threshold,
         threshold_margin_f=round(threshold_margin, 1),
+        low_is_estimated=forecast.low_is_estimated,
+        tomorrow_low_is_estimated=forecast.tomorrow_low_is_estimated,
     )

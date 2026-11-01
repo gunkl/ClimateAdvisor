@@ -70,10 +70,13 @@ class DayPlan:
     indoor_start_f: float
     reclassify_every_min: int | None
     # (minute_since_start, kind, args) - sparse exogenous events, all drawn up front
-    timed: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
+    timed: list[tuple[float, str, dict[str, Any]]] = field(default_factory=list)
+    # Issue #1144: the whole-house-fan hazard drawn for this day (None = none).  Records what it replaced
+    # so the pinned "earlier draws unchanged" digest can strip it; absent from to_dict() when None.
+    whf: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "day_seed": self.day_seed,
             "profile": self.profile,
             "use_coordinator": self.use_coordinator,
@@ -87,11 +90,119 @@ class DayPlan:
             "reclassify_every_min": self.reclassify_every_min,
             "timed": [[m, k, a] for m, k, a in self.timed],
         }
+        if self.whf is not None:
+            d["whf"] = self.whf
+        return d
 
 
 def _hhmm(minute_of_day: int) -> str:
     minute_of_day %= 1440
     return f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d}"
+
+
+# Issue #1144: share of coordinator days that carry a whole-house fan, and the occupant orders drawn for it.
+WHF_DAY_RATE = 0.35
+WHF_ENTITY = "fan.whf"
+# Seconds of AC/fan overlap the generated-day mutex check tolerates: one toy-thermostat reporting interval.  The
+# toy house reports its equipment state on its own five-minute tick (and right after an exogenous event), so a
+# command CA sends from a timer between ticks (a grace expiry re-arming the fan and turning HVAC off) shows as
+# AC still running until the next tick.  Production thermostats report within seconds.
+WHF_P2_OVERLAP_S = float(TICK_MIN * 60)
+WHF_ORDERS = (
+    "sealed_then_fan_on",  # every sensor closed, then the occupant switches the fan on
+    "fan_on_then_sealed",  # the fan runs with a window open, then every sensor closes
+    "fan_on_then_open_fast",  # sealed, fan on, a window opens within 10 s (one motion: must not be fought)
+    "fan_on_then_open_late",  # sealed, fan on, a window opens 10-30 s later
+)
+
+
+def _apply_whf_hazard(
+    config: dict[str, Any],
+    timed: list[tuple[float, str, dict[str, Any]]],
+    *,
+    mode_roll: float,
+    order_roll: float,
+    when_roll: float,
+    lag_roll: float,
+) -> dict[str, Any]:
+    """Turn the day into a whole-house-fan day (mutates ``config`` and ``timed``); return what it replaced.
+
+    The fan is switched on by the occupant (HomeKit / wall switch: an external state change with no CA
+    context), in one of the ``WHF_ORDERS``.  The house always has at least one door/window sensor here:
+    with none, sealed-ness cannot be judged and the safety rule does not apply.
+    """
+    record = {
+        "pre_fan_mode": config["fan_mode"],
+        "pre_sensors": list(config["door_window_sensors"]),
+    }
+    config["fan_mode"] = "whole_house_fan" if mode_roll < 0.6 else "both"
+    config["fan_entity"] = WHF_ENTITY
+    config["fan_state_feedback"] = True
+    config["promise_p2_min_overlap_s"] = WHF_P2_OVERLAP_S
+    if not config["door_window_sensors"]:
+        config["door_window_sensors"] = ["binary_sensor.door_window_1"]
+    sensors = list(config["door_window_sensors"])
+    order = WHF_ORDERS[min(int(order_roll * len(WHF_ORDERS)), len(WHF_ORDERS) - 1)]
+    record["order"] = order
+    t0 = 120.0 + float(int(when_roll * (1200 - 120)))  # whole minute, 02:00 .. 20:00 into the day
+
+    timed.append((0.0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "off"}))
+    if order == "fan_on_then_sealed":
+        timed.append((t0 - 1.0, "sensor_open", {"entity": sensors[0]}))
+        timed.append((t0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "on"}))
+        lag_min = 1.0 + float(int(lag_roll * 30))
+        for entity in sensors:
+            timed.append((t0 + lag_min, "sensor_close", {"entity": entity}))
+        record["sealed_after_min"] = lag_min
+        return record
+    for entity in sensors:
+        timed.append((t0 - 1.0, "sensor_close", {"entity": entity}))
+    timed.append((t0, "external_fan_state_change", {"entity": WHF_ENTITY, "state": "on"}))
+    if order == "fan_on_then_open_fast":
+        lag_s = 1.0 + float(int(lag_roll * 9))  # 1 .. 9 s
+        timed.append((t0 + lag_s / 60.0, "sensor_open", {"entity": sensors[0]}))
+        record["window_open_after_s"] = lag_s
+    elif order == "fan_on_then_open_late":
+        lag_s = 10.0 + float(int(lag_roll * 20))  # 10 .. 29 s
+        timed.append((t0 + lag_s / 60.0, "sensor_open", {"entity": sensors[0]}))
+        record["window_open_after_s"] = lag_s
+    return record
+
+
+def strip_whf_hazard(plan_dict: dict) -> dict:
+    """Undo the whole-house-fan hazard in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digest)."""
+    whf = plan_dict.pop("whf", None)
+    if whf is None:
+        return plan_dict
+    plan_dict["config"]["fan_mode"] = whf["pre_fan_mode"]
+    plan_dict["config"]["door_window_sensors"] = whf["pre_sensors"]
+    plan_dict["config"].pop("fan_entity", None)
+    plan_dict["config"].pop("fan_state_feedback", None)
+    plan_dict["config"].pop("promise_p2_min_overlap_s", None)
+    # the hazard's own events: the fan switches and the extra sensor events it appended
+    n_pre = len(whf["pre_sensors"])
+    plan_dict["timed"] = _strip_whf_events(plan_dict["timed"], whf, n_pre)
+    return plan_dict
+
+
+def _strip_whf_events(timed: list, whf: dict, n_pre: int) -> list:
+    """Remove exactly the events ``_apply_whf_hazard`` appended (they are the trailing ones by construction)."""
+    marker = [t for t in timed if t[1] == "external_fan_state_change"]
+    out = [t for t in timed if t[1] != "external_fan_state_change"]
+    order = whf["order"]
+    sensors = whf["pre_sensors"] or ["binary_sensor.door_window_1"]
+    drop: list = []
+    t_on = next(t[0] for t in marker if t[2]["state"] == "on")
+    if order == "fan_on_then_sealed":
+        drop.append([t_on - 1.0, "sensor_open", {"entity": sensors[0]}])
+        drop += [[t_on + whf["sealed_after_min"], "sensor_close", {"entity": e}] for e in sensors]
+    else:
+        drop += [[t_on - 1.0, "sensor_close", {"entity": e}] for e in sensors]
+        if "window_open_after_s" in whf:
+            drop.append([t_on + whf["window_open_after_s"] / 60.0, "sensor_open", {"entity": sensors[0]}])
+    for d in drop:
+        out.remove(d)
+    return out
 
 
 def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
@@ -209,6 +320,19 @@ def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
         t0 = max(1, anchor - rng.randint(5, 60))
         timed.append((t0, "indoor_unreadable", {"unreadable": True}))
         timed.append((anchor + rng.randint(10, 180), "indoor_unreadable", {"unreadable": False}))
+    # Issue #1144 whole-house-fan hazards: drawn LAST (after the hazards above) so every earlier draw of
+    # every seed is unchanged.  A fixed number of draws is consumed whether or not the hazard fires.
+    whf_roll, whf_mode_roll, whf_order_roll, whf_when_roll, whf_lag_roll = (rng.random() for _ in range(5))
+    whf: dict[str, Any] | None = None
+    if use_coordinator and whf_roll < WHF_DAY_RATE:
+        whf = _apply_whf_hazard(
+            config,
+            timed,
+            mode_roll=whf_mode_roll,
+            order_roll=whf_order_roll,
+            when_roll=whf_when_roll,
+            lag_roll=whf_lag_roll,
+        )
     timed.sort(key=lambda x: x[0])
 
     return DayPlan(
@@ -224,6 +348,7 @@ def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
         indoor_start_f=indoor_start,
         reclassify_every_min=reclassify,
         timed=timed,
+        whf=whf,
     )
 
 
@@ -433,6 +558,8 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                     feed({"time": _iso(et), "type": kind, "entity": args["entity"]})
                 elif kind == "occupancy_change":
                     feed({"time": _iso(et), "type": kind, "mode": args["mode"]})
+                elif kind == "external_fan_state_change":
+                    feed({"time": _iso(et), "type": kind, "entity": args["entity"], "state": args["state"]})
                 elif kind == "thermostat_state_changed":
                     if plan.use_coordinator:
                         feed(
@@ -458,6 +585,11 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                         feed({"time": _iso(et), "type": kind})
                 else:  # bedtime / wakeup
                     feed({"time": _iso(et), "type": kind})
+                if plan.whf is not None:
+                    # A real thermostat reports its equipment state within seconds of a command; the toy house
+                    # otherwise reports it on the next five-minute tick, which would read as minutes of AC running
+                    # beside the whole-house fan that the occupant never had (Issue #1144).
+                    report_action(et)
             if plan.reclassify_every_min and (i * TICK_MIN) % plan.reclassify_every_min == 0:
                 feed(_classification_event(plan, t, house.reported_f()))
             weather_now[0] = weather.outdoor_f(t)

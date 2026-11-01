@@ -35,9 +35,10 @@ def _build(*, fan_running: bool = True, window_open: bool = True, config: dict |
             },
         ),
     )
-    coordinator._resolved_sensors = ["binary_sensor.window"] if window_open else []
-    if window_open:
-        fake_hass.states.set("binary_sensor.window", FakeState(state="on", attributes={}))
+    # Issue #1144: a sealed house needs a CONFIGURED sensor reading closed -- with zero sensors the
+    # sealed-house rule does not apply (sealed-ness cannot be judged).
+    coordinator._resolved_sensors = ["binary_sensor.window"]
+    fake_hass.states.set("binary_sensor.window", FakeState(state="on" if window_open else "off", attributes={}))
     coordinator._read_live_remote_timer_provenance = lambda: None
     return coordinator, fake_hass, scheduler, event_log
 
@@ -131,14 +132,20 @@ class TestPersistedOverrideDropped:
         assert ae._reconcile_rearmed_override is False
         assert ae._pending_override_rearm_end is None
 
-    def test_sealed_house_does_not_rearm(self) -> None:
-        coordinator, _fake_hass, scheduler, _event_log = _build(window_open=False)
+    def test_sealed_house_does_not_rearm_and_does_not_feed_shadow_fsm(self) -> None:
+        from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
+
+        # Issue #1144: the sealed-house rule is about the whole-house fan, so this scenario is a WHF install
+        # (the headless default is fan control disabled) with a configured sensor reading closed.
+        coordinator, fake_hass, scheduler, _event_log = _build(
+            window_open=False, config={"fan_mode": "whole_house_fan", "fan_entity": "fan.whf"}
+        )
+        fake_hass.states.set("fan.whf", FakeState(state="on", attributes={}))
         _restart(coordinator, scheduler, _persisted(scheduler, remaining_s=7200))
         ae = coordinator.automation_engine
         assert ae._fan_override_active is False
         assert ae._reconcile_rearmed_override is False
         # #882 sealed-house deactivate path: no protecting grace, no override, nothing left in the FSM.
-        from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
 
         assert ae._grace_protects_override is False
         assert ae.override_grace_lifecycle_state == (OverrideConfirmState.IDLE, GraceState.NONE)

@@ -2306,6 +2306,14 @@ def _render_whf_hvac_suppressed(p: dict, unit: str) -> tuple[str, str]:
     return label, settings
 
 
+def _render_whf_sealed_observe_notified(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1144: automation is off and the whole-house fan runs with every door/window closed.
+
+    Climate Advisor sends no command in observe-only mode; it told the occupant instead (one notice per episode).
+    """
+    return "Whole-house fan running on a closed-up house -- automation is off, occupant notified, fan not touched", ""
+
+
 def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
     """Issue #495: a manual/remote WHF session ended — HVAC suppression released and CA's
     current classification reasserted (not a blind restore of the mode captured at activation,
@@ -3137,6 +3145,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "hvac_write_blocked_whf_active": _render_hvac_write_blocked_whf_active,
     "whf_hvac_suppressed": _render_whf_hvac_suppressed,
     "whf_hvac_released": _render_whf_hvac_released,
+    "whf_sealed_observe_notified": _render_whf_sealed_observe_notified,
     "stranded_hvac_suppression_restored": _render_stranded_hvac_suppression_restored,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,

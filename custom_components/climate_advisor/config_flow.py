@@ -102,6 +102,7 @@ from .const import (
     DEFAULT_THRESHOLD_WARM,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
+    FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
@@ -428,14 +429,53 @@ def threshold_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, f
     }
 
 
+# Issue #1144: sealed-house safety setup checks, shared by the initial setup and the options flow.
+_WHF_ERR_SHARED = "whf_entity_shared_zone"
+_WHF_WARN_NO_SENSORS = "whf_no_sensors_warning"
+_WHF_WARN_COMMAND_ONLY = "whf_command_only_warning"
+
+
+def _whf_setup_findings(
+    hass: HomeAssistant,
+    values: dict[str, Any],
+    entry_id: str | None,
+    *,
+    fan_feedback_asked: bool,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return ``(errors, warnings)`` for the whole-house-fan safety rules, keyed by form field.
+
+    Errors block the step (a fan already owned by another zone). Warnings do not: the form is shown
+    once more with them and the second identical submit is accepted (see ``_confirm_whf_warnings``).
+    ``fan_feedback_asked`` is False in the initial setup (feedback is options-only, so command-only is
+    the state the new zone will start in).
+    """
+    errors: dict[str, str] = {}
+    warnings: dict[str, str] = {}
+    if values.get(CONF_FAN_MODE) not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        return errors, warnings
+    if zone_registry.fan_entity_owned_by_other_zone(hass, values.get(CONF_FAN_ENTITY), entry_id):
+        errors[CONF_FAN_ENTITY] = _WHF_ERR_SHARED
+    if not values.get("door_window_sensors"):
+        warnings["door_window_sensors"] = _WHF_WARN_NO_SENSORS
+    has_feedback = bool(values.get(CONF_FAN_STATE_ENTITY)) or bool(values.get(CONF_FAN_STATE_FEEDBACK, False))
+    if not has_feedback:
+        warnings[CONF_FAN_STATE_FEEDBACK if fan_feedback_asked else CONF_FAN_ENTITY] = _WHF_WARN_COMMAND_ONLY
+    return errors, warnings
+
+
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
     VERSION = 20
 
+    # Class-level default so a flow built without __init__ (tests) still works; only ever re-assigned.
+    _whf_acknowledged: dict[str, str] = {}
+
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._data: dict[str, Any] = {}
+        # Issue #1144: the sealed-house warnings last shown (a resubmit with the same set is accepted).
+        self._whf_acknowledged: dict[str, str] = {}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Handle the initial setup step — core entities and notify service."""
@@ -626,30 +666,45 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Issue #1061: timing/debounce and fan-feedback fields live only in the options flow;
         every engine read of those keys falls back to a default (``config.get(KEY, DEFAULT)``).
         """
+        errors: dict[str, str] = {}
+        values: dict[str, Any] = user_input or {}
         if user_input is not None:
-            self._data.update(user_input)
-            return await self.async_step_occupancy()
+            errors, warnings = _whf_setup_findings(self.hass, user_input, None, fan_feedback_asked=False)
+            if not errors and warnings and self._whf_acknowledged != warnings:
+                # Issue #1144: warn once, accept the identical resubmit.
+                self._whf_acknowledged = dict(warnings)
+                errors = dict(warnings)
+            elif not errors:
+                self._data.update(user_input)
+                return await self.async_step_occupancy()
 
         return self.async_show_form(
             step_id="sensors",
+            errors=errors,
             data_schema=vol.Schema(
                 {
-                    vol.Optional("door_window_sensors", default=[]): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain=["binary_sensor"],
-                            multiple=True,
+                    vol.Optional("door_window_sensors", default=values.get("door_window_sensors", [])): (
+                        selector.EntitySelector(
+                            selector.EntitySelectorConfig(
+                                domain=["binary_sensor"],
+                                multiple=True,
+                            )
                         )
                     ),
-                    vol.Optional(CONF_SENSOR_POLARITY_INVERTED, default=False): selector.BooleanSelector(),
-                    vol.Optional(CONF_FAN_MODE, default=DEFAULT_FAN_MODE): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=FAN_MODE_OPTIONS,
-                            mode=selector.SelectSelectorMode.DROPDOWN,
+                    vol.Optional(
+                        CONF_SENSOR_POLARITY_INVERTED, default=values.get(CONF_SENSOR_POLARITY_INVERTED, False)
+                    ): selector.BooleanSelector(),
+                    vol.Optional(CONF_FAN_MODE, default=values.get(CONF_FAN_MODE, DEFAULT_FAN_MODE)): (
+                        selector.SelectSelector(
+                            selector.SelectSelectorConfig(
+                                options=FAN_MODE_OPTIONS,
+                                mode=selector.SelectSelectorMode.DROPDOWN,
+                            )
                         )
                     ),
                     vol.Optional(
                         CONF_FAN_ENTITY,
-                        description={"suggested_value": None},
+                        description={"suggested_value": values.get(CONF_FAN_ENTITY)},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["fan", "switch"])),
                 }
             ),
@@ -760,6 +815,9 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     """Handle options for Climate Advisor — menu-based navigation (Issue #50)."""
+
+    # Class-level default so a flow built without __init__ (tests) still works; only ever re-assigned.
+    _whf_acknowledged: dict[str, str] = {}
 
     def __init__(self) -> None:
         """Initialize the options flow."""
@@ -1134,6 +1192,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_sensors(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Door/window sensor and fan configuration."""
+        errors: dict[str, str] = {}
+        current: Any = self.config_entry.data
         if user_input is not None:
             # Convert minutes (UI) to seconds (internal storage)
             for key in (
@@ -1144,15 +1204,26 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             ):
                 if key in user_input:
                     user_input[key] = int(user_input[key] * 60)
-            await self._commit_section(
-                user_input, clearable_keys=(CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY, CONF_FAN_REMOTE_ENTITY)
+            clearable = (CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY, CONF_FAN_REMOTE_ENTITY)
+            merged = {**self.config_entry.data, **user_input}
+            for key in clearable:
+                if key not in user_input:
+                    merged.pop(key, None)
+            errors, warnings = _whf_setup_findings(
+                self.hass, merged, self.config_entry.entry_id, fan_feedback_asked=True
             )
-            return await self.async_step_init()
-
-        current = self.config_entry.data
+            if not errors and warnings and self._whf_acknowledged != warnings:
+                # Issue #1144: warn once (nothing saved yet), accept the identical resubmit.
+                self._whf_acknowledged = dict(warnings)
+                errors = dict(warnings)
+            elif not errors:
+                await self._commit_section(user_input, clearable_keys=clearable)
+                return await self.async_step_init()
+            current = merged  # re-show the form with what the user just entered
 
         return self.async_show_form(
             step_id="sensors",
+            errors=errors,
             data_schema=vol.Schema(
                 {
                     vol.Optional(

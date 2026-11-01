@@ -51,22 +51,6 @@
    }
   },
   {
-   "scenario": "window_close_stops_whole_house_fan",
-   "failing_assertions": [
-    0
-   ],
-   "first_difference": "a0@2026-06-12T06:01 expected classification_applied, real fan_activated (min_runtime_cycle at 05:59:59)",
-   "evidence": "Config has fan_min_runtime_per_hour=15 and fan_mode=whole_house_fan. Engine-only FakeHass never runs coordinator start-up, so start_min_fan_runtime_cycles() is never called; real HA starts the hourly minimum-runtime fan cycles at coordinator start-up (fan_activated reason=min_runtime_cycle at 05:59:59, then hourly at :59:59), so the 06:01 'last decision' is the fan, not the classification.",
-   "occupant_view": "With a minimum-runtime fan configured the whole-house fan runs 15 minutes each hour, as configured; the golden's timeline omits it.",
-   "issue_or_justification": "Trigger divergence (coordinator start-up behavior absent from the engine-only scenario).",
-   "class": "T",
-   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
-   "date": "2026-10-30",
-   "failing_outcomes": {
-    "0": "unknown:fan_activated"
-   }
-  },
-  {
    "scenario": "issue-392-natvent-ceiling-oscillation",
    "failing_assertions": [
     2,

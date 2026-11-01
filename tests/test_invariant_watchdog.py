@@ -152,3 +152,79 @@ class TestCoordinatorInvariantWatchdogWiring:
         assert len(result) == 1, "The violation itself is still returned/logged every cycle"
         coord._emit_event.assert_not_called()
         coord.automation_engine._notify.assert_not_called()
+
+
+class TestProductionOverlapTolerance:
+    """Issue #1144 (owner decision 2): production ignores an AC/fan overlap under 30 s; tests stay strict.
+
+    Occupant story: switching the fan on while the AC runs always overlaps for the few seconds the thermostat
+    takes to report the HVAC-off Climate Advisor sends. That must not raise the "invariant violated" alert.
+    """
+
+    @staticmethod
+    def _coord_with_journal(readings):
+        from custom_components.climate_advisor.promise_journal import PromiseJournal
+
+        coord = _make_real_coordinator(whf_physically_on=True, fan_mode=FAN_MODE_WHOLE_HOUSE)
+        coord._ac_whf_overlap_confirmed = types.MethodType(
+            __import__(
+                "custom_components.climate_advisor.coordinator", fromlist=["ClimateAdvisorCoordinator"]
+            ).ClimateAdvisorCoordinator._ac_whf_overlap_confirmed,
+            coord,
+        )
+        coord._promise_journal = PromiseJournal()
+        coord._record_promise_reading = MagicMock()  # readings are supplied by the test
+        for r in readings:
+            coord._promise_journal.record_reading(r)
+        return coord
+
+    @staticmethod
+    def _reading(base, seconds, *, action, fan):
+        from custom_components.climate_advisor.promise_journal import Reading
+
+        return Reading(
+            ts=base + __import__("datetime").timedelta(seconds=seconds),
+            hvac_mode="cool",
+            hvac_action=action,
+            fan_on=fan,
+        )
+
+    def _run(self, coord, now):
+        from unittest.mock import patch
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
+            return coord._run_invariant_watchdog(hvac_action="cooling")
+
+    def test_a_ten_second_overlap_does_not_alert(self):
+        from datetime import UTC, datetime, timedelta
+
+        base = datetime(2026, 10, 31, 13, 0, tzinfo=UTC)
+        rs = [
+            self._reading(base, 0, action="cooling", fan=False),
+            self._reading(base, 60, action="cooling", fan=True),  # fan pressed; AC still reported cooling
+        ]
+        coord = self._coord_with_journal(rs)
+        assert self._run(coord, base + timedelta(seconds=70)) == []
+        coord._emit_event.assert_not_called()
+
+    def test_a_forty_second_overlap_alerts(self):
+        from datetime import UTC, datetime, timedelta
+
+        base = datetime(2026, 10, 31, 13, 0, tzinfo=UTC)
+        rs = [
+            self._reading(base, 0, action="cooling", fan=False),
+            self._reading(base, 60, action="cooling", fan=True),
+            self._reading(base, 100, action="cooling", fan=True),
+        ]
+        coord = self._coord_with_journal(rs)
+        result = self._run(coord, base + timedelta(seconds=100))
+        assert [v.name for v in result] == ["ac_whf_mutex"]
+        coord._emit_event.assert_called_once()
+
+    def test_the_test_world_default_stays_strict(self):
+        from custom_components.climate_advisor.const import AC_WHF_OVERLAP_TOLERANCE_S
+        from custom_components.climate_advisor.invariant_watchdog import PromiseConfig
+
+        assert AC_WHF_OVERLAP_TOLERANCE_S == 30.0
+        assert PromiseConfig.from_config({}).p2_min_overlap_s == 0.0
+        assert PromiseConfig.from_config({}, p2_min_overlap_s=AC_WHF_OVERLAP_TOLERANCE_S).p2_min_overlap_s == 30.0

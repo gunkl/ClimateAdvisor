@@ -434,13 +434,13 @@
     "issue": 645
   },
   "issue_677_rf_timer_restart_resume": {
-    "sha256": "a13c3ae66502b833868508983b0dd612e5f7aa1d5da2403e8950e5e1b80c52d6",
-    "signed": "2026-09-09",
+    "sha256": "a63870a4ed17874c26b176c60bf39c85e178900f8b09a573071e25a340b79cb6",
+    "signed": "2026-10-31",
     "issue": 677
   },
   "restart_whf_ac_mutex_backstop_race": {
-    "sha256": "c87de8afe52d1be171e4c5f5b08f9cafddb65b96c2eb2d981131c805a0cd4229",
-    "signed": "2026-08-22",
+    "sha256": "bd9d139ccf68493fd9a85d2a62721d071cfc1c223d6fca9846ac6a553302677f",
+    "signed": "2026-10-31",
     "issue": 627
   },
   "startup_coalesce_sensor_open_nat_vent_gate_false": {

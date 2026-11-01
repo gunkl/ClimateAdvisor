@@ -1188,3 +1188,13 @@ When creating PRs:
 **Last Updated**: 2026-04-25
 **For**: Climate Advisor — Home Assistant Integration
 **AI**: Claude Opus 4.6
+
+### WHF/HVAC Safety Invariants (Issue #1144)
+
+Owner rules, authoritative:
+
+1. The WHF never runs on a sealed house (stop within 30 s).
+2. WHF and HVAC are mutually exclusive; the newest occupant action wins.
+3. HVAC stays off while a window is open, unless a manual override turns it on.
+
+An override is never an exemption from rules 1-2; stops go through `_enforce_whf_safety`/`_deactivate_fan(safety=True)` only. Never copy-paste a stop or stand-down. Climate Advisor also never *starts* the whole-house fan on a sealed house (entry gate in `_activate_fan()`, which keeps the HVAC blower leg of `FAN_MODE_BOTH` allowed). Zero configured sensors means rule 1 does not apply (setup warns); command-only installs (`fan_state_feedback` off) cannot be enforced (setup warns); a WHF entity shared across zones is refused in setup.

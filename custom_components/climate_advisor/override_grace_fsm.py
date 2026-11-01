@@ -137,7 +137,7 @@ class OverrideGraceFsmInputs:
 
     Field-by-field correspondence to the real ``AutomationEngine`` attributes:
       confirm_seconds        -> config CONF_OVERRIDE_CONFIRM_PERIOD
-      setpoint_override       -> (the detected override's source == "setpoint")
+      setpoint_override       -> is_always_confirm_origin(the detected override's source): "setpoint" or "pause"
       current_mode             -> self.hass.states.get(self.climate_entity).state
       classification_mode      -> self._current_classification.hvac_mode
       manual_override_active   -> self._manual_override_active

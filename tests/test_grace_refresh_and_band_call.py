@@ -66,6 +66,7 @@ def _minimal_engine() -> AutomationEngine:
             "_doorwindow_fsm_authoritative": False,
             "_override_grace_fsm_authoritative": False,
             "_grace_protects_override": False,
+            "_last_grace_trigger": None,
             "_manual_grace_cancel": None,
             "_automation_grace_cancel": None,
             "_grace_active": True,  # grace is active when expiry fires

@@ -141,7 +141,11 @@ from .desired_state import (
     decide_scheduled_write_seq_current,
     decide_setpoint_retry_action,
 )
-from .override_confirm_split import OverrideConfirmPathOutcome, decide_override_confirm_path
+from .override_confirm_split import (
+    OverrideConfirmPathOutcome,
+    decide_override_confirm_path,
+    is_always_confirm_origin,
+)
 from .override_match import decide_override_matches_decision
 
 if TYPE_CHECKING:
@@ -3374,7 +3378,7 @@ class AutomationEngine:
             # One definition of the PATH A/B split (override_confirm_split), shared with the FSM.
             if (
                 decide_override_confirm_path(
-                    setpoint_override=source == "setpoint",
+                    setpoint_override=is_always_confirm_origin(source),
                     current_mode=current_mode,
                     classification_mode=cls_mode,
                 )
@@ -9163,15 +9167,18 @@ class AutomationEngine:
         if unprotected_grace_expiry_keeps_pending(
             confirm_pending=bool(self._override_confirm_pending),
             manual_override_active=bool(self._manual_override_active),
-            grace_protects_override=bool(self._grace_protects_override),
+            grace_protects_override=self._grace_is_occupants_thermostat_grace(),
         ):
             _LOGGER.info(
                 "%s grace expired while the occupant's thermostat change is awaiting confirmation"
                 " -- ending the grace only; not re-pausing, not clearing the change",
                 source,
             )
-            self._cancel_grace_timers_action()
+            # Resolve BEFORE cancelling: the cancel clears ``_last_grace_trigger``, which the FSM input builder
+            # reads (``_grace_is_occupants_thermostat_grace()``) to tell a fan grace from the occupant's own; read
+            # afterwards it would call every grace the occupant's and the FSM would drop the pending press.
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
+            self._cancel_grace_timers_action()
             if self._request_refresh_callback:
                 self._request_refresh_callback()
             if self._post_grace_fan_check_callback:
@@ -11883,6 +11890,16 @@ class AutomationEngine:
             caller="_resolve_door_window_pause_flags",
         )
 
+    def _grace_is_occupants_thermostat_grace(self) -> bool:
+        """Whether the running grace is the occupant's OWN thermostat grace (Issue #1158 M1).
+
+        A whole-house-fan override grace also sets ``_grace_protects_override`` (it must not be reaped as
+        orphaned), but it protects the fan session, not a thermostat change: a press still awaiting its
+        confirmation has to survive that grace expiring. The one fact both the engine's ``_on_grace_expired()``
+        and the FSM input builder feed ``unprotected_grace_expiry_keeps_pending``.
+        """
+        return bool(self._grace_protects_override) and self._last_grace_trigger != "fan_manual_override"
+
     def _build_override_grace_fsm_inputs(self, *, confirm_source: str | None = None):
         """Build the override/grace FSM's input snapshot from current engine state
         (Issue #664).
@@ -11924,7 +11941,7 @@ class AutomationEngine:
         current_mode_state = self.hass.states.get(self.climate_entity)
         return OverrideGraceFsmInputs(
             confirm_seconds=float(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS)),
-            setpoint_override=bool((confirm_source or self._override_confirm_source) == "setpoint"),
+            setpoint_override=is_always_confirm_origin(confirm_source or self._override_confirm_source),
             current_mode=current_mode_state.state if current_mode_state else None,
             classification_mode=classification_mode,
             manual_override_active=bool(self._manual_override_active),
@@ -11947,6 +11964,7 @@ class AutomationEngine:
             grace_source=self._last_resume_source or "automation",
             now=now,
             grace_would_start=self._manual_grace_would_start(now),
+            grace_is_occupants_own=self._grace_is_occupants_thermostat_grace(),
             decision_mode=decision_mode,
             decision_mode_resolved=True,
         )

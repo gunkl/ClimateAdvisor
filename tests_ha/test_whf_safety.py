@@ -147,29 +147,83 @@ async def test_user_turning_heat_on_stops_an_override_only_fan(make_house) -> No
     assert not house.fan.is_on
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "Separate finding surfaced by #1144 (pre-existing on origin/main, see the #1144 phase-1 report): with a "
-        "fan-override grace active, the occupant's heat set during a door/window pause is dropped from the "
-        "pending-confirmation state and the next update cycle turns it back off. Owner rule 3 says a manual "
-        "override may turn HVAC on while a window is open. Delete this marker when fixed."
-    ),
+@pytest.mark.parametrize(
+    ("contact", "press"),
+    [("window", "heat"), ("window", "cool"), ("door", "heat")],
 )
-async def test_occupants_heat_survives_the_next_cycle_while_a_window_is_open(make_house) -> None:
+async def test_occupants_press_survives_the_next_cycle_while_a_contact_is_open(make_house, contact, press) -> None:
+    """Issue #1158, rule 3 (+ rule 2): fan-override grace running, contact open, HVAC paused; the occupant presses
+    heat/cool. The next update cycle used to turn it off again because the press never became a pending change
+    (the override/grace FSM treated a press on a paused thermostat as a no-op while a protecting grace ran)."""
+    house = await make_house(fan="whf", **_sealed_house(contacts=[contact]))
+    await house.open(contact)
+    await house.advance(minutes=2)
+    await _press_after_refresh(house, True)
+    await _advance_finely(house, 30)
+    assert house.fan.is_on
+    ae = house.coordinator.automation_engine
+    assert ae._grace_active, "precondition: the fan override's grace period is running"
+
+    await house.occupant_sets_thermostat(mode=press)
+    await house.coordinator.async_request_refresh()
+    await house.hass.async_block_till_done()
+    await _advance_finely(house, 5)
+
+    assert house.thermostat.mode == press, "the next update cycle switched the occupant's change off"
+    assert ae._override_confirm_pending, "the press must be a pending change that automation defers to"
+    assert not house.fan.is_on, "rule 2: the newest occupant action (the press) wins, the fan must have stopped"
+
+
+async def test_occupants_press_under_a_fan_grace_is_confirmed_and_ends_pending(make_house) -> None:
+    """Once the confirmation window ends the press is a confirmed override and nothing stays pending (a pending
+    flag the FSM could never clear would shield the thermostat from automation for good)."""
     house = await make_house(fan="whf", **_sealed_house())
     await house.open("window")
     await house.advance(minutes=2)
     await _press_after_refresh(house, True)
     await _advance_finely(house, 30)
-
     await house.occupant_sets_thermostat(mode="heat")
     await house.coordinator.async_request_refresh()
     await house.hass.async_block_till_done()
-    await _advance_finely(house, 5)
 
+    await house.advance(minutes=12)  # past the 10 minute confirmation
+
+    ae = house.coordinator.automation_engine
+    assert not ae._override_confirm_pending
+    assert ae._manual_override_active, "the heat press was confirmed as a manual override"
     assert house.thermostat.mode == "heat"
+
+
+async def test_press_equal_to_the_days_plan_under_a_fan_grace_self_resolves_and_clears_pending(make_house) -> None:
+    """A heat press on a cold day (heat IS the day's plan) while a fan-override grace runs is a transient change:
+    at the end of the confirmation window it self-resolves. The pending flag must clear, and the running grace
+    must stay, or the thermostat would stay shielded from automation for good."""
+    from datetime import UTC, datetime
+
+    house = await make_house(
+        fan="whf",
+        contacts=[],
+        startup="settled",
+        start=datetime(2026, 1, 15, 7, 0, tzinfo=UTC),
+        initial_indoor_f=62.0,
+        outdoor_f=38.0,
+        high_f=44.0,
+        low_f=28.0,
+        initial_hvac_mode="heat",
+        ca_config={"fan_min_runtime_per_hour": 0, "override_confirm_seconds": 600},
+    )
+    ae = house.coordinator.automation_engine
+    await house.advance(minutes=6)
+    await _press_after_refresh(house, True)
+    await _advance_finely(house, 30)
+    assert ae._grace_active, "precondition: the fan override's grace is running"
+
+    await house.occupant_sets_thermostat(mode="heat")
+    await house.advance(minutes=2)
+    assert ae._override_confirm_pending, "precondition: the press is awaiting confirmation"
+    await house.advance(minutes=10)
+
+    assert not ae._override_confirm_pending, "a self-resolved press left the confirmation pending forever"
 
 
 async def test_zero_configured_sensors_the_fan_is_never_stopped(make_house) -> None:

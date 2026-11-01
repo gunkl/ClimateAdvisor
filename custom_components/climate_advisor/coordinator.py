@@ -3096,8 +3096,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # `_on_grace_expired()` — confirm was never involved here (Issue #647's own comment:
         # "not via clear_manual_override()"), so only the grace half is dispatched. Closest
         # semantic match is GRACE_TIMER_EXPIRED (grace ending with nothing left to protect).
-        ae._cancel_grace_timers_action()
+        # Issue #1158 (M1, second caller): resolve BEFORE the cancel. The cancel clears
+        # `_last_grace_trigger`, so resolving afterwards made a WHF fan-override grace read as the
+        # occupant's own thermostat grace and dropped a pending press made during a window pause
+        # (same ordering trap as AutomationEngine._on_grace_expired()'s keep branch).
         ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
+        ae._cancel_grace_timers_action()
         # Issue #679: derive_door_window_lifecycle_state() also takes grace_active as an
         # input; this method used to also re-notify the door/window shadow FSM here
         # (Issue #679's own comment) — that call and the door/window shadow-comparison

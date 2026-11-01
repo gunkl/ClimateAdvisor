@@ -99,6 +99,18 @@ class TestFsmUsesAuthoritativeAlreadyOff:
             == DoorWindowLifecycleState.PAUSED_DURING_GRACE
         )
 
+    @pytest.mark.parametrize(
+        ("pre_pause_mode_active", "expected"),
+        [(True, DoorWindowLifecycleState.PAUSED_ACTIVE), (False, DoorWindowLifecycleState.PAUSED_IDLE)],
+    )
+    def test_grace_expiry_while_paused_uses_pre_pause_mode_not_live_mode(self, pre_pause_mode_active, expected):
+        """By expiry CA has turned HVAC off, so the live mode reads "off" either way; the restore target decides."""
+        event = DoorWindowFsmEvent(
+            DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
+            _fsm_inputs(hvac_mode="off", pre_pause_mode_active=pre_pause_mode_active),
+        )
+        assert transition(DoorWindowLifecycleState.PAUSED_DURING_GRACE, event).to_state == expected
+
     def test_no_authoritative_answer_falls_back_to_live_mode(self):
         """Callers without a pre-command reading (hvac_already_off=None) keep the live-mode split."""
         assert (
@@ -206,3 +218,49 @@ class TestReactivationAfterActivePauseTakesPausedBranch:
         events = self._reactivate(engine)
         assert "nat_vent_reactivated_while_paused" not in events
         assert engine._natural_vent_active is True
+
+
+class TestGraceExpiryKeepsActivePauseSubstate:
+    """Grace expires while the window is still open after CA paused a running cycle (PAUSED_DURING_GRACE)."""
+
+    def _paused_during_grace(self, mode):
+        engine = _engine(mode=mode)
+        _forecast_peak_ahead(engine)
+        engine._grace_active = True
+        engine._last_grace_trigger = "automation"
+        engine._last_resume_source = "automation"
+        _open(engine)
+        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+        assert engine._paused_with_hvac_already_off is False
+        return engine
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_expiry_stays_active_and_next_check_takes_paused_branch(self, mode):
+        engine = self._paused_during_grace(mode)
+        with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
+            engine._on_grace_expired("automation", 300, False)
+        assert engine._grace_active is False
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"  # the live mode the old derivation misread
+        assert engine._paused_with_hvac_already_off is False
+        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+
+        events = TestReactivationAfterActivePauseTakesPausedBranch()._reactivate(engine)
+        assert "nat_vent_reactivated_while_paused" in events
+        assert "sensor_opened" not in events
+        assert engine._paused_by_door is False
+        assert engine._paused_entity is None
+        assert engine._pre_pause_mode is None
+
+    def test_expiry_stays_idle_when_hvac_was_already_off(self):
+        engine = _engine(mode="off")
+        _forecast_peak_ahead(engine)
+        engine._grace_active = True
+        engine._last_grace_trigger = "automation"
+        engine._last_resume_source = "automation"
+        _open(engine)
+        with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
+            engine._on_grace_expired("automation", 300, False)
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is True
+        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.PAUSED_IDLE

@@ -407,12 +407,16 @@ def _nat_vent_gate_inputs(inputs: DoorWindowFsmInputs) -> NatVentGateInputs:
     )
 
 
-def _pause_entry_outcome(inputs: DoorWindowFsmInputs) -> PauseEntryOutcome:
+def _pause_entry_outcome(inputs: DoorWindowFsmInputs, *, hvac_already_off: bool | None = None) -> PauseEntryOutcome:
     """The one place this module turns its inputs into a ``PauseEntryOutcome`` (Issue #1143).
 
-    Passes the caller's authoritative ``hvac_already_off`` through when it has one
-    (``None`` otherwise -> the live ``hvac_mode`` split, unchanged)."""
-    return decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode, hvac_already_off=inputs.hvac_already_off))
+    The pause action's authoritative ``hvac_already_off`` wins when the event carries one
+    (``inputs.hvac_already_off``); otherwise the caller may pass its own (the grace-expiry
+    transition below, which has none but can read ``pre_pause_mode_active``). With neither,
+    the live ``hvac_mode`` split applies -- correct only while CA has not yet commanded the pause."""
+    if inputs.hvac_already_off is not None:
+        hvac_already_off = inputs.hvac_already_off
+    return decide_pause_entry(PauseEntryInputs(hvac_mode=inputs.hvac_mode, hvac_already_off=hvac_already_off))
 
 
 def _pause_sub_state(outcome: PauseEntryOutcome) -> DoorWindowLifecycleState | None:
@@ -703,10 +707,11 @@ def _transition_from_paused_during_grace(
         # recheck (unlike the plain-GRACE case above) does NOT clear
         # _paused_by_door either way (see module docstring's third finding).
         # So every outcome converges on the same next-state logic: grace
-        # clears, pause remains, sub-state re-derived from the live hvac_mode
-        # on THIS event (the composite state doesn't itself retain which
-        # plain sub-state it came from — same live-inputs-on-the-event
-        # convention nat_vent_fsm.py already establishes).
+        # clears, pause remains, and the sub-state is re-derived on THIS event (the
+        # composite state doesn't itself retain which plain sub-state it came from).
+        # Issue #1143: NOT from the live hvac_mode — by now CA has itself turned HVAC
+        # off for this pause, so the live mode reads "off" even for an active pause.
+        # pre_pause_mode_active is truthy only when CA turned HVAC off (restore target).
         outcome = decide_grace_expiry_outcome(
             GraceExpiryInputs(
                 within_planned_window=inputs.within_planned_window,
@@ -715,7 +720,7 @@ def _transition_from_paused_during_grace(
                 override_matches_current_decision=inputs.override_matches_current_decision,
             )
         )
-        sub = _pause_sub_state(_pause_entry_outcome(inputs))
+        sub = _pause_sub_state(_pause_entry_outcome(inputs, hvac_already_off=not inputs.pre_pause_mode_active))
         next_state = sub or DoorWindowLifecycleState.PAUSED_ACTIVE
         return DoorWindowTransition(current_state, next_state, kind, outcome.value, inputs.now)
 

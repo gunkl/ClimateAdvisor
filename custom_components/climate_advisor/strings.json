@@ -136,7 +136,10 @@
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
       "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
-      "zone_name_too_long": "Zone name must be 50 characters or fewer"
+      "zone_name_too_long": "Zone name must be 50 characters or fewer",
+      "whf_entity_shared_zone": "This fan is already controlled by another Climate Advisor zone. A whole-house fan can belong to only one zone. Pick a different fan, or remove it from the other zone first.",
+      "whf_no_sensors_warning": "No door or window sensors are selected, so Climate Advisor cannot tell when the house is sealed and will not stop the whole-house fan for it. Submit again to keep this, or add sensors.",
+      "whf_command_only_warning": "Climate Advisor cannot see the fan's real state, so it cannot see or stop a fan it did not start. Submit again to keep this, or add a fan state sensor in Sensors & Fan options."
     },
     "abort": {
       "already_configured": "This thermostat already has a Climate Advisor zone configured."
@@ -472,6 +475,9 @@
       "ai_max_tokens_out_of_range": "Max tokens value is out of the allowed range for this field.",
       "github_repo_invalid": "Repository must be in owner/repo format (e.g. myuser/MyRepo).",
       "zone_name_too_long": "Zone name must be 50 characters or fewer",
+      "whf_entity_shared_zone": "This fan is already controlled by another Climate Advisor zone. A whole-house fan can belong to only one zone. Pick a different fan, or remove it from the other zone first.",
+      "whf_no_sensors_warning": "No door or window sensors are selected, so Climate Advisor cannot tell when the house is sealed and will not stop the whole-house fan for it. Submit again to keep this, or add sensors.",
+      "whf_command_only_warning": "Climate Advisor cannot see the fan's real state, so it cannot see or stop a fan it did not start. Submit again to keep this, or add a fan state sensor in Sensors & Fan options.",
       "thresholds_must_be_ascending": "Day-type thresholds must increase from Cool to Mild to Warm to Hot (Cool < Mild < Warm < Hot)."
     }
   },

@@ -354,6 +354,25 @@ cancellation plus reconciliation, only for callers that mean deliberate, immedia
 
 **Ending a grace without resuming:** `cancel_override()` already ends a grace-only state (`had_grace`). The dashboard button (`index.html`, `cancel-override-btn`) is now enabled on `manual_override_active || grace_active` (status API field `grace_active`) and labelled **End Grace Period** when only a grace is active. `ClimateAdvisorCancelOverrideView` answers `Grace period ended…` instead of `Override cancelled…` in that case. The door/window pause is not affected; "Resume from Pause" still starts a manual grace by design (Issue #47).
 
+## WHF Safety Stop Ends the Fan Override and Grace (Issue #1144)
+
+Occupant impact: when the whole-house fan is stopped because the house is sealed (rule 1) or
+because the occupant turned the heat or AC on after it (rule 2), the fan override that the
+occupant's own fan-on created ends with it. Otherwise the stopped fan would leave a grace
+period that suppresses automation for the rest of its timer (up to the RF remote's 12 h).
+
+`_after_whf_safety_stop()` calls `_end_fan_override_and_grace(reason="whf_safety_stop",
+keep_grace=not sealed)`: the fan override, the RF timer token and a **fan-owned** grace
+(`manual`/`fan_manual_override` trigger) end. A sealed-house stop clears the grace; a rule 2
+(mutex) stop keeps a grace that another mechanism owns (it is the occupant's HVAC change that
+is protected there). The ending is recorded as the `whf_safety_stop` override ending, which
+household promise P4 lists as an allowed ending for fan overrides
+([household-promises-spec.md](household-promises-spec.md)). Nothing here lets the safety stop
+be suppressed *by* a grace: a safety stop never consults `_grace_active` or
+`_fan_override_active`.
+
+---
+
 ## Orphaned Grace Self-Heal (Issue #508)
 
 **Shape of the problem:** the opposite of the pre-existing Issue #321 stuck-grace check (below).

@@ -13,6 +13,7 @@ reuses ``PromiseProbe`` unchanged.  This module imports no Home Assistant code.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -298,6 +299,12 @@ class FakeHassPromiseSource:
     def __init__(self, session: Any) -> None:
         self._s = session
         self._cfg = PromiseConfig.from_config(session.config)
+        # Issue #1144: a thermostat's equipment report trails the command that stopped it by seconds, so an
+        # occupant turning the fan on while the AC runs always shows a moment of overlap before the HVAC-off
+        # lands.  A scenario may state the overlap it allows (the 30 s the safety rules allow); default 0.
+        _overlap = session.config.get("promise_p2_min_overlap_s")
+        if isinstance(_overlap, (int, float)) and _overlap > 0:
+            self._cfg = dataclasses.replace(self._cfg, p2_min_overlap_s=float(_overlap))
         self._unit = str(session.config.get("temp_unit", "fahrenheit"))
         self._watched = {session.climate_entity}
         fan_entity = session.config.get("fan_entity")
@@ -463,6 +470,7 @@ class FakeHassPromiseSource:
             setpoint_f=setpoint,
             fan_on=fan_on,
             contacts_open=contacts_open,
+            automation_enabled=self._automation_enabled(),
         )
 
     def _automation_enabled(self) -> bool:

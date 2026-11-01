@@ -1,0 +1,81 @@
+{
+  "name": "issue_1144_natvent_floor_exit_window_open",
+  "description": "Issue #1144 coverage: a whole-house-fan nat-vent session with the window still OPEN rides the house down to the comfort floor and exits at the floor. The owner rules (sealed house never runs the fan) made the old window-close variant of this exit unreachable, because the safety stop now ends a sealed session first; this scenario keeps the floor-exit wording (indoor <= comfort floor, cooled to floor) exercised with a window open, where the fan is legitimate. Occupant outcome: the fan stops on its own at the floor instead of chilling the house below the comfort floor.",
+  "source": "Issue #1144 phase 3 -- display-test coverage source for the nat-vent comfort-floor exit reason (tests/test_automation_unit_display.py).",
+  "issue": 1144,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-08-31T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot-day classification, HVAC in cool mode \u2014 comfort band arms at the ceiling. This is the mode _pre_fan_hvac_mode will capture when nat-vent activates a moment later."
+    },
+    {
+      "time": "2026-08-31T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "Baseline: indoor 72F, outdoor 60F \u2014 favorable for nat-vent, well above the 68F floor."
+    },
+    {
+      "time": "2026-08-31T08:00:01",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens: outdoor(60) < indoor(72) - hysteresis(1), indoor > comfort_heat(68), outdoor < threshold \u2014 nat-vent activates, WHF turns on, HVAC suppressed (_pre_fan_hvac_mode captures \"cool\")."
+    },
+    {
+      "time": "2026-08-31T08:05:00",
+      "type": "temp_update",
+      "indoor_f": 62.0,
+      "outdoor_f": 60.0,
+      "note": "Indoor continues decaying on momentum after the session already ended \u2014 down to 62F, 6F below comfort_heat(68). Issue #827: a hot day's heating direction is against-grain (native family is cooling), so the fallback candidate only arms once the breach clears comfort_deadband_hot_f (default 5.0F, clamped [2,8]) \u2014 6F clears it. Nat-vent is inactive and the fan is off, so neither fan_thermostat_check() nor check_natural_vent_conditions()'s active-session block has anything to race against; this temp_update alone has no decision consequence (no classification cycle yet)."
+    },
+    {
+      "time": "2026-08-31T08:05:01",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "First classification cycle with indoor below the floor by more than comfort_deadband_hot_f (6F breach > 5F deadband). _apply_comfort_band()'s resolver call arms the fallback candidate (first evaluation, not yet confirmed \u2014 stays \"cool\" this tick, also re-affirming the \"cooling\" family; per Issue #827, the FSM's dwell clock only advances on a genuine transition, so this reassertion cannot reset a lockout the way pre-#827 code could)."
+    },
+    {
+      "time": "2026-08-31T08:21:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "The 08:05:01 restore-adjacent grace period (armed by _exit_nat_vent()'s own _start_grace_period() call) expires at 08:10:01 and its own resume-cycle re-affirms \"cool\" one more time (the fallback candidate is not yet confirmed relative to ITS clock at that point either) \u2014 under Issue #827's FSM this reassertion still does not move dwell_since, since dwell_since only advances on a genuine transition (the structural #823 fix). 08:21:00 is well past both the 90s COMFORT_FALLBACK_CONFIRM_S sustain window (measured from the 08:05:01 arm) and the 600s comfort_mode_switch_min_interval_s dwell floor (measured from whichever prior genuine transition last moved dwell_since \u2014 cold start here, so the very first transition is unconditionally allowed). Indoor is still 62F, 6F below the floor. The fallback path sustain-confirms and escalates: comfort family switches to heating, engine commands heat at comfort_heat."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-31T08:00:01",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Nat-vent activates on window-open per the standard gate; the window is open, so the whole-house fan is legitimate."
+    },
+    {
+      "at": "2026-08-31T08:05:00",
+      "expect": "nat_vent_fan_off",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Indoor (62F) is below the 68F comfort floor with the window still open: nat-vent's own thermostatic exit ends the session (the sealed-house stop is not involved because a window is open)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "With the window open, nat-vent exits at the comfort floor (cooled to floor) rather than running the house colder."
+  }
+}

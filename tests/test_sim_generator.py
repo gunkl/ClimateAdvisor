@@ -26,6 +26,7 @@ from tools.sim_harness.generator import (
     CI_SMOKE_SEEDS,
     DAYS_PER_MASTER,
     SIM_HOURS,
+    WHF_ORDERS,
     build_plan,
     day_seed_of,
     replay_scenario,
@@ -33,6 +34,7 @@ from tools.sim_harness.generator import (
     run_day,
     run_plan,
     save_finding,
+    strip_whf_hazard,
 )
 from tools.sim_harness.replay import shrink
 from tools.sim_harness.world import TICK_MIN, HouseParams, ToyHouse, Weather
@@ -305,6 +307,7 @@ def test_adding_hazards_left_every_earlier_draw_unchanged() -> None:
     for i in range(60):
         for profile in ("coordinator", "engine", "mixed"):
             d = build_plan(i, profile).to_dict()
+            d = strip_whf_hazard(d)  # Issue #1144: the whole-house-fan day is a later, appended draw
             d["timed"] = [t for t in d["timed"] if t[1] not in _HAZARDS]
             h.update(json.dumps(d, sort_keys=True).encode())
     assert h.hexdigest() == _PRE_HAZARD_PLAN_DIGEST
@@ -543,3 +546,61 @@ def test_p5_never_fires_on_generated_days_for_the_real_engine() -> None:
         n += 1
         if n >= 25:
             break
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+# Whole-house-fan days (Issue #1144): the occupant switches the fan on around the doors and windows
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+def _whf_plans(n: int = 300):
+    return [p for p in (build_plan(day_seed_of(21, i), "coordinator") for i in range(n)) if p.whf]
+
+
+def test_whf_days_are_drawn_at_the_set_rate_and_cover_every_order() -> None:
+    plans = [build_plan(day_seed_of(21, i), "coordinator") for i in range(300)]
+    whf = [p for p in plans if p.whf]
+    assert 0.2 * len(plans) <= len(whf) <= 0.5 * len(plans)
+    assert {p.whf["order"] for p in whf} == set(WHF_ORDERS)
+    assert {p.config["fan_mode"] for p in whf} == {"whole_house_fan", "both"}
+    assert all(p.config["door_window_sensors"] and p.config["fan_state_feedback"] for p in whf)
+    # the engine-only profile has no fan-entity listener: never drawn there
+    assert not [p for p in (build_plan(day_seed_of(21, i), "engine") for i in range(100)) if p.whf]
+
+
+def test_whf_order_timing_matches_the_order_name() -> None:
+    for p in _whf_plans():
+        on = next(m for m, k, a in p.timed if k == "external_fan_state_change" and a["state"] == "on")
+        closes = [m for m, k, _ in p.timed if k == "sensor_close" and abs(m - (on - 1.0)) < 1e-9]
+        opens_after = [m for m, k, _ in p.timed if k == "sensor_open" and 0.0 < m - on <= 0.5 + 1e-9]
+        order = p.whf["order"]
+        if order == "fan_on_then_open_fast":
+            assert (
+                closes
+                and [round((m - on) * 60) for m in opens_after]
+                and all(0 < (m - on) * 60 < 10 for m in opens_after)
+            )
+        elif order == "fan_on_then_open_late":
+            assert closes and opens_after and all(10 <= round((m - on) * 60) < 30 for m in opens_after)
+        elif order == "sealed_then_fan_on":
+            assert closes
+        else:  # fan_on_then_sealed: a window is open when the fan starts, the house seals after
+            assert any(m == on - 1.0 for m, k, _ in p.timed if k == "sensor_open")
+
+
+def test_a_sealed_house_fan_day_never_breaks_the_whf_promises_on_head() -> None:
+    sealed = [p for p in _whf_plans(120) if p.whf["order"] in ("sealed_then_fan_on", "fan_on_then_sealed")][:3]
+    assert sealed
+    for p in sealed:
+        rec = run_plan(p)
+        bad = [h for h in rec.report.hard if h.promise in ("whf_sealed", "ac_whf_mutex")]
+        assert not bad, f"seed {p.day_seed} ({p.whf['order']}): {[h.detail for h in bad]}"
+
+
+def test_seed_7000031_fan_pressed_inside_the_restart_window_no_longer_overlaps_the_ac() -> None:
+    """Calibration finding (Issue #1144): fan switched on within startup coalescing while the AC cools.
+
+    Before the fix the enforcer could not see the fan-on as newer than the AC (override detection is suppressed
+    while coalescing), so the AC ran beside the fan for the full five-minute window.
+    """
+    rec = run_day(7000031)
+    assert rec.plan.whf is not None
+    assert [h for h in rec.report.hard if h.promise == "ac_whf_mutex"] == []

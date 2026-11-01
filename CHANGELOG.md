@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.24] — 2026-11-01
+
+- Fix #1195: with the HVAC-fan setting, if you close the windows within 5 minutes of Climate Advisor starting the blower for fresh air, the blower now stops by itself once those 5 minutes are up. Before, it ran on (and Status kept saying natural ventilation) behind closed windows, sometimes overnight.
+- Fix #1196: with a restricted thermostat blower, a start that Climate Advisor was not allowed to make no longer counts as a fan change. When you turn the blower off after Climate Advisor started it, the usual 30-minute pause now applies, and Climate Advisor no longer switches it back on 5 minutes later.
+
 ## [0.8.23] — 2026-11-01
 
 - Fix #1186 (developer-facing, no behavior change): unit tests no longer depend on run order. The `homeassistant.util.dt` test stub is now one real, timezone-aware module, tests freeze the clock with a `frozen_now` fixture instead of import-time assignments, and CI runs each changed test file on its own.

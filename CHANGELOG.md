@@ -7,6 +7,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 - Fix #1144: the whole-house fan is now switched off within 30 seconds if it is running while every door and window is closed, even when you turned it on from the wall switch, HomeKit or the RF remote (a fan that ran for about 55 minutes on a sealed house on 2026-10-30 prompted this). Climate Advisor itself will also never start the whole-house fan on a sealed house, and the hourly minimum-runtime fan cycle runs a whole-house fan only while a window or door is open. The fan and the heat or AC are mutually exclusive: if you turn the heat or AC on after the fan, the fan stops; if you turn the fan on after the AC, the AC is turned off. With automation switched off (observe-only), Climate Advisor sends no command to the fan; it sends one notification per episode telling you the fan is running on a closed-up house. Setup and Settings now warn when a whole-house fan has no door/window sensors (the sealed-house rule cannot apply) or no fan state feedback (Climate Advisor cannot see or stop a fan it did not start), and refuse a fan that another Climate Advisor zone already controls.
 
+## [0.8.11] — 2026-10-31
+
+- Fix #1163: switching on your thermostat's own fan for air circulation no longer turns your heating or cooling off on a home that also has a whole-house fan. Only the whole-house fan does that.
+- Fix #1164: switching your thermostat's own fan from On back to Auto no longer cancels a whole-house fan you started with its remote timer (and the reverse). A change you made that is still waiting for confirmation also stays pending when you switch on the thermostat fan.
+
 ## [0.8.10] — 2026-10-31
 
 - Fix #1133: if you change the thermostat (with "Manual Change Pause" set to 0 minutes) and a window is opened later, Climate Advisor no longer switches your heating or cooling off over your change. It stays as you set it until you, Cancel Override, away mode or a restart ends it. Where there is a grace period, an open window still pauses heating or cooling when the grace ends. This replaces the 0.8.3 behaviour for a window opened over a grace-less manual change (the pause is no longer needed there).

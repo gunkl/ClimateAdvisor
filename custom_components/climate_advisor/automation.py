@@ -1342,6 +1342,9 @@ class AutomationEngine:
         self._last_fan_active: str | None = None  # ISO timestamp
         self._last_natvent_active: str | None = None  # ISO timestamp
         self._fan_override_active: bool = False
+        # Issue #1164: which fan the active override belongs to -- True = the thermostat's own fan (blower),
+        # False = the whole-house fan, None = unknown/no override. Only meaningful while _fan_override_active.
+        self._fan_override_is_hvac_fan: bool | None = None
         self._fan_override_time: str | None = None
         # RF remote timer selection in hours, for observability only (Issue #486).
         # None when the active override wasn't started by a remote timer, or the
@@ -2080,6 +2083,21 @@ class AutomationEngine:
         if self._override_confirm_pending:
             self._deferred_while_pending = True
 
+    def _is_whf_press(self, hvac_fan: bool) -> bool:
+        """Whether a manual fan press is a press of the WHOLE-HOUSE fan -- the one fan-identity predicate.
+
+        True only for a non-thermostat press (``hvac_fan=False``: the WHF fan entity, the RF remote, the restart
+        re-arm) under a configuration that has a WHF (``whole_house_fan`` or ``both``). Used by both consequences
+        of a WHF press -- replacing the occupant's thermostat change (Issue #1133) and suppressing HVAC for the
+        fan (Issue #495 / #1163) -- so they cannot drift. The WHF and the thermostat blower are different
+        physics: circulating air with the blower is not a decision about heat/cool, and the blower does not
+        fight the compressor. Under ``both`` only the WHF leg qualifies.
+        """
+        return not hvac_fan and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) in (
+            FAN_MODE_WHOLE_HOUSE,
+            FAN_MODE_BOTH,
+        )
+
     def _protected_active_mode(self) -> str | None:
         """The ACTIVE HVAC mode the occupant's protected change asks for, else None.
 
@@ -2364,14 +2382,10 @@ class AutomationEngine:
         # Owner principle (2026-10-31, Issue #1133): the latest manual change creates the latest override and any
         # new override REPLACES the old one -- there is no returning to an earlier one. A press of the WHOLE-HOUSE
         # fan therefore drops a thermostat change, pending or confirmed, at any grace setting (grace 0 included);
-        # when the fan session ends, CA restores what the fan paused and resumes its own plan. The rule is for
-        # the WHF only: a press of the thermostat's own fan (``hvac_fan=True``; ``fan_mode`` hvac_fan, or the
-        # thermostat leg of ``both``) leaves the heat/cool change alone, as on main. It applies exactly when this
-        # press starts or continues a WHF session -- the same fan-mode gate that suppresses HVAC for the WHF below.
-        _whf_press = not hvac_fan and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) in (
-            FAN_MODE_WHOLE_HOUSE,
-            FAN_MODE_BOTH,
-        )
+        # when the fan session ends, CA resumes its own plan. The rule is for the WHF only: a press of the
+        # thermostat's own fan (``hvac_fan=True``) leaves the heat/cool change alone, pending included. The same
+        # one predicate (``_is_whf_press()``) also gates the HVAC suppression for the WHF further down.
+        _whf_press = self._is_whf_press(hvac_fan)
         _replaced_pending = False
         if _whf_press and self._manual_change_protected():
             _LOGGER.info(
@@ -2386,10 +2400,11 @@ class AutomationEngine:
         self._note_fan_readback_recovered()
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
+        self._fan_override_is_hvac_fan = bool(hvac_fan)
         self._fan_override_time = dt_util.now().isoformat()
-        if not hvac_fan:
+        if _whf_press:
             # Issue #1144: rule 2 compares the occupant's WHOLE-HOUSE-fan press with their HVAC change; a press of the
-            # thermostat's own blower (hvac_fan=True) is not a WHF action (owner decision, Issue #1133).
+            # thermostat's own blower is not a WHF action (the one predicate, ``_is_whf_press()``, Issue #1133).
             self._whf_press_time = self._fan_override_time
         # Issue #495: only overwrite the remote-timer value when the caller has a genuine
         # opinion about it. This method is the SHARED entry point for both remote-timer
@@ -2447,7 +2462,9 @@ class AutomationEngine:
 
         _trigger = "fan_manual_override"
         if self._start_grace_period_action("manual", trigger=_trigger, duration_override=duration_override):
-            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.FAN_OVERRIDE_DETECTED)
+            self._resolve_override_grace_fsm_state(
+                kind=_OGFEventKind.FAN_OVERRIDE_DETECTED if _whf_press else _OGFEventKind.HVAC_FAN_OVERRIDE_DETECTED
+            )
         elif _replaced_pending:
             # grace 0: no grace starts, so FAN_OVERRIDE_DETECTED is not dispatched -- cancel the dropped pending
             # confirmation through the FSM (the confirm flag is FSM-owned) so it can never confirm later.
@@ -2455,9 +2472,10 @@ class AutomationEngine:
 
         # Issue #495: whole-house fan and HVAC are mutually exclusive — this was previously
         # only enforced for CA-initiated activation (_activate_fan()). A manually/remotely
-        # detected WHF-on left the AC armed for the life of the override. Scoped to
-        # WHOLE_HOUSE/BOTH; FAN_MODE_HVAC coexists with the compressor by design.
-        if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        # detected WHF-on left the AC armed for the life of the override. Scoped to a WHOLE-HOUSE-fan press
+        # (``_is_whf_press()``: WHOLE_HOUSE/BOTH and not the thermostat's own blower); the blower coexists with
+        # the compressor by design, under every configuration (Issue #1163).
+        if _whf_press:
             self.hass.async_create_task(
                 self._suppress_hvac_for_whf(
                     reason="whole-house fan manually turned on — suppressing HVAC to prevent AC/fan fighting"
@@ -2496,7 +2514,13 @@ class AutomationEngine:
                 },
             )
 
-    def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None) -> None:
+    def on_fan_turned_off(
+        self,
+        fan_before: str = "",
+        fan_after: str = "",
+        event_context_id: str | None = None,
+        hvac_fan: bool = False,
+    ) -> None:
         """Handle the user turning the fan OFF — clears fan state and gates nat-vent re-activation (Issue #359).
 
         Unlike ``handle_fan_manual_override`` (which is for fan-ON and sets ``_fan_override_active``),
@@ -2511,6 +2535,23 @@ class AutomationEngine:
                 any (Issue #482) — surfaced in the Activity Report payload as diagnostic
                 provenance data.
         """
+        # Issue #1164: which fan went off. The thermostat blower and the whole-house fan are different fans; an off
+        # report from one must not end an override (or an RF timer) that belongs to the other.
+        if (
+            self._fan_override_active
+            and self._fan_override_is_hvac_fan is not None
+            and self._fan_override_is_hvac_fan != bool(hvac_fan)
+        ):
+            _LOGGER.info(
+                "Fan-off ignored: the active fan override belongs to the %s, not the %s that went off "
+                "(fan=%s->%s remote_timer_hours=%s)",
+                "thermostat fan" if self._fan_override_is_hvac_fan else "whole-house fan",
+                "thermostat fan" if hvac_fan else "whole-house fan",
+                fan_before or "?",
+                fan_after or "?",
+                self._fan_remote_timer_hours,
+            )
+            return
         # Issue #530: a fan-off arriving inside the settle window of a just-expired
         # RF-timer-linked grace is the tail of that SAME timer boundary, not a fresh
         # event — coalesce into whatever the post-grace reconcile already decided instead

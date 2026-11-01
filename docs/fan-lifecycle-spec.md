@@ -95,6 +95,10 @@ There is a single `AutomationEngine` instance in production (the dual-engine pro
 
 This is the fan/WHF subsystem's only direct cross-lifecycle read. It does not go through `lifecycle_dispatcher.py`'s pub/sub event channel (unlike the door/window ↔ nat-vent coupling `nat-vent-lifecycle-spec.md`'s "First live disagreement" incident describes) — `_build_fan_fsm_inputs()` reads `self._natural_vent_active` directly off the engine, same canonical-attribute convention the other 3 lifecycle builders already follow (Issue #717's revert rationale: a same-instance emit/consume round-trip can never actually go stale relative to the canonical attribute, so routing through a dispatcher-synced mirror buys nothing).
 
+## Occupant Blower vs. HVAC-Off (Issue #1180)
+
+`_set_hvac_mode("off")` normally asserts thermostat `fan_mode=auto` under `hvac_fan`/`both` (post-heat blowdown, Issues #134/#277). It does not while the occupant's own thermostat-blower override is active (`_occupant_blower_override_active()`): CA turning HVAC off must not stop a blower the occupant asked for. CA's own blower use and the no-override case are unchanged; a WHF press replaces the blower override record (#1133) so it still resets. `_deactivate_fan()` already returns OVERRIDDEN for any active override (except WHF safety stops).
+
 ## Blind-Fan Coverage (Issue #1037)
 
 The fan FSM and `fan_thermostat_check` have no indoor-`None` handling: with indoor unreadable, `STOP_DEACTIVATE` / `STOP_COOLED_TO_FLOOR` cannot fire and the coordinator's reactive checks return early. The 5-minute thermostatic backstop (armed in `_activate_fan` and on reconcile adoption - not for manual/RF-timer fans with no CA session) now also runs `indoor_blind_check()`, which alerts once and ends a CA-owned nat-vent session after 30 min. It deliberately does not touch `_deactivate_fan` for min-runtime / always-on circulation (indoor-independent by design) or economizer sessions (`_economizer_active` would be left stuck; tracked in #1042). No new FSM event kind or composed axis was added; the clock and flags live on `AutomationEngine` (`_indoor_blind_*`), like `_nat_vent_exit_candidate_since`.

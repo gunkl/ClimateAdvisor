@@ -100,3 +100,19 @@ class TestOccupantOffIssue1159:
             )
             == OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
         )
+
+
+class TestIsAlwaysConfirmOrigin:
+    """Issue #1158: a press made during a door/window pause is the occupant's own change whatever the label says."""
+
+    def test_pause_and_setpoint_origins_always_confirm(self):
+        from custom_components.climate_advisor.override_confirm_split import is_always_confirm_origin
+
+        assert is_always_confirm_origin("pause")
+        assert is_always_confirm_origin("setpoint")
+
+    def test_ordinary_mode_change_still_compares_against_the_classification(self):
+        from custom_components.climate_advisor.override_confirm_split import is_always_confirm_origin
+
+        assert not is_always_confirm_origin("normal")
+        assert not is_always_confirm_origin(None)

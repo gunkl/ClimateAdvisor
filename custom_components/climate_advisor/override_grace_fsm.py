@@ -350,22 +350,21 @@ def _transition_from_grace_protecting(
         return OverrideGraceTransition(current_state, next_state, kind, outcome, inputs.now)
 
     if kind == OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED and current_state[0] == OverrideConfirmState.PENDING:
-        # Issue #1158: a confirmation started under this grace (above) must be able to end, or
-        # ``_override_confirm_pending`` would stay True for good. Same split as the no-grace and
-        # unprotected branches: CONFIRM re-protects with a fresh grace, a self-resolve leaves the
-        # running grace untouched.
-        path = decide_override_confirm_path(
-            setpoint_override=inputs.setpoint_override,
-            current_mode=inputs.current_mode or "unknown",
-            classification_mode=inputs.classification_mode,
+        # Issue #1158: a change that became pending under this grace (above) must be able to end, or
+        # ``_override_confirm_pending`` would stay True for good. Only the PATH B self-resolve reaches here in
+        # production: PATH A (confirm) first runs ``_confirm_override_action()``, whose grace restart clears the
+        # running grace's flags, so the FSM sees the no-grace state and lands on a fresh protecting grace there.
+        # A self-resolve touches no grace at all, so the running one stays.
+        return OverrideGraceTransition(
+            current_state,
+            (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE),
+            kind,
+            OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED.value,
+            inputs.now,
         )
-        if path == OverrideConfirmPathOutcome.CONFIRM and not inputs.grace_would_start:
-            next_state = (OverrideConfirmState.IDLE, GraceState.NONE)
-        else:
-            next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
-        return OverrideGraceTransition(current_state, next_state, kind, path.value, inputs.now)
 
-    # DASHBOARD_RESUME: guards on paused_by_door and is a no-op while a protecting grace runs.
+    # DASHBOARD_RESUME: resume_from_pause() restarts the grace, and that restart clears a fan-override grace's
+    # flags before this event is resolved, so production reaches the no-grace branch; a no-op here is defensive.
     # OVERRIDE_CONFIRM_EXPIRED with nothing pending: unreachable.
     return OverrideGraceTransition(current_state, current_state, kind, "noop_already_protecting", inputs.now)
 

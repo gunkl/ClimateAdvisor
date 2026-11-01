@@ -209,6 +209,7 @@ class TestFromGraceProtecting:
         assert t.outcome == "override_confirmation_started"
 
     def test_manual_override_during_pause_confirm_disabled_stays_protecting(self):
+        """Control: confirmation disabled -> already protecting, nothing pending (same on origin/main)."""
         t = transition(
             _IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE, confirm_seconds=0.0)
         )
@@ -223,14 +224,6 @@ class TestFromGraceProtecting:
         t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED))
         assert t.to_state == _IDLE_PROTECTING
         assert t.outcome == "noop_already_protecting"
-
-    def test_confirm_expired_pending_confirms_and_ends_pending(self):
-        t = transition(
-            _PENDING_PROTECTING,
-            _ev(OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED, current_mode="heat", classification_mode="cool"),
-        )
-        assert t.to_state == _IDLE_PROTECTING
-        assert t.outcome == "confirm"
 
     def test_confirm_expired_pending_self_resolves_and_keeps_the_running_grace(self):
         t = transition(

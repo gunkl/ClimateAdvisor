@@ -28,6 +28,18 @@ class OverrideConfirmPathOutcome(Enum):
     DISCARD_SELF_RESOLVED = "discard_self_resolved"
 
 
+# Override origins whose expiry always confirms, whatever the classification label says.
+# "setpoint": the occupant deliberately moved the target. "pause" (Issue #1158): the occupant pressed heat/cool on a
+# thermostat Climate Advisor had paused for an open door/window -- CA's plan there is "paused", not the day's
+# classification label, so a press equal to that label (heat on a cold day) is still the occupant's own change.
+_ALWAYS_CONFIRM_ORIGINS = frozenset({"setpoint", "pause"})
+
+
+def is_always_confirm_origin(origin: str | None) -> bool:
+    """Whether an override of this origin is confirmed at expiry regardless of the classification label."""
+    return origin in _ALWAYS_CONFIRM_ORIGINS
+
+
 def decide_override_confirm_path(
     *,
     setpoint_override: bool,
@@ -37,8 +49,8 @@ def decide_override_confirm_path(
     """Pure reimplementation of ``_confirm_override_expired()``'s PATH A/B split.
 
     Field-by-field correspondence:
-      setpoint_override    -> source == "setpoint" (a deliberate setpoint-only override
-                               always takes PATH A regardless of mode)
+      setpoint_override    -> is_always_confirm_origin(origin) (a deliberate setpoint-only override, or a press
+                               made during a door/window pause, always takes PATH A regardless of mode)
       current_mode          -> self.hass.states.get(self.climate_entity).state at expiry
       classification_mode   -> self._current_classification.hvac_mode at expiry
 

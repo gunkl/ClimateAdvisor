@@ -194,21 +194,34 @@ async def test_occupants_press_under_a_fan_grace_is_confirmed_and_ends_pending(m
     assert house.thermostat.mode == "heat"
 
 
-async def test_occupants_press_reverted_under_a_fan_grace_does_not_stay_pending(make_house) -> None:
-    """The occupant presses heat under the fan grace and puts it back before the confirmation ends: the change
-    self-resolves. Nothing may stay 'pending' (it would shield the thermostat from automation for good)."""
-    house = await make_house(fan="whf", **_sealed_house())
-    await house.open("window")
-    await house.advance(minutes=2)
+async def test_press_equal_to_the_days_plan_under_a_fan_grace_self_resolves_and_clears_pending(make_house) -> None:
+    """A heat press on a cold day (heat IS the day's plan) while a fan-override grace runs is a transient change:
+    at the end of the confirmation window it self-resolves. The pending flag must clear, and the running grace
+    must stay, or the thermostat would stay shielded from automation for good."""
+    from datetime import UTC, datetime
+
+    house = await make_house(
+        fan="whf",
+        contacts=[],
+        startup="settled",
+        start=datetime(2026, 1, 15, 7, 0, tzinfo=UTC),
+        initial_indoor_f=62.0,
+        outdoor_f=38.0,
+        high_f=44.0,
+        low_f=28.0,
+        initial_hvac_mode="heat",
+        ca_config={"fan_min_runtime_per_hour": 0, "override_confirm_seconds": 600},
+    )
+    ae = house.coordinator.automation_engine
+    await house.advance(minutes=6)
     await _press_after_refresh(house, True)
     await _advance_finely(house, 30)
+    assert ae._grace_active, "precondition: the fan override's grace is running"
+
     await house.occupant_sets_thermostat(mode="heat")
     await house.advance(minutes=2)
-    ae = house.coordinator.automation_engine
     assert ae._override_confirm_pending, "precondition: the press is awaiting confirmation"
-    await house.occupant_sets_thermostat(mode="off")
-
-    await house.advance(minutes=12)
+    await house.advance(minutes=10)
 
     assert not ae._override_confirm_pending, "a self-resolved press left the confirmation pending forever"
 

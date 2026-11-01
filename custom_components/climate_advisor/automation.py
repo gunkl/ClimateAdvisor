@@ -141,7 +141,11 @@ from .desired_state import (
     decide_scheduled_write_seq_current,
     decide_setpoint_retry_action,
 )
-from .override_confirm_split import OverrideConfirmPathOutcome, decide_override_confirm_path
+from .override_confirm_split import (
+    OverrideConfirmPathOutcome,
+    decide_override_confirm_path,
+    is_always_confirm_origin,
+)
 from .override_match import decide_override_matches_decision
 
 if TYPE_CHECKING:
@@ -3298,7 +3302,7 @@ class AutomationEngine:
             # One definition of the PATH A/B split (override_confirm_split), shared with the FSM.
             if (
                 decide_override_confirm_path(
-                    setpoint_override=source == "setpoint",
+                    setpoint_override=is_always_confirm_origin(source),
                     current_mode=current_mode,
                     classification_mode=cls_mode,
                 )
@@ -11603,7 +11607,7 @@ class AutomationEngine:
         current_mode_state = self.hass.states.get(self.climate_entity)
         return OverrideGraceFsmInputs(
             confirm_seconds=float(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS)),
-            setpoint_override=bool((confirm_source or self._override_confirm_source) == "setpoint"),
+            setpoint_override=is_always_confirm_origin(confirm_source or self._override_confirm_source),
             current_mode=current_mode_state.state if current_mode_state else None,
             classification_mode=classification_mode,
             manual_override_active=bool(self._manual_override_active),

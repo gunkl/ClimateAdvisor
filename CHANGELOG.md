@@ -3,13 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.8.19] — 2026-11-01
-
-- Fix #1143: when a window or door opens while your heating or cooling is running and Climate Advisor turns it off for the window, it now remembers that it interrupted a running cycle, including after the automatic grace period ends with the window still open. Before, it noted the system as already off, so when the outdoor air later became suitable for natural ventilation the fan was started by the idle-open path, which does not clear the window pause, and the pause stayed on while the fan ran. Now the paused path runs, which clears the pause as it starts the fan.
-## [0.8.18] — 2026-11-01
+## [0.8.21] — 2026-11-01
 
 - Fix #1158: if a window or door is open and you turn the heat or cooling on at the thermostat (for example while the whole-house fan is running), Climate Advisor no longer switches it off again on its next check, and no longer drops it ten minutes later when it happens to match the day's plan (heat on a cold day, cooling on a hot day). Your change stays as you set it, and the whole-house fan stops because your newest action wins. A press of yours that is still being confirmed also survives the fan's own pause ending.
 
+## [0.8.19] — 2026-11-01
+
+- Fix #1143: when a window or door opens while your heating or cooling is running and Climate Advisor turns it off for the window, it now remembers that it interrupted a running cycle, including after the automatic grace period ends with the window still open. Before, it noted the system as already off, so when the outdoor air later became suitable for natural ventilation the fan was started by the idle-open path, which does not clear the window pause, and the pause stayed on while the fan ran. Now the paused path runs, which clears the pause as it starts the fan.
 ## [0.8.17] — 2026-11-01
 
 - Fix #1165: if you turn the thermostat Off while a window is open and then close the window, Climate Advisor no longer turns heating or cooling back on over your Off. Your Off stays until your manual-change pause ends.

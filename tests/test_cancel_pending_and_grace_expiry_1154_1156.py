@@ -20,9 +20,15 @@ from tests.test_protect_manual_change import (
     _engine,
     _occupant_overrides,
     _off_writes,
+    _open_window,
     timers,  # noqa: F401  (fixture)
 )
 from tests.test_restore_resolved_band import _run
+
+
+def _open_window_pause(engine) -> None:
+    _open_window(engine)
+    assert engine._paused_by_door
 
 
 def _pending_change(engine) -> None:
@@ -146,5 +152,64 @@ class TestRePauseRespectsALiveChange:
         _run(engine._re_pause_for_open_sensor())
 
         assert engine._paused_by_door is False
+        assert _off_writes(engine) == []
+        assert engine._test_state.state == "heat"
+
+
+# ---------------------------------------------------------------------------
+# #1156 review follow-ups: a CONFIRMED override whose protecting grace was replaced still ends at expiry
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmedOverrideWithAReplacementGraceStillEnds:
+    """fan-off and dashboard Resume replace the override's protecting grace with an unprotected one while the
+    override stays live. That grace expiring ends the override (and honours an open window, rule 3): keeping the
+    override would leave it with no timer and no end."""
+
+    def test_fan_off_grace_expiry_ends_the_override_and_repauses_for_an_open_window(self, timers):  # noqa: F811
+        engine = _engine("heat", override_confirm_seconds=0, manual_grace_seconds=1800)
+        _occupant_overrides(engine)
+        assert engine._manual_override_active and engine._grace_protects_override
+        engine._window_open = True
+        engine._clear_fan_flags_and_start_grace(reason="occupant switched the thermostat fan off")
+        assert engine._grace_active and not engine._grace_protects_override
+        assert engine._manual_override_active, "fan-off leaves the thermostat override live"
+
+        engine._on_grace_expired("manual", 1800, False)
+        _run(engine._re_pause_for_open_sensor())
+
+        assert engine._manual_override_active is False, "the override must not outlive its grace with no timer"
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"
+
+    def test_dashboard_resume_grace_expiry_ends_the_override(self, timers):  # noqa: F811
+        engine = _engine("heat", override_confirm_seconds=0, manual_grace_seconds=1800)
+        _open_window_pause(engine)
+        _occupant_overrides(engine, source="setpoint")
+        assert engine._manual_override_active and engine._paused_by_door
+        _run(engine.resume_from_pause())
+        assert engine._grace_active and not engine._grace_protects_override
+        assert engine._manual_override_active
+
+        engine._on_grace_expired("manual", 1800, False)
+
+        assert engine._manual_override_active is False, "the override must not outlive its grace with no timer"
+
+
+class TestRePauseEarlyReturnLeavesNoStalePauseRecord:
+    def test_a_change_landing_after_the_repause_flags_were_applied_replaces_the_pause(self, timers):  # noqa: F811
+        """``_on_grace_expired`` records the re-pause flags and schedules the task; the occupant's plain
+        mode change (not from Off, so the during-pause handler does not run) lands before the task does."""
+        engine = _engine("heat", override_confirm_seconds=0, manual_grace_seconds=1800, automation_grace_seconds=300)
+        _window_reopened_during_a_window_close_grace(engine)
+        engine._on_grace_expired("automation", 300, False)  # window open: RE_PAUSE flags recorded
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "heat", "the pause command has not run yet"
+
+        _occupant_overrides(engine)  # plain change while the HVAC is still running
+        _run(engine._re_pause_for_open_sensor())
+
+        assert engine._paused_by_door is False, "no pause may stay recorded over the occupant's change"
+        assert engine._pre_pause_mode is None
         assert _off_writes(engine) == []
         assert engine._test_state.state == "heat"

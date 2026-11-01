@@ -8703,6 +8703,21 @@ class AutomationEngine:
                 archetype,
             )
 
+    def _discard_pause_record_for_manual_change(self) -> None:
+        """Drop the door/window pause record because the occupant's own thermostat change replaces it.
+
+        MANUAL_OVERRIDE_DURING_PAUSE lands on NORMAL from PAUSED_ACTIVE/PAUSED_IDLE, or GRACE from
+        PAUSED_DURING_GRACE (grace left running) (Issue #594 Phase R, Step 0 / #757 Phase 6 Step 4);
+        the pause entity/time/pre-pause mode go with it. Shared by ``handle_manual_override_during_pause()``
+        and the ``_re_pause_for_open_sensor()`` early return (Issue #1156).
+        """
+        from .door_window_fsm import DoorWindowFsmEventKind
+
+        self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE)
+        self._paused_entity = None
+        self._paused_since = None
+        self._pre_pause_mode = None
+
     async def handle_manual_override_during_pause(
         self,
         *,
@@ -8729,16 +8744,7 @@ class AutomationEngine:
             return
         _LOGGER.info("Manual HVAC override detected during door/window pause")
 
-        from .door_window_fsm import DoorWindowFsmEventKind
-
-        # Issue #594 Phase R, Step 0 / #757 Phase 6 Step 4: routed through the shared,
-        # unconditionally FSM-authoritative dispatcher — MANUAL_OVERRIDE_DURING_PAUSE
-        # lands on NORMAL from PAUSED_ACTIVE/PAUSED_IDLE, or GRACE from
-        # PAUSED_DURING_GRACE (grace left running).
-        self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE)
-        self._paused_entity = None
-        self._paused_since = None
-        self._pre_pause_mode = None
+        self._discard_pause_record_for_manual_change()
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         # Start confirmation period — wait before formally accepting the override
@@ -9020,17 +9026,19 @@ class AutomationEngine:
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         # Issue #1156: an expiring grace that is NOT the occupant's own (window-close resume, fan-off
-        # cooldown, dashboard resume, ...) must not undo a protected thermostat change -- neither drop
-        # its pending confirmation nor re-pause over it. It just ends. The occupant's own grace
-        # (``_grace_protects_override``) is the designed moment to honour an open window, so it falls
-        # through to the branches below unchanged.
-        if not self._grace_protects_override and self._manual_change_protected():
+        # cooldown, dashboard resume, ...) must not drop a thermostat change that is still awaiting its
+        # confirmation, nor re-pause over it. It just ends; the confirmation timer carries on.
+        # Deliberately NOT keyed on a CONFIRMED override: its protection IS a grace, and fan-off /
+        # dashboard-resume replace that protecting grace with an unprotected one while the override
+        # stays live. That replacement grace expiring is the end of the override's grace (a window left
+        # open is then honoured by the re-pause below, rule 3); keeping the override here would leave it
+        # with no timer and no end. The occupant's own grace (``_grace_protects_override``) likewise
+        # falls through to the branches below unchanged.
+        if self._override_confirm_pending and not self._manual_override_active and not self._grace_protects_override:
             _LOGGER.info(
-                "%s grace expired while the occupant's thermostat change is protected (confirmed=%s pending=%s)"
+                "%s grace expired while the occupant's thermostat change is awaiting confirmation"
                 " -- ending the grace only; not re-pausing, not clearing the change",
                 source,
-                self._manual_override_active,
-                self._override_confirm_pending,
             )
             self._cancel_grace_timers_action()
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
@@ -9328,6 +9336,10 @@ class AutomationEngine:
             # occupant's latest choice wins, so do not pause over it.
             if self._manual_change_protected():
                 _LOGGER.info("Skipping re-pause -- the occupant's thermostat change is protected")
+                # _on_grace_expired() already recorded the re-pause flags; a change that landed before this
+                # task ran replaces that pause (the HVAC is running at the occupant's choice).
+                if self._paused_by_door:
+                    self._discard_pause_record_for_manual_change()
                 return
             if self._is_within_planned_window_period():
                 _LOGGER.info(

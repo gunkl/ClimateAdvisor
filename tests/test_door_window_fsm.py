@@ -381,7 +381,8 @@ class TestFromPausedDuringGrace:
             _ev(
                 DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
                 within_planned_window=True,
-                hvac_mode="cool",
+                hvac_mode="off",
+                pre_pause_mode_active=True,
             ),
         )
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE

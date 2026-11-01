@@ -1,0 +1,100 @@
+{
+  "name": "issue_1159_mild_day_occupant_off_kept_through_grace",
+  "description": "Mild day (classification hvac_mode off), indoor 76F above the 74F comfort ceiling, so Climate Advisor is cooling. At 12:00 the occupant switches the thermostat Off. Climate Advisor confirms it at 12:10 as a manual change and keeps it for the 60-minute manual grace. The 12:30 classification refresh must not switch cooling back on.",
+  "source": "Issue #1159 (design gap since #249: the 'off' classification is a label, CA arms the band)",
+  "issue": 1159,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant: on a mild day you switch the thermostat Off. Before the fix the confirm window ended as 'self-resolved' (Off equalled the label off), no grace, no notice, and the next refresh wrote cool again within half an hour.",
+    "Three-exercise protocol (CLAUDE.md #10):",
+    "(a) Effectiveness: tests/test_override_off_mild_day.py is revert-proven (override_confirmed missing, cool re-commanded at the refresh). This pending scenario is the production-harness mirror; run it with the fix reverted and the 12:10 override_confirmed and 12:35 override_active assertions fail.",
+    "(b) Docs<->production: docs/grace-periods-spec.md State Machine ('An occupant's Off on a mild day (Issue #1159)').",
+    "(c) User outcome if this regresses: the occupant's Off is silently undone within 30 minutes with no notice, every mild day.",
+    "The 12:30 refresh uses day_type warm (still hvac_mode off) so it is not event-deduped against the 12:01 mild classification."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "manual_grace_seconds": 3600,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "off"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T11:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 80.0
+    },
+    {
+      "time": "2026-07-15T11:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: classification mode off, but the comfort-edge selector arms cool at the ceiling (indoor above 74F)."
+    },
+    {
+      "time": "2026-07-15T12:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "note": "Occupant switches the thermostat Off -> override detection, 10-min confirm window."
+    },
+    {
+      "time": "2026-07-15T12:10:00",
+      "type": "temp_update",
+      "indoor_f": 76.5,
+      "outdoor_f": 81.0,
+      "note": "Confirm window elapses -> override confirmed (was: self-resolved), 60-minute manual grace starts."
+    },
+    {
+      "time": "2026-07-15T12:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "30-minute refresh inside the grace: must not switch cooling back on."
+    },
+    {
+      "time": "2026-07-15T12:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 81.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T12:10:00",
+      "expect": "override_confirmed",
+      "reason": "The occupant's Off is confirmed as a manual change, like on hot or cold days.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T12:35:00",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["cool", "heat"],
+      "since": "2026-07-15T12:00:00",
+      "reason": "The refresh inside the manual grace does not switch heating or cooling back on.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T12:35:00",
+      "expect": "override_active",
+      "reason": "The override and its grace survive the refresh (not adopted as 'automation agrees').",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "An occupant's Off on a mild day is kept through the manual grace instead of being undone at the next refresh.",
+    "observed_behavior": "Off at 12:00 -> override confirmed 12:10 -> 12:30 refresh leaves the thermostat Off -> override still active at 12:35.",
+    "expected_behavior": "grace-periods-spec State Machine: an Off is a real manual change on every day type unless CA itself is holding HVAC off for an open door/window."
+  }
+}

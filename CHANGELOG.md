@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.25] — 2026-11-01
+
+- Test tooling #1179 (no change to how Climate Advisor behaves at home): the randomly generated test days now check the rule "the whole-house fan and the heating/cooling never run together, and your newest action wins" at the same 30-second tolerance the real system uses (they forgave 5 minutes before), no longer exercise the unsupported "both" fan setting, and add the cases the rule was never tried on: you turn the heat or AC on after the fan, 1-3 seconds after Climate Advisor's own pause, the AC already running when you start the fan, and a press of the thermostat's own blower under each supported fan setting.
+
 ## [0.8.24] — 2026-11-01
 
 - Fix #1195: with the HVAC-fan setting, if you close the windows within 5 minutes of Climate Advisor starting the blower for fresh air, the blower now stops by itself once those 5 minutes are up. Before, it ran on (and Status kept saying natural ventilation) behind closed windows, sometimes overnight.

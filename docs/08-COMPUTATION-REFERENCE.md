@@ -2446,6 +2446,8 @@ Called from three sites so no WHF-activation path can bypass it:
 
 Stops go through `_enforce_whf_safety_locked` / `_deactivate_fan(safety=True)` only; an override is never an exemption from rules 1 and 2.
 
+**Known limitation (accepted, Issue #1203):** if you press heat or AC within about 3 seconds of Climate Advisor turning the HVAC off for the whole-house fan, the press is taken as Climate Advisor's own echo rather than your action. The fan then keeps running alongside the HVAC until every door and window is closed, the fan is stopped, or the thermostat is switched off and back on (the off/on recovery is not covered by a test). Pinned by the strict xfails in `tests/test_sim_generator.py` (generated seeds 21000027, 21000052, 21000080, 21000087); if they start passing, the limitation is gone and this note and the test excuse should be removed.
+
 #### I. Nat-Vent Mid-Session Cycle-Off Missing the OFF-Direction Guard (Issue #955)
 
 Occupant impact: a legitimate whole-house-fan cycle-off *within* an ongoing nat-vent session (holding indoor temp inside its on/off band — see §C) could briefly show as a fabricated "Fan running (external)" immediately followed by "Fan stopped (external)" in the Activity Report, moments after CA's own `nat_vent_cycling_off` action.

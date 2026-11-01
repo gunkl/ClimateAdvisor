@@ -1,6 +1,6 @@
 {
   "name": "2026-03-28-overnight-door-open",
-  "description": "Door open all day (87F high); 555 min comfort violations; outdoor dropped to 53F overnight",
+  "description": "Door open all day (87F high); 555 min comfort violations; outdoor dropped to 53F overnight [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "activity-report",
   "issue": 69,
   "notes": [
@@ -73,13 +73,13 @@
     },
     {
       "at": "2026-03-28T20:00:00",
-      "expect": "natural_ventilation",
-      "reason": "outdoor 74F dropped back to <= threshold 75F while paused \u00e2\u20ac\u201d re-activate nat vent"
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': outdoor 74F dropped back to <= threshold 75F while paused \u00e2\u20ac\u201d re-activate nat vent"
     },
     {
       "at": "2026-03-28T23:30:00",
-      "expect": "nat_vent_comfort_floor_exit",
-      "reason": "indoor 70F hit comfort_heat floor \u00e2\u20ac\u201d nat vent exits and heat restores (Issue #99 behavior)"
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'nat_vent_comfort_floor_exit': indoor 70F hit comfort_heat floor \u00e2\u20ac\u201d nat vent exits and heat restores (Issue #99 behavior)"
     }
   ]
 }

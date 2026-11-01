@@ -1615,7 +1615,15 @@ class TestOnGraceExpiredFsmAuthoritative:
 
     def _make_engine_grace_origin(self, *, paused_during_grace: bool, outdoor: float) -> AutomationEngine:
         engine = _make_automation_engine(
-            {"comfort_heat": 70, "comfort_cool": 76, "natural_vent_delta": 3, "sensor_debounce_seconds": 0}
+            {
+                "comfort_heat": 70,
+                "comfort_cool": 76,
+                "natural_vent_delta": 3,
+                "sensor_debounce_seconds": 0,
+                # Issue #1140: nat-vent needs a working fan
+                "fan_mode": "whole_house_fan",
+                "fan_entity": "fan.whf",
+            }
         )
         engine._doorwindow_fsm_authoritative = True
         engine._grace_active = True
@@ -1727,7 +1735,15 @@ class TestRePauseForOpenSensorFsmAuthoritative:
 
     def _make_engine(self, *, paused_by_door: bool) -> AutomationEngine:
         engine = _make_automation_engine(
-            {"comfort_heat": 70, "comfort_cool": 76, "natural_vent_delta": 3, "sensor_debounce_seconds": 0}
+            {
+                "comfort_heat": 70,
+                "comfort_cool": 76,
+                "natural_vent_delta": 3,
+                "sensor_debounce_seconds": 0,
+                # Issue #1140: nat-vent needs a working fan
+                "fan_mode": "whole_house_fan",
+                "fan_entity": "fan.whf",
+            }
         )
         engine._paused_by_door = paused_by_door
         engine._last_outdoor_temp = 68.0

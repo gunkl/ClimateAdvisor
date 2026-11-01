@@ -67,6 +67,24 @@
     "2": "classification_suppressed_paused",
     "3": "paused"
    }
+  },
+  {
+   "scenario": "2026-03-28-overnight",
+   "failing_assertions": [
+    2,
+    3
+   ],
+   "first_difference": "a2@2026-03-28T20:00 expected paused, real morning_wakeup_skipped (morning_wakeup at 06:30:00.275); a3@2026-03-28T23:30 expected paused, real bedtime_setback_skipped (bedtime at 22:30:00.275)",
+   "evidence": "Issue #1140 re-signed this golden: the install has no fan, so the 20:00 window open pauses HVAC instead of starting windows-only nat-vent, and the scenario's last event-driven decision is 'paused'. FakeHass models only the listed events, so 'paused' stays the last decision. Real HA also runs the default daily schedule (wake 06:30, bedtime 22:30), which emits morning_wakeup_skipped / bedtime_setback_skipped because the pause is in force; the outcomes layer is last-decision-wins, so those are what a2/a3 see. Real log: 'Door/window pause (binary_sensor.door_window): HVAC already off - pause flag set'. Dump: .pytest_cache/realha/2026-03-28-overnight.real.json",
+   "occupant_view": "Same end state for the person: HVAC stays off while the window is open, and the wake-up and bedtime routines correctly skip. No occupant impact.",
+   "issue_or_justification": "Trigger divergence (daily schedule not modeled by the scenario), same mechanism as cool_all_day_heat_all_day and warm_day_planned_window_no_pause. Not a production defect.",
+   "class": "T",
+   "reviewer": "Craftsman triage 2026-11-01 (awaiting human review)",
+   "date": "2026-11-01",
+   "failing_outcomes": {
+    "2": "morning_wakeup_skipped",
+    "3": "bedtime_setback_skipped"
+   }
   }
  ]
 }

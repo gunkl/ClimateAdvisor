@@ -167,7 +167,8 @@ class TestLaterWindowDoesNotPauseTheOccupantsChange:
 
     def test_control_an_automation_grace_without_an_override_does_not_block_the_pause(self, timers):
         """Owner decision D16: a grace with no manual override behind it never protects anything here."""
-        engine = _engine("heat", manual_grace_seconds=0)
+        # Issue #1140: nat-vent needs a working fan, so this control install has a whole-house fan
+        engine = _engine("heat", manual_grace_seconds=0, fan_mode="whole_house_fan", fan_entity="fan.whf")
         engine._start_grace_period("automation", trigger="sensor_closed_resume")
         assert engine._grace_active and not engine._manual_change_protected()
         # make the nat-vent gate viable so the #655 bypass falls through the (override-less) grace

@@ -85,6 +85,9 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
         "automation_grace_period": 300,
         "manual_grace_notify": False,
         "automation_grace_notify": False,
+        # Issue #1140: nat-vent needs a working fan
+        "fan_mode": "whole_house_fan",
+        "fan_entity": "fan.whf",
     }
     ae._current_classification = _make_hot_classification()
     ae._natural_vent_active = False

@@ -1,6 +1,6 @@
 {
   "name": "nat-vent-evening-activation",
-  "description": "Evening cool-down: outdoor 70F < indoor 76F — nat vent activates for free cooling",
+  "description": "Evening cool-down: outdoor 70F < indoor 76F — nat vent activates for free cooling [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 115,
   "verdict": {
@@ -32,8 +32,8 @@
   "assertions": [
     {
       "at": "2026-04-20T18:00:00",
-      "expect": "natural_ventilation",
-      "reason": "outdoor 70F < indoor 76F (beneficial direction); outdoor 70F < threshold 79F; indoor 76F > comfort_heat 70F; indoor 76F <= ceiling_threshold 76F — nat vent activates"
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': outdoor 70F < indoor 76F (beneficial direction); outdoor 70F < threshold 79F; indoor 76F > comfort_heat 70F; indoor 76F <= ceiling_threshold 76F — nat vent activates"
     }
   ]
 }

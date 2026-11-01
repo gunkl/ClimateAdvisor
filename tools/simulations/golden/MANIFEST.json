@@ -14,8 +14,8 @@
     "issue": 95
   },
   "2026-03-28-overnight": {
-    "sha256": "0a888340544f632afdde84b823688e6a82f7c322a1d603c0131c54d9b3d29faf",
-    "signed": "2026-07-02",
+    "sha256": "d6fdf4cfd8ce2777f137fcac8e13949e7a7a7c5a9d7264f6d154b89d54992d21",
+    "signed": "2026-11-01",
     "issue": 69
   },
   "away-mode-classification-cycle": {
@@ -29,18 +29,18 @@
     "issue": 115
   },
   "nat-vent-evening-activation": {
-    "sha256": "9114cf34c3501d8884b11e39a6ae6728121a50ee04b83a839b85c25a8dae1471",
-    "signed": "2026-07-02",
+    "sha256": "9d01fe543a1c56ad1dee5c7a8b82add3b3ad270231ea73d2f49a6322d0945a1e",
+    "signed": "2026-11-01",
     "issue": 115
   },
   "nat-vent-indoor-hot-outdoor-near-comfort": {
-    "sha256": "d1d8b2d815d4c855da2f7187ef182aa1600e9ab3d752957b63b00a104be9ab24",
-    "signed": "2026-07-02",
+    "sha256": "8d7bb963114a05be7dd43396d4efdadef5d0acc4d57cf1cde5997ff17335ee0a",
+    "signed": "2026-11-01",
     "issue": 115
   },
   "nat-vent-outdoor-rises-above-indoor-exit": {
-    "sha256": "93414d8a93af51fe660d5c2a28715d27bb48d16d79ba7cabcce9406702c09b5a",
-    "signed": "2026-07-02",
+    "sha256": "dc756ef34cabc0a9a686aa261597228f6e9e45c6ee2afeb8683f638571bbc8c3",
+    "signed": "2026-11-01",
     "issue": 115
   },
   "nat-vent-outdoor-warmer-no-activate": {
@@ -49,8 +49,8 @@
     "issue": 115
   },
   "cold_morning_warm_day_no_breach": {
-    "sha256": "4a871e1b918974246f6057e46da54c0b12071cdf9f74d6d0e4e7289fe24feff3",
-    "signed": "2026-06-10",
+    "sha256": "1413d744a97f441be6fb27d7b2cde2220474c55066549db6f2c59ef2effe0dd4",
+    "signed": "2026-11-01",
     "issue": 249
   },
   "cool_all_day_heat_all_day": {
@@ -64,18 +64,18 @@
     "issue": 136
   },
   "mild_all_day_nat_vent_only": {
-    "sha256": "27585a3981a1f663c38d7e1532219095b8a2d76f767befe5a2a77925d87dcc78",
-    "signed": "2026-06-10",
+    "sha256": "161aa0ff3418c7b512adc0f2f695eebd1353c6a1c89fcfb7ef79e915769e6c5e",
+    "signed": "2026-11-01",
     "issue": 136
   },
   "warm_day_ceiling_breach_ac_defense": {
-    "sha256": "31d131e30fbedb245ed4c9dfec4154a8a5e115d153d97d527ef89b76f0ef80b1",
-    "signed": "2026-06-18",
+    "sha256": "8d5e146ec5d50900028a7bb07d686111a8f60fde08ba0e1de1b014783e1af055",
+    "signed": "2026-11-01",
     "issue": 136
   },
   "warm_day_forecast_improves_guard_dormant": {
-    "sha256": "04dc45199a196b5251c5a77d326ca735ce574ec2000b3f3a84099d94eaab1d4d",
-    "signed": "2026-06-13",
+    "sha256": "28ec9433f8693d41470089163e8dd2d74e78e4dc337c0ef6e90b276727448efd",
+    "signed": "2026-11-01",
     "issue": 136
   },
   "away_occupancy_cool_mode_setback": {
@@ -89,13 +89,13 @@
     "issue": 220
   },
   "nat_vent_active_indoor_in_band_guard_dormant": {
-    "sha256": "324173cda2b5e1f194caa839154761aa08813005c5f60aff1f21e2676c82b9f4",
-    "signed": "2026-06-13",
+    "sha256": "c15aae3a90e5ab9a8b420ff500eff77c7ffe8e1afe2f5106a92d14dce0764e12",
+    "signed": "2026-11-01",
     "issue": 218
   },
   "nat_vent_ceiling_breach_hvac_escalation": {
-    "sha256": "309d3a79b4cf365d44bebffac152949018dc50c04960fac5ef22af94e51f0961",
-    "signed": "2026-06-13",
+    "sha256": "88fbf366b5e9e7bb80b7af7411e2d37758c74077e5eb7bee075f14d2e6e28b58",
+    "signed": "2026-11-01",
     "issue": 218
   },
   "startup_indoor_above_cool_nat_vent_not_running": {
@@ -114,8 +114,8 @@
     "issue": 249
   },
   "ceiling_guard_fires_when_outdoor_stays_below_indoor": {
-    "sha256": "5f9e753a9a8300a52653b271ae179713603dfb0b366b6516d67d73aaac5791d4",
-    "signed": "2026-06-13",
+    "sha256": "c08dff3972655d32233ebd9903bb560e7a354e96540dc13ea893be54e1217ee0",
+    "signed": "2026-11-01",
     "issue": 247
   },
   "p3_warm_day_dual_thermostat_comfort_band": {
@@ -124,8 +124,8 @@
     "issue": 249
   },
   "p3_warm_day_natvent_band_stays_armed": {
-    "sha256": "46c068ae62d49ceee089975afa8842e1169e31365d4f26fe91798e5509bd4211",
-    "signed": "2026-06-10",
+    "sha256": "89227bf5bc6dcd5e32f37775cb7f30662de57b809adb942c0dca2654aa33d1dc",
+    "signed": "2026-11-01",
     "issue": 249
   },
   "p3_cold_day_heat_floor_band": {
@@ -139,13 +139,13 @@
     "issue": 249
   },
   "away_with_active_natvent_transition": {
-    "sha256": "10329e957a044a97c35e45aa2ca51f24f9470351c383dcf5edc67c77c68ef935",
-    "signed": "2026-06-10",
+    "sha256": "529cef693f29f535d7b361a4a42584a1fd96d22e7cb7dc9a7b2d45c983d11788",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "away_natvent_exits_at_comfort_ceiling": {
-    "sha256": "4fe9c92913a5d397e8321fbc4421836d16df9af52a6425e41c7939ed5d53dad3",
-    "signed": "2026-09-02",
+    "sha256": "19e95d305406fb55d97b404c0986cc6a9022bea6efa135bda3d66b545c01ad61",
+    "signed": "2026-11-01",
     "issue": 231
   },
   "mild_day_planned_window_no_pause": {
@@ -169,8 +169,8 @@
     "issue": 229
   },
   "away_natvent_activates_free_cooling": {
-    "sha256": "9f4c6745e1b2ecc30c8612d5f64d01e9a2745fa385e539f95ee7e41aed8c4857",
-    "signed": "2026-06-10",
+    "sha256": "0e81edace67424fd38865fbaf6488ad941a3ba1614444e28bb064f7c174ae041",
+    "signed": "2026-11-01",
     "issue": 231
   },
   "away_cold_day_setback_heat": {
@@ -184,8 +184,8 @@
     "issue": 226
   },
   "ceiling_guard_dormancy_nat_vent_active_in_band": {
-    "sha256": "18c95ac064f52e71c719d55570f783fa1ce9194a360b9b8cdc7d5633b29e7798",
-    "signed": "2026-06-13",
+    "sha256": "f5a8d6ddd3120860547b90f362127468f9b22fd995034491e4696b60c7c66640",
+    "signed": "2026-11-01",
     "issue": 218
   },
   "cold_day_occupancy_away": {
@@ -399,8 +399,8 @@
     "issue": 637
   },
   "issue_637_paused_during_grace_nat_vent_exit": {
-    "sha256": "7399c938fd7bbe2299acd4f8539025b29385722355848126b493c6327e391cb7",
-    "signed": "2026-09-02",
+    "sha256": "e2c5b83b3a98a9554f339c54f63bfd793ba13ddcd9f7e0963a5dca55550fdbb2",
+    "signed": "2026-11-01",
     "issue": 637
   },
   "override_second_override_during_grace": {

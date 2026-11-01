@@ -1,6 +1,6 @@
 {
   "name": "nat-vent-outdoor-rises-above-indoor-exit",
-  "description": "Nat vent active; outdoor rises above indoor — new directional exit fires before threshold is crossed",
+  "description": "Nat vent active; outdoor rises above indoor — new directional exit fires before threshold is crossed [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
   "source": "synthetic",
   "issue": 115,
   "verdict": {
@@ -39,13 +39,13 @@
   "assertions": [
     {
       "at": "2026-04-20T18:00:00",
-      "expect": "natural_ventilation",
-      "reason": "outdoor 70F < indoor 76F and below threshold 79F; indoor 76F <= ceiling_threshold 76F — nat vent activates"
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': outdoor 70F < indoor 76F and below threshold 79F; indoor 76F <= ceiling_threshold 76F — nat vent activates"
     },
     {
       "at": "2026-04-20T20:00:00",
-      "expect": "nat_vent_outdoor_rise_exit",
-      "reason": "outdoor 74.5F >= indoor 74.0F — directional exit fires; outdoor still below threshold 79F but airflow no longer beneficial"
+      "expect": "paused",
+      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'nat_vent_outdoor_rise_exit': outdoor 74.5F >= indoor 74.0F — directional exit fires; outdoor still below threshold 79F but airflow no longer beneficial"
     }
   ]
 }

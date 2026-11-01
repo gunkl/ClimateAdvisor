@@ -226,11 +226,12 @@ class TestOffWithOpenWindowIsTreatedAsOnHotDays:
 
 
 class TestOffWithCaDoorWindowPauseIsTreatedAsOnHotDays:
-    """An occupant's Off is always a manual change, even when CA's own door/window pause is in force.
+    """An occupant's Off is always a manual change, even when a door or window opens around it.
 
-    Two routes to ``_paused_by_door`` with an Off in play: the window opens inside the confirm window
-    (the pause engages before the confirm fires), or ``handle_door_window_open`` runs while the override is
-    active. In both the Off is kept, never adopted, and nothing is written; the hot row is the control.
+    Two routes: the window opens inside the confirm window, or ``handle_door_window_open`` runs while the
+    override is active. Since #1133 a pending or confirmed manual change is protected, so CA does not pause
+    over it in either route (``_paused_by_door`` stays False). In both the Off is kept, never adopted, and
+    nothing is written; the hot row is the control.
     """
 
     _DAYS = TestOffWithOpenWindowIsTreatedAsOnHotDays._DAYS
@@ -248,12 +249,12 @@ class TestOffWithCaDoorWindowPauseIsTreatedAsOnHotDays:
             _run(e.handle_door_window_open("binary_sensor.window"))
 
     @_DAYS
-    def test_pause_engaged_before_confirm_keeps_off_until_grace_expiry(self, day, indoor, ca_first):
+    def test_window_opened_before_confirm_keeps_off_until_grace_expiry(self, day, indoor, ca_first):
         s = _Scene(day=day, indoor=indoor, ca_first=ca_first)
         s.occupant_sets("off", old_mode=ca_first)  # 12:00
         s.clock.advance(minutes=5)
-        self._open_window(s)  # 12:05: CA pauses (override still unconfirmed)
-        assert s.engine._paused_by_door
+        self._open_window(s)  # 12:05: the unconfirmed Off is protected (#1133), so CA does not pause over it
+        assert not s.engine._paused_by_door
         s.clock.advance(minutes=5)
         s.confirm_elapses()
         assert "override_confirmed" in s.events

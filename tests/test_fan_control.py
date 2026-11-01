@@ -1261,47 +1261,52 @@ class TestManualOverrideEndsNatVentDespiteRfRemoteTimer:
         engine.hass.services.async_call.assert_not_called()
         assert engine._fan_active is True  # unchanged
 
-    def test_all_four_manual_override_conflict_sites_route_through_shared_helper(self):
-        """Issue #748's five-whys found the bug's deepest root cause was four
-        near-identical inline copies of the "stand WHF down on override conflict"
-        logic, only one of which got fixed if patched by hand. Guard against a future
-        edit reintroducing a fifth inline duplicate (which would silently skip the
-        bypass_absolute_override fix) by asserting the source has exactly one call
-        site that constructs the 'ending free cooling' reason string directly —
-        inside the shared helper — and that every other reference to it is a call
-        into that helper.
-        """
-        import inspect
+    def test_override_only_fan_is_physically_turned_off_by_the_stand_down(self):
+        """Issue #1144 H2: an override-only fan (manual/RF press) has ``_fan_active=False`` while it physically
+        runs. The stand-down used to report ALREADY_IN_STATE and leave it running next to the occupant's heat;
+        it must now turn it off, RF timer or not, and the occupant outcome is a stopped fan."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._fan_active = False
+        engine._fan_override_active = True
+        engine._fan_remote_timer_hours = 2.0
+        engine._get_fan_physical_state_callback = lambda: True
+        state_mock = MagicMock()
+        state_mock.state = "heat"
+        engine.hass.states.get = MagicMock(return_value=state_mock)
 
-        from custom_components.climate_advisor import automation as automation_module
+        asyncio.run(engine._stand_down_whf_for_override_conflict(mode="heat", indoor_temp=70.0, event_source="test"))
 
-        source = inspect.getsource(automation_module)
-        inline_reason_constructions = source.count('f"manual override to {')
-        assert inline_reason_constructions == 1, (
-            "Expected exactly one inline construction of the override-conflict reason string "
-            "(inside _stand_down_whf_for_override_conflict) — found "
-            f"{inline_reason_constructions}. A new call site building this reason directly "
-            "(instead of calling the shared helper) would bypass the Issue #748 mutex fix."
-        )
-        helper_call_sites = source.count("self._stand_down_whf_for_override_conflict(")
-        assert helper_call_sites == 4, (
-            f"Expected all 4 known manual-override-conflict call sites to route through the "
-            f"shared helper, found {helper_call_sites} call(s)."
-        )
+        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[:2] == ("fan", "turn_off")]
+        assert fan_calls, "the occupant's heat must stop the physically running override-only fan"
+
+    def test_stand_down_stop_inside_the_rate_limit_window_still_executes(self):
+        """Issue #1144: a safety stop is never deferred by the 300 s toggle floor."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._fan_active = True
+        _now = datetime(2026, 3, 19, 14, 30, 0)
+        engine._fan_toggle_command_time = _now - timedelta(seconds=20)  # inside the 300 s floor
+        state_mock = MagicMock()
+        state_mock.state = "cool"
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=_now):
+            asyncio.run(
+                engine._stand_down_whf_for_override_conflict(mode="cool", indoor_temp=70.0, event_source="test")
+            )
+
+        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[:2] == ("fan", "turn_off")]
+        assert fan_calls, "rate-limited: the hard AC/WHF mutex stop was deferred"
 
 
 class TestSealedHouseWhfGuard:
-    """Issue #882: reproduction of the 2026-09-09 live incident — a WHF session
-    started via a QuietCool RF remote timer kept running for ~5m53s after all
-    monitored doors/windows closed, until an unrelated timer expiry happened to
-    turn it off. Occupant impact: the whole-house fan pulled outdoor air through
-    a sealed house with nothing watching for it.
+    """Issue #882 / #1144: reproduction of the 2026-09-09 live incident -- a WHF session started via a
+    QuietCool RF remote timer kept running for ~5m53s after all monitored doors/windows closed, until an
+    unrelated timer expiry happened to turn it off. Occupant impact: the whole-house fan pulled outdoor air
+    through a sealed house with nothing watching for it.
 
-    Root cause: Fix D (Issue #277, handle_all_doors_windows_closed()) only
-    checked _fan_active, which a manual/RF-remote override never sets (it sets
-    _fan_override_active instead) — so an override session was invisible to the
-    one shutoff that's supposed to enforce "never run the WHF against a sealed
-    house."
+    Issue #1144 turned the sealed-house guard into the WHF safety enforcer (``enforce_whf_safety``), which
+    reads ground truth and also covers a fan switched on while the house was already sealed. These tests
+    assert OUTCOMES (a ``fan.turn_off`` went out, the override ended), not call sites.
     """
 
     def _engine_with_active_override(self, *, sensor_open: bool) -> AutomationEngine:
@@ -1314,47 +1319,59 @@ class TestSealedHouseWhfGuard:
         engine._fan_override_active = True
         engine._fan_remote_timer_hours = 2.0
         engine._sensor_check_callback = lambda: sensor_open
+        engine._get_fan_physical_state_callback = lambda: True
         return engine
 
+    @staticmethod
+    def _fan_off_calls(engine):
+        return [c for c in engine.hass.services.async_call.call_args_list if c.args[:2] == ("fan", "turn_off")]
+
     def test_override_session_stopped_when_all_sensors_close(self):
-        """The exact incident scenario: a manual/RF-remote override session, no
-        _fan_active, all sensors closed — the guard must still turn the fan off,
-        bypassing the Issue #486 absolute-override guard the same way Issue #748's
-        hard AC/WHF mutex already does."""
+        """The exact incident scenario: a manual/RF-remote override session, no _fan_active, all sensors
+        closed -- the enforcer must still turn the fan off, bypassing the Issue #486 absolute-override guard."""
         engine = self._engine_with_active_override(sensor_open=False)
 
-        result = asyncio.run(engine._enforce_sealed_house_whf_guard(reason="test"))
+        result = asyncio.run(engine.enforce_whf_safety("test"))
 
-        assert result is not FanCommandResult.OVERRIDDEN
-        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
-        assert fan_calls, "WHF must be turned off once all sensors close, even under an active override"
+        assert result is FanCommandResult.EXECUTED
+        assert self._fan_off_calls(engine), "WHF must be turned off once all sensors close, even under an override"
+        assert engine._fan_override_active is False, "a safety stop ends the fan override"
 
     def test_noop_while_any_sensor_still_open(self):
         """Must not fight a legitimate, still-justified WHF session."""
         engine = self._engine_with_active_override(sensor_open=True)
 
-        result = asyncio.run(engine._enforce_sealed_house_whf_guard(reason="test"))
+        result = asyncio.run(engine.enforce_whf_safety("test"))
 
         assert result is None
         engine.hass.services.async_call.assert_not_called()
         assert engine._fan_override_active is True
 
     def test_handle_all_doors_windows_closed_stops_override_session(self):
-        """The primary, event-driven path (~1-3s latency) that fires the instant
-        the coordinator detects all sensors closed — this is what should have
-        caught the 2026-09-09 incident immediately instead of ~6 minutes later."""
+        """The primary, event-driven path (~1-3s latency) that fires the instant the coordinator detects all
+        sensors closed -- this is what should have caught the 2026-09-09 incident immediately."""
         engine = self._engine_with_active_override(sensor_open=False)
         engine._paused_by_door = False
 
         asyncio.run(engine.handle_all_doors_windows_closed())
 
-        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
-        assert fan_calls, "handle_all_doors_windows_closed() must stop an override-active WHF session"
+        assert self._fan_off_calls(engine), "handle_all_doors_windows_closed() must stop an override-active WHF"
+
+    def test_nat_vent_session_with_rf_timer_is_stopped_on_close(self):
+        """Issue #1144: handle_all_doors_windows_closed() returned right after _exit_nat_vent(), whose
+        deactivation an RF-timer override blocks -- the fan then ran on for up to 5 minutes. It must stop now."""
+        engine = self._engine_with_active_override(sensor_open=False)
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._paused_by_door = False
+
+        asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert self._fan_off_calls(engine), "RF-timer nat-vent session left running against a sealed house"
+        assert engine._natural_vent_active is False
 
     def test_thermo_backstop_stops_override_session_as_fallback(self):
-        """The 5-minute backstop must catch a sealed-house override session even
-        if the event-driven path was somehow missed (race, dropped/coalesced
-        event) — the exact gap that let the 2026-09-09 incident run for minutes."""
+        """The 5-minute backstop must catch a sealed-house override session even if every event was missed."""
         engine = self._engine_with_active_override(sensor_open=False)
         engine._get_indoor_temp_f = MagicMock(return_value=72.0)
         engine._last_outdoor_temp = 65.0
@@ -1363,20 +1380,14 @@ class TestSealedHouseWhfGuard:
 
         asyncio.run(engine._thermo_backstop_task())
 
-        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
-        assert fan_calls, "The 5-minute thermostatic backstop must also enforce the sealed-house guard"
+        assert self._fan_off_calls(engine), "The 5-minute thermostatic backstop must also enforce the safety rule"
 
     def test_restart_reconcile_does_not_rearm_override_against_sealed_house(self):
-        """_reconcile_fan_on_startup_locked() already receives any_sensor_open as
-        a live-read parameter — it must not re-arm a WHF override across a
-        restart when that parameter says the house is sealed."""
-        engine = _make_automation_engine(
-            {
-                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
-                CONF_FAN_ENTITY: "fan.attic",
-            }
-        )
+        """_reconcile_fan_on_startup_locked() already receives any_sensor_open as a live-read parameter -- it
+        must not re-arm a WHF override across a restart when that parameter says the house is sealed."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
         engine._sensor_check_callback = lambda: False
+        engine._get_fan_physical_state_callback = lambda: True
 
         asyncio.run(
             engine._reconcile_fan_on_startup_locked(
@@ -1390,28 +1401,26 @@ class TestSealedHouseWhfGuard:
         )
 
         assert engine._fan_override_active is False, "Must not re-arm the override against a sealed house"
-        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
-        assert fan_calls, "Must actively turn off the physically-running fan, not just skip re-arming"
+        assert self._fan_off_calls(engine), "Must actively turn off the physically-running fan, not just skip re-arming"
 
-    def test_three_call_sites_route_through_shared_guard(self):
-        """Guard against a future edit reintroducing a fourth WHF-shutoff path
-        that bypasses _enforce_sealed_house_whf_guard() — the same duplication
-        failure mode this codebase has hit before (Issue #277 vs the manual-
-        override path never getting the guard added in the first place)."""
-        import inspect
+    def test_fan_pressed_on_while_already_sealed_is_stopped(self):
+        """Issue #1144 (the 2026-10-30 incident): the fan is switched on while the house is ALREADY sealed, so
+        no sensor event ever fires. The enforcer is asked by the fan listener / tick and must stop it."""
+        engine = self._engine_with_active_override(sensor_open=False)
+        engine._fan_remote_timer_hours = None
 
-        from custom_components.climate_advisor import automation as automation_module
+        result = asyncio.run(engine.enforce_whf_safety("tick"))
 
-        source = inspect.getsource(automation_module)
-        guard_call_sites = source.count("self._enforce_sealed_house_whf_guard(")
-        assert guard_call_sites == 2, (
-            "Expected exactly 2 call sites for the shared sealed-house guard "
-            "(handle_all_doors_windows_closed, _thermo_backstop_task) — found "
-            f"{guard_call_sites}. The restart re-arm branch deliberately calls "
-            "_deactivate_fan() directly (see test_restart_reconcile_does_not_rearm_"
-            "override_against_sealed_house) because _fan_active/_fan_override_active "
-            "are both still False at that point in the reconcile."
-        )
+        assert result is FanCommandResult.EXECUTED
+        assert self._fan_off_calls(engine)
+
+    def test_zero_configured_sensors_the_rule_does_not_apply(self):
+        """Owner decision 1: with no sensors configured sealed-ness cannot be judged -- never stop the fan."""
+        engine = self._engine_with_active_override(sensor_open=False)
+        engine._sensor_check_callback = None
+
+        assert asyncio.run(engine.enforce_whf_safety("tick")) is None
+        engine.hass.services.async_call.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,7 @@ from .comfort_stall_decision import StallReason, decide_comfort_stall, stall_mar
 from .confirmed_transition import is_confirmed, resolve_candidate_since
 from .const import (
     _VENT_SPLIT_TYPES,
+    AC_WHF_OVERLAP_TOLERANCE_S,
     ATTR_AI_STATUS,
     ATTR_AUTOMATION_STATUS,
     ATTR_BRIEFING,
@@ -335,6 +336,13 @@ from .temperature import (
     unit_key_from_attr,
     unit_mismatch,
 )
+from .whf_safety_decision import (
+    WHF_ACTIVE_HVAC_MODES,
+    WHF_OWN_COMMAND_ECHO_S,
+    WHF_SENSOR_UNKNOWN_GRACE_S,
+    SensorReading,
+    WhfSafetySnapshot,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -526,6 +534,72 @@ def _prune_event_log(event_log: list[dict], now: datetime) -> list[dict]:
 # fed only the now-deleted door/window shadow-comparison axes via
 # _evaluate_door_window_fsm()/_evaluate_door_window_fsm_nat_vent_exit(), which had zero
 # other consumers.
+
+
+def _whf_safety_after_event(after: Callable[[Any, Any], None]) -> Callable[[Any], Any]:
+    """Run ``after(self, event)`` once the decorated state-change listener has finished (Issue #1144).
+
+    The WHF safety rules are about the fan's physical state, so the check must run whatever the listener
+    decided (it has many early returns for attribution/echo reasons) and AFTER it has recorded any override
+    (avoiding the #1130 refresh race). A decorator rather than a wrapper method so a test that binds the
+    listener onto a stub with ``types.MethodType`` still runs it as one function.
+    """
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        async def wrapped(self: Any, event: Any) -> Any:
+            try:
+                return await fn(self, event)
+            finally:
+                try:
+                    after(self, event)
+                except Exception:  # a safety hook must never break the listener it follows
+                    _LOGGER.debug("WHF safety post-listener hook failed", exc_info=True)
+
+        return wrapped
+
+    return decorate
+
+
+def _whf_safety_after_call(trigger: str) -> Callable[[Any], Any]:
+    """Like ``_whf_safety_after_event`` for a method with no event argument (the RF burst flush)."""
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        async def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(self, *args, **kwargs)
+            finally:
+                _whf_request_check(self, trigger)
+
+        return wrapped
+
+    return decorate
+
+
+def _whf_request_check(coordinator: Any, trigger: str) -> None:
+    request = getattr(coordinator, "_request_whf_safety_check", None)
+    if request is not None:
+        request(trigger)
+
+
+def _whf_after_fan_event(coordinator: Any, event: Any) -> None:
+    _whf_request_check(coordinator, "fan_entity")
+
+
+def _whf_after_thermostat_event(coordinator: Any, event: Any) -> None:
+    old, new = event.data.get("old_state"), event.data.get("new_state")
+    if old is not None and new is not None and old.state != new.state:
+        _whf_request_check(coordinator, "thermostat_mode")
+
+
+def _whf_after_sensor_event(coordinator: Any, event: Any) -> None:
+    new = event.data.get("new_state")
+    if new is not None and new.state in ("unavailable", "unknown"):
+        arm = getattr(coordinator, "_arm_whf_unknown_sensor_check", None)
+        if arm is not None:
+            arm()
+    _whf_request_check(coordinator, "sensor_changed")
 
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
@@ -831,6 +905,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._startup_hvac_initialized: bool = False  # Issue #96: prevents repeated late-start init
         self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
         self._fan_state_entity_unavailable_warned: bool = False  # Issue #359: WHF Type 2 fallback warning dedup
+        # Issue #1144: one-shot armed when a door/window sensor goes unavailable, so the WHF safety
+        # check re-runs once it has been unknown for the 60 s benefit of the doubt (cancelled on shutdown).
+        self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
+        self._whf_safety_started_at: datetime | None = None
         # Issue #805: transient (not persisted) entity-health transition tracker, keyed by
         # config_key -> {"status": str, "first_seen": datetime, "last_notified": datetime}.
         # Not persisted across restarts by design — a restart re-evaluates from scratch,
@@ -950,6 +1028,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # current classification rather than a blindly-restored, potentially
             # hours-stale captured mode.
             reclassify=self._on_whf_release_reclassify,
+            # Issue #1144: ground-truth snapshot for the WHF safety enforcer.
+            get_whf_safety_snapshot=self._build_whf_safety_snapshot,
+            spawn=self._spawn,
         )
 
     def _current_hvac_mode(self) -> str | None:
@@ -972,6 +1053,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Automation %s",
             "enabled" if enabled else "disabled (observe-only)",
         )
+        if enabled:
+            # Issue #1144: leaving observe-only is the moment a whole-house fan that ran on a sealed house in the
+            # meantime (and was only reported) must now be stopped; do not wait for the next 15 s tick.
+            self._request_whf_safety_check("automation_enabled")
         self._spawn(self._async_save_state())
 
     async def async_setup(self) -> None:
@@ -1034,6 +1119,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.hass,
                 self._zone_scoped_sync(self._async_thermal_sample_tick),
                 timedelta(minutes=5),
+            )
+        )
+
+        # Issue #1144: cheap always-on WHF safety tick (rule 1 within 30 s). Returns immediately unless the
+        # whole-house fan is physically on, so it costs two state reads per 15 s on every other install.
+        self._whf_safety_started_at = dt_util.utcnow()
+        self._unsub_listeners.append(
+            async_track_time_interval(
+                self.hass,
+                self._zone_scoped_sync(self._async_whf_safety_tick),
+                timedelta(seconds=15),
             )
         )
 
@@ -1258,6 +1354,145 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _async_homeassistant_stop))
 
         _LOGGER.info("Climate Advisor v%s coordinator setup complete", VERSION)
+
+    @callback
+    def _async_whf_safety_tick(self, now: datetime) -> None:
+        """15 s WHF safety tick (Issue #1144): ask the enforcer only while the fan is physically on."""
+        self._whf_safety_tick_body()
+
+    def _whf_safety_tick_body(self) -> None:
+        """The tick's logic, undecorated so unit tests can run it (``@callback`` is a MagicMock in the stub layer)."""
+        if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return
+        if self._get_fan_physical_state() is not True:
+            return
+        self._request_whf_safety_check("tick")
+
+    def _request_whf_safety_check(self, trigger: str) -> None:
+        """Queue a WHF safety check on the engine (Issue #1144). Sync, never raises into a listener."""
+        engine = getattr(self, "automation_engine", None)
+        if engine is None:
+            return
+        try:
+            engine.request_whf_safety_check(trigger)
+        except Exception:
+            _LOGGER.warning("WHF safety check request failed: trigger=%s", trigger, exc_info=True)
+
+    def _build_whf_safety_snapshot(self) -> WhfSafetySnapshot:
+        """Ground truth for the WHF safety enforcer (Issue #1144): fan state and age, sensor readings.
+
+        A sensor that is unavailable/unknown/missing carries ``unknown_for_s`` (the enforcer counts it open
+        for 60 s, closed after). Ages come from HA's own ``last_changed``, so they survive anything this
+        integration does to its internal flags.
+        """
+        now = dt_util.utcnow()
+
+        def _age(state: Any) -> float | None:
+            changed = getattr(state, "last_changed", None)
+            if isinstance(changed, datetime):
+                return max(0.0, (now - changed).total_seconds())
+            return None
+
+        readings: list[SensorReading] = []
+        stale: list[str] = []
+        for sensor_id in getattr(self, "_resolved_sensors", []) or []:
+            state = self.hass.states.get(sensor_id)
+            if state is None or state.state in ("unavailable", "unknown"):
+                started = getattr(self, "_whf_safety_started_at", None)
+                since = _age(state) if state is not None else None
+                if since is None and isinstance(started, datetime):
+                    since = max(0.0, (now - started).total_seconds())
+                unknown_for = since if since is not None else 0.0
+                readings.append(SensorReading(is_open=False, unknown_for_s=unknown_for, stable_for_s=unknown_for))
+                if unknown_for > WHF_SENSOR_UNKNOWN_GRACE_S:
+                    stale.append(sensor_id)
+            else:
+                readings.append(SensorReading(is_open=self._state_is_open(state), stable_for_s=_age(state)))
+
+        fan_state_id = self.config.get(CONF_FAN_STATE_ENTITY) or self.config.get(CONF_FAN_ENTITY)
+        fan_state = self.hass.states.get(fan_state_id) if fan_state_id else None
+        if fan_state is None or fan_state.state in ("unavailable", "unknown"):
+            fan_state = self.hass.states.get(self.config.get(CONF_FAN_ENTITY) or "") or fan_state
+        fan_on = self._get_fan_physical_state()
+        fan_on_for_s = _age(fan_state) if fan_state is not None else None
+        return WhfSafetySnapshot(
+            fan_on=fan_on,
+            fan_on_for_s=fan_on_for_s,
+            sensors=tuple(readings),
+            stale_names=tuple(stale),
+            occupant_fan_on_at=self._occupant_fan_on_at_from_ground_truth(fan_on, fan_on_for_s),
+            occupant_hvac_on_at=self._occupant_hvac_on_at_from_ground_truth(),
+        )
+
+    def _occupant_fan_on_at_from_ground_truth(self, fan_on: bool | None, fan_on_for_s: float | None) -> datetime | None:
+        """When the occupant turned the whole-house fan on, from its physical on-time (Issue #1144).
+
+        Event-based fan-override detection can be skipped -- startup coalescing (Issue #491, seed 7000031: 5
+        minutes of AC beside the fan) or another fan override already active (Issue #1168: a blower override
+        under ``both`` makes the fan listener ignore the WHF turning on) -- and then no WHF-press stamp exists, so
+        the enforcer's newest-action-wins rule 2 could not see the fan-on as newer than the AC. This ground-truth
+        stamp is the state-based backstop for every such case; the engine prefers its own press stamp when it has
+        one. Climate Advisor's own fan activity never counts (owner decision 7): a CA-owned fan
+        (``_fan_active`` / nat-vent) or an on-transition within ``WHF_OWN_COMMAND_ECHO_S`` of CA's last real
+        fan command is not an occupant action. A fan that was already on when Home Assistant started has no
+        transition to date, so it yields no stamp.
+        """
+        ae = self.automation_engine
+        if ae is None:
+            return None
+        if fan_on is not True or fan_on_for_s is None or ae._fan_active or ae._natural_vent_active:
+            return None
+        on_at = dt_util.now() - timedelta(seconds=fan_on_for_s)
+        if not self._transition_after_startup(on_at):
+            return None
+        own = ae._fan_toggle_command_time
+        if isinstance(own, datetime) and abs((on_at - own).total_seconds()) <= WHF_OWN_COMMAND_ECHO_S:
+            return None
+        return on_at
+
+    def _occupant_hvac_on_at_from_ground_truth(self) -> datetime | None:
+        """When the occupant turned HVAC on (heat/cool/heat_cool/auto), from the thermostat's mode age (Issue #1144).
+
+        The mirror of ``_occupant_fan_on_at_from_ground_truth``: thermostat override detection is suppressed
+        during startup coalescing (Issue #321), so ``handle_manual_override`` never stamps the occupant's HVAC-on
+        and rule 2 would wrongly let an OLDER fan win over it (the enforcer would suppress the occupant's heat).
+        Climate Advisor's own mode writes never count: a mode change within ``WHF_OWN_COMMAND_ECHO_S`` of CA's last
+        HVAC command is CA's.
+        """
+        ae = self.automation_engine
+        if not getattr(self, "_startup_coalesce_active", False) or ae is None:
+            return None
+        state = self.hass.states.get(self.config.get("climate_entity", ""))
+        changed = getattr(state, "last_changed", None) if state is not None else None
+        if state is None or state.state not in WHF_ACTIVE_HVAC_MODES or not isinstance(changed, datetime):
+            return None
+        if not self._transition_after_startup(changed):
+            return None
+        for own in (ae._last_commanded_hvac_time, ae._hvac_command_time):
+            if isinstance(own, datetime) and abs((changed - own).total_seconds()) <= WHF_OWN_COMMAND_ECHO_S:
+                return None
+        return changed
+
+    def _transition_after_startup(self, when: datetime) -> bool:
+        """True when ``when`` is a real state change after this integration started (not a restored state)."""
+        started = getattr(self, "_whf_safety_started_at", None)
+        if not isinstance(started, datetime):
+            return True
+        return when > started
+
+    def _arm_whf_unknown_sensor_check(self) -> None:
+        """Re-run the WHF safety check once a just-unavailable sensor passes the 60 s grace (Issue #1144)."""
+        if self._whf_unknown_sensor_cancel is not None:
+            self._whf_unknown_sensor_cancel()
+
+        @callback
+        def _fire(_now: Any) -> None:
+            self._whf_unknown_sensor_cancel = None
+            self._request_whf_safety_check("sensor_unavailable")
+
+        self._whf_unknown_sensor_cancel = async_call_later(
+            self.hass, WHF_SENSOR_UNKNOWN_GRACE_S + 1.0, self._zone_scoped_sync(_fire)
+        )
 
     @callback
     def _async_thermal_sample_tick(self, now: datetime) -> None:
@@ -5645,6 +5880,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         await self._async_save_state()
 
+    @_whf_safety_after_event(_whf_after_sensor_event)
     async def _async_door_window_changed(self, event: Event) -> None:
         """Handle a door/window sensor state change with debounce."""
         entity_id = event.data.get("entity_id", "")
@@ -5872,6 +6108,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         await self._async_run_temp_reactive_checks()
 
+    @_whf_safety_after_event(_whf_after_thermostat_event)
     async def _async_thermostat_changed(self, event: Event) -> None:
         """Track thermostat changes for learning (detect manual overrides)."""
         # Issue #1128: evidence first, before any early return below (sync, no I/O, never raises).
@@ -6739,8 +6976,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         await self.hass.services.async_call(domain, service, {"entity_id": fan_entity_id})
         return True
 
+    @_whf_safety_after_event(_whf_after_fan_event)
     async def _async_fan_entity_changed(self, event: Event) -> None:
-        """Detect manual fan entity state changes (Issue #37)."""
+        """Detect manual fan entity state changes (Issue #37), then re-check WHF safety (Issue #1144).
+
+        The safety check (decorator) runs AFTER the override handling and regardless of any of its early
+        returns (command-only skip, startup coalescing, override already active, the 30 s echo guard): those
+        guards exist to avoid mis-attributing a change, but the safety rule is about the fan's physical
+        state, not about who caused it. Running after the override is recorded also avoids re-creating
+        the #1130 refresh race.
+        """
         # Issue #361: command-only mode — entity state changes are command echoes, not physical signals.
         if not self._fan_state_feedback_enabled():
             _LOGGER.debug(
@@ -7066,6 +7311,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.hass, REMOTE_BURST_WINDOW_SECONDS, self._zone_scoped_sync(_burst_window_elapsed)
         )
 
+    @_whf_safety_after_call("rf_burst")
     async def _flush_fan_remote_burst(self) -> None:
         """Apply the accumulated burst's decision once the combining window elapses (Issue #519).
 
@@ -7413,11 +7659,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         (``hvac_action`` from the caller, ``_get_fan_physical_state()`` here) rather than
         any derived/session-blended status — see Issue #739/#748.
         """
-        violations = run_invariant_checks(
-            hvac_action=hvac_action,
-            whf_physically_on=self._get_fan_physical_state(),
-            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
-        )
+        violations = [
+            v
+            for v in run_invariant_checks(
+                hvac_action=hvac_action,
+                whf_physically_on=self._get_fan_physical_state(),
+                fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            )
+            if v.name != "ac_whf_mutex" or self._ac_whf_overlap_confirmed()
+        ]
         for violation in violations:
             _LOGGER.critical("Hard invariant violated: %s — %s", violation.name, violation.detail)
             # Issue #1128 (K4): one dedup slot PER invariant, so two interleaved violations cannot thrash.
@@ -7428,11 +7678,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._emit_event("invariant_violation", {"invariant": violation.name, "detail": violation.detail})
             self._notify_in_background(
                 "Climate Advisor — invariant violated",
-                f"{violation.detail} Climate Advisor is stepping in to prevent this, but"
-                " flagging it because it should never happen.",
+                f"{violation.detail} Climate Advisor's whole-house-fan safety check is acting on this where"
+                " it can, but it is flagged because it should never happen.",
                 "invariant_violation",
             )
         return violations
+
+    def _ac_whf_overlap_confirmed(self) -> bool:
+        """True when the AC/fan overlap has lasted at least ``AC_WHF_OVERLAP_TOLERANCE_S`` (Issue #1144).
+
+        Asks the same P2 judge the household-promise layer uses (one authoritative definition of the
+        mutex), over the journal with a current reading recorded first. Fails toward alerting: if the
+        journal cannot answer, the instantaneous violation stands.
+        """
+        try:
+            self._record_promise_reading()
+            window = self._promise_journal.window(dt_util.now())
+            cfg = PromiseConfig.from_config(
+                self.config, p2_min_overlap_s=AC_WHF_OVERLAP_TOLERANCE_S, p2_excuse_observe_only=False
+            )
+            return any(h.promise == "ac_whf_mutex" for h in run_promise_checks(window, cfg, scope=SCOPE_HOME))
+        except Exception:
+            _LOGGER.debug(
+                "AC/WHF overlap confirmation unavailable; alerting on the instantaneous reading", exc_info=True
+            )
+            return True
 
     # ── Household promises (Issue #1128, Step 3) ───────────────────────────────
     # Pure checks live in invariant_watchdog.py; this block only feeds the journal and reports.
@@ -7450,6 +7720,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         contacts: bool | None = None
         if getattr(self, "_resolved_sensors", None):
             contacts = bool(self._any_sensor_open())
+            if not contacts:
+                # Issue #1144: the same benefit of the doubt the WHF safety enforcer gives -- a sensor that is
+                # unavailable/unknown (a state exists, it is just unreadable) for under 60 s counts as open, so
+                # the whf_sealed promise never disagrees with the enforcer. A MISSING state is not extended.
+                now_utc = dt_util.utcnow()
+                for sensor_id in self._resolved_sensors:
+                    st = self.hass.states.get(sensor_id)
+                    changed = getattr(st, "last_changed", None) if st is not None else None
+                    if (
+                        st is not None
+                        and st.state in ("unavailable", "unknown")
+                        and isinstance(changed, datetime)
+                        and (now_utc - changed).total_seconds() <= WHF_SENSOR_UNKNOWN_GRACE_S
+                    ):
+                        contacts = True
+                        break
         return _PromiseReading(
             ts=now,
             hvac_mode=mode,
@@ -7460,6 +7746,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             setpoint_f=read_state_temp_f(cs, "temperature", unit) if cs is not None else None,
             fan_on=self._get_fan_physical_state(),
             contacts_open=contacts,
+            automation_enabled=bool(self._automation_enabled),
         )
 
     def _record_promise_reading(self) -> None:
@@ -7541,8 +7828,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Run the home-scope promise checks and report each NEW hit (Issue #1128).
 
         Promise 2 (the AC/WHF mutex) keeps its existing alerting path in ``_run_invariant_watchdog``
-        and is skipped here. Every other promise is LOG-ONLY today: a WARNING line and an
-        ``invariant_violation`` event with ``severity="log"`` -- no notification, no Status line.
+        and is skipped here. Promise 9 (whf_sealed, Issue #1144) ALERTS: a WARNING, an
+        ``invariant_violation`` event and one notification per episode. Every other promise is
+        LOG-ONLY today: a WARNING line and an ``invariant_violation`` event with ``severity="log"``
+        -- no notification, no Status line.
         Promotion to alert is a one-line ``home_level`` change in ``invariant_watchdog.PROMISES``.
         """
         journal = self._promise_journal
@@ -7555,7 +7844,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         now = dt_util.now()
         window = journal.window(now)
-        hits = run_promise_checks(window, PromiseConfig.from_config(self.config), scope=SCOPE_HOME)
+        hits = run_promise_checks(
+            window,
+            PromiseConfig.from_config(self.config, p2_min_overlap_s=AC_WHF_OVERLAP_TOLERANCE_S),
+            scope=SCOPE_HOME,
+        )
         reported = []
         for hit in hits:
             if hit.promise == "ac_whf_mutex":
@@ -7565,7 +7858,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 continue
             spec = next(p for p in PROMISES if p.key == hit.promise)
             evidence = " ".join(f"{k}={v}" for k, v in hit.evidence)
-            _LOGGER.warning("Household promise missed (log only): promise=%s %s", hit.promise, evidence)
+            _LOGGER.warning(
+                "Household promise missed (%s): promise=%s %s",
+                "alert" if spec.home_level == LEVEL_ALERT else "log only",
+                hit.promise,
+                evidence,
+            )
             bump_promise_stats(self._promise_stats, hit.promise, hit.ts)
             self._emit_event(
                 "invariant_violation",
@@ -7577,6 +7875,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "episode_ts": hit.ts.isoformat(),
                 },
             )
+            if spec.home_level == LEVEL_ALERT:
+                # Issue #1144: promise 9 (whf_sealed) alerts. Promise 2 has its own path above. The journal's
+                # is_new() dedup already limits this to one alert per episode.
+                self._notify_in_background(
+                    "Climate Advisor — whole-house fan ran on a sealed house",
+                    f"{hit.detail} The safety check should have stopped it within 30 seconds; please report this.",
+                    "invariant_violation",
+                )
             reported.append(hit)
         if reported:
             self._spawn(self._async_save_state())
@@ -10070,6 +10376,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         that already resolved the active band (e.g. ``_detect_and_emit_incidents()``) may pass
         it explicitly to avoid re-resolving it.
         """
+        # One incident, one record: _detect_and_emit_incidents() re-scans the last 35 minutes of the event log
+        # on every coordinator refresh, so an override/occupancy incident (id = the triggering event's time)
+        # was re-emitted on each refresh while it stayed in that window (Issue #1144: the safety enforcer's
+        # extra refreshes made the repeat adjacent in the log). Same class + id already logged -> skip.
+        if any(
+            e.get("type") == "incident_detected"
+            and e.get("incident_class") == incident_class
+            and e.get("incident_id") == incident_id
+            for e in self._event_log[-100:]
+        ):
+            return
         if comfort_heat is None or comfort_cool is None:
             _resolved_heat, _resolved_cool = self._resolve_active_comfort_band()
             comfort_heat = _resolved_heat if comfort_heat is None else comfort_heat
@@ -12200,6 +12517,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._unsubscribe_occupancy_listeners()
             self._cancel_fan_remote_burst(reason="shutdown")
             self._cancel_pre_cool_trigger()
+            if self._whf_unknown_sensor_cancel is not None:  # Issue #1144
+                self._whf_unknown_sensor_cancel()
+                self._whf_unknown_sensor_cancel = None
 
             for unsub in self._unsub_listeners:
                 unsub()

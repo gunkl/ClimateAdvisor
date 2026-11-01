@@ -9,13 +9,14 @@
     "Fix: coordinator._should_run_untracked_fan_backstop() now also requires `not self._startup_coalesce_active`, the same idiom already used by every other override-detection check in this file. This scenario models the real restart boundary via engine.restore_state(engine.get_serializable_state()) (Issue #627's new `simulate_restart` harness event) and the real periodic backstop call site (Issue #627's new `fan_backstop_tick` harness event) -- not a mirror of the decision logic, the actual production methods.",
     "(a) Scenario effectiveness: if the Issue #627 gate were removed (reverting to the pre-fix condition), _should_run_untracked_fan_backstop would return True at the fan_backstop_tick event (fan is untracked, _startup_coalesce_active=True but no longer checked, no override, no grace) -- reconcile_fan_on_startup(trigger=\"backstop_30min\") would fire, nat-vent would not be eligible (outdoor 74F >= indoor 72F), the turn-off branch would deactivate the fan and clear _pre_fan_hvac_mode, and the following classification event would then be free to command Cool mode -- exactly reproducing the incident and failing hvac_mode_never_commanded/fan_not_active below. The scenario would fail without the fix.",
     "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md's startup-coalescing/fan-reconcile section and docs/grace-periods-spec.md are updated in this same PR to describe the new _startup_coalesce_active gate -- reviewed against current code before this scenario was authored, not after.",
+    "Issue #1144 (owner-approved edit, 2026-10-31): door_window_sensors is now empty. With a monitored window that is never opened, the WHF ran on a sealed house, which the #1144 sealed-house enforcer now stops within 30 s. The incident this scenario reproduces is a restart-timing race in the AC/WHF mutex, not a sealed-house case, so the scenario models an install with no door/window sensors, where rule 1 does not apply.",
     "(c) User outcome if this scenario's assertions fail in the future: the AC and whole-house fan could run simultaneously again after any restart during an active RF-remote WHF session -- wasted energy at minimum, and the exact fan-fighting condition the mutual-exclusion rule exists to prevent at worst."
   ],
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 74,
     "natural_vent_delta": 3.0,
-    "door_window_sensors": ["binary_sensor.window"],
+    "door_window_sensors": [],
     "fan_mode": "whole_house_fan",
     "fan_entity": "fan.whf",
     "fan_state_feedback": true

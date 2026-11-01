@@ -1762,6 +1762,13 @@ class AutomationEngine:
         # independent contexts and could in principle overlap.
         self._setpoint_retry_cancel: Any | None = None
         self._fan_on_verify_cancel: Any | None = None
+        # Issue #1195: timer that finishes a closed-window nat-vent exit the 5-minute fan-toggle floor deferred.
+        self._nat_vent_closed_exit_retry_cancel: Any | None = None
+        # Issue #1195: bumped on every nat-vent session start/end (_decision_pass); the retry only acts on the
+        # session that was live when it was scheduled.
+        self._nat_vent_session_seq: int = 0
+        # (event_type, event_payload) of the exit the pending retry will complete; kept across a re-schedule.
+        self._nat_vent_closed_exit_pending: tuple[str | None, dict[str, Any] | None] | None = None
         self._fan_off_verify_cancel: Any | None = None
 
         # Minimum fan runtime per hour — rolling cycle (Issue #77)
@@ -3750,6 +3757,12 @@ class AutomationEngine:
                 try:
                     _nat_vent_after = bool(self._natural_vent_active)
                     if _nat_vent_after != _nat_vent_before:
+                        # Issue #1195: a session boundary invalidates a pending closed-window exit retry --
+                        # it belongs to the session that just ended and must never end a new one.
+                        self._nat_vent_session_seq += 1
+                        if self._nat_vent_closed_exit_retry_cancel:
+                            self._nat_vent_closed_exit_retry_cancel()
+                            self._nat_vent_closed_exit_retry_cancel = None
                         # Issue #1095: a session start/end ends the previous "not engaged" streak;
                         # the next block after it is a NEW event and must log at INFO again.
                         self._last_nat_vent_eval_key = None
@@ -9577,7 +9590,18 @@ class AutomationEngine:
                 )
                 if not _applied:
                     _reactivates = False
-                    if _activation_result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+                    _activation_deferred = (
+                        isinstance(self._fan_rate_limited_until, datetime)
+                        and self._fan_rate_limited_direction == "activate"
+                    )
+                    _activation_rate_limited = _activation_result in (
+                        FanCommandResult.RATE_LIMITED_NEW,
+                        FanCommandResult.RATE_LIMITED_DUP,
+                    )
+                    if _activation_rate_limited and _activation_deferred:
+                        # Issue #1196: armed only when a deferred activation is really recorded
+                        # (_fan_rate_limited_until, direction "activate"); a refusal that is not a pending
+                        # CA run must leave no marker, or the occupant's later blower-off is misread (#829).
                         # Issue #829 provenance: a rate-limited command is CA's own deferred
                         # grace-expiry reactivation (it WILL run when the 5-minute floor ends, via a
                         # later _activate_fan() call that does not pass through this site), so arm the
@@ -10916,6 +10940,89 @@ class AutomationEngine:
         self._nat_vent_soft_start = False
         return True
 
+    def _schedule_deferred_closed_exit_retry(
+        self,
+        reason: str,
+        event_type: str | None = None,
+        event_payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Issue #1195: finish a closed-window nat-vent exit that the 5-minute fan-toggle floor deferred.
+
+        The session is kept (#931) because the fan is still on, and with every sensor closed nothing else
+        re-runs the exit for a non-WHF fan: the blower and Status "nat-vent" stayed on until some unrelated
+        exit condition fired (hours, on a mild night). One timer, due when the floor ends, re-enters
+        ``_exit_nat_vent()`` -- the same choke point, so restore, grace and events behave exactly as for an
+        immediate exit. Re-arming replaces the previous timer (``_rearm_timer``); ``cleanup()`` cancels it.
+
+        The original exit's ``reason`` / ``event_type`` / ``event_payload`` are carried through (this is reached
+        from every ``_exit_nat_vent()`` caller, not only the door/window one), and the retry is bound to the
+        session live now (``_nat_vent_session_seq``): a session boundary cancels it, and the retry re-checks.
+        """
+        if _refuse_if_shut_down(self, "schedule deferred nat-vent closed exit"):
+            return
+        applies_at = self._fan_rate_limited_until
+        if isinstance(applies_at, datetime):
+            delay = max((applies_at - dt_util.now()).total_seconds(), 0.0) + 1.0
+        else:
+            delay = float(FAN_MIN_TOGGLE_INTERVAL_S)
+        _LOGGER.info(
+            "Nat-vent closed-window exit retry scheduled: delay=%.0fs reason=%s",
+            delay,
+            reason,
+        )
+        session_seq = self._nat_vent_session_seq
+        if event_type is None and self._nat_vent_closed_exit_retry_cancel and self._nat_vent_closed_exit_pending:
+            # A later re-schedule without a completion event must not drop the first pending exit's event.
+            event_type, event_payload = self._nat_vent_closed_exit_pending
+        self._nat_vent_closed_exit_pending = (event_type, event_payload)
+
+        @callback
+        def _retry_due(_now: Any) -> None:
+            self._nat_vent_closed_exit_retry_cancel = None
+            self._nat_vent_closed_exit_pending = None
+            self._spawn_whf_task(self._retry_deferred_closed_exit(reason, event_type, event_payload, session_seq))
+
+        self._rearm_timer("_nat_vent_closed_exit_retry_cancel", delay, _retry_due)
+
+    async def _retry_deferred_closed_exit(
+        self,
+        reason: str,
+        event_type: str | None,
+        event_payload: dict[str, Any] | None,
+        session_seq: int,
+    ) -> None:
+        """Run the deferred closed-window nat-vent exit once the floor has ended (Issue #1195).
+
+        Re-enters ``_exit_nat_vent()`` with the ORIGINAL exit's reason and completion event, so the log, the
+        Activity Report and the restore/grace behave as that exit would have. Guarded like
+        ``_run_whf_safety_check``: a latched engine does nothing and a failure is logged, never raised.
+        """
+        if _latched(self):
+            return
+        try:
+            async with self._decision_pass("retry_deferred_closed_exit"):
+                if _latched(self):
+                    return
+                if not self._natural_vent_active or session_seq != self._nat_vent_session_seq:
+                    _LOGGER.debug("Nat-vent closed-window exit retry skipped: its session already ended")
+                    return
+                if self._any_monitored_sensor_holding_open() or self._sensor_debounce_pending:
+                    # A window reopened (or is settling): the session is legitimate again and the open-window
+                    # exit chain owns it. The next close schedules a fresh retry if one is needed.
+                    _LOGGER.info("Nat-vent closed-window exit retry skipped: a monitored door/window is open again")
+                    return
+                _LOGGER.info(
+                    "Nat-vent closed-window exit retry running: all monitored sensors still closed original_reason=%s",
+                    reason,
+                )
+                await self._exit_nat_vent(
+                    reason=reason if reason.endswith(" (deferred retry)") else f"{reason} (deferred retry)",
+                    event_type=event_type,
+                    event_payload=event_payload,
+                )
+        except Exception:
+            _LOGGER.warning("Nat-vent closed-window exit retry failed: reason=%s", reason, exc_info=True)
+
     def _deferred_fan_mode_change_marker(self) -> str:
         """Issue #936: the "deferred (5-min floor...)" fan_mode_change payload string,
         shared by every rate-limited-fan-command emission site so the wording can't
@@ -11085,9 +11192,11 @@ class AutomationEngine:
             # (#931; the fan is still on), and starting "nat_vent_exit_resume" grace now left session and
             # grace both active with the fan running. The completion is not lost: with the house sealed,
             # the WHF safety enforcer (#1144, run right after this by handle_all_doors_windows_closed())
-            # stops the fan, ends the session and reclassifies. KNOWN GAP (pre-existing on main): for a
-            # non-WHF fan (hvac_fan) nothing retries this exit -- window-closed is not an exit reason in
-            # decide_nat_vent_exit(), so the session and blower can stay on after the floor ends.
+            # stops the fan, ends the session and reclassifies. Issue #1195: a non-WHF fan (hvac_fan blower) has
+            # no such enforcer and window-closed is not an exit reason in decide_nat_vent_exit() (a session needs
+            # an open window only to START; the sensor-open exit is retried by the slow-loop tick, which does not
+            # run while every sensor is closed), so the deferral below schedules its own retry for when the floor
+            # ends -- the blower no longer runs on with Status "nat-vent" behind shut windows.
             if self._end_nat_vent_session(result):
                 # Issue #821 follow-up (project owner's own fix, confirmed by reading
                 # _deactivate_fan()'s restore branches directly): _deactivate_fan() above
@@ -11121,6 +11230,7 @@ class AutomationEngine:
                     "Nat-vent exit (%s): sensors closed but fan-off deferred — restore and grace wait for the fan-off",
                     reason,
                 )
+                self._schedule_deferred_closed_exit_retry(reason, event_type, event_payload)
 
         if event_type and self._emit_event_callback and result is not FanCommandResult.RATE_LIMITED_DUP:
             payload = dict(event_payload or {})
@@ -14781,6 +14891,21 @@ class AutomationEngine:
                 self.role,
             )
 
+        # Issue #1196: a start the restriction refuses sends nothing, so it must not reach the toggle floor at
+        # all -- it used to be judged by the floor first, which deferred it (recording an activation that would
+        # never run) or, once stamped, made the NEXT attempt look rate-limited. hvac_fan only: with BOTH the WHF
+        # leg still runs, so the restriction is applied to the blower leg further down.
+        if fan_mode == FAN_MODE_HVAC:
+            _early_restrict_reason = self._hvac_fan_restriction_block_reason()
+            if _early_restrict_reason:
+                _LOGGER.info("Feature suppressed: HVAC fan not activated — %s (%s)", _early_restrict_reason, reason)
+                # A deferral recorded by an earlier attempt is moot (the start is refused, nothing is pending);
+                # clear it as the normal path does so the FSM stops reporting DEFERRED_ACTIVATE.
+                if self._fan_rate_limited_direction == "activate":
+                    self._fan_rate_limited_until = None
+                    self._fan_rate_limited_direction = None
+                return FanCommandResult.SUPPRESSED
+
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
         from .fan_fsm import FanFsmEventKind
 
@@ -14844,11 +14969,17 @@ class AutomationEngine:
             self._fan_rate_limited_until = None
             self._fan_rate_limited_direction = None
 
+        # Issue #1196 (mirror of the #1144 deactivate-side rule): the 300 s toggle floor counts only a command
+        # that actually went out. The stamps are provisional here and rolled back below if nothing was sent
+        # (restriction, no usable "on" fan mode), so a refused start is not a toggle.
+        _prev_fan_command_time = self._fan_command_time
+        _prev_fan_toggle_time = self._fan_toggle_command_time
         self._fan_command_time = dt_util.now()
         self._fan_toggle_command_time = self._fan_command_time
         self._fan_command_pending = True
         _activated_whf = False
         _activated_hvac = False
+        _command_issued = False
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not _skip_whf_leg:
                 # Whole-house fan exchanges outdoor air directly — running AC/heat
@@ -14869,6 +15000,7 @@ class AutomationEngine:
                     domain = fan_entity.split(".")[0]  # "fan" or "switch"
                     _commanded = await self._command_whf_control_entity(True, reason=reason)
                     if _commanded:
+                        _command_issued = True
                         _LOGGER.info("Activated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
@@ -14903,6 +15035,7 @@ class AutomationEngine:
                             kind="climate",
                         )
                         _activated_hvac = True
+                        _command_issued = True
                         _LOGGER.info("Activated HVAC fan (fan_mode=%s) — %s role=%s", _on_value, reason, self.role)
 
             if not _activated_whf and not _activated_hvac:
@@ -14910,8 +15043,16 @@ class AutomationEngine:
                 # this with fan_mode != DISABLED is fan_mode=hvac_fan (no WHF leg)
                 # and the restriction blocked the HVAC leg. Do not mark the fan
                 # active or emit a fan_activated event for a command that never
-                # happened.
+                # happened. Issue #1196: and no toggle was made, so roll the stamps back.
+                self._fan_command_time = _prev_fan_command_time
+                self._fan_toggle_command_time = _prev_fan_toggle_time
                 return FanCommandResult.SUPPRESSED
+
+            if not _command_issued:
+                # Issue #1196 (mirror of the #1144 deactivate side): the session bookkeeping below stands, but no
+                # command went out (no control entity configured, or it already agreed), so no toggle happened.
+                self._fan_toggle_command_time = _prev_fan_toggle_time
+                self._fan_command_time = _prev_fan_command_time  # also: an echo-window must not open (#1144)
 
             # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state().
             # This is the raw hardware-activation write itself — the FSM's physical axis
@@ -14974,6 +15115,12 @@ class AutomationEngine:
             # is CA-owned; calls fan_thermostat_check so a slow-updating outdoor sensor
             # cannot leave the fan running indefinitely between state-listener events.
             self._start_fan_thermo_backstop()
+        except Exception:
+            if not _command_issued:
+                # Nothing went out before the failure: no toggle, no echo window (mirror of _deactivate_fan()).
+                self._fan_command_time = _prev_fan_command_time
+                self._fan_toggle_command_time = _prev_fan_toggle_time
+            raise
         finally:
             self._fan_command_pending = False
         return FanCommandResult.EXECUTED
@@ -15537,7 +15684,7 @@ class AutomationEngine:
         # already reflects whatever entity the coordinator treats as ground truth (fan_state_entity
         # when configured, else the command entity) — logged alongside the command entity's own
         # reported state for direct comparison.
-        _command_state = self.hass.states.get(self.config.get(CONF_FAN_ENTITY, ""))
+        _command_state = self.hass.states.get(self.config.get(CONF_FAN_ENTITY) or "")
         _LOGGER.debug(
             "Fan drift tick: fan_active=%s fan_mode=%s recent_command=%s physical_available=%s"
             " physical_on=%s readback=%s command_entity_state=%s tick_count=%d",
@@ -16854,6 +17001,9 @@ class AutomationEngine:
         if self._fan_on_verify_cancel:
             self._fan_on_verify_cancel()
             self._fan_on_verify_cancel = None
+        if self._nat_vent_closed_exit_retry_cancel:  # Issue #1195
+            self._nat_vent_closed_exit_retry_cancel()
+            self._nat_vent_closed_exit_retry_cancel = None
         if self._fan_off_verify_cancel:
             self._fan_off_verify_cancel()
             self._fan_off_verify_cancel = None

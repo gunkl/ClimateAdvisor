@@ -54,6 +54,12 @@ _AUTOMATION_PY = _REPO_ROOT / "custom_components" / "climate_advisor" / "automat
 #   "exempted: <reason>" — deliberately does not arm the lockout, with a specific reason
 #                       (never a bare "not needed").
 _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
+    ("_retry_deferred_closed_exit", 1): (
+        "exempted: Issue #1195 -- runs only while every monitored sensor is closed (it returns early if one is "
+        "open or settling) and only completes an _exit_nat_vent() call (any caller's) that already took the "
+        "sensors-closed branch and was deferred by the toggle floor, so it never consults "
+        "the paused-reactivation lockout"
+    ),
     ("handle_all_doors_windows_closed", 1): (
         "exempted: fires only when _any_monitored_sensor_open() is False (all sensors just "
         "closed) — _exit_nat_vent() always takes the sensors-closed grace-period branch here, "

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.18] — 2026-11-01
+
+- Fix #1158: if a window or door is open and you turn the heat or cooling on at the thermostat while the whole-house fan is running, Climate Advisor no longer switches your heating or cooling off again on its next check. Your change stays as you set it (and the whole-house fan stops, since your newest action wins).
+
 ## [0.8.14] — 2026-11-01
 
 - Fix #1180: if you turn your thermostat's fan to On for air circulation, Climate Advisor no longer switches it back to Auto when it turns heating or cooling off (for example when a door or window opens, or on a mild day). The fan keeps running until you turn it off. Once your manual-change period ends, the next time Climate Advisor turns heating or cooling off it sets the fan back to Auto, as before.

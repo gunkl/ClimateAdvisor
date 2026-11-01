@@ -20,6 +20,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock
@@ -32,6 +33,7 @@ if "homeassistant" not in sys.modules:
 
 from homeassistant.util import dt as dt_util  # noqa: E402
 
+from custom_components.climate_advisor.automation import _refuse_if_shut_down  # noqa: E402
 from custom_components.climate_advisor.const import VERSION  # noqa: E402
 from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: E402
 from custom_components.climate_advisor.learning import LearningEngine, LearningState  # noqa: E402
@@ -297,12 +299,8 @@ class TestHomeAssistantStopPersistsShutdownDiagnostics:
     """
 
     def _make_handler(self, coord):
-        """Extract the handler by replicating the closure logic in async_setup()."""
-
-        def _async_homeassistant_stop(_event):
-            coord.hass.async_create_task(coord._persist_shutdown_diagnostics(kind="ha_stop"))
-
-        return _async_homeassistant_stop
+        """The real STOP listener async_setup() registers (Issue #1183: a method, not a test-side copy)."""
+        return types.MethodType(ClimateAdvisorCoordinator._async_homeassistant_stop, coord)
 
     def test_stop_event_schedules_persist_diagnostics_task(self):
         coord = _make_coord_stub()
@@ -363,6 +361,63 @@ class TestHomeAssistantStopPersistsShutdownDiagnostics:
         calls = coord._emit_event.call_args_list
         restarted_payload = next(c[0][1] for c in calls if c[0][0] == "system_restarted")
         assert restarted_payload["cause"] == "unknown"
+
+
+class TestHomeAssistantStopEndsCommands:
+    """Issue #1183: once Home Assistant begins stopping, Climate Advisor stops acting.
+
+    Occupant view: during a restart the fan and its RF remote go unavailable as HA unloads them. Before the
+    fix that kicked off a full update cycle, which emailed "2 entities aren't responding" and sent a
+    thermostat command that failed with "Connection lost". A restart never unloads the config entry, so the
+    #1102 shut-down latch never engaged; the STOP listener now sets a separate one-way stopping flag that the
+    same refusal check honours.
+    """
+
+    def _stop(self, coord):
+        types.MethodType(ClimateAdvisorCoordinator._async_homeassistant_stop, coord)(MagicMock())
+
+    def test_stop_marks_coordinator_and_engine_stopping(self):
+        coord = _make_coord_stub()
+        self._stop(coord)
+
+        assert coord._ha_stopping is True
+        assert coord.automation_engine._ha_stopping is True
+
+    def test_stopping_refuses_the_update_cycle(self):
+        coord = _make_coord_stub()
+        coord.data = {"sentinel": 1}
+        coord._async_update_data_impl = AsyncMock()
+        update = types.MethodType(ClimateAdvisorCoordinator._async_update_data, coord)
+        self._stop(coord)
+
+        assert asyncio.run(update()) == {"sentinel": 1}
+        coord._async_update_data_impl.assert_not_called()
+
+    def test_stopping_refusal_is_info_not_the_reload_leak_warning(self, caplog):
+        """A refusal while HA stops is expected; the #1102 WARNING ("stale after reload/unload") is a leak tripwire."""
+        engine = types.SimpleNamespace(_ha_stopping=True, climate_entity="climate.thermostat")
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.automation"):
+            assert _refuse_if_shut_down(engine, "send notification 'x'") is True
+
+        refusals = [r for r in caplog.records if "send notification" in r.getMessage()]
+        assert [r.levelno for r in refusals] == [logging.INFO]
+        assert "stopping" in refusals[0].getMessage()
+
+    def test_unload_after_stop_still_saves_and_releases(self):
+        """The stopping flag must not short-circuit async_shutdown(): an unload after a stop still saves state,
+        writes its own diagnostics and cleans up the engine (the #1102 idempotency gate reads _shut_down only)."""
+        coord = _make_coord_stub()
+        scheduled = []
+        coord.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+        self._stop(coord)
+        asyncio.run(scheduled[0])
+
+        asyncio.run(coord.async_shutdown())
+
+        coord._async_save_state.assert_called_once()
+        coord.automation_engine.cleanup.assert_called_once()
+        assert coord.learning._state.last_shutdown_kind == "unload"
 
 
 # ---------------------------------------------------------------------------
@@ -582,10 +637,14 @@ class TestReloadCause:
         assert "cause=user_restart/version_changed/reload (benign, expected)" in _SYSTEM_PROMPT
 
     def test_production_stop_listener_passes_ha_stop_kind(self):
-        """The closure replicas above pass kind="ha_stop"; pin that production does too."""
+        """The real STOP handler persists kind="ha_stop"; async_shutdown() passes "unload"."""
         import inspect
 
-        src = inspect.getsource(ClimateAdvisorCoordinator.async_setup)
-        assert "self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP)" in src
+        coord = _make_coord_stub()
+        scheduled = []
+        coord.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+        types.MethodType(ClimateAdvisorCoordinator._async_homeassistant_stop, coord)(MagicMock())
+        asyncio.run(scheduled[0])
+        assert coord.learning._state.last_shutdown_kind == "ha_stop"
         shutdown_src = inspect.getsource(ClimateAdvisorCoordinator.async_shutdown)
         assert "self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_UNLOAD)" in shutdown_src

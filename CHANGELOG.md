@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.20] — 2026-11-01
+
+- Fix #1140: if you have no fan set up, or the fan does not take the command, opening a window now pauses heating and cooling like any other open window. Before, Climate Advisor called it natural ventilation and left the system running. The Activity Report no longer says a fan turned on when it did not.
+- Fix #1138: the "forecast peak" and "floor coming soon" checks that decide whether natural ventilation is worth starting now apply every time Climate Advisor considers starting it (window just opened, window still open after a pause, grace period ended), not only when the window first opens. Before, the next refresh could start the fan right after it had been skipped.
+- Fix #1141: when natural ventilation ends with a window still open, the window pause is now recorded only after the fan has actually stopped. If the fan's off command is held back by the 5-minute fan-switching limit, Climate Advisor no longer shows "ventilating" and "paused for the window" at the same time. With the windows closed, it likewise waits for the fan to stop before restoring heating/cooling and starting the grace period.
+
 ## [0.8.19] — 2026-11-01
 
 - Fix #1143: when a window or door opens while your heating or cooling is running and Climate Advisor turns it off for the window, it now remembers that it interrupted a running cycle, including after the automatic grace period ends with the window still open. Before, it noted the system as already off, so when the outdoor air later became suitable for natural ventilation the fan was started by the idle-open path, which does not clear the window pause, and the pause stayed on while the fan ran. Now the paused path runs, which clears the pause as it starts the fan.

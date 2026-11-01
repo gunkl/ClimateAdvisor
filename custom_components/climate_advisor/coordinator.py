@@ -6656,7 +6656,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not _is_expected_confirmation
             and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _setpoint_override_detected
-            and not _mode_override_detected  # Issue #1133: one thermostat event, one root cause (mode change wins)
+            # Issue #1133: one thermostat event, one root cause -- a mode-change override wins over a fan-ON press
+            # in the same event, but the fan-OFF/cancel direction still has to end a thermostat-fan override.
+            and not (_mode_override_detected and not _fan_cancel_in_this_event)
         ):
             _fan_ct = self.automation_engine._fan_command_time
             try:
@@ -6685,7 +6687,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (clears fan state, gates nat-vent re-activation) instead of handle_fan_manual_override()
             # (which sets the "user turned fan ON" override flag).
             if _fan_cancel_in_this_event:
-                self.automation_engine.on_fan_turned_off(fan_before=str(old_fan_mode), fan_after=str(new_fan_mode))
+                self.automation_engine.on_fan_turned_off(
+                    fan_before=str(old_fan_mode), fan_after=str(new_fan_mode), hvac_fan=True
+                )
             else:
                 self.automation_engine.handle_fan_manual_override(
                     fan_before=str(old_fan_mode), fan_after=str(new_fan_mode), hvac_fan=True

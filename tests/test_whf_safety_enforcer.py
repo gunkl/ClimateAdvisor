@@ -117,7 +117,7 @@ class TestSealedHouseStop:
     def test_fan_on_a_sealed_house_is_stopped_and_its_override_and_grace_end(self, clock):
         engine, _ = _engine()
         engine._fan_override_active = True
-        engine._fan_override_time = clock.now().isoformat()
+        engine._fan_override_time = engine._whf_press_time = clock.now().isoformat()
         engine._fan_remote_timer_hours = 2.0  # RF timer: absolute against routine automation, not against safety
 
         result = _run(engine)
@@ -279,7 +279,7 @@ class TestRule2Mutex:
         engine, world = _engine(thermostat_mode="heat")
         world["sensors"] = (OPEN,)
         engine._fan_override_active = True
-        engine._fan_override_time = clock.now().isoformat()
+        engine._fan_override_time = engine._whf_press_time = clock.now().isoformat()
         engine._grace_active = True  # the fan override's grace, shared with the HVAC change in the field
         engine._grace_protects_override = True
         clock.advance(60)

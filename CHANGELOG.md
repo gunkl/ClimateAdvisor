@@ -3,9 +3,41 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.8.6] — 2026-10-31
+## [0.8.12] — 2026-10-31
 
 - Fix #1144: the whole-house fan is now switched off within 30 seconds if it is running while every door and window is closed, even when you turned it on from the wall switch, HomeKit or the RF remote (a fan that ran for about 55 minutes on a sealed house on 2026-10-30 prompted this). Climate Advisor itself will also never start the whole-house fan on a sealed house, and the hourly minimum-runtime fan cycle runs a whole-house fan only while a window or door is open. The fan and the heat or AC are mutually exclusive: if you turn the heat or AC on after the fan, the fan stops; if you turn the fan on after the AC, the AC is turned off. With automation switched off (observe-only), Climate Advisor sends no command to the fan; it sends one notification per episode telling you the fan is running on a closed-up house. Setup and Settings now warn when a whole-house fan has no door/window sensors (the sealed-house rule cannot apply) or no fan state feedback (Climate Advisor cannot see or stop a fan it did not start), and refuse a fan that another Climate Advisor zone already controls.
+
+## [0.8.10] — 2026-10-31
+
+- Fix #1133: if you change the thermostat (with "Manual Change Pause" set to 0 minutes) and a window is opened later, Climate Advisor no longer switches your heating or cooling off over your change. It stays as you set it until you, Cancel Override, away mode or a restart ends it. Where there is a grace period, an open window still pauses heating or cooling when the grace ends. This replaces the 0.8.3 behaviour for a window opened over a grace-less manual change (the pause is no longer needed there).
+- Fix #1148: opening a window while your manual heat or cool change is still protected no longer makes Climate Advisor pause it a few minutes before the protection ends, even when the air outside would have allowed natural ventilation.
+- Fix #1147: if you turn the thermostat off while natural ventilation is running and then close the window, Climate Advisor no longer turns the air conditioning back on over your change.
+- Fix #1131: if you raise or lower the temperature while a door or window has paused heating or cooling, closing the door now resumes heating or cooling at your temperature instead of Climate Advisor's.
+- Fix #1146: when you change only the temperature (and the mode already matches the day's plan), Climate Advisor now protects that change for the full manual-change period and shows the grace period on the Status card.
+- Fix #1133 (follow-up): changing only the temperature while the whole-house fan is running is now ignored (the fan keeps running, nothing is turned on into the open window, and it is not treated as a manual change). Changing the mode, or turning the fan off, still ends the fan session.
+- Fix #1133 (follow-up): your newest manual change always wins and replaces the previous one. Turning the whole-house fan on replaces a heating or cooling change you made just before it (it is no longer half-remembered and then confirmed as "off"); when you turn the fan off Climate Advisor ends its hold and continues its own plan, and when Climate Advisor itself stops the fan it also puts back the mode the fan paused. Switching on your thermostat's own fan for air circulation does not replace a heating or cooling change. A failing notification service can no longer leave heating or cooling switched off after a door or window pause, and a late echo of Climate Advisor's own thermostat command is no longer mistaken for a change you made.
+- Internal (#1152): removed a dead diagnostic copy of the override/grace state machine from the coordinator (its FSM tracker, feeds and the `test_startup_coalesce_shadow_fsm.py` test file that only exercised it).
+
+## [0.8.9] — 2026-10-31
+
+- Fix #1136: the Next User Action card now judges the room against the comfort range your thermostat is actually holding. At night it uses your sleep range, so it no longer tells you to act at 66°F when your sleep range is 64–72°F, and it now speaks up at 73°F when that is above your sleep ceiling.
+- Fix #1094: with Prefer savings on, the Next User Action card no longer suggests cooling or heating while the house is still inside the wider range the thermostat is deliberately holding (for example 75–77°F). It now uses the same range as the chart and the briefing.
+- Fix #1093: with Prefer savings on, Climate Advisor holds the same cooling limit on every day. On a warm "AC off" day it now waits until the house is forecast to pass your savings ceiling (for example 77°F, not 75°F) before starting the AC early, holds that ceiling, and the morning briefing quotes that number. Homes with a whole-house fan now also get this early cooling when every monitored door and window is confirmed closed, because the fan can't run on a closed-up house. With any window open, a window sensor offline or unreadable, or no window sensors set up, nothing changes.
+- Fix #1120: the Activity Record's thermostat-change rows show the comfort range the thermostat is holding at that moment. After a skipped wake-up or bedtime (for example because you had changed the thermostat yourself) that is the range for the current time of day, not last night's or yesterday's. During an overnight pre-cool, every row (the pre-cool switch itself, a change you make, a door or window pause) shows the lowered cooling limit Climate Advisor actually set, until the wake-up or another setting replaces it.
+- Internal #1153: each household-promise miss found by the nightly test runs now records how it happened (the command and its reason, the pause or override state, whether a window was open, and the code version), and a known miss can only be waived against an open issue with an expiry date. Nothing you see in Home Assistant changes.
+
+## [0.8.8] — 2026-10-31
+
+- Fix #1149: right after the AC has cooled the house, a thermostat you switched Off (or one in heat/cool auto mode, or one that just came back online) is no longer switched to heat for a shallow dip under your comfort minimum. Climate Advisor keeps the cooling side armed (the AC stays idle because the house is below your maximum) until the recency window passes or the house drops more than your tolerance below the minimum, and then it heats. Likewise, right after the furnace has run, a slight overshoot just above your maximum no longer starts the AC. The natural side for the day (heating on a cool or cold day, cooling on a hot or warm day) is never delayed, and if neither side ran recently nothing changes.
+
+## [0.8.5] — 2026-10-31
+
+- Internal #1150, #1151: the household-promise checks no longer report two false alarms found by the nightly generated-day runs. A normal furnace restart after an earlier heat run is no longer called "heat started right after the AC", and one reversal of your manual change is reported once rather than twice (and no longer says "0 min before your manual change was due to end" when that change had no end). These checks only note misses; nothing you see on the thermostat changes.
+
+## [0.8.3] — 2026-10-31
+
+- Fix #1132: when a window opens while you have a manual thermostat change in effect, Climate Advisor now records the pause, so closing the window restores your heating or cooling instead of leaving it off. A pause is no longer dropped when the whole-house fan command could not run, and a leftover "mode before pause" can no longer switch heating or cooling back on at a later window close.
+- Docs (#1139): during the planned window period heating and cooling are already off by plan, so no separate window pause is recorded; natural ventilation still runs.
 
 ## [0.8.2] — 2026-10-30
 

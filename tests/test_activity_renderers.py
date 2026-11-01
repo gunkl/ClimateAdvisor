@@ -553,9 +553,8 @@ class TestEventRenderersCoverage:
     # dedicated renderer.  Add here only with a comment explaining why.
     _DEFAULT_RENDERER_ALLOWLIST: frozenset[str] = frozenset(
         {
-            # Issue #672 (superseded by Issue #913): purely a technical signal feeding
-            # coordinator.py's diagnostic override/grace FSM tracker
-            # (_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP) — the SAME real grace-start
+            # Issue #672 (superseded by Issue #913): purely a technical signal for the event log
+            # (the coordinator override/grace FSM tracker it fed was deleted in Issue #1152) — the SAME real grace-start
             # _start_grace_period_action() already emits as the user-facing
             # "grace_started" event (which has its own dedicated renderer) moments
             # earlier. Issue #913: this type is no longer routed to _default_renderer at
@@ -1625,6 +1624,21 @@ class TestLifecycleScopedNarration:
         assert "breach in 0.4h" in st
         assert "lead=15min" in st
         assert "k_cool=-0.550" in st
+
+    def test_nat_vent_ceiling_escalation_prefers_the_ceiling_key(self):
+        # Issue #1093: "ceiling" is the guard ceiling (77 with Prefer savings); old rows only have comfort_cool.
+        ev, _st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
+            {"indoor": 78.0, "ceiling": 77.0, "comfort_cool": 75.0, "hours_to_breach": 0.4, "lead_min": 15},
+            "fahrenheit",
+        )
+        assert "ceiling 77" in ev
+
+    def test_nat_vent_ceiling_escalation_old_rows_fall_back_to_comfort_cool(self):
+        ev, _st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
+            {"indoor": 78.0, "comfort_cool": 76.0, "hours_to_breach": 0.4, "lead_min": 15},
+            "fahrenheit",
+        )
+        assert "ceiling 76" in ev
 
     def test_nat_vent_bedtime_continue_shows_outdoor_and_sleep_cool(self):
         ev, st = _act_mod.EVENT_RENDERERS["nat_vent_bedtime_continue"](

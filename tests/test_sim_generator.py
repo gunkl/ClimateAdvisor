@@ -237,14 +237,44 @@ def test_run_plan_is_the_same_as_run_day() -> None:
     assert run_plan(plan).scenario["events"] == run_day(day_seed_of(5, 1)).scenario["events"]
 
 
-# Hard promises whose hits on HEAD are NOT yet triaged (reported to the owner with replay seeds, see
-# the Step 3 trial report).  Everything else is a hard failure.  Remove an entry when it is triaged.
-# Triaged 2026-10-30 (epic #1125), re-measured after coordinator days were made to always run the 30-minute
-# cycle (10 seeds x 100 days: 18 days with override_respected, no other hard promise). All 18 are real CA
-# defects or an owner decision: #1131 (setpoint change during a door pause, 6 days), #1132 (door pause not
-# recorded, 3 days) and #1133 (grace-0 override paused by a later window, 12 days incl. those 3). Remove once
-# those land.
-_UNTRIAGED_ON_HEAD = {"override_respected"}
+# Hard promises whose hits on HEAD are NOT yet triaged (reported to the owner with replay seeds).  Everything
+# else is a hard failure.  Remove an entry when it is triaged.
+# Epic #1125 triage history for ``override_respected`` (10 seeds x 100 days, coordinator profile): 18 days on
+# the first measurement, 21 days / 30 hits on the pre-fix tree of Issue #1133.  Every one was a real Climate
+# Advisor defect or an owner decision, all fixed together: #1131 (setpoint change during a door pause),
+# #1132 (door pause not recorded), #1133 (grace-0 override paused by a later window), #1146 (setpoint-only
+# override lost its grace flags), #1147 (nat-vent exit rewrote the occupant's Off) and #1148 (the #655 bypass
+# paused a protected manual grace).  The same 10 x 100 run is now 0 hits, so the tolerance is gone: any new
+# ``override_respected`` hit is a failure.
+_UNTRIAGED_ON_HEAD: set[str] = set()
+
+# Nightly / epic-#1125 seeds that each broke ``override_respected`` before the "protect the occupant's manual
+# change" fixes (#1131 #1133 #1146 #1147 #1148); the issue named in each entry is the one the issue text
+# attributes it to, the rest are nightly seeds the family clears together.
+_PROTECT_MANUAL_CHANGE_SEEDS = {
+    1000016: "#1131 setpoint change during a door pause overwritten at the door close",
+    1000025: "#1133 grace 0, window opened after a confirmed override (the #1153 mechanism example)",
+    3000032: "#1131 (3000032 is the second #1131 example)",
+    1003000002: "#1146 setpoint-only override lost its grace flags",
+    1008000153: "#1146",
+    1012000126: "#1146",
+    1012000229: "#1146",
+    1007000194: "#1148 #655 bypass fell through to a pause over a manual grace",
+    1005000246: "#1147 nat-vent exit rewrote the occupant's Off",
+    1002000218: "nightly seed; cleared by the family, not bisected to one issue",
+    1001000043: "nightly seed; cleared by the family, not bisected to one issue",
+    1002000019: "nightly seed; cleared by the family, not bisected to one issue",
+    1004000122: "nightly seed; cleared by the family, not bisected to one issue",
+    1006000028: "nightly seed; cleared by the family, not bisected to one issue",
+    1012000033: "nightly seed; cleared by the family, not bisected to one issue",
+}
+
+
+@pytest.mark.parametrize("day_seed", sorted(_PROTECT_MANUAL_CHANGE_SEEDS))
+def test_the_occupants_manual_change_is_respected_on_the_days_that_used_to_break_it(day_seed: int) -> None:
+    rec = run_day(day_seed, "coordinator")
+    broken = [(h.promise, h.detail) for h in rec.report.hard]
+    assert not broken, f"seed {day_seed} ({_PROTECT_MANUAL_CHANGE_SEEDS[day_seed]}): {broken}"
 
 
 @pytest.mark.parametrize("master_seed", CI_SMOKE_SEEDS)

@@ -374,6 +374,17 @@ def _map_event_to_outcome(
     (these are documented in UNMAPPED_PRODUCTION_EVENTS).
     """
     # --- Sensor events ---
+    # Issue #1132: nat_vent_reactivated_while_paused is the "natural ventilation resumed while a
+    # door/window pause was recorded" decision. Since #1132 it is emitted only when a nat-vent session
+    # is recorded (the fan command was applied: a SUPPRESSED/DISABLED/ALREADY_IN_STATE result counts as
+    # applied; OVERRIDDEN and RATE_LIMITED_* do not and emit nothing). Emitters:
+    # check_natural_vent_conditions() emits ONLY this event; _re_pause_for_open_sensor() is the one
+    # emitter that is followed by sensor_opened. Unmapped it surfaced as 'unknown:<type>' under
+    # last-decision-wins and misreported a working reactivation. Cannot hide a real failure: a refused
+    # reactivation emits no event at all (pause kept), so a scenario expecting natural_ventilation still
+    # fails when nat-vent did not resume.
+    if event_type == "nat_vent_reactivated_while_paused":
+        return ProductionDecision(ts_str, event_type, "natural_ventilation")
     if event_type == "sensor_opened":
         result_field = payload.get("result", "")
         if result_field == "natural_ventilation":

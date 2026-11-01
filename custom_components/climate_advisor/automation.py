@@ -414,6 +414,16 @@ class FanCommandResult(Enum):
     SUPPRESSED = "suppressed"  # Issue #835: hvac_fan_restrict_mode blocked activation
 
 
+# Issue #1132: the FanCommandResult values meaning "the fan-ON command did NOT take effect, so the
+# pre-await nat-vent activation decision is stale". ONE definition shared by
+# _apply_nat_vent_fsm_state_after_activation() (decides whether a session is recorded) and
+# _nat_vent_activation_applied() (decides whether a door/window pause may be cleared) so the two can
+# never disagree about "did the activation work".
+_NAT_VENT_ACTIVATION_NOT_APPLIED = frozenset(
+    {FanCommandResult.OVERRIDDEN, FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP}
+)
+
+
 class HvacCommandResult(Enum):
     """Outcome of ``_set_hvac_mode()`` (Issue #1049, Part of #1048).
 
@@ -1038,7 +1048,7 @@ def _real_hvac_mode(value: Any) -> str | None:
 
 @dataclass
 class AutomationEngineCallbacks:
-    """Bundle of the 9 callbacks the coordinator wires onto an AutomationEngine.
+    """Bundle of the 10 callbacks the coordinator wires onto an AutomationEngine.
 
     Issue #604 (Block 5, subtask N2): named-bundle form of the callback wiring the
     coordinator has always done post-construction, so a future second ("shadow")
@@ -1050,13 +1060,15 @@ class AutomationEngineCallbacks:
 
     revisit: Callable[[], Any] | None = None
     sensor_check: Callable[[], bool] | None = None
+    # Issue #1093: True only when >=1 sensor is configured and every one reads a real closed state.
+    sensors_known_closed: Callable[[], bool] | None = None
     sensor_debounce_pending: Callable[[], bool] | None = None
     emit_event: Callable[..., None] | None = None
     request_refresh: Callable[[], None] | None = None
     post_grace_fan_check: Callable[[], None] | None = None
     get_fan_physical_state: Callable[[], Any] | None = None
     is_recent_fan_command: Callable[[], bool] | None = None
-    reclassify: Callable[[], None] | None = None
+    reclassify: Callable[..., None] | None = None
     # Issue #1144: ground-truth snapshot (fan state + age, door/window sensors with unknown
     # durations) for the WHF safety enforcer. None (shadow engine, bare tests) -> the enforcer
     # falls back to the sensor_check/get_fan_physical_state callbacks and applies no settle.
@@ -1095,6 +1107,8 @@ class AutomationEngine:
     _whf_safety_seen_off_since_stop: bool = True
     _whf_safety_unenforceable_logged: bool = False
     _whf_safety_observe_logged: bool = False
+    # When the occupant last pressed the WHOLE-HOUSE fan (not the thermostat blower); None = no WHF press.
+    _whf_press_time: str | None = None
     _whf_observe_notified: bool = False
 
     # Issue #1049: class-level defaults for attributes first read by the climate-command
@@ -1104,6 +1118,12 @@ class AutomationEngine:
     _hvac_cmd_fail_since: datetime | None = None
     _hvac_cmd_fail_mode: str | None = None  # last attempted mode of the open failure episode
     _request_refresh_callback: Any | None = None
+    # Issue #1093: class-level default for engines built via object.__new__ in tests.
+    _sensors_known_closed_callback: Any | None = None
+    # Issue #1120: the pre-cool band the thermostat is holding, and when it was armed (see
+    # _pre_cool_band_in_force_now()). Class-level defaults for engines built via object.__new__ in tests.
+    _pre_cool_band_in_force: ComfortBand | None = None
+    _pre_cool_band_since: datetime | None = None
     # Issue #1049 change 1: (mode, when) of the last mode command that went out successfully;
     # dedupes the explicit set_hvac_mode that would otherwise follow in the same cycle.
     _mode_switch_marker: tuple[str, datetime] | None = None
@@ -1260,6 +1280,10 @@ class AutomationEngine:
         # re-deriving the band itself (which stays this call's job, via a full
         # apply_classification() re-entry — see that method's own docstring).
         self._last_comfort_band: ComfortBand | None = None
+        # Issue #1120: the pre-cool band the thermostat is holding (None = none), and when it was armed.
+        # In memory only on purpose: a restart forgets it, and rows then quote the clock-resolved band.
+        self._pre_cool_band_in_force: ComfortBand | None = None
+        self._pre_cool_band_since: datetime | None = None
 
         # Economizer state (two-phase window cooling per Issue #27)
         # Phase "cool-down": AC runs to cool to set temp (outdoor air assists)
@@ -1368,6 +1392,9 @@ class AutomationEngine:
         # HVAC mode captured before whole-house fan activation (Issue #277 Fix C).
         # Restored when the whole-house fan deactivates so AC/heat resumes.
         self._pre_fan_hvac_mode: str | None = None
+        # Issue #1133 F-E: something (a scheduled routine, a window pause) waited on a PENDING change; when it
+        # self-resolves the band is re-armed right away instead of at the next 30-minute cycle.
+        self._deferred_while_pending: bool = False
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
@@ -1525,6 +1552,7 @@ class AutomationEngine:
         self._comfort_hold_episode: dict[str, Any] | None = None
         self._comfort_mode_changes: deque[dict[str, Any]] = deque(maxlen=COMFORT_MODE_CHANGE_LOG_CAP)
         self._mode_change_reason: str = "other"
+        self._mode_change_band: ComfortBand | None = None  # Issue #1120: band armed for the write in flight
         # Issue #1066 (F1): TOU banking window. Set by the coordinator each cycle
         # (set_tou_precondition_window) from the resolved scheduler phase: while now < until the
         # TOU precondition owns the thermostat and the comfort-edge selector defers. ``mode`` is
@@ -1736,7 +1764,7 @@ class AutomationEngine:
         # direct handle on that coordinator-owned state, so this mirrors the existing
         # callback-injection pattern above rather than reaching into the coordinator directly.
         # Set by coordinator after construction.
-        self._reclassify_callback: Callable[[], None] | None = None
+        self._reclassify_callback: Callable[..., None] | None = None
 
         # Today's DailyRecord — set by coordinator; used for bedtime setback tracking
         self._today_record: Any | None = None
@@ -1751,6 +1779,9 @@ class AutomationEngine:
         # Resume-from-pause tracking (Issue #47)
         self._resumed_from_pause: bool = False
         self._sensor_check_callback: Any | None = None  # Set by coordinator: returns True if any sensor open
+        # Issue #1093: Set by coordinator: True only when >=1 sensor is configured and every one reads a
+        # real closed state. None/unset (no coordinator wired) means "unknown", i.e. NOT sealed.
+        self._sensors_known_closed_callback: Any | None = None
         # Issue #504: Set by coordinator: returns True if any currently-open monitored sensor
         # is still within its CONF_SENSOR_DEBOUNCE settle window. None/unset (e.g. tests that
         # don't wire a coordinator) is treated as "not pending", matching pre-#504 behavior.
@@ -1790,7 +1821,7 @@ class AutomationEngine:
         # Occupancy mode — synced by coordinator (Issue #85)
         self._occupancy_mode: str = OCCUPANCY_HOME
 
-        # Issue #604: seed the 9 callback attributes from the bundle, if one was given.
+        # Issue #604: seed the 10 callback attributes from the bundle, if one was given.
         # Omitted (None) → every _x_callback attribute stays None, exactly as before this
         # dataclass existed. Applied last so it can't be shadowed by any of the plain
         # `self._x_callback: Any | None = None` assignments above.
@@ -1809,6 +1840,7 @@ class AutomationEngine:
         """
         self._revisit_callback = callbacks.revisit
         self._sensor_check_callback = callbacks.sensor_check
+        self._sensors_known_closed_callback = callbacks.sensors_known_closed
         self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
         self._emit_event_callback = callbacks.emit_event
         self._request_refresh_callback = callbacks.request_refresh
@@ -1844,12 +1876,34 @@ class AutomationEngine:
         push_key = f"push_{notification_type}"
         email_key = f"email_{notification_type}"
         service_name = self.notify_service.split(".")[-1] if "." in self.notify_service else self.notify_service
+        # Issue #1133 M3: a notification is never load-bearing. A failing notify service used to raise out of
+        # _pause_for_door_window_action() AFTER set_hvac_mode(off) and BEFORE the pause was recorded, leaving
+        # HVAC off with no pause (closing the window then restored nothing). Each channel is isolated and a
+        # failure is a WARNING, never an exception (CancelledError is not an Exception and still propagates).
         if self.config.get(push_key, True):
-            await self.hass.services.async_call("notify", service_name, {"message": message, "title": title})
-            _LOGGER.info("Notification sent: %s — %s role=%s", title, message, self.role)
+            try:
+                await self.hass.services.async_call("notify", service_name, {"message": message, "title": title})
+                _LOGGER.info("Notification sent: %s — %s role=%s", title, message, self.role)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Notification failed (push): type=%s title=%s error=%s role=%s",
+                    notification_type,
+                    title,
+                    type(err).__name__,
+                    self.role,
+                )
         if email and self.config.get(email_key, True):
-            await self.hass.services.async_call("notify", "send_email", {"message": message, "title": title})
-            _LOGGER.info("Email notification sent: %s — %s role=%s", title, message, self.role)
+            try:
+                await self.hass.services.async_call("notify", "send_email", {"message": message, "title": title})
+                _LOGGER.info("Email notification sent: %s — %s role=%s", title, message, self.role)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Notification failed (email): type=%s title=%s error=%s role=%s",
+                    notification_type,
+                    title,
+                    type(err).__name__,
+                    self.role,
+                )
 
     @property
     def is_paused_by_door(self) -> bool:
@@ -1991,6 +2045,83 @@ class AutomationEngine:
         self._override_confirm_mode = None
         self._override_confirm_source = None
 
+    def _manual_change_protected(self) -> bool:
+        """Whether the occupant's own thermostat change currently owns the thermostat (Issue #1133).
+
+        True while a manual override is confirmed (``_manual_override_active``) or a change is
+        awaiting its confirmation window (``_override_confirm_pending``). This is the ONE
+        definition of "the occupant's change is protected" that every automation-initiated
+        HVAC write consults: the door/window pause (``handle_door_window_open()``), the live
+        re-check (``_sync_paused_by_door_with_live_sensors()``), the nat-vent exit's HVAC
+        restore (``_exit_nat_vent()``) and the door-close comfort restore
+        (``_restore_comfort_after_door_window_close()``).
+
+        Deliberately NOT derived from ``_grace_active`` / ``_grace_protects_override``: with
+        ``manual_grace_seconds=0`` ("Manual Change Pause" = 0) a confirmed override has no
+        grace timer at all, yet it is still the occupant's change. It ends only through the
+        override-ending paths (next manual change, Cancel Override, away/vacation, adoption,
+        grace expiry when there is one, HA restart) -- never because a window opened.
+
+        The designed moments that DO switch an override off for an open window are not
+        guarded by this predicate because they run AFTER the override is cleared:
+        ``_on_grace_expired()`` clears it first and then schedules ``_re_pause_for_open_sensor()``.
+        A fan-off / automation / dashboard-resume grace has no override behind it and does not
+        make this True (owner decision D16).
+        """
+        return bool(self._manual_override_active or self._override_confirm_pending)
+
+    def _note_deferred_to_protected_change(self) -> None:
+        """Remember that automation held off because of a PENDING change (Issue #1133 F-E / L2).
+
+        When the pending change self-resolves, ``_after_override_self_resolved()`` re-arms the band right away
+        iff something waited. Every skip site that is guarded by ``_manual_change_protected()`` calls this.
+        """
+        if self._override_confirm_pending:
+            self._deferred_while_pending = True
+
+    def _protected_active_mode(self) -> str | None:
+        """The ACTIVE HVAC mode the occupant's protected change asks for, else None.
+
+        ``_manual_override_mode`` while confirmed, ``_override_confirm_mode`` while pending. Off / unknown /
+        unavailable are not active modes (an occupant's Off is protected by NOT writing, not by restoring
+        anything).
+        """
+        mode = self._manual_override_mode if self._manual_override_active else None
+        if mode is None and self._override_confirm_pending:
+            mode = self._override_confirm_mode
+        return mode if mode not in (None, "off", "unavailable", "unknown") else None
+
+    def _occupant_mode_when_ca_holds_off(self, live_mode: str, detected_mode: str | None = None) -> str:
+        """The mode an occupant change means when the thermostat's live Off is Climate Advisor's door pause.
+
+        While a door/window pause holds the thermostat Off the live ``off`` is CA's, not the occupant's, so a
+        setpoint-only change is judged against what the occupant actually asked for (Issue #1131): at detection
+        (live Off, nothing detected yet) the mode the pause interrupted (``_pre_pause_mode``); at confirm time the
+        mode detected when the change was made. Anything else (a live mode that is not Off, no pause, HVAC
+        already Off before the pause) is returned unchanged. Every substitution is logged at WARNING.
+
+        Deliberately NOT applied to the whole-house fan: an occupant's fan press REPLACES any earlier thermostat
+        change (owner principle 2026-10-31 -- the latest manual change is the latest override and replaces the
+        old one), and a temperature-only change while the fan owns HVAC is ignored, so a pending change can
+        never be confirmed against the fan's Off.
+        """
+        if live_mode != "off" or not self._paused_by_door:
+            return live_mode
+        if detected_mode not in (None, "off", "unavailable", "unknown"):
+            substitute = detected_mode
+        elif self._pre_pause_mode:
+            substitute = self._pre_pause_mode
+        else:
+            return live_mode
+        _LOGGER.warning(
+            "Override mode substituted: live Off belongs to Climate Advisor (door/window pause), judging the "
+            "occupant's change against their mode live_mode=%s mode=%s detected_mode=%s",
+            live_mode,
+            substitute,
+            detected_mode,
+        )
+        return str(substitute)
+
     def clear_manual_override(self, reason: str = "grace_expired") -> None:
         """Clear the manual override flag (called at transition points).
 
@@ -2006,6 +2137,7 @@ class AutomationEngine:
         if self._override_confirm_pending:
             self._clear_override_confirm_action()
             self._legacy_clear_confirm_flag()
+        self._deferred_while_pending = False  # Issue #1133 L1: whatever waited on a pending change is moot now
         self._clear_manual_override_active(reason)
 
     def _clear_manual_override_active(self, reason: str, *, announce_fan: bool = True) -> None:
@@ -2015,6 +2147,40 @@ class AutomationEngine:
         (same exclusion list ``_apply_override_grace_fsm_state()``'s docstring
         documents) — always runs directly, unconditionally, regardless of which
         computation determined the confirm/grace flags for this event.
+        """
+        self._clear_thermostat_override_flags(reason)
+        self._resumed_from_pause = False
+        self.clear_fan_override(reason=reason, announce=announce_fan)
+
+    def _replace_thermostat_override(self, *, reason: str, fsm_kind=None, clear_fan: bool = False) -> bool:
+        """A NEW manual override replaces the old thermostat override -- the one place this happens.
+
+        Owner principle (2026-10-31, Issue #1133): the latest manual change creates the latest override; there is
+        no returning to an earlier one. Used by the coordinator's mode-to-mode supersession (``clear_fan=True``,
+        ``fsm_kind=OVERRIDE_SUPERSEDED`` dispatched here, before the flags clear, exactly as before) and by the
+        engine's whole-house-fan press (``clear_fan=False`` -- the fan override that is being created must not be
+        cleared -- and the FSM event dispatched by the caller once it knows whether a grace starts).
+
+        Cancels a pending confirmation (timer, bookkeeping), optionally dispatches ``fsm_kind``, clears the
+        confirmed override flags and the deferral marker. Returns whether a confirmation was pending.
+        """
+        was_pending = self._override_confirm_pending
+        if was_pending:
+            self._clear_override_confirm_action()
+        if fsm_kind is not None:
+            self._resolve_override_grace_fsm_state(kind=fsm_kind)
+        if clear_fan:
+            self._clear_manual_override_active(reason)
+        else:
+            self._clear_thermostat_override_flags(reason)
+        self._deferred_while_pending = False
+        return was_pending
+
+    def _clear_thermostat_override_flags(self, reason: str) -> None:
+        """The thermostat-override half of ``_clear_manual_override_active()`` -- never touches fan state.
+
+        Also what an occupant fan press uses to REPLACE an earlier thermostat change (owner principle
+        2026-10-31: the latest manual change replaces the old override; nothing is ever "returned to").
         """
         if self._manual_override_active:
             if self._emit_event_callback:
@@ -2057,8 +2223,6 @@ class AutomationEngine:
                 )
             except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real clear
                 _LOGGER.exception("_clear_manual_override_active: lifecycle event emit failed (isolated)")
-        self._resumed_from_pause = False
-        self.clear_fan_override(reason=reason, announce=announce_fan)
 
     def cancel_override(self, reason: str = "user_cancel") -> bool:
         """User/system deliberately ends an override and its grace protection right now (Issue #508).
@@ -2084,6 +2248,7 @@ class AutomationEngine:
         had_grace = self._grace_active
         if not (had_manual or had_fan or had_grace):
             return False
+        self._deferred_while_pending = False  # Issue #1133 F-E: cancelled -- nothing is waiting any more
 
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
@@ -2139,6 +2304,7 @@ class AutomationEngine:
         remote_speed: str | None = None,
         is_remote_event: bool = False,
         restored_from: str | None = None,
+        hvac_fan: bool = False,
     ) -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
 
@@ -2177,6 +2343,11 @@ class AutomationEngine:
                 for observability only (Issue #519) — same guarded-overwrite treatment as
                 ``remote_timer_hours`` below. None for a non-remote-triggered override, or a
                 remote press with no speed component (e.g. timer alone).
+            hvac_fan: True when the press is the THERMOSTAT's own fan (its ``fan_mode`` attribute -- the HVAC
+                fan leg), False for the whole-house fan (fan entity, RF remote, restart re-arm). Only a
+                whole-house-fan press replaces a thermostat change (Issue #1133): the WHF and the HVAC fan are
+                different physics, and circulating air with the thermostat fan is not a decision to override
+                the heat/cool setting.
             restored_from: Set only by the startup reconcile re-arm (Issue #677 ``"rf_timer"``,
                 Issue #1045 ``"persisted"``) — marks this override as restored across an HA
                 restart rather than freshly detected, for the log line and Activity event.
@@ -2189,12 +2360,36 @@ class AutomationEngine:
         _override_origin_state = self.fan_lifecycle_state
 
         was_override_active = self._fan_override_active
+        # Owner principle (2026-10-31, Issue #1133): the latest manual change creates the latest override and any
+        # new override REPLACES the old one -- there is no returning to an earlier one. A press of the WHOLE-HOUSE
+        # fan therefore drops a thermostat change, pending or confirmed, at any grace setting (grace 0 included);
+        # when the fan session ends, CA restores what the fan paused and resumes its own plan. The rule is for
+        # the WHF only: a press of the thermostat's own fan (``hvac_fan=True``; ``fan_mode`` hvac_fan, or the
+        # thermostat leg of ``both``) leaves the heat/cool change alone, as on main. It applies exactly when this
+        # press starts or continues a WHF session -- the same fan-mode gate that suppresses HVAC for the WHF below.
+        _whf_press = not hvac_fan and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) in (
+            FAN_MODE_WHOLE_HOUSE,
+            FAN_MODE_BOTH,
+        )
+        _replaced_pending = False
+        if _whf_press and self._manual_change_protected():
+            _LOGGER.info(
+                "Thermostat change replaced by a WHF override: override_active=%s confirm_pending=%s mode=%s",
+                self._manual_override_active,
+                self._override_confirm_pending,
+                self._protected_active_mode() or self._manual_override_mode or self._override_confirm_mode,
+            )
+            _replaced_pending = self._replace_thermostat_override(reason="new_override_during_grace")
         # Issue #1050: the occupant (or an RF remote) turned the fan on -- it demonstrably reacts, so
         # a read-back give-up no longer blocks CA's own fan activation.
         self._note_fan_readback_recovered()
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
         self._fan_override_time = dt_util.now().isoformat()
+        if not hvac_fan:
+            # Issue #1144: rule 2 compares the occupant's WHOLE-HOUSE-fan press with their HVAC change; a press of the
+            # thermostat's own blower (hvac_fan=True) is not a WHF action (owner decision, Issue #1133).
+            self._whf_press_time = self._fan_override_time
         # Issue #495: only overwrite the remote-timer value when the caller has a genuine
         # opinion about it. This method is the SHARED entry point for both remote-timer
         # presses and plain (non-remote) fan-on detections; a plain re-stamp of an
@@ -2252,6 +2447,10 @@ class AutomationEngine:
         _trigger = "fan_manual_override"
         if self._start_grace_period_action("manual", trigger=_trigger, duration_override=duration_override):
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.FAN_OVERRIDE_DETECTED)
+        elif _replaced_pending:
+            # grace 0: no grace starts, so FAN_OVERRIDE_DETECTED is not dispatched -- cancel the dropped pending
+            # confirmation through the FSM (the confirm flag is FSM-owned) so it can never confirm later.
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
 
         # Issue #495: whole-house fan and HVAC are mutually exclusive — this was previously
         # only enforced for CA-initiated activation (_activate_fan()). A manually/remotely
@@ -2425,6 +2624,7 @@ class AutomationEngine:
             )
             self._fan_override_active = False
             self._fan_override_time = None
+            self._whf_press_time = None
             self._fan_remote_timer_hours = None
             self._fan_remote_speed = None
 
@@ -2583,6 +2783,7 @@ class AutomationEngine:
                 )
             self._fan_override_active = False
             self._fan_override_time = None
+            self._whf_press_time = None
             self._fan_remote_timer_hours = None
             self._fan_remote_speed = None
 
@@ -2908,6 +3109,8 @@ class AutomationEngine:
         self._close_mode_episode_quietly("manual override detected")
         state = self.hass.states.get(self.climate_entity)
         detected_mode = state.state if state else "unknown"
+        if source == "setpoint":
+            detected_mode = self._occupant_mode_when_ca_holds_off(detected_mode)  # Issue #1131
         # Issue #1073 (S3): a user-initiated MODE change is a mode change like any other -- it
         # must move the one mode-change clock (the ring buffer), so a selector switch moments
         # later is dwell-locked instead of undoing the occupant's action. Setpoint-only
@@ -3032,6 +3235,7 @@ class AutomationEngine:
                 return
             current_state = self.hass.states.get(self.climate_entity)
             current_mode = current_state.state if current_state else "unknown"
+            current_mode = self._occupant_mode_when_ca_holds_off(current_mode, detected_mode)  # #1131 / #1133 M1
             cls_mode = self._current_classification.hvac_mode if self._current_classification else None
             # For setpoint overrides: mode may still match classification, but
             # the user deliberately moved the setpoint — always take PATH A.
@@ -3053,7 +3257,10 @@ class AutomationEngine:
                 )
                 self._clear_override_confirm_action()
                 self._confirm_override_action(current_mode, source=source)
-                self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED)
+                # Issue #1146: the confirm source was just cleared; hand it to the FSM explicitly.
+                self._resolve_override_grace_fsm_state(
+                    kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED, confirm_source=source
+                )
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "override_confirmed",
@@ -3072,24 +3279,53 @@ class AutomationEngine:
                     current_mode,
                 )
                 self._clear_override_confirm_action()
-                self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED)
+                self._resolve_override_grace_fsm_state(
+                    kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED, confirm_source=source
+                )
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "override_self_resolved",
                         {"detected_mode": detected_mode, "current_mode": current_mode},
                     )
-                if self.config.get(CONF_MANUAL_GRACE_NOTIFY, True):
-                    self.hass.async_create_task(
-                        self._notify(
-                            "Brief thermostat adjustment detected — treated as transient "
-                            "(reverted within confirmation window). "
-                            "Climate Advisor continues normal operation.",
-                            "Climate Advisor",
-                            notification_type="override_self_resolved",
-                        )
-                    )
+                # Issue #1133 follow-up: while the change was pending, a window that opened was
+                # skipped (the occupant's change was protected). Now that it has self-resolved
+                # nothing protects it, so apply the window pause right away instead of waiting up
+                # to one 30-minute scheduled re-check. One task (the bare-task ratchet allows one
+                # here): the notification and the re-check share it.
+                _recheck = self._any_monitored_sensor_open()
+                _notify_transient = bool(self.config.get(CONF_MANUAL_GRACE_NOTIFY, True))
+                self.hass.async_create_task(
+                    self._after_override_self_resolved(notify=_notify_transient, recheck_window=_recheck)
+                )
 
         self._override_confirm_cancel = async_call_later(self.hass, confirm_seconds, _confirm_override_expired)
+
+    async def _after_override_self_resolved(self, *, notify: bool, recheck_window: bool) -> None:
+        """Follow-ups of a pending change that self-resolved (PATH B) as one task.
+
+        Order matters (Issue #1133): first the window pause a pending change had shielded -- with a monitored
+        sensor open and nothing protecting HVAC any more, apply it now (owner rule 1) -- then the reclassify,
+        and only then the notification. A failing notify service must never skip the rule-1 re-check, so the
+        notification is last and isolated.
+        """
+        if recheck_window:
+            async with self._decision_pass("override_self_resolved_recheck"):
+                await self._sync_paused_by_door_with_live_sensors()
+        # Nothing protects the thermostat any more, so re-arm the band now rather than at the next 30-minute
+        # cycle (the pause above, if any, gates it) -- but only when something actually waited on the pending
+        # change (a routine, a TOU path, the arrival hold or a window), so an ordinary revert changes nothing.
+        deferred, self._deferred_while_pending = self._deferred_while_pending, False
+        if (deferred or recheck_window) and self._reclassify_callback:
+            self._reclassify_callback(reason="override_self_resolved")
+        if notify:
+            # _notify() never raises (Issue #1133 M3), so this last step cannot undo the follow-ups above.
+            await self._notify(
+                "Brief thermostat adjustment detected \u2014 treated as transient "
+                "(reverted within confirmation window). "
+                "Climate Advisor continues normal operation.",
+                "Climate Advisor",
+                notification_type="override_self_resolved",
+            )
 
     def _override_matches_current_decision(self, classification: DayClassification | None) -> bool:
         """Return True if the active manual override already matches what automation wants now.
@@ -3243,6 +3479,7 @@ class AutomationEngine:
             grace is disabled by config.
         """
         self._manual_override_active = True
+        self._deferred_while_pending = False  # Issue #1133 F-E: confirmed -- nothing is waiting any more
         self._manual_override_mode = mode
         self._manual_override_source = source
         self._manual_override_time = dt_util.now().isoformat()
@@ -3463,6 +3700,7 @@ class AutomationEngine:
                     return
 
             if self._override_confirm_pending:
+                self._deferred_while_pending = True
                 _LOGGER.info(
                     "Override confirmation pending (detected=%s at %s) — skipping HVAC mode change",
                     self._override_confirm_mode,
@@ -3749,7 +3987,7 @@ class AutomationEngine:
         _effective_active = {"cool": "ceiling", "heat": "floor"}.get(_resolved_mode, band.active)
 
         if _effective_active == "ceiling" and caps.supports_cool:
-            with self._mode_change_context("selector"):
+            with self._mode_change_context("selector", band=band):
                 _write_result = await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
@@ -3761,7 +3999,7 @@ class AutomationEngine:
             # to preserve, unlike _set_temperature_for_mode()'s two equivalent
             # branches below.)
         elif _effective_active == "floor" and caps.supports_heat:
-            with self._mode_change_context("selector"):
+            with self._mode_change_context("selector", band=band):
                 _write_result = await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
@@ -3890,14 +4128,24 @@ class AutomationEngine:
         return ClimateCallResult(ClimateCallOutcome.OK)
 
     @contextlib.contextmanager
-    def _mode_change_context(self, reason: str) -> Iterator[None]:
-        """Issue #1066: label the commanded-mode changes made inside the block (ring buffer)."""
+    def _mode_change_context(self, reason: str, *, band: ComfortBand | None = None) -> Iterator[None]:
+        """Issue #1066: label the commanded-mode changes made inside the block (ring buffer).
+
+        Issue #1120: ``band`` is the comfort band ``_apply_comfort_band()`` has just armed for the
+        write inside the block (pre-cool's lowered ceiling, nat-vent AC assist's full band...); the
+        ring-buffer row quotes it instead of the clock-resolved band. Every other writer (pause,
+        restore, ODE guard, TOU, nat-vent...) passes none, and a nested block resets it, so a row is
+        only ever stamped with a band armed for THAT write.
+        """
         prior = getattr(self, "_mode_change_reason", "other")
+        prior_band = getattr(self, "_mode_change_band", None)
         self._mode_change_reason = reason
+        self._mode_change_band = band
         try:
             yield
         finally:
             self._mode_change_reason = prior
+            self._mode_change_band = prior_band
 
     def _record_commanded_mode(self, mode: str, reason_text: str | None = None) -> None:
         """Single writer of ``_last_commanded_hvac_mode`` (Issue #1066).
@@ -3945,7 +4193,13 @@ class AutomationEngine:
         # The "from" side is CA's last command when it differs; when CA is reversing an occupant's change
         # (prev == mode) the thermostat was really in the live mode.
         _from = _live if (prev == mode and _live is not None) else prev
-        self._append_mode_change(_from, mode, getattr(self, "_mode_change_reason", "other"), reason_text)
+        self._append_mode_change(
+            _from,
+            mode,
+            getattr(self, "_mode_change_reason", "other"),
+            reason_text,
+            armed_band=getattr(self, "_mode_change_band", None),
+        )
 
     def _live_hvac_state(self) -> str | None:
         """The thermostat's reported HVAC mode, or None when unreadable or not a real mode (unavailable/unknown)."""
@@ -3956,7 +4210,39 @@ class AutomationEngine:
         live = getattr(state, "state", None) if state is not None else None
         return _real_hvac_mode(live)
 
-    def _append_mode_change(self, prev: str | None, mode: str, reason: str, reason_text: str | None = None) -> None:
+    def _pre_cool_band_in_force_now(self) -> ComfortBand | None:
+        """The pre-cool band the thermostat is holding right now, or None (Issue #1120).
+
+        Authoritative state for "pre-cool is in force": ``handle_pre_cool()`` records the band once its
+        write is sent; every later setpoint write (``_set_temperature()``) clears it, and a restart never
+        has it (in memory only). Backstop for the case no write follows: pre-cool is a night state, so it
+        ends at the first wake time after it was armed -- a wake-up skipped by an override must not leave
+        the night band quoted all day (the original #1120 bug).
+        """
+        band = self._pre_cool_band_in_force
+        since = self._pre_cool_band_since
+        if band is None or since is None:
+            return None
+        try:
+            _wp = str(self.config.get("wake_time")).split(":")
+            wake = since.replace(hour=int(_wp[0]), minute=int(_wp[1]), second=0, microsecond=0)
+            if wake <= since:
+                wake += timedelta(days=1)
+            if dt_util.now() >= wake:
+                return None
+        except ValueError, IndexError, TypeError:  # no usable wake time or mixed naive/aware: do not guess
+            return None
+        return band
+
+    def _append_mode_change(
+        self,
+        prev: str | None,
+        mode: str,
+        reason: str,
+        reason_text: str | None = None,
+        *,
+        armed_band: ComfortBand | None = None,
+    ) -> None:
         """Append one entry to the capped mode-change ring buffer (the one mode-change clock).
 
         Issue #1073 (S3): shared by the commanded-mode choke point (``_record_commanded_mode``)
@@ -3967,7 +4253,21 @@ class AutomationEngine:
         if changes is None:
             changes = deque(maxlen=COMFORT_MODE_CHANGE_LOG_CAP)
             self._comfort_mode_changes = changes
-        band = getattr(self, "_last_comfort_band", None)
+        # Issue #1120: record the band in force NOW, not the last one ARMED -- a skipped wake-up or
+        # bedtime (override, open window) leaves ``_last_comfort_band`` on the previous period's band.
+        # ``_last_comfort_band`` is only the fallback before any classification exists.
+        # The one exception: a write ``_apply_comfort_band()`` itself just armed (pre-cool's lowered
+        # ceiling) quotes that band (``armed_band``) -- it is fresh by construction for this write.
+        _cls = getattr(self, "_current_classification", None)
+        _held_pre_cool = self._pre_cool_band_in_force_now()
+        if armed_band is not None:
+            band = armed_band
+        elif _held_pre_cool is not None:
+            # Issue #1120: the pre-cool band is what the thermostat is actually holding until something
+            # supersedes it (next setpoint write, wake time) -- every row quotes it, not the clock band.
+            band = _held_pre_cool
+        else:
+            band = self._resolved_comfort_band(_cls) if _cls is not None else getattr(self, "_last_comfort_band", None)
         try:
             indoor = self._get_indoor_temp_f()
         except Exception:  # noqa: BLE001 - bookkeeping must never break a mode write
@@ -4313,7 +4613,7 @@ class AutomationEngine:
         rec = self._hvac_write_record
         if rec.episode_reason is None:
             return
-        if self._manual_override_active or self._override_confirm_pending:
+        if self._manual_change_protected():
             self._close_mode_episode_quietly("manual control")
             return
         state = self.hass.states.get(self.climate_entity)
@@ -4546,7 +4846,13 @@ class AutomationEngine:
         failed, rejected, WHF-blocked, dry-run, superseded) lands in ``_hvac_write_record.result``
         so incident context and diagnostics report what happened to the SETPOINT write, not just
         the last mode command.
+
+        Issue #1120: every setpoint write supersedes a held pre-cool band (``_pre_cool_band_in_force``);
+        ``handle_pre_cool()`` records it again after ITS write is sent, so the only writer that leaves it
+        set is pre-cool itself.
         """
+        self._pre_cool_band_in_force = None
+        self._pre_cool_band_since = None
         result = await self._set_temperature_impl(
             temperature,
             reason=reason,
@@ -4768,7 +5074,7 @@ class AutomationEngine:
                     )
                     if _action is SetpointRetryAction.SUPERSEDED:
                         return  # newer command superseded; skip retry
-                    if self._manual_override_active or self._override_confirm_pending:
+                    if self._manual_change_protected():
                         # Issue #1049 (in-phase investigation i): a user took manual control
                         # after the rejected write -- never re-assert CA's setpoint over it.
                         _LOGGER.info("Setpoint retry skipped -- manual override active/pending")
@@ -4825,7 +5131,7 @@ class AutomationEngine:
                                 current_write_seq=self._write_seq, target_write_seq=_retry_seq
                             ):
                                 return  # newer command superseded; skip
-                            if self._manual_override_active or self._override_confirm_pending:
+                            if self._manual_change_protected():
                                 _LOGGER.info("Real-target send after nudge skipped -- manual override active/pending")
                                 return
                             _LOGGER.info(
@@ -5090,6 +5396,7 @@ class AutomationEngine:
         # `apply_classification()` guards this exact window separately (see its own
         # `_override_confirm_pending` check above) — mirror that here.
         if self._override_confirm_pending:
+            self._deferred_while_pending = True
             _LOGGER.info(
                 "Override confirmation pending (detected=%s at %s) — skipping TOU pre-conditioning (schedule=%s)",
                 self._override_confirm_mode,
@@ -5179,6 +5486,7 @@ class AutomationEngine:
         only ever invoked while occupancy already is away/vacation.
         """
         if self._override_confirm_pending:
+            self._deferred_while_pending = True
             _LOGGER.info(
                 "Override confirmation pending (detected=%s at %s) — skipping away/vacation "
                 "TOU pre-conditioning (schedule=%s)",
@@ -5357,6 +5665,7 @@ class AutomationEngine:
         """
         if not self._override_confirm_pending:
             return False
+        self._deferred_while_pending = True
         _LOGGER.info(
             "Override confirmation pending (detected=%s at %s) — skipping %s",
             self._override_confirm_mode,
@@ -5386,7 +5695,7 @@ class AutomationEngine:
         switched the occupant's heat/cool off inside a grace CA had just announced. A grace with
         no manual override (fan-off / automation grace) does NOT block the re-check (D16).
         """
-        if self._manual_override_active or self._override_confirm_pending:
+        if self._manual_change_protected():
             return  # the occupant owns the thermostat; grace expiry / the gate decide, not this
         if self._paused_by_door:
             return  # already paused
@@ -5462,6 +5771,14 @@ class AutomationEngine:
                 )
             return False
         if mode == "off":
+            # Issue #1132: HVAC was already off when this window opened, so there is nothing to
+            # restore at close. Without this a stale value from an earlier pause that never
+            # recorded (or never restored) survives here and the close would switch on a mode
+            # the occupant had off. Skipped when a pause is already recorded: HVAC is off
+            # *because we paused it*, and _pre_pause_mode is that pause's restore target
+            # (reached via _re_pause_for_open_sensor()'s idempotent re-pause).
+            if not self._paused_by_door:
+                self._pre_pause_mode = None
             _LOGGER.info(
                 "Door/window pause (%s): HVAC already off — pause flag set, no mode change needed",
                 entity_label,
@@ -5534,6 +5851,32 @@ class AutomationEngine:
         async with self._decision_pass("handle_door_window_open"):
             if self._paused_by_door:
                 return  # Already paused
+
+            # Issue #1133 (design gap since #3, extends #1119 from an already-open window to a
+            # window that opens LATER) and Issue #1148 (the #655 bypass below fell through to a
+            # pause over a live manual grace): the occupant's own change wins over an open
+            # window (owner rule 1). Placed ahead of every grace branch because
+            # ``_grace_active`` is the wrong test -- with ``manual_grace_seconds=0`` a confirmed
+            # override has no grace flag at all, and inside a manual grace the #655 real-gate
+            # bypass used to fall through here with the nat-vent FSM already refusing entry
+            # (``override_active``), so the "fall through" always ended in a pause over the
+            # occupant's heat/cool. Nat-vent cannot start over an override (the FSM refuses
+            # it), so there is nothing left to decide: return, do not pause. Switching off for
+            # the still-open window happens at the designed moment instead -- grace expiry
+            # (``_on_grace_expired()`` clears the override, then ``_re_pause_for_open_sensor()``
+            # pauses) -- and, for a grace-less override, when it ends by another path and the
+            # next scheduled routine's live re-check runs.
+            if self._manual_change_protected():
+                self._note_deferred_to_protected_change()
+                _LOGGER.info(
+                    "Pause skipped: occupant's manual change protected entity=%s "
+                    "override_active=%s confirm_pending=%s grace_active=%s",
+                    entity_id,
+                    self._manual_override_active,
+                    self._override_confirm_pending,
+                    self._grace_active,
+                )
+                return
 
             if self._grace_active:
                 # Issue #1006: a fan_off grace's entire contract is "the user just stopped
@@ -5830,7 +6173,16 @@ class AutomationEngine:
                 notify_type="door_window_pause",
             )
             if hvac_already_off is not None:
-                self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.SENSOR_OPENED)
+                # Issue #1132: the legacy decision above already chose PAUSE (the nat-vent
+                # gate was rejected, or a Phase 2 guard skipped it, or an override/grace
+                # exemption fell through). The FSM's own simplified SENSOR_OPENED gate can
+                # disagree (e.g. it cannot see the forecast-peak/thermal-floor guards or a
+                # manual override) and would answer NAT_VENT_ELIGIBLE/GRACE_SUPPRESSED,
+                # recording no pause while HVAC was just turned off. Same contract as
+                # _pause_for_door_window(): tell the FSM the gate is ruled out.
+                self._resolve_door_window_pause_flags(
+                    kind=DoorWindowFsmEventKind.SENSOR_OPENED, nat_vent_gate_ruled_out=True
+                )
                 self._paused_entity = entity_id
                 self._paused_since = dt_util.now()
 
@@ -5889,6 +6241,8 @@ class AutomationEngine:
             await self._enforce_whf_safety_locked("sensor_closed", emit_event=False, sealed_confirmed=True)
 
             if not self._paused_by_door:
+                # Issue #1132: no pause recorded -> nothing to restore; never let a stale value survive.
+                self._pre_pause_mode = None
                 return
 
             from .door_window_fsm import DoorWindowFsmEventKind
@@ -5925,6 +6279,36 @@ class AutomationEngine:
         ``restore_mode`` is the pre-pause HVAC mode (None for the Issue #1068 nat-vent-exit
         case where the thermostat was Off and the comfort resolver must re-arm it).
         """
+        if self._manual_change_protected():
+            self._note_deferred_to_protected_change()
+            # Issue #1131: the occupant changed the SETPOINT while the thermostat sat Off for the
+            # door/window pause (a mode change would have cleared the pause instead, see
+            # handle_manual_override_during_pause()). That change is theirs and it is still live
+            # (confirmed, or inside its confirmation window), so the door closing must not
+            # replace it with Climate Advisor's own setpoint, and a 5-minute automation grace must
+            # not replace their manual grace. Rule 1 (HVAC off while a window is open, unless the
+            # occupant turns it on) kept HVAC off while the window was open -- a setpoint tweak on
+            # an Off thermostat does not turn it on -- so the window closing is the moment HVAC
+            # resumes: the pre-pause mode comes back and the thermostat keeps the OCCUPANT's
+            # setpoint. Mode only; no comfort write, no automation grace. (Assumes a thermostat
+            # keeps its target temperature across a mode change, which the integration cannot
+            # verify; if one resets it, the override_respected promise exposes it.)
+            if restore_mode:
+                with self._mode_change_context("restore"):
+                    await self._set_hvac_mode(
+                        restore_mode,
+                        reason=f"door/window closed — restoring {restore_mode} mode (occupant's setpoint kept)",
+                    )
+            _LOGGER.info(
+                "Comfort restore skipped: occupant's manual change protected (mode restored only, no setpoint "
+                "or automation grace) restore_mode=%s override_active=%s confirm_pending=%s grace_active=%s",
+                restore_mode,
+                self._manual_override_active,
+                self._override_confirm_pending,
+                self._grace_active,
+            )
+            return
+
         # Issue #1066 (item 5): deliberately a blind mode restore BEFORE the comfort write.
         # The restored mode is the selector's "gap memory": a paused thermostat reads
         # Off/unknown and the selector would fall back to the day-type default family in the
@@ -6423,13 +6807,25 @@ class AutomationEngine:
                                 "fan_mode_change": _fan_transition_text(self.config, activating=False),
                                 "fan_device": _fan_device_label(self.config),
                                 "hvac_mode_restored": (
-                                    self._current_classification.hvac_mode
-                                    if self._current_classification
-                                    else "unknown"
+                                    "unchanged (occupant's change kept)"
+                                    if self._manual_change_protected()
+                                    else (
+                                        self._current_classification.hvac_mode
+                                        if self._current_classification
+                                        else "unknown"
+                                    )
                                 ),
                             },
                         )
-                    if self._current_classification:
+                    if self._manual_change_protected():
+                        self._note_deferred_to_protected_change()
+                        _LOGGER.info(
+                            "Comfort restore skipped: occupant's manual change protected "
+                            "(nat-vent comfort-floor exit) override_active=%s confirm_pending=%s",
+                            self._manual_override_active,
+                            self._override_confirm_pending,
+                        )
+                    elif self._current_classification:
                         c = self._current_classification
                         if c.hvac_mode in ("heat", "cool"):
                             # Issue #1066 (F4): no blind _set_hvac_mode(c.hvac_mode) here -- the
@@ -6616,14 +7012,20 @@ class AutomationEngine:
                     # _apply_nat_vent_fsm_state_after_activation() — an override
                     # arriving during the await below must not be silently
                     # overwritten by this pre-await _to_state decision.
-                    _activation_result = await self._activate_fan(
+                    # Issue #1132 (mirror of #931): the pause is cleared below ONLY when the
+                    # activation was applied (a nat-vent session is recorded).
+                    _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
+                        _to_state,
                         reason=(
                             f"natural vent activated: outdoor {self._t(outdoor)}"
                             f" < indoor {self._t(indoor)} − {self._td(hysteresis)} hysteresis,"
                             f" outdoor ≤ threshold {self._t(threshold)}"
-                        )
+                        ),
+                        outdoor=outdoor,
+                        indoor=indoor,
                     )
-                    self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
+                    if not _applied:
+                        return
 
                     from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -6647,13 +7049,17 @@ class AutomationEngine:
                 elif _to_state == NatVentLifecycleState.ACTIVE_SOFT_START:
                     # Issue #706 (Bug F): same override-race guard as the
                     # ACTIVE_FULL_GATE branch above.
-                    _activation_result = await self._activate_fan(
+                    _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
+                        _to_state,
                         reason=(
                             f"nat-vent soft-start while paused: outdoor {self._t(outdoor)} at/below"
                             f" indoor {self._t(indoor)} parity, past today's peak and declining"
-                        )
+                        ),
+                        outdoor=outdoor,
+                        indoor=indoor,
                     )
-                    self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
+                    if not _applied:
+                        return
 
                     from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -7384,7 +7790,7 @@ class AutomationEngine:
         classification = self._current_classification
         if classification is None:
             return
-        if self._manual_override_active or self._override_confirm_pending:
+        if self._manual_change_protected():
             self._release_comfort_hold(dt_util.now())
             return
         if self._natural_vent_active or self._whf_owns_hvac():
@@ -8497,9 +8903,8 @@ class AutomationEngine:
             # UNPROTECTED_GRACE_STARTED for those too). This wrapper is, by construction
             # per its own docstring, called only for the non-protecting triggers, so this
             # event type is exactly and only ever "an unprotected grace genuinely started"
-            # — feeds coordinator.py's diagnostic FSM tracker via
-            # _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP, closing the live production=idle/
-            # active_unprotected vs fsm=idle/none gap this whole fix targets.
+            # — a technical signal for the event log (the coordinator's diagnostic FSM tracker
+            # it once fed was deleted in Issue #1152).
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "unprotected_grace_started",
@@ -8548,6 +8953,7 @@ class AutomationEngine:
             """
             if self._override_confirm_pending:
                 self._clear_override_confirm_action()
+            self._deferred_while_pending = False  # Issue #1133 L1
             self._cancel_grace_timers_action()
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
 
@@ -8883,10 +9289,26 @@ class AutomationEngine:
                 # site's own _fsm_result.to_state == ACTIVE_FULL_GATE is exactly what
                 # _reactivates was computed from above, so ACTIVE_FULL_GATE is the
                 # correct to_state to pass here.
-                _activation_result = await self._activate_fan(reason=nat_vent_reason)
-                self._apply_nat_vent_fsm_state_after_activation(
-                    NatVentLifecycleState.ACTIVE_FULL_GATE, _activation_result
+                # Issue #1132 (mirror of #931): only clear the pause / report a nat-vent
+                # session when the activation was applied. Otherwise fall through to the
+                # re-pause below, which re-records the pause (idempotent when already paused).
+                _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
+                    NatVentLifecycleState.ACTIVE_FULL_GATE,
+                    reason=nat_vent_reason,
+                    outdoor=outdoor,
+                    indoor=indoor,
                 )
+                if not _applied:
+                    _reactivates = False
+                    if _activation_result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+                        # Issue #829 provenance: a rate-limited command is CA's own deferred
+                        # grace-expiry reactivation (it WILL run when the 5-minute floor ends, via a
+                        # later _activate_fan() call that does not pass through this site), so arm the
+                        # marker now exactly as before -- otherwise that eventual run's real off would be
+                        # misread as a fresh manual override (the #829 loop). OVERRIDDEN means the
+                        # occupant owns the fan right now: nothing of CA's is pending, nothing to mark.
+                        self._fan_manual_origin_unclosed = True
+            if _reactivates:
                 # Issue #829: this fan run is CA reactivating on its own initiative right
                 # after a grace expiry, with the monitored sensor still open — not a fresh
                 # user action. Mark provenance so that whenever this run eventually turns
@@ -8946,9 +9368,9 @@ class AutomationEngine:
                     # so "sensor_opened" — the event the golden-scenario harness's
                     # production_outcome_at() already maps to this branch's
                     # "natural_ventilation" outcome — remains the last-emitted event at
-                    # this instant, unchanged from pre-fix behavior; this new event type
-                    # has no outcome mapping of its own (diagnostic-only) and would
-                    # otherwise shadow it.
+                    # this instant, unchanged from pre-fix behavior. Since Issue #1132 this
+                    # event also maps to "natural_ventilation" (outcomes.py), so the order
+                    # no longer changes the outcome; it is kept for readability.
                     self._emit_event_callback(
                         "nat_vent_reactivated_while_paused",
                         {"outdoor": outdoor, "indoor": indoor, "threshold": nat_vent_threshold},
@@ -9447,6 +9869,10 @@ class AutomationEngine:
             )
 
         if _pre_cool_outcome == "sent":
+            # Issue #1120: the thermostat now holds the pre-cool band (set AFTER the write, which cleared
+            # any earlier one); rows written while it is held quote it.
+            self._pre_cool_band_in_force = _pre_cool_band
+            self._pre_cool_band_since = dt_util.now()
             _LOGGER.info(
                 "Pre-cool setpoint applied: cool ceiling %.1f°F (heat floor unchanged at %.1f°F)",
                 pre_cool_target,
@@ -9718,10 +10144,10 @@ class AutomationEngine:
 
     def _occupant_fan_on_at(self) -> datetime | None:
         """When the occupant turned the fan on (the active fan override's stamp), else None."""
-        if not self._fan_override_active or not self._fan_override_time:
+        if not self._fan_override_active or not self._whf_press_time:
             return None
         try:
-            parsed = dt_util.parse_datetime(self._fan_override_time)
+            parsed = dt_util.parse_datetime(self._whf_press_time)
         except TypeError, ValueError:
             return None
         return parsed if isinstance(parsed, datetime) else None
@@ -10027,8 +10453,7 @@ class AutomationEngine:
         if (
             not keep_grace
             and self._grace_active
-            and not self._manual_override_active
-            and not self._override_confirm_pending
+            and not self._manual_change_protected()
             and (self._fan_override_active or self._last_grace_trigger in ("fan_manual_override", "fan_off"))
         ):
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
@@ -10039,7 +10464,7 @@ class AutomationEngine:
             self._fan_override_active
             and self._grace_active
             and self._grace_protects_override
-            and not self._manual_override_active
+            and not self._manual_change_protected()
         ):
             # Clearing the fan override now would leave its grace "orphaned": _check_orphaned_grace() would
             # force-cancel it and, through the override/grace FSM, drop a pending thermostat confirmation too.
@@ -10181,7 +10606,32 @@ class AutomationEngine:
         # generic fan_deactivated event here would land at the same timestamp and shadow
         # the specific event in outcome-ordering consumers (Issue #411 — found during
         # test verification).
-        if sensor_open:
+        if self._manual_change_protected():
+            self._note_deferred_to_protected_change()
+            # Issue #1147 (and the sensor-open mirror, Issue #1133): the occupant changed the
+            # thermostat during the session (e.g. set it Off) and it is still theirs. Ending the
+            # session must not write the pre-vent mode back over it ("nat-vent exit resume"
+            # turned an occupant's Off into Cool ~14 min into the Off grace), must not start an
+            # automation grace on top of their change, and must not record a window pause
+            # (owner rule 1: the occupant's change beats the open-window hold). Only the fan
+            # stops and the WHF ownership of the thermostat is released, so
+            # ``_pre_fan_hvac_mode`` is not stranded (same release as the sensor-open branch,
+            # Issue #618) and ``_whf_owns_hvac()`` reads False afterwards. The override's own
+            # grace / adoption / next scheduled routine decide what the thermostat does next.
+            result = await self._deactivate_fan(
+                reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
+            )
+            self._end_nat_vent_session(result)
+            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+            _log(
+                "Nat-vent exit left HVAC alone: occupant's manual change protected reason=%s "
+                "sensor_open=%s override_active=%s confirm_pending=%s",
+                reason,
+                sensor_open,
+                self._manual_override_active,
+                self._override_confirm_pending,
+            )
+        elif sensor_open:
             # Don't restore active HVAC into an open window — pause instead. The
             # existing pause/grace machinery (_re_pause_for_open_sensor) re-evaluates
             # nat-vent reactivation on the next grace-expiry cycle.
@@ -10497,7 +10947,7 @@ class AutomationEngine:
             )
         )
 
-    def _apply_nat_vent_fsm_state(self, state: NatVentLifecycleState) -> None:
+    def _apply_nat_vent_fsm_state(self, state: NatVentLifecycleState, *, keep_door_pause: bool = False) -> None:
         """Write ``_natural_vent_active``/``_nat_vent_soft_start``/``_paused_by_door``
         from a ``nat_vent_fsm.transition()`` result (Issue #594 Phase R, Phase 2f).
 
@@ -10521,6 +10971,10 @@ class AutomationEngine:
         diff so DOOR_PAUSE_STARTED/ENDED still fires correctly on this path — found the
         same way Phase 1 found ``coordinator.py:5088``: a second real writer of a
         field this issue is already instrumenting.
+
+        ``keep_door_pause`` (Issue #1132): a refused paused-reactivation keeps the door/window
+        pause, so this writer must not clear it -- clearing then re-recording it emitted a
+        spurious DOOR_PAUSE_ENDED/STARTED pair for a pause that never ended.
         """
         _paused_before = bool(self._paused_by_door)
         self._natural_vent_active = state in (
@@ -10528,7 +10982,9 @@ class AutomationEngine:
             NatVentLifecycleState.ACTIVE_SOFT_START,
         )
         self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
-        self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+        self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT or (
+            keep_door_pause and _paused_before
+        )
         self._emit_boolean_transition(
             before=_paused_before,
             after=bool(self._paused_by_door),
@@ -10538,8 +10994,76 @@ class AutomationEngine:
             caller="_apply_nat_vent_fsm_state",
         )
 
+    async def _activate_fan_for_paused_reactivation(
+        self,
+        to_state: NatVentLifecycleState,
+        *,
+        reason: str,
+        outdoor: float | None,
+        indoor: float | None,
+    ) -> tuple[bool, FanCommandResult]:
+        """Issue #1132: fan-ON for a nat-vent reactivation while a door/window pause may be recorded.
+
+        Shared by the three reactivation sites. Captures whether a pause was recorded, runs
+        ``_activate_fan()``, applies the nat-vent FSM state via
+        ``_apply_nat_vent_fsm_state_after_activation()``, and -- when the activation was not applied
+        -- keeps the pause. Returns ``(applied, result)``; callers clear the pause only if ``applied``.
+        """
+        result = await self._activate_fan(reason=reason)
+        self._apply_nat_vent_fsm_state_after_activation(to_state, result, keep_door_pause=True)
+        applied = self._nat_vent_activation_applied(result)
+        if not applied:
+            self._keep_pause_after_refused_reactivation(result, outdoor, indoor)
+        return applied, result
+
+    def _keep_pause_after_refused_reactivation(
+        self,
+        activation_result: FanCommandResult,
+        outdoor: float | None,
+        indoor: float | None,
+    ) -> None:
+        """Issue #1132: a nat-vent reactivation was refused, so the door/window pause stays.
+
+        The pause itself is preserved at the write: ``_activate_fan_for_paused_reactivation()``
+        applies INACTIVE with ``keep_door_pause=True``, so ``_apply_nat_vent_fsm_state()`` (the
+        second ``_paused_by_door`` writer Issue #717 documents) never clears it and no spurious
+        DOOR_PAUSE_ENDED/STARTED pair is emitted. ``_pre_pause_mode``/``_paused_entity``/
+        ``_paused_since``/``_paused_with_hvac_already_off`` are untouched by that writer. This method
+        only reports the refusal.
+        """
+        # RATE_LIMITED_DUP can repeat every tick for up to 5 minutes (same split as
+        # _apply_nat_vent_fsm_state_after_activation()), so it logs at DEBUG.
+        _LOGGER.log(
+            logging.DEBUG if activation_result == FanCommandResult.RATE_LIMITED_DUP else logging.INFO,
+            "Nat-vent reactivation while paused not applied: fan command %s -- door/window pause kept "
+            "(outdoor=%s indoor=%s paused_entity=%s)",
+            activation_result.name,
+            f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+            f"{indoor:.1f}" if indoor is not None else "unavailable",
+            self._paused_entity,
+        )
+
+    @staticmethod
+    def _nat_vent_activation_applied(activation_result: FanCommandResult) -> bool:
+        """True when ``_activate_fan()``'s result means the nat-vent activation was applied
+        (a nat-vent session is recorded; SUPPRESSED/DISABLED/ALREADY_IN_STATE count as applied).
+
+        Issue #1132 (mirror of #931): the "paused-by-door nat-vent reactivation" sites used to
+        clear the door/window pause unconditionally after ``await self._activate_fan(...)``. An
+        OVERRIDDEN or rate-limited command left HVAC off with no pause recorded and no nat-vent
+        session (the occupant's HVAC stays off after the window closes). Those sites now clear the
+        pause only when this returns True -- the exact predicate
+        ``_apply_nat_vent_fsm_state_after_activation()`` uses to decide whether a session is
+        recorded, so "pause cleared" implies "session recorded".
+        """
+        return activation_result not in _NAT_VENT_ACTIVATION_NOT_APPLIED
+
     def _apply_nat_vent_fsm_state_after_activation(
-        self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
+        self,
+        to_state: NatVentLifecycleState,
+        activation_result: FanCommandResult,
+        *,
+        keep_door_pause: bool = False,
     ) -> None:
         """Apply an FSM decision computed BEFORE an ``await self._activate_fan(...)``
         call, guarding against the Issue #706 Bug F race and the Issue #935
@@ -10577,11 +11101,7 @@ class AutomationEngine:
         ``DISABLED``) means no override intervened mid-await and no command was
         deferred, so the pre-await ``to_state`` is still correct to apply.
         """
-        if activation_result in (
-            FanCommandResult.OVERRIDDEN,
-            FanCommandResult.RATE_LIMITED_NEW,
-            FanCommandResult.RATE_LIMITED_DUP,
-        ):
+        if activation_result in _NAT_VENT_ACTIVATION_NOT_APPLIED:
             # Issue #935 verification finding: OVERRIDDEN is a genuine anomaly (worth
             # a WARNING), but RATE_LIMITED_NEW/DUP is routine anti-cycling behavior
             # that can repeat every tick for up to 5 minutes — same INFO/DEBUG split
@@ -10601,7 +11121,7 @@ class AutomationEngine:
                 activation_result.name,
                 to_state,
             )
-            self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)
+            self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE, keep_door_pause=keep_door_pause)
         else:
             self._apply_nat_vent_fsm_state(to_state)
 
@@ -10671,7 +11191,7 @@ class AutomationEngine:
             pre_pause_mode_active=bool(self._pre_pause_mode),
             manual_grace_would_start=self._grace_would_start("manual", now),
             automation_grace_would_start=self._grace_would_start("automation", now),
-            manual_override_owns_hvac=bool(self._manual_override_active or self._override_confirm_pending),
+            manual_override_owns_hvac=self._manual_change_protected(),
             now=now,
             nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
         )
@@ -10811,8 +11331,9 @@ class AutomationEngine:
 
         ``nat_vent_gate_ruled_out``: forwarded to ``_build_door_window_fsm_inputs()`` —
         see ``DoorWindowFsmInputs.nat_vent_gate_ruled_out``'s own docstring (Issue #757
-        Phase 6 Step 4 fix). ``_pause_for_door_window()`` is the only real caller that
-        passes ``True``.
+        Phase 6 Step 4 fix). ``_pause_for_door_window()`` and ``handle_door_window_open()``'s
+        pause fall-through (Issue #1132) are the only real callers that pass ``True`` --
+        both have already decided PAUSE on the legacy side before dispatching.
 
         Issue #717: also the single emit point for DOOR_PAUSE_STARTED/ENDED — every
         real door/window pause transition already funnels through here regardless of
@@ -10824,7 +11345,7 @@ class AutomationEngine:
         (each can resolve to either direction depending on the real outcome).
         """
         _paused_before = bool(self._paused_by_door)
-        from .door_window_fsm import DoorWindowFsmEvent
+        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
         from .door_window_fsm import transition as _door_window_transition
 
         state = origin_state if origin_state is not None else self.door_window_lifecycle_state
@@ -10838,6 +11359,21 @@ class AutomationEngine:
             ),
         )
         self._apply_door_window_fsm_state(result.to_state)
+        # Issue #1132: ``_pre_pause_mode`` is the restore target of a RECORDED pause and must not
+        # outlive one. Whenever a dispatch leaves no pause recorded -- the pause was never recorded
+        # (the SENSOR_OPENED defect), or it ended without a restore (nat-vent reactivation, manual
+        # override, grace hand-off) -- a surviving value would make a LATER pause that finds HVAC
+        # already off close by restoring a mode the occupant had off. ALL_SENSORS_CLOSED is the one
+        # kind that consumes the value after this call (handle_all_doors_windows_closed() restores
+        # from it, then clears it itself), so it is exempt.
+        if not self._paused_by_door and kind != DoorWindowFsmEventKind.ALL_SENSORS_CLOSED:
+            if self._pre_pause_mode:
+                _LOGGER.info(
+                    "Door/window pause not recorded after %s -- discarding stale pre_pause_mode=%s",
+                    kind.value,
+                    self._pre_pause_mode,
+                )
+            self._pre_pause_mode = None
         self._emit_boolean_transition(
             before=_paused_before,
             after=bool(self._paused_by_door),
@@ -10847,18 +11383,22 @@ class AutomationEngine:
             caller="_resolve_door_window_pause_flags",
         )
 
-    def _build_override_grace_fsm_inputs(self):
+    def _build_override_grace_fsm_inputs(self, *, confirm_source: str | None = None):
         """Build the override/grace FSM's input snapshot from current engine state
         (Issue #664).
 
-        Sole builder for ``OverrideGraceFsmInputs`` — mirrors
-        ``coordinator._evaluate_override_grace_fsm()``'s pre-existing computation
-        exactly (same ``current_setpoint_f``/``target_setpoint_f`` resolution via
-        ``select_comfort_band()`` + ``to_fahrenheit()``, wrapped in the same
-        defensive try/except a missing/unparseable live setpoint tolerates), now
-        called from inside ``AutomationEngine`` itself so the dispatcher can build
-        the same snapshot the shadow-mirror path already builds, without a second,
-        coordinator-side copy of this computation.
+        ``confirm_source`` (Issue #1146): the override's source ("normal" / "pause" /
+        "setpoint") when the caller already cleared ``_override_confirm_source`` before
+        dispatching. ``_confirm_override_expired()`` has to clear the confirm bookkeeping
+        (``_clear_override_confirm_action()``) before it writes the grace flags, so reading
+        ``self._override_confirm_source`` here saw ``None`` and the FSM took PATH B for a
+        setpoint-only override whose mode already matched the classification -- landing on
+        (IDLE, NONE) while the real manual timer was armed. ``None`` keeps the live read.
+
+        Sole builder for ``OverrideGraceFsmInputs`` (Issue #1152 deleted the coordinator's
+        third copy). ``current_setpoint_f``/``target_setpoint_f`` are resolved via
+        ``_override_match_inputs()`` + ``to_fahrenheit()``, wrapped in a defensive try/except
+        so a missing/unparseable live setpoint just means "no setpoint to compare".
         """
         from .override_grace_fsm import OverrideGraceFsmInputs
 
@@ -10884,7 +11424,7 @@ class AutomationEngine:
         current_mode_state = self.hass.states.get(self.climate_entity)
         return OverrideGraceFsmInputs(
             confirm_seconds=float(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS)),
-            setpoint_override=bool(self._override_confirm_source == "setpoint"),
+            setpoint_override=bool((confirm_source or self._override_confirm_source) == "setpoint"),
             current_mode=current_mode_state.state if current_mode_state else None,
             classification_mode=classification_mode,
             manual_override_active=bool(self._manual_override_active),
@@ -11008,6 +11548,7 @@ class AutomationEngine:
         *,
         kind: OverrideGraceFsmEventKind,
         origin_state: OverrideGraceLifecycleState | None = None,
+        confirm_source: str | None = None,
     ) -> None:
         """Single dispatch point for every override/grace flag-derivation call site
         (Issue #664). Unconditionally authoritative as of Issue #757 Phase 6 Step 3 —
@@ -11023,6 +11564,10 @@ class AutomationEngine:
         (``_start_grace_period_action()``, ``_start_override_confirmation_action()``,
         ``_cancel_grace_timers_action()``) *before* calling this dispatcher; this method
         only ever decides the 3 flags, never timers.
+
+        ``confirm_source`` (Issue #1146) is passed only by ``_confirm_override_expired()``, which
+        clears ``_override_confirm_source`` before this dispatch; see
+        ``_build_override_grace_fsm_inputs()``.
 
         ``origin_state`` defaults to a live read of ``self.override_grace_lifecycle_state``
         — correct for every site except ``_on_grace_expired()``'s branches and
@@ -11044,7 +11589,10 @@ class AutomationEngine:
         state = origin_state if origin_state is not None else self.override_grace_lifecycle_state
         result = _override_grace_transition(
             state,
-            OverrideGraceFsmEvent(kind=kind, inputs=self._build_override_grace_fsm_inputs()),
+            OverrideGraceFsmEvent(
+                kind=kind,
+                inputs=self._build_override_grace_fsm_inputs(confirm_source=confirm_source),
+            ),
         )
         self._apply_override_grace_fsm_state(result.to_state)
         self._emit_boolean_transition(
@@ -11623,6 +12171,25 @@ class AutomationEngine:
         except TypeError:  # naive vs aware mix: treat the window as lapsed
             return False
 
+    def _minutes_since_family_ran(self, family: str, now: datetime) -> float | None:
+        """Issue #1073/#1149: minutes since ``family`` ("heating"/"cooling") ran or was DELIBERATELY commanded.
+
+        min() of the equipment clock and the mode-change clock; either None = unknown, so the result is
+        None when neither is known. Only DELIBERATE commands count (user, TOU bank, ODE guard); a
+        selector/restore/default write says nothing about the equipment having run (the #1066 09:17 symptom).
+        The ONE place this fact is computed, for the known-family and the unknown-family settling guard alike.
+        """
+        _cands = [
+            v
+            for v in (
+                self.minutes_since_equipment_ran(family, now),
+                self.minutes_since_mode_set(family, now, _DELIBERATE_MODE_REASONS),
+            )
+            # A negative value is a future timestamp (clock jump / restore): unknown, not "just ran".
+            if v is not None and v >= 0.0
+        ]
+        return min(_cands) if _cands else None
+
     def _comfort_family_inputs(
         self,
         day_mode: str,
@@ -11644,23 +12211,20 @@ class AutomationEngine:
             day_type = self._current_classification.day_type if self._current_classification else None
         caps = self._get_thermostat_capabilities()
         current_state = self._current_thermostat_family(now)
-        # Issue #1073 settling guard: minutes since the family being LEFT ran or was commanded.
-        # min() of the equipment clock and the mode-change clock; either None = unknown. The thermal
-        # model is deliberately not consulted (R7).
-        opposite_ran: float | None = None
+        # Issue #1073 settling guard: minutes since the family being LEFT ran or was commanded. The thermal
+        # model is deliberately not consulted (R7). Issue #1149: when the live family is unknown (Off /
+        # heat_cool / auto / unavailable) the family that ran most recently stands in as "the family being
+        # left" (the guard needs the side that ran, not the live mode), so a thermostat the occupant switched
+        # Off right after the AC ran is not flipped to heat for a shallow dip.
+        settling_from: str | None = None
         if current_state is not None:
-            _cands = [
-                v
-                for v in (
-                    self.minutes_since_equipment_ran(current_state.value, now),
-                    # Only DELIBERATE commands count (user, TOU bank, ODE guard); a selector/restore/default
-                    # write says nothing about the equipment having run (the #1066 09:17 symptom).
-                    self.minutes_since_mode_set(current_state.value, now, _DELIBERATE_MODE_REASONS),
-                )
-                # A negative value is a future timestamp (clock jump / restore): unknown, not "just ran".
-                if v is not None and v >= 0.0
-            ]
-            opposite_ran = min(_cands) if _cands else None
+            opposite_ran = self._minutes_since_family_ran(current_state.value, now)
+        else:
+            opposite_ran = None
+            for _fam in (ComfortFamilyState.HEATING.value, ComfortFamilyState.COOLING.value):
+                _ago = self._minutes_since_family_ran(_fam, now)
+                if _ago is not None and (opposite_ran is None or _ago < opposite_ran):
+                    settling_from, opposite_ran = _fam, _ago  # newest wins
         inputs = ComfortFamilyFsmInputs(
             default_family="heating" if day_mode == "heat" else "cooling",
             indoor=indoor if indoor is not None else self._get_indoor_temp_f(),
@@ -11683,6 +12247,7 @@ class AutomationEngine:
             recency_window_min=float(
                 self.config.get(CONF_COMFORT_FAMILY_RECENCY_WINDOW_MIN, DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN)
             ),
+            settling_from_family=settling_from,
         )
         return inputs, current_state
 
@@ -11736,7 +12301,9 @@ class AutomationEngine:
             self._comfort_hold_signature = None
             self._end_comfort_hold_episode(result, fsm_inputs, floor, ceiling, now)
             return
-        current = result.from_state.value if result.from_state is not None else None
+        # The family being held: the live one when known, else (Issue #1149) the family that ran, which the
+        # hold's target_family names in both cases.
+        current = decision.target_family
         signature = (str(decision.hold_candidate_family), str(current))
         is_new = signature != getattr(self, "_comfort_hold_signature", None)
         self._comfort_hold_signature = signature
@@ -12108,22 +12675,68 @@ class AutomationEngine:
         self._arm_comfort_family(resolved_family, now, only_if_changed=True)
         return "heat" if resolved_family == "heating" else "cool"
 
-    def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
+    def _whf_house_sealed_with_known_sensors(self) -> bool:
+        """True only when at least one monitored door/window sensor is configured AND every one reads closed.
+
+        Issue #1093. "Sealed" must be a positive, known state: no sensors configured, or any sensor
+        unavailable/unknown/missing (a Zigbee hub down), is unknown -- not sealed -- so the compressor is
+        never handed a house whose windows may be open. Read from the coordinator's sensors-known-closed
+        callback (``_all_sensors_known_closed()``, next to ``_state_is_open``); without it wired this is
+        False. This is deliberately NOT ``not _any_monitored_sensor_open()``: that predicate treats an
+        unreadable sensor as not-open, which is right for the WHF safety stop
+        (``_enforce_whf_safety_locked`` over ``whf_safety_decision.house_is_sealed``, Issue #1144: an
+        offline sensor counts open for 60 s, then closed, so a dead sensor can never keep a fan running on a
+        sealed house) and wrong here. The two agree whenever every sensor is readable; they differ only for
+        an unreadable sensor, each in its own safe direction (never hand the compressor an unknown house;
+        never keep a fan running on one).
+        """
+        return bool(self._sensors_known_closed_callback and self._sensors_known_closed_callback())
+
+    def _whf_unsealed_reason(self) -> str:
+        """Why a WHF/BOTH home is not treated as sealed (log text only; Issue #1093).
+
+        Order matters: no sensors configured, a sensor open, otherwise a sensor whose state cannot be read.
+        """
+        if not self.config.get("door_window_sensors"):
+            return "no door/window sensors configured"
+        if self._any_monitored_sensor_open():
+            return "a door/window is open"
+        return "a door/window sensor state is unknown or unavailable"
+
+    def _ceiling_threshold(self, comfort_cool: float | None, *, house_sealed: bool = False) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.
+
+        Issue #1093: this is the ONE ceiling the ODE ceiling guard defends -- its dormancy test,
+        breach scan, lead-time delta and cool-setpoint write all read it. With Prefer savings on it
+        is the savings-widened awake ceiling (``awake_comfort_edges()``) -- the number the thermostat's
+        comfort band is armed with while awake. At night the band is armed with the sleep range, but this
+        guard still defends the awake ceiling (it has never read the sleep band; unchanged).
 
         Returns None for whole-house-fan mode (FAN_MODE_WHOLE_HOUSE / FAN_MODE_BOTH): a WHF
         is guaranteed to keep converging toward outdoor temperature as long as outdoor stays
         below indoor, so there is no ceiling-based handoff point — only the outdoor/indoor
         direction matters (Issue #392 Fix 1). HVAC fan mode coexists with the compressor (band
         stays armed per Issue #249), so the ceiling is a valid handoff signal there.
+
+        Issue #1093: that WHF reasoning only holds while a window is open. With ``house_sealed=True``
+        (``_whf_house_sealed_with_known_sensors()``: sensors configured and all closed) the WHF cannot
+        run -- it never runs on a sealed house -- so the home behaves like a non-WHF home and gets the
+        same ceiling. Only the ODE ceiling guard passes it; the nat-vent gate (``nat_vent_gate.py``,
+        a window-open decision) and the forecast walk keep the archetype-only ``None``.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        if not house_sealed and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return None
         if comfort_cool is None:
             return None
-        aggressive = bool(self.config.get("aggressive_savings", False))
-        return comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive else comfort_cool
+        # Issue #1093: the Prefer savings margin is added in exactly one place --
+        # awake_comfort_edges() -- so this handoff point can never differ from the ceiling the
+        # thermostat is armed with. The caller's comfort_cool overrides the config value (callers
+        # pass the config value; tests pass literals).
+        return awake_comfort_edges(
+            {**self.config, "comfort_cool": comfort_cool},
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )[1]
 
     def _resolve_classification_fsm_state(
         self,
@@ -12171,7 +12784,9 @@ class AutomationEngine:
             comfort_cool=comfort_cool,
             outdoor=self._last_outdoor_temp,
             indoor=self._get_indoor_temp_f(),
-            ceiling_threshold=self._ceiling_threshold(comfort_cool),
+            ceiling_threshold=self._ceiling_threshold(
+                comfort_cool, house_sealed=self._whf_house_sealed_with_known_sensors()
+            ),
             now=dt_util.now(),
         )
         event = ClassificationFsmEvent(kind=ClassificationFsmEventKind.CYCLE_EVALUATED, inputs=inputs)
@@ -12214,6 +12829,9 @@ class AutomationEngine:
         _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
         _k_active_cool = _thermal.get("k_active_cool")
         _comfort_cool_cg = self.config.get("comfort_cool")
+        # Issue #1093: the ceiling the decision was made against (savings-adjusted awake ceiling);
+        # None only on outcomes that return before the shell reads it.
+        _ceiling_cg = outcome_obj.ceiling
         # Issue #1036: use the readings the decision was made from — a second
         # read could be None by now and would crash the %.1f / :.1f formatting below.
         # (Either may be None on MODEL_INELIGIBLE/MISSING_TEMPS, and both on NOT_APPLICABLE; only %s-logged there.)
@@ -12222,10 +12840,12 @@ class AutomationEngine:
         _unit = self._temp_unit
 
         _LOGGER.debug(
-            "ODE ceiling guard eval: %d points, comfort_cool=%s, outdoor=%s, indoor=%s,"
-            " k_passive=%s, conf=%s, bridge=%s",
+            "ODE ceiling guard eval: %d points, comfort_cool=%s, ceiling=%s, house_sealed=%s, outdoor=%s,"
+            " indoor=%s, k_passive=%s, conf=%s, bridge=%s",
             len(predicted_indoor) if predicted_indoor else 0,
             _comfort_cool_cg,
+            _ceiling_cg,
+            self._whf_house_sealed_with_known_sensors(),
             _outdoor,
             _indoor_cg,
             _k_passive,
@@ -12242,12 +12862,13 @@ class AutomationEngine:
             return
         if outcome is OdeCeilingGuardOutcome.NO_CEILING_THRESHOLD:
             _LOGGER.debug(
-                "ODE ceiling guard: dormant — no ceiling-based compressor handoff for this"
-                " fan archetype (WHOLE_HOUSE/BOTH); free cooling is direction-only"
+                "ODE ceiling guard: dormant — no ceiling-based compressor handoff: whole-house-fan archetype"
+                " (WHOLE_HOUSE/BOTH) and the house is not known sealed (%s); free cooling is direction-only",
+                self._whf_unsealed_reason(),
             )
             return
         if outcome is OdeCeilingGuardOutcome.DORMANT:
-            _ceiling_threshold_val = self._ceiling_threshold(_comfort_cool_cg)
+            _ceiling_threshold_val = _ceiling_cg
             _LOGGER.debug(
                 "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
                 " indoor <= ceiling threshold %s (free cooling viable)",
@@ -12258,7 +12879,7 @@ class AutomationEngine:
             return
         if outcome is OdeCeilingGuardOutcome.NO_BREACH_PREDICTED:
             _tolerance = CEILING_BRIDGE_TOLERANCE_F if _k_via_bridge else 0.0
-            _threshold = _comfort_cool_cg + _tolerance
+            _threshold = _ceiling_cg + _tolerance
             _LOGGER.debug("ODE ceiling guard: dormant — no breach above %.1f°F predicted", _threshold)
             return
 
@@ -12307,7 +12928,8 @@ class AutomationEngine:
         # Issue #1066 (F3): this guard's WRITE must not fight the comfort-edge selector. When the
         # selector PREVIEW says the thermostat should guard the FLOOR (heat) right now -- indoor
         # below the floor, in the heat margin zone, or in the hysteresis gap with heat already
-        # armed -- a predicted ceiling breach hours away does not justify flipping to cool: the
+        # armed; NOT while the settling guard holds cooling after the AC ran, Issue #1149 -- a predicted
+        # ceiling breach hours away does not justify flipping to cool: the
         # reactive check would flip straight back. The guard's decision logic is unchanged; only
         # the write is held. The preview ignores nat-vent/WHF/TOU ownership (this guard is the
         # nat-vent -> cool escalator, so those must not suppress the comparison).
@@ -12343,7 +12965,7 @@ class AutomationEngine:
         # ESCALATE
         _LOGGER.info(
             "ODE ceiling guard: active — setting HVAC cool, target=%.1f (breach %.1fh, lead=%.0fmin, k_cool=%s)",
-            _comfort_cool_cg,
+            _ceiling_cg,
             _hours_to_breach,
             _lead_min,
             _k_active_cool,
@@ -12352,7 +12974,7 @@ class AutomationEngine:
             _ceiling_escalation_result = await self._deactivate_fan(
                 reason=(
                     f"ceiling guard override — indoor {self._t(_indoor_cg)} approaching"
-                    f" comfort_cool {self._t(_comfort_cool_cg)}, breach predicted in"
+                    f" ceiling {self._t(_ceiling_cg)}, breach predicted in"
                     f" {_hours_to_breach:.1f}h — switching to active cooling"
                 )
             )
@@ -12369,7 +12991,11 @@ class AutomationEngine:
                 _ceiling_escalation_payload = {
                     "indoor": _indoor_cg,
                     "outdoor": _outdoor,
-                    "comfort_cool": _comfort_cool_cg,
+                    # Issue #1093: the guard ceiling (comfort_cool, or comfort_cool + the Prefer savings
+                    # margin). "comfort_cool" is kept, carrying the same value, only because persisted
+                    # events and older readers use that name; new readers use "ceiling".
+                    "ceiling": _ceiling_cg,
+                    "comfort_cool": _ceiling_cg,
                     "hours_to_breach": round(_hours_to_breach, 2),
                     "lead_min": round(_lead_min),
                     "k_active_cool": _k_active_cool,
@@ -12395,8 +13021,8 @@ class AutomationEngine:
                     reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
                 )
             await self._set_temperature(
-                _comfort_cool_cg,
-                reason="ODE ceiling guard — target comfort_cool",
+                _ceiling_cg,
+                reason="ODE ceiling guard — target comfort ceiling",
                 mode="cool",
             )
         # Issue #843: this guard writes mode directly rather than going through
@@ -12414,7 +13040,7 @@ class AutomationEngine:
                     "lead_time_min": round(_lead_min),
                     "old_hvac_mode": _old_mode_cg,
                     "new_hvac_mode": "cool",
-                    "new_setpoint_f": _comfort_cool_cg,
+                    "new_setpoint_f": _ceiling_cg,
                     "old_setpoint_f": _old_setpoint_f_cg,
                 },
             )
@@ -12639,6 +13265,8 @@ class AutomationEngine:
         if decision.restore_deferred_reason is not None:
             # Issue #1050 (#1048 #18): the restore waits for the reason to clear.
             self._occupancy_restore_deferred_pending = True
+            if decision.restore_deferred_reason == "override_confirm_pending":
+                self._deferred_while_pending = True  # Issue #1133 F-E
             _LOGGER.info(
                 "Occupancy home — restore deferred: reason=%s mode=%s (resumes once the reason clears)",
                 decision.restore_deferred_reason,
@@ -13549,10 +14177,15 @@ class AutomationEngine:
         # entry-side half of the #705 bug; the exit-side half is handled by the new
         # MANUAL_OVERRIDE_CONFLICT checks in nat_vent_exit.py/fan_thermostat_decision.py).
         # Mirrors the _fan_override_active guard immediately above.
-        if self._manual_override_active and self._manual_override_mode not in (None, "off"):
+        # Issue #1133 F-D (entry/exit symmetry with the exit-side protection): also while the change is only
+        # PENDING confirmation -- CA's own min-runtime / economizer start must not suppress it either.
+        if self._protected_active_mode() is not None:
             _LOGGER.info(
-                "Manual override active (mode=%s) — skipping fan activation (%s)",
-                self._manual_override_mode,
+                "Fan activation skipped: occupant's manual change protected mode=%s override_active=%s "
+                "confirm_pending=%s reason=%s",
+                self._protected_active_mode(),
+                self._manual_override_active,
+                self._override_confirm_pending,
                 reason,
             )
             return FanCommandResult.OVERRIDDEN
@@ -13763,7 +14396,8 @@ class AutomationEngine:
                     verify_write_seq=_verify_seq,
                     expected_temp=_expected_temp,
                     expected_mode=_expected_mode,
-                    manual_override_active=self._manual_override_active,
+                    # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
+                    manual_override_active=self._manual_change_protected(),
                     actual_temp=actual_temp,
                 )
                 if outcome is SetpointVerifyOutcome.REASSERT:
@@ -14572,6 +15206,21 @@ class AutomationEngine:
         """
         if release_suppression is None:
             release_suppression = restore_hvac
+        if restore_hvac and self._manual_change_protected():
+            # Issue #1147 mirror (#1133 family): the ONE place a fan stop writes a pre-suppression HVAC
+            # mode back. Every nat-vent / WHF exit that bypasses _exit_nat_vent() reaches that write
+            # here, so the occupant's change is protected once, not per call site. (An occupant FAN press
+            # REPLACES any earlier thermostat change -- handle_fan_manual_override() -- so a snapshot taken
+            # under a fan session is never a protected change's mode; the normal pre-fan restore below runs
+            # whenever nothing newer is protected.) The suppression is still released.
+            _LOGGER.info(
+                "HVAC restore skipped: occupant's manual change protected reason=%s override_active=%s "
+                "confirm_pending=%s",
+                reason,
+                self._manual_override_active,
+                self._override_confirm_pending,
+            )
+            restore_hvac = False
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if not fan_control_enabled(fan_mode):
             if self._fan_active or self._fan_on_since is not None:
@@ -14920,7 +15569,8 @@ class AutomationEngine:
                     verify_write_seq=_verify_seq,
                     expected_temp=_expected_temp,
                     expected_mode=_expected_mode,
-                    manual_override_active=self._manual_override_active,
+                    # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
+                    manual_override_active=self._manual_change_protected(),
                     actual_temp=actual_temp,
                 )
                 if outcome is SetpointVerifyOutcome.REASSERT:
@@ -15211,7 +15861,9 @@ class AutomationEngine:
         else:
             self._economizer_active = False
             self._economizer_phase = "inactive"
-        if c and c.hvac_mode == "cool":
+        if c and c.hvac_mode == "cool" and self._manual_change_protected():
+            self._note_deferred_to_protected_change()
+        elif c and c.hvac_mode == "cool":
             # Issue #1066 (F4): no blind _set_hvac_mode("cool") first -- the selector call below
             # writes mode + setpoint (and may legitimately arm heat if the floor needs defending).
             with self._mode_change_context("restore"):
@@ -15437,6 +16089,7 @@ class AutomationEngine:
         # reconcile_fan_on_startup() runs shortly after and decides adopt-on / turn-off.
         self._fan_override_active = False
         self._fan_override_time = None
+        self._whf_press_time = None
         # Issue #486: an RF remote timer selection is part of the override it started —
         # not persisted/restored, same as the rest of the override/grace clean slate above.
         self._fan_remote_timer_hours = None

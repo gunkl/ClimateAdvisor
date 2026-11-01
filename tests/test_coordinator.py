@@ -22,6 +22,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from custom_components.climate_advisor.automation import ComfortBand
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_BRIEFING_NOTIFICATIONS_ENABLED,
@@ -316,6 +317,48 @@ class TestComputeNextAction:
         result = _compute_next_action(c, {}, time(12, 0))
         assert "Comfortable" in result
 
+    # Issue #1094: with Prefer savings the thermostat is armed 2 F wider on BOTH sides and is idle on
+    # purpose inside it, so the card must not ask the occupant to act for a drift the system accepts.
+    _SAVINGS_BAND = {"comfort_heat": 70, "comfort_cool": 75}
+
+    def test_next_action_savings_hot_side_inside_widened_ceiling_is_comfortable(self):
+        """Prefer savings on, indoor 76 (past 75, inside 77): no cooling suggestion."""
+        c = _make_classification(day_type=DAY_TYPE_MILD)
+        result = _compute_next_action(
+            c, {**self._SAVINGS_BAND, "aggressive_savings": True}, time(12, 0), indoor_temp=76.0, outdoor_temp=60.0
+        )
+        assert "Comfortable" in result
+
+    def test_next_action_savings_hot_side_past_widened_ceiling_suggests_cooling(self):
+        """Prefer savings on, indoor 78 (past 77): the cooling suggestion still fires."""
+        c = _make_classification(day_type=DAY_TYPE_MILD)
+        result = _compute_next_action(
+            c, {**self._SAVINGS_BAND, "aggressive_savings": True}, time(12, 0), indoor_temp=78.0, outdoor_temp=60.0
+        )
+        assert "Open windows" in result
+
+    def test_next_action_no_savings_hot_side_past_plain_ceiling_suggests_cooling(self):
+        """Prefer savings off, indoor 76 (past 75): unchanged behaviour, cooling suggested."""
+        c = _make_classification(day_type=DAY_TYPE_MILD)
+        result = _compute_next_action(c, self._SAVINGS_BAND, time(12, 0), indoor_temp=76.0, outdoor_temp=60.0)
+        assert "Open windows" in result
+
+    def test_next_action_savings_cold_side_inside_widened_floor_is_comfortable(self):
+        """Prefer savings on, indoor 69 (under 70, inside 68): no heating suggestion (mirror side)."""
+        c = _make_classification(day_type=DAY_TYPE_MILD)
+        result = _compute_next_action(
+            c, {**self._SAVINGS_BAND, "aggressive_savings": True}, time(12, 0), indoor_temp=69.0, outdoor_temp=60.0
+        )
+        assert "Comfortable" in result
+
+    def test_next_action_savings_cold_side_past_widened_floor_suggests_heat_holding(self):
+        """Prefer savings on, indoor 67 (under 68): the heating-side suggestion still fires."""
+        c = _make_classification(day_type=DAY_TYPE_MILD)
+        result = _compute_next_action(
+            c, {**self._SAVINGS_BAND, "aggressive_savings": True}, time(12, 0), indoor_temp=67.0, outdoor_temp=60.0
+        )
+        assert "hold heat" in result
+
     def test_next_action_prefers_ode_cutoff_over_static_close_time(self):
         """Issue #817: when self._nat_vent_plan has an ODE-adjusted cutoff earlier than
         the static classifier window_close_time, the card must show the earlier ODE
@@ -448,6 +491,10 @@ class TestComputeNextAction:
         """Nat-vent/economizer already active → nothing for the occupant to do (Issue #527 regression)."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         ae = _make_ae_stub(_natural_vent_active=True)
+        # The card reads the engine's resolved band (Issue #1136/#1094); the stub arms 68-75.
+        ae._resolved_comfort_band = MagicMock(
+            return_value=ComfortBand(floor=68.0, ceiling=75.0, active="ceiling", reason="test")
+        )
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=78.0, outdoor_temp=70.0, ae=ae)
         assert result == "-"
 

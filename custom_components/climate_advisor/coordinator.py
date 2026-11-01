@@ -14,7 +14,7 @@ import hashlib
 import logging
 import math
 import statistics
-from collections.abc import Callable, Container, Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from .ai_skills import AISkillRegistry
     from .claude_api import ClaudeAPIClient
-    from .override_grace_fsm import OverrideGraceFsmEventKind
 
 from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
@@ -49,6 +48,7 @@ from .automation import (
     compute_pre_cool_target,
     fallback_edges_without_classification,
     hvac_outcome_label,
+    resolve_active_band,
     resolve_pre_cool_modifier,
 )
 from .briefing import generate_briefing
@@ -120,7 +120,6 @@ from .const import (
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
     CONF_NATURAL_VENT_DELTA,
-    CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_SLEEP_HEAT,
@@ -140,7 +139,6 @@ from .const import (
     DEFAULT_COMFORT_HEAT,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NATURAL_VENT_DELTA,
-    DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_DEPTH_COOL_F,
@@ -180,7 +178,6 @@ from .const import (
     OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
     OUTDOOR_SENSOR_STALE_HOURS,
-    OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
     REJECT_AC_INSUFFICIENT_MIDDAY_ACTIVITY,
@@ -300,7 +297,6 @@ from .nat_vent_plan import (
 )
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
-from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
 from .promise_journal import (
     Command as _PromiseCommand,
 )
@@ -526,83 +522,12 @@ def _prune_event_log(event_log: list[dict], now: datetime) -> list[dict]:
     return pruned
 
 
-# Issue #757 Phase 6 Step 4: _DOOR_WINDOW_FSM_EVENT_KINDS/
-# _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS/_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES
-# (Issue #637/#594 Phase R Step 1b) were removed here — they fed only the now-deleted
-# door/window shadow-comparison axes (door_window_mirror_agrees/door_window_fsm_agrees)
-# via _evaluate_door_window_fsm(), which had zero other consumers. "override_adopted"/
-# "grace_expired" — the event-type strings the removed
-# _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES also fed — are still consumed by
-# _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP below for that FSM's own still-active
-# GRACE_TIMER_EXPIRED concept.
-
-# Issue #639/#643: which automation.py entry-point methods correspond to which
-# override/grace FSM event kind. Of the 8 OverrideGraceFsmEventKind members, 3 are
-# fed here via _feed_override_grace_fsm_on_detect() (added Issue #757 Phase 6 Step 8,
-# replacing the removed dual-engine shell's _mirror_to_shadow() finally block, which
-# used to derive the same lookup as an incidental side effect of replaying the call
-# onto the now-deleted shadow engine). OVERRIDE_CONFIRM_EXPIRED/OVERRIDE_SUPERSEDED/
-# OVERRIDE_CANCELLED are fed separately by _feed_override_grace_fsm_cancelled() and
-# the ``_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP``-driven exit paths below.
-# GRACE_TIMER_EXPIRED is fed the same way (see that map).
-_OVERRIDE_GRACE_FSM_EVENT_KINDS: dict[str, str] = {
-    "handle_manual_override_during_pause": "manual_override_during_pause",
-    "resume_from_pause": "dashboard_resume",
-    # Issue #661: was "override_detected" — handle_fan_manual_override() never
-    # routes through start_override_confirmation()'s confirm-delay machinery
-    # like the two OVERRIDE_DETECTED call sites below do, so it was landing the
-    # FSM on a spurious PENDING confirm state that production never creates.
-    # FAN_OVERRIDE_DETECTED is a dedicated kind the dispatcher short-circuits to
-    # (IDLE, ACTIVE_PROTECTING_OVERRIDE) immediately, matching production's
-    # actual unconditional behavior.
-    "handle_fan_manual_override": "fan_override_detected",
-    # Issue #651: same entry-wiring gap #643 fixed for handle_fan_manual_override,
-    # never done for the thermostat-level override path. Maps to the same
-    # OVERRIDE_DETECTED kind — OverrideGraceFsmInputs.setpoint_override already
-    # differentiates a setpoint-only override from a mode-change override.
-    "handle_manual_override": "override_detected",
-}
-
-# Issue #647: the mirror-name-keyed dicts above only ever covered FSM *entry* paths —
-# every FSM *exit* path (override confirmed/self-resolved/cleared/cancelled, grace
-# naturally expiring) has no `_mirror_to_shadow()` call site at all (see the block
-# comment above) and was therefore silently unreachable, leaving each FSM's carried
-# state permanently stuck once it entered a non-idle state. `automation.py` already
-# emits a named event via `_emit_event_callback` at every one of these transitions —
-# that stream reaches `_emit_event()` (below) regardless of shadow-mirror status, so
-# `_feed_lifecycle_fsms_from_event()` hooks there instead of adding new dedicated call
-# sites. `OverrideGraceFsmEventKind` values are looked up dynamically (not hardcoded
-# here) to avoid importing the FSM module at coordinator import time.
-_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP: dict[str, str] = {
-    # _confirm_override_expired() closure (automation.py) — both branches resolve the
-    # same pending confirm window; the FSM re-derives which branch from its own fresh
-    # inputs, so one event kind covers both. Both branches emit AFTER their respective
-    # state mutation completes, so `self.automation_engine`'s live flags are already
-    # correct when `_feed_lifecycle_fsms_from_event()` reads them.
-    "override_confirmed": "override_confirm_expired",
-    "override_self_resolved": "override_confirm_expired",
-    # _on_grace_expired() — "adopted" is a distinct emitted event type for the one
-    # branch that returns early without also emitting "grace_expired"; both are the
-    # same underlying grace-timer-expiry transition from the FSM's point of view. Both
-    # emit only after `clear_manual_override()` has fully returned, same
-    # already-correct-by-the-time-we-read-it reasoning as above.
-    "grace_expired": "grace_timer_expired",
-    "override_adopted": "grace_timer_expired",
-    # Deliberately NOT "override_cleared": clear_manual_override() emits it *before*
-    # clearing `_manual_override_active` (the event payload needs the pre-clear
-    # was_mode/active_since values) — feeding the FSM there would read stale
-    # still-active state. cancel_override()/clear_manual_override() are called from a
-    # handful of real coordinator.py/api.py sites instead; those are fed directly,
-    # post-return, via `_feed_override_grace_fsm_cancelled()` below.
-    # Issue #672: _start_grace_period()'s "every other trigger" callers (fan-off,
-    # window-close, nat-vent-exit, drift-correction) emit this DISTINCT event type —
-    # deliberately not the pre-existing generic "grace_started" (which also fires for
-    # the 3 protecting triggers via their own direct dispatcher call sites; reusing it
-    # here would wrongly feed UNPROTECTED_GRACE_STARTED for those too). Confirmed live:
-    # this closes the "production=idle/active_unprotected fsm=idle/none" disagreement
-    # that persisted indefinitely because none of these 4 triggers had ANY feed at all.
-    "unprotected_grace_started": "unprotected_grace_started",
-}
+# Issue #1152: the coordinator's third copy of the override/grace FSM -- a diagnostic tracker
+# (``_override_grace_fsm_state``) fed by ``_evaluate_override_grace_fsm()`` from ~15 call sites,
+# keyed by ``_OVERRIDE_GRACE_FSM_EVENT_KINDS`` / ``_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP`` -- was
+# deleted. Nothing in production ever read the tracker (one test did), and its input builder
+# carried the same stale-confirm-source defect as the engine's (Issue #1146). The engine's
+# ``_resolve_override_grace_fsm_state()`` is the sole override/grace FSM dispatch.
 
 # Issue #757 Phase 6 Step 4: _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES (Issue #647) and
 # _DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES (Issue #668) were removed here — both
@@ -782,7 +707,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # collapses back to the single engine every other part of the codebase
         # (api.py, sensor.py, tests) already expects `coordinator.automation_engine`
         # to be. See #757 for the full migration history.
-        self._override_grace_fsm_state: OverrideGraceLifecycleState = (OverrideConfirmState.IDLE, GraceState.NONE)
         self.automation_engine: AutomationEngine = AutomationEngine(
             hass=hass,
             climate_entity=config["climate_entity"],
@@ -1079,6 +1003,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return AutomationEngineCallbacks(
             revisit=self.async_request_refresh,
             sensor_check=self._any_sensor_open,
+            # Issue #1093: the sealed-house read for the ODE ceiling guard -- "every configured
+            # sensor reports a real closed state" (unavailable/unknown is NOT closed).
+            sensors_known_closed=self._all_sensors_known_closed,
             # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell
             # whether any currently-open monitored sensor is still within its
             # CONF_SENSOR_DEBOUNCE settle window. Issue #623: _door_open_timers alone
@@ -1105,192 +1032,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             get_whf_safety_snapshot=self._build_whf_safety_snapshot,
             spawn=self._spawn,
         )
-
-    def _dispatch_fsm_evaluators(
-        self,
-        key: str,
-        dispatches: list[tuple[Container[str], Callable[[], None], str]],
-    ) -> None:
-        """Shared try/except-and-log dispatch loop for FSM re-evaluation (Issue #660,
-        Phase R Step 0).
-
-        Each dispatch tuple is ``(registry, evaluator, label)``. If ``key`` (a
-        mirrored method name or an emitted event type, depending on caller) is a
-        member of ``registry``, ``evaluator()`` runs isolated: any exception is
-        logged under ``label`` and swallowed, never allowed to affect production.
-        Replaces what used to be a hand-copied ``if key in <registry>: try: ...
-        except: _LOGGER.warning(...)`` block per FSM — both in ``_mirror_to_shadow()``'s
-        ``finally`` block and in ``_feed_lifecycle_fsms_from_event()`` — so adding a
-        future FSM (or fixing a missing registration, as Issue #660 did for
-        ``check_natural_vent_conditions()``) is a one-line registry addition instead
-        of a new copy-pasted try/except block.
-        """
-        for registry, evaluator, label in dispatches:
-            if key in registry:
-                try:
-                    evaluator()
-                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                    _LOGGER.warning("%s failed (isolated, no production impact): %s", label, fsm_exc)
-
-    def _evaluate_override_grace_fsm(self, event_kind: OverrideGraceFsmEventKind) -> None:
-        """Run the unified override/grace joint-lifecycle FSM (Issue #639) against
-        production's current live readings and track its own independently-
-        derived state.
-
-        Issue #647: takes an explicit ``event_kind`` rather than deriving one from a
-        ``_mirror_to_shadow()`` method name — the FSM reads its inputs fresh from
-        **production** ``self.automation_engine`` every call (see below), never from
-        the shadow engine, so it has no actual dependency on whether the triggering
-        production call site also happens to replay onto the shadow engine. Coupling
-        "does this feed the FSM" to "does this have a mirror call site" (the original
-        v1 design) is what left every override/grace *exit* path — confirm, cancel,
-        clear, grace-timer-expiry — permanently unreachable, since none of those have
-        (or need) a shadow replay. Callers now pass the event kind explicitly: the 3
-        original mirrored entry points still resolve theirs via
-        ``_OVERRIDE_GRACE_FSM_EVENT_KINDS`` at the ``_mirror_to_shadow()`` call site;
-        the new exit-path callers (``_feed_lifecycle_fsms_from_event()``, driven by
-        ``_emit_event()``'s already-comprehensive event stream) resolve theirs via
-        ``_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP``. The FSM's own tracked state
-        (``self._override_grace_fsm_state``) is never written back onto either engine
-        — a third, independent computation, purely for comparison against
-        production's real derived state. Isolated the same way: any exception here is
-        logged and swallowed by the caller, never allowed to affect production.
-
-        ``current_setpoint_f``/``target_setpoint_f`` are resolved inline via the
-        same ``select_comfort_band()`` + ``to_fahrenheit()`` sequence
-        ``AutomationEngine._override_matches_current_decision()`` itself uses,
-        wrapped in the same defensive try/except that method's own live-state
-        reads implicitly tolerate (a missing/unparseable setpoint just means "no
-        setpoint to compare" — mode match alone is still meaningful evidence).
-        """
-        from .override_grace_fsm import (
-            OverrideGraceFsmEvent,
-            OverrideGraceFsmInputs,
-        )
-        from .override_grace_fsm import (
-            transition as _override_grace_transition,
-        )
-
-        ae = self.automation_engine
-        now = dt_util.now()
-        config = self.config
-
-        classification = ae._current_classification
-        classification_mode = classification.hvac_mode if classification else None
-
-        current_setpoint_f: float | None = None
-        target_setpoint_f: float | None = None
-        # Issue #1073: the same decision inputs production compares (selector family + resolved band),
-        # via the engine's read-only helper -- not classification.hvac_mode / the flat band.
-        decision_mode, decision_target_f = ae._override_match_inputs(classification)
-        try:
-            if classification is not None and decision_mode in ("heat", "cool"):
-                target_setpoint_f = decision_target_f
-                state = self.hass.states.get(ae.climate_entity)
-                raw_setpoint = state.attributes.get("temperature") if state else None
-                if raw_setpoint is not None:
-                    unit = config.get("temp_unit", "fahrenheit")
-                    current_setpoint_f = to_fahrenheit(float(raw_setpoint), unit)
-        except TypeError, ValueError, AttributeError:
-            current_setpoint_f = None
-            target_setpoint_f = None
-
-        event = OverrideGraceFsmEvent(
-            kind=event_kind,
-            inputs=OverrideGraceFsmInputs(
-                confirm_seconds=float(config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS)),
-                setpoint_override=bool(ae._override_confirm_source == "setpoint"),
-                current_mode=self._current_hvac_mode(),
-                classification_mode=classification_mode,
-                manual_override_active=bool(ae._manual_override_active),
-                manual_override_mode=ae._manual_override_mode,
-                manual_override_source=ae._manual_override_source,
-                fan_override_active=bool(ae._fan_override_active),
-                current_setpoint_f=current_setpoint_f,
-                target_setpoint_f=target_setpoint_f,
-                tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-                within_planned_window=ae._is_within_planned_window_period(),
-                any_sensor_open=ae._any_monitored_sensor_open(),
-                grace_source=ae._last_resume_source or "automation",
-                now=now,
-                decision_mode=decision_mode,
-                decision_mode_resolved=True,
-            ),
-        )
-        result = _override_grace_transition(self._override_grace_fsm_state, event)
-        self._override_grace_fsm_state = result.to_state
-
-    def _feed_override_grace_fsm_on_detect(self, method_name: str) -> None:
-        """Feed the override/grace FSM an entry event for a former ``_mirror_to_shadow()``
-        call site (Issue #757 Phase 6 Step 8).
-
-        The dual-engine shell (and ``_mirror_to_shadow()`` itself) was removed, but 8 of
-        its call sites secretly drove the still-live override/grace FSM via its
-        ``finally`` block (see the removed ``_OVERRIDE_GRACE_FSM_EVENT_KINDS`` dispatch).
-        This preserves that FSM feed exactly, keyed the same way (mirrored method name ->
-        event kind via ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``). Isolated the same way every
-        other FSM-feed call site is: any exception here is logged and swallowed, never
-        allowed to affect production.
-        """
-        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-        try:
-            self._evaluate_override_grace_fsm(_OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name]))
-        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-            _LOGGER.warning(
-                "Override/grace FSM evaluation failed (isolated, no production impact): %s",
-                fsm_exc,
-            )
-
-    def _feed_override_grace_fsm_cancelled(self) -> None:
-        """Feed the override/grace FSM an ``OVERRIDE_CANCELLED`` event (Issue #647).
-
-        ``cancel_override()``/``clear_manual_override()`` emit their own
-        ``"override_cleared"`` event *before* clearing ``_manual_override_active``
-        (the event payload needs the pre-clear values), so
-        ``_feed_lifecycle_fsms_from_event()`` deliberately does not hook that event
-        type — it would read stale, still-active state. Call this instead, after the
-        real ``cancel_override()``/``clear_manual_override()`` call has fully
-        returned, at each of the handful of real coordinator.py/api.py call sites —
-        by then ``self.automation_engine``'s flags are correctly cleared. Isolated the
-        same way every other FSM-feed call site is: an exception here is logged and
-        swallowed, never allowed to affect production.
-        """
-        try:
-            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-            self._evaluate_override_grace_fsm(_OGFEventKind.OVERRIDE_CANCELLED)
-        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-            _LOGGER.warning(
-                "Override/grace FSM evaluation (cancel-driven) failed (isolated, no production impact): %s",
-                fsm_exc,
-            )
-
-    def _any_override_active(self) -> bool:
-        """True if either a thermostat-level or fan-only override is currently active.
-
-        Used to detect a same-cycle clear across ``handle_bedtime()``/
-        ``handle_morning_wakeup()`` (Issue #651) — see
-        ``_feed_override_grace_fsm_if_cleared()``.
-        """
-        ae = self.automation_engine
-        return bool(ae._manual_override_active or ae._fan_override_active)
-
-    def _feed_override_grace_fsm_if_cleared(self, was_active: bool) -> None:
-        """Feed OVERRIDE_CANCELLED if an override that was active before a call is gone after it (Issue #651).
-
-        ``handle_bedtime()``/``handle_morning_wakeup()`` can silently clear a fan-only
-        override via ``clear_manual_override()`` — its ``"override_cleared"`` emit is
-        gated on ``_manual_override_active`` (false for a fan-only override), so no
-        event reaches ``_feed_lifecycle_fsms_from_event()``. Without this, the FSM
-        still self-heals within one update cycle via ``_check_orphaned_grace()``'s
-        orphaned-grace backstop, but produces a transient shadow-disagreement blip
-        until then. Call with the pre-call ``_any_override_active()`` result; this
-        reads state strictly after the real engine call has returned, so no staleness
-        risk (same ordering guarantee as ``_feed_override_grace_fsm_cancelled()``).
-        """
-        if was_active and not self._any_override_active():
-            self._feed_override_grace_fsm_cancelled()
 
     def _current_hvac_mode(self) -> str | None:
         """Live thermostat mode read, shared by the door/window FSM evaluation
@@ -2947,9 +2688,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return state.state == "off"
         return state.state == "on"
 
+    def _state_is_known_closed(self, state: Any) -> bool:
+        """Return True only when a contact-sensor State positively reads 'closed', respecting polarity.
+
+        Issue #1093. The complement of ``_state_is_open`` over the two real states only: an
+        unavailable/unknown/missing state is neither open nor known-closed. ``_state_is_open``
+        stays the one definition of "open" (an unreadable sensor must not block the WHF safety
+        stop); this is the one definition of "known closed" (an unreadable sensor must not count
+        as a sealed house).
+        """
+        if not state or state.state not in ("on", "off"):
+            return False
+        return not self._state_is_open(state)
+
     def _is_sensor_open(self, entity_id: str) -> bool:
         """Check if a door/window sensor is in the 'open' state, respecting polarity."""
         return self._state_is_open(self.hass.states.get(entity_id))
+
+    def _all_sensors_known_closed(self) -> bool:
+        """True when at least one door/window sensor is configured AND every one reads a real closed state.
+
+        Issue #1093: the sealed-house predicate behind ``AutomationEngine._whf_house_sealed_with_known_sensors()``.
+        No sensors configured, or any sensor unavailable/unknown/missing, is unknown -- not sealed.
+        """
+        return bool(self._resolved_sensors) and all(
+            self._state_is_known_closed(self.hass.states.get(s)) for s in self._resolved_sensors
+        )
 
     def _is_recent_hvac_command(self, threshold_seconds: float = 3.0) -> bool:
         """Check if an HVAC command was issued very recently (race guard)."""
@@ -3203,46 +2967,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         _LOGGER.debug("[coalesce-diag] after reconcile_fan_on_startup()")
 
-        # Issue #707: reconcile_fan_on_startup()'s RF-timer-survives-restart branch
-        # (_reconcile_fan_on_startup_locked(), automation.py ~5005-5022) calls
-        # handle_fan_manual_override() INTERNALLY when a live remote timer is still
-        # valid — that inner call correctly updates production's real override/grace
-        # flags via _resolve_override_grace_fsm_state(), but is invisible to
-        # _mirror_to_shadow()'s dispatch above, since "reconcile_fan_on_startup" (the
-        # outer mirrored method name) isn't a key in _OVERRIDE_GRACE_FSM_EVENT_KINDS —
-        # only "handle_fan_manual_override" is, and that key is only ever consulted
-        # when _mirror_to_shadow() itself is invoked with that method name, which never
-        # happens here since the inner call is a direct synchronous call inside
-        # automation.py, not a coordinator-level mirrored call. Left the shadow tracker
-        # permanently stuck reporting "none" after every restart with an active RF
-        # timer (confirmed live: production=idle/active_protecting_override vs
-        # fsm=idle/none, sustained 993s+, 2026-08-20 06:54-07:11).
-        #
-        # Fix: feed the FSM tracker directly here, gated on the EXACT same condition
-        # _reconcile_fan_on_startup_locked() uses to decide whether to call
-        # handle_fan_manual_override() (remote_timer_provenance is not None and
-        # thermostat_fan_running) — so this only fires when the inner override call
-        # actually happened, never on the plain "nothing to reconcile" path. By this
-        # point reconcile_fan_on_startup() has already fully returned (including its
-        # synchronous inner handle_fan_manual_override() call), so
-        # self.automation_engine's live flags are already correct — same
-        # read-fresh-from-production pattern _check_orphaned_grace() uses at ~2865-2869.
-        # Issue #1045: decided by the engine's own signal ("a restored override was actually
-        # re-armed"), not by re-deriving the condition here — there are now two provenance
-        # sources (live RF token, persisted override) and a sealed-house deactivate path that
-        # must NOT feed the tracker. ``is True`` keeps MagicMock-stubbed engines inert.
-        if getattr(self.automation_engine, "_reconcile_rearmed_override", False) is True:
-            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-            try:
-                self._evaluate_override_grace_fsm(_OGFEventKind.FAN_OVERRIDE_DETECTED)
-            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                _LOGGER.warning(
-                    "Override/grace FSM evaluation (restart-resume RF-timer-driven) failed"
-                    " (isolated, no production impact): %s",
-                    fsm_exc,
-                )
-
         self._emit_event(
             "startup_coalesced",
             {
@@ -3301,13 +3025,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # semantic match is GRACE_TIMER_EXPIRED (grace ending with nothing left to protect).
         ae._cancel_grace_timers_action()
         ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
-        try:
-            self._evaluate_override_grace_fsm(_OGFEventKind.GRACE_TIMER_EXPIRED)
-        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-            _LOGGER.warning(
-                "Override/grace FSM evaluation (orphaned-grace-driven) failed (isolated, no production impact): %s",
-                fsm_exc,
-            )
         # Issue #679: derive_door_window_lifecycle_state() also takes grace_active as an
         # input; this method used to also re-notify the door/window shadow FSM here
         # (Issue #679's own comment) — that call and the door/window shadow-comparison
@@ -3697,7 +3414,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _stale_mode = _ae._manual_override_mode
                     _stale_since = _ae._manual_override_time
                     _ae.clear_manual_override(reason="stuck_grace_recovery")
-                    self._feed_override_grace_fsm_cancelled()
                     self._emit_event(
                         "stuck_grace_recovered",
                         {
@@ -5445,16 +5161,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""
-        _was_overridden = self._any_override_active()
         _indoor_temp = self._get_indoor_temp()
         await self.automation_engine.handle_morning_wakeup(indoor_temp=_indoor_temp)
-        self._feed_override_grace_fsm_if_cleared(_was_overridden)
 
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
-        _was_overridden = self._any_override_active()
         await self.automation_engine.handle_bedtime()
-        self._feed_override_grace_fsm_if_cleared(_was_overridden)
 
     def _resolve_tou_schedule_state(self) -> None:
         """Resolve TOU cost-period schedule state for this cycle (Issue #786) — cheap,
@@ -5724,6 +5436,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._nat_vent_plan = None
             return
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+        # Issue #1093: the plan's AC-handoff time measures against the ceiling the thermostat is armed
+        # with (Prefer savings widens it) -- the engine's single source, not comfort_cool + a margin here.
+        _, _armed_ceiling = awake_comfort_edges(
+            self.config, aggressive_savings=bool(self.config.get("aggressive_savings", False))
+        )
         if c.day_type == DAY_TYPE_HOT:
             # Issue #876: HOT's own open-time field is window_opportunity_morning_start
             # (window_open_time is always None for HOT — see classifier.py) and the
@@ -5734,6 +5451,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                ceiling=_armed_ceiling,
                 window_open_time=c.window_opportunity_morning_start,
             )
         else:
@@ -5743,6 +5461,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                ceiling=_armed_ceiling,
                 comfort_heat_raw=_comfort_heat_raw,
                 sleep_heat=_sleep_heat,
                 in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
@@ -6476,6 +6195,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # four override-detection sites below. No early return — other bookkeeping must run.
         _is_availability_recovery = is_availability_recovery(old_state)
 
+        _mode_override_detected = False  # set by any of the mode-change override registrations below
+
         # Detect manual HVAC override during a door/window pause.
         # Note: we intentionally do NOT require old_state == "off" here.
         # The async _set_hvac_mode("off") service call may not have
@@ -6514,7 +6235,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._current_classification.hvac_mode if self._current_classification else None
                     ),
                 )
-                self._feed_override_grace_fsm_on_detect("handle_manual_override_during_pause")
+                _mode_override_detected = True
                 self._cancel_all_debounce_timers()
             else:
                 _LOGGER.debug(
@@ -6556,27 +6277,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # this as OVERRIDE_CANCELLED (as Issue #647 originally did, shadow-only)
             # would have made an authoritative FSM wrongly force grace to NONE here.
             ae = self.automation_engine
-            _was_confirm_pending = ae._override_confirm_pending
-            if _was_confirm_pending:
-                ae._clear_override_confirm_action()
 
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-            ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_SUPERSEDED)
-            ae._clear_manual_override_active("new_override_during_grace")
-            try:
-                self._evaluate_override_grace_fsm(_OGFEventKind.OVERRIDE_SUPERSEDED)
-            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                _LOGGER.warning(
-                    "Override/grace FSM evaluation (supersession-driven) failed (isolated, no production impact): %s",
-                    fsm_exc,
-                )
+            ae._replace_thermostat_override(
+                reason="new_override_during_grace", fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED, clear_fan=True
+            )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
             )
-            self._feed_override_grace_fsm_on_detect("handle_manual_override")
+            _mode_override_detected = True
         elif (
             old_state.state != new_state.state
             and not is_unavailable_state(new_state.state)
@@ -6661,7 +6373,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
             )
-            self._feed_override_grace_fsm_on_detect("handle_manual_override")
+            _mode_override_detected = True
 
         # HVAC runtime tracking via hvac_action (preferred) or mode
         new_action = new_state.attributes.get("hvac_action", "").lower()
@@ -7002,7 +6714,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             old_temp = old_state.attributes.get("temperature")
             _setpoint_changed = new_temp != old_temp
 
-        if (
+        _setpoint_candidate = bool(
             _setpoint_changed
             # Issue #1049: a reconnecting thermostat has no prior setpoint — that is a reading
             # appearing, not an occupant changing it. (Only the recovery case: a missing prior
@@ -7016,7 +6728,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_temp_command(threshold_seconds=30.0)
             and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _fan_cancel_in_this_event  # Issue #359 Fix A: fan-off echo suppresses grace
-        ):
+        )
+        # Owner decision (2026-10-31, Issue #1133): while the whole-house fan has suppressed HVAC, the
+        # thermostat reads Off only because of the fan and a window is open. A temperature-only change then
+        # does not stop the fan, does not resume heat/cool (that would heat an open window) and is not a manual
+        # override at all -- only a mode change or turning the fan off ends the session. ``is True`` keeps
+        # MagicMock-stubbed engines inert.
+        _setpoint_ignored_for_whf = _setpoint_candidate and self.automation_engine._whf_owns_hvac() is True
+        if _setpoint_ignored_for_whf:
+            _LOGGER.info(
+                "Setpoint change ignored: whole-house fan owns HVAC, not a manual override "
+                "old_temp=%s new_temp=%s hvac_mode=%s (only a mode change or the fan turning off ends the session)",
+                old_temp,
+                new_temp,
+                new_state.state,
+            )
+        if _setpoint_candidate and not _setpoint_ignored_for_whf:
             # Mark setpoint detection as fired so Block 3 (fan_mode) is suppressed for this event.
             # A single event that changes both setpoint and fan_mode has one root cause; two
             # simultaneous grace periods from one event would confuse the automation engine.
@@ -7026,6 +6753,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _ov_unit = self.config.get("temp_unit", "fahrenheit")
             old_val = new_val = None
             old_setpoint_f = new_setpoint_f = None
+            _setpoint_numeric = True
             try:
                 _pairs: list[tuple[float, float]] = []
                 for _a in _sp_attrs:
@@ -7051,6 +6779,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     }
                 )
             except ValueError, TypeError:
+                # A missing PRIOR setpoint with a readable new one (Sensi reports temperature=null while Off)
+                # is a real occupant change and keeps its original override semantics (Issue #1049, pinned by
+                # test_missing_prior_setpoint_without_unavailable_...). Only an UNREADABLE NEW value -- the
+                # setpoint vanishing, e.g. an HVAC-off transition reporting None (#583) -- registers nothing.
+                _setpoint_numeric = any(
+                    read_attribute_temp_f(new_state, _a, _ov_unit)[0] is not None for _a in _sp_attrs
+                )
+                if _setpoint_numeric and _is_expected_confirmation:
+                    # Issue #1133 L6: the prior setpoint is missing (a thermostat that reports temperature=null
+                    # while Off) and CA itself commanded this mode within the last 120 s -- this is CA's own
+                    # restore echoing back late (past the 30 s recency guards), not the occupant. Scoped to the
+                    # missing-prior case: with a real prior value a quick occupant tweak right after a CA write
+                    # must still count.
+                    _setpoint_numeric = False
+                    _LOGGER.info(
+                        "Setpoint change skipped: echo of Climate Advisor's own command (prior setpoint missing) "
+                        "new_temp=%s hvac_mode=%s",
+                        new_temp,
+                        new_state.state,
+                    )
                 # Issue #583: diagnostic evidence for the still-open Phase (b) investigation
                 # (leading hypothesis: a WHF-triggered HVAC-off transition producing a None
                 # temperature reading outside the ~30s command-recency window). Do NOT count
@@ -7080,7 +6828,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _ca_active_mode = ae._last_commanded_hvac_mode or (
                 self._current_classification.hvac_mode if self._current_classification else None
             )
-            if (
+            if not _setpoint_numeric:
+                # Not a real setpoint pair: nothing was counted above, so nothing may be registered as an
+                # override either (it used to log and then fall through to handle_manual_override). Only this
+                # block is skipped -- the rest of the handler (fan_mode detection, runtime tracking) still has
+                # to run for the same event, so this is a guarded skip, not a function return.
+                _LOGGER.info("Setpoint change skipped: non-numeric reading, no override registered")
+            elif (
                 not ae._manual_override_active
                 and not ae._override_confirm_pending
                 and self._current_classification is not None
@@ -7102,7 +6856,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_setpoint_f=old_setpoint_f,
                     new_setpoint_f=new_setpoint_f,
                 )
-                self._feed_override_grace_fsm_on_detect("handle_manual_override")
         elif _fan_cancel_in_this_event and _setpoint_changed:
             # Issue #359 Fix A: fan-off echo branch — the thermostat restored its comfort-program
             # setpoint as a side-effect of the fan being turned off (ecobee behavior).  Do NOT start
@@ -7139,6 +6892,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not _is_expected_confirmation
             and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _setpoint_override_detected
+            and not _mode_override_detected  # Issue #1133: one thermostat event, one root cause (mode change wins)
         ):
             _fan_ct = self.automation_engine._fan_command_time
             try:
@@ -7170,9 +6924,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine.on_fan_turned_off(fan_before=str(old_fan_mode), fan_after=str(new_fan_mode))
             else:
                 self.automation_engine.handle_fan_manual_override(
-                    fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
+                    fan_before=str(old_fan_mode), fan_after=str(new_fan_mode), hvac_fan=True
                 )
-                self._feed_override_grace_fsm_on_detect("handle_fan_manual_override")
 
     async def _async_command_fan_entity(self, *, on: bool) -> bool:
         """Issue a turn_on or turn_off service call to the configured WHF fan entity (Issue #361).
@@ -7398,7 +7151,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.automation_engine.handle_fan_manual_override(
                 fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
             )
-            self._feed_override_grace_fsm_on_detect("handle_fan_manual_override")
         elif not is_on and (self.automation_engine._fan_active or self.automation_engine._fan_override_active):
             # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
             # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
@@ -7599,7 +7351,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 remote_speed=burst.speed,
                 is_remote_event=True,
             )
-            self._feed_override_grace_fsm_on_detect("handle_fan_manual_override")
         else:
             self.automation_engine.handle_fan_speed_observed(burst.speed, is_remote_event=True)
         await self.async_request_refresh()
@@ -7735,7 +7486,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             return None
 
-    async def _async_reassert_setpoint_after_fan_off(self) -> None:
+    async def _async_reassert_setpoint_after_fan_off(self, reason: str = "fan-off echo") -> None:
         """Re-assert CA's intended setpoint after an ecobee fan-off echo (Issue #359 Fix A).
 
         Ecobee simultaneously restores its comfort-program setpoint when the user turns the fan
@@ -7755,7 +7506,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
             )
             _LOGGER.info(
-                "Setpoint re-asserted after fan-off echo: reasserted day_type=%s hvac_mode=%s",
+                "Setpoint re-asserted after %s: reasserted day_type=%s hvac_mode=%s",
+                reason,
                 classification.day_type,
                 classification.hvac_mode,
             )
@@ -7766,7 +7518,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
 
     @callback
-    def _on_whf_release_reclassify(self) -> None:
+    def _on_whf_release_reclassify(self, reason: str = "WHF release") -> None:
         """Called by the engine when a manual/remote WHF session releases HVAC suppression
         (Issue #495, ``AutomationEngine._release_whf_and_reclassify``).
 
@@ -7775,7 +7527,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ended, push CA's current classification back to the thermostat" and share the same
         5s-settle-then-reclassify mechanics.
         """
-        self.hass.async_create_task(self._async_reassert_setpoint_after_fan_off())
+        self.hass.async_create_task(self._async_reassert_setpoint_after_fan_off(reason))
 
     @callback
     def _on_post_grace_fan_check(self) -> None:
@@ -10316,7 +10068,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         comfort_cool = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
-        comfort_heat = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         fan_enabled = fan_mode != FAN_MODE_DISABLED
 
@@ -10459,8 +10210,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # WARM/MILD/COOL fallback: symmetric cooling-direction and heating-direction
         # checks, both gated on live outdoor-vs-indoor direction (Issue #428).
-        cooling_needed = indoor_temp is not None and indoor_temp > comfort_cool
-        heating_needed = indoor_temp is not None and indoor_temp < comfort_heat
+        # Issue #1136: judge "too warm / too cold" against the band the thermostat is armed
+        # with right now (sleep at night, setback away -- the engine's one resolver), not the
+        # flat daytime comfort_heat/comfort_cool config values. Issue #1094: the resolver's awake
+        # edges are awake_comfort_edges(), so the Prefer savings margin is already included.
+        # With an engine the read goes through its _resolved_comfort_band() -- the same call (and the TOU
+        # away/vacation expansion the thermostat is armed with, Issue #1080) the restore, override matching
+        # and the status API use; without one, the bare resolver.
+        if ae is not None:
+            _armed = ae._resolved_comfort_band(c)
+        else:
+            _armed = resolve_active_band(
+                c,
+                self.config,
+                occupancy_mode=self._occupancy_mode,
+                now=dt_util.now(),
+            )
+        _armed_heat, _armed_cool = _armed.floor, _armed.ceiling
+        cooling_needed = indoor_temp is not None and indoor_temp > _armed_cool
+        heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
@@ -10552,31 +10320,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "_nat_vent_was_active", False) and not _nat_vent_active_now:
             self._maybe_reschedule_pre_cool_on_nat_vent_exit()
         self._nat_vent_was_active = _nat_vent_active_now
-
-        self._feed_lifecycle_fsms_from_event(event_type)
-
-    def _feed_lifecycle_fsms_from_event(self, event_type: str) -> None:
-        """Re-evaluate the lifecycle FSMs whose tracked state this event just changed
-        in production (Issue #647).
-
-        Called from ``_emit_event`` (the real ``AutomationEngine``'s callback). Each
-        branch is isolated the same way ``_feed_override_grace_fsm_on_detect()`` is:
-        an exception here is logged and swallowed, never allowed to affect production.
-        """
-        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-        self._dispatch_fsm_evaluators(
-            event_type,
-            [
-                (
-                    _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP,
-                    lambda: self._evaluate_override_grace_fsm(
-                        _OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP[event_type])
-                    ),
-                    "Override/grace FSM evaluation (event-driven)",
-                ),
-            ],
-        )
 
     def _resolve_active_comfort_band(self) -> tuple[float | None, float | None]:
         """Resolve the currently-active (comfort_heat, comfort_cool) band.
@@ -10673,9 +10416,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Never show a self-contradicting entry: hidden while the occupant owns the thermostat
         # and whenever the thermostat already reports the mode the entry is about. Shared by
         # mode_not_obeyed and (Issue #1121) command_failing.
-        user_owns = bool(getattr(ae, "_manual_override_active", False)) or bool(
-            getattr(ae, "_override_confirm_pending", False)
-        )
+        user_owns = bool(ae._manual_change_protected())
 
         def _contradicted(mode: str) -> bool:
             return user_owns or live == mode
@@ -10810,8 +10551,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             thermostat_available=state is not None and not is_unavailable_state(state_str),
             has_hvac_action=action is not None,
             hvac_modes=modes if isinstance(modes, (list, tuple)) else None,
-            manual_control=bool(getattr(ae, "_manual_override_active", False))
-            or bool(getattr(ae, "_override_confirm_pending", False)),
+            manual_control=bool(ae._manual_change_protected()),
             sensor_open=self._any_sensor_open() or bool(getattr(ae, "_paused_by_door", False)),
             startup_coalescing=bool(self._startup_coalesce_active),
             nat_vent_tolerated=in_tolerance,
@@ -12265,7 +12005,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _ae = getattr(self, "automation_engine", None)
             _day_modes = _compute_day_hvac_modes(_extended_forecast, now, self._current_classification)
             _comfort_cool_raw = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-            _ceiling_threshold = _ae._ceiling_threshold(_comfort_cool_raw) if _ae else None
+            # Issue #1093: the SAME sealed decision the live ODE ceiling guard makes. Sensor state is only
+            # known now, so the walk holds the current sealed state for every forecast hour; hours where the
+            # walk plans a nat-vent/WHF session skip the guard inside _walk_forward_regime() (the FSM's
+            # WHF-archetype defer). One predicate, one ceiling -- the chart never disagrees with the guard.
+            _house_sealed = bool(_ae and _ae._whf_house_sealed_with_known_sensors())
+            _ceiling_threshold = _ae._ceiling_threshold(_comfort_cool_raw, house_sealed=_house_sealed) if _ae else None
             _regime_by_ts = _walk_forward_regime(
                 _day_modes,
                 _raw_predicted_indoor,
@@ -14783,7 +14528,14 @@ def _walk_forward_regime(
         # Hot day's morning window and evening reopen are two separate, independent
         # opportunities in the same day, unlike an "off" day's single escalate-once
         # pattern).
-        if day_mode == "off":
+        #
+        # Issue #1093: a WHF/BOTH home's ceiling_threshold is only non-None when the house is sealed
+        # right now (the caller holds that state forward). In a forecast hour where this walk plans a
+        # nat-vent/WHF session the windows are open and the fan owns the cooling, so the guard is
+        # skipped -- matching classification_fsm.py's NOT_EVALUATED_WHF_ARCHETYPE defer. Unsealed WHF
+        # homes have ceiling_threshold=None and could never escalate here, so this changes nothing there.
+        _whf_archetype_session = session_active and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+        if day_mode == "off" and not _whf_archetype_session:
             _idx = predicted_indoor_index.get(ts_str)
             _remaining_predicted_indoor = predicted_indoor[_idx:] if _idx is not None else []
             guard_decision = decide_ode_ceiling_guard(

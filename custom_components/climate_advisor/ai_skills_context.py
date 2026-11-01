@@ -2590,7 +2590,8 @@ def _render_nat_vent_reactivated_while_paused(p: dict, unit: str) -> tuple[str, 
 
 def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor")
-    cool = p.get("comfort_cool")
+    # Issue #1093: "ceiling" is the guard ceiling; older persisted events only carry "comfort_cool".
+    cool = p.get("ceiling", p.get("comfort_cool"))
     label = "Nat-vent escalated to AC cooling"
     if indoor is not None and cool is not None:
         with contextlib.suppress(TypeError, ValueError):

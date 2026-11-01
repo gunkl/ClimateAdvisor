@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      issues: read  # Issue #1153: the waiver ledger checks each waiver's issue is still open
 
     steps:
       - name: Checkout code
@@ -54,11 +55,18 @@ jobs:
           echo "days=$days" >> "$GITHUB_OUTPUT"
           echo "Master seeds: ${list# }"
 
-      - name: Generated days judged by the household promises (P1-P7)
+      # Issue #1153: a known hit is tolerated only through tools/sim_harness/nightly_waivers.json - issue-linked,
+      # expiring, matched on mechanism (never seed). A closed issue, a passed expiry or a waiver whose hit no
+      # longer occurs fails this step. GITHUB_SHA / GITHUB_REPOSITORY are set by Actions; the token reads issues.
+      - name: Generated days judged by the household promises (P1-P7) and the waiver ledger
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           uv run --locked --only-group test python tools/simulate.py
           --generate ${{ steps.seeds.outputs.days }}
           --seeds ${{ steps.seeds.outputs.list }}
+          --waiver-ledger tools/sim_harness/nightly_waivers.json
+          --issue-state github
 
       - name: Generated days judged by surfaces_agree (P8, ratcheted)
         run: >

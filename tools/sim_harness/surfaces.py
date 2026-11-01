@@ -420,9 +420,13 @@ def read_ode_ceiling(session: Any, armed: Armed) -> Shown | None:
     awake = awake_comfort_edges(coord.config, aggressive_savings=bool(coord.config.get("aggressive_savings", False)))
     if abs(armed.ceiling - awake[1]) > 1e-6 or abs(armed.floor - awake[0]) > 1e-6:
         return None  # not in the awake window
-    threshold = engine._ceiling_threshold(float(coord.config.get("comfort_cool", 75.0)))
+    # Issue #1093: the same sealed decision the live guard and the chart forecast make, so a sealed
+    # whole-house-fan home's hand-off is probed (an unsealed one has none, by design).
+    threshold = engine._ceiling_threshold(
+        float(coord.config.get("comfort_cool", 75.0)), house_sealed=engine._whf_house_sealed_with_known_sensors()
+    )
     if threshold is None:
-        return None  # whole-house-fan mode has no ceiling hand-off by design
+        return None  # whole-house-fan mode with a window open / sensor unknown has no ceiling hand-off
     return Shown("ode_ceiling", None, float(threshold))
 
 

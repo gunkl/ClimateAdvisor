@@ -127,18 +127,17 @@
     },
     {
       "at": "2026-09-02T20:37:00",
-      "expect_event": "nat_vent_reactivated_while_paused",
-      "expect": "fan_external_change_classified",
+      "expect": "paused_by_door",
       "track": "integration",
       "simulator_support": false,
-      "reason": "The grace-expiry reactivation this fix's marker is armed against must genuinely happen through the real production gate (not assumed) -- proves the scenario reaches the code path it claims to."
+      "reason": "Issue #1132: the grace-expiry activation is RATE_LIMITED at this instant (the backstop reconcile just toggled the fan), so the window is still open and the fan did not start: HVAC must stay paused (off) -- the pause is KEPT, nat_vent_reactivated_while_paused is not emitted. Reads the final engine flag; the timeline ends at 20:40, before the deferred activation at 20:42 could run, so the flag still reflects the refused-reactivation state. Before the fix the pause was cleared here, leaving HVAC off with no pause and no nat-vent session."
     },
     {
       "at": "2026-09-02T20:37:00",
       "expect": "manual_origin_unclosed",
       "track": "integration",
       "simulator_support": false,
-      "reason": "Issue #829's fix: the real production _re_pause_for_open_sensor() reactivation branch must arm _fan_manual_origin_unclosed on this handoff -- proving the marker is set by actual production control flow (grace timer, reconcile callback, reactivation gate all real), not only by a unit test's hand-set precondition."
+      "reason": "Issue #829's fix: the real production _re_pause_for_open_sensor() reactivation branch must arm _fan_manual_origin_unclosed on this handoff -- proving the marker is set by actual production control flow (grace timer, reconcile callback, reactivation gate all real), not only by a unit test's hand-set precondition. Issue #1132 note: at this instant the backstop reconcile has just toggled the fan, so the grace-expiry activation is RATE_LIMITED (deferred to 20:42). The door/window pause is therefore KEPT and no nat_vent_reactivated_while_paused event is emitted (a deferred command is not a reactivation); the marker is still armed because the deferred activation is CA's own and will run later without passing through this site. The earlier assertion that expected that event encoded the pre-#1132 defect of clearing the pause on a deferred fan command."
     }
   ],
   "verdict": {

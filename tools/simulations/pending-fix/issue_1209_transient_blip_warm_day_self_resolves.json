@@ -1,0 +1,105 @@
+{
+  "name": "issue_1209_transient_blip_warm_day_self_resolves",
+  "description": "Issue #1209: warm day (classifier derives hvac_mode=off, comfort band armed, CA commanding cool at the 74F ceiling). The thermostat glitches to heat and returns to cool within the 10-minute confirm window; it must self-resolve with no override. Currently FAILS on production: at 10:10 the blip is confirmed as an override (override_confirmed), so the automation stands down for a transient glitch the occupant never made.",
+  "source": "synthetic",
+  "issue": 1209,
+  "notes": [
+    "Reproduces Issue #1209 (bug-reproducing scenario, expected to FAIL at 10:10 until production is fixed; verdict.type=negative so simulate.py reports EXPECTED FAIL).",
+    "Occupant outcome: a momentary thermostat glitch is mistaken for the occupant's own change; the system then treats it as a manual override and stops managing comfort for the grace period.",
+    "Derived from override_self_resolve_transient (golden), which covers the same blip on a HOT day (hvac_mode=cool), where it passes; on a warm day the classifier label is off and production confirms the override instead of self-resolving.",
+    "Promote to golden/ once Issue #1209 is fixed and this scenario passes."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "cool",
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T09:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.5,
+      "outdoor_f": 68.0,
+      "note": "Cool morning. Indoor near comfort_cool=74F."
+    },
+    {
+      "time": "2026-07-15T09:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "windows_recommended": false,
+      "note": "Warm-day classification (hvac_mode left to classifier.py, off): comfort band armed, active ceiling comfort_cool=74F.",
+      "today_low": 72.0
+    },
+    {
+      "time": "2026-07-15T10:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "Transient: thermostat briefly reports heat mode. Override detection fires; 10-min confirm window starts."
+    },
+    {
+      "time": "2026-07-15T10:04:59",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "note": "Thermostat returns to cool mode before 10:05 (transient glitch resolved)"
+    },
+    {
+      "time": "2026-07-15T10:05:00",
+      "type": "temp_update",
+      "note": "Thermostat returns to cool mode at 10:05 — only 5 minutes elapsed, before confirm window expires. Override self-resolves.",
+      "indoor_f": 74.0,
+      "outdoor_f": 72.0
+    },
+    {
+      "time": "2026-07-15T10:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "30-min classification cycle. Override should NOT be active — classification should apply normally."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T09:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Initial cool-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T10:00:00",
+      "expect": "override_detected",
+      "reason": "Thermostat changed to heat while classification says cool — pending override detection.",
+      "track": "integration",
+      "note": "Override detection fires in coordinator _async_thermostat_changed listener."
+    },
+    {
+      "at": "2026-07-15T10:10:00",
+      "expect": "override_self_resolved",
+      "reason": "Confirm timer (override_confirm_seconds=600) fires at 10:10 — 10 minutes after detection at 10:00. Reads current thermostat state (still 'cool', set at 10:04:59) which matches classification.hvac_mode ('cool') — self-resolve path (PATH B in _confirm_override_expired), no override accepted. Corrected from 10:05 — see notes.",
+      "track": "integration",
+      "note": "Self-resolve genuinely happens at real timer expiry, not proactively on return-to-expected."
+    },
+    {
+      "at": "2026-07-15T10:30:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Override was not confirmed (self-resolved), so classification cycle at 10:30 applies normally — not suppressed.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "negative",
+    "summary": "Issue #1209: a transient thermostat blip on a warm day is confirmed as an override instead of self-resolving",
+    "observed_behavior": "override_detected (10:00) -> override_confirmed (10:10)",
+    "expected_behavior": "override_self_resolved at 10:10: CA distinguishes transient thermostat glitches from real user overrides using the 10-min confirmation window"
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

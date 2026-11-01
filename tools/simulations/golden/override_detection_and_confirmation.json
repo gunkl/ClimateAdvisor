@@ -54,7 +54,7 @@
     {
       "time": "2026-07-15T13:01:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
       "note": "Warm-day classification: HVAC cool at comfort_cool=74F."
@@ -75,7 +75,7 @@
     {
       "time": "2026-07-15T14:30:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "off",
       "windows_recommended": false,
       "note": "Scheduled 30-min classification cycle — deliberately a DIFFERENT hvac_mode (off, not cool) from the 13:01 classification, so that if suppression were bypassed a genuinely NEW classification_applied event would fire (breaking the separate day_type/hvac_mode dedup in automation.py:1355-1356) — making the 14:30 assertion below actually discriminating rather than passing vacuously regardless of whether the override guard works. Override is active — should be suppressed."

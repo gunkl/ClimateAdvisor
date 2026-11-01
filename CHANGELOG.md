@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.26] — 2026-11-01
+
+- Fix #1193 (test coverage only, nothing changes in how Climate Advisor behaves): the simulated-day checks that watch natural ventilation and the away setback now also run with an HVAC fan and with a whole-house fan set up, so they cover the installs where the fan can actually run. They had been reduced to "paused" checks for installs without a fan. The test scenarios themselves were also tightened: they now describe days the way Climate Advisor classifies them, the grace-period and restart checks confirm what actually happens (including that a Home Assistant restart clears a manual override), and two newly written scenarios track known problems (#1208, #1209).
+
 ## [0.8.25] — 2026-11-01
 
 - Test tooling #1179 (no change to how Climate Advisor behaves at home): the randomly generated test days now check the rule "the whole-house fan and the heating/cooling never run together, and your newest action wins" at the same 30-second tolerance the real system uses (they forgave 5 minutes before), no longer exercise the unsupported "both" fan setting, and add the cases the rule was never tried on: you turn the heat or AC on after the fan, 1-3 seconds after Climate Advisor's own pause, the AC already running when you start the fan, and a press of the thermostat's own blower under each supported fan setting.

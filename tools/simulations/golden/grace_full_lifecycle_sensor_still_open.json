@@ -1,6 +1,6 @@
 {
   "name": "grace_full_lifecycle_sensor_still_open",
-  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). At 13:12 sensor opens again while grace is active — grace blocks re-pause. Grace expires at 13:15 with sensor still open → re-pause fires.",
+  "description": "Hot day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). At 13:12 sensor opens again while grace is active — grace blocks re-pause. Grace expires at 13:15 with sensor still open → re-pause fires.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -53,10 +53,10 @@
     {
       "time": "2026-07-15T12:31:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Warm-day classification: HVAC cool at 74F."
+      "note": "Hot-day classification: HVAC cool at 74F (classifier.py derives cool for a hot day)."
     },
     {
       "time": "2026-07-15T13:00:00",
@@ -105,6 +105,14 @@
       "at": "2026-07-15T13:15:00",
       "expect": "classification_suppressed_paused",
       "reason": "Grace expires with sensor still open → real _on_grace_expired() re-pause fires (grace_expired event with re_paused=True, mapped to outcome 'paused'), which ALSO schedules _apply_current_scheduled_state() as a follow-up task (automation.py) — since the sensor is still open, this correctly suppresses re-applying classification and emits classification_suppressed_paused at the SAME timestamp, which is the last (and thus reported) decision. This is a stronger confirmation than the legacy simulator could produce: not just 'grace re-paused' but 'the re-pause genuinely blocks classification, verified via the real code path that runs after grace resolves.' Corrected from 'paused' during #476 migration once the actual last-decision tie was traced.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:15:00",
+      "expect": "event_emitted",
+      "event": "grace_expired",
+      "payload_subset": {"re_paused": true},
+      "reason": "Grace expired at 13:15 with the back door still open: _on_grace_expired() must take the sensor-still-open branch and re-pause (re_paused=True) itself, not end the grace cleanly and leave the pause to a later sensor handler.",
       "track": "integration"
     }
   ],

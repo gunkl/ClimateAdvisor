@@ -1,0 +1,90 @@
+{
+  "name": "nat_vent_active_indoor_in_band_guard_dormant__hvac_fan",
+  "description": "[hvac_fan twin of golden 'nat_vent_active_indoor_in_band_guard_dormant'; Issue #1193] Regression guard: ceiling guard correctly dormant when nat-vent active and indoor within band",
+  "source": "Issue #1193: hvac_fan twin of golden 'nat_vent_active_indoor_in_band_guard_dormant' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "[hvac_fan twin] When nat-vent is active and indoor is within comfort band (comfort_heat < indoor < comfort_cool), ceiling guard stays dormant",
+    "observed_behavior": "nat_vent_active=True with indoor 73F within band [70F, 74F], outdoor 65F",
+    "expected_behavior": "ceiling guard dormant, nat_vent continues, no HVAC intervention"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-05-25T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.5,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 72.5F, outdoor 65F (favorable for nat vent)"
+    },
+    {
+      "time": "2026-05-25T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification",
+      "today_high": 80,
+      "today_low": 72,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
+    },
+    {
+      "time": "2026-05-25T08:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor 65F < indoor 72.5F, indoor > comfort_heat 70F, outdoor <= threshold 77F — nat vent activates"
+    },
+    {
+      "time": "2026-05-25T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "Mid-morning: indoor 73F still within comfort band [70F, 74F], outdoor 65F (still favorable). Nat vent continues to provide free cooling. Ceiling guard should remain dormant — this is correct behavior. A predicted_indoor curve crossing comfort_cool (74F) within the lead time is supplied so the guard has a breach to act on: without the dormancy rule it would escalate.",
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-25T10:00:00",
+          "temp": 73.0
+        },
+        {
+          "ts": "2026-05-25T10:15:00",
+          "temp": 74.3
+        },
+        {
+          "ts": "2026-05-25T11:00:00",
+          "temp": 75.0
+        }
+      ]
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-25T08:05:00",
+      "expect": "natural_ventilation",
+      "reason": "[hvac_fan twin] Window opens with favorable conditions: outdoor 65F < indoor 72.5F, outdoor <= threshold 77F, indoor > comfort_heat 70F — nat vent activates"
+    },
+    {
+      "at": "2026-05-25T10:00:00",
+      "expect": "natural_ventilation",
+      "reason": "[hvac_fan twin] REGRESSION GUARD: temp_update with nat_vent_active and indoor 73F within band [70F, 74F] — ceiling guard dormant, nat vent continues. No HVAC change. This guards against broken ceiling guard logic that incorrectly fires when nat vent is already handling cooling."
+    }
+  ],
+  "issue_followup": 1193,
+  "notes": [
+    "hvac_fan twin (Issue #1193): with the HVAC fan configured, an open window with usable outdoor air is ventilation (fan on), not a pause. This scenario pins the ventilation/exit/setback decision only; it deliberately does NOT assert the cool setpoint that production also arms during hvac_fan ventilation (nat_vent_ac_assist_armed), which is the rule-3 question tracked in #1142.",
+    "Issue #1193 revert-proofing: a thermal_model (confidence high) and a predicted_indoor curve that crosses comfort_cool within the lead time are supplied so the ODE ceiling guard is actually evaluated here; without them the guard returns MODEL_INELIGIBLE/NOT_APPLICABLE and a dormant-guard assertion passes vacuously. With the dormancy rule removed the guard escalates (clears nat-vent, commands cool) and the nat-vent assertion fails."
+  ],
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.15,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  }
+}

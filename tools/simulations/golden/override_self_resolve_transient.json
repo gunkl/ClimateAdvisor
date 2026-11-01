@@ -32,10 +32,10 @@
     {
       "time": "2026-07-15T09:01:00",
       "type": "classification",
-      "day_type": "cool",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Cool-day classification: hvac_mode=cool, target=comfort_cool=74F."
+      "note": "Hot-day classification: hvac_mode=cool, target=comfort_cool=74F."
     },
     {
       "time": "2026-07-15T10:00:00",
@@ -59,8 +59,8 @@
     {
       "time": "2026-07-15T10:30:00",
       "type": "classification",
-      "day_type": "cool",
-      "hvac_mode": "off",
+      "day_type": "warm",
+      "today_low": 72.0,
       "windows_recommended": false,
       "note": "30-min classification cycle — deliberately a DIFFERENT hvac_mode (off, not cool) from the 09:01 classification, so the assertion below genuinely discriminates (see notes). Override should NOT be active — classification should apply normally."
     }

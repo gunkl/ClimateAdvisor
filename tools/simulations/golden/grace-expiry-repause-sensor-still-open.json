@@ -26,10 +26,10 @@
     {
       "time": "2026-07-10T13:00:01",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Warm-day classification: HVAC cool."
+      "note": "Hot-day classification: HVAC cool (classifier.py derives cool for a hot day)."
     },
     {
       "time": "2026-07-10T13:05:00",
@@ -60,7 +60,7 @@
     {
       "at": "2026-07-10T13:00:01",
       "expect": "classification_applied",
-      "reason": "Warm-day classification applied: hvac_mode=cool."
+      "reason": "Hot-day classification applied: hvac_mode=cool."
     },
     {
       "at": "2026-07-10T13:05:00",
@@ -71,6 +71,13 @@
       "at": "2026-07-10T13:06:00",
       "expect": "resumed",
       "reason": "Door closes -- HVAC restores to cool, 120s automation grace period begins."
+    },
+    {
+      "at": "2026-07-10T13:08:01",
+      "expect": "event_emitted",
+      "event": "grace_expired",
+      "payload_subset": {"re_paused": true},
+      "reason": "Grace expired with the door still open: _on_grace_expired() must take the sensor-still-open branch and re-pause (re_paused=True), not end the grace cleanly and rely on a later sensor handler to pause."
     },
     {
       "at": "2026-07-10T13:08:00",

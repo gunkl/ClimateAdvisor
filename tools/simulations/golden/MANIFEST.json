@@ -4,8 +4,8 @@
     "policy": "Modify only via: python tools/simulate.py --sign <scenario-name>"
   },
   "nat-vent-comfort-floor-exit-restores-heat": {
-    "sha256": "a726b6aed94660123275ee3d26ed473765271c61a722d45cae162c1bc7c5d4d6",
-    "signed": "2026-06-10",
+    "sha256": "293fe438bf023713bb1bd4a561b12ca49698bb9deb188ee08f8fe83d0e316e10",
+    "signed": "2026-11-01",
     "issue": 99
   },
   "nat-vent-fan-preserved-on-thermostat-event": {
@@ -19,8 +19,8 @@
     "issue": 69
   },
   "away-mode-classification-cycle": {
-    "sha256": "9b1a1574bfb2a983bbe3017100954c97e42cdd9c6dd16279255b6e1c4a5bd296",
-    "signed": "2026-06-13",
+    "sha256": "7b11fdb9e325f0098ba96de984b2636e9c2f293f1ab3fe07bcaad47acc47db10",
+    "signed": "2026-11-01",
     "issue": 85
   },
   "nat-vent-at-comfort-floor-no-activate": {
@@ -139,12 +139,12 @@
     "issue": 249
   },
   "away_with_active_natvent_transition": {
-    "sha256": "529cef693f29f535d7b361a4a42584a1fd96d22e7cb7dc9a7b2d45c983d11788",
+    "sha256": "89736148580fbc41f182d1f46ede29942a0c83b65638576b78551f779198a56d",
     "signed": "2026-11-01",
     "issue": 229
   },
   "away_natvent_exits_at_comfort_ceiling": {
-    "sha256": "19e95d305406fb55d97b404c0986cc6a9022bea6efa135bda3d66b545c01ad61",
+    "sha256": "20f9a03da46812d88d529aa046f2b4fc19ce587a575e18e6d9e851da49e32f77",
     "signed": "2026-11-01",
     "issue": 231
   },
@@ -159,17 +159,17 @@
     "issue": 229
   },
   "away_morning_wakeup_skipped_assertion": {
-    "sha256": "3f82436d23c2219e110a3730714ed5551891fca7a8219431312657f52c98aa81",
-    "signed": "2026-08-07",
+    "sha256": "e2da9031d1034ed556fc6c813731bd863f090b147ecec390258a7348c80746a4",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "morning_wakeup_skipped_away_occupancy": {
-    "sha256": "a57f603d79ce5bd914dcdb5502ab5c8565194da5e0c06fa690fc2afe5c83eaff",
-    "signed": "2026-08-07",
+    "sha256": "478c0eb5648abde66530d6ffd75c94c8733828b19787704f683d757dc512123a",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "away_natvent_activates_free_cooling": {
-    "sha256": "0e81edace67424fd38865fbaf6488ad941a3ba1614444e28bb064f7c174ae041",
+    "sha256": "8deceed9281c2b83a390345b6f169040f2d69e3e37d7816019c0116e461cc479",
     "signed": "2026-11-01",
     "issue": 231
   },
@@ -179,8 +179,8 @@
     "issue": 229
   },
   "cancel_override_then_resume": {
-    "sha256": "dcc8681836fd26b0bf18d7e8183e95b178c7de7e02b9288b7cf8a61ac414b291",
-    "signed": "2026-07-12",
+    "sha256": "94ecb81dd6aac7bc041e9061493ee9f77a60668b22ec8129a2d14b4732aefa95",
+    "signed": "2026-11-01",
     "issue": 226
   },
   "ceiling_guard_dormancy_nat_vent_active_in_band": {
@@ -194,33 +194,28 @@
     "issue": 229
   },
   "grace_prevents_sensor_repause": {
-    "sha256": "e97a66351304c5ffb0d3409e17c0221b09215973bebe91cb8eaf7a82130b330b",
-    "signed": "2026-07-12",
-    "issue": 227
-  },
-  "grace_timer_expired_on_restart": {
-    "sha256": "07cb69727e3aefece2d6204b33d2821e5ab16eb2b519bad76f936bc1f224bfaa",
-    "signed": "2026-07-12",
+    "sha256": "4a4ab54ab9943821140a500d76760a343adde8cd18fc2d36c5f551c2a9f85726",
+    "signed": "2026-11-01",
     "issue": 227
   },
   "guest_mode_maintains_comfort": {
-    "sha256": "b021b7ec296c32e96f32ef01069fc178578fbd7ffd088fd2bd8f79f29e885bc3",
-    "signed": "2026-06-13",
+    "sha256": "c82efdda5562932f4dfc8c4d0d30021362861514ebab96b2b85db24dc764ec3c",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "overnight_with_adaptive_setback_and_wakeup": {
-    "sha256": "eb16f8b51a1450a022414445d45fc0dd06a7c7ebdf6a7b35300b130166c0562a",
-    "signed": "2026-07-10",
+    "sha256": "5494559e6be31ecbd5f72c865b8dc8f68169c91155f674a13f6d9dbc20229ba9",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "strong_warming_trend_aggressive_setback": {
-    "sha256": "e02c9c5d849cc6c39baaea2b3f417fbebfd8a879c69743f21d6106673a599784",
-    "signed": "2026-07-10",
+    "sha256": "34ac2166be37aa03b8cc4b7b929d2428cc7cd0160baf15afe44414d44665bce5",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "vacation_mode_full_lifecycle": {
-    "sha256": "29de99c31b0d1f7ee87a85559dae4968f19290294554a846ee1f6a861b142e99",
-    "signed": "2026-07-20",
+    "sha256": "12fa5cb9383f9ae22c5e94a60be581bc01cc4732b1992a79672aabe312e26406",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "whole_house_fan_hvac_suppression": {
@@ -239,13 +234,13 @@
     "issue": 321
   },
   "warming_trend_pre_cool_applied": {
-    "sha256": "1b98d73f4163b93673a2f9e8d170685fadbb6281530bb92109a2ccf6831f802c",
-    "signed": "2026-07-10",
+    "sha256": "6e296595024b5147c2fe6caf7adb6b0f3843bc39e2b4849833872dc39aba212f",
+    "signed": "2026-11-01",
     "issue": 258
   },
   "warming_trend_pre_cool_nat_vent_bypass": {
-    "sha256": "e24d63e60a07ed8d730a4025ae0b2c33ecc0c7053ae344e26497da8dd874e84e",
-    "signed": "2026-07-10",
+    "sha256": "629fba29be75a7d57db4fc3d8be0a8a9ff9d8b31b7f21ba412a122d46d2768a7",
+    "signed": "2026-11-01",
     "issue": 258
   },
   "whf_reactivates_after_sleep_floor_exit": {
@@ -264,8 +259,8 @@
     "issue": 429
   },
   "grace-expiry-repause-sensor-still-open": {
-    "sha256": "95ead5ffd05872086bbc28bb84a9dd262d6b4210f7d28e04964e198d2e8ed66f",
-    "signed": "2026-07-09",
+    "sha256": "c9eec24c2805b3d60bc2b3d1d14a8aa7cecd0ec281d0709ec1e06a81a43a6390",
+    "signed": "2026-11-01",
     "issue": 429
   },
   "reconcile-adopts-running-fan-as-nat-vent": {
@@ -284,8 +279,8 @@
     "issue": 221
   },
   "bedtime_natvent_continuation": {
-    "sha256": "15ea56d775655976a0121839aec0878853991bbde498120aab75b8a467bd2a25",
-    "signed": "2026-09-03",
+    "sha256": "077af50c616990e72ba1e6eeb26dfe561c494436054f42056573672ee36a3954",
+    "signed": "2026-11-01",
     "issue": 371
   },
   "cold_day_heat_all_day_with_override": {
@@ -304,13 +299,13 @@
     "issue": 482
   },
   "grace_full_lifecycle_clean_expiry": {
-    "sha256": "cb39f3b877fa4376254830ac3ff4878b37b77aa43f27dec73d4208fd360390a2",
-    "signed": "2026-07-12",
+    "sha256": "b02e4cc1c2e83724dde9eef89abc158464c177edf56919573ad77246a7fa541d",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "grace_full_lifecycle_sensor_still_open": {
-    "sha256": "4ea37885eb9f152a2d9b6a4073e58b62f747a5bd954840ad867190d81f904a37",
-    "signed": "2026-07-12",
+    "sha256": "8833e5d88397ff5b52e453307a6257fa7270e5ca9d04df755ffbfd18be1104b5",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "grace_window_period_no_repause": {
@@ -324,8 +319,8 @@
     "issue": 359
   },
   "issue-392-natvent-ceiling-oscillation": {
-    "sha256": "cf17610449d7d74ab3815db379611ec71a77515263fb05e5cf6c87489868e590",
-    "signed": "2026-07-12",
+    "sha256": "cafaf8836df1d314c976b0abba834e84b0c0d34c25c18b0bd4818d99cf72221b",
+    "signed": "2026-11-01",
     "issue": 392
   },
   "issue-411-natvent-floor-exit-consistency": {
@@ -354,18 +349,18 @@
     "issue": 337
   },
   "override_adopted_on_matching_decision": {
-    "sha256": "0e1c37131a4a63375a5398a5f12d7eb8473a4f0ecff33011217a0c7bb4245844",
-    "signed": "2026-07-12",
+    "sha256": "c5984b82081eaf0353ccd276b3169eaac79bee7f1ff3c2a61f0c9d15bf86abb7",
+    "signed": "2026-11-01",
     "issue": 483
   },
   "override_detection_and_confirmation": {
-    "sha256": "3f50bfab1a81469dbc64f0325e94d201618cd555d64b6d5fd5cbf0d9fdbe14cf",
-    "signed": "2026-07-12",
+    "sha256": "de6323c2e21b72c03dc47eb3b786b56aaec84f539f789756a249273d68d490b9",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "override_self_resolve_transient": {
-    "sha256": "5c940c360f5da74bbac528a9412549af5f6ae01455bf1a066c51c7d8a20cf17e",
-    "signed": "2026-07-12",
+    "sha256": "c75a2c88dca1733d2e874ff4ff73a817e3addf92cb5c8649c256631849fc581d",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "hot_plateau_pre_cool_applied": {
@@ -394,18 +389,18 @@
     "issue": 629
   },
   "issue_637_paused_during_grace_open_fallthrough": {
-    "sha256": "90e1a78d73f2fa27558186f57cf55b9655cb4153393683a6f8ce9318304ad15b",
-    "signed": "2026-08-16",
+    "sha256": "5b653a0c104d65c37272872a2122688aeb188f48f5fadd8f6e996a5329aa3357",
+    "signed": "2026-11-01",
     "issue": 637
   },
   "issue_637_paused_during_grace_nat_vent_exit": {
-    "sha256": "e2c5b83b3a98a9554f339c54f63bfd793ba13ddcd9f7e0963a5dca55550fdbb2",
+    "sha256": "7cc0bd22a132c617dbbd9aecbc27bf7875f7023bebf35c8b7e38fdb7ca143476",
     "signed": "2026-11-01",
     "issue": 637
   },
   "override_second_override_during_grace": {
-    "sha256": "ff043f148f3afb8afd9f6181113ad15f6eb87c71893673bdfe4d794002a74183",
-    "signed": "2026-08-14",
+    "sha256": "efc7e394fee75e4c028350109f2606c1f125454f82c86cc044a097aa1b9852a5",
+    "signed": "2026-11-01",
     "issue": 639
   },
   "issue_748_manual_override_ends_whf_despite_rf_timer": {
@@ -419,8 +414,8 @@
     "issue": 733
   },
   "bedtime_skipped_manual_override_active": {
-    "sha256": "683e39c777992920791f45ffaaca2ffdd54891854913ddd20f8bfb3c22718eb9",
-    "signed": "2026-08-22",
+    "sha256": "af78193c17a1a882c69f07d35c42417825805bda953f434f40cf02582c933bbf",
+    "signed": "2026-11-01",
     "issue": 229
   },
   "issue-641-whf-proactive-exit-reactivation-flip-flop": {
@@ -449,13 +444,13 @@
     "issue": 523
   },
   "vacation_occupancy_override_cleared": {
-    "sha256": "80c170fc5808de0c6f89088019f03c987587abee367ac2c867aeeea487799531",
-    "signed": "2026-08-22",
+    "sha256": "478741436623337ad3a28adeef572edbde38ec23c2094aef59008c1932ddb3ac",
+    "signed": "2026-11-01",
     "issue": 505
   },
   "wakeup_preserves_whf_manual_override": {
-    "sha256": "3b37ff08a0e578265f122d9df9a2210e81c0237823b7f9f9d268811b2464bc98",
-    "signed": "2026-08-22",
+    "sha256": "0f44ad6bc13d3495a9a695478adb9daf15701a4386a03796d599d2b900bf0739",
+    "signed": "2026-11-01",
     "issue": 498
   },
   "issue_882_sealed_house_whf_override": {
@@ -467,5 +462,10 @@
     "sha256": "edc81ab52b904b3e0aa436c6e9c0b3107db86862799f84bb6812bf8cd4abe1bb",
     "signed": "2026-09-09",
     "issue": 764
+  },
+  "override_cleared_on_restart": {
+    "sha256": "86f5d30ac901a61b7509a8e60110276737d8a9d55531ad98e87b1c765388cf8d",
+    "signed": "2026-11-01",
+    "issue": 1193
   }
 }

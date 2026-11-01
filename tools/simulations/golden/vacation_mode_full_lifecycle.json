@@ -22,7 +22,7 @@
     {
       "time": "2026-07-15T08:00:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "note": "Morning classification at home — cool mode, comfort_cool=74F"
     },
@@ -34,21 +34,21 @@
     {
       "time": "2026-07-15T10:30:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "note": "30-min classification cycle while on vacation — must reapply vacation setback (82F), NOT comfort"
     },
     {
       "time": "2026-07-15T11:00:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "note": "Second classification cycle while on vacation — setback maintained"
     },
     {
       "time": "2026-07-15T11:30:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "note": "Third classification cycle while on vacation — setback maintained"
     },

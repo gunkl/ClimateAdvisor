@@ -1,6 +1,6 @@
 {
   "name": "away_natvent_activates_free_cooling",
-  "description": "Away mode, warm day: a window opens while away with outdoor (68F) cooler than indoor (74F). Natural ventilation activates — free cooling is free cooling, home or away. The user opts into fan-assisted ventilation by configuring a fan; occupancy does not gate it. #231 ensures nat-vent exits at the comfort ceiling so an empty home is not over-cooled below comfort. [Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. The failing assertions below were updated accordingly.]",
+  "description": "Away mode, warm day, whole-house fan configured: a window opens while away with outdoor (68F) cooler than indoor (74F). Natural ventilation activates: free cooling is free cooling, home or away. The user opts into fan-assisted ventilation by configuring a fan; occupancy does not gate it. #231 ensures nat-vent exits at the comfort ceiling so an empty home is not over-cooled below comfort. (Without a fan, an open window pauses HVAC instead; that case is covered by the scenarios Issue #1140 added.)",
   "source": "synthetic",
   "issue": 231,
   "notes": [
@@ -13,15 +13,16 @@
     "comfort_cool": 74,
     "setback_heat": 62,
     "setback_cool": 79,
-    "natural_vent_delta": 3.0
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
   },
   "events": [
     {
       "time": "2026-07-15T09:00:00",
       "type": "classification",
       "day_type": "warm",
-      "hvac_mode": "cool",
-      "note": "Morning classification — comfort band armed (occupied)"
+      "note": "Morning classification — comfort band armed (occupied); hvac_mode left to classifier.py (off for a warm day)"
     },
     {
       "time": "2026-07-15T10:00:00",
@@ -52,8 +53,8 @@
     },
     {
       "at": "2026-07-15T14:00:00",
-      "expect": "paused",
-      "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'natural_ventilation': sensor_open while away with outdoor (68F) < indoor (74F) and a fan configured — natural ventilation activates for free cooling. Occupancy does not gate nat-vent; the user opts in/out via fan configuration. #231 handles the comfort-ceiling exit so the empty home is not over-cooled.",
+      "expect": "natural_ventilation",
+      "reason": "sensor_open while away with outdoor (68F) < indoor (74F) and a whole-house fan configured — natural ventilation activates for free cooling. Occupancy does not gate nat-vent; the user opts in/out via fan configuration (Issue #1140). #231 handles the comfort-ceiling exit so the empty home is not over-cooled.",
       "track": "logic"
     }
   ],

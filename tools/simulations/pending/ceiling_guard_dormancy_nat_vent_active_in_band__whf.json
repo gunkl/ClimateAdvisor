@@ -1,0 +1,112 @@
+{
+  "name": "ceiling_guard_dormancy_nat_vent_active_in_band__whf",
+  "description": "[whole-house-fan twin of golden 'ceiling_guard_dormancy_nat_vent_active_in_band'; Issue #1193] ODE ceiling guard stays dormant when nat-vent is active AND indoor is within comfort band. Outdoor cooler than indoor provides free cooling — no HVAC escalation needed.",
+  "source": "Issue #1193: whole-house-fan twin of golden 'ceiling_guard_dormancy_nat_vent_active_in_band' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "[whole-house-fan twin] Ceiling guard correctly defers to nat-vent when outdoor is cooler than indoor and indoor is within the comfort band",
+    "observed_behavior": "nat_vent_active=True with indoor 73F within band [70F, 74F], outdoor 65F — ceiling guard bypassed",
+    "expected_behavior": "ceiling guard dormant (bypassed), nat-vent continues, no HVAC intervention"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "k_passive": -0.04,
+    "k_active_cool": -11.8,
+    "k_active_heat": 6.78,
+    "ode_enabled": true,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T09:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC off",
+      "today_high": 80,
+      "today_low": 72,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 73F within comfort band [70F, 74F], outdoor 65F (8F cooler than indoor — nat-vent favorable)"
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor 65F < indoor 73F, indoor > comfort_heat 70F, outdoor < threshold 77F — nat-vent activates"
+    },
+    {
+      "time": "2026-07-10T09:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "30 min later: indoor still 73F (within band), outdoor still 65F. Nat-vent providing free cooling. Ceiling guard should remain dormant — ODE branch is bypassed entirely when nat-vent is active. A predicted_indoor curve that crosses comfort_cool (74F) within the lead time is supplied so the ceiling guard has a breach to act on: without the dormancy rule it would escalate.",
+      "predicted_indoor": [
+        {
+          "ts": "2026-07-10T09:30:00",
+          "temp": 73.0
+        },
+        {
+          "ts": "2026-07-10T09:45:00",
+          "temp": 74.3
+        },
+        {
+          "ts": "2026-07-10T10:30:00",
+          "temp": 75.0
+        }
+      ]
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T09:01:00",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "[whole-house-fan twin] sensor_open: outdoor 65F < indoor 73F, indoor > comfort_heat 70F, outdoor 65F <= threshold 77F — nat-vent activates"
+    },
+    {
+      "at": "2026-07-10T09:30:00",
+      "expect": "nat_vent_still_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "[whole-house-fan twin] temp_update with nat-vent active and indoor 73F within band [70F, 74F], outdoor 65F < indoor: no exit condition fires (indoor > comfort_heat, outdoor < indoor, outdoor < threshold). Ceiling guard is bypassed by simulator routing when nat_vent_active=True. Nat-vent continues as expected."
+    },
+    {
+      "at": "2026-07-10T09:01:00",
+      "expect": "hvac_mode_never_commanded",
+      "since": "2026-07-10T09:01:00",
+      "forbidden_modes": [
+        "cool",
+        "heat"
+      ],
+      "track": "logic",
+      "reason": "Rule 2/3 guarantee: once the whole-house fan session starts, no climate command may select cool or heat for the rest of the run; HVAC stays off while the fan ventilates the house."
+    }
+  ],
+  "issue_followup": 1193,
+  "notes": [
+    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together).",
+    "Issue #1193 revert-proofing: a thermal_model (confidence high) and a predicted_indoor curve that crosses comfort_cool within the lead time are supplied so the ODE ceiling guard is actually evaluated here; without them the guard returns MODEL_INELIGIBLE/NOT_APPLICABLE and a dormant-guard assertion passes vacuously. With the dormancy rule removed the guard escalates (clears nat-vent, commands cool) and the nat-vent assertion fails."
+  ],
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.15,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  }
+}

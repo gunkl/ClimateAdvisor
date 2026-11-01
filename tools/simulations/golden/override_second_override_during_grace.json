@@ -35,7 +35,7 @@
     {
       "time": "2026-07-15T13:01:00",
       "type": "classification",
-      "day_type": "warm",
+      "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
       "note": "Warm-day classification: HVAC cool at comfort_cool=74F."

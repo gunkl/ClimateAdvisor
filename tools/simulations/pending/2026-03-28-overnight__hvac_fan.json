@@ -1,0 +1,89 @@
+{
+  "name": "2026-03-28-overnight__hvac_fan",
+  "description": "[hvac_fan twin of golden '2026-03-28-overnight'; Issue #1193] Door open all day (87F high); 555 min comfort violations; outdoor dropped to 53F overnight",
+  "source": "Issue #1193: hvac_fan twin of golden '2026-03-28-overnight' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
+  "issue": 69,
+  "notes": [
+    "This scenario captures natural ventilation cycling from a real activity report (March 28, 2026).",
+    "Tests: nat vent pause at 06:00 (directional guard), pause at 14:00 (afternoon peak), re-activation at 20:00, comfort-floor exit at 23:30.",
+    "At 06:00: outdoor(75F) >= indoor(74F) â€” Issue #115 directional guard blocks nat vent; enters paused instead.",
+    "At 23:30 indoor drops to comfort_heat=70F â€” Issue #99 comfort-floor exit fires, heat restores.",
+    "The outdoor temp (53F) is still below the nat vent threshold, but the indoor comfort floor takes priority.",
+    "06:00 assertion updated for Issue #115: outdoor >= indoor -> paused (directional guard).",
+    "Promote to golden/ once all assertions pass in production.",
+    "Issue #392: comfort_cool raised from 72 to 76 so the archetype-aware ceiling gate (indoor <= ceiling_threshold, applied to the default/HVAC-fan archetype used here) does not block the 20:00 re-activation (indoor 76F) — this scenario tests directional/threshold/comfort-floor behavior, not the ceiling gate.",
+    "hvac_fan twin (Issue #1193): with the HVAC fan configured, an open window with usable outdoor air is ventilation (fan on), not a pause. This scenario pins the ventilation/exit/setback decision only; it deliberately does NOT assert the cool setpoint that production also arms during hvac_fan ventilation (nat_vent_ac_assist_armed), which is the rule-3 question tracked in #1142.",
+    "Issue #1193 revert-proofing: the 06:00/14:00 assertions were nat_vent_not_active, which reads the final engine state and so passed even with the directional gate removed (and the sensor_open preceded the temp_update, so the gate had no readings). Reordered the events and assert the 'paused' decision instead."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan"
+  },
+  "verdict": {
+    "type": "positive",
+    "summary": "[hvac_fan twin] Directional guard blocks nat vent when outdoor >= indoor; threshold-based exit and comfort-floor exit still fire correctly",
+    "observed_behavior": "paused at 06:00 (outdoor >= indoor), paused at 14:00 (threshold exceeded), nat_vent at 20:00 (cooled below indoor + threshold), nat_vent_comfort_floor_exit at 23:30",
+    "expected_behavior": "paused at 06:00 (outdoor >= indoor), paused at 14:00 (threshold exceeded), nat_vent at 20:00 (cooled below indoor + threshold), nat_vent_comfort_floor_exit at 23:30"
+  },
+  "events": [
+    {
+      "time": "2026-03-28T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 75.0,
+      "note": "morning temps â€” outdoor 75F >= indoor 74F; new directional guard -> paused, not nat vent"
+    },
+    {
+      "time": "2026-03-28T06:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "door/window opened, remained open all day (dispatched after the 06:00 temp_update so the directional gate sees outdoor 75F >= indoor 74F)"
+    },
+    {
+      "time": "2026-03-28T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 82.0,
+      "outdoor_f": 87.0,
+      "note": "afternoon peak â€” outdoor 87F well above threshold 75F, must exit nat vent and pause"
+    },
+    {
+      "time": "2026-03-28T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 74.0,
+      "note": "evening cooldown â€” outdoor 74F still below threshold 75F, should re-activate nat vent"
+    },
+    {
+      "time": "2026-03-28T23:30:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 53.0,
+      "note": "midnight â€” outdoor 53F, well below threshold; nat vent should still be active"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-03-28T06:00:00",
+      "expect": "paused",
+      "reason": "[hvac_fan twin] Door open with outdoor >= indoor (06:00) / outdoor 87F over the 75F threshold (14:00): nat-vent must NOT activate, so the window-open pause stands. Asserted as the 'paused' decision at that moment: nat_vent_not_active reads only the FINAL engine state (after the 23:30 floor exit), so it could not catch a gate that wrongly activates nat-vent here (Issue #1193 revert-proofing)."
+    },
+    {
+      "at": "2026-03-28T14:00:00",
+      "expect": "paused",
+      "reason": "[hvac_fan twin] Door open with outdoor >= indoor (06:00) / outdoor 87F over the 75F threshold (14:00): nat-vent must NOT activate, so the window-open pause stands. Asserted as the 'paused' decision at that moment: nat_vent_not_active reads only the FINAL engine state (after the 23:30 floor exit), so it could not catch a gate that wrongly activates nat-vent here (Issue #1193 revert-proofing)."
+    },
+    {
+      "at": "2026-03-28T20:00:00",
+      "expect": "natural_ventilation",
+      "reason": "[hvac_fan twin] outdoor 74F dropped back to <= threshold 75F while paused â€” re-activate nat vent"
+    },
+    {
+      "at": "2026-03-28T23:30:00",
+      "expect": "nat_vent_comfort_floor_exit",
+      "reason": "[hvac_fan twin] indoor 70F hit comfort_heat floor â€” nat vent exits and heat restores (Issue #99 behavior)"
+    }
+  ],
+  "issue_followup": 1193
+}

@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.17] — 2026-11-01
+
+- Fix #1165: if you turn the thermostat Off while a window is open and then close the window, Climate Advisor no longer turns heating or cooling back on over your Off. Your Off stays until your manual-change pause ends.
+- Fix #1157: if natural ventilation ends with a window still open (thermostat Off) and you change the temperature on the thermostat, closing the window now starts heating or cooling at your temperature instead of leaving the thermostat Off until your manual-change pause ends. This includes mild days, where Climate Advisor picks heating or cooling from your comfort range and the current indoor temperature.
+
 ## [0.8.16] — 2026-11-01
 
 - Fix #1156: a change you made on the thermostat is no longer dropped, and heating or cooling is no longer switched off over it, when an unrelated waiting period (for example the few minutes after a window closes) runs out while a window is open again. Your own change's pause still ends the normal way.

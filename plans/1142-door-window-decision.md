@@ -66,7 +66,7 @@ Behavior-preserving ordering: step 1 for sites that already apply the guards (si
 - No mirror tests: assertions are on observable results (recorded sub-state, which branch ran via emitted events, thermostat state after close), not on the code path.
 - Symmetry set for every new test: open vs close, heat vs cool (parametrized), fan vs no-fan (`FAN_MODE_WHOLE_HOUSE` engines), active vs idle pause, NORMAL vs GRACE origin.
 - Revert-prove: each new test file is run against the pre-fix source (patch reversed) and must fail on behavior.
-- Gates: `ruff check . && ruff format --check .`, `python scripts/test.py unit`, `tools/simulate.py` (golden, `--pending`, `--check-integrity`, `--surfaces`), calibration `--generate 100 --seeds 1..10` origin/main vs branch, compare hit lines (not timing); real-HA tier `python scripts/test.py ha` (uv venv `.venv-test-ha`) was run and passes (140 passed, 2 xfailed).
+- Gates: `ruff check . && ruff format --check .`, `python scripts/test.py unit`, `tools/simulate.py` (golden, `--pending`, `--check-integrity`, `--surfaces`), calibration `--generate 100 --seeds 1..10` origin/main vs branch, compare hit lines (not timing); real-HA tier `python scripts/test.py ha` (uv venv `.venv-test-ha`) was run and passes (141 passed, 1 xfailed).
 - For D2: add a golden-independent unit test per site (3, 4, 8): forecast peak ahead -> no fan, pause kept; guard clears -> fan starts. For D1: a test per `FanCommandResult` (DISABLED, SUPPRESSED, RATE_LIMITED_*, OVERRIDDEN).
 
 ## 6. Owner decisions needed
@@ -120,4 +120,4 @@ Options:
 
 ## 8. Calibration of what shipped (#1143)
 
-`python tools/simulate.py --generate 100 --seeds N` for N = 1..10 (one process per seed, merged tree vs origin/main at b0b5567): all ten runs print identical output apart from timing (`hard=none` both sides; warnings identical per seed, e.g. seed 3 `blind_fan_continue 1, comfort_kept 10`, seed 5 `blind_fan_continue 2, comfort_kept 4`). No new promise hits. Golden 91/91, pending 43/43, integrity OK, P8 surfaces ok (2 known divergences, same as main). Unit tier 9293 passed, 8 skipped, 1 xfailed. `tests_ha/` (real HA) was run: 140 passed, 2 xfailed.
+`python tools/simulate.py --generate 100 --seeds N` for N = 1..10 (one process per seed, merged tree vs origin/main at b0b5567): all ten runs print identical output apart from timing (`hard=none` both sides; warnings identical per seed, e.g. seed 3 `blind_fan_continue 1, comfort_kept 10`, seed 5 `blind_fan_continue 2, comfort_kept 4`). No new promise hits. Golden 91/91, pending 44/44, integrity OK, P8 surfaces ok (2 known divergences, same as main). Unit tier 9358 passed, 8 skipped, 1 xfailed. `tests_ha/` (real HA) was run: 141 passed, 1 xfailed.

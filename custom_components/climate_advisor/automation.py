@@ -4605,7 +4605,7 @@ class AutomationEngine:
         so a settings save or zone reload left a ghost timer that woke on a dead engine. The setpoint
         check/retry and the post-fan setpoint verifies re-arm through here.
         """
-        previous = getattr(self, slot)
+        previous = getattr(self, slot, None)
         if previous:
             previous()
         setattr(self, slot, async_call_later(self.hass, delay, fn))

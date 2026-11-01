@@ -169,6 +169,8 @@ class TestGraceExpiryTriggersRefreshCallback:
     def test_planned_window_path_calls_refresh_callback(self):
         """Planned-window path: callback fires after clearing grace."""
         engine = _minimal_engine()
+        # A manual override's grace always protects it (Issue #1156 keys the expiry on that flag).
+        engine._grace_protects_override = True
         refresh_mock = MagicMock()
         engine._request_refresh_callback = refresh_mock
         events: list[tuple] = []

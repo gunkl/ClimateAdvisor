@@ -10,6 +10,7 @@ driven through the real method that arms it.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +26,9 @@ class _Armed:
 
     def __init__(self) -> None:
         self.timers: list[tuple[float, object, MagicMock]] = []
+        # Own clock: other test modules replace ``dt_util.now`` process-wide with a frozen value, which would
+        # make the fan's minimum-runtime floor depend on test order.
+        self.now = datetime(2026, 10, 28, 14, 0, 0, tzinfo=UTC)
 
     def __call__(self, _hass, delay, fn):
         cancel = MagicMock(name=f"cancel_{delay}")
@@ -41,6 +45,8 @@ def armed():
     with (
         patch(f"{_AUTOMATION}.async_call_later", side_effect=rec),
         patch(f"{_AUTOMATION}.callback", side_effect=lambda fn: fn),
+        patch(f"{_AUTOMATION}.dt_util.now", side_effect=lambda: rec.now),
+        patch(f"{_AUTOMATION}.dt_util.parse_datetime", side_effect=datetime.fromisoformat),
     ):
         yield rec
 
@@ -152,6 +158,7 @@ def test_fan_on_verify_cancels_the_previous_handle(armed):
 def test_fan_off_verify_cancels_the_previous_handle(armed):
     engine = _fan_engine()
     _run(engine._activate_fan(reason="test"))
+    armed.now += timedelta(minutes=20)  # past the fan's minimum-runtime floor
     stale = MagicMock(name="stale_fan_off_verify")
     engine._fan_off_verify_cancel = stale
 

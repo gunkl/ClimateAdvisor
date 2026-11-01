@@ -12,9 +12,11 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# Provide a base dt_util.now — individual tests override this via patch
+import pytest  # noqa: E402
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
@@ -25,8 +27,10 @@ from custom_components.climate_advisor.const import (
     OCCUPANCY_VACATION,
 )
 
-# Provide a base dt_util.now — individual tests override this via patch
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 3, 20, 23, 0, 0)
+
+def _frozen_now_value():
+    return datetime(2026, 3, 20, 23, 0, 0)
+
 
 # Patch targets
 _PATCH_CALL_LATER = "custom_components.climate_advisor.automation.async_call_later"
@@ -360,3 +364,9 @@ class TestGraceNormalExpirySchedulesConvergence:
         assert len(scheduled_coros) >= 1, (
             "async_create_task should have been called to schedule _apply_current_scheduled_state"
         )
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

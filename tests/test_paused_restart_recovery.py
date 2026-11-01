@@ -12,24 +12,16 @@ tests/test_nat_vent_activation.py.
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Patch dt_util.now so isoformat() calls inside the engine always work.
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 13, 10, 0, 0)
-
-import custom_components.climate_advisor.automation as _automation_mod  # noqa: E402
+import pytest  # noqa: E402
 
 
-def _real_parse_datetime(dt_str: str):
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
+def _frozen_now_value():
+    return datetime(2026, 6, 13, 10, 0, 0)
 
-
-_automation_mod.dt_util.parse_datetime = _real_parse_datetime
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
@@ -231,3 +223,9 @@ class TestApplyClassificationAfterCleanSlateRestart:
         call_args = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in call_args if c[0][0] == "climate"]
         assert len(climate_calls) >= 1, "Expected at least one 'climate' service call from apply_classification"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

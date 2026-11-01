@@ -31,7 +31,12 @@ if "homeassistant" not in sys.modules:
     install_ha_stubs()
 
 # Patch dt_util.now to return a real datetime so isoformat() calls work.
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 28, 8, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 6, 28, 8, 0, 0)
+
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.const import CONF_FAN_MODE, FAN_MODE_WHOLE_HOUSE  # noqa: E402
@@ -595,3 +600,9 @@ class TestFanEntityContextProvenance:
         asyncio.run(method(event))
 
         ae.on_fan_turned_off.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

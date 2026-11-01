@@ -26,7 +26,12 @@ if "homeassistant" not in sys.modules:
     _install_ha_stubs()
 
 # Patch dt_util.now before import (needed for isoformat() calls in start_override_confirmation)
-sys.modules["homeassistant.util.dt"].now = lambda: datetime.datetime(2026, 6, 13, 14, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime.datetime(2026, 6, 13, 14, 0, 0)
+
 
 from custom_components.climate_advisor.ai_skills_context import EVENT_RENDERERS  # noqa: E402
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
@@ -177,3 +182,9 @@ class TestOverrideDetectedRendererSetpointFields:
             "fahrenheit",
         )
         assert "setpoint:" not in settings
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

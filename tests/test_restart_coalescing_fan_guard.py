@@ -41,7 +41,12 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 7, 12, 17, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 7, 12, 17, 0, 0)
+
 
 from custom_components.climate_advisor.const import CONF_FAN_REMOTE_ENTITY  # noqa: E402
 
@@ -325,3 +330,9 @@ class TestAbandonObservationExecutorJob:
         passed_fn()
         assert learning.save_state.call_count == 1
         hass.async_create_task.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

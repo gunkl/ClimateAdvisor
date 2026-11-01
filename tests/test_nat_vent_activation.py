@@ -15,7 +15,6 @@ the pattern from test_resume_from_pause.py.
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -49,22 +48,12 @@ def _arm_sustained_exit(engine: AutomationEngine, reason: NatVentExitReason, now
 
 
 # Patch dt_util.now so isoformat() calls inside the engine always work
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 4, 20, 10, 0, 0)
+def _frozen_now_value():
+    return datetime(2026, 4, 20, 10, 0, 0)
+
 
 # Patch automation.dt_util.parse_datetime directly — the automation module's dt_util
-# is a child mock of homeassistant.util (not sys.modules["homeassistant.util.dt"]).
-import custom_components.climate_advisor.automation as _automation_mod  # noqa: E402
-
-
-def _real_parse_datetime(dt_str: str):
-    """Parse ISO 8601 datetime string; mirrors dt_util.parse_datetime."""
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
-
-
-_automation_mod.dt_util.parse_datetime = _real_parse_datetime
+# is the real stub dt module (same object as sys.modules["homeassistant.util.dt"]).
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -3058,3 +3047,9 @@ class TestBlockerFRaceAcrossAllGraduatedSubsystems:
             "the pre-await ACTIVE_FULL_GATE decision must not be applied once "
             "_activate_fan() reports the command was overridden mid-activation"
         )
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

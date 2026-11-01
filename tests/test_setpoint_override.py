@@ -13,9 +13,11 @@ See: GitHub Issue #196
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# Patch dt_util.now to return a real datetime (needed for isoformat() calls)
+import pytest  # noqa: E402
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
@@ -24,8 +26,9 @@ from custom_components.climate_advisor.const import (
 )
 from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
 
-# Patch dt_util.now to return a real datetime (needed for isoformat() calls)
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 1, 17, 0, 0)
+
+def _frozen_now_value():
+    return datetime(2026, 6, 1, 17, 0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +359,9 @@ class TestOverrideGateClassification:
 
         assert engine._override_confirm_source is None
         assert engine._override_confirm_pending is False
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

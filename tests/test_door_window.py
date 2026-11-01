@@ -940,15 +940,11 @@ class TestGracePeriodDuration:
     def test_manual_grace_uses_config_value(self):
         # Issue #860 test-isolation fix: _start_grace_period_action() computes
         # `duration = int((grace.at - dt_util.now()).total_seconds())` — without an
-        # explicit real `now`, dt_util.now() resolves to the shared unconfigured
-        # MagicMock module stub (homeassistant.util.dt), whose arithmetic dunders
-        # silently collapse to int(MagicMock()) == 1 instead of raising. This test
-        # previously only passed because some other, alphabetically-earlier test file
-        # (tests/test_chart_log.py) leaks a permanent, unrestored module-level
-        # `dt_util.now = ...` patch onto the same shared mock singleton — invisible
-        # in a full-suite run, but this test fails on its own under any selection
-        # that excludes that file. Patch `now` explicitly so this test is correct in
-        # isolation, matching this file's engines never asserting real wall-clock time.
+        # explicit `now`, the duration would depend on the real wall clock. Historically
+        # this test passed only because another test file leaked a module-level
+        # `dt_util.now = ...` patch onto the shared stub (#1186 removed that leak and made
+        # the stub a real tz-aware module). Patch `now` explicitly so the test is
+        # deterministic and correct in isolation.
         engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 600})
         engine._paused_by_door = True
 

@@ -27,7 +27,12 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 8, 15, 8, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 8, 15, 8, 0, 0)
+
 
 _SENSOR = "binary_sensor.group_contact_sensors_climate_advisor"
 _PATCH_CALL_LATER = "custom_components.climate_advisor.coordinator.async_call_later"
@@ -172,3 +177,9 @@ class TestReconnectBlipExcludedFromDebouncePending:
 
         assert _SENSOR in coord._door_open_timers
         assert coord._sensor_debounce_pending() is True
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

@@ -27,7 +27,12 @@ if "homeassistant" not in sys.modules:
     _install_ha_stubs()
 
 # Patch dt_util.now before import
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 4, 7, 14, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 4, 7, 14, 0, 0)
+
 
 from custom_components.climate_advisor.ai_skills_context import (  # noqa: E402
     build_state_cross_validation_context,
@@ -309,3 +314,9 @@ class TestSwingAcquisitionThreadsLearningHealth:
         asyncio.run(build_state_cross_validation_context(hass, coord))
 
         coord.learning.get_thermal_model.assert_called_once_with(learning_health=_health)
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

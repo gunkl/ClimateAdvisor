@@ -26,7 +26,12 @@ if "homeassistant" not in sys.modules:
 
     install_ha_stubs()
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 12, 14, 0, 0)
+import pytest  # noqa: E402
+
+
+def _frozen_now_value():
+    return datetime(2026, 6, 12, 14, 0, 0)
+
 
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord  # noqa: E402
@@ -673,3 +678,9 @@ class TestRegularCycleCoalesceGating:
     def test_apply_classification_fires_once_coalescing_window_closes(self):
         coord = self._make_coord(startup_coalesce_active=False, any_sensor_open=True, today_record=_make_today_record())
         assert coord._should_run_regular_cycle_apply_classification() is True
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

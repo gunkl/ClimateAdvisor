@@ -33,6 +33,89 @@ def _make_mock_module(name: str) -> MagicMock:
     return mod
 
 
+def _make_dt_module() -> Any:
+    """Build the real, timezone-aware stand-in for ``homeassistant.util.dt`` (Issue #1186).
+
+    Production binds ``from homeassistant.util import dt as dt_util``. When both
+    ``homeassistant.util`` and ``homeassistant.util.dt`` were independent MagicMocks that
+    resolved to two different objects, so a test assigning ``sys.modules[...dt].now`` never
+    reached production and every undefined helper (``parse_datetime``, ``as_local``...) was a
+    MagicMock that silently poisoned datetime arithmetic. This module has real, HA-faithful
+    defaults: ``now()``/``utcnow()`` are wall-clock and always aware; ``as_local`` treats a
+    naive value as already local and always returns an aware one (local zone = UTC here).
+
+    ``reset()`` restores every default; tests freeze the clock through the ``frozen_now``
+    fixture (tests/conftest.py), never by assigning attributes at import time.
+    """
+    import types  # noqa: PLC0415
+    from datetime import UTC, date, datetime, timedelta  # noqa: PLC0415
+
+    mod = types.ModuleType("homeassistant.util.dt")
+    mod.UTC = UTC
+    mod.DEFAULT_TIME_ZONE = UTC
+
+    def now(time_zone: Any = None) -> datetime:
+        return datetime.now(time_zone or mod.DEFAULT_TIME_ZONE)
+
+    def utcnow() -> datetime:
+        return datetime.now(UTC)
+
+    def as_local(dattim: datetime) -> datetime:
+        if dattim.tzinfo is None:
+            return dattim.replace(tzinfo=mod.DEFAULT_TIME_ZONE)
+        return dattim.astimezone(mod.DEFAULT_TIME_ZONE)
+
+    def as_utc(dattim: datetime) -> datetime:
+        if dattim.tzinfo is None:
+            dattim = dattim.replace(tzinfo=mod.DEFAULT_TIME_ZONE)
+        return dattim.astimezone(UTC)
+
+    def parse_datetime(dt_str: str | None, *, raise_on_error: bool = False) -> datetime | None:
+        if not dt_str:
+            return None
+        try:
+            return datetime.fromisoformat(dt_str)
+        except ValueError, TypeError:
+            if raise_on_error:
+                raise
+            return None
+
+    def start_of_local_day(dt_or_d: date | datetime | None = None) -> datetime:
+        if dt_or_d is None:
+            dt_or_d = mod.now().date()
+        elif isinstance(dt_or_d, datetime):
+            dt_or_d = dt_or_d.date()
+        return datetime.combine(dt_or_d, datetime.min.time(), tzinfo=mod.DEFAULT_TIME_ZONE)
+
+    def get_time_zone(time_zone_str: str) -> Any:
+        import zoneinfo  # noqa: PLC0415
+
+        try:
+            return zoneinfo.ZoneInfo(time_zone_str)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def get_age(date_: datetime) -> str:
+        return str(mod.now() - date_ if isinstance(date_, datetime) else timedelta(0))
+
+    defaults = {
+        f.__name__: f
+        for f in (now, utcnow, as_local, as_utc, parse_datetime, start_of_local_day, get_time_zone, get_age)
+    }
+    defaults["DEFAULT_TIME_ZONE"] = UTC
+    defaults["UTC"] = UTC
+    mod._defaults = defaults
+
+    def reset() -> None:
+        """Restore every default attribute (undo freezes and any stray assignment)."""
+        for name, value in defaults.items():
+            setattr(mod, name, value)
+
+    mod.reset = reset
+    reset()
+    return mod
+
+
 _HA_MODULES = [
     "homeassistant",
     "homeassistant.config_entries",
@@ -53,7 +136,8 @@ _HA_MODULES = [
     "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
     "homeassistant.util",
-    "homeassistant.util.dt",
+    # "homeassistant.util.dt" is NOT listed here: it is a real module built by _make_dt_module()
+    # (Issue #1186) so ``from homeassistant.util import dt`` and ``sys.modules[...]`` agree.
     "homeassistant.components.http",
     "homeassistant.components.repairs",
     "homeassistant.components.diagnostics",
@@ -542,6 +626,13 @@ def install_ha_stubs() -> None:
     for mod_name in _HA_MODULES:
         if mod_name not in sys.modules:
             sys.modules[mod_name] = _make_mock_module(mod_name)
+
+    # Issue #1186: one real dt module; the parent's ``.dt`` attribute and sys.modules entry must
+    # be the SAME object (production binds the attribute, tests used to assign the entry).
+    if "homeassistant.util.dt" not in sys.modules:
+        sys.modules["homeassistant.util.dt"] = _make_dt_module()
+    sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
+    sys.modules["homeassistant"].util = sys.modules["homeassistant.util"]
 
     # Attach real base classes to the already-installed mock modules.
     # These assignments are idempotent — re-assigning the same class is harmless.

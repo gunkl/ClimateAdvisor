@@ -27,10 +27,6 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
-_ha_util = sys.modules.get("homeassistant.util")
-if _ha_util is not None:
-    _ha_util.dt.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
-
 # ---------------------------------------------------------------------------
 # Imports after stubs are in place
 # ---------------------------------------------------------------------------

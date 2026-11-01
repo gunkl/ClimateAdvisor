@@ -467,8 +467,8 @@ class TestZoneResolutionAmbiguousIssue:
             "unaffected_field": "learning._state.dismissed_suggestions",
         }
         # force_reclassify drives a REAL coordinator data-refresh cycle, which
-        # reads homeassistant.util.dt.now() internally — that only resolves to
-        # a real datetime (rather than a bare auto-mock) while the harness's
+        # reads homeassistant.util.dt.now() internally — that only follows the
+        # harness's virtual clock while the harness's
         # FakeScheduler is installed, which build_headless_multi_zone() only
         # keeps active for its own zone-setup phase. Re-enter it here for the
         # duration of the service call.

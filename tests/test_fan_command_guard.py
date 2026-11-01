@@ -44,10 +44,8 @@ _NOW = datetime(2026, 6, 11, 14, 0, 0)
 def _fixed_now(when: datetime):
     """Temporarily pin coordinator.dt_util.now() to a fixed datetime.
 
-    coordinator.py resolves dt_util as sys.modules["homeassistant.util"].dt
-    (the attribute on the parent MagicMock), NOT sys.modules["homeassistant.util.dt"].
-    We patch only the coordinator module's name so other modules (chart_log, etc.)
-    that share the same MagicMock are unaffected.
+    dt_util is the shared stub dt module (one object, also sys.modules["homeassistant.util.dt"]);
+    patch.object restores `now` on exit, so other modules are unaffected.
     """
     coordinator_mod = importlib.import_module("custom_components.climate_advisor.coordinator")
     with patch.object(coordinator_mod.dt_util, "now", return_value=when):

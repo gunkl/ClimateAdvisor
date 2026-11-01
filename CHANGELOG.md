@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.23] — 2026-11-01
+
+- Fix #1186 (developer-facing, no behavior change): unit tests no longer depend on run order. The `homeassistant.util.dt` test stub is now one real, timezone-aware module, tests freeze the clock with a `frozen_now` fixture instead of import-time assignments, and CI runs each changed test file on its own.
+
 ## [0.8.22] — 2026-11-01
 
 - Fix #1197: with a whole-house fan set up, switching your thermostat's own blower on or off is now left alone. Climate Advisor no longer treats it as a fan override or starts a grace period for it.

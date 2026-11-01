@@ -24,11 +24,9 @@ import custom_components.climate_advisor.coordinator as coordinator_module
 def _patch_now(monkeypatch, moments: list[_datetime.datetime]):
     """Patch coordinator.dt_util.now() to return successive real datetimes.
 
-    homeassistant.util.dt is a bare MagicMock module in this test harness
-    (tools/sim_harness/ha_stubs.py) — dt_util.now() returns a MagicMock, not a
-    real datetime, by default. Any test exercising the transition tracker's
-    time-elapsed arithmetic must patch it, per the project's documented
-    dt_util testing gotcha (CLAUDE.md).
+    homeassistant.util.dt is a real tz-aware stub module (tools/sim_harness/ha_stubs.py)
+    whose now() follows the wall clock. Tests exercising the transition tracker's
+    time-elapsed arithmetic patch it to return deterministic moments.
     """
     calls = iter(moments)
     monkeypatch.setattr(coordinator_module.dt_util, "now", lambda: next(calls))

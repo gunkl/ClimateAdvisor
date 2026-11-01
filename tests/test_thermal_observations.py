@@ -26,12 +26,6 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
-# Give the HA dt sub-attribute a real parse_datetime so coordinator's local
-# `from homeassistant.util import dt as dt_util2` works correctly.
-_ha_util = sys.modules.get("homeassistant.util")
-if _ha_util is not None:
-    _ha_util.dt.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
-
 # ---------------------------------------------------------------------------
 # Imports after stubs are in place
 # ---------------------------------------------------------------------------

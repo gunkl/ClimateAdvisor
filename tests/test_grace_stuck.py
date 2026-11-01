@@ -25,23 +25,21 @@ if "homeassistant" not in sys.modules:
     install_ha_stubs()
 
 _STABLE_NOW = datetime(2026, 6, 12, 14, 0, 0)
-sys.modules["homeassistant.util.dt"].now = lambda: _STABLE_NOW
-sys.modules["homeassistant.util.dt"].parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
+import pytest  # noqa: E402
 
-from custom_components.climate_advisor import automation as _automation_mod  # noqa: E402
+
+def _frozen_now_value():
+    return _STABLE_NOW
+
+
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord  # noqa: E402
 
-# The `sys.modules["homeassistant.util.dt"]` patch above is a no-op for automation.py's
-# own `dt_util` reference: `homeassistant.util` is itself a MagicMock (not a real
-# package), so `from homeassistant.util import dt as dt_util` resolves `.dt` to an
-# auto-generated child MagicMock attribute — shared process-wide across every module that
-# does the same `from homeassistant.util import dt as dt_util` import — rather than the
-# real submodule registered in sys.modules. This went unnoticed because nothing in this
-# file previously exercised a comparison operator (`<`/`>`) on the result — MagicMock's
-# default numeric dunders (`__add__`, `__int__`, etc.) silently degrade to harmless
-# stand-ins, but ordering comparisons raise TypeError.
+# `homeassistant.util.dt` is a real tz-aware stub module (tools/sim_harness/ha_stubs.py),
+# the same single object whether reached via sys.modules or `from homeassistant.util import
+# dt as dt_util`. Tests pin the clock with the `frozen_now` fixture or by patching
+# `dt_util.now`; the autouse `_reset_ha_dt` fixture undoes stray assignments.
 #
 # `parse_datetime` is safe to patch with a permanent raw assignment (the established
 # pattern elsewhere, e.g. test_nat_vent_activation.py) — it is a strict correctness
@@ -52,9 +50,7 @@ from custom_components.climate_advisor.learning import DailyRecord  # noqa: E402
 # failures in tests/test_chart_log.py when the full suite ran). `now` must only be
 # patched per-test via a scoped context manager (`_DT_NOW_PATH` below), exactly like
 # test_nat_vent_activation.py's own `_DT_NOW_PATH` pattern.
-_automation_mod.dt_util.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
 _DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
-_automation_mod.dt_util.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -735,3 +731,9 @@ class TestGracePeriodPriorityGuard:
 
         assert result is True
         assert ae._last_resume_source == "automation"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

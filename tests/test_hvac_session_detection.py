@@ -30,7 +30,9 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
-sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 4, 8, 21, 0, 0)
+
+def _frozen_now_value():
+    return datetime(2026, 4, 8, 21, 0, 0)
 
 
 def _get_coordinator_class():
@@ -1137,3 +1139,9 @@ class TestRestartReconciliationFanOnly:
         assert coord._hvac_on_since == datetime(2026, 4, 8, 7, 0, 0)
         assert coord._thermostat_fan_only_on_since is None
         coord._start_hvac_observation.assert_called_once_with("heat")
+
+
+@pytest.fixture(autouse=True)
+def _freeze_module_now(frozen_now):
+    """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
+    frozen_now(_frozen_now_value())

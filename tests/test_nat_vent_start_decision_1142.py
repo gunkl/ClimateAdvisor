@@ -191,6 +191,96 @@ class TestNoWorkingFanPausesInstead:
         assert engine._test_state.state == "off"
 
 
+# ---------------------------------------------------------------------------
+# A second window opening while a session is already live must not tear it down
+# ---------------------------------------------------------------------------
+
+
+def _live_session_engine(mode: str = "cool") -> AutomationEngine:
+    """WHF install, first window opened and nat-vent running with the fan on."""
+    engine = _engine(mode=mode)
+    _open(engine)
+    assert engine._natural_vent_active is True
+    assert engine._fan_active is True
+    return engine
+
+
+def _fan_cycled_off(engine: AutomationEngine) -> None:
+    """Cycling turned the fan off mid-session; the session (and its HVAC suppression) stays live."""
+    engine._fan_active = False
+
+
+def _assert_second_window_keeps_the_session(engine: AutomationEngine, mode: str) -> None:
+    """While the second window is open: session intact, rule 2 (no WHF + HVAC together), rule 3 (HVAC off)."""
+    assert engine._natural_vent_active is True, "a second window must not end a live session"
+    assert engine._test_state.state == "off", "rule 3: HVAC stays off while a window is open"
+    assert not (engine._fan_active and engine._test_state.state != "off"), "rule 2: WHF and HVAC never together"
+    assert engine._pre_fan_hvac_mode == mode, "the WHF suppression record must survive for the close to release"
+    assert engine._whf_owns_hvac() is True
+
+
+def _assert_closing_restores_hvac(engine: AutomationEngine, mode: str) -> None:
+    _close(engine)
+    assert engine._test_state.state == mode, "HVAC must not be left stuck off after every window closed"
+    assert engine._whf_owns_hvac() is False, "no stale WHF suppression after every window closed"
+    assert engine._pre_fan_hvac_mode is None
+    assert engine._natural_vent_active is False
+    assert engine._paused_by_door is False
+
+
+class TestSecondWindowKeepsALiveSession:
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_second_window_with_a_working_fan_control(self, mode):
+        engine = _live_session_engine(mode)
+        _open(engine)
+        assert engine._fan_active is True
+        assert engine._natural_vent_active is True
+        assert engine._test_state.state == "off"
+        assert engine._whf_owns_hvac() is True
+        _assert_closing_restores_hvac(engine, mode)
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_second_window_after_the_readback_gave_up(self, mode):
+        """The reviewer's scenario: cycling turned the fan off, the read-back gave up (#1050)."""
+        engine = _live_session_engine(mode)
+        _fan_cycled_off(engine)
+        engine._fan_readback_gave_up = True
+        _open(engine)
+        assert engine._fan_active is False
+        _assert_second_window_keeps_the_session(engine, mode)
+        _assert_closing_restores_hvac(engine, mode)
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            FanCommandResult.SUPPRESSED,
+            FanCommandResult.RATE_LIMITED_NEW,
+            FanCommandResult.RATE_LIMITED_DUP,
+            FanCommandResult.OVERRIDDEN,
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_second_window_with_a_fan_command_that_did_not_apply(self, mode, result):
+        engine = _live_session_engine(mode)
+        _fan_cycled_off(engine)
+        _fan_result(engine, result)
+        _open(engine)
+        _assert_second_window_keeps_the_session(engine, mode)
+        _assert_closing_restores_hvac(engine, mode)
+
+    def test_first_window_without_a_live_session_still_pauses_instead(self):
+        """Symmetric control: with NO live session the same refusal is still 'no working fan -> pause'."""
+        engine = _engine(mode="cool")
+        _fan_result(engine, FanCommandResult.SUPPRESSED)
+        _open(engine)
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"
+        _close(engine)
+        assert engine._test_state.state == "cool"
+        assert engine._whf_owns_hvac() is False
+
+
 class TestFanClaimOnlyWhenTheFanRan:
     def test_executed_reports_the_fan_transition(self):
         engine = _engine(mode="cool")
@@ -262,6 +352,19 @@ class TestGuardsHoldOnEveryStartSite:
         assert not _fan_started(engine)
         assert engine._paused_by_door is True
         assert engine._test_state.state == "off"
+
+    @pytest.mark.parametrize(
+        ("guard", "reason"),
+        [(_forecast_peak_ahead, FORECAST_PEAK_ABOVE_THRESHOLD), (_floor_imminent, FLOOR_IMMINENT)],
+        ids=["forecast", "floor"],
+    )
+    def test_grace_expiry_recheck_logs_the_veto(self, guard, reason, caplog):
+        """The grace-expiry site used to drop the veto silently (the other start sites log it)."""
+        engine = _engine(mode="cool")
+        guard(engine)
+        with caplog.at_level("DEBUG", logger="custom_components.climate_advisor.automation"):
+            _re_check(engine)
+        assert any("not engaged" in r.getMessage() and reason in r.getMessage() for r in caplog.records)
 
     def test_grace_expiry_recheck_starts_when_no_guard_applies(self):
         """Control for the previous test: same engine, no guard -> nat-vent takes the window."""

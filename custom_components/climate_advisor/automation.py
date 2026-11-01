@@ -6225,6 +6225,15 @@ class AutomationEngine:
                     f"natural ventilation: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
                     f" outdoor {self._t(outdoor)} <= {self._t(nat_vent_threshold)}"
                 )
+                # Issue #1140 follow-up: a window opening while a nat-vent session is ALREADY live is not a
+                # start decision. The session (and the WHF suppression that goes with it) stays until its own
+                # exit path ends it; a fan command that did not take effect (SUPPRESSED, DISABLED,
+                # rate-limited, overridden) must not tear it down through the start path -- that cleared
+                # ``_natural_vent_active`` with no exit, no lockout and no suppression release, leaving the
+                # thermostat off after the windows closed (the #618 stuck-off shape; same defect already on
+                # main for RATE_LIMITED/OVERRIDDEN). Captured BEFORE the await: an override arriving
+                # mid-await is the start path's own business (#706).
+                _session_was_live = self._natural_vent_active
                 _activation_result = await self._activate_fan(reason=nat_vent_reason)
                 # Project onto the FSM state that matches legacy's writes at this
                 # site exactly: legacy only ever set _natural_vent_active = True
@@ -6239,13 +6248,23 @@ class AutomationEngine:
                 # _apply_nat_vent_fsm_state_after_activation() rather than applying
                 # this pre-await decision directly — a manual override arriving
                 # during the await above must not be silently overwritten.
-                self._apply_nat_vent_fsm_state_after_activation(
-                    NatVentLifecycleState.ACTIVE_SOFT_START
-                    if self._nat_vent_soft_start
-                    else NatVentLifecycleState.ACTIVE_FULL_GATE,
-                    _activation_result,
-                )
-                if _activation_result in _NAT_VENT_NO_WORKING_FAN_RESULTS:
+                _keep_live_session = _session_was_live and _activation_result in _NAT_VENT_ACTIVATION_NOT_APPLIED
+                if _keep_live_session:
+                    _LOGGER.info(
+                        "Nat vent session kept on second window open (%s): fan command %s did not apply — "
+                        "session and HVAC suppression unchanged (per-tick fan retry and the session's own "
+                        "exit path own it)",
+                        entity_id,
+                        _activation_result.name,
+                    )
+                else:
+                    self._apply_nat_vent_fsm_state_after_activation(
+                        NatVentLifecycleState.ACTIVE_SOFT_START
+                        if self._nat_vent_soft_start
+                        else NatVentLifecycleState.ACTIVE_FULL_GATE,
+                        _activation_result,
+                    )
+                if _activation_result in _NAT_VENT_NO_WORKING_FAN_RESULTS and not _keep_live_session:
                     # Issue #1140 (#1142 D1): no working fan (not configured, or refused at run time) ->
                     # no session was recorded; fall through to the HVAC pause below like any other open
                     # window (household rule 3).
@@ -9489,6 +9508,21 @@ class AutomationEngine:
                 NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs),
             )
             _reactivates = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+            if not _reactivates and _fsm_result.veto is not None:
+                # Issue #1138/#1140: the temperature gate passed but a start rule refused it (no working
+                # fan, forecast peak, imminent floor) -- log it like every other start site instead of
+                # dropping the veto silently.
+                self._log_nat_vent_not_engaged(
+                    _fsm_result.to_state,
+                    indoor=indoor,
+                    outdoor=outdoor,
+                    comfort_heat=self._nat_vent_reactivation_floor(),
+                    comfort_cool=comfort_cool,
+                    nat_vent_delta=nat_vent_delta,
+                    hysteresis=0.0,
+                    threshold=nat_vent_threshold,
+                    veto=_fsm_result.veto,
+                )
 
             if _reactivates:
                 nat_vent_reason = (

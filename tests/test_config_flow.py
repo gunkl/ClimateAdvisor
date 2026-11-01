@@ -3342,3 +3342,130 @@ class TestOptionsFlowCelsiusRoundTrip:
         assert _display_default(64.4, True, 7, 18) == 18  # fp noise snapped to max
         assert _display_default(66.0, True, 7, 18) == pytest.approx(18.8889, abs=1e-4)  # genuine overshoot kept
         assert _display_default(70, False, 55, 80) == 70
+
+
+class TestWholeHouseFanSafetySetup:
+    """Issue #1144 (owner decisions 1, 8, 9): setup tells the occupant when the sealed-house safety rule
+    cannot protect them, and refuses a whole-house fan another zone already owns.
+
+    Occupant story: a whole-house fan with no door/window sensors, or one Climate Advisor can only command
+    (never read), cannot be stopped on a sealed house; and two zones commanding one fan cannot both obey the
+    safety rules. The flow says so up front instead of the occupant finding out from a fan that will not stop.
+    """
+
+    WHF_BASE = {
+        "door_window_sensors": ["binary_sensor.window"],
+        "sensor_polarity_inverted": False,
+        "fan_mode": "whole_house_fan",
+        "fan_entity": "fan.whf",
+        "fan_state_feedback": True,
+    }
+
+    @staticmethod
+    def _other_zone(fan_entity: str, fan_mode: str = "whole_house_fan") -> MagicMock:
+        other = MagicMock()
+        other.entry_id = "other_zone"
+        other.data = {"fan_mode": fan_mode, "fan_entity": fan_entity}
+        return other
+
+    def _options_sensors(self, user_input: dict, others: list | None = None, base: dict | None = None):
+        flow, captured = _make_options_flow({**FULL_CONFIG, **(base or {})})
+        flow.hass.config_entries.async_entries = MagicMock(return_value=others or [])
+
+        async def _drive():
+            return await flow.async_step_sensors(dict(user_input))
+
+        return asyncio.run(_drive()), captured, flow
+
+    def test_options_whf_with_everything_configured_saves_without_warning(self):
+        result, captured, _ = self._options_sensors(self.WHF_BASE)
+        assert "data" in captured
+        assert not result.get("errors")
+
+    def test_options_zero_sensors_warns_then_accepts_the_identical_resubmit(self):
+        user_input = {**self.WHF_BASE, "door_window_sensors": []}
+        flow, captured = _make_options_flow(dict(FULL_CONFIG))
+        flow.hass.config_entries.async_entries = MagicMock(return_value=[])
+
+        async def _drive():
+            first = await flow.async_step_sensors(dict(user_input))
+            saved_after_first = "data" in captured
+            second = await flow.async_step_sensors(dict(user_input))
+            return first, saved_after_first, second
+
+        first, saved_after_first, _second = asyncio.run(_drive())
+        assert first["errors"] == {"door_window_sensors": "whf_no_sensors_warning"}
+        assert not saved_after_first, "the warned submit must not save"
+        assert captured["data"]["door_window_sensors"] == [], "the confirmed resubmit must save"
+
+    def test_options_command_only_fan_warns_on_the_feedback_field(self):
+        user_input = {**self.WHF_BASE, "fan_state_feedback": False}
+        result, captured, _ = self._options_sensors(user_input)
+        assert result["errors"] == {"fan_state_feedback": "whf_command_only_warning"}
+        assert "data" not in captured
+
+    def test_options_a_fan_state_entity_counts_as_feedback(self):
+        user_input = {**self.WHF_BASE, "fan_state_feedback": False, "fan_state_entity": "binary_sensor.fan_on"}
+        result, captured, _ = self._options_sensors(user_input)
+        assert not result.get("errors")
+        assert "data" in captured
+
+    def test_options_both_warnings_show_together(self):
+        user_input = {**self.WHF_BASE, "door_window_sensors": [], "fan_state_feedback": False}
+        result, _, _ = self._options_sensors(user_input)
+        assert result["errors"] == {
+            "door_window_sensors": "whf_no_sensors_warning",
+            "fan_state_feedback": "whf_command_only_warning",
+        }
+
+    def test_options_fan_owned_by_another_zone_is_a_blocking_error(self):
+        result, captured, flow = self._options_sensors(self.WHF_BASE, others=[self._other_zone("fan.WHF")])
+        assert result["errors"] == {"fan_entity": "whf_entity_shared_zone"}
+        assert "data" not in captured
+        # An error is not acknowledged away by resubmitting.
+        again = asyncio.run(flow.async_step_sensors(dict(self.WHF_BASE)))
+        assert again["errors"] == {"fan_entity": "whf_entity_shared_zone"}
+
+    def test_options_this_zones_own_entry_is_not_another_zone(self):
+        own = self._other_zone("fan.whf")
+        own.entry_id = "test_entry_id"
+        result, captured, _ = self._options_sensors(self.WHF_BASE, others=[own])
+        assert not result.get("errors")
+        assert "data" in captured
+
+    def test_options_a_blower_only_zone_does_not_own_the_fan(self):
+        result, captured, _ = self._options_sensors(self.WHF_BASE, others=[self._other_zone("fan.whf", "hvac_fan")])
+        assert not result.get("errors")
+        assert "data" in captured
+
+    def test_options_hvac_fan_mode_has_no_whf_findings(self):
+        user_input = {**self.WHF_BASE, "fan_mode": "hvac_fan", "door_window_sensors": [], "fan_state_feedback": False}
+        result, captured, _ = self._options_sensors(user_input)
+        assert not result.get("errors")
+        assert "data" in captured
+
+    def test_initial_setup_zero_sensors_warns_once_then_continues(self):
+        flow = _make_config_flow()
+        user_input = {"door_window_sensors": [], "fan_mode": "whole_house_fan", "fan_entity": "fan.whf"}
+
+        async def _drive():
+            first = await flow.async_step_sensors(dict(user_input))
+            second = await flow.async_step_sensors(dict(user_input))
+            return first, second
+
+        first, second = asyncio.run(_drive())
+        assert first["errors"] == {
+            "door_window_sensors": "whf_no_sensors_warning",
+            "fan_entity": "whf_command_only_warning",
+        }
+        assert second["step_id"] == "occupancy", "the identical resubmit must move on to the next step"
+
+    def test_initial_setup_fan_owned_by_another_zone_is_a_blocking_error(self):
+        flow = _make_config_flow([self._other_zone("fan.whf", "both")])
+        user_input = {
+            "door_window_sensors": ["binary_sensor.window"],
+            "fan_mode": "whole_house_fan",
+            "fan_entity": "fan.whf",
+        }
+        result = asyncio.run(flow.async_step_sensors(dict(user_input)))
+        assert result["errors"] == {"fan_entity": "whf_entity_shared_zone"}

@@ -6,6 +6,7 @@
   "use_coordinator": true,
   "skip_startup_coalesce": true,
   "notes": [
+    "Moved to unsupported/ by Issue #1144 (owner-approved, 2026-10-31): the premise is a whole-house fan override running about 3 hours with every door and window closed. Owner rule 1 forbids that state: Climate Advisor now stops a whole-house fan on a sealed house within 30 s, so the grace loop this scenario describes can no longer arise. Opening a window earlier does not rescue it (tested at 17:30: the fan then becomes natural ventilation, not the expected manual-origin case).",
     "Occupant impact if this regresses: turning the whole-house fan on for a while with no",
     "timer -- a completely ordinary interaction -- can trigger a loop where CA silently",
     "reactivates the fan on its own after the override's grace expires, then, whenever that",

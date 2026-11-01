@@ -28,6 +28,7 @@ MAX_READINGS = 400
 MAX_COMMANDS = 128
 MAX_MARKS = 128
 MAX_EPISODE_MARKS = 64
+MAX_NOTICES = 16
 MAX_OPEN_EPISODES = 8
 MAX_SEEN_KEYS = 256
 # A reading is stored when a discrete field changed, indoor moved this far, or this long passed.
@@ -71,6 +72,9 @@ class Reading:
     setpoint_f: float | None = None
     fan_on: bool | None = None
     contacts_open: bool | None = None
+    # Issue #1144: False while automation is switched off (observe-only). Climate Advisor commands nothing then,
+    # so the AC/whole-house-fan mutex (P2) cannot be CA's failure; see check_p2_ac_whf_mutex.
+    automation_enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +125,9 @@ class PromiseInput:
     commands: tuple[Command, ...]
     marks: tuple[Mark, ...]
     episodes: tuple[Episode, ...]
+    # Issue #1144: (opened, closed-or-None) spans of observe-only sealed-fan notices, kept past the window so a long
+    # run whose start has aged out is still recognised as the noticed one (see PromiseJournal.on_event).
+    observe_notices: tuple[tuple[datetime, datetime | None], ...] = ()
 
 
 # event type -> payload keys read into Mark.attrs. A test asserts every mapped type exists in
@@ -150,6 +157,8 @@ EVENT_MARK_MAP: dict[str, tuple[str, ...]] = {
     "nat_vent_exit_resume": (),
     "system_restarted": (),
     "startup_coalesced": (),
+    # Issue #1144: observe-only (automation off) and the occupant was notified that the fan runs on a sealed house.
+    "whf_sealed_observe_notified": (),
 }
 
 NAT_VENT_END_KINDS = frozenset(
@@ -357,12 +366,16 @@ class PromiseJournal:
         self._episode_marks: deque[Mark] = deque(maxlen=MAX_EPISODE_MARKS)
         self._latest: Reading | None = None
         self._seen: OrderedDict[str, None] = OrderedDict()
+        self._notices: deque[list] = deque(maxlen=MAX_NOTICES)  # [opened, closed|None]
         self._runs: dict[str, datetime] = {}  # run series -> end of the last reported span
 
     # ── recording ────────────────────────────────────────────────────────────
     def record_reading(self, reading: Reading) -> bool:
         """Record a reading; returns True when it was stored in the window (always updates latest)."""
         self._latest = reading
+        # Issue #1144: an observe-only sealed-fan notice covers the episode until the fan stops or a window opens.
+        if self._notices and self._notices[-1][1] is None and (reading.fan_on is False or reading.contacts_open):
+            self._notices[-1][1] = reading.ts
         last = self._readings[-1] if self._readings else None
         if last is not None and not self._worth_storing(last, reading):
             return False
@@ -404,6 +417,8 @@ class PromiseJournal:
         mark = mark_from_event(ts, event_type, payload)
         if mark is not None:
             self.record_mark(mark)
+        if event_type == "whf_sealed_observe_notified" and not (self._notices and self._notices[-1][1] is None):
+            self._notices.append([ts, None])
         return mark
 
     def reset(self) -> None:
@@ -412,6 +427,7 @@ class PromiseJournal:
         self._commands.clear()
         self._marks.clear()
         self._episode_marks.clear()
+        self._notices.clear()
         self._latest = None
 
     # ── window ───────────────────────────────────────────────────────────────
@@ -436,6 +452,7 @@ class PromiseJournal:
             commands=tuple(self._commands),
             marks=tuple(self._marks),
             episodes=eps,
+            observe_notices=tuple((o, c) for o, c in self._notices),
         )
 
     @staticmethod

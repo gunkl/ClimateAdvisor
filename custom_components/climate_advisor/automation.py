@@ -265,8 +265,20 @@ from .temperature import (
     to_fahrenheit,
 )
 from .thermal_lead_time import compute_lead_minutes_from_rate
+from .whf_safety_decision import (
+    WHF_ACTIVE_HVAC_MODES,
+    SensorReading,
+    WhfSafetyAction,
+    WhfSafetyInputs,
+    WhfSafetySnapshot,
+    decide_whf_safety,
+    house_is_sealed,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Issue #1144: seconds between min-runtime cycle retries while the house is sealed (WHF-only installs).
+WHF_SEALED_CYCLE_RETRY_S = 300
 
 # Issue #1066: allowed reason codes / keys for commanded-mode ring-buffer entries.
 _MODE_CHANGE_REASONS = frozenset(
@@ -1045,6 +1057,13 @@ class AutomationEngineCallbacks:
     get_fan_physical_state: Callable[[], Any] | None = None
     is_recent_fan_command: Callable[[], bool] | None = None
     reclassify: Callable[[], None] | None = None
+    # Issue #1144: ground-truth snapshot (fan state + age, door/window sensors with unknown
+    # durations) for the WHF safety enforcer. None (shadow engine, bare tests) -> the enforcer
+    # falls back to the sensor_check/get_fan_physical_state callbacks and applies no settle.
+    get_whf_safety_snapshot: Callable[[], Any] | None = None
+    # Issue #1144: starts a coroutine as a config-entry task (coordinator._spawn) so unload waits for a
+    # safety stop in flight. None -> a plain hass task (shadow engine, bare tests).
+    spawn: Callable[[Any], Any] | None = None
 
 
 class AutomationEngine:
@@ -1061,6 +1080,22 @@ class AutomationEngine:
     # Issue #1102: shut-down latch (see _refuse_if_shut_down). Class-level default for
     # engines built via object.__new__ in tests; __init__ sets the instance attribute.
     _shut_down: bool = False
+
+    # Issue #1144: WHF safety enforcer state. Class-level defaults for engines built via
+    # object.__new__ in tests (the runtime source of truth is whatever the methods assign).
+    _whf_safety_snapshot_callback: Any | None = None
+    _spawn_callback: Any | None = None
+    _whf_safety_queued: bool = False
+    _whf_safety_retry_cancel: Any | None = None
+    _whf_safety_verify_cancel: Any | None = None
+    # When the occupant last turned HVAC on (heat/cool/heat_cool) at the thermostat; None = CA's own
+    # commands never count (rule 2 compares OCCUPANT actions only).
+    _occupant_hvac_on_at: datetime | None = None
+    _whf_safety_last_stop_at: datetime | None = None
+    _whf_safety_seen_off_since_stop: bool = True
+    _whf_safety_unenforceable_logged: bool = False
+    _whf_safety_observe_logged: bool = False
+    _whf_observe_notified: bool = False
 
     # Issue #1049: class-level defaults for attributes first read by the climate-command
     # helpers below, so engines built via object.__new__ (skipping __init__) still work.
@@ -1781,16 +1816,29 @@ class AutomationEngine:
         self._get_fan_physical_state_callback = callbacks.get_fan_physical_state
         self._is_recent_fan_command_callback = callbacks.is_recent_fan_command
         self._reclassify_callback = callbacks.reclassify
+        self._whf_safety_snapshot_callback = callbacks.get_whf_safety_snapshot
+        self._spawn_callback = callbacks.spawn
 
-    async def _notify(self, message: str, title: str, notification_type: str, *, email: bool = True) -> None:
+    async def _notify(
+        self,
+        message: str,
+        title: str,
+        notification_type: str,
+        *,
+        email: bool = True,
+        observe_only_ok: bool = False,
+    ) -> None:
         """Send a notification via configured channels, filtered by per-event preferences.
 
         ``email=False`` suppresses the email channel for this call (push still follows its
         per-event preference); the default keeps today's push + email behavior.
+        ``observe_only_ok=True`` sends even with automation switched off: a notification is not a
+        command, and the one caller (the sealed-house whole-house-fan notice, Issue #1144) exists
+        precisely to tell the occupant about a fan Climate Advisor will not touch while observing.
         """
         if _refuse_if_shut_down(self, f"send notification {title!r}"):
             return
-        if self.dry_run:
+        if self.dry_run and not observe_only_ok:
             _LOGGER.info("[DRY RUN] Would send notification: %s — %s role=%s", title, message, self.role)
             return
         push_key = f"push_{notification_type}"
@@ -2641,6 +2689,29 @@ class AutomationEngine:
         if outcome in (FanCycleOutcome.DISABLED, FanCycleOutcome.OVERRIDE_SUSPENDED):
             return
 
+        # Issue #1144 (owner decision 10): the min-runtime cycle runs for whole-house-fan-only installs
+        # only while a window is open. A FAN_MODE_BOTH install still cycles its HVAC blower (the WHF leg
+        # is skipped inside _activate_fan()); FAN_MODE_HVAC is unaffected. Retry later, never give up.
+        if (
+            outcome in (FanCycleOutcome.ACTIVATE_ALWAYS_ON, FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER)
+            and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_WHOLE_HOUSE
+            and self._whf_start_blocked_by_sealed_house()
+        ):
+            _LOGGER.info(
+                "Min-runtime cycle deferred: house sealed, whole-house fan runs only with a door/window open "
+                "(retry in %ds) role=%s",
+                WHF_SEALED_CYCLE_RETRY_S,
+                self.role,
+            )
+
+            @callback
+            def _sealed_retry(_now: Any) -> None:
+                self._fan_min_cycle_cancel = None
+                self._spawn_whf_task(self._fan_cycle_on())
+
+            self._fan_min_cycle_cancel = async_call_later(self.hass, WHF_SEALED_CYCLE_RETRY_S, _sealed_retry)
+            return
+
         if outcome is FanCycleOutcome.ACTIVATE_ALWAYS_ON:
             await self._activate_fan(reason="min_runtime_cycle")
             self._fan_min_runtime_active = True
@@ -2773,17 +2844,19 @@ class AutomationEngine:
         ``_set_hvac_mode()``, which has no override awareness of its own and would silently
         overwrite the user's just-set mode right back — the exact bug this rule closes.
 
-        Passes ``bypass_absolute_override=True`` to ``_deactivate_fan()``: this is a hard
-        AC/WHF mutex, not routine automation second-guessing an RF remote timer — last setting
-        placed wins, unconditionally, no matter what mechanism is currently protecting the
-        losing device.
+        Passes ``safety=True`` to ``_deactivate_fan()`` (Issue #1144, superseding Issue #748's
+        ``bypass_absolute_override``): this is a hard AC/WHF mutex, not routine automation
+        second-guessing an RF remote timer — last setting placed wins, unconditionally, no
+        matter what mechanism is currently protecting the losing device. ``safety`` also keys
+        the stop on the fan's PHYSICAL state, so an override-only fan (``_fan_active=False``
+        while physically running) is actually turned off instead of reported ALREADY_IN_STATE.
         """
         result = await self._deactivate_fan(
             reason=f"manual override to {mode} — ending free cooling",
             restore_hvac=False,
             release_suppression=True,
             emit_event=False,
-            bypass_absolute_override=True,
+            safety=True,
         )
         # Issue #931: flags clear only once this result is known (see
         # _end_nat_vent_session()) — previously cleared unconditionally before this
@@ -2843,6 +2916,9 @@ class AutomationEngine:
             _user_mode = new_mode if isinstance(new_mode, str) and new_mode else detected_mode
             if _real_hvac_mode(_user_mode) is not None and _user_mode != old_mode:
                 self._append_mode_change(old_mode, _user_mode, "user")
+                if _user_mode in WHF_ACTIVE_HVAC_MODES:
+                    # Issue #1144 rule 2: the occupant turned HVAC on -- the newer action beats a running fan.
+                    self._occupant_hvac_on_at = dt_util.now()
                 # NOT updating ``_last_commanded_hvac_mode`` here (asked for, then reverted): it means
                 # "CA-issued only". The coordinator's override detector (state listener) fires only when
                 # the live mode != (``_last_commanded_hvac_mode`` or classification mode); if this field
@@ -4789,6 +4865,12 @@ class AutomationEngine:
         def _schedule_check(_now: Any) -> None:
             self.hass.async_create_task(_check_single_setpoint_accepted())
 
+        # Issue #1144: a newer write supersedes the pending acceptance check of the previous one. Overwriting
+        # the handle without cancelling it left the older 10 s timer armed but untracked, so unload could not
+        # cancel it (the real-HA lingering-timer check caught it after a WHF safety stop's two writes).
+        _previous_check = getattr(self, "_setpoint_retry_cancel", None)
+        if _previous_check:
+            _previous_check()
         self._setpoint_retry_cancel = async_call_later(self.hass, 10, _schedule_check)
         self._schedule_mode_alignment_recheck(_my_seq)
         _LOGGER.info(
@@ -5788,6 +5870,10 @@ class AutomationEngine:
             # satisfies _exit_nat_vent()'s "caller emits its own specific event" contract.
             if self._natural_vent_active:
                 await self._exit_nat_vent(reason="door/window closed — ending natural ventilation mode")
+                # Issue #1144: this early return used to be the whole story. A fan that
+                # _exit_nat_vent() could not stop (an RF-timer override blocks its deactivation, or the
+                # toggle floor deferred it) kept running for up to 5 minutes against a sealed house.
+                await self._enforce_whf_safety_locked("sensor_closed", sealed_confirmed=True)
                 return
 
             # Fix D (Issue #277): whole-house fan running outside nat-vent must stop
@@ -5797,12 +5883,10 @@ class AutomationEngine:
             # a manually/RF-remote-overridden WHF session (_fan_override_active), not just
             # a CA-owned one (_fan_active) — the prior _fan_active-only check left an
             # override session invisible to this shutoff entirely.
-            _fan_cfg_d = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-            if _fan_cfg_d in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not self._natural_vent_active:
-                # emit_event=False: this transition is reported via sensor_all_closed above.
-                await self._enforce_sealed_house_whf_guard(
-                    reason="all sensors closed — stopping whole-house fan", emit_event=False
-                )
+            # Issue #1144: the sealed-house guard is now the shared WHF safety enforcer. The debounced
+            # sensor-closed event already confirmed the close (sealed_confirmed). emit_event=False:
+            # this transition is reported via sensor_all_closed above.
+            await self._enforce_whf_safety_locked("sensor_closed", emit_event=False, sealed_confirmed=True)
 
             if not self._paused_by_door:
                 return
@@ -7696,17 +7780,23 @@ class AutomationEngine:
             if not any_sensor_open:
                 _LOGGER.warning(
                     "Fan reconcile: restored override (source=%s) still valid at restart but all"
-                    " monitored sensors are closed — deactivating instead of re-arming"
-                    " the sealed-house-unsafe override (archetype=%s)",
+                    " monitored sensors are closed — asking the WHF safety enforcer instead of"
+                    " re-arming the sealed-house-unsafe override (archetype=%s)",
                     _rearm_source,
                     archetype,
                 )
-                self._fan_active = True  # let _deactivate_fan see an owned fan
-                await self._deactivate_fan(
-                    reason="sealed-house on restart — not re-arming WHF override",
-                    bypass_absolute_override=True,
-                )
-                return
+                # Issue #1144: the enforcer replaces the hand-written copy of the stop that used to
+                # live here. The reconcile already knows the fan is running (assume_running covers an
+                # install whose ground truth is unreadable); when the enforcer declines to stop
+                # (zero configured sensors, an unknown sensor inside its 60 s benefit of the doubt),
+                # fall through to the normal re-arm.
+                if (
+                    await self._enforce_whf_safety_locked(
+                        "restart_reconcile", sealed_confirmed=True, assume_running=True
+                    )
+                    is not None
+                ):
+                    return
             _remaining_seconds, _token_hours = _rearm
             _LOGGER.info(
                 "Fan reconcile: restored override still valid at restart (source=%s, token=%s,"
@@ -9583,36 +9673,405 @@ class AutomationEngine:
         """
         return bool(self._sensor_check_callback and self._sensor_check_callback())
 
-    async def _enforce_sealed_house_whf_guard(self, *, reason: str, emit_event: bool = True) -> FanCommandResult | None:
-        """Stop the whole-house fan — CA-owned OR manually/RF-remote overridden — the
-        instant no monitored sensor is open (Issue #882).
+    # ── WHF safety enforcer (Issue #1144) ──────────────────────────────────────────────────────
+    # Owner rules: (1) the whole-house fan never runs on a sealed house -- off within 30 s even under a
+    # manual or RF override; (2) WHF and HVAC are mutually exclusive, the occupant's newest action wins.
+    # The decision is the pure whf_safety_decision.decide_whf_safety() over ground truth; this block is
+    # its shell. It replaces _enforce_sealed_house_whf_guard() (event-driven only: a fan switched on
+    # while the house was already sealed fired none of its three triggers), the hand-written restart copy
+    # in _reconcile_fan_on_startup_locked(), and the fan-stopping half of the override-conflict stand-down.
 
-        Single choke point for the sealed-house safety invariant: the WHF must never run
-        against a closed house. Prior to this, Fix D (Issue #277,
-        ``handle_all_doors_windows_closed()``) only checked ``_fan_active``, so a manual/
-        RF-remote override (which sets ``_fan_override_active`` instead) was invisible to
-        it — and even if it had fired, ``_deactivate_fan()``'s Issue #486 absolute-override
-        guard would have suppressed the shutoff anyway. This calls ``_deactivate_fan()``
-        with ``bypass_absolute_override=True``, the same escape hatch Issue #748 already
-        uses for the hard AC/WHF mutex — a sealed house is the same class of hard physical
-        invariant, not the "routine automation second-guessing" Issue #486 protects against.
+    def _whf_start_blocked_by_sealed_house(self) -> bool:
+        """Rule 1 entry gate: True when Climate Advisor must not START the whole-house fan.
 
-        ``_deactivate_fan()``'s own idempotency guard only reads ``_fan_active`` — an
-        override-only session (``_fan_override_active=True``, ``_fan_active=False``) would
-        otherwise hit that guard's early-return and never issue the real physical off
-        command. Mirrors the existing idiom at ``_reconcile_fan_on_startup_locked()``'s
-        turn-off branch ("let _deactivate_fan see an owned fan") for exactly this case.
+        The same ``house_is_sealed`` definition the stop decision uses (at least one sensor configured, none
+        open; an unreadable one counts open for 60 s). Zero configured sensors: never blocks.
         """
+        return house_is_sealed(self._whf_safety_snapshot().sensors)
+
+    def _whf_physically_running_for_safety(self) -> bool:
+        """Whether the whole-house fan is physically running, for a safety stop's idempotency check.
+
+        Ground truth when readable; when it is not (command-only install, unavailable entity) the
+        override flag is the best remaining evidence. ``_fan_active`` is deliberately NOT consulted:
+        a safety stop exists to catch the fan CA does not own.
+        """
+        cb = self._get_fan_physical_state_callback
+        if cb is not None:
+            physical = cb()
+            if physical is not None:
+                return physical is True
+        return bool(self._fan_override_active)
+
+    def _whf_safety_snapshot(self) -> WhfSafetySnapshot:
+        """Ground-truth snapshot: from the coordinator callback, else from the bare engine callbacks."""
+        cb = self._whf_safety_snapshot_callback
+        if cb is not None:
+            snap = cb()
+            if isinstance(snap, WhfSafetySnapshot):
+                return snap
+        physical = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
+        sensors: tuple[SensorReading, ...] = ()
+        if self._sensor_check_callback is not None:
+            sensors = (SensorReading(is_open=bool(self._sensor_check_callback())),)
+        return WhfSafetySnapshot(fan_on=physical, fan_on_for_s=None, sensors=sensors)
+
+    def _occupant_fan_on_at(self) -> datetime | None:
+        """When the occupant turned the fan on (the active fan override's stamp), else None."""
+        if not self._fan_override_active or not self._fan_override_time:
+            return None
+        try:
+            parsed = dt_util.parse_datetime(self._fan_override_time)
+        except TypeError, ValueError:
+            return None
+        return parsed if isinstance(parsed, datetime) else None
+
+    def request_whf_safety_check(self, trigger: str) -> None:
+        """Queue a WHF safety check from synchronous code (listeners, timers). Coalesced.
+
+        Triggers arriving while a check is already queued are dropped: the queued check reads live
+        ground truth when it runs, so it covers them. A trigger arriving while a check is running
+        queues the next one, which waits on the decision lock.
+        """
+        if self._shut_down or self._whf_safety_queued:
+            return
+        if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return
+        # Cheap pre-gate (no task for the common case): nothing to enforce while the fan is off. Ground
+        # truth when readable, else Climate Advisor's own flags (the unenforceable-install fallback).
+        physical = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
+        if physical is False:
+            self._whf_safety_seen_off_since_stop = True
+            return
+        if physical is None and not (self._fan_active or self._fan_override_active):
+            return
+        self._whf_safety_queued = True
+        self._spawn_whf_task(self._run_whf_safety_check(trigger))
+
+    def _spawn_whf_task(self, coro: Any) -> Any:
+        """Start a WHF safety coroutine as a config-entry task when the coordinator supplied a spawner."""
+        if self._spawn_callback is not None:
+            return self._spawn_callback(coro)
+        return self.hass.async_create_task(coro)  # fallback: no coordinator (tests, shadow engine)
+
+    async def _run_whf_safety_check(self, trigger: str) -> None:
+        self._whf_safety_queued = False
+        try:
+            await self.enforce_whf_safety(trigger)
+        except Exception:
+            _LOGGER.warning("WHF safety check failed: trigger=%s role=%s", trigger, self.role, exc_info=True)
+
+    async def enforce_whf_safety(self, trigger: str, *, sealed_confirmed: bool = False) -> FanCommandResult | None:
+        """Public entry: take the decision lock, then run the check. Not for callers already under the lock."""
+        if self._shut_down:
+            return None
+        async with self._decision_pass("enforce_whf_safety"):
+            return await self._enforce_whf_safety_locked(trigger, sealed_confirmed=sealed_confirmed)
+
+    def _cancel_whf_safety_timers(self) -> None:
+        for attr in ("_whf_safety_retry_cancel", "_whf_safety_verify_cancel"):
+            cancel = getattr(self, attr, None)
+            if cancel:
+                cancel()
+                setattr(self, attr, None)
+
+    def _schedule_whf_safety_timer(self, attr: str, delay_s: float, trigger: str) -> None:
+        """Arm (replacing) a one-shot that re-runs the check. Always @callback (creates a task)."""
+        previous = getattr(self, attr, None)
+        if previous:
+            previous()
+
+        @callback
+        def _fire(_now: Any) -> None:
+            setattr(self, attr, None)
+            self.request_whf_safety_check(trigger)
+
+        setattr(self, attr, async_call_later(self.hass, delay_s, _fire))
+
+    async def _enforce_whf_safety_locked(
+        self,
+        trigger: str,
+        *,
+        emit_event: bool = True,
+        sealed_confirmed: bool = False,
+        assume_running: bool = False,
+    ) -> FanCommandResult | None:
+        """Run the WHF safety decision and act on it. Caller holds the decision lock.
+
+        Returns the stop's ``FanCommandResult`` when a stop was attempted, else None (nothing to do,
+        deferred, or HVAC suppressed instead). ``assume_running`` is for the restart reconcile, which
+        has already established the fan is running even when ground truth is unreadable.
+        """
+        if self._shut_down:
+            return None
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return None
-        if self._any_monitored_sensor_open():
+
+        if self.dry_run:
+            # Observe-only (the occupant switched automation off): Climate Advisor sends no commands, so it
+            # never stops the fan (owner decision 2026-10-31) -- it tells the occupant once per sealed episode.
+            if not self._whf_safety_observe_logged:
+                self._whf_safety_observe_logged = True
+                _LOGGER.info(
+                    "WHF safety: automation is off (observe-only), no fan command is sent; the occupant is"
+                    " notified instead if the fan runs on a sealed house (trigger=%s)",
+                    trigger,
+                )
+            await self._observe_only_whf_notice(trigger)
             return None
-        if not (self._fan_active or self._fan_override_active):
+        self._whf_safety_observe_logged = False
+        self._whf_observe_notified = False
+
+        snap = self._whf_safety_snapshot()
+        if snap.fan_on is False:
+            self._whf_safety_seen_off_since_stop = True
+        climate_state = self.hass.states.get(self.climate_entity)
+        thermostat_mode = climate_state.state if climate_state else None
+        if thermostat_mode not in WHF_ACTIVE_HVAC_MODES:
+            self._occupant_hvac_on_at = None  # the occupant's HVAC-on ended; nothing left to compare
+        if snap.fan_on is None and not self._whf_safety_unenforceable_logged:
+            self._whf_safety_unenforceable_logged = True
+            _LOGGER.info(
+                "WHF safety: fan state not readable (command-only install or unavailable entity) --"
+                " enforcement falls back to Climate Advisor's own override flags; a fan it cannot see"
+                " cannot be stopped (trigger=%s)",
+                trigger,
+            )
+        decision = decide_whf_safety(
+            WhfSafetyInputs(
+                fan_mode=fan_mode,
+                fan_on=snap.fan_on,
+                fan_believed_on=bool(self._fan_active or self._fan_override_active or assume_running),
+                fan_on_for_s=snap.fan_on_for_s,
+                sensors=snap.sensors,
+                sealed_confirmed=sealed_confirmed,
+                thermostat_mode=thermostat_mode,
+                occupant_fan_on_at=self._occupant_fan_on_at() or snap.occupant_fan_on_at,
+                occupant_hvac_on_at=self._occupant_hvac_on_at or snap.occupant_hvac_on_at,
+                whf_owns_hvac=self._whf_owns_hvac(),
+            )
+        )
+
+        if decision.stale_sensor_count and decision.action is not WhfSafetyAction.NONE:
+            self._alert_whf_stale_sensors(snap, decision.stale_sensor_count)
+
+        if decision.action is WhfSafetyAction.NONE:
+            _LOGGER.debug(
+                "WHF safety check: no action: reason=%s trigger=%s fan_on=%s", decision.reason, trigger, snap.fan_on
+            )
             return None
-        _LOGGER.warning("Sealed-house WHF guard: stopping fan — %s", reason)
-        self._fan_active = True  # let _deactivate_fan see an owned fan (override-only case)
-        return await self._deactivate_fan(reason=reason, bypass_absolute_override=True, emit_event=emit_event)
+
+        if decision.action is WhfSafetyAction.DEFER:
+            _LOGGER.info(
+                "WHF safety check deferred: reason=%s trigger=%s retry_in_s=%.1f fan_on_for_s=%s",
+                decision.reason,
+                trigger,
+                decision.retry_in_s or 0.0,
+                snap.fan_on_for_s,
+            )
+            self._schedule_whf_safety_timer("_whf_safety_retry_cancel", (decision.retry_in_s or 0.0) + 0.5, "settle")
+            return None
+
+        if decision.action is WhfSafetyAction.SUPPRESS_HVAC:
+            _LOGGER.warning(
+                "WHF safety: suppressing HVAC: reason=%s trigger=%s thermostat_mode=%s",
+                decision.reason,
+                trigger,
+                thermostat_mode,
+            )
+            await self._suppress_hvac_for_whf(
+                reason="whole-house fan turned on after HVAC — suppressing HVAC (newest action wins)"
+            )
+            return None
+
+        # STOP_SEALED / STOP_MUTEX_FAN
+        sealed = decision.action is WhfSafetyAction.STOP_SEALED
+        reason_text = (
+            "sealed house — stopping whole-house fan" if sealed else "HVAC turned on — stopping whole-house fan"
+        )
+        _LOGGER.warning(
+            "WHF safety stop: reason=%s trigger=%s sealed=%s fan_on=%s fan_override=%s rf_timer_h=%s nat_vent=%s",
+            decision.reason,
+            trigger,
+            sealed,
+            snap.fan_on,
+            self._fan_override_active,
+            self._fan_remote_timer_hours,
+            self._natural_vent_active,
+        )
+        result = await self._deactivate_fan(
+            reason=reason_text,
+            restore_hvac=False,
+            release_suppression=True,
+            emit_event=emit_event,
+            safety=True,
+        )
+        if result is FanCommandResult.EXECUTED:
+            self._after_whf_safety_stop(result, sealed=sealed, reason=reason_text, trigger=trigger)
+        return result
+
+    async def _observe_only_whf_notice(self, trigger: str) -> None:
+        """Observe-only: notify ONCE per sealed-house episode that the whole-house fan is running (Issue #1144).
+
+        The decision is the same pure ``decide_whf_safety`` the enforcer uses (one authoritative definition of
+        "running on a sealed house"); nothing is commanded. The episode re-arms when the fan stops or a door or
+        window opens. The ``whf_sealed_observe_notified`` event lets the sealed-house promise (P9) accept this
+        run as "observe-only and the occupant was told" -- and only this run.
+        """
+        snap = self._whf_safety_snapshot()
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        climate_state = self.hass.states.get(self.climate_entity)
+        decision = decide_whf_safety(
+            WhfSafetyInputs(
+                fan_mode=fan_mode,
+                fan_on=snap.fan_on,
+                fan_believed_on=bool(self._fan_active or self._fan_override_active),
+                fan_on_for_s=snap.fan_on_for_s,
+                sensors=snap.sensors,
+                sealed_confirmed=False,
+                thermostat_mode=climate_state.state if climate_state else None,
+                occupant_fan_on_at=None,
+                occupant_hvac_on_at=None,
+                whf_owns_hvac=False,
+            )
+        )
+        if not decision.sealed:
+            if self._whf_observe_notified:
+                _LOGGER.info(
+                    "WHF sealed-house notice re-armed: the fan stopped or a door/window opened role=%s", self.role
+                )
+            self._whf_observe_notified = False
+            return
+        if decision.action is WhfSafetyAction.DEFER:
+            self._schedule_whf_safety_timer("_whf_safety_retry_cancel", (decision.retry_in_s or 0.0) + 0.5, "settle")
+            return
+        if self._whf_observe_notified:
+            return
+        self._whf_observe_notified = True
+        _LOGGER.warning(
+            "WHF safety: fan running on a sealed house but automation is off (observe-only): notifying, not stopping"
+            " trigger=%s role=%s",
+            trigger,
+            self.role,
+        )
+        try:
+            await self._notify(
+                "The whole-house fan is running while every door and window is closed, and automation is switched"
+                " off, so Climate Advisor will not turn it off. Turn the fan off, or open a window.",
+                "Climate Advisor — whole-house fan on with the house closed up",
+                "invariant_violation",
+                observe_only_ok=True,
+            )
+        except Exception:
+            _LOGGER.warning("WHF observe-only notification failed", exc_info=True)
+            self._whf_observe_notified = False
+            return
+        if self._emit_event_callback:
+            self._emit_event_callback("whf_sealed_observe_notified", {"trigger": trigger})
+
+    def _after_whf_safety_stop(self, result: FanCommandResult, *, sealed: bool, reason: str, trigger: str) -> None:
+        """Bookkeeping after a safety stop command went out (owner decisions 4 and 5)."""
+        now = dt_util.now()
+        if self._natural_vent_active:
+            self._end_nat_vent_session(result)
+        self._end_fan_override_and_grace(reason="whf_safety_stop", keep_grace=not sealed)
+        # Sealed: reclassify (the right mode AND setpoint now) instead of a blind _pre_fan_hvac_mode restore.
+        if sealed and self._reclassify_callback:
+            self._reclassify_callback()
+
+        # Stops within 10 minutes of each other belong to one episode: notify once per episode, and count
+        # DISTINCT stops (fan observed off since the previous stop) for the anti-oscillation alert.
+        # A verify-retry of a stop that did not take is not a new stop.
+        last = self._whf_safety_last_stop_at
+        in_episode = isinstance(last, datetime) and (now - last).total_seconds() < 600
+        distinct = (not in_episode) or self._whf_safety_seen_off_since_stop
+        stops = [t for t in getattr(self, "_whf_safety_stop_times", []) if (now - t).total_seconds() < 600]
+        if distinct:
+            stops.append(now)
+        self._whf_safety_stop_times = stops
+        self._whf_safety_last_stop_at = now
+        self._whf_safety_seen_off_since_stop = False
+
+        if not in_episode:
+            self._notify_whf_safety(
+                "Climate Advisor — whole-house fan stopped",
+                (
+                    "Climate Advisor turned off the whole-house fan because every monitored door and window is closed."
+                    if sealed
+                    else "Climate Advisor turned off the whole-house fan because the heating/cooling was turned on."
+                )
+                + " It will not restart the fan until a window opens.",
+            )
+        if len(stops) >= 3 and not self._recent_duplicate(
+            "whf_safety_oscillation", (len(stops) >= 3,), window_seconds=600
+        ):
+            self._notify_whf_safety(
+                "Climate Advisor — whole-house fan keeps being turned on",
+                f"The whole-house fan was turned on {len(stops)} times in 10 minutes and Climate Advisor stopped"
+                " it each time. Check what keeps switching it on (a remote, a HomeKit automation, a schedule).",
+            )
+            _LOGGER.warning("WHF safety anti-oscillation alert: stops_in_10min=%d trigger=%s", len(stops), trigger)
+        # A stop that did not take is retried by this verify; the 15 s tick is the second line.
+        self._schedule_whf_safety_timer("_whf_safety_verify_cancel", 12.0, "stop_verify")
+
+    def _end_fan_override_and_grace(self, *, reason: str, keep_grace: bool = False) -> None:
+        """End the fan override and the grace period it started (Issue #1144, owner decision 4).
+
+        A safety stop ends the occupant's override: leaving it armed would make the next re-press look
+        like an override already in progress. The grace is cancelled only when it is fan-owned (no
+        thermostat override or pending confirmation shares it -- cancelling that one would also drop the
+        occupant's HVAC change). ``keep_grace`` leaves it alone (the mutex case: the occupant's HVAC
+        action has its own grace running).
+        """
+        if (
+            not keep_grace
+            and self._grace_active
+            and not self._manual_override_active
+            and not self._override_confirm_pending
+            and (self._fan_override_active or self._last_grace_trigger in ("fan_manual_override", "fan_off"))
+        ):
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            self._cancel_grace_intentionally(reason)
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
+        if (
+            self._fan_override_active
+            and self._grace_active
+            and self._grace_protects_override
+            and not self._manual_override_active
+        ):
+            # Clearing the fan override now would leave its grace "orphaned": _check_orphaned_grace() would
+            # force-cancel it and, through the override/grace FSM, drop a pending thermostat confirmation too.
+            # The grace expires on its own and ends the fan override with it.
+            _LOGGER.debug(
+                "WHF safety stop: fan override left to expire with its grace (shared grace) role=%s", self.role
+            )
+            return
+        self.clear_fan_override(reason=reason)
+
+    def _alert_whf_stale_sensors(self, snap: WhfSafetySnapshot, count: int) -> None:
+        """Alert (once per 6 h per sensor set) that an unavailable sensor is being counted as closed."""
+        names = ", ".join(snap.stale_names) if snap.stale_names else f"{count} sensor(s)"
+        if self._recent_duplicate("whf_stale_sensor", (names,), window_seconds=6 * 3600):
+            return
+        _LOGGER.warning("WHF safety: door/window sensor unavailable > 60 s, counted as closed: sensors=%s", names)
+        self._notify_whf_safety(
+            "Climate Advisor — door/window sensor unavailable",
+            f"{names} has been unavailable for over a minute. Climate Advisor counts it as closed when deciding"
+            " whether the whole-house fan may run.",
+        )
+
+    def _notify_whf_safety(self, title: str, message: str) -> None:
+        """Fire-and-forget owner push (a notify failure must never abort a safety stop)."""
+
+        async def _send() -> None:
+            try:
+                await self._notify(message, title, "invariant_violation")
+            except Exception:
+                _LOGGER.warning("WHF safety notification failed: title=%s", title, exc_info=True)
+
+        self._spawn_whf_task(_send())
 
     def _end_nat_vent_session(self, result: FanCommandResult) -> None:
         """Clear nat-vent session bookkeeping only once the paired fan command actually ran.
@@ -12259,6 +12718,7 @@ class AutomationEngine:
         fan_min_runtime_minutes: float | None = None,
         natural_vent_active: bool | None = None,
         fan_drift_tick_count: int | None = None,
+        rate_limit_bypass: bool = False,
     ) -> FanFsmInputs:
         """Build the fan/WHF FSM's input snapshot from current engine state (Issue #731,
         Phase 4).
@@ -12335,6 +12795,7 @@ class AutomationEngine:
             ),
             last_toggle_command_time=self._fan_toggle_command_time,
             toggle_min_interval_s=float(FAN_MIN_TOGGLE_INTERVAL_S),
+            rate_limit_bypass=rate_limit_bypass,
             recent_fan_command=recent_fan_command,
             physical_state_available=physical_state_available,
             physical_on=physical_on,
@@ -13110,6 +13571,28 @@ class AutomationEngine:
             _LOGGER.debug("_activate_fan: skipped -- fan switch ignored CA's on-command twice (%s)", reason)
             return FanCommandResult.SUPPRESSED
 
+        # Issue #1144 rule 1 (entry gate): Climate Advisor never STARTS the whole-house fan on a sealed
+        # house. Single choke point for every CA start path (nat-vent, economizer, min-runtime cycle,
+        # reconcile adopt, cycling-on). Zero configured sensors -> the rule does not apply; the HVAC
+        # blower (FAN_MODE_HVAC, and the blower leg of FAN_MODE_BOTH) is unaffected.
+        _skip_whf_leg = False
+        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._whf_start_blocked_by_sealed_house():
+            if fan_mode == FAN_MODE_WHOLE_HOUSE:
+                _LOGGER.info(
+                    "Fan activation refused: house sealed, whole-house fan never starts with every door/window "
+                    "closed (%s) role=%s",
+                    reason,
+                    self.role,
+                )
+                return FanCommandResult.SUPPRESSED
+            _skip_whf_leg = True
+            _LOGGER.info(
+                "WHF leg skipped: house sealed, whole-house fan never starts with every door/window closed "
+                "(%s) role=%s -- HVAC blower leg unaffected",
+                reason,
+                self.role,
+            )
+
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
         from .fan_fsm import FanFsmEventKind
 
@@ -13179,7 +13662,7 @@ class AutomationEngine:
         _activated_whf = False
         _activated_hvac = False
         try:
-            if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not _skip_whf_leg:
                 # Whole-house fan exchanges outdoor air directly — running AC/heat
                 # simultaneously fights the fan and wastes energy (Issue #277 Fix C).
                 await self._suppress_hvac_for_whf(
@@ -13349,7 +13832,7 @@ class AutomationEngine:
         # case the event-driven handle_all_doors_windows_closed() path was ever missed
         # (a race, a dropped/coalesced sensor event). Worst-case latency is this timer's
         # own 5-minute cadence; a no-op whenever any monitored sensor is open.
-        await self._enforce_sealed_house_whf_guard(reason="sealed-house backstop — 5-minute thermostatic check")
+        await self.enforce_whf_safety("backstop")
         # Issue #423: self-healing physical-state check — if _fan_active is stale (e.g.
         # from a reconcile that "adopted" a fan that was never actually turned on),
         # correct it here so fan_thermostat_check()/nat_vent_temperature_check() below see
@@ -14048,7 +14531,7 @@ class AutomationEngine:
         restore_hvac: bool = True,
         release_suppression: bool | None = None,
         emit_event: bool = True,
-        bypass_absolute_override: bool = False,
+        safety: bool = False,
     ) -> FanCommandResult:
         """Deactivate fan based on configured fan_mode.
 
@@ -14072,14 +14555,16 @@ class AutomationEngine:
                 Report shows every CA fan-off with its source. Callers that already emit a
                 more specific event for the same transition (nat-vent cycler / exit paths)
                 pass False to avoid a duplicate row (Issue #331 follow-up).
-            bypass_absolute_override: Issue #748 — when True, skip the Issue #486
-                RF-remote-timer-absolute guard below entirely. Reserved for the single hard
-                AC/WHF mutex-enforcement path (``_stand_down_whf_for_override_conflict()``):
-                a manual HVAC-mode override physically conflicts with an active WHF session
-                right now, which is a hard invariant, not an automation preference Issue #486
-                was designed to protect against. Every other caller must leave this False so
-                Issue #486's "an RF remote timer is absolute against routine automation
-                second-guessing" behavior is unchanged.
+            safety: Issue #1144 (supersedes Issue #748's ``bypass_absolute_override``) — a
+                WHF safety stop: the sealed-house rule or the hard AC/WHF mutex. Such a stop is a
+                physical invariant, not routine automation second-guessing, so it (a) skips the
+                Issue #486 RF-remote-timer-absolute guard, (b) keys idempotency on the fan's
+                PHYSICAL state instead of ``_fan_active`` (an override-only fan has
+                ``_fan_active=False`` yet is running — the old guard reported ALREADY_IN_STATE
+                and left it running, Issue #1144 H2), (c) bypasses the 300 s toggle rate limit
+                via the fan FSM's ``rate_limit_bypass`` input, and (d) never touches the HVAC
+                blower in ``FAN_MODE_BOTH`` (rule 1 covers the whole-house fan only). Every other
+                caller must leave this False.
 
         Returns:
             A ``FanCommandResult`` describing what actually happened (Issue #649) — see
@@ -14095,7 +14580,7 @@ class AutomationEngine:
                 self._fan_on_since = None
             return FanCommandResult.DISABLED
 
-        if self._fan_override_active and not bypass_absolute_override:
+        if self._fan_override_active and not safety:
             if self._fan_remote_timer_hours is not None:
                 # Issue #486: the override is absolute while an RF remote timer is active —
                 # this shutoff (nat-vent exit, comfort-floor breach, cycle-off, etc.) is
@@ -14111,15 +14596,15 @@ class AutomationEngine:
                 _LOGGER.info("Fan override active — skipping fan deactivation")
             return FanCommandResult.OVERRIDDEN
 
-        if self._fan_override_active and bypass_absolute_override and self._fan_remote_timer_hours is not None:
-            # Issue #748: the hard AC/WHF mutex overrides even an active RF remote timer —
-            # last setting placed wins. Logged (not silently proceeding) so the
+        if self._fan_override_active and safety and self._fan_remote_timer_hours is not None:
+            # Issue #748/#1144: a WHF safety stop (sealed house, hard AC/WHF mutex) overrides even
+            # an active RF remote timer. Logged (not silently proceeding) so the
             # remote-timer-overridden outcome stays observable, matching Issue #486's own
             # observability bar for the opposite (suppressed) outcome above. Issue #585:
-            # INFO, not WARNING — the mutex is working correctly, not malfunctioning.
+            # INFO, not WARNING — the safety stop is working correctly, not malfunctioning.
             _LOGGER.info(
-                "Fan deactivation forced despite active RF remote timer (%sh) — hard AC/WHF"
-                " mutex overrides remote-timer protection — reason: %s",
+                "Fan deactivation forced despite active RF remote timer (%sh) — WHF safety stop"
+                " overrides remote-timer protection — reason: %s",
                 self._fan_remote_timer_hours,
                 reason,
             )
@@ -14141,7 +14626,12 @@ class AutomationEngine:
         # window, but don't strand the snapshot either — a stranded snapshot kept
         # _whf_owns_hvac() reporting True for hours after the session actually ended,
         # blocking apply_classification()'s DEFER_NAT_VENT gate from ever clearing).
-        if not self._fan_active:
+        #
+        # Issue #1144: a safety stop keys this guard on the fan's PHYSICAL state. An override-only
+        # fan (manual/RF press) has ``_fan_active=False`` while it physically runs; reading only
+        # the flag made every stand-down against it a silent no-op.
+        _safety_fan_physically_on = safety and self._whf_physically_running_for_safety()
+        if not self._fan_active and not _safety_fan_physically_on:
             if release_suppression and self._pre_fan_hvac_mode is not None:
                 _restore_mode = self._pre_fan_hvac_mode
 
@@ -14231,6 +14721,7 @@ class AutomationEngine:
         _rl_transition = self._resolve_fan_fsm_state(
             kind=FanFsmEventKind.DEACTIVATE_REQUESTED,
             origin_state=_rl_from_state,
+            rate_limit_bypass=safety,
         )
         # Issue #731 Phase 7 fix: see _activate_fan()'s matching comment — the FSM's
         # own computed rate_limit_applies_at must be written back here, mirroring the
@@ -14282,8 +14773,14 @@ class AutomationEngine:
             self._fan_rate_limited_until = None
             self._fan_rate_limited_direction = None
 
+        # Issue #1144: the 300 s toggle floor is stamped only once a command actually went out. A
+        # no-op deactivation (the control entity already agreed with the target) used to stamp it
+        # anyway, which both opened a bogus rate-limit window and made the occupant's next real
+        # fan press look like an echo of a command that was never sent.
+        _prev_fan_command_time = self._fan_command_time
         self._fan_command_time = dt_util.now()
-        self._fan_toggle_command_time = self._fan_command_time
+        _toggle_stamp = self._fan_command_time
+        _command_issued = False
         self._fan_command_pending = True
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -14292,6 +14789,8 @@ class AutomationEngine:
                     domain = fan_entity.split(".")[0]
                     _commanded = await self._command_whf_control_entity(False, reason=reason)
                     if _commanded:
+                        _command_issued = True
+                        self._fan_toggle_command_time = _toggle_stamp
                         _LOGGER.info("Deactivated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
 
                 # Restore prior HVAC mode that was suppressed when the fan activated
@@ -14355,7 +14854,9 @@ class AutomationEngine:
                             _restore_mode,
                         )
 
-            if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
+            # Issue #1144: a safety stop in FAN_MODE_BOTH is about the whole-house fan only; the HVAC
+            # blower is not part of the sealed-house / mutex rules and is left alone.
+            if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH) and not (safety and fan_mode == FAN_MODE_BOTH):
                 _cs_deact = self.hass.states.get(self.climate_entity)
                 _fan_modes_deact = list(_cs_deact.attributes.get("fan_modes") or []) if _cs_deact else []
                 _deact_value = resolve_fan_mode_command(_fan_modes_deact, "off")
@@ -14371,6 +14872,8 @@ class AutomationEngine:
                         {"entity_id": self.climate_entity, "fan_mode": _deact_value},
                         kind="climate",
                     )
+                    _command_issued = True
+                    self._fan_toggle_command_time = _toggle_stamp
                     _LOGGER.info("Deactivated HVAC fan (fan_mode=%s) — %s role=%s", _deact_value, reason, self.role)
 
             # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state() —
@@ -14436,6 +14939,8 @@ class AutomationEngine:
             self._fan_off_verify_cancel = async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_off)
         finally:
             self._fan_command_pending = False
+            if not _command_issued:
+                self._fan_command_time = _prev_fan_command_time  # Issue #1144: nothing was sent
         return FanCommandResult.EXECUTED
 
     @property
@@ -15120,6 +15625,7 @@ class AutomationEngine:
         self._cancel_grace_timers()
         self._stop_fan_min_runtime_cycles()
         self._cancel_fan_thermo_backstop()  # Issue #327
+        self._cancel_whf_safety_timers()  # Issue #1144
         if self._revisit_cancel:
             self._revisit_cancel()
             self._revisit_cancel = None

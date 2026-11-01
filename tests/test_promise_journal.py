@@ -305,3 +305,29 @@ class TestPromiseStats:
         assert stats["settling_flip"]["hits"] == 2
         assert stats["settling_flip"]["first_ts"] == at(0).isoformat()
         assert stats["settling_flip"]["last_ts"] == at(5).isoformat()
+
+
+class TestObserveOnlySealedNotices:
+    """Issue #1144: the observe-only notice opens a span that the fan stopping or a window opening closes."""
+
+    def test_notice_opens_a_span_and_the_fan_stopping_closes_it(self):
+        j = PromiseJournal()
+        j.on_event(at(1), "whf_sealed_observe_notified", {})
+        j.record_reading(Reading(ts=at(2), fan_on=True, contacts_open=False))
+        assert j.window(at(3)).observe_notices == ((at(1), None),)
+        j.record_reading(Reading(ts=at(4), fan_on=False, contacts_open=False))
+        assert j.window(at(5)).observe_notices == ((at(1), at(4)),)
+
+    def test_a_window_opening_also_closes_it_and_a_second_notice_starts_a_new_span(self):
+        j = PromiseJournal()
+        j.on_event(at(1), "whf_sealed_observe_notified", {})
+        j.record_reading(Reading(ts=at(2), fan_on=True, contacts_open=True))
+        j.on_event(at(10), "whf_sealed_observe_notified", {})
+        spans = j.window(at(11)).observe_notices
+        assert spans == ((at(1), at(2)), (at(10), None))
+
+    def test_the_span_survives_the_window_sliding_past_it(self):
+        j = PromiseJournal()
+        j.on_event(at(1), "whf_sealed_observe_notified", {})
+        later = at(1) + timedelta(hours=5)
+        assert j.window(later).observe_notices == ((at(1), None),)

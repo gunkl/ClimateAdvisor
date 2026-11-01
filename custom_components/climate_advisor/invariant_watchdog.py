@@ -25,6 +25,10 @@ CA's own override/grace *events* (``Episode``/``Mark``), because it is a promise
 its own word. Every other promise reads only ground truth: thermostat/fan readings and the
 service commands CA actually issued.
 
+Promise 9 (``whf_sealed``, Issue #1144) was added with the owner's sign-off: rule 1 ("the
+whole-house fan never runs on a sealed house, off within 30 s even under a manual or RF override")
+was declared authoritative on 2026-10-31.
+
 Changing the invariant set (adding, removing, or loosening a check) is treated the same as
 this project's LOCKED golden-scenario policy (see CLAUDE.md's "Golden Simulation Test
 Policy"): it requires explicit human review — show the proposed invariant in human-readable
@@ -182,7 +186,15 @@ class PromiseNumbers:
     P4_MIN_EARLY_END_S: float = 60.0
     P4_START_SLACK_S: float = 10.0
     P4_END_SLACK_S: float = 5.0
+    # Issue #1144 rule 2 (newest occupant action wins): the HVAC-off Climate Advisor sends when the occupant turns the
+    # fan on after their own thermostat change follows the fan-on within production's 30 s bound; 60 s is looser.
+    P4_RULE2_SUPPRESS_S: float = 60.0
     P5_BLIND_CONTINUE_MIN: float = 35.0  # production auto-stops at 30 min
+    # Issue #1144: owner rule 1 -- the whole-house fan is off within 30 s of running on a sealed house. Production's
+    # worst case is a 10 s settle + the 15 s tick + the 5 s on/off dance of a one-way transmitter; the promise counts
+    # 30 s AFTER the 10 s settle, so it is looser than production.
+    P9_WHF_SEALED_S: float = 30.0
+    P9_WHF_SETTLE_S: float = 10.0
     P6_MAX_FLIPS: int = 2
     P6_WINDOW_MIN: float = 60.0
     P6_OCCUPANT_EXCUSE_MIN: float = 5.0
@@ -247,9 +259,20 @@ class PromiseConfig:
     threshold_warm: float = float(DEFAULT_THRESHOLD_WARM)
     temp_unit: str = "fahrenheit"
     p2_min_overlap_s: float = 0.0
+    # Issue #1144: test worlds excuse an AC/fan overlap while automation is off (Climate Advisor commands nothing
+    # then). Production's alert path passes False: it keeps alerting the occupant exactly as before.
+    p2_excuse_observe_only: bool = True
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> PromiseConfig:
+    def from_config(
+        cls, config: dict[str, Any], *, p2_min_overlap_s: float = 0.0, p2_excuse_observe_only: bool = True
+    ) -> PromiseConfig:
+        """Build the promise view of ``config``. ``p2_min_overlap_s`` is the AC/fan overlap P2 ignores.
+
+        Default 0 (every test world keeps its strictness); production passes
+        ``const.AC_WHF_OVERLAP_TOLERANCE_S`` (Issue #1144) so a thermostat's seconds-long equipment-report lag
+        after the HVAC-off command is not an alert.
+        """
         config = config if isinstance(config, dict) else {}
         tol_keys = (
             (CONF_COMFORT_DEADBAND_HOT_F, DEFAULT_COMFORT_DEADBAND_HOT_F),
@@ -274,6 +297,8 @@ class PromiseConfig:
             threshold_mild=_num(config, "threshold_mild", DEFAULT_THRESHOLD_MILD),
             threshold_warm=_num(config, "threshold_warm", DEFAULT_THRESHOLD_WARM),
             temp_unit=str(config.get(CONF_TEMP_UNIT, "fahrenheit")),
+            p2_min_overlap_s=float(p2_min_overlap_s),
+            p2_excuse_observe_only=bool(p2_excuse_observe_only),
         )
 
     # ── promise-owned sleep window (midnight wrap; malformed -> never asleep) ──
@@ -344,6 +369,7 @@ class OccupantAction:
     ts: datetime
     target: str  # "thermostat" | "fan"
     what: str  # "mode" | "setpoint" | "fan"
+    fan_on: bool | None = None  # for what == "fan": the fan's new physical state
 
 
 def _mins(a: datetime, b: datetime) -> float:
@@ -436,7 +462,7 @@ def _compute_occupant_actions(inp: PromiseInput) -> list[OccupantAction]:
             i0 = bisect_left(stamps, cur.ts - echo)
             if i0 < len(stamps) and stamps[i0] <= cur.ts + after:
                 continue
-            out.append(OccupantAction(cur.ts, target, what))
+            out.append(OccupantAction(cur.ts, target, what, cur.fan_on if what == "fan" else None))
     return out
 
 
@@ -541,6 +567,13 @@ def check_p2_ac_whf_mutex(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
     latest = inp.latest
     if latest is None:
         return []
+    # Rule-8-style justification (Issue #1144, owner decision 1): with automation switched off Climate Advisor sends
+    # no command (P3 enforces that), so it cannot stop the fan or suppress HVAC, and an AC/fan overlap there is the
+    # occupant's or the thermostat's own doing, not a Climate Advisor failure. The sealed-house case is covered by
+    # the observe-only notice. Could this let a real failure pass silently? Only if automation were reported off while
+    # Climate Advisor was commanding; P3 reports exactly that, and the flag comes from the same ground truth.
+    if cfg.p2_excuse_observe_only and latest.automation_enabled is False:
+        return []
     v = check_ac_whf_mutex(hvac_action=latest.hvac_action, whf_physically_on=latest.fan_on, fan_mode=cfg.fan_mode)
     if v is None:
         return []
@@ -599,18 +632,52 @@ _THERMOSTAT_LISTED = _COMMON_LISTED | {
     "ac_whf_mutex",
     "new_override_during_grace",
 }
-_FAN_OVERRIDE_LISTED = _THERMOSTAT_LISTED | {"bedtime", "morning_wakeup"}
+# Issue #1144: ``whf_safety_stop`` -- the WHF safety enforcer ended a FAN override (and its grace) because the
+# whole-house fan was running on a sealed house or against the occupant's newer HVAC action. Fan targets only: a
+# thermostat override is never ended by it.
+_FAN_OVERRIDE_LISTED = _THERMOSTAT_LISTED | {"bedtime", "morning_wakeup", "whf_safety_stop"}
 
 
-def _p4_end_is_listed(ep: Episode) -> bool:
+def _p4_rule2_suppression_ends(ep: Episode, inp: PromiseInput) -> bool:
+    """A thermostat override ended by the occupant's NEWER fan press (owner rule 2, Issue #1144).
+
+    Accepted only when all three hold: the fan-on is an OCCUPANT action (``occupant_actions``: a physical
+    change with no Climate Advisor fan command nearby, so CA's own fan starts never count), it is stamped after
+    the override began, and the episode's ending coincides with a Climate Advisor HVAC-off sent within
+    ``P4_RULE2_SUPPRESS_S`` of it (the rule-2 suppression). A CA-initiated off with no occupant fan-on before it
+    stays a miss.
+
+    Rule-8-style justification (could this let a real failure pass silently?): the exception needs a physical
+    fan-on that CA did not command, which is exactly the occupant action rule 2 gives priority to; a CA bug that
+    switched HVAC off on its own would have no such fan-on and is still reported.
+    """
+    if ep.target != "thermostat" or ep.end_ts is None:
+        return False
+    window = timedelta(seconds=NUMBERS.P4_RULE2_SUPPRESS_S)
+    start = ep.start_ts + timedelta(seconds=NUMBERS.P4_START_SLACK_S)
+    fan_ons = [o.ts for o in occupant_actions(inp) if o.target == "fan" and o.fan_on is True and o.ts > start]
+    if not any(abs((ep.end_ts - f).total_seconds()) <= window.total_seconds() for f in fan_ons):
+        return False
+    return any(
+        c.origin == "ca"
+        and c.target == "thermostat"
+        and c.service in _HVAC_MODE_SERVICES
+        and c.mode == "off"
+        and any(0 <= (c.ts - f).total_seconds() <= window.total_seconds() for f in fan_ons)
+        for c in inp.commands
+    )
+
+
+def _p4_end_is_listed(ep: Episode, inp: PromiseInput) -> bool:
     r = ep.end_reason or ""
     if r.startswith("user_cancel"):
         return True
     if ep.target == "thermostat":
-        return r in _THERMOSTAT_LISTED or r.startswith("occupancy_")
+        return r in _THERMOSTAT_LISTED or r.startswith("occupancy_") or _p4_rule2_suppression_ends(ep, inp)
     if ep.kind == "override":  # fan override
         return r in _FAN_OVERRIDE_LISTED or r.startswith("occupancy_")
-    return r in _COMMON_LISTED or "ceiling" in r  # fan_off grace (#134 ceiling exception)
+    # fan_off grace (#134 ceiling exception; #1144 whf_safety_stop)
+    return r in _COMMON_LISTED or "ceiling" in r or r == "whf_safety_stop"
 
 
 # Services whose ``Command.mode`` is an HVAC mode. ``set_fan_mode`` also stores its fan mode in
@@ -650,7 +717,7 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
     start_slack = timedelta(seconds=NUMBERS.P4_START_SLACK_S)
     end_slack = timedelta(seconds=NUMBERS.P4_END_SLACK_S)
     for ep in inp.episodes:
-        listed = ep.end_ts is not None and _p4_end_is_listed(ep)
+        listed = ep.end_ts is not None and _p4_end_is_listed(ep, inp)
         if ep.end_ts is None:
             until = inp.now
         elif listed:
@@ -765,6 +832,65 @@ def check_p5b_blind_fan_continue(inp: PromiseInput, cfg: PromiseConfig) -> list[
             flush(run, False)
             run = []
     flush(run, bool(rs) and rs[-1].fan_on is True and rs[-1].indoor_f is None)
+    return hits
+
+
+# ── P9 whf_sealed (Issue #1144) ────────────────────────────────────────────────
+def check_p9_whf_sealed(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
+    """The whole-house fan never runs on a sealed house: off within 30 s (after a 10 s settle).
+
+    Owner rule 1 (authoritative, issue #1144; approved as the sign-off this module's docstring asks for
+    when adding a promise). Ground truth only: the fan's physical reading and the door/window contacts.
+    ``contacts_open is None`` (no sensors configured, or none readable) means sealed-ness cannot be judged,
+    so the promise does not apply -- the same rule the enforcer follows. The producer counts a sensor that
+    has been unavailable for under 60 s as open, exactly as the enforcer does, so the two never disagree.
+    """
+    if cfg.fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        return []
+    rs = inp.readings
+    hits: list[Hit] = []
+    # Rule-8-style justification (Issue #1144, owner decision 1): with automation switched off Climate Advisor sends
+    # no command, so the fan CANNOT be stopped; the promise there is "the occupant was told". A run is accepted
+    # only when the engine emitted ``whf_sealed_observe_notified`` inside it -- an event the engine raises solely
+    # in observe-only after the notification went out. Could this let a real failure pass silently? Only if that
+    # event were emitted without a notification; a run with no such mark (or any run with automation on, where the
+    # enforcer must stop the fan) is still reported.
+    notices = inp.observe_notices
+
+    def flush(run: list[Reading], ongoing: bool) -> None:
+        if not run:
+            return
+        end = inp.now if ongoing else run[-1].ts
+        # The notice span [opened, closed) is closed by the first reading with the fan off or a window open, so
+        # a run is the noticed one when its start lies inside a span, or it contains the notice (opened inside
+        # the run). A run whose start has aged out of the window is still inside its span.
+        horizon = end + timedelta(seconds=NUMBERS.P9_WHF_SETTLE_S)
+        if any(o <= horizon and (c is None or c >= run[0].ts) for o, c in notices):
+            return
+        seconds = (end - run[0].ts).total_seconds() - NUMBERS.P9_WHF_SETTLE_S
+        if seconds > NUMBERS.P9_WHF_SEALED_S:
+            hits.append(
+                Hit(
+                    promise="whf_sealed",
+                    ts=run[0].ts,
+                    key=RunKey("whf_sealed", run[0].ts, end),
+                    detail=(
+                        f"The whole-house fan ran {seconds + NUMBERS.P9_WHF_SETTLE_S:.0f} seconds with every "
+                        "door and window closed."
+                    ),
+                    evidence=_ev(seconds=seconds + NUMBERS.P9_WHF_SETTLE_S),
+                    kind=KIND_STATE,
+                )
+            )
+
+    run: list[Reading] = []
+    for r in rs:
+        if r.fan_on is True and r.contacts_open is False:
+            run.append(r)
+        else:
+            flush(run, False)
+            run = []
+    flush(run, bool(rs) and rs[-1].fan_on is True and rs[-1].contacts_open is False)
     return hits
 
 
@@ -940,6 +1066,8 @@ PROMISES: tuple[PromiseSpec, ...] = (
     PromiseSpec(5, "blind_fan_continue", "5b", check_p5b_blind_fan_continue, SEVERITY_WARNING, LEVEL_LOG),
     PromiseSpec(6, "mode_flip_rate", "6", check_p6_mode_flip_rate, SEVERITY_WARNING, LEVEL_LOG),
     PromiseSpec(7, "comfort_kept", "7", check_p7_comfort_kept, SEVERITY_WARNING, LEVEL_LOG),
+    # Issue #1144: owner rule 1. 8 is surfaces_agree (test-only, not in this registry).
+    PromiseSpec(9, "whf_sealed", "9", check_p9_whf_sealed, SEVERITY_HARD, LEVEL_ALERT),
 )
 
 

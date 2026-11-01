@@ -166,6 +166,10 @@ _BARE_TASK_PERMANENT = {
     ("coordinator.py", "_async_homeassistant_stop"): 1,
     # _spawn's mandatory fallback when there is no config entry (tests, sim harness).
     ("coordinator.py", "_spawn"): 1,
+    # Issue #1144: the engine's counterpart of _spawn -- uses the coordinator's config-entry spawner when
+    # wired (production), and falls back to a plain hass task only for an engine with no coordinator
+    # (bare tests, the shadow engine).
+    ("automation.py", "_spawn_whf_task"): 1,
 }
 
 # Ratchet: groups B-D of Issue #1113 (engine/timer dispatch, refresh requests,

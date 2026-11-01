@@ -278,6 +278,9 @@ class FanFsmInputs:
     # --- fan_toggle_rate_limit.py (ACTIVATE_REQUESTED / DEACTIVATE_REQUESTED) ---
     last_toggle_command_time: datetime | None = None
     toggle_min_interval_s: float = _FAN_MIN_TOGGLE_INTERVAL_S_DEFAULT
+    # Issue #1144: a WHF safety stop (sealed house / HVAC mutex) is a hard physical invariant and
+    # is never deferred by the rapid-cycling backstop. Only DEACTIVATE_REQUESTED reads this.
+    rate_limit_bypass: bool = False
 
     # --- fan_drift_reconciliation.py (DRIFT_TICK) ---
     recent_fan_command: bool = False
@@ -454,7 +457,11 @@ def _transition_on_deactivate_requested(current_state: FanLifecycleState, event:
     """_deactivate_fan(): mirror of _transition_on_activate_requested() for the
     opposite direction — see that function's docstring for the shared rationale."""
     inputs = event.inputs
-    outcome, applies_at = decide_fan_toggle_rate_limit(_rate_limit_inputs(inputs, action="deactivate"))
+    if inputs.rate_limit_bypass:
+        # Issue #1144: safety stops bypass the 300 s toggle floor (no deferral window is recorded).
+        outcome, applies_at = FanToggleRateLimitOutcome.ALLOW, None
+    else:
+        outcome, applies_at = decide_fan_toggle_rate_limit(_rate_limit_inputs(inputs, action="deactivate"))
 
     if outcome is FanToggleRateLimitOutcome.ALLOW:
         effective = FanLifecycleInputs(

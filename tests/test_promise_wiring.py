@@ -14,7 +14,7 @@ import importlib
 import logging
 import sys
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -38,6 +38,7 @@ _BOUND = (
     "_tick_household_promises",
     "_evaluate_household_promises",
     "_run_invariant_watchdog",
+    "_ac_whf_overlap_confirmed",
     "_build_state_dict",
     "_async_command_fan_entity",
     "_async_fan_entity_changed",
@@ -139,6 +140,12 @@ class TestPromiseMissIsLoggedNotAlerted:
         c._tick_household_promises()  # must not raise
 
 
+def _overlap_began_a_minute_ago(c):
+    """Issue #1144: production alerts only on an AC/fan overlap of 30 s or more; the journal needs the earlier one."""
+    with patch(f"{COORD_MOD}.dt_util.now", return_value=NOW - timedelta(seconds=60)):
+        c._record_promise_reading()
+
+
 class TestMutexStillAlerts:
     def _wire_dedup(self, c):
         seen: dict[str, tuple] = {}
@@ -155,6 +162,7 @@ class TestMutexStillAlerts:
     def test_p2_notifies_and_emits_with_a_per_invariant_dedup_key(self):
         c = _make_coord(hvac_action="cooling", fan_on=True)
         seen = self._wire_dedup(c)
+        _overlap_began_a_minute_ago(c)
         with _now_patch():
             violations = c._run_invariant_watchdog(hvac_action="cooling")
             c._run_invariant_watchdog(hvac_action="cooling")
@@ -175,6 +183,7 @@ class TestMutexStillAlerts:
     def test_p3_and_p2_dedupe_independently(self):
         c = _make_coord(hvac_action="cooling", fan_on=True, automation_enabled=False)
         self._wire_dedup(c)
+        _overlap_began_a_minute_ago(c)
         with _now_patch():
             c._promise_observe_command("fan", "turn_off", {"entity_id": "switch.whf"}, "fan")
             c._run_invariant_watchdog(hvac_action="cooling")

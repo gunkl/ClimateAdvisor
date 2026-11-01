@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.2"
+VERSION = "0.8.6"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -252,6 +252,10 @@ FAN_MODE_DISABLED = "disabled"
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
 FAN_MODE_HVAC = "hvac_fan"
 FAN_MODE_BOTH = "both"
+# Issue #1144: production ignores an AC/whole-house-fan overlap shorter than this (seconds). The occupant's newest
+# action wins, so a fan pressed while the AC runs always overlaps for the seconds the thermostat takes to report
+# the HVAC-off CA sends; that is not a violation. The same bound as the sealed-house stop. Tests keep 0.
+AC_WHF_OVERLAP_TOLERANCE_S = 30.0
 DEFAULT_FAN_MODE = FAN_MODE_DISABLED
 
 # HVAC fan mode restriction — heat/cool/both (Issue #835). Orthogonal to CONF_FAN_MODE:

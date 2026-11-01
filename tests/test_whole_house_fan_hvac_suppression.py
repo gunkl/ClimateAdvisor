@@ -355,6 +355,8 @@ class TestWindowCloseStopsWholehouseFan:
         engine._fan_active = True
         engine._natural_vent_active = False
         engine._paused_by_door = False
+        # Issue #1144: the sealed-house rule needs a configured sensor (zero sensors: rule does not apply).
+        engine._sensor_check_callback = lambda: False
 
         asyncio.run(engine.handle_all_doors_windows_closed())
 
@@ -374,6 +376,8 @@ class TestWindowCloseStopsWholehouseFan:
         engine._fan_active = True
         engine._natural_vent_active = False
         engine._paused_by_door = False
+        # Issue #1144: the sealed-house rule needs a configured sensor (zero sensors: rule does not apply).
+        engine._sensor_check_callback = lambda: False
 
         asyncio.run(engine.handle_all_doors_windows_closed())
 

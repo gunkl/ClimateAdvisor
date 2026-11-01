@@ -162,6 +162,16 @@ class TestOtherPromiseNumbersAreLooserThanProduction:
     def test_p4_setpoint_reversal_is_looser_than_the_override_adoption_tolerance(self):
         assert NUMBERS.P4_REVERSAL_SETPOINT_F > const.OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
 
+    def test_p4_rule_2_window_covers_production_overlap_tolerance(self):
+        """Issue #1144: the HVAC-off that follows an occupant fan press lands within production's 30 s bound."""
+        assert NUMBERS.P4_RULE2_SUPPRESS_S >= const.AC_WHF_OVERLAP_TOLERANCE_S
+
+    def test_occupant_echo_window_covers_production_own_command_echo_window(self):
+        """Issue #1144: the promise layer never calls a CA fan start 'the occupant' later than production would."""
+        from custom_components.climate_advisor.whf_safety_decision import WHF_OWN_COMMAND_ECHO_S
+
+        assert NUMBERS.OCCUPANT_ECHO_S >= WHF_OWN_COMMAND_ECHO_S
+
     def test_p7_overshoot_allowance_covers_the_largest_default_settling_tolerance(self):
         defaults = [getattr(const, f"DEFAULT_COMFORT_DEADBAND_{d.upper()}_F") for d in DAY_TYPES]
         assert max(defaults) <= NUMBERS.P7_OVERSHOOT_EXPLAINED_F

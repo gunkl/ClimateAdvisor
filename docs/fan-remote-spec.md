@@ -312,6 +312,20 @@ silently dropped. No new predicate was added; a plain manual fan override (start
 physically toggling the fan, not via a remote timer) is unaffected and continues to log at
 its pre-existing level.
 
+### Safety carve-out (Issue #1144)
+
+"Absolute" applies to **comfort** and CA-initiated decisions only. It never overrides the two
+owner safety rules: (1) the whole-house fan never runs on a sealed house (off within 30 s), and
+(2) WHF and HVAC are mutually exclusive, the occupant's newest action wins. A running RF-timer
+fan on a sealed house is stopped by the WHF safety enforcer
+(`AutomationEngine._enforce_whf_safety_locked`), which calls
+`_deactivate_fan(safety=True)`: that call skips the RF-timer-absolute guard above, ends the fan
+override (`_fan_remote_timer_hours` is cleared with it) and its fan-owned grace, and logs an
+INFO `WHF safety stop` line plus a `whf_safety_stop` event. No other path may stop an
+RF-timer fan; the comfort guards above stay as they are. CA also never *starts* the
+whole-house fan on a sealed house (entry gate in `_activate_fan()`). See
+[08-COMPUTATION-REFERENCE.md §9e-H](08-COMPUTATION-REFERENCE.md#h-sealed-house-guard--override-sessions-are-not-exempt-issue-882).
+
 ---
 
 ## Restart Behavior

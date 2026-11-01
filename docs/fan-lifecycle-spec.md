@@ -95,6 +95,10 @@ There is a single `AutomationEngine` instance in production (the dual-engine pro
 
 This is the fan/WHF subsystem's only direct cross-lifecycle read. It does not go through `lifecycle_dispatcher.py`'s pub/sub event channel (unlike the door/window ↔ nat-vent coupling `nat-vent-lifecycle-spec.md`'s "First live disagreement" incident describes) — `_build_fan_fsm_inputs()` reads `self._natural_vent_active` directly off the engine, same canonical-attribute convention the other 3 lifecycle builders already follow (Issue #717's revert rationale: a same-instance emit/consume round-trip can never actually go stale relative to the canonical attribute, so routing through a dispatcher-synced mirror buys nothing).
 
+## Occupant Blower vs. HVAC-Off (Issue #1180)
+
+`_set_hvac_mode("off")` normally asserts thermostat `fan_mode=auto` under `hvac_fan`/`both` (post-heat blowdown, Issues #134/#277). It does not while the occupant's own thermostat-blower override is active (`_occupant_blower_override_active()`): CA turning HVAC off must not stop a blower the occupant asked for. CA's own blower use and the no-override case are unchanged; a WHF press replaces the blower override record (#1133) so it still resets. `_deactivate_fan()` already returns OVERRIDDEN for any active override (except WHF safety stops).
+
 ## Blind-Fan Coverage (Issue #1037)
 
 The fan FSM and `fan_thermostat_check` have no indoor-`None` handling: with indoor unreadable, `STOP_DEACTIVATE` / `STOP_COOLED_TO_FLOOR` cannot fire and the coordinator's reactive checks return early. The 5-minute thermostatic backstop (armed in `_activate_fan` and on reconcile adoption - not for manual/RF-timer fans with no CA session) now also runs `indoor_blind_check()`, which alerts once and ends a CA-owned nat-vent session after 30 min. It deliberately does not touch `_deactivate_fan` for min-runtime / always-on circulation (indoor-independent by design) or economizer sessions (`_economizer_active` would be left stuck; tracked in #1042). No new FSM event kind or composed axis was added; the clock and flags live on `AutomationEngine` (`_indoor_blind_*`), like `_nat_vent_exit_candidate_since`.
@@ -116,6 +120,20 @@ While the dual-engine production/shadow shell existed, `coordinator.py`'s `_upda
 ## Shadow-Coverage Classification
 
 While it existed, `tests/test_shadow_engine_coverage.py`'s AST-based `_TRACKED_FIELDS` registry classified `_activate_fan`/`_deactivate_fan` as `"internal"` — neither needed a `_mirror_to_shadow()` replay call site, since the shadow engine ran its own fan/WHF FSM dispatch internally on every one of its own 16 entry-point calls. That test file, the registry, and the shadow engine it audited were all removed in Phase 6; there is no coverage-classification mechanism for fan/WHF methods today because there is no second engine to classify coverage against.
+
+## Sealed-House Stop: HVAC Restore Waits for the Fan (Issue #1176)
+
+Rule 2 (the whole-house fan and heating/cooling never run together) used to be breached by the rule-1 stop itself: `_deactivate_fan(restore_hvac=sealed)` restored the pre-fan HVAC mode in the same breath as the `fan.turn_off` command, with no look at whether the fan had stopped, and a fan that lags (or ignores) the command ran under a freshly started compressor. Now a sealed-house safety stop (`_enforce_whf_safety_locked`) calls `_deactivate_fan(restore_hvac=False, release_suppression=False, safety=True)` and sets `_whf_restore_pending`; the thermostat is given back by `_complete_whf_safety_release()` (reclassify, via `_release_whf_and_reclassify()`) only when `_whf_safety_release_blocked()` is False:
+
+| Fan reading | Release |
+|---|---|
+| physically on (`_fan_physically_on_for_release()`, the same check `_release_whf_and_reclassify()` uses) | blocked; the enforcer's verify (`WHF_STOP_VERIFY_S`, 12 s) stops it again if it ignored the command |
+| physically off | released at once (same pass if the entity already reads off; otherwise on the fan-state event, the 15 s tick or the verify) |
+| unreadable (command-only fan) | released by the `stop_verify` re-check, i.e. after the verify window has passed; that trigger is never coalesced away |
+
+`request_whf_safety_check()` no longer short-circuits on "fan reads off" while a restore is pending, since that reading is what releases it. A mutex stop (`STOP_MUTEX_FAN`) is unchanged: it never restores. Tests: `tests/test_unreadable_sensors_1181.py::TestRestoreWaitsForTheFanToReadOff`. `_whf_restore_pending` is not persisted; after a restart the startup fan reconcile owns the state.
+
+When the release runs it writes the pre-fan mode back only if `_any_monitored_sensor_holding_open()` is False (Issue #1181, D1): a sensor dark for over 60 s counts closed for the fan (so the stop happens), but if it last read open it still holds the door/window pause, so the release only drops the suppression and the reclassify pauses. The fan-off branch of `reconcile_fan_on_startup()` applies the same check before its stranded-suppression restore.
 
 ## Verification
 

@@ -3,11 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.15] — 2026-11-01
+
+- Fix #1130: turning the whole-house fan on or off at the wall no longer gets undone by Climate Advisor's own status refresh. Your switch-on is recorded as your choice before anything else runs, so the fan keeps running, and your switch-off starts its pause before anything can start the fan again. A sealed house still stops the fan, as before.
+- Fix #1181, #1177, #1176: if a door or window sensor stops responding while its window is open and Climate Advisor has paused heating or cooling, the pause now stays until that sensor reports again or you change the thermostat; before, the silent sensor was read as "closed" and heating or cooling came back on into the open window. Climate Advisor now tells you, on a notification and on the dashboard, when a door or window sensor stops responding and what it is doing about it, one sensor at a time (a second sensor failing while the first is still out is announced too), and the Doors/Windows tile no longer says "all closed" while a sensor cannot be read. If the thermostat itself stops responding while the whole-house fan is running, the notification and dashboard now say Climate Advisor cannot check that the fan and heating or cooling are never on together until the thermostat responds. The whole-house fan safety stop, the household-promise check and the early-cooling guard now all treat a silent sensor the same way, and early cooling also switches on when the fan cannot run because a sensor has been silent for over a minute. After Climate Advisor stops the whole-house fan on a closed-up house, heating or cooling now starts again only once the fan reads off (for a fan whose state cannot be read, after a short re-check), instead of in the same instant. Heating or cooling is also not switched back on when the whole-house fan stops while a door or window reads open, or its sensor last read open and has stopped responding.
+
 ## [0.8.14] — 2026-11-01
 
-- Fix #1156: a change you made on the thermostat is no longer dropped, and heating or cooling is no longer switched off over it, when an unrelated waiting period (for example the few minutes after a window closes) runs out while a window is open again. Your own change's pause still ends the normal way.
-- Fix #1154: Cancel Override now works on a thermostat change that is still waiting for its confirmation, instead of saying there is nothing to cancel.
-- Fix #1135: saving settings or reloading Climate Advisor no longer leaves a stale thermostat check running a few seconds later.
+- Fix #1180: if you turn your thermostat's fan to On for air circulation, Climate Advisor no longer switches it back to Auto when it turns heating or cooling off (for example when a door or window opens, or on a mild day). The fan keeps running until you turn it off. Once your manual-change period ends, the next time Climate Advisor turns heating or cooling off it sets the fan back to Auto, as before.
 
 ## [0.8.12] — 2026-10-31
 

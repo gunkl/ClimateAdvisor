@@ -67,40 +67,6 @@
     "2": "classification_suppressed_paused",
     "3": "paused"
    }
-  },
-  {
-   "scenario": "wakeup_preserves_whf_manual_override",
-   "failing_assertions": [
-    0
-   ],
-   "first_difference": "a0@2026-07-14T06:30 expected hvac_write_blocked_whf_active, real comfort_restored; at 06:00:00 CA turned the person's whole-house fan OFF (fan.turn_off, backstop_30min reconcile) instead of recording fan_manual_override",
-   "evidence": "Log 'fan_entity physical transition off -> on - requesting refresh' runs _async_update_data(), whose untracked-fan backstop reconcile switches the fan off BEFORE _async_fan_entity_changed() records the manual override (the provenance line 'context_confirms_ca=False' is logged after the fan.turn_off). Known production bug Issue #1130; same race as the strict-xfail tests_ha/test_escaped_bugs.py::test_press_is_not_raced_by_immediate_reconcile.",
-   "occupant_view": "The person turns the whole-house fan on at the wall and Climate Advisor switches it off again within the same second; the override and the morning wake-up protection the golden describes never take hold.",
-   "issue_or_justification": "Issue #1130 (open). Replay: python scripts/test.py ha tests_ha/test_goldens_realha.py -k wakeup_preserves_whf_manual_override. Remove this entry when #1130 is fixed (the ratchet will say so).",
-   "class": "P",
-   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
-   "date": "2026-10-30",
-   "issue": 1130,
-   "failing_outcomes": {
-    "0": "comfort_restored"
-   }
-  },
-  {
-   "scenario": "restart_whf_ac_mutex_backstop_race",
-   "failing_assertions": [
-    0
-   ],
-   "first_difference": "a0@2026-08-11T19:05:30 expected hvac_mode_never_commanded, real classification_applied; at 18:59:41 CA turned the person's fan off (fan.turn_off, nat_vent_reconcile_exit) right after external_fan_state_change on",
-   "evidence": "Same Issue #1130 race as wakeup_preserves_whf_manual_override: the fan-entity listener's immediate refresh runs the untracked-fan backstop reconcile first (fan_running_untracked + nat_vent_reconcile_exit at 18:59:41, then fan.turn_off), so no fan_manual_override is recorded and the later restart finds no override to protect.",
-   "occupant_view": "The person starts the whole-house fan while the AC is cooling and CA switches it off at once, then restores the AC setpoint; after a restart nothing of the person's choice survives.",
-   "issue_or_justification": "Issue #1130 (open). Replay: python scripts/test.py ha tests_ha/test_goldens_realha.py -k restart_whf_ac_mutex_backstop_race",
-   "class": "P",
-   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
-   "date": "2026-10-30",
-   "issue": 1130,
-   "failing_outcomes": {
-    "0": "classification_applied"
-   }
   }
  ]
 }

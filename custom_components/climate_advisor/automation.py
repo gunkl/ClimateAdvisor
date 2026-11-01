@@ -272,6 +272,7 @@ from .temperature import (
 from .thermal_lead_time import compute_lead_minutes_from_rate
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
+    WHF_STOP_VERIFY_S,
     SensorReading,
     WhfSafetyAction,
     WhfSafetyInputs,
@@ -1070,8 +1071,9 @@ class AutomationEngineCallbacks:
 
     revisit: Callable[[], Any] | None = None
     sensor_check: Callable[[], bool] | None = None
-    # Issue #1093: True only when >=1 sensor is configured and every one reads a real closed state.
-    sensors_known_closed: Callable[[], bool] | None = None
+    # Issue #1181: True when any sensor reads open, or is dark with its last real reading open (the
+    # pause-ENDING read). None falls back to ``sensor_check``.
+    sensor_hold_check: Callable[[], bool] | None = None
     sensor_debounce_pending: Callable[[], bool] | None = None
     emit_event: Callable[..., None] | None = None
     request_refresh: Callable[[], None] | None = None
@@ -1115,6 +1117,9 @@ class AutomationEngine:
     _occupant_hvac_on_at: datetime | None = None
     _whf_safety_last_stop_at: datetime | None = None
     _whf_safety_seen_off_since_stop: bool = True
+    # Issue #1176: a sealed-house stop's HVAC restore waits for the fan to read physically off.
+    _whf_restore_pending: bool = False
+    _whf_restore_verify_passed: bool = False
     _whf_safety_unenforceable_logged: bool = False
     _whf_safety_observe_logged: bool = False
     # When the occupant last pressed the WHOLE-HOUSE fan (not the thermostat blower); None = no WHF press.
@@ -1128,8 +1133,8 @@ class AutomationEngine:
     _hvac_cmd_fail_since: datetime | None = None
     _hvac_cmd_fail_mode: str | None = None  # last attempted mode of the open failure episode
     _request_refresh_callback: Any | None = None
-    # Issue #1093: class-level default for engines built via object.__new__ in tests.
-    _sensors_known_closed_callback: Any | None = None
+    # Issue #1181: class-level default for engines built via object.__new__ in tests.
+    _sensor_hold_callback: Any | None = None
     # Issue #1120: the pre-cool band the thermostat is holding, and when it was armed (see
     # _pre_cool_band_in_force_now()). Class-level defaults for engines built via object.__new__ in tests.
     _pre_cool_band_in_force: ComfortBand | None = None
@@ -1792,9 +1797,9 @@ class AutomationEngine:
         # Resume-from-pause tracking (Issue #47)
         self._resumed_from_pause: bool = False
         self._sensor_check_callback: Any | None = None  # Set by coordinator: returns True if any sensor open
-        # Issue #1093: Set by coordinator: True only when >=1 sensor is configured and every one reads a
-        # real closed state. None/unset (no coordinator wired) means "unknown", i.e. NOT sealed.
-        self._sensors_known_closed_callback: Any | None = None
+        # Issue #1181: Set by coordinator: True when any sensor reads open or is dark with its last real
+        # reading open (the pause-ENDING read). None/unset falls back to _sensor_check_callback.
+        self._sensor_hold_callback: Any | None = None
         # Issue #504: Set by coordinator: returns True if any currently-open monitored sensor
         # is still within its CONF_SENSOR_DEBOUNCE settle window. None/unset (e.g. tests that
         # don't wire a coordinator) is treated as "not pending", matching pre-#504 behavior.
@@ -1853,7 +1858,7 @@ class AutomationEngine:
         """
         self._revisit_callback = callbacks.revisit
         self._sensor_check_callback = callbacks.sensor_check
-        self._sensors_known_closed_callback = callbacks.sensors_known_closed
+        self._sensor_hold_callback = callbacks.sensor_hold_check
         self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
         self._emit_event_callback = callbacks.emit_event
         self._request_refresh_callback = callbacks.request_refresh
@@ -3352,7 +3357,7 @@ class AutomationEngine:
                 # nothing protects it, so apply the window pause right away instead of waiting up
                 # to one 30-minute scheduled re-check. One task (the bare-task ratchet allows one
                 # here): the notification and the re-check share it.
-                _recheck = self._any_monitored_sensor_open()
+                _recheck = self._any_monitored_sensor_holding_open()
                 _notify_transient = bool(self.config.get(CONF_MANUAL_GRACE_NOTIFY, True))
                 self.hass.async_create_task(
                     self._after_override_self_resolved(notify=_notify_transient, recheck_window=_recheck)
@@ -3490,7 +3495,7 @@ class AutomationEngine:
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
             debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_open(),
+            any_sensor_open=self._any_monitored_sensor_holding_open(),
         ):
             return None, None
         band = self._resolved_comfort_band(classification)
@@ -4023,7 +4028,7 @@ class AutomationEngine:
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
             debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_open(),
+            any_sensor_open=self._any_monitored_sensor_holding_open(),
         ):
             _LOGGER.warning(
                 "_apply_comfort_band: monitored door/window open — refusing to arm active mode "
@@ -5784,7 +5789,7 @@ class AutomationEngine:
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
             debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_open(),
+            any_sensor_open=self._any_monitored_sensor_holding_open(),
         ):
             return  # nat-vent/WHF owns this, or not open / only transiently open — do not pause on a blip
         await self._pause_for_door_window(
@@ -8405,7 +8410,12 @@ class AutomationEngine:
             # it misread the blower phase as "the WHF stopped."
             await self._deactivate_fan(
                 reason=f"{trigger} reconcile — fan confirmed off, releasing any stranded HVAC suppression",
-                restore_hvac=not self._paused_by_door and not recent_hvac_session_ended,
+                # Issue #1181: nor into a door/window that reads open or went dark after last reading open.
+                restore_hvac=(
+                    not self._paused_by_door
+                    and not recent_hvac_session_ended
+                    and not self._any_monitored_sensor_holding_open()
+                ),
                 release_suppression=True,
             )
             return
@@ -9046,7 +9056,7 @@ class AutomationEngine:
             return
 
         # If any contact sensor is still open, re-pause instead of clearing
-        if self._any_monitored_sensor_open():
+        if self._any_monitored_sensor_holding_open():
             _LOGGER.info(
                 "%s grace expired but sensor(s) still open — re-pausing HVAC",
                 source,
@@ -10160,6 +10170,19 @@ class AutomationEngine:
         """
         return bool(self._sensor_check_callback and self._sensor_check_callback())
 
+    def _any_monitored_sensor_holding_open(self) -> bool:
+        """Return True if any monitored sensor must keep a door/window pause alive (Issue #1181, owner decision D1).
+
+        ``_any_monitored_sensor_open()`` plus the dark case: a sensor that went unavailable/unknown/missing
+        after last reading OPEN still counts as open here. This is the read for every decision that ENDS a
+        pause or restores HVAC after one; starting a pause keeps asking ``_any_monitored_sensor_open()`` so a
+        dark sensor never starts one. Falls back to ``_any_monitored_sensor_open()`` when the coordinator wired
+        no hold callback (bare engines in tests, the simulator).
+        """
+        if self._sensor_hold_callback is not None:
+            return bool(self._sensor_hold_callback())
+        return self._any_monitored_sensor_open()
+
     # ── WHF safety enforcer (Issue #1144) ──────────────────────────────────────────────────────
     # Owner rules: (1) the whole-house fan never runs on a sealed house -- off within 30 s even under a
     # manual or RF override; (2) WHF and HVAC are mutually exclusive, the occupant's newest action wins.
@@ -10220,7 +10243,8 @@ class AutomationEngine:
         ground truth when it runs, so it covers them. A trigger arriving while a check is running
         queues the next one, which waits on the decision lock.
         """
-        if self._shut_down or self._whf_safety_queued:
+        # The post-stop verify is never coalesced away: it is what ends a command-only fan's wait (Issue #1176).
+        if self._shut_down or (self._whf_safety_queued and trigger != "stop_verify"):
             return
         if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return
@@ -10229,8 +10253,11 @@ class AutomationEngine:
         physical = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
         if physical is False:
             self._whf_safety_seen_off_since_stop = True
-            return
-        if physical is None and not (self._fan_active or self._fan_override_active):
+        # A sealed-house stop whose HVAC restore is still waiting needs the check to run even though the fan
+        # now reads off (that reading is what releases it) -- Issue #1176.
+        if not self._whf_restore_pending and (
+            physical is False or (physical is None and not (self._fan_active or self._fan_override_active))
+        ):
             return
         self._whf_safety_queued = True
         self._spawn_whf_task(self._run_whf_safety_check(trigger))
@@ -10313,6 +10340,11 @@ class AutomationEngine:
         snap = self._whf_safety_snapshot()
         if snap.fan_on is False:
             self._whf_safety_seen_off_since_stop = True
+        if self._whf_restore_pending:
+            # Issue #1176: the HVAC restore of an earlier sealed-house stop is waiting for the fan to read off.
+            if trigger == "stop_verify":
+                self._whf_restore_verify_passed = True
+            await self._complete_whf_safety_release(trigger=trigger)
         climate_state = self.hass.states.get(self.climate_entity)
         thermostat_mode = climate_state.state if climate_state else None
         if thermostat_mode not in WHF_ACTIVE_HVAC_MODES:
@@ -10389,17 +10421,25 @@ class AutomationEngine:
         )
         result = await self._deactivate_fan(
             reason=reason_text,
-            # Owner principle (Issue #1133): no hand-back. A sealed-house stop restores what the fan paused through
-            # the ordinary restore path (which itself declines while the occupant's own change is protected), then
-            # CA's plan resumes (reclassify below). A mutex stop must NOT restore: the thermostat is already in the
-            # mode the occupant just chose, and a restore would overwrite it.
-            restore_hvac=sealed,
-            release_suppression=True,
+            # Owner principle (Issue #1133): no hand-back. A sealed-house stop gives the thermostat back through
+            # the ordinary release path (reclassify: the right mode AND setpoint), but only once the fan reads
+            # physically off (Issue #1176, rule 2: the fan and heating/cooling never run together) -- so here it
+            # neither restores nor releases; ``_complete_whf_safety_release`` does. A mutex stop must NOT restore:
+            # the thermostat is already in the mode the occupant just chose, and a restore would overwrite it.
+            restore_hvac=False,
+            release_suppression=not sealed,
             emit_event=emit_event,
             safety=True,
         )
+        if sealed and result in (FanCommandResult.EXECUTED, FanCommandResult.ALREADY_IN_STATE):
+            self._whf_restore_pending = True
+            # Nothing was commanded when the fan was already off, so there is no verify window to wait for.
+            self._whf_restore_verify_passed = result is FanCommandResult.ALREADY_IN_STATE
+            self._cancel_fan_thermo_backstop()  # the release this stop used to make also ended the backstop
         if result is FanCommandResult.EXECUTED:
             self._after_whf_safety_stop(result, sealed=sealed, reason=reason_text, trigger=trigger)
+        if self._whf_restore_pending:
+            await self._complete_whf_safety_release(trigger=trigger)
         return result
 
     async def _observe_only_whf_notice(self, trigger: str) -> None:
@@ -10467,9 +10507,8 @@ class AutomationEngine:
         if self._natural_vent_active:
             self._end_nat_vent_session(result)
         self._end_fan_override_and_grace(reason="whf_safety_stop", keep_grace=not sealed)
-        # Sealed: reclassify (the right mode AND setpoint now) instead of a blind _pre_fan_hvac_mode restore.
-        if sealed and self._reclassify_callback:
-            self._reclassify_callback()
+        # Sealed: the restore + reclassify waits for the fan to read physically off (Issue #1176); the caller
+        # asks ``_complete_whf_safety_release`` right after this, and the verify below asks again.
 
         # Stops within 10 minutes of each other belong to one episode: notify once per episode, and count
         # DISTINCT stops (fan observed off since the previous stop) for the anti-oscillation alert.
@@ -10504,7 +10543,73 @@ class AutomationEngine:
             )
             _LOGGER.warning("WHF safety anti-oscillation alert: stops_in_10min=%d trigger=%s", len(stops), trigger)
         # A stop that did not take is retried by this verify; the 15 s tick is the second line.
-        self._schedule_whf_safety_timer("_whf_safety_verify_cancel", 12.0, "stop_verify")
+        self._schedule_whf_safety_timer("_whf_safety_verify_cancel", WHF_STOP_VERIFY_S, "stop_verify")
+
+    def _fan_physically_on_for_release(self) -> bool:
+        """True while the fan reads physically on -- the one check every WHF suppression release defers to.
+
+        Shared by ``_release_whf_and_reclassify`` and the post-safety-stop release so they cannot disagree
+        about "still running". Unreadable (command-only, unavailable entity) is not "on" here.
+        """
+        return bool(self._get_fan_physical_state_callback and self._get_fan_physical_state_callback())
+
+    def _whf_safety_release_blocked(self) -> bool:
+        """True while a sealed-house stop's HVAC release must keep waiting (Issue #1176, rule 2).
+
+        Blocked while the fan still reads physically on, and -- for a fan whose physical state cannot be read --
+        until the stop's verify window (``WHF_STOP_VERIFY_S``) has passed. False when no such stop is waiting.
+        """
+        if not self._whf_restore_pending:
+            return False
+        if self._fan_physically_on_for_release():
+            return True
+        physical = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
+        return physical is None and not self._whf_restore_verify_passed
+
+    async def _complete_whf_safety_release(self, *, trigger: str) -> bool:
+        """Give the thermostat back after a sealed-house safety stop once the fan is confirmed off (Issue #1176).
+
+        Previously the stop restored HVAC in the same breath as the off command, with no look at whether the
+        fan had actually stopped -- heating or cooling could start under a still-spinning fan. Now the release
+        waits (``_whf_safety_release_blocked``); the verify timer and every fan/tick check re-asks. When it runs
+        it is the same ordinary restore as before (``_deactivate_fan`` writes back the pre-fan mode unless the
+        occupant's own change is protected, then the day is reclassified). Returns True when the release ran.
+        """
+        if not self._whf_restore_pending:
+            return False
+        if self._whf_safety_release_blocked():
+            # DEBUG: re-asked on every 15 s tick while a stuck fan keeps reading on (the stop itself is logged).
+            _LOGGER.debug(
+                "WHF safety: HVAC restore held until the fan reads off"
+                " (trigger=%s fan_physically_on=%s verify_passed=%s)",
+                trigger,
+                self._fan_physically_on_for_release(),
+                self._whf_restore_verify_passed,
+            )
+            return False
+        self._whf_restore_pending = False
+        self._whf_restore_verify_passed = False
+        # Issue #1181 (owner decision D1): "sealed" here can mean a sensor has been dark for over a minute (the
+        # enforcer then counts it closed so a dead sensor never keeps the fan running). If that sensor last read
+        # OPEN it still holds the door/window pause: release the fan's suppression but write no heat/cool mode;
+        # the reclassify below pauses for the held-open window instead.
+        held_open = self._any_monitored_sensor_holding_open()
+        _LOGGER.info(
+            "WHF safety: fan confirmed off after the sealed-house stop — %s (trigger=%s)",
+            "a door/window is held open, not restoring HVAC" if held_open else "restoring HVAC",
+            trigger,
+        )
+        if self._pre_fan_hvac_mode is not None:
+            await self._deactivate_fan(
+                reason="whole-house fan confirmed off after the sealed-house stop",
+                restore_hvac=not held_open,
+                release_suppression=True,
+                emit_event=False,
+                safety=True,
+            )
+        if self._reclassify_callback:
+            self._reclassify_callback()
+        return True
 
     def _end_fan_override_and_grace(self, *, reason: str, keep_grace: bool = False) -> None:
         """End the fan override and the grace period it started (Issue #1144, owner decision 4).
@@ -10668,7 +10773,7 @@ class AutomationEngine:
         self._arm_comfort_family("cooling", dt_util.now())
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
-        sensor_open = self._any_monitored_sensor_open()
+        sensor_open = self._any_monitored_sensor_holding_open()
         # emit_event=False on both branches: the caller's own specific exit event
         # (nat_vent_comfort_floor_exit, nat_vent_outdoor_rise_exit, etc.) is emitted
         # below, by this method, once the
@@ -11374,7 +11479,7 @@ class AutomationEngine:
             fan_mode=str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             within_planned_window=self._is_within_planned_window_period(),
-            any_sensor_open=self._any_monitored_sensor_open(),
+            any_sensor_open=self._any_monitored_sensor_holding_open(),
             sensor_debounce_pending=bool(self._sensor_debounce_pending),
             override_matches_current_decision=self._override_matches_current_decision(self._current_classification),
             grace_source=self._last_resume_source or "automation",
@@ -11638,7 +11743,7 @@ class AutomationEngine:
             target_setpoint_f=target_setpoint_f,
             tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
             within_planned_window=self._is_within_planned_window_period(),
-            any_sensor_open=self._any_monitored_sensor_open(),
+            any_sensor_open=self._any_monitored_sensor_holding_open(),
             # Issue #757 Phase 6 Step 3 correction: for GRACE_TIMER_EXPIRED specifically,
             # _cancel_grace_timers_action() already set _last_resume_source=None before
             # this dispatch, so this read is always "automation" for that kind. Confirmed
@@ -12885,32 +12990,27 @@ class AutomationEngine:
         return "heat" if resolved_family == "heating" else "cool"
 
     def _whf_house_sealed_with_known_sensors(self) -> bool:
-        """True only when at least one monitored door/window sensor is configured AND every one reads closed.
+        """True when the whole-house fan cannot run: the enforcer would refuse to start it / stop it as sealed.
 
-        Issue #1093. "Sealed" must be a positive, known state: no sensors configured, or any sensor
-        unavailable/unknown/missing (a Zigbee hub down), is unknown -- not sealed -- so the compressor is
-        never handed a house whose windows may be open. Read from the coordinator's sensors-known-closed
-        callback (``_all_sensors_known_closed()``, next to ``_state_is_open``); without it wired this is
-        False. This is deliberately NOT ``not _any_monitored_sensor_open()``: that predicate treats an
-        unreadable sensor as not-open, which is right for the WHF safety stop
-        (``_enforce_whf_safety_locked`` over ``whf_safety_decision.house_is_sealed``, Issue #1144: an
-        offline sensor counts open for 60 s, then closed, so a dead sensor can never keep a fan running on a
-        sealed house) and wrong here. The two agree whenever every sensor is readable; they differ only for
-        an unreadable sensor, each in its own safe direction (never hand the compressor an unknown house;
-        never keep a fan running on one).
+        Issue #1093 introduced this as "every sensor reads a real closed state". Issue #1177 (owner decision D3)
+        makes "the fan cannot run" reason enough to pre-cool: it is now the enforcer's OWN predicate
+        (``_whf_start_blocked_by_sealed_house`` -> ``whf_safety_decision.house_is_sealed``): at least one sensor
+        configured and none counts open, where an unreadable sensor counts open for 60 s and closed after. So a
+        dead sensor that stops the fan also arms the ceiling guard, and a sensor that blipped for a few seconds
+        does not. One definition, no parallel copy. (The name is historical.)
         """
-        return bool(self._sensors_known_closed_callback and self._sensors_known_closed_callback())
+        return self._whf_start_blocked_by_sealed_house()
 
     def _whf_unsealed_reason(self) -> str:
         """Why a WHF/BOTH home is not treated as sealed (log text only; Issue #1093).
 
-        Order matters: no sensors configured, a sensor open, otherwise a sensor whose state cannot be read.
+        Order matters: no sensors configured, a sensor open, otherwise a sensor whose state cannot be read yet.
         """
         if not self.config.get("door_window_sensors"):
             return "no door/window sensors configured"
         if self._any_monitored_sensor_open():
             return "a door/window is open"
-        return "a door/window sensor state is unknown or unavailable"
+        return "a door/window sensor was unreadable for under a minute"
 
     def _ceiling_threshold(self, comfort_cool: float | None, *, house_sealed: bool = False) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.
@@ -12928,10 +13028,10 @@ class AutomationEngine:
         stays armed per Issue #249), so the ceiling is a valid handoff signal there.
 
         Issue #1093: that WHF reasoning only holds while a window is open. With ``house_sealed=True``
-        (``_whf_house_sealed_with_known_sensors()``: sensors configured and all closed) the WHF cannot
-        run -- it never runs on a sealed house -- so the home behaves like a non-WHF home and gets the
-        same ceiling. Only the ODE ceiling guard passes it; the nat-vent gate (``nat_vent_gate.py``,
-        a window-open decision) and the forecast walk keep the archetype-only ``None``.
+        (``_whf_house_sealed_with_known_sensors()``: the enforcer's own "the fan cannot run" predicate,
+        Issue #1177) the WHF cannot run -- it never runs on a sealed house -- so the home behaves like a
+        non-WHF home and gets the same ceiling. Only the ODE ceiling guard passes it; the nat-vent gate
+        (``nat_vent_gate.py``, a window-open decision) and the forecast walk keep the archetype-only ``None``.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if not house_sealed and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -13433,7 +13533,7 @@ class AutomationEngine:
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
             debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_open(),
+            any_sensor_open=self._any_monitored_sensor_holding_open(),
         ):
             return "open_sensor"
         return None
@@ -13916,8 +14016,13 @@ class AutomationEngine:
                 reason,
             )
             return
-        if self._get_fan_physical_state_callback and self._get_fan_physical_state_callback():
+        if self._fan_physically_on_for_release():
             _LOGGER.debug("WHF release-and-reclassify skipped (%s) — fan still physically on", reason)
+            return
+        if self._whf_restore_pending:
+            # Issue #1176: a sealed-house safety stop owns this release (``_complete_whf_safety_release``), which
+            # waits for the fan to be confirmed off and then restores the pre-fan mode and reclassifies.
+            _LOGGER.debug("WHF release-and-reclassify skipped (%s) — a safety-stop restore is pending", reason)
             return
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().

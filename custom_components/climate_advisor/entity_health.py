@@ -54,6 +54,7 @@ _UNAVAILABLE_STATES = UNAVAILABLE_STATES  # back-compat alias; rule lives in con
 DOOR_WINDOW_SENSORS_CONFIG_KEY = "door_window_sensors"
 DOOR_WINDOW_SENSOR_FRIENDLY_NAME = "Door/window sensor"
 DOOR_WINDOW_SENSOR_CRITICALITY = "degraded"
+THERMOSTAT_CONFIG_KEY = "climate_entity"
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,54 @@ class EntityHealthIssue:
     friendly_name: str
     criticality: str  # "critical" | "degraded" | "optional"
     status: str  # "missing" (state is None) | "unavailable" (state exists but unavailable/unknown)
+    # What Climate Advisor is doing about it, in the occupant's terms (Issue #1181). Filled in by the
+    # coordinator (``entity_health_consequence``); empty keeps the generic "may not control your HVAC" text.
+    detail: str = ""
+
+    @property
+    def state_key(self) -> str:
+        """Key of this issue's transition/debounce slot: one per entity, not one per config key.
+
+        ``door_window_sensors`` is a list, so every sensor needs its own slot -- otherwise a second sensor that
+        fails during the first one's outage is never announced (Issue #1181).
+        """
+        if self.config_key == DOOR_WINDOW_SENSORS_CONFIG_KEY:
+            return f"{self.config_key}:{self.entity_id}"
+        return self.config_key
+
+
+def entity_health_consequence(
+    issue: EntityHealthIssue, *, door_last_reading: str | None = None, whf_running: bool = False
+) -> str:
+    """The one place that words what Climate Advisor does while an entity is unreadable (Issue #1181).
+
+    Door/window sensors (owner rule 3, decision D1): a sensor that last read open keeps heating and cooling
+    paused; one that last read closed (or never reported) counts as closed. Thermostat (rule 2, decision D5):
+    while the whole-house fan runs, "fan and heating/cooling never together" cannot be checked. Anything else
+    returns "" and keeps the generic text. This module still never changes what automation does.
+    """
+    if issue.config_key == DOOR_WINDOW_SENSORS_CONFIG_KEY:
+        if door_last_reading == "open":
+            return (
+                "It last read open, so heating and cooling stay paused until it reports again "
+                "or you change the thermostat."
+            )
+        if door_last_reading == "closed":
+            return (
+                "It last read closed, so Climate Advisor treats it as closed. "
+                "If that door or window is actually open, heating or cooling may run."
+            )
+        return (
+            "It hasn't reported since Climate Advisor started, so Climate Advisor treats it as closed. "
+            "If that door or window is actually open, heating or cooling may run."
+        )
+    if issue.config_key == THERMOSTAT_CONFIG_KEY and whf_running:
+        return (
+            "The whole-house fan is running, and Climate Advisor can't check that the fan and heating/cooling "
+            "are never on together until the thermostat responds. Turn the heating or cooling off yourself "
+            "if it is on."
+        )
+    return ""
 
 
 def _always_relevant(_config: dict) -> bool:

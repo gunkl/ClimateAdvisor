@@ -89,9 +89,13 @@ class TestRestartFlood:
     def test_real_close_open_to_closed_proceeds(self):
         assert _run(_make(live="off"), _event("on", "off")) == 1
 
-    def test_open_to_unavailable_still_processed(self):
-        """open -> unavailable (an unavailable sensor reads closed) is the first leg and must run."""
-        assert _run(_make(live="unavailable"), _event("on", "unavailable")) == 1
+    def test_open_to_unavailable_holds_the_pause(self):
+        """open -> unavailable still runs the handler, but the dark sensor last read open so nothing resumes.
+
+        Issue #1181: this used to resume HVAC (an unavailable sensor read closed) with the window still open.
+        The real close afterwards (test_real_close_open_to_closed_proceeds) still resumes.
+        """
+        assert _run(_make(live="unavailable"), _event("on", "unavailable")) == 0
 
     def test_restart_while_paused_still_clears(self):
         """A pause persisted across the restart must be cleared by the re-reported close."""

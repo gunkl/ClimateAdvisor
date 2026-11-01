@@ -199,11 +199,20 @@ class TestFromGraceProtecting:
         assert t.to_state == _PENDING_PROTECTING
         assert t.outcome == "detected"
 
-    def test_manual_override_during_pause_noop_already_protecting(self):
-        t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE))
+    def test_manual_override_during_pause_lands_pending_under_a_protecting_grace(self):
+        """Issue #1158: a fan-override grace protects with no thermostat change behind it; the occupant's press on
+        the door/window-paused thermostat must become a pending confirmation, not vanish."""
+        t = transition(
+            _IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE, confirm_seconds=600.0)
+        )
+        assert t.to_state == _PENDING_PROTECTING
+        assert t.outcome == "override_confirmation_started"
+
+    def test_manual_override_during_pause_confirm_disabled_stays_protecting(self):
+        t = transition(
+            _IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE, confirm_seconds=0.0)
+        )
         assert t.to_state == _IDLE_PROTECTING
-        assert t.outcome == "noop_already_protecting"
-        assert not t.changed
 
     def test_dashboard_resume_noop_already_protecting(self):
         t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.DASHBOARD_RESUME))
@@ -214,6 +223,22 @@ class TestFromGraceProtecting:
         t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED))
         assert t.to_state == _IDLE_PROTECTING
         assert t.outcome == "noop_already_protecting"
+
+    def test_confirm_expired_pending_confirms_and_ends_pending(self):
+        t = transition(
+            _PENDING_PROTECTING,
+            _ev(OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED, current_mode="heat", classification_mode="cool"),
+        )
+        assert t.to_state == _IDLE_PROTECTING
+        assert t.outcome == "confirm"
+
+    def test_confirm_expired_pending_self_resolves_and_keeps_the_running_grace(self):
+        t = transition(
+            _PENDING_PROTECTING,
+            _ev(OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED, current_mode="heat", classification_mode="heat"),
+        )
+        assert t.to_state == _IDLE_PROTECTING
+        assert t.outcome == "discard_self_resolved"
 
 
 class TestFromGraceUnprotected:
@@ -271,10 +296,14 @@ class TestFromGraceUnprotected:
         assert t.outcome == "noop_unprotected_grace"
         assert not t.changed
 
-    def test_manual_override_during_pause_noop_unprotected(self):
-        t = transition(_IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE))
-        assert t.to_state == _IDLE_UNPROTECTED
-        assert t.outcome == "noop_unprotected_grace"
+    def test_manual_override_during_pause_lands_pending_under_an_unprotected_grace(self):
+        """Issue #1158 (symmetry): the door/window FSM has PAUSED_DURING_GRACE, so a press on a paused thermostat
+        can also arrive while an automation/fan-off grace runs."""
+        t = transition(
+            _IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE, confirm_seconds=600.0)
+        )
+        assert t.to_state == _PENDING_UNPROTECTED
+        assert t.outcome == "override_confirmation_started"
 
     def test_dashboard_resume_noop_unprotected(self):
         t = transition(_IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.DASHBOARD_RESUME))

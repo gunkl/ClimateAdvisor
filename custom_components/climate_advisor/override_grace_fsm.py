@@ -210,6 +210,13 @@ class OverrideGraceTransition:
         return self.from_state != self.to_state
 
 
+# The two kinds that start a thermostat-change confirmation (Issue #1158: both must land the same way from
+# a running grace, protecting or not).
+_DETECTION_KINDS = frozenset(
+    {OverrideGraceFsmEventKind.OVERRIDE_DETECTED, OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE}
+)
+
+
 def _land_after_detection(inputs: OverrideGraceFsmInputs, current_grace: GraceState) -> OverrideGraceLifecycleState:
     """Shared landing logic for OVERRIDE_DETECTED / OVERRIDE_SUPERSEDED /
     MANUAL_OVERRIDE_DURING_PAUSE — all three route through
@@ -330,19 +337,36 @@ def _transition_from_grace_protecting(
         next_state = (OverrideConfirmState.IDLE, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome.value, inputs.now)
 
-    if kind == OverrideGraceFsmEventKind.OVERRIDE_DETECTED:
+    if kind in _DETECTION_KINDS:
         # A second, independent override candidate arrives while a DIFFERENT
         # override's grace already protects (e.g. a fan-only override's grace
         # while a thermostat-mode override is separately being detected).
+        # Issue #1158: that includes the occupant's heat/cool press on a door/window-paused
+        # thermostat while a whole-house-fan grace (which protects with no thermostat override
+        # behind it, FAN_OVERRIDE_DETECTED) is running -- the pause and a protecting grace DO
+        # coexist, so this is not a no-op: the press must become a pending confirmation.
         next_state = _land_after_detection(inputs, GraceState.ACTIVE_PROTECTING_OVERRIDE)
-        return OverrideGraceTransition(current_state, next_state, kind, "detected", inputs.now)
+        outcome = "detected" if kind == OverrideGraceFsmEventKind.OVERRIDE_DETECTED else "override_confirmation_started"
+        return OverrideGraceTransition(current_state, next_state, kind, outcome, inputs.now)
 
-    # MANUAL_OVERRIDE_DURING_PAUSE / DASHBOARD_RESUME: both guard on
-    # paused_by_door, unreachable while already protecting an active override
-    # (production cannot be simultaneously paused-by-door and override-active —
-    # pause clears before override confirmation starts). OVERRIDE_CONFIRM_EXPIRED:
-    # unreachable — this state's confirm is already IDLE by construction (grace
-    # only becomes ACTIVE_PROTECTING_OVERRIDE via a completed confirmation).
+    if kind == OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED and current_state[0] == OverrideConfirmState.PENDING:
+        # Issue #1158: a confirmation started under this grace (above) must be able to end, or
+        # ``_override_confirm_pending`` would stay True for good. Same split as the no-grace and
+        # unprotected branches: CONFIRM re-protects with a fresh grace, a self-resolve leaves the
+        # running grace untouched.
+        path = decide_override_confirm_path(
+            setpoint_override=inputs.setpoint_override,
+            current_mode=inputs.current_mode or "unknown",
+            classification_mode=inputs.classification_mode,
+        )
+        if path == OverrideConfirmPathOutcome.CONFIRM and not inputs.grace_would_start:
+            next_state = (OverrideConfirmState.IDLE, GraceState.NONE)
+        else:
+            next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
+        return OverrideGraceTransition(current_state, next_state, kind, path.value, inputs.now)
+
+    # DASHBOARD_RESUME: guards on paused_by_door and is a no-op while a protecting grace runs.
+    # OVERRIDE_CONFIRM_EXPIRED with nothing pending: unreachable.
     return OverrideGraceTransition(current_state, current_state, kind, "noop_already_protecting", inputs.now)
 
 
@@ -358,12 +382,14 @@ def _transition_from_grace_unprotected(
         next_state = (OverrideConfirmState.IDLE, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome_str, inputs.now)
 
-    if kind == OverrideGraceFsmEventKind.OVERRIDE_DETECTED:
+    if kind in _DETECTION_KINDS:
         # A possible override is detected while a non-override grace (fan-off,
         # window-close, dashboard-resume) is running — independent flags, no
-        # mutual guard between them.
+        # mutual guard between them. Issue #1158: includes a press on a paused thermostat
+        # (the door/window FSM has a PAUSED_DURING_GRACE state, so the two do coexist).
         next_state = _land_after_detection(inputs, GraceState.ACTIVE_UNPROTECTED)
-        return OverrideGraceTransition(current_state, next_state, kind, "detected", inputs.now)
+        outcome = "detected" if kind == OverrideGraceFsmEventKind.OVERRIDE_DETECTED else "override_confirmation_started"
+        return OverrideGraceTransition(current_state, next_state, kind, outcome, inputs.now)
 
     if kind == OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED:
         if confirm != OverrideConfirmState.PENDING:
@@ -402,11 +428,7 @@ def _transition_from_grace_unprotected(
         return OverrideGraceTransition(current_state, next_state, kind, outcome.value, inputs.now)
 
     # OVERRIDE_SUPERSEDED: requires an active override to supersede, not
-    # reachable while unprotected. MANUAL_OVERRIDE_DURING_PAUSE / DASHBOARD_RESUME:
-    # both guard on paused_by_door — orthogonal to this grace running, but
-    # production never reaches door/window pause while a non-override grace from
-    # a DIFFERENT trigger (fan-off) is simultaneously active in the scenarios
-    # traced for this phase; modeled as a defensive no-op rather than assumed.
+    # reachable while unprotected. DASHBOARD_RESUME: guards on paused_by_door; defensive no-op.
     return OverrideGraceTransition(current_state, current_state, kind, "noop_unprotected_grace", inputs.now)
 
 

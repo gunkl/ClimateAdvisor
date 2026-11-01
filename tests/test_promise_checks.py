@@ -73,7 +73,7 @@ def events(*items):
     return [mark_from_event(at(m), t, p) for m, t, p in items]
 
 
-def make_input(readings=(), commands=(), marks=(), now=None) -> PromiseInput:
+def make_input(readings=(), commands=(), marks=(), now=None, notices=()) -> PromiseInput:
     readings = tuple(sorted(readings, key=lambda r: r.ts))
     marks = tuple(sorted(marks, key=lambda m: m.ts))
     if now is None:
@@ -86,6 +86,7 @@ def make_input(readings=(), commands=(), marks=(), now=None) -> PromiseInput:
         commands=tuple(commands),
         marks=marks,
         episodes=derive_episodes(marks, readings),
+        observe_notices=tuple(notices),
     )
 
 
@@ -105,8 +106,8 @@ class TestRegistry:
     def test_promise_five_has_a_second_clause(self):
         assert [p.label for p in PROMISES if p.number == 5] == ["5", "5b"]
 
-    def test_only_the_mutex_alerts_at_home_today(self):
-        assert [p.key for p in PROMISES if p.home_level == LEVEL_ALERT] == ["ac_whf_mutex"]
+    def test_only_the_mutex_and_the_sealed_house_promise_alert_at_home_today(self):
+        assert [p.key for p in PROMISES if p.home_level == LEVEL_ALERT] == ["ac_whf_mutex", "whf_sealed"]
 
     def test_unknown_scope_is_rejected(self):
         with pytest.raises(ValueError):
@@ -413,6 +414,71 @@ class TestP2AcWhfMutex:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# P9 whf_sealed  (#1144: owner rule 1 -- the whole-house fan never runs on a sealed house)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestP9WhfSealed:
+    WHF = PromiseConfig(fan_mode=FAN_MODE_WHOLE_HOUSE)
+
+    def test_negative_control_fan_runs_on_a_sealed_house_for_a_minute(self):
+        inp = make_input([rd(0, fan_on=True, contacts_open=False), rd(1, fan_on=True, contacts_open=False)])
+        (h,) = hits_for("whf_sealed", inp, self.WHF)
+        assert h.kind == "state" and "closed" in h.detail
+
+    def test_negative_control_the_incident_55_minutes(self):
+        rs = [rd(m, fan_on=True, contacts_open=False) for m in range(0, 56, 5)]
+        assert len(hits_for("whf_sealed", make_input(rs), self.WHF)) == 1
+
+    def test_twin_a_short_run_inside_the_settle_and_grace_is_fine(self):
+        inp = make_input([rd(0, fan_on=True, contacts_open=False), rd(0.5, fan_on=False, contacts_open=False)])
+        assert hits_for("whf_sealed", inp, self.WHF) == []
+
+    def test_twin_a_window_is_open(self):
+        rs = [rd(m, fan_on=True, contacts_open=True) for m in range(0, 30, 5)]
+        assert hits_for("whf_sealed", make_input(rs), self.WHF) == []
+
+    def test_twin_zero_sensors_the_rule_does_not_apply(self):
+        rs = [rd(m, fan_on=True, contacts_open=None) for m in range(0, 30, 5)]
+        assert hits_for("whf_sealed", make_input(rs), self.WHF) == []
+
+    def test_twin_hvac_blower_install_is_out_of_scope(self):
+        rs = [rd(m, fan_on=True, contacts_open=False) for m in range(0, 30, 5)]
+        assert hits_for("whf_sealed", make_input(rs), PromiseConfig(fan_mode=FAN_MODE_HVAC)) == []
+
+    def test_twin_fan_off(self):
+        rs = [rd(m, fan_on=False, contacts_open=False) for m in range(0, 30, 5)]
+        assert hits_for("whf_sealed", make_input(rs), self.WHF) == []
+
+    def test_a_window_opening_ends_the_run(self):
+        rs = [rd(0, fan_on=True, contacts_open=False), rd(0.5, fan_on=True, contacts_open=True)]
+        assert hits_for("whf_sealed", make_input(rs), self.WHF) == []
+
+    def test_twin_observe_only_and_the_occupant_was_notified_is_accepted(self):
+        """Owner decision 1: with automation off CA cannot stop the fan; the promise there is 'you were told'."""
+        rs = [rd(m, fan_on=True, contacts_open=False) for m in range(0, 6)]
+        notices = ((at(0.3), None),)
+        assert hits_for("whf_sealed", make_input(rs, notices=notices), self.WHF) == []
+
+    def test_negative_control_no_notice_mark_means_the_run_is_still_a_miss(self):
+        rs = [rd(m, fan_on=True, contacts_open=False) for m in range(0, 6)]
+        assert len(hits_for("whf_sealed", make_input(rs), self.WHF)) == 1
+
+    def test_twin_a_long_run_whose_start_aged_out_is_still_the_noticed_one(self):
+        """The 3 h window slid past the run start and the notice: the span still covers the surviving tail."""
+        rs = [rd(m, fan_on=True, contacts_open=False) for m in range(20, 60, 5)]
+        notices = ((at(12.0), None),)
+        assert hits_for("whf_sealed", make_input(rs, notices=notices), self.WHF) == []
+
+    def test_a_notice_from_an_earlier_episode_does_not_excuse_a_later_run(self):
+        rs = [rd(0, fan_on=True, contacts_open=True)] + [rd(m, fan_on=True, contacts_open=False) for m in range(10, 16)]
+        notices = ((at(0.3), at(1.0)),)  # that episode ended (a window opened) before the later run began
+        assert len(hits_for("whf_sealed", make_input(rs, notices=notices), self.WHF)) == 1
+
+    def test_registered_hard_in_tests_and_alert_at_home(self):
+        spec = next(p for p in PROMISES if p.key == "whf_sealed")
+        assert spec.test_severity == SEVERITY_HARD and spec.home_level == LEVEL_ALERT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # P3 observe_only_silence  (#1108; family #589, #1102, #1109)
 # ─────────────────────────────────────────────────────────────────────────────
 class TestP3ObserveOnlySilence:
@@ -583,6 +649,50 @@ class TestP4OverrideRespected:
         inp = _thermostat_override(commands=[cmd(5.5, mode="off")])
         (h,) = hits_for("override_respected", inp)
         assert "25 min before your manual change was due to end" in h.detail
+
+
+class TestP4Rule2FanPressEndsThermostatOverride:
+    """Issue #1144 (owner rule 2): the occupant's NEWER fan press legitimately ends their thermostat change.
+
+    Occupant story: you set heat, then switch the whole-house fan on. The fan wins; Climate Advisor turns the heat
+    off. That must not read as Climate Advisor undoing your thermostat change. A CA-initiated off with no fan press
+    from you still must.
+    """
+
+    SUPERSEDED = [(5, "grace_cancelled", {"reason": "superseded", "trigger": "manual", "protects_override": True})]
+
+    def _history(self, *, occupant_fan_press: bool, ca_off: bool = True, ca_fan_cmd: bool = False):
+        rs = [
+            rd(-1, hvac_mode="cool"),
+            rd(0, hvac_mode="heat", hvac_action="heating", setpoint_f=70.0),
+            rd(4, hvac_mode="heat", hvac_action="heating", setpoint_f=70.0, fan_on=False),
+            rd(5, hvac_mode="off", hvac_action="off", setpoint_f=70.0, fan_on=occupant_fan_press),
+        ]
+        cmds = [cmd(5, mode="off")] if ca_off else []
+        if ca_fan_cmd:
+            cmds.append(cmd(5, target="fan", service="turn_on", fan_on=True, mode=None))
+        return _thermostat_override(extra_events=self.SUPERSEDED, commands=cmds, readings=rs)
+
+    def test_the_occupants_newer_fan_press_with_the_rule_2_off_is_a_legitimate_ending(self):
+        assert hits_for("override_respected", self._history(occupant_fan_press=True)) == []
+
+    def test_a_ca_off_with_no_occupant_fan_press_is_still_a_miss(self):
+        hits = hits_for("override_respected", self._history(occupant_fan_press=False))
+        assert hits, "CA switching HVAC off on its own must still be reported"
+
+    def test_a_fan_climate_advisor_started_itself_does_not_excuse_it(self):
+        hits = hits_for("override_respected", self._history(occupant_fan_press=True, ca_fan_cmd=True))
+        assert hits, "CA's own fan start is not an occupant action (owner decision 7)"
+
+    def test_a_fan_press_before_the_override_does_not_excuse_a_later_off(self):
+        rs = [
+            rd(-3, hvac_mode="cool", fan_on=False),
+            rd(-2, hvac_mode="cool", fan_on=True),
+            rd(0, hvac_mode="heat", hvac_action="heating", setpoint_f=70.0, fan_on=True),
+            rd(5, hvac_mode="off", hvac_action="off", setpoint_f=70.0, fan_on=True),
+        ]
+        inp = _thermostat_override(extra_events=self.SUPERSEDED, commands=[cmd(5, mode="off")], readings=rs)
+        assert hits_for("override_respected", inp), "the fan press must be newer than the thermostat change"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -798,3 +908,23 @@ class TestPromiseConfig:
         t = datetime(2026, 7, 15, 21, 30)  # inside the hour before bedtime
         assert cfg.floor_hi(t) == 70 and cfg.floor_lo(t) == 64
         assert cfg.ceiling_lo(t) == 74 and cfg.ceiling_hi(t) == 78
+
+
+class TestP2ObserveOnly:
+    """Issue #1144: with automation off CA commands nothing, so an AC/fan overlap is not its failure."""
+
+    WHF = PromiseConfig(fan_mode=FAN_MODE_WHOLE_HOUSE)
+
+    def _inp(self, *, automation_enabled):
+        return make_input(
+            [
+                rd(0, hvac_action="cooling", fan_on=True, automation_enabled=automation_enabled),
+                rd(1, hvac_action="cooling", fan_on=True, automation_enabled=automation_enabled),
+            ]
+        )
+
+    def test_twin_automation_off_overlap_is_not_a_miss(self):
+        assert hits_for("ac_whf_mutex", self._inp(automation_enabled=False), self.WHF) == []
+
+    def test_negative_control_automation_on_overlap_is_still_a_miss(self):
+        assert len(hits_for("ac_whf_mutex", self._inp(automation_enabled=True), self.WHF)) == 1

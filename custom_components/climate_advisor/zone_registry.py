@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
-from .const import DOMAIN
+from .const import CONF_FAN_ENTITY, CONF_FAN_MODE, DOMAIN, FAN_MODE_BOTH, FAN_MODE_WHOLE_HOUSE
 
 if TYPE_CHECKING:
     from .coordinator import ClimateAdvisorCoordinator
@@ -185,6 +185,30 @@ def default_briefing_notifications_enabled(hass: HomeAssistant, entry_id: str | 
     if not existing:
         return True
     return existing[0].entry_id == entry_id
+
+
+def fan_entity_owned_by_other_zone(hass: HomeAssistant, fan_entity: str | None, entry_id: str | None = None) -> bool:
+    """Whether another Climate Advisor zone already controls this whole-house fan entity.
+
+    Issue #1144 (owner decision 9): a whole-house fan shared across zones is not allowed -- two
+    engines commanding one fan cannot honour "off within 30 s on a sealed house" or the WHF/HVAC
+    mutex coherently. Reads only this integration's own config entries (HA boundary). Only zones
+    that themselves use a whole-house fan mode count; a blower-only zone never commands the fan
+    entity. ``entry_id`` excludes the zone being edited (``None`` for a zone being created).
+    """
+    if not fan_entity:
+        return False
+    wanted = str(fan_entity).strip().lower()
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if entry_id is not None and other.entry_id == entry_id:
+            continue
+        data = other.data or {}
+        if data.get(CONF_FAN_MODE) not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            continue
+        other_fan = data.get(CONF_FAN_ENTITY)
+        if other_fan and str(other_fan).strip().lower() == wanted:
+            return True
+    return False
 
 
 def _raise_ambiguous_issue(hass: HomeAssistant) -> None:

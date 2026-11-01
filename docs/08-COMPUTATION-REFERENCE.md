@@ -2026,6 +2026,8 @@ Before Issue #277, this path did not set `_fan_command_time`, so the echo arrive
 
 **Why here (not in `_activate_fan`/`_deactivate_fan`):** The `set_fan_mode(auto)` inside `_set_hvac_mode("off")` is not a fan activation/deactivation — it is a cleanup step bundled with the HVAC-mode command. It is therefore not routed through `_activate_fan()` or `_deactivate_fan()`, and those helpers' existing `_fan_command_time` stamps do not cover it.
 
+**Occupant's blower is left running (Issue #1180).** The assertion is skipped while `AutomationEngine._occupant_blower_override_active()` (`_fan_override_active and _fan_override_is_hvac_fan`) is true: when the occupant has set the thermostat blower to On for circulation, Climate Advisor turning heating/cooling off for its own reasons (door/window pause, mild-day switch-off) leaves the blower running. A whole-house-fan press replaces the blower record (Issue #1133), so HVAC suppression for it still resets the thermostat blower. The blower returns to Auto through the existing end paths (the occupant sets Auto; the override clears and `_deactivate_fan()` or the next CA switch-off resets it).
+
 #### Setpoint/Fan Override Mutual Exclusion (Issue #277 Bug B)
 
 A single thermostat event can carry both a setpoint attribute change and a `fan_mode` attribute change simultaneously. Before Issue #277, both Block 2 (setpoint-override detection) and Block 3 (fan-mode override detection) in `_async_thermostat_changed()` evaluated independently — a single physical user action could trigger two simultaneous overrides (setpoint + fan), each starting its own grace timer.

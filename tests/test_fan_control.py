@@ -25,6 +25,8 @@ import types
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 3, 19, 14, 30, 0)
 
@@ -5254,3 +5256,97 @@ class TestShouldRunUntrackedFanBackstop:
         blocks the backstop even once the coalescing window has closed."""
         coord = self._make_coord(startup_coalesce_active=False, fan_override_active=False, grace_active=True)
         assert coord._should_run_untracked_fan_backstop(True) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #1180: CA turning HVAC off must not stop the blower the OCCUPANT turned on
+# ---------------------------------------------------------------------------
+
+
+class TestHvacOffKeepsOccupantBlower:
+    """Under hvac_fan/both the occupant sets the thermostat blower to On for circulation; when Climate Advisor
+    then turns heating/cooling off for its own reasons it must leave that blower running (Issue #1180)."""
+
+    @staticmethod
+    def _engine(fan_mode: str, thermostat_mode: str = "heat") -> AutomationEngine:
+        # manual_grace_seconds=0: the override has no grace timer, so it is still active when the door pauses HVAC
+        engine = _make_automation_engine(config_overrides={CONF_FAN_MODE: fan_mode, "manual_grace_seconds": 0})
+        engine.hass.states.get.return_value.state = thermostat_mode
+        engine.hass.states.get.return_value.attributes = {"fan_modes": ["auto", "on"], "fan_mode": "on"}
+        engine._last_outdoor_temp = 95.0  # too hot for nat-vent: the open door pauses HVAC
+        return engine
+
+    @staticmethod
+    def _press_blower(engine: AutomationEngine) -> None:
+        engine.handle_fan_manual_override(fan_before="auto", fan_after="on", hvac_fan=True)
+
+    @staticmethod
+    def _auto_asserts(engine: AutomationEngine) -> list:
+        return [c for c in _get_service_calls(engine, "climate", "set_fan_mode") if c[0][2]["fan_mode"] == "auto"]
+
+    @pytest.mark.parametrize("fan_mode", [FAN_MODE_HVAC, FAN_MODE_BOTH])
+    def test_door_window_pause_keeps_blower(self, fan_mode):
+        engine = self._engine(fan_mode)
+        self._press_blower(engine)
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
+        assert _get_service_calls(engine, "climate", "set_hvac_mode"), "the pause must still turn HVAC off"
+        assert self._auto_asserts(engine) == []
+        assert engine._fan_override_active is True
+        assert engine._fan_override_is_hvac_fan is True
+
+    def test_mild_day_off_keeps_blower(self):
+        """The mild-day switch-off (and every other CA-initiated off) funnels through ``_set_hvac_mode("off")``."""
+        engine = self._engine(FAN_MODE_HVAC)
+        self._press_blower(engine)
+        asyncio.run(engine._set_hvac_mode("off", reason="mild day — no heating or cooling needed"))
+
+        assert [c[0][2]["hvac_mode"] for c in _get_service_calls(engine, "climate", "set_hvac_mode")] == ["off"]
+        assert self._auto_asserts(engine) == []
+        assert engine._fan_override_active is True
+
+    def test_whf_press_under_both_replaces_blower_override(self):
+        """A whole-house-fan press REPLACES the blower override (Issue #1133): HVAC suppression resets the
+        thermostat blower as before, and the override now belongs to the whole-house fan."""
+        engine = self._engine(FAN_MODE_BOTH)
+        self._press_blower(engine)
+        engine.handle_fan_manual_override(fan_before="off", fan_after="on", hvac_fan=False)
+        assert engine._fan_override_is_hvac_fan is False
+        asyncio.run(engine._set_hvac_mode("off", reason="whole-house fan on"))
+
+        assert len(self._auto_asserts(engine)) == 1
+
+    @pytest.mark.parametrize("fan_mode", [FAN_MODE_HVAC, FAN_MODE_BOTH])
+    def test_no_override_still_asserts_auto(self, fan_mode):
+        engine = self._engine(fan_mode)
+        asyncio.run(engine._set_hvac_mode("off", reason="mild day"))
+
+        assert len(self._auto_asserts(engine)) == 1
+
+    def test_ca_own_blower_still_asserts_auto(self):
+        """CA started the blower itself (no occupant override): the post-heat reset still applies."""
+        engine = self._engine(FAN_MODE_HVAC)
+        asyncio.run(engine._activate_fan(reason="min runtime"))
+        assert engine._fan_active is True
+        assert engine._fan_override_active is False
+        asyncio.run(engine._set_hvac_mode("off", reason="mild day"))
+
+        assert len(self._auto_asserts(engine)) == 1
+
+    def test_override_end_returns_blower_to_auto(self):
+        """After the occupant's blower override ends, CA's next HVAC-off (or fan stop) resets the blower again."""
+        engine = self._engine(FAN_MODE_HVAC)
+        self._press_blower(engine)
+        asyncio.run(engine._set_hvac_mode("off", reason="mild day"))
+        assert self._auto_asserts(engine) == []
+
+        engine.clear_fan_override(reason="grace_expired")
+        assert engine._fan_override_active is False
+        engine._fan_active = True  # the blower is still physically running after the grace
+        result = asyncio.run(engine._deactivate_fan(reason="override ended"))
+
+        assert result is FanCommandResult.EXECUTED
+        assert len(self._auto_asserts(engine)) == 1
+        asyncio.run(engine._set_hvac_mode("off", reason="mild day"))
+        assert len(self._auto_asserts(engine)) == 2

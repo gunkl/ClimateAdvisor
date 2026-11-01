@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.14] — 2026-11-01
+
+- Fix #1180: if you turn your thermostat's fan to On for air circulation, Climate Advisor no longer switches it back to Auto when it turns heating or cooling off (for example when a door or window opens, or on a mild day). The fan keeps running until you turn it off; Climate Advisor only takes it back to Auto after your manual-change period ends.
+
 ## [0.8.12] — 2026-10-31
 
 - Fix #1144: the whole-house fan is now switched off within 30 seconds if it is running while every door and window is closed, even when you turned it on from the wall switch, HomeKit or the RF remote (a fan that ran for about 55 minutes on a sealed house on 2026-10-30 prompted this). Climate Advisor itself will also never start the whole-house fan on a sealed house, and the hourly minimum-runtime fan cycle runs a whole-house fan only while a window or door is open. The fan and the heat or AC are mutually exclusive: if you turn the heat or AC on after the fan, the fan stops; if you turn the fan on after the AC, the AC is turned off. With automation switched off (observe-only), Climate Advisor sends no command to the fan; it sends one notification per episode telling you the fan is running on a closed-up house. Setup and Settings now warn when a whole-house fan has no door/window sensors (the sealed-house rule cannot apply) or no fan state feedback (Climate Advisor cannot see or stop a fan it did not start), and refuse a fan that another Climate Advisor zone already controls.

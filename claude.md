@@ -563,7 +563,7 @@ Authoring templates for new Tier 2 briefs and Tier 3 specs live in `docs/templat
 - ~~`docs/state-persistence.md` — Tier 2 brief~~ — written (108 lines).
 - ~~`docs/temperature-conversion.md` — Tier 2 brief~~ — written (140 lines).
 - ~~**Security gap:** `climate_advisor_state.json` is not created with `0o600` permissions~~ — fixed in Issue #384 (v0.4.53); `state.py::save()` calls `os.chmod(path, 0o600)` after `os.replace()`. Confirmed against current code 2026-09-16.
-- **Behavioral gap (still open):** Sensor going unavailable during a grace pause leaves the system paused indefinitely (no unavailable-state handler) — confirmed still present in `docs/grace-periods-spec.md`'s "Door/Window Sensor Goes Unavailable During Grace" error-condition writeup and in `coordinator.py`'s `_is_sensor_open()`/`_async_door_window_changed()`. Tracked for fix.
+- ~~**Behavioral gap:** Sensor going unavailable during a grace pause~~ — the old entry ("stays paused indefinitely") was wrong: an `open -> unavailable` sensor read as closed and the pause *ended*, resuming HVAC into the open window. Fixed in Issue #1181 (v0.8.15, owner decision D1): a sensor that goes dark after last reading OPEN holds its pause until it reports again or the occupant changes the thermostat; see `docs/grace-periods-spec.md` "Door/Window Sensor Goes Unavailable During Grace".
 
 ---
 

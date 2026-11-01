@@ -159,11 +159,11 @@ class TestComputeContactStatus:
         result = _compute_contact_status(["binary_sensor.front_door"], getter)
         assert result == "1 open"
 
-    def test_unavailable_sensor_treated_as_closed(self):
-        """Sensor not found in HA states → treated as closed."""
+    def test_unavailable_sensor_is_reported_not_responding_never_all_closed(self):
+        """Issue #1181: a sensor not found in HA states is called out, not summarised as 'all closed'."""
         getter = _states_getter({})  # no states registered
         result = _compute_contact_status(["binary_sensor.missing_sensor"], getter)
-        assert result == "all closed"
+        assert result == "1 not responding"
 
 
 # ---------------------------------------------------------------------------

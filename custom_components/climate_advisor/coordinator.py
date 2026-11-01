@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import logging
@@ -257,7 +258,12 @@ from .const import (
     is_availability_recovery,
     is_unavailable_state,
 )
-from .entity_health import run_entity_health_sweep
+from .entity_health import (
+    THERMOSTAT_CONFIG_KEY,
+    EntityHealthIssue,
+    entity_health_consequence,
+    run_entity_health_sweep,
+)
 from .fan_mode_resolver import fan_control_enabled, is_thermostat_fan_physically_active
 from .fan_status import (
     FAN_STATUS_THERMOSTAT,
@@ -342,6 +348,8 @@ from .whf_safety_decision import (
     WHF_SENSOR_UNKNOWN_GRACE_S,
     SensorReading,
     WhfSafetySnapshot,
+    house_is_sealed,
+    sensor_reading,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1003,9 +1011,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return AutomationEngineCallbacks(
             revisit=self.async_request_refresh,
             sensor_check=self._any_sensor_open,
-            # Issue #1093: the sealed-house read for the ODE ceiling guard -- "every configured
-            # sensor reports a real closed state" (unavailable/unknown is NOT closed).
-            sensors_known_closed=self._all_sensors_known_closed,
+            # Issue #1181: the pause-ENDING read -- open, or dark with its last real reading open.
+            sensor_hold_check=self._any_sensor_holding_open,
             # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell
             # whether any currently-open monitored sensor is still within its
             # CONF_SENSOR_DEBOUNCE settle window. Issue #623: _door_open_timers alone
@@ -1378,6 +1385,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.warning("WHF safety check request failed: trigger=%s", trigger, exc_info=True)
 
+    def _whf_sensor_readings(self) -> tuple[tuple[SensorReading, ...], list[str]]:
+        """The one reading of the door/window sensors for every "is the house sealed" judge (Issue #1177).
+
+        Feeds the WHF safety enforcer's snapshot, Climate Advisor's own fan-start gate, the ceiling guard's
+        "the fan cannot run" test and the P9 promise reading, so they cannot disagree. A sensor that is
+        unavailable/unknown carries ``unknown_for_s`` (``house_is_sealed`` counts it open for 60 s, closed
+        after); a MISSING entity is aged from ``_whf_safety_started_at`` the same way (an unknown start counts as
+        past the grace). Returns the readings and the ids of sensors that have been unreadable past the grace.
+        """
+        now = dt_util.utcnow()
+        started = getattr(self, "_whf_safety_started_at", None)
+        since_start = max(0.0, (now - started).total_seconds()) if isinstance(started, datetime) else None
+        readings: list[SensorReading] = []
+        stale: list[str] = []
+        for sensor_id in getattr(self, "_resolved_sensors", []) or []:
+            state = self.hass.states.get(sensor_id)
+            changed = getattr(state, "last_changed", None)
+            age = max(0.0, (now - changed).total_seconds()) if isinstance(changed, datetime) else None
+            reading = sensor_reading(
+                state=state.state if state is not None else None,
+                is_open=self._state_is_open(state),
+                age_s=age,
+                since_start_s=since_start,
+            )
+            readings.append(reading)
+            if reading.unknown_for_s is not None and reading.unknown_for_s > WHF_SENSOR_UNKNOWN_GRACE_S:
+                stale.append(sensor_id)
+        return tuple(readings), stale
+
     def _build_whf_safety_snapshot(self) -> WhfSafetySnapshot:
         """Ground truth for the WHF safety enforcer (Issue #1144): fan state and age, sensor readings.
 
@@ -1393,21 +1429,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return max(0.0, (now - changed).total_seconds())
             return None
 
-        readings: list[SensorReading] = []
-        stale: list[str] = []
-        for sensor_id in getattr(self, "_resolved_sensors", []) or []:
-            state = self.hass.states.get(sensor_id)
-            if state is None or state.state in ("unavailable", "unknown"):
-                started = getattr(self, "_whf_safety_started_at", None)
-                since = _age(state) if state is not None else None
-                if since is None and isinstance(started, datetime):
-                    since = max(0.0, (now - started).total_seconds())
-                unknown_for = since if since is not None else 0.0
-                readings.append(SensorReading(is_open=False, unknown_for_s=unknown_for, stable_for_s=unknown_for))
-                if unknown_for > WHF_SENSOR_UNKNOWN_GRACE_S:
-                    stale.append(sensor_id)
-            else:
-                readings.append(SensorReading(is_open=self._state_is_open(state), stable_for_s=_age(state)))
+        readings, stale = self._whf_sensor_readings()
 
         fan_state_id = self.config.get(CONF_FAN_STATE_ENTITY) or self.config.get(CONF_FAN_ENTITY)
         fan_state = self.hass.states.get(fan_state_id) if fan_state_id else None
@@ -1418,7 +1440,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return WhfSafetySnapshot(
             fan_on=fan_on,
             fan_on_for_s=fan_on_for_s,
-            sensors=tuple(readings),
+            sensors=readings,
             stale_names=tuple(stale),
             occupant_fan_on_at=self._occupant_fan_on_at_from_ground_truth(fan_on, fan_on_for_s),
             occupant_hvac_on_at=self._occupant_hvac_on_at_from_ground_truth(),
@@ -1691,6 +1713,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # function gates on.
         # Issue #1128: per-promise counters live across days (the "two quiet weeks" evidence).
         self._promise_stats = sanitize_promise_stats(state.get("promise_stats"), {p.key for p in PROMISES})
+        # Issue #1181: restored regardless of date, like the health fields below -- a sensor that has been
+        # dark since yesterday still holds whatever it last read.
+        _persisted_readings = state.get("sensor_last_real_reading")
+        if isinstance(_persisted_readings, dict):
+            self._sensor_last_readings().update(
+                {str(k): v for k, v in _persisted_readings.items() if v in ("open", "closed")}
+            )
         self.last_update_error = state.get("last_update_error")
         self.last_update_error_time = state.get("last_update_error_time")
         try:
@@ -2039,6 +2068,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "last_update_error": getattr(self, "last_update_error", None),
             "last_update_error_time": getattr(self, "last_update_error_time", None),
             "consecutive_failure_count": getattr(self, "consecutive_failure_count", 0),
+            # Issue #1181: last REAL reading per door/window sensor, so a pause held by a sensor that went
+            # dark survives a restart. Kept across the date boundary (restored before the same-day check).
+            "sensor_last_real_reading": dict(self._sensor_last_readings()),
         }
 
     async def _async_save_state(self) -> None:
@@ -2689,32 +2721,72 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return state.state == "off"
         return state.state == "on"
 
-    def _state_is_known_closed(self, state: Any) -> bool:
-        """Return True only when a contact-sensor State positively reads 'closed', respecting polarity.
+    def _sensor_real_reading(self, state: Any) -> str | None:
+        """The one definition of a door/window sensor's REAL reading: ``"open"``, ``"closed"``, or ``None``.
 
-        Issue #1093. The complement of ``_state_is_open`` over the two real states only: an
-        unavailable/unknown/missing state is neither open nor known-closed. ``_state_is_open``
-        stays the one definition of "open" (an unreadable sensor must not block the WHF safety
-        stop); this is the one definition of "known closed" (an unreadable sensor must not count
-        as a sealed house).
+        Issue #1181. ``None`` means the sensor is dark (unavailable, unknown or missing): it says nothing
+        about the door or window. ``_state_is_open`` stays the one definition of what "open" means (polarity);
+        this adds only the dark case on top of it.
         """
         if not state or state.state not in ("on", "off"):
+            return None
+        return "open" if self._state_is_open(state) else "closed"
+
+    def _sensor_last_readings(self) -> dict[str, str]:
+        """Last REAL reading (``"open"``/``"closed"``) per door/window sensor; persisted (Issue #1181).
+
+        Created lazily so the partially-built coordinators several tests use keep working.
+        """
+        return self.__dict__.setdefault("_sensor_last_real_reading", {})
+
+    def _record_sensor_reading(self, entity_id: str, state: Any) -> bool:
+        """Remember a sensor's last real reading. Dark states are ignored. True when the record changed."""
+        reading = self._sensor_real_reading(state)
+        last = self._sensor_last_readings()
+        if reading is None or last.get(entity_id) == reading:
             return False
-        return not self._state_is_open(state)
+        _LOGGER.debug(
+            "Contact sensor last real reading recorded: %s — %s (was %s)", entity_id, reading, last.get(entity_id)
+        )
+        last[entity_id] = reading
+        return True
+
+    def _sync_sensor_last_readings(self) -> bool:
+        """Record every configured sensor's live real reading and drop records of removed sensors.
+
+        A dark sensor keeps its old record. True when anything changed (the caller persists).
+        """
+        last = self._sensor_last_readings()
+        changed = False
+        for sensor_id in list(last):
+            if sensor_id not in self._resolved_sensors:
+                del last[sensor_id]
+                changed = True
+        for sensor_id in self._resolved_sensors:
+            changed = self._record_sensor_reading(sensor_id, self.hass.states.get(sensor_id)) or changed
+        return changed
+
+    def _sensor_holds_open(self, entity_id: str) -> bool:
+        """True when this sensor must keep a door/window pause alive (Issue #1181, owner decision D1).
+
+        The ONE authoritative question for every pause-ending / HVAC-restoring decision: a sensor holds the
+        pause when it reads open, or when it is dark and its last real reading was open. A dark sensor whose
+        last real reading was closed, or that never reported, does not hold anything -- and no dark sensor
+        ever STARTS a pause (starting asks ``_is_sensor_open``, which keeps counting a dark sensor closed).
+        """
+        if self._is_sensor_open(entity_id):
+            return True
+        if self._sensor_real_reading(self.hass.states.get(entity_id)) is not None:
+            return False  # readable and not open: closed
+        return self._sensor_last_readings().get(entity_id) == "open"
+
+    def _any_sensor_holding_open(self) -> bool:
+        """True when any monitored sensor holds a door/window pause (see ``_sensor_holds_open``)."""
+        return any(self._sensor_holds_open(s) for s in self._resolved_sensors)
 
     def _is_sensor_open(self, entity_id: str) -> bool:
         """Check if a door/window sensor is in the 'open' state, respecting polarity."""
         return self._state_is_open(self.hass.states.get(entity_id))
-
-    def _all_sensors_known_closed(self) -> bool:
-        """True when at least one door/window sensor is configured AND every one reads a real closed state.
-
-        Issue #1093: the sealed-house predicate behind ``AutomationEngine._whf_house_sealed_with_known_sensors()``.
-        No sensors configured, or any sensor unavailable/unknown/missing, is unknown -- not sealed.
-        """
-        return bool(self._resolved_sensors) and all(
-            self._state_is_known_closed(self.hass.states.get(s)) for s in self._resolved_sensors
-        )
 
     def _is_recent_hvac_command(self, threshold_seconds: float = 3.0) -> bool:
         """Check if an HVAC command was issued very recently (race guard)."""
@@ -3628,6 +3700,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # service) that would otherwise degrade silently at every one of its own read
         # sites. Returns transition-debounced issues and fires at most one notification
         # per outage-start (plus a daily reminder) — see _run_entity_health_check().
+        # Issue #1181: refresh each door/window sensor's last real reading first (a dark sensor keeps its
+        # record), so the sweep's rule-aware text and the pause-holding read use the same record.
+        if self._sync_sensor_last_readings():
+            await self._async_save_state()
         _entity_health_issues = self._run_entity_health_check()
 
         # Emit a structured warning event when the HVAC entity reports an active action
@@ -3921,6 +3997,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "friendly_name": i.friendly_name,
                     "criticality": i.criticality,
                     "status": i.status,
+                    "detail": i.detail,  # Issue #1181: what Climate Advisor is doing about it
                 }
                 for i in _entity_health_issues
             ],
@@ -5894,6 +5971,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # gates the HVAC pause/resume and nat-vent decision.
         self.hass.async_create_task(self.async_request_refresh())
 
+        # Issue #1181: remember the last REAL reading (old state first, so a missed earlier event still
+        # leaves the right record). A sensor that goes dark keeps this record; it is what lets a pause the
+        # sensor caused outlive the outage. Persisted so a restart during the outage keeps it.
+        _record_changed = self._record_sensor_reading(entity_id, event.data.get("old_state"))
+        _record_changed = self._record_sensor_reading(entity_id, new_state) or _record_changed
+        if _record_changed:
+            await self._async_save_state()
+
         if self._is_sensor_open(entity_id):
             # Issue #645: a group/helper sensor re-reporting "on" after being unavailable
             # (e.g. re-registering during an HA restart/integration reload) is not a genuine
@@ -6015,8 +6100,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 return
 
-            # Check if ALL monitored sensors are now closed
-            all_closed = all(not self._is_sensor_open(s) for s in self._resolved_sensors)
+            # Check if ALL monitored sensors are now closed. Issue #1181: a sensor that is dark after last
+            # reading OPEN is not closed -- it holds the pause until it reports again (owner decision D1).
+            all_closed = not self._any_sensor_holding_open()
+            if not all_closed and self._sensor_real_reading(new_state) is None:
+                _LOGGER.info(
+                    "Contact sensor unreadable: %s (state=%r) — last real reading %s; any door/window pause it caused"
+                    " holds until it reports again or the thermostat is changed",
+                    entity_id,
+                    getattr(new_state, "state", "none"),
+                    self._sensor_last_readings().get(entity_id, "none"),
+                )
             if all_closed:
                 # Track window close time if we were tracking compliance
                 if (
@@ -7011,169 +7105,177 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #510: refresh immediately on every genuine physical transition, regardless of
         # whether an override is currently active or what caused it -- so the displayed status
         # never waits on the next scheduled coordinator poll (up to 30 min) to reflect reality.
-        # Display-only: does not affect the override-detection/decision logic below. Previously
-        # this refresh only fired from inside the "override already active" branch further down,
+        # Display-only: does not affect the override-detection/decision logic. Previously
+        # this refresh only fired from inside the "override already active" branch,
         # leaving the display stale whenever a physical transition happened with NO override
-        # active (the exact mechanism behind Issue #510's reported staleness — a nat-vent
-        # session flag masked a confirmed-running WHF for hours because nothing prompted a
-        # recompute). Mirrors the identical Issue #489 pattern already used for door/window.
+        # active (the exact mechanism behind Issue #510's reported staleness). Mirrors the
+        # identical Issue #489 pattern already used for door/window.
+        #
+        # Issue #1130: the refresh is requested only AFTER the transition has been classified
+        # (override / grace recorded), never before. HA starts the refresh task eagerly and the
+        # debouncer runs it immediately, so scheduling it first let _async_update_data()'s
+        # untracked-fan backstop switch off a fan the occupant had just turned on (and, for an
+        # off press, let nat-vent re-engage before the grace period started). `finally` keeps
+        # the display refresh on every exit path of the classification, as before.
         _LOGGER.debug(
-            "fan_entity physical transition %s -> %s — requesting refresh so displayed status stays live",
+            "fan_entity physical transition %s -> %s — requesting refresh (after override detection)"
+            " so displayed status stays live",
             old_state.state,
             new_state.state,
         )
-        self.hass.async_create_task(self.async_request_refresh())
+        try:
+            # Issue #482: HA attaches the originating service call's Context to every
+            # state-changed Event. When CA itself issued the fan command (via
+            # automation.py's _call_fan_service_with_context), it records that Context's id.
+            # If this event's own context.id (or its parent_id, for cases where the target
+            # integration wraps CA's context in a child context) matches a recently-issued
+            # CA command, that is an authoritative "CA caused this" signal — logged here on
+            # EVERY change (matched or not) so a future investigation has direct evidence
+            # instead of needing cross-source timestamp archaeology (the gap this issue
+            # closes).
+            #
+            # Issue #561: matches against a short-lived set of recently-issued command
+            # contexts (automation_engine.fan_command_context_matches()) rather than a
+            # single last-write-wins id — two fan commands issued in close succession (e.g.
+            # a duplicate reactivation attempt from a since-fixed reentrancy gap) could
+            # otherwise have the second command's context overwrite the first's before this
+            # listener evaluated the first command's resulting event, misattributing CA's
+            # own action to the user.
+            #
+            # This is treated as an ADDITIONAL/corroborating signal alongside the
+            # existing _fan_command_pending/timing checks below, not a replacement for
+            # them: context propagation through third-party fan/switch integrations
+            # (especially a one-way RF transmitter entity with no feedback of its own)
+            # is not guaranteed reliable by HA core, so a non-match here does not prove
+            # the change was external — it only fails to prove it was CA's. A match,
+            # however, is conclusive.
+            event_context = getattr(event, "context", None)
+            event_context_id = getattr(event_context, "id", None) if event_context is not None else None
+            event_context_parent_id = getattr(event_context, "parent_id", None) if event_context is not None else None
+            # Issue #561: matches against a short-lived set of recently-issued CA command
+            # contexts rather than a single last-write-wins id — a second overlapping fan
+            # command could otherwise overwrite the first's id before this listener saw the
+            # first command's resulting event, causing CA's own action to be misattributed
+            # as a manual override.
+            context_confirms_ca = self.automation_engine.fan_command_context_matches(
+                event_context_id, event_context_parent_id
+            )
+            _LOGGER.debug(
+                "fan_entity state change provenance: %s -> %s event_context_id=%s"
+                " event_context_parent_id=%s context_confirms_ca=%s",
+                old_state.state,
+                new_state.state,
+                event_context_id,
+                event_context_parent_id,
+                context_confirms_ca,
+            )
 
-        # Issue #482: HA attaches the originating service call's Context to every
-        # state-changed Event. When CA itself issued the fan command (via
-        # automation.py's _call_fan_service_with_context), it records that Context's id.
-        # If this event's own context.id (or its parent_id, for cases where the target
-        # integration wraps CA's context in a child context) matches a recently-issued
-        # CA command, that is an authoritative "CA caused this" signal — logged here on
-        # EVERY change (matched or not) so a future investigation has direct evidence
-        # instead of needing cross-source timestamp archaeology (the gap this issue
-        # closes).
-        #
-        # Issue #561: matches against a short-lived set of recently-issued command
-        # contexts (automation_engine.fan_command_context_matches()) rather than a
-        # single last-write-wins id — two fan commands issued in close succession (e.g.
-        # a duplicate reactivation attempt from a since-fixed reentrancy gap) could
-        # otherwise have the second command's context overwrite the first's before this
-        # listener evaluated the first command's resulting event, misattributing CA's
-        # own action to the user.
-        #
-        # This is treated as an ADDITIONAL/corroborating signal alongside the
-        # existing _fan_command_pending/timing checks below, not a replacement for
-        # them: context propagation through third-party fan/switch integrations
-        # (especially a one-way RF transmitter entity with no feedback of its own)
-        # is not guaranteed reliable by HA core, so a non-match here does not prove
-        # the change was external — it only fails to prove it was CA's. A match,
-        # however, is conclusive.
-        event_context = getattr(event, "context", None)
-        event_context_id = getattr(event_context, "id", None) if event_context is not None else None
-        event_context_parent_id = getattr(event_context, "parent_id", None) if event_context is not None else None
-        # Issue #561: matches against a short-lived set of recently-issued CA command
-        # contexts rather than a single last-write-wins id — a second overlapping fan
-        # command could otherwise overwrite the first's id before this listener saw the
-        # first command's resulting event, causing CA's own action to be misattributed
-        # as a manual override.
-        context_confirms_ca = self.automation_engine.fan_command_context_matches(
-            event_context_id, event_context_parent_id
-        )
-        _LOGGER.debug(
-            "fan_entity state change provenance: %s -> %s event_context_id=%s"
-            " event_context_parent_id=%s context_confirms_ca=%s",
-            old_state.state,
-            new_state.state,
-            event_context_id,
-            event_context_parent_id,
-            context_confirms_ca,
-        )
+            # Skip if this change was initiated by us — either the transient
+            # command-pending bookkeeping (existing guard) or a confirmed event.context
+            # match (Issue #482, additional signal).
+            if self.automation_engine._fan_command_pending or context_confirms_ca:
+                if context_confirms_ca and not self.automation_engine._fan_command_pending:
+                    _LOGGER.info(
+                        "Fan entity change attributed to CA via event.context match (id=%s) —"
+                        " suppressing (would otherwise have been evaluated as external)",
+                        event_context_id,
+                    )
+                return
 
-        # Skip if this change was initiated by us — either the transient
-        # command-pending bookkeeping (existing guard) or a confirmed event.context
-        # match (Issue #482, additional signal).
-        if self.automation_engine._fan_command_pending or context_confirms_ca:
-            if context_confirms_ca and not self.automation_engine._fan_command_pending:
-                _LOGGER.info(
-                    "Fan entity change attributed to CA via event.context match (id=%s) —"
-                    " suppressing (would otherwise have been evaluated as external)",
-                    event_context_id,
-                )
-            return
-
-        # Issue #787: `unavailable` on this entity can reflect a transient connectivity/API
-        # dropout (e.g. an ESPHome encryption-handshake hiccup between Home Assistant and the
-        # device) rather than a real physical change. The sibling remote listener
-        # (_async_fan_remote_changed, Issue #495) already guards `unavailable` for the same
-        # physical device family; this listener never had the equivalent treatment, so a brief
-        # connectivity blip was misread as a manual override (going unavailable->on) followed
-        # immediately by a manual cancel (on->unavailable), each starting its own bogus grace
-        # period. Cross-check the ground-truth fan_state_entity (when fan_state_feedback is
-        # enabled) before trusting either direction of an `unavailable` transition.
-        if new_state.state == "unavailable" or old_state.state == "unavailable":
-            ground_truth_on = self._get_fan_physical_state()
-            if ground_truth_on is not None:
-                # Use the ground-truth reading in place of the (possibly bogus) raw
-                # entity state for the dispatch decision below. The existing dispatch
-                # conditions already produce "no dispatch" whenever this matches what
-                # CA currently believes (_fan_active) — no separate early-return needed
-                # here, and none should be added: an `unavailable->on` recovery must
-                # still correctly dispatch handle_fan_manual_override() if ground truth
-                # shows a real state CA doesn't already expect (e.g. a genuine override
-                # that happens to coincide with a connectivity blip).
-                _LOGGER.info(
-                    "Fan entity availability blip (%s -> %s) — using ground truth"
-                    " (fan_state_entity) instead of the raw transition: physically %s",
-                    old_state.state,
-                    new_state.state,
-                    "on" if ground_truth_on else "off",
-                )
-                is_on = ground_truth_on
+            # Issue #787: `unavailable` on this entity can reflect a transient connectivity/API
+            # dropout (e.g. an ESPHome encryption-handshake hiccup between Home Assistant and the
+            # device) rather than a real physical change. The sibling remote listener
+            # (_async_fan_remote_changed, Issue #495) already guards `unavailable` for the same
+            # physical device family; this listener never had the equivalent treatment, so a brief
+            # connectivity blip was misread as a manual override (going unavailable->on) followed
+            # immediately by a manual cancel (on->unavailable), each starting its own bogus grace
+            # period. Cross-check the ground-truth fan_state_entity (when fan_state_feedback is
+            # enabled) before trusting either direction of an `unavailable` transition.
+            if new_state.state == "unavailable" or old_state.state == "unavailable":
+                ground_truth_on = self._get_fan_physical_state()
+                if ground_truth_on is not None:
+                    # Use the ground-truth reading in place of the (possibly bogus) raw
+                    # entity state for the dispatch decision below. The existing dispatch
+                    # conditions already produce "no dispatch" whenever this matches what
+                    # CA currently believes (_fan_active) — no separate early-return needed
+                    # here, and none should be added: an `unavailable->on` recovery must
+                    # still correctly dispatch handle_fan_manual_override() if ground truth
+                    # shows a real state CA doesn't already expect (e.g. a genuine override
+                    # that happens to coincide with a connectivity blip).
+                    _LOGGER.info(
+                        "Fan entity availability blip (%s -> %s) — using ground truth"
+                        " (fan_state_entity) instead of the raw transition: physically %s",
+                        old_state.state,
+                        new_state.state,
+                        "on" if ground_truth_on else "off",
+                    )
+                    is_on = ground_truth_on
+                else:
+                    # No ground-truth fan_state_entity configured (Type-1 install) — there is no
+                    # way to confidently distinguish a connectivity blip from a real physical
+                    # change here. Do not dispatch a manual override/cancel off an `unavailable`
+                    # transition with no corroborating signal; a debounce-based mitigation for
+                    # this case is tracked as a follow-up (see Issue #787).
+                    _LOGGER.warning(
+                        "Fan entity unavailable transition (%s -> %s) with no fan_state_entity"
+                        " configured — cannot confirm this is a real change; skipping"
+                        " override/cancel classification",
+                        old_state.state,
+                        new_state.state,
+                    )
+                    return
             else:
-                # No ground-truth fan_state_entity configured (Type-1 install) — there is no
-                # way to confidently distinguish a connectivity blip from a real physical
-                # change here. Do not dispatch a manual override/cancel off an `unavailable`
-                # transition with no corroborating signal; a debounce-based mitigation for
-                # this case is tracked as a follow-up (see Issue #787).
-                _LOGGER.warning(
-                    "Fan entity unavailable transition (%s -> %s) with no fan_state_entity"
-                    " configured — cannot confirm this is a real change; skipping"
-                    " override/cancel classification",
+                is_on = new_state.state in {"on"}
+
+            # Skip if fan override is already active AND this is not the fan turning off — the
+            # display refresh is requested in the finally below, after this classification (Issue #510); an "on"
+            # transition here is a redundant re-announcement, already accounted for. An "off"
+            # transition, however, is the override's own defining condition ending and must not
+            # be swallowed here (Issue #774) — it falls through to the direction-aware dispatch
+            # below instead of returning.
+            if self.automation_engine._fan_override_active and is_on:
+                _LOGGER.info(
+                    "Fan/state entity changed while override already active (%s -> %s) — "
+                    "skipping override re-detection (display refresh follows in the finally below)",
                     old_state.state,
                     new_state.state,
                 )
                 return
-        else:
-            is_on = new_state.state in {"on"}
 
-        # Skip if fan override is already active AND this is not the fan turning off — the
-        # display refresh already happened unconditionally above (Issue #510); an "on"
-        # transition here is a redundant re-announcement, already accounted for. An "off"
-        # transition, however, is the override's own defining condition ending and must not
-        # be swallowed here (Issue #774) — it falls through to the direction-aware dispatch
-        # below instead of returning.
-        if self.automation_engine._fan_override_active and is_on:
-            _LOGGER.info(
-                "Fan/state entity changed while override already active (%s -> %s) — "
-                "skipping override re-detection (display already refreshed above)",
-                old_state.state,
-                new_state.state,
-            )
-            return
+            # Skip if a fan command was issued recently (cloud thermostat echo guard)
+            if self._is_recent_fan_command(threshold_seconds=30.0):
+                return
 
-        # Skip if a fan command was issued recently (cloud thermostat echo guard)
-        if self._is_recent_fan_command(threshold_seconds=30.0):
-            return
-
-        if is_on and not self.automation_engine._fan_active:
-            # Fan turned on externally — manual override
-            _LOGGER.info(
-                "Manual fan override detected: %s -> %s (integration expected fan off)",
-                old_state.state,
-                new_state.state,
-            )
-            self.automation_engine.handle_fan_manual_override(
-                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
-            )
-        elif not is_on and (self.automation_engine._fan_active or self.automation_engine._fan_override_active):
-            # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
-            # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
-            # the "user turned fan ON" path and must NOT be called here.
-            #
-            # Issue #774: the `_fan_override_active` half of this condition matters when an
-            # active fan override (user turned the fan on, CA backed off) ends because the
-            # fan turns back off — `_fan_active` stays False for the whole life of an override
-            # (CA never "owns" that run), so checking `_fan_active` alone would silently drop
-            # this dispatch for exactly the case an override protects.
-            _LOGGER.info(
-                "Fan turned off externally: %s -> %s (integration expected fan on)",
-                old_state.state,
-                new_state.state,
-            )
-            self.automation_engine.on_fan_turned_off(
-                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
-            )
+            if is_on and not self.automation_engine._fan_active:
+                # Fan turned on externally — manual override
+                _LOGGER.info(
+                    "Manual fan override detected: %s -> %s (integration expected fan off)",
+                    old_state.state,
+                    new_state.state,
+                )
+                self.automation_engine.handle_fan_manual_override(
+                    fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+                )
+            elif not is_on and (self.automation_engine._fan_active or self.automation_engine._fan_override_active):
+                # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
+                # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
+                # the "user turned fan ON" path and must NOT be called here.
+                #
+                # Issue #774: the `_fan_override_active` half of this condition matters when an
+                # active fan override (user turned the fan on, CA backed off) ends because the
+                # fan turns back off — `_fan_active` stays False for the whole life of an override
+                # (CA never "owns" that run), so checking `_fan_active` alone would silently drop
+                # this dispatch for exactly the case an override protects.
+                _LOGGER.info(
+                    "Fan turned off externally: %s -> %s (integration expected fan on)",
+                    old_state.state,
+                    new_state.state,
+                )
+                self.automation_engine.on_fan_turned_off(
+                    fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+                )
+        finally:
+            self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_fan_remote_changed(self, event: Event) -> None:
         """Handle a QuietCool RF wall remote event (Issue #486, extended by Issue #519).
@@ -7711,23 +7813,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         classification = self._current_classification
         contacts: bool | None = None
         if getattr(self, "_resolved_sensors", None):
-            contacts = bool(self._any_sensor_open())
-            if not contacts:
-                # Issue #1144: the same benefit of the doubt the WHF safety enforcer gives -- a sensor that is
-                # unavailable/unknown (a state exists, it is just unreadable) for under 60 s counts as open, so
-                # the whf_sealed promise never disagrees with the enforcer. A MISSING state is not extended.
-                now_utc = dt_util.utcnow()
-                for sensor_id in self._resolved_sensors:
-                    st = self.hass.states.get(sensor_id)
-                    changed = getattr(st, "last_changed", None) if st is not None else None
-                    if (
-                        st is not None
-                        and st.state in ("unavailable", "unknown")
-                        and isinstance(changed, datetime)
-                        and (now_utc - changed).total_seconds() <= WHF_SENSOR_UNKNOWN_GRACE_S
-                    ):
-                        contacts = True
-                        break
+            # Issue #1177: the enforcer's own reading (``_whf_sensor_readings``) and verdict
+            # (``house_is_sealed``), so the whf_sealed promise can never disagree with it -- including for a
+            # MISSING sensor, which gets the same 60 s from start-up instead of counting closed at once.
+            contacts = not house_is_sealed(self._whf_sensor_readings()[0])
         return _PromiseReading(
             ts=now,
             hvac_mode=mode,
@@ -7928,22 +8017,49 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._startup_coalesce_active:
             return []
         try:
-            issues = run_entity_health_sweep(self.hass, self.config)
+            issues = [self._with_entity_health_detail(i) for i in run_entity_health_sweep(self.hass, self.config)]
             self._process_entity_health_transitions(issues)
             return issues
         except Exception:
             _LOGGER.error("Entity health sweep failed internally", exc_info=True)
             return []
 
+    def _with_entity_health_detail(self, issue: EntityHealthIssue) -> EntityHealthIssue:
+        """Attach the rule-aware consequence text (Issue #1181 D2, Issue #1181 D5) to a sweep issue.
+
+        The wording lives in ``entity_health.entity_health_consequence``; this only gathers the two facts it
+        needs: a door/window sensor's last real reading, and whether the whole-house fan is running (or Climate
+        Advisor believes it is) while the thermostat cannot be read.
+        """
+        whf_running = False
+        if issue.config_key == THERMOSTAT_CONFIG_KEY:
+            ae = getattr(self, "automation_engine", None)
+            whf_running = bool(
+                ae is not None and (self._get_fan_physical_state() is True or ae._fan_active or ae._fan_override_active)
+            )
+        return dataclasses.replace(
+            issue,
+            detail=entity_health_consequence(
+                issue,
+                door_last_reading=self._sensor_last_readings().get(issue.entity_id),
+                whf_running=whf_running,
+            ),
+        )
+
     def _process_entity_health_transitions(self, issues: list) -> None:
-        """Diff the current sweep result against tracked state and notify on new/stale outages."""
+        """Diff the current sweep result against tracked state and notify on new/stale outages.
+
+        Tracked per ``EntityHealthIssue.state_key``: one slot per entity, so a second door/window sensor that
+        fails during the first one's outage is announced too (Issue #1181).
+        """
         now = dt_util.now()
         current_keys = set()
         to_notify: list = []
 
         for issue in issues:
-            current_keys.add(issue.config_key)
-            tracked = self._entity_health_state.get(issue.config_key)
+            key = issue.state_key
+            current_keys.add(key)
+            tracked = self._entity_health_state.get(key)
             step = next_fallback_episode(
                 issue.status,
                 tracked["status"] if tracked else None,
@@ -7952,7 +8068,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             if step.kind == "fallback":
                 # ok -> missing/unavailable transition — a brand new outage.
-                self._entity_health_state[issue.config_key] = {
+                self._entity_health_state[key] = {
                     "status": issue.status,
                     "first_seen": now,
                     "last_notified": now,
@@ -7965,10 +8081,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     tracked["last_notified"] = now
                     to_notify.append(issue)
 
-        for config_key in list(self._entity_health_state.keys()):
-            if config_key not in current_keys:
-                _LOGGER.info("Entity health: %s is available again", config_key)
-                del self._entity_health_state[config_key]
+        for key in list(self._entity_health_state.keys()):
+            if key not in current_keys:
+                _LOGGER.info("Entity health: %s is available again", key)
+                del self._entity_health_state[key]
 
         if to_notify:
             self._notify_entity_health_issues(to_notify)
@@ -7979,25 +8095,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The unconditional log happens regardless of whether the push/email call below
         succeeds — ``notify_service`` is itself one of the monitored entities (Issue
         #805), so a broken notify target must not mean the failure goes unrecorded
-        anywhere. The HA log is the fallback channel of last resort.
+        anywhere. The HA log is the fallback channel of last resort. An issue's ``detail`` (Issue #1181:
+        what Climate Advisor is doing about a dark door/window sensor or an unreadable thermostat) replaces
+        the generic "may not be able to control your HVAC" sentence.
         """
         for issue in issues:
             log_fn = _LOGGER.error if issue.criticality == "critical" else _LOGGER.warning
-            log_fn("Entity health: %s (%s) is %s", issue.friendly_name, issue.entity_id, issue.status)
+            log_fn(
+                "Entity health: %s (%s) is %s%s",
+                issue.friendly_name,
+                issue.entity_id,
+                issue.status,
+                f" — {issue.detail}" if issue.detail else "",
+            )
 
+        generic = "Climate Advisor may not be able to control your HVAC correctly until {}."
         if len(issues) == 1:
             issue = issues[0]
+            consequence = issue.detail or generic.format("it's fixed")
             message = (
-                f"{issue.friendly_name} ('{issue.entity_id}') isn't responding. Climate Advisor "
-                "may not be able to control your HVAC correctly until it's fixed. Check "
-                "Settings > Devices & Services."
+                f"{issue.friendly_name} ('{issue.entity_id}') isn't responding. {consequence} "
+                "Check Settings > Devices & Services."
             )
         else:
             names = ", ".join(f"{i.friendly_name} ({i.entity_id})" for i in issues)
+            details = " ".join(f"{i.friendly_name} ({i.entity_id}): {i.detail}" for i in issues if i.detail)
             message = (
-                f"{len(issues)} entities aren't responding: {names}. Climate Advisor may not be "
-                "able to control your HVAC correctly until they're fixed. Check Settings > "
-                "Devices & Services."
+                f"{len(issues)} entities aren't responding: {names}. "
+                f"{details or generic.format("they're fixed")} Check Settings > Devices & Services."
             )
 
         self._notify_in_background("Climate Advisor — entity not found", message, "entity_health")
@@ -11427,24 +11552,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return "inactive"
 
     def _compute_contact_status(self) -> str:
-        """Compute the contact sensor summary string."""
+        """Compute the contact sensor summary string.
+
+        Issue #1181: a sensor that cannot be read is never summarised as closed -- it is called out with
+        what Climate Advisor is doing about it ("held open" when its last real reading was open).
+        """
         if not self._resolved_sensors:
             return "no sensors"
         open_count = sum(1 for s in self._resolved_sensors if self._is_sensor_open(s))
-        if open_count == 0:
+        dark = [s for s in self._resolved_sensors if self._sensor_real_reading(self.hass.states.get(s)) is None]
+        if open_count == 0 and not dark:
             return "all closed"
-        return f"{open_count} open"
+        parts = [f"{open_count} open"] if open_count else []
+        if dark:
+            held = sum(1 for s in dark if self._sensor_holds_open(s))
+            parts.append(f"{len(dark)} not responding" + (f" ({held} last read open, held open)" if held else ""))
+        return ", ".join(parts)
 
     def _compute_contact_details(self) -> list[dict[str, Any]]:
-        """Return per-sensor details for contact status attributes."""
+        """Return per-sensor details for contact status attributes.
+
+        Issue #1181: ``unreadable`` / ``last_reading`` / ``treated_as`` say what a dark sensor reads as.
+        """
         details = []
         for sensor_id in self._resolved_sensors:
             friendly = sensor_id.split(".")[-1].replace("_", " ").title()
+            unreadable = self._sensor_real_reading(self.hass.states.get(sensor_id)) is None
             details.append(
                 {
                     "entity_id": sensor_id,
                     "friendly_name": friendly,
                     "open": self._is_sensor_open(sensor_id),
+                    "unreadable": unreadable,
+                    "last_reading": self._sensor_last_readings().get(sensor_id),
+                    "treated_as": "open" if self._sensor_holds_open(sensor_id) else "closed",
                 }
             )
         return details

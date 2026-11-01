@@ -1155,7 +1155,7 @@
           ${data.coordinator_healthy === false ? `<div class="value" style="color:var(--danger, #f44336)">⚠ Climate Advisor unavailable since ${data.stale_since ? new Date(data.stale_since).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'unknown'} — ${escapeHtml(data.last_error || 'unknown error')}</div>` : ''}
           ${(data.invariant_violations || []).map(v => `<div class="value" style="color:var(--danger, #f44336)">⚠ ${escapeHtml(v.detail)}</div>`).join('')}
           ${(data.hvac_control_issues || []).map(v => `<div class="value" style="color:var(--danger, #f44336)">⚠ ${escapeHtml(v.detail)}</div>`).join('')}
-          ${(data.entity_health_issues || []).map(i => `<div class="value" style="color:var(--danger, #f44336)">⚠ ${escapeHtml(i.friendly_name)} (${escapeHtml(i.entity_id)}) is ${escapeHtml(i.status)}</div>`).join('')}
+          ${(data.entity_health_issues || []).map(i => `<div class="value" style="color:var(--danger, #f44336)">⚠ ${escapeHtml(i.friendly_name)} (${escapeHtml(i.entity_id)}) is ${escapeHtml(i.status)}${i.detail ? ' — ' + escapeHtml(i.detail) : ''}</div>`).join('')}
           ${data.pause_suppressed_classification_text ? `<div class="value">${escapeHtml(data.pause_suppressed_classification_text)}</div>` : ''}
           ${data.nat_vent_active && data.nat_vent_off_threshold != null && data.nat_vent_on_threshold != null ? `
           <div class="value" style="font-size:0.8rem;opacity:0.85">
@@ -1214,6 +1214,7 @@
         <div class="status-item">
           <div class="label">Doors/Windows</div>
           <div class="value" style="color: ${data.contact_status === 'all closed' ? 'var(--success, #4caf50)' : 'var(--warning, #ff9800)'}">${data.contact_status || 'unknown'}</div>
+          ${data.contact_sensors.filter(c => c.unreadable).map(c => `<div class="value" style="font-size:0.8rem;opacity:0.85">${escapeHtml(c.friendly_name)} not responding — last read ${escapeHtml(c.last_reading || 'never')}, treated as ${escapeHtml(c.treated_as)}</div>`).join('')}
         </div>
         ` : ''}
       `;

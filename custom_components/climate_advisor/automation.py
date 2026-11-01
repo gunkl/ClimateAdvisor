@@ -2079,6 +2079,15 @@ class AutomationEngine:
         """
         return bool(self._manual_override_active or self._override_confirm_pending)
 
+    def _occupant_override_active(self) -> bool:
+        """Whether Cancel Override has an occupant override to end (Issues #1095, #1154).
+
+        The protected thermostat change (``_manual_change_protected()``: confirmed OR still awaiting its
+        confirmation window) or a fan override. ``cancel_override()`` and the dashboard Cancel Override
+        response both read this, so what the button can end and what it reports cannot drift apart.
+        """
+        return bool(self._manual_change_protected() or self._fan_override_active)
+
     def _note_deferred_to_protected_change(self) -> None:
         """Remember that automation held off because of a PENDING change (Issue #1133 F-E / L2).
 
@@ -2278,8 +2287,8 @@ class AutomationEngine:
         """
         had_manual = self._manual_override_active
         had_fan = self._fan_override_active
-        had_grace = self._grace_active
-        if not (had_manual or had_fan or had_grace):
+        # Issue #1154: an unconfirmed change is protected (#1133), so it must be cancellable too.
+        if not (self._occupant_override_active() or self._grace_active):
             return False
         self._deferred_while_pending = False  # Issue #1133 F-E: cancelled -- nothing is waiting any more
 
@@ -4687,6 +4696,18 @@ class AutomationEngine:
         if isinstance(live, str) and requested and live == requested:
             self._recover_mode_episode(requested)
 
+    def _rearm_timer(self, slot: str, delay: float, fn: Any) -> None:
+        """Arm ``async_call_later`` into cancel slot ``slot``, cancelling the handle already in it (Issue #1135).
+
+        Overwriting a live handle orphans its timer: ``cleanup()`` cancels only the slot's latest handle,
+        so a settings save or zone reload left a ghost timer that woke on a dead engine. The setpoint
+        check/retry and the post-fan setpoint verifies re-arm through here.
+        """
+        previous = getattr(self, slot, None)
+        if previous:
+            previous()
+        setattr(self, slot, async_call_later(self.hass, delay, fn))
+
     def _schedule_mode_alignment_recheck(self, my_seq: int) -> None:
         """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049)."""
         if self._mode_align_recheck_cancel:
@@ -5201,6 +5222,13 @@ class AutomationEngine:
                             # successful one closes it like every other climate write.
                             self._note_hvac_command_ok(_retry_mode)
 
+                        if not decide_scheduled_write_seq_current(
+                            current_write_seq=self._write_seq, target_write_seq=_retry_seq
+                        ):
+                            # Issue #1135: a newer write re-armed the check slot during the awaits above;
+                            # arming here would cancel ITS check, and _send_real_target would skip anyway.
+                            return
+
                         async def _send_real_target(_later: Any) -> None:
                             if not decide_scheduled_write_seq_current(
                                 current_write_seq=self._write_seq, target_write_seq=_retry_seq
@@ -5220,7 +5248,7 @@ class AutomationEngine:
                         def _schedule_real_target(_later: Any) -> None:
                             self.hass.async_create_task(_send_real_target(_later))
 
-                        self._setpoint_retry_cancel = async_call_later(self.hass, 30, _schedule_real_target)
+                        self._rearm_timer("_setpoint_retry_cancel", 30, _schedule_real_target)
                     else:
                         _LOGGER.warning(
                             "Retrying setpoint write after rejection: %.0f°F %s",
@@ -5233,7 +5261,7 @@ class AutomationEngine:
                 def _schedule_retry(_now: Any) -> None:
                     self.hass.async_create_task(_retry_callback(_now))
 
-                self._setpoint_retry_cancel = async_call_later(self.hass, 900, _schedule_retry)
+                self._rearm_timer("_setpoint_retry_cancel", 900, _schedule_retry)
             else:
                 self._setpoint_reject_streak = 0
                 _LOGGER.info(
@@ -5246,13 +5274,9 @@ class AutomationEngine:
         def _schedule_check(_now: Any) -> None:
             self.hass.async_create_task(_check_single_setpoint_accepted())
 
-        # Issue #1144: a newer write supersedes the pending acceptance check of the previous one. Overwriting
-        # the handle without cancelling it left the older 10 s timer armed but untracked, so unload could not
-        # cancel it (the real-HA lingering-timer check caught it after a WHF safety stop's two writes).
-        _previous_check = getattr(self, "_setpoint_retry_cancel", None)
-        if _previous_check:
-            _previous_check()
-        self._setpoint_retry_cancel = async_call_later(self.hass, 10, _schedule_check)
+        # Issue #1144 / #1135: a newer write supersedes the previous write's pending acceptance check; the
+        # helper cancels the older 10 s timer (unload could not cancel an overwritten, untracked handle).
+        self._rearm_timer("_setpoint_retry_cancel", 10, _schedule_check)
         self._schedule_mode_alignment_recheck(_my_seq)
         _LOGGER.info(
             "Set temperature to %s (mode=%s) — zone=%s %s role=%s",
@@ -8714,6 +8738,21 @@ class AutomationEngine:
                 archetype,
             )
 
+    def _discard_pause_record_for_manual_change(self) -> None:
+        """Drop the door/window pause record because the occupant's own thermostat change replaces it.
+
+        MANUAL_OVERRIDE_DURING_PAUSE lands on NORMAL from PAUSED_ACTIVE/PAUSED_IDLE, or GRACE from
+        PAUSED_DURING_GRACE (grace left running) (Issue #594 Phase R, Step 0 / #757 Phase 6 Step 4);
+        the pause entity/time/pre-pause mode go with it. Shared by ``handle_manual_override_during_pause()``
+        and the ``_re_pause_for_open_sensor()`` early return (Issue #1156).
+        """
+        from .door_window_fsm import DoorWindowFsmEventKind
+
+        self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE)
+        self._paused_entity = None
+        self._paused_since = None
+        self._pre_pause_mode = None
+
     async def handle_manual_override_during_pause(
         self,
         *,
@@ -8740,16 +8779,7 @@ class AutomationEngine:
             return
         _LOGGER.info("Manual HVAC override detected during door/window pause")
 
-        from .door_window_fsm import DoorWindowFsmEventKind
-
-        # Issue #594 Phase R, Step 0 / #757 Phase 6 Step 4: routed through the shared,
-        # unconditionally FSM-authoritative dispatcher — MANUAL_OVERRIDE_DURING_PAUSE
-        # lands on NORMAL from PAUSED_ACTIVE/PAUSED_IDLE, or GRACE from
-        # PAUSED_DURING_GRACE (grace left running).
-        self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE)
-        self._paused_entity = None
-        self._paused_since = None
-        self._pre_pause_mode = None
+        self._discard_pause_record_for_manual_change()
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         # Start confirmation period — wait before formally accepting the override
@@ -9029,6 +9059,36 @@ class AutomationEngine:
         _origin_state = self.door_window_lifecycle_state
 
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+        from .override_grace_fsm import unprotected_grace_expiry_keeps_pending
+
+        # Issue #1156: an expiring grace that is NOT the occupant's own (window-close resume, fan-off
+        # cooldown, dashboard resume, ...) must not drop a thermostat change that is still awaiting its
+        # confirmation, nor re-pause over it. It just ends; the confirmation timer carries on.
+        # Deliberately NOT keyed on a CONFIRMED override: its protection IS a grace, and fan-off /
+        # dashboard-resume replace that protecting grace with an unprotected one while the override
+        # stays live. That replacement grace expiring is the end of the override's grace (a window left
+        # open is then honoured by the re-pause below, rule 3); keeping the override here would leave it
+        # with no timer and no end. The occupant's own grace (``_grace_protects_override``) likewise
+        # falls through to the branches below unchanged.
+        if unprotected_grace_expiry_keeps_pending(
+            confirm_pending=bool(self._override_confirm_pending),
+            manual_override_active=bool(self._manual_override_active),
+            grace_protects_override=bool(self._grace_protects_override),
+        ):
+            _LOGGER.info(
+                "%s grace expired while the occupant's thermostat change is awaiting confirmation"
+                " -- ending the grace only; not re-pausing, not clearing the change",
+                source,
+            )
+            self._cancel_grace_timers_action()
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
+            if self._request_refresh_callback:
+                self._request_refresh_callback()
+            if self._post_grace_fan_check_callback:
+                self._post_grace_fan_check_callback()
+            if self._emit_event_callback:
+                self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
+            return
 
         def _dispatch_override_grace_expired() -> None:
             """Real action + single dispatcher call for GRACE_TIMER_EXPIRED (Issue #664),
@@ -9311,6 +9371,16 @@ class AutomationEngine:
     async def _re_pause_for_open_sensor(self) -> None:
         """Re-pause HVAC because a sensor is still open when grace expired."""
         async with self._decision_pass("_re_pause_for_open_sensor"):
+            # Issue #1156: the designed re-pause runs after the occupant's own override has been
+            # cleared (``_on_grace_expired()``). A protected change here is one made since -- the
+            # occupant's latest choice wins, so do not pause over it.
+            if self._manual_change_protected():
+                _LOGGER.info("Skipping re-pause -- the occupant's thermostat change is protected")
+                # _on_grace_expired() already recorded the re-pause flags; a change that landed before this
+                # task ran replaces that pause (the HVAC is running at the occupant's choice).
+                if self._paused_by_door:
+                    self._discard_pause_record_for_manual_change()
+                return
             if self._is_within_planned_window_period():
                 _LOGGER.info(
                     "Skipping re-pause — within planned window period (windows recommended)",
@@ -14614,7 +14684,7 @@ class AutomationEngine:
             def _verify_setpoint_after_fan_on(_now: Any) -> None:
                 self.hass.async_create_task(_do_verify_after_fan_on())
 
-            self._fan_on_verify_cancel = async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_on)
+            self._rearm_timer("_fan_on_verify_cancel", 30.0, _verify_setpoint_after_fan_on)
 
             # Issue #327: thermostatic backstop timer — fires every 5 min while the fan
             # is CA-owned; calls fan_thermostat_check so a slow-updating outdoor sensor
@@ -15787,7 +15857,7 @@ class AutomationEngine:
             def _verify_setpoint_after_fan_off(_now: Any) -> None:
                 self.hass.async_create_task(_do_verify_after_fan_off())
 
-            self._fan_off_verify_cancel = async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_off)
+            self._rearm_timer("_fan_off_verify_cancel", 30.0, _verify_setpoint_after_fan_off)
         finally:
             self._fan_command_pending = False
             if not _command_issued:

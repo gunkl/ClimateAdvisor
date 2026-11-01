@@ -17,6 +17,7 @@
 | What is out of scope for this feature? | Any code path that actually calls a speed-setting HA service (`fan.set_percentage` or similar) — this feature is detect-and-respect only, not detect-and-set. See [§ Scope](#scope) for the full boundary, including what changed from the original (pre-#519) scope. | [§ Scope](#scope) |
 | Does an RF timer press also suppress HVAC? | Yes, as of Issue #495 — for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` schedules `_suppress_hvac_for_whf()`, the same helper `_activate_fan()` uses. Previously ONLY CA-initiated activation suppressed HVAC; a manual/remote fan-on left the AC armed for the life of the override. As of Issue #519, an override-classified speed press schedules the same suppression; a comfort-only speed observation does not. | [§ HVAC Suppression on Manual/Remote Fan-On](#hvac-suppression-on-manualremote-fan-on) |
 | Can a stale/repeated remote event trigger a false override? | It used to. The `event.*` entity flaps to `unavailable` at arbitrary times (not just restart) and re-announces its STALE last `event_type` with the SAME state (the entity's `state` field IS the event timestamp). Issue #495 added a dedup guard (`_last_fan_remote_event_ts`) that ignores a re-announced identical timestamp — confirmed live: without it, a phantom 2h override fired with zero user action when the entity restored a 6-hour-stale `timer_2h`. | [§ Stale-Event Dedup](#stale-event-dedup) |
+| Can a device reconnect still cause a false override? | Not since Issue #1198. The #495 guard only knew timestamps it had acted on, so a reconnect re-announcing an hours-old press (after a restart that never recorded one) became a 3 h override with the heat held off while the fan never ran. Now every event's timestamp is remembered (seeded at start), timestamps older than 30 s are rejected, and an override needs the fan (when it has state feedback) to actually report on (applied the moment it does, given up after 45 s). | [§ Reconnect re-announcement hardening](#reconnect-re-announcement-hardening-issue-1198) |
 | Does the dashboard's remote-timer display stay accurate? | As of Issue #495, yes. Previously `handle_fan_manual_override()` unconditionally overwrote `_fan_remote_timer_hours` on every call — including plain non-remote re-stamps (e.g. the WHF fan entity re-reporting "on") — which nulled an active remote timer within seconds of a genuine press. Fixed by only overwriting when the caller is the remote itself (`is_remote_event=True`) or supplies a genuine value. `_fan_remote_speed` (Issue #519) uses the identical guarded-overwrite idiom. | [§ Timer Value Durability](#timer-value-durability) |
 | How does CA find the ambient speed sensor without new config? | Auto-discovery via HA's entity/device registry, keyed off the already-configured `fan_remote_entity` — resolves its `device_id`, then scans sibling entities for a `sensor.*` matching an object-id hint. No new user-facing config field; a discovery miss (older firmware, or registry not yet populated at startup) degrades to "speed unknown," which IS the auto-detect + fallback mechanism. | [§ Ambient Speed Sensor Discovery](#ambient-speed-sensor-discovery-issue-519) |
 | Can CA's OWN fan command be misread as a remote press? | It used to. The QuietCool device transmits AND receives on the same RF channel, so a CA-issued command can be heard back by this same receive-side entity within ~1-2 seconds. Issue #567 added an echo guard (`_is_recent_fan_command()`, the same 30s-window primitive `_async_fan_entity_changed()` already used) at the top of `_async_fan_remote_changed()` — event-context matching isn't available here since CA never calls a service on this receive-only entity. | [§ CA's Own Command Echo Suppression](#cas-own-command-echo-suppression-issue-567) |
@@ -27,8 +28,8 @@
 
 **Files:**
 - `custom_components/climate_advisor/fan_status.py` — `parse_remote_timer_event()`, the single source of truth for the event-token → hours mapping; `parse_remote_speed_event()` (Issue #519), the sibling for the speed-token family
-- `custom_components/climate_advisor/const.py` — `CONF_FAN_REMOTE_ENTITY`, `REMOTE_TIMER_EVENT_HOURS`; `REMOTE_SPEED_TOKENS`, `REMOTE_BURST_WINDOW_SECONDS`, `REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS` (Issue #519)
-- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler; `_last_fan_remote_event_ts` (Issue #495 stale-event dedup); `_PendingFanRemoteBurst`, `_arm_fan_remote_burst()`/`_cancel_fan_remote_burst()`/`_flush_fan_remote_burst()` (Issue #519 burst combining + classification); `_resolve_fan_remote_speed_sensor()`/`_read_fan_remote_speed()` (Issue #519 ambient sensor discovery); `_is_recent_fan_command()` echo guard at ingestion (Issue #567)
+- `custom_components/climate_advisor/const.py` — `CONF_FAN_REMOTE_ENTITY`, `REMOTE_TIMER_EVENT_HOURS`; `REMOTE_SPEED_TOKENS`, `REMOTE_BURST_WINDOW_SECONDS`, `REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS` (Issue #519); `REMOTE_EVENT_MAX_AGE_SECONDS`, `REMOTE_CONFIRM_SECONDS` (Issue #1198)
+- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler; `_last_fan_remote_event_ts` (Issue #495 stale-event dedup); `_PendingFanRemoteBurst`, `_arm_fan_remote_burst()`/`_cancel_fan_remote_burst()`/`_flush_fan_remote_burst()` (Issue #519 burst combining + classification); `_fan_remote_event_age_seconds()`, `_defer_fan_remote_override()`/`_confirm_fan_remote_override()`/`_apply_fan_remote_override()` (Issue #1198 stale-timestamp rejection + fan-confirmation gate); `_resolve_fan_remote_speed_sensor()`/`_read_fan_remote_speed()` (Issue #519 ambient sensor discovery); `_is_recent_fan_command()` echo guard at ingestion (Issue #567)
 - `custom_components/climate_advisor/ai_skills_context.py` — `_render_fan_cancel()` branches on the `fan_cancel` event's `trigger` field so CA's own drift-reconciliation self-correction (`physical_drift_correction`) doesn't render as "user turned off" (Issue #567)
 - `custom_components/climate_advisor/automation.py` — `handle_fan_manual_override(duration_override=..., is_remote_event=..., remote_speed=...)`, `_start_grace_period(duration_override=...)`, the suppression WARNING at `_deactivate_fan()` and `fan_thermostat_check()`, `_suppress_hvac_for_whf()`/`_release_whf_and_reclassify()` (Issue #495 HVAC suppression + reclassify-on-exit); `handle_fan_speed_observed()` (Issue #519 comfort-only path)
 - `custom_components/climate_advisor/api.py` + `custom_components/climate_advisor/frontend/index.html` — `fan_remote_speed` status field + dashboard display (Issue #519)
@@ -429,6 +430,57 @@ the last event actually acted on. `_async_fan_remote_changed()` compares the inc
 restart-only guard to every `unavailable`→restore flap, using the entity's own timestamp
 rather than a time-window heuristic. Not persisted — a stale restore immediately after a
 restart is already covered by `_suppress_during_startup_coalescing()`.
+
+### Reconnect re-announcement hardening (Issue #1198)
+
+**Occupant effect (2026-11-01 01:01):** with the whole-house fan off all night, an ESPHome reconnect
+made the remote entity go `unavailable` for ~337 ms and come back with its hours-old last press.
+Climate Advisor recorded a 3 h manual fan override and held the heat off; the fan never ran.
+The #495 guard above did not catch it because `_last_fan_remote_event_ts` was memory-only,
+`None` at start, and set only when a speed/timer event was *acted on* (the restart blip had been
+swallowed by startup coalescing, so nothing had ever been recorded). Original design gap, not a
+regression. Three independent layers now cover it:
+
+1. **Remember every timestamp.** `_last_fan_remote_event_ts` is seeded from the entity's current
+   state when the listener is registered and updated on EVERY event the listener sees —
+   including ones dropped by startup coalescing or the echo guard, `off`, bare `on` and unknown
+   tokens. An identical timestamp is then always a duplicate. When the previous state was
+   `unavailable`/`unknown` the drop is logged at INFO ("Fan remote event ignored: re-announced
+   after reconnect"); an ordinary repeat state write stays at DEBUG.
+2. **Reject an old event time.** An event whose state time (an EventEntity's state is HA's own receive time of the press, restored unchanged on reconnect) is more than
+   `REMOTE_EVENT_MAX_AGE_SECONDS` (30 s) older than HA's clock is not a press now (INFO "Fan
+   remote event ignored: stale event time, restored on reconnect"). Covers the first re-announcement after a
+   restart where the entity was unavailable, so nothing could be seeded. The state is stamped by
+   HA when the device's event arrives, so only transport latency (well under a second normally)
+   separates a real press from this check. An unparseable timestamp is not judged (processed as
+   before).
+3. **Ground-truth gate at flush.** When a burst classifies as an override and the configured fan
+   *with state feedback* still reads off (`_get_fan_physical_state() is False`), the press is not
+   recorded immediately. The flush runs only 1.5 s after the last packet, and a real fan's state
+   entity (a power detector) lags the RF press by 8-15 s (measured on the owner's house: 14.8,
+   13.1, 13.5 and 8.4 s), so the press is held and confirmation is **event-driven**:
+   `_async_fan_entity_changed()` applies the pending press the moment the fan's ground truth reads
+   on (same `_apply_fan_remote_override()` path, keeping the remote's timer token, so HVAC
+   suppression follows the fan's real start). While the state entity still reads off, the command
+   entity's echo of the same press records nothing, so there is never a second, token-less
+   override. This also covers the echo arriving BEFORE the burst flushes (the transmitter echoes
+   within ~1-2 s, the flush runs at 1.5 s after the last packet): while a burst is open, or a press
+   is pending, a command-entity "on" whose state entity reads off is deferred to the remote press
+   (INFO "Fan entity on deferred to the remote press"). The give-up WARNING states what is actually
+   active: it claims "no override recorded" only when no fan override/grace is active. `REMOTE_CONFIRM_SECONDS` (45 s) is only the give-up deadline, handled by
+   `_confirm_fan_remote_override()`: still off then means no override, no grace, no HVAC
+   suppression, WARNING "Fan remote press not confirmed by the fan". A newer press replaces a
+   pending one; an `off` press or shutdown cancels it (the timer is zone-scoped and cancelled in
+   `_cancel_fan_remote_burst()`, per the teardown contract). Command-only installs (no state
+   feedback, `_get_fan_physical_state()` is `None`) cannot be checked and keep the previous
+   behaviour. The comfort-only speed path needs no gate (the fan was already running).
+
+**Symmetry:** a real press during startup coalescing is still dropped (unchanged — the fan entity
+listener covers physical on/off) but its timestamp is now recorded; a stale-restored `off` can no
+longer cancel a genuine pending press (it is rejected before the `off` branch); a stale event can no
+longer re-stamp or extend a real active override (it never reaches the burst). Tests:
+`tests/test_fan_remote.py::TestRemoteReannounceAfterReconnect1198`,
+`tests_ha/test_remote_reconnect_1198.py`.
 
 ---
 

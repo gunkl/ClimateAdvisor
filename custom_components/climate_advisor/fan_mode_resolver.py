@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from .const import FAN_MODE_DISABLED
+from .const import FAN_MODE_BOTH, FAN_MODE_DISABLED, FAN_MODE_HVAC
 
 # Preference order when resolving "turn the fan on" against a real fan_modes list —
 # checked case-insensitively, first match wins.
@@ -52,6 +52,17 @@ def fan_control_enabled(fan_mode: str) -> bool:
     thermostat's blower is never CA's to adopt, time, or override-track.
     """
     return fan_mode != FAN_MODE_DISABLED
+
+
+def thermostat_blower_is_ca_fan(fan_mode: str) -> bool:
+    """True when the thermostat's own blower (its ``fan_mode`` attribute) is a fan Climate Advisor owns (Issue #1197).
+
+    ``hvac_fan`` (and the unsupported, unchanged ``both``): the blower IS CA's fan, so an occupant's press is an
+    override of it. ``whole_house_fan``: CA's fan is the separate whole-house-fan entity, and the thermostat's blower
+    is only the occupant's own equipment -- a press creates no override, no grace and no fan-off handling.
+    ``disabled``: CA owns no fan at all. The one predicate the thermostat fan_mode-change handler consults.
+    """
+    return fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH)
 
 
 def resolve_fan_mode_command(fan_modes: list[str] | None, intent: Literal["on", "off"]) -> str | None:

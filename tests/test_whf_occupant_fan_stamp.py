@@ -295,6 +295,10 @@ def test_issue_1168_a_whf_pressed_after_a_blower_override_still_suppresses_hvac(
 
     The listener ignores the WHF ON while any fan override is active (#1168, out of scope); the state backstop must
     still make the newer WHF win: HVAC is suppressed within the 30 s bound and the fan keeps running.
+
+    Fan mode `both` is unsupported (#1175). Since #1172 the debounced window pause already turns HVAC off before the
+    WHF press, so this no longer exercises the rule-2 backstop; it is kept only as a no-regression check that the
+    fan is not stopped.
     """
     scenario = _both_mode_scenario(
         window_open=True,
@@ -308,7 +312,9 @@ def test_issue_1168_a_whf_pressed_after_a_blower_override_still_suppresses_hvac(
         "setup: a blower override is active and the listener recorded no WHF press"
     )
     late = [a for a in acts if a[0] >= "14:22:00"]
-    assert any(a[2] == "set_hvac_mode" and a[3] == "off" and a[0] <= "14:22:30" for a in late), late
+    # Issue #1172: the blower override's grace no longer holds off the window pause, so HVAC is already off from the
+    # moment the window's debounce expired (14:15 in this harness) -- the outcome rule 2 asks for is reached earlier.
+    assert any(a[2] == "set_hvac_mode" and a[3] == "off" and a[0] <= "14:22:30" for a in acts), acts
     assert not any(a[1] == "fan" and a[2] == "turn_off" for a in late), "the newer WHF press must keep running"
 
 
@@ -324,3 +330,44 @@ def test_issue_1169_a_whf_running_on_a_sealed_house_is_stopped_even_with_a_blowe
     acts, _override, _press = _acts(scenario)
     stops = [a for a in acts if a[1] == "fan" and a[2] == "turn_off" and a[0] >= "14:22:00"]
     assert stops and stops[0][0] <= "14:22:30", f"the sealed-house WHF was not stopped within the bound: {acts}"
+
+
+# ── Issue #1178: a fan entity waking from unavailable/unknown is a reconnect, not an occupant action ───────
+
+
+def test_a_fan_that_reconnects_already_on_is_not_an_occupant_action():
+    """The whole-house-fan entity wakes unavailable -> on: HA stamps a fresh last_changed, but nobody pressed it."""
+    coord = _coord()
+    coord._whf_reconnect_changed_at = NOW - timedelta(seconds=20)  # the listener recorded the wake-up at the on-time
+    assert _stamp(coord) is None
+
+
+def test_an_occupant_turn_on_after_the_reconnect_still_counts():
+    coord = _coord()
+    coord._whf_reconnect_changed_at = NOW - timedelta(minutes=30)  # the wake-up was long before this on-time
+    assert _stamp(coord) == NOW - timedelta(seconds=20)
+
+
+def test_the_fan_listener_records_an_availability_recovery():
+    """Real ``_async_fan_entity_changed``: unavailable/unknown -> on records the wake-up; off -> on does not."""
+    import asyncio
+
+    from tests.test_fan_cancel import _make_coordinator_stub, _make_fake_event, _make_fake_state
+
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    for old, new, expect_recorded in (
+        ("unavailable", "on", True),
+        ("unknown", "on", True),
+        ("off", "on", False),
+        ("unavailable", "off", False),  # a reconnect to off must not leave a stamp
+        ("unknown", "off", False),
+    ):
+        coord = _make_coordinator_stub()
+        coord._whf_reconnect_changed_at = None
+        coord._is_recent_fan_command = MagicMock(return_value=False)
+        coord._get_fan_physical_state = MagicMock(return_value=True)
+        new_state = _make_fake_state(new)
+        new_state.last_changed = NOW
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+        asyncio.run(method(_make_fake_event(_make_fake_state(old), new_state)))
+        assert (coord._whf_reconnect_changed_at == NOW) is expect_recorded, (old, new)

@@ -196,6 +196,10 @@ def _make_fan_remote_coord(*, startup_coalesce_active: bool) -> object:
     # directly rather than waiting out the real async_call_later timer.
     coord._fan_remote_burst = None
     coord._fan_remote_burst_cancel = None
+    coord._fan_remote_confirm_burst = None  # Issue #1198
+    coord._fan_remote_confirm_cancel = None
+    # Issue #1198: the firmware-timestamp age check reads the wall clock; these tests use fixed timestamps.
+    coord._fan_remote_event_age_seconds = MagicMock(return_value=None)
     coord._get_fan_physical_state = MagicMock(return_value=None)
 
     coord._suppress_during_startup_coalescing = types.MethodType(

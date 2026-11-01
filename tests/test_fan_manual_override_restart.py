@@ -237,3 +237,24 @@ class TestWholeHouseFanInstall:
         assert ae._fan_override_active is False
         assert ae._reconcile_rearmed_override is False
         assert ae._pending_override_rearm_end is None
+
+
+class TestRestartRearmKeepsTheFansIdentity:
+    """Issue #1170: the override's fan identity is not persisted; the re-arm derives it from the configured fan."""
+
+    def test_hvac_fan_house_rearms_a_blower_override_that_blower_off_ends(self) -> None:
+        coordinator, _fake_hass, scheduler, _event_log = _build(config={"fan_mode": "hvac_fan"})
+        _restart(coordinator, scheduler, _persisted(scheduler, remaining_s=3600))
+        ae = coordinator.automation_engine
+        assert ae._fan_override_active is True, "the blower override was re-armed"
+        assert ae._fan_override_is_hvac_fan is True, "...as the occupant's thermostat-blower override"
+        with scheduler.installed():
+            ae.on_fan_turned_off(fan_before="on", fan_after="auto", hvac_fan=True)
+        assert ae._fan_override_active is False, "the occupant turning the blower off ends the override"
+
+    def test_whole_house_fan_house_rearms_a_whf_override(self) -> None:
+        coordinator, _fake_hass, scheduler, _event_log = _build(config={"fan_mode": "whole_house_fan"})
+        _restart(coordinator, scheduler, _persisted(scheduler, remaining_s=3600))
+        ae = coordinator.automation_engine
+        assert ae._fan_override_active is True
+        assert ae._fan_override_is_hvac_fan is False

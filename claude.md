@@ -37,6 +37,15 @@ When investigating any symptom (wrong values, unexpected behavior, report inaccu
 
 Skipping to code without completing steps 1–3 is a process violation. The Coordinator must redirect the agent to restart from step 1.
 
+### Scope Facts — check these before calling anything a bug (Issue #1197)
+
+Every investigation brief (including every subagent prompt) must carry these, because the code alone suggests otherwise:
+
+1. **Supported fan modes are `whole_house_fan` or `hvac_fan` — never `both`.** `FAN_MODE_BOTH` still exists in the code (~78 references) but is hidden from the config flow and **not supported** (owner decision, #1175). A defect that only occurs under `both` is out of scope: note it, don't file or fix it. Under `whole_house_fan` the thermostat's own blower is the occupant's equipment, not CA's fan: a blower press is ignored (no override, no grace; owner decision 2026-11-01, #1197). Only under `hvac_fan` is a blower press a tracked fan override (#1103/#1180). So a "blower override plus whole-house fan" scenario cannot occur in a supported mode.
+2. **A door/window opening never pauses HVAC instantly.** Each sensor is debounced (`DEFAULT_SENSOR_DEBOUNCE_SECONDS` = 600 s, configurable); the pause happens only if the sensor is still open when its debounce expires (`docs/08-COMPUTATION-REFERENCE.md` §10). An immediate pause would thrash the HVAC on every brief door opening. HVAC running during the debounce is correct, not a rule-3 violation; never propose "pause immediately".
+
+**Root cause of this block:** both facts were repeatedly forgotten by investigations (2026-11-01 audit of #1134+). The `both` decision lived only in a private assistant memory that subagents never see, while CLAUDE.md described `FAN_MODE_BOTH` behaviour as if live; #1168–#1170 were filed as `both` bugs 30 minutes before #1175 ruled `both` out, and nobody swept them. Owner rule 3 was written as "HVAC stays off while a window is open" with no debounce, so it read as "pause instantly".
+
 **Root cause of this rule:** Explore agents went directly to source code (Issue #149) without reading the Tier 3 spec or fetching live data first. The spec at `docs/ai-skills-spec.md` and `docs/thermal-model-v3-spec.md` answers most structure questions without opening a `.py` file. Live data (ha_logs, learning_db) provides ground-truth values that make hypotheses falsifiable before code is read.
 
 ### Symmetry/Mirror Check (CRITICAL — before closing any bug fix)
@@ -793,6 +802,7 @@ After merge: `gh release edit vX.Y.Z --draft=false`
 - **const.py VERSION and manifest.json version must always match** — enforced by test_version_sync.py
 
 ### Issue Requirements
+- **When the owner rules a scope out (e.g. "fan mode `both` is not supported", #1175), sweep the open issues for that scope in the same session** and close or re-scope each one, then record the decision in the Scope Facts block above — not only in a closing comment or a private memory. #1168–#1170 stayed open as `both` bugs because this sweep never happened (Issue #1197).
 - Every feature/fix should have a tracking issue
 - Include summary, requirements, implementation checklist
 - Update issue status when work is complete — provide user with brief commit summary including GitHub issue reference
@@ -1195,6 +1205,8 @@ Owner rules, authoritative:
 
 1. The WHF never runs on a sealed house (stop within 30 s).
 2. WHF and HVAC are mutually exclusive; the newest occupant action wins.
-3. HVAC stays off while a window is open, unless a manual override turns it on.
+3. HVAC stays off while a window is open — **after the sensor debounce** (default 600 s; a window open for less than that never pauses HVAC, by design, to avoid thrashing) — unless a manual override turns it on. See Scope Facts above.
 
-An override is never an exemption from rules 1-2; stops go through `_enforce_whf_safety`/`_deactivate_fan(safety=True)` only. Never copy-paste a stop or stand-down. Climate Advisor also never *starts* the whole-house fan on a sealed house (entry gate in `_activate_fan()`, which keeps the HVAC blower leg of `FAN_MODE_BOTH` allowed). Zero configured sensors means rule 1 does not apply (setup warns); command-only installs (`fan_state_feedback` off) cannot be enforced (setup warns); a WHF entity shared across zones is refused in setup.
+Supported fan modes are `whole_house_fan` or `hvac_fan` only; `both` is unsupported and hidden (#1175), see Scope Facts above.
+
+An override is never an exemption from rules 1-2; stops go through `_enforce_whf_safety`/`_deactivate_fan(safety=True)` only. Never copy-paste a stop or stand-down. Climate Advisor also never *starts* the whole-house fan on a sealed house (entry gate in `_activate_fan()`; that gate still leaves the HVAC-blower leg of the unsupported `FAN_MODE_BOTH` code path allowed). Zero configured sensors means rule 1 does not apply (setup warns); command-only installs (`fan_state_feedback` off) cannot be enforced (setup warns); a WHF entity shared across zones is refused in setup.

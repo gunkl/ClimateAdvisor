@@ -62,6 +62,7 @@ def _make_coord_stub(config: dict) -> MagicMock:
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
 
     coord = MagicMock()
+    coord._fan_remote_confirm_burst = None  # Issue #1198: no remote press awaiting the fan
     coord.hass = hass
     coord.config = config
     coord._fan_state_entity_unavailable_warned = False

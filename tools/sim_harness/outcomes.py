@@ -509,8 +509,12 @@ def _map_event_to_outcome(
     # mapping it fell to the catch-all below and surfaced as the placeholder label
     # "unknown:occupancy_setback_suppressed_paused", which the catch-all documents as
     # "an event type nobody classified", so two locked goldens pinned a placeholder
-    # (it would have changed meaning silently if the catch-all prefix ever changed, and
-    # could hide a second unclassified event at the same timestamp). The mapping is
+    # (away_natvent_exits_at_comfort_ceiling and away_with_active_natvent_transition;
+    # Issue #1193 has since given both a whole-house fan, so they no longer reach this
+    # branch; the no-fan scenario setback_suppressed_while_window_paused_on_leaving_home
+    # now pins the mapped outcome). A placeholder would have changed meaning silently if
+    # the catch-all prefix ever changed, and could hide a second unclassified event at
+    # the same timestamp. The mapping is
     # strictly 1:1 to its OWN outcome: NOT "paused" and NOT "setback_applied", so a
     # regression that applies the setback while paused still yields "setback_applied"
     # and fails the assertion, and a regression that stops emitting the suppression

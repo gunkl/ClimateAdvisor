@@ -16,28 +16,42 @@
     "setback_cool": 79,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
-    "fan_entity": "fan.whole_house"
+    "fan_entity": "fan.whole_house",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
       "time": "2026-07-10T09:00:00",
       "type": "classification",
       "day_type": "warm",
-      "windows_recommended": false,
-      "note": "Warm-day classification (hvac_mode left to classifier.py, which derives off for a warm day)"
+      "windows_recommended": true,
+      "note": "Warm-day classification (hvac_mode left to classifier.py, which derives off for a warm day)",
+      "today_low": 60,
+      "today_high": 80,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
     },
     {
       "time": "2026-07-10T09:01:00",
       "type": "temp_update",
       "indoor_f": 72.0,
       "outdoor_f": 65.0,
-      "note": "Morning: indoor 72F within band [70F, 74F], outdoor 65F \u00e2\u20ac\u201d nat-vent favorable"
+      "note": "Morning: indoor 72F within band [70F, 74F], outdoor 65F \u2014 nat-vent favorable"
     },
     {
       "time": "2026-07-10T09:01:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F \u00e2\u20ac\u201d nat-vent activates"
+      "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F \u2014 nat-vent activates"
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 65.0,
+      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
     },
     {
       "time": "2026-07-10T10:00:00",
@@ -87,5 +101,7 @@
     "summary": "Nat-vent uses free cooling while away, exits at comfort_cool ceiling (74F) via Issue #231 away-ceiling-exit path",
     "observed_behavior": "nat-vent activates while home, persists through away transition (setback applied), exits when indoor reaches comfort_cool=74F",
     "expected_behavior": "Free cooling opportunity exploited while away; ceiling exit at comfort_cool prevents over-cooling and accumulating comfort violations in the band"
-  }
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
 }

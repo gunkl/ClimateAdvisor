@@ -34,10 +34,10 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
+      "windows_recommended": true,
       "note": "Warm-day classification: HVAC off. Indoor will be checked for nat-vent eligibility on sensor open.",
       "today_high": 80,
-      "today_low": 72,
+      "today_low": 66,
       "window_open_time": "06:00",
       "window_close_time": "10:00"
     },

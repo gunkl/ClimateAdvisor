@@ -26,15 +26,18 @@
       "type": "temp_update",
       "indoor_f": 73.5,
       "outdoor_f": 68.0,
-      "note": "Cool morning. Indoor near comfort_cool=74F."
+      "note": "Mild morning (outdoor 68F). Indoor near comfort_cool=74F."
     },
     {
       "time": "2026-07-15T09:01:00",
       "type": "classification",
       "day_type": "warm",
-      "windows_recommended": false,
-      "note": "Warm-day classification (hvac_mode left to classifier.py, off): comfort band armed, active ceiling comfort_cool=74F.",
-      "today_low": 72.0
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "note": "Warm-day classification (hvac_mode left to classifier.py, off): comfort band armed, active ceiling comfort_cool=74F. Forecast high 80 / low 66 agrees with the 68-74F readings; classifier derives windows_recommended true for 06:00-10:00.",
+      "today_high": 80,
+      "today_low": 66.0
     },
     {
       "time": "2026-07-15T10:00:00",
@@ -60,6 +63,7 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
+      "today_high": 90,
       "windows_recommended": false,
       "note": "30-min classification cycle. Override should NOT be active — classification should apply normally."
     }
@@ -69,20 +73,20 @@
       "at": "2026-07-15T09:01:00",
       "expect": "classification_applied",
       "expect_temp": 74.0,
-      "reason": "Initial cool-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "reason": "Initial warm-day classification applied: comfort band armed, CA commands cool at the comfort_cool=74F ceiling (the classifier label is hvac_mode=off).",
       "track": "integration"
     },
     {
       "at": "2026-07-15T10:00:00",
       "expect": "override_detected",
-      "reason": "Thermostat changed to heat while classification says cool — pending override detection.",
+      "reason": "Thermostat changed to heat while CA is commanding cool (warm-day classification: hvac_mode off, comfort band armed, cool commanded at the 74F ceiling) — pending override detection.",
       "track": "integration",
       "note": "Override detection fires in coordinator _async_thermostat_changed listener."
     },
     {
       "at": "2026-07-15T10:10:00",
       "expect": "override_self_resolved",
-      "reason": "Confirm timer (override_confirm_seconds=600) fires at 10:10 — 10 minutes after detection at 10:00. Reads current thermostat state (still 'cool', set at 10:04:59) which matches classification.hvac_mode ('cool') — self-resolve path (PATH B in _confirm_override_expired), no override accepted. Corrected from 10:05 — see notes.",
+      "reason": "Confirm timer (override_confirm_seconds=600) fires at 10:10 — 10 minutes after detection at 10:00. Reads current thermostat state (still 'cool', set at 10:04:59) which matches the mode CA is commanding on this warm day (classifier label is hvac_mode off, band armed, cool commanded at the ceiling) — expected self-resolve path (PATH B in _confirm_override_expired), no override accepted. Corrected from 10:05 — see notes.",
       "track": "integration",
       "note": "Self-resolve genuinely happens at real timer expiry, not proactively on return-to-expected."
     },

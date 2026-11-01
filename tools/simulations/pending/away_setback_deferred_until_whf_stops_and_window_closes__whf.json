@@ -21,17 +21,17 @@
       "type": "temp_update",
       "indoor_f": 73.5,
       "outdoor_f": 65.0,
-      "note": "Morning: indoor 73.5F, outdoor 65F â€” nat-vent favorable"
+      "note": "Morning: indoor 73.5F, outdoor 65F — nat-vent favorable"
     },
     {
       "time": "2026-07-15T09:01:00",
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "note": "Warm-day classification at home",
+      "note": "Hot-day classification at home (classifier derives cool for a hot day)",
       "windows_recommended": false,
       "today_high": 88,
-      "today_low": 72
+      "today_low": 60
     },
     {
       "time": "2026-07-15T10:00:00",

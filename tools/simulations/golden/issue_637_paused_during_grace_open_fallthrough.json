@@ -35,6 +35,7 @@
       "time": "2026-08-14T12:31:00",
       "type": "classification",
       "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "windows_recommended": false,
       "note": "Hot-day classification: HVAC cool at 74F (classifier.py derives cool for a hot day)."

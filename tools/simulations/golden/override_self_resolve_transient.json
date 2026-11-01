@@ -1,13 +1,13 @@
 {
   "name": "override_self_resolve_transient",
-  "description": "Cool day, HVAC in cool mode at comfort (74F). At 10:00 thermostat briefly reports heat mode (transient glitch). At 10:05 thermostat returns to cool before the 10-minute confirm window expires. Override self-resolves; no override is accepted; classification continues normally.",
+  "description": "Hot day, HVAC in cool mode at comfort_cool (74F). At 10:00 thermostat briefly reports heat mode (transient glitch). At 10:05 thermostat returns to cool before the 10-minute confirm window expires. Override self-resolves; no override is accepted; classification continues normally.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
     "Tests the 'transient glitch' vs 'real user change' distinction in the override confirmation window.",
     "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true, evaluated for real.",
     "CORRECTED per #474/#476 investigation: the override_self_resolved assertion moved from 10:05 to 10:10. Tracing automation.py's start_override_confirmation()/_confirm_override_expired() shows the self-resolve check ONLY runs when the confirm timer itself fires (10:10 here — 10 minutes after detection, per override_confirm_seconds=600), reading whatever the current thermostat state is at THAT moment. There is no code path in _async_thermostat_changed that proactively cancels/re-evaluates the pending timer early when the thermostat returns to the expected mode before the window expires (confirmed by directly reading the guard chain — no such early-cancel branch exists). The scenario's original 10:05 assertion described aspirational behavior that was never implemented, not a harness dispatch-fidelity gap — do not 'fix' this by modifying automation.py/coordinator.py; that would be a production behavior change out of scope for a test-infra issue. The self-resolve genuinely happens, just at timer-expiry (10:10), not at the return-to-expected moment (10:05).",
-    "10:30's classification hvac_mode changed from 'cool' (same as 09:01) to 'off': the original, identical classification would be silently deduped by apply_classification()'s day_type/hvac_mode dedup (automation.py:1355-1356) regardless of whether the override genuinely self-resolved or incorrectly stuck — making the assertion pass vacuously either way. A different hvac_mode makes it discriminating: a genuine NEW classification_applied only fires if the override really did clear.",
+    "10:30's classification changed from hot/cool (same as 09:01) to a genuine warm day (classifier-derived hvac_mode 'off'; today_high 80, today_low 66 agree with the 65-74F readings): the original, identical classification would be silently deduped by apply_classification()'s day_type/hvac_mode dedup (automation.py:1355-1356) regardless of whether the override genuinely self-resolved or incorrectly stuck — making the assertion pass vacuously either way. A different day type and hvac_mode avoids the dedup, so the 10:30 classification_applied is a genuine new application. It is NOT by itself discriminating for the PATH-A regression: when the regression confirms the override at 10:10, the override is adopted at 10:25 and 10:30 still shows classification_applied. Only the 10:10 override_self_resolved assertion catches that regression.",
     "Revert test: temporarily forced _confirm_override_expired() (automation.py:1145) to always take PATH A (confirm) instead of checking current_mode != cls_mode — the 10:10 assertion correctly failed (override_confirmed instead of override_self_resolved). Restored; git diff confirmed clean."
   ],
   "config": {
@@ -27,13 +27,14 @@
       "type": "temp_update",
       "indoor_f": 73.5,
       "outdoor_f": 68.0,
-      "note": "Cool morning. Indoor near comfort_cool=74F."
+      "note": "Mild morning (outdoor 68F). Indoor near comfort_cool=74F."
     },
     {
       "time": "2026-07-15T09:01:00",
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
+      "today_high": 90,
       "windows_recommended": false,
       "note": "Hot-day classification: hvac_mode=cool, target=comfort_cool=74F."
     },
@@ -60,9 +61,12 @@
       "time": "2026-07-15T10:30:00",
       "type": "classification",
       "day_type": "warm",
-      "today_low": 72.0,
-      "windows_recommended": false,
-      "note": "30-min classification cycle — deliberately a DIFFERENT hvac_mode (off, not cool) from the 09:01 classification, so the assertion below genuinely discriminates (see notes). Override should NOT be active — classification should apply normally."
+      "today_high": 80,
+      "today_low": 66.0,
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "note": "30-min classification cycle with the forecast revised to a warm day (high 80, low 66, so the classifier derives hvac_mode off and windows_recommended true for 06:00-10:00; hvac_mode is left unset because the harness defaults it to off) — deliberately a DIFFERENT day type and mode (warm/off, not hot/cool) from the 09:01 classification, so the assertion below genuinely discriminates (see notes). Override should NOT be active — classification should apply normally."
     }
   ],
   "assertions": [
@@ -70,7 +74,7 @@
       "at": "2026-07-15T09:01:00",
       "expect": "classification_applied",
       "expect_temp": 74.0,
-      "reason": "Initial cool-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "reason": "Initial hot-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
       "track": "integration"
     },
     {

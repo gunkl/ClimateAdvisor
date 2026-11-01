@@ -20,6 +20,7 @@
       "time": "2026-04-05T08:00:00",
       "type": "classification",
       "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "note": "morning classification — cool mode at 75F comfort"
     },
@@ -33,6 +34,7 @@
       "time": "2026-04-05T10:00:00",
       "type": "classification",
       "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "note": "30-min classification cycle fires while away — must NOT overwrite setback with comfort"
     },
@@ -40,6 +42,7 @@
       "time": "2026-04-05T10:30:00",
       "type": "classification",
       "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "note": "another classification cycle — should still maintain setback"
     },

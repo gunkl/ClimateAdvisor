@@ -13,7 +13,10 @@
     "comfort_heat": 70,
     "comfort_cool": 74,
     "natural_vent_delta": 3.0,
-    "fan_mode": "hvac_fan"
+    "fan_mode": "hvac_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
@@ -28,10 +31,10 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
+      "windows_recommended": true,
       "note": "Warm-day classification",
       "today_high": 80,
-      "today_low": 72,
+      "today_low": 60,
       "window_open_time": "06:00",
       "window_close_time": "10:00"
     },
@@ -40,6 +43,13 @@
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
       "note": "Window opens: outdoor 65F < indoor 72.5F, indoor > comfort_heat 70F, outdoor <= threshold 77F — nat vent activates"
+    },
+    {
+      "time": "2026-05-25T08:05:00",
+      "type": "temp_update",
+      "indoor_f": 72.5,
+      "outdoor_f": 65.0,
+      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
     },
     {
       "time": "2026-05-25T10:00:00",
@@ -86,5 +96,7 @@
     "k_passive": -0.15,
     "k_active_cool": -2.0,
     "k_active_heat": 2.0
-  }
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
 }

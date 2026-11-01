@@ -36,6 +36,7 @@
       "time": "2026-06-10T14:01:00",
       "type": "classification",
       "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "note": "Hot-day classification: hvac_mode=cool set explicitly (harness default is off; classifier.py derives cool for a hot day)."
     },

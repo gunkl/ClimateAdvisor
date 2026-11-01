@@ -47,7 +47,7 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "note": "Hot day classification \u00e2\u20ac\u201d cool mode; away setback (79F) should be applied and must NOT trigger override detection"
+      "note": "Hot day classification \u2014 cool mode; away setback (79F) should be applied and must NOT trigger override detection"
     },
     {
       "time": "2026-06-10T08:30:00",

@@ -22,8 +22,10 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
-      "note": "Hot-day classification at dawn (classifier derives hvac_mode=cool, windows recommended). Indoor 71F is inside the band [68F, 74F]."
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
+      "note": "Hot-day classification at dawn (classifier derives hvac_mode=cool, windows_recommended false). Indoor 71F is inside the band [68F, 74F]."
     },
     {
       "time": "2026-09-01T06:00:00",
@@ -44,7 +46,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "First evaluation with indoor below the floor: floor breach, heat is armed immediately."
     },
     {
@@ -52,7 +56,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "Re-evaluation 2 minutes later: still below the floor, heating remains armed (redundant re-affirmation kept from the original timeline)."
     }
   ],

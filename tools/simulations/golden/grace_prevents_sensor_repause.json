@@ -22,6 +22,7 @@
       "type": "classification",
       "hvac_mode": "cool",
       "day_type": "hot",
+      "today_high": 90,
       "note": "Hot day, cooling active (classifier.py derives cool for a hot day)"
     },
     {

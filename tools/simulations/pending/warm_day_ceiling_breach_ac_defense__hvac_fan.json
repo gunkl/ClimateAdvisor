@@ -24,7 +24,10 @@
     "setback_heat": 62,
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
-    "fan_mode": "hvac_fan"
+    "fan_mode": "hvac_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
@@ -39,10 +42,10 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
-      "note": "Warm-day classification: hvac_mode=off, windows_recommended=false so sensor_open at 8:05 AM is processed by the nat-vent eligibility check. Indoor=72F >= comfort_heat=70F so no comfort-floor guard fires.",
+      "windows_recommended": true,
+      "note": "Warm-day classification (forecast high 80 / low 60, matching the 62-76F readings): the classifier derives hvac_mode=off and windows_recommended=true for 06:00-10:00, so the 8:05 AM window opening is a planned window with a fan configured and starts nat-vent (via the coordinator refresh and the paused-reactivation path). Indoor=72F >= comfort_heat=70F so no comfort-floor guard fires.",
       "today_high": 80,
-      "today_low": 72,
+      "today_low": 60,
       "window_open_time": "06:00",
       "window_close_time": "10:00"
     },
@@ -58,6 +61,13 @@
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
       "note": "User opens window. outdoor=65F < indoor=72.5F, indoor > comfort_heat=70F, outdoor <= threshold 77F — nat vent activates. _paused_by_door=False while nat-vent is active."
+    },
+    {
+      "time": "2026-05-20T08:05:00",
+      "type": "temp_update",
+      "indoor_f": 72.5,
+      "outdoor_f": 65.0,
+      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
     },
     {
       "time": "2026-05-20T10:00:00",
@@ -129,7 +139,7 @@
     {
       "at": "2026-05-20T10:00:00",
       "expect": "nat_vent_outdoor_rise_exit",
-      "reason": "[hvac_fan twin] temp_update: outdoor=73.5F >= indoor=73.0F — directional exit fires; airflow would now add heat rather than cool."
+      "reason": "[hvac_fan twin] temp_update: outdoor=73.5F >= indoor=73.0F — directional exit fires at 10:00; airflow would now add heat rather than cool."
     },
     {
       "at": "2026-05-20T12:30:00",
@@ -159,5 +169,7 @@
     "k_active_cool": -2.0,
     "k_active_heat": 2.0
   },
-  "issue_followup": 1193
+  "issue_followup": 1193,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
 }

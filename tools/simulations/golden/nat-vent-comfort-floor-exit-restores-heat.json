@@ -21,10 +21,10 @@
             "type": "classification",
             "day_type": "cool",
             "hvac_mode": "heat",
-            "note": "Morning classification — cool day (high 60F, low 42F), hvac_mode heat, comfort_heat=70F",
-            "today_high": 60.0,
+            "note": "Morning classification — cool day (high 58F, low 42F), hvac_mode heat, comfort_heat=70F",
+            "today_high": 58.0,
             "today_low": 42.0,
-            "tomorrow_high": 60.0,
+            "tomorrow_high": 58.0,
             "tomorrow_low": 42.0
         },
         {

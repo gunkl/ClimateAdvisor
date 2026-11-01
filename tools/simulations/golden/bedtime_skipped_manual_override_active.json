@@ -1,6 +1,6 @@
 {
   "name": "bedtime_skipped_manual_override_active",
-  "description": "Warm day: user bumps thermostat at 21:00 (override confirmed). Bedtime fires at 22:30. In production, an active manual override suppresses bedtime setback. As of Issue #476 (use_coordinator=true, skip_startup_coalesce=true), this scenario runs for real against the actual coordinator/engine — the earlier 'simulator_support:false pending Gap 3' framing predates that migration and is stale; the assertion passes for real, not by simulator approximation.",
+  "description": "Hot day: user bumps thermostat at 21:00 (override confirmed). Bedtime fires at 22:30. In production, an active manual override suppresses bedtime setback. As of Issue #476 (use_coordinator=true, skip_startup_coalesce=true), this scenario runs for real against the actual coordinator/engine — the earlier 'simulator_support:false pending Gap 3' framing predates that migration and is stale; the assertion passes for real, not by simulator approximation.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -25,6 +25,7 @@
       "time": "2026-07-15T14:00:00",
       "type": "classification",
       "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "note": "Afternoon hot-day classification — cool mode at comfort_cool=74F (classifier.py derives cool for a hot day)"
     },

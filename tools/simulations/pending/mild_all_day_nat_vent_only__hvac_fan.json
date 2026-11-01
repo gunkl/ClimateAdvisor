@@ -33,9 +33,9 @@
       "day_type": "mild",
       "hvac_mode": "off",
       "windows_recommended": true,
-      "note": "Mild classification: hvac_mode=off, windows_recommended=false so sensor_open events are processed by the nat-vent eligibility check rather than the planned-window gate.",
-      "today_high": 80,
-      "today_low": 72,
+      "note": "Mild classification (forecast high 70 / low 58, matching the 65-70F outdoor readings): the classifier derives hvac_mode=off and windows_recommended=true for 10:00-17:00. The 08:00 window opening is before that planned-window period, so the sensor_open is processed by the nat-vent eligibility check rather than the planned-window gate.",
+      "today_high": 70,
+      "today_low": 58,
       "window_open_time": "10:00",
       "window_close_time": "17:00"
     },

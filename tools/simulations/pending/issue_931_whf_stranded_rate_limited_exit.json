@@ -41,7 +41,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "Hot-day classification, HVAC in cool mode -- nat-vent free-cools ahead of the AC needing to run."
     },
     {

@@ -1,6 +1,6 @@
 {
   "name": "away_with_active_natvent_transition__whf",
-  "description": "[whole-house-fan twin of golden 'away_with_active_natvent_transition'; Issue #1193] Warm day: nat-vent running at home. User leaves (occupancy_away) at 15:00. Production only changes the setpoint to setback_cool â€” nat-vent continues running. There is no explicit nat-vent exit event on occupancy transition. WHF specifics: the away setback is refused while the fan runs (rule 2); the deferral and the later landing of the setback are pinned by away_setback_deferred_until_whf_stops_and_window_closes__whf.",
+  "description": "[whole-house-fan twin of golden 'away_with_active_natvent_transition'; Issue #1193] Hot day: nat-vent running at home. User leaves (occupancy_away) at 15:00. Production only changes the setpoint to setback_cool — nat-vent continues running. There is no explicit nat-vent exit event on occupancy transition. WHF specifics: the away setback is refused while the fan runs (rule 2); the deferral and the later landing of the setback are pinned by away_setback_deferred_until_whf_stops_and_window_closes__whf.",
   "source": "Issue #1193: whole-house-fan twin of golden 'away_with_active_natvent_transition' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
   "issue": 229,
   "notes": [
@@ -8,7 +8,7 @@
     "Nat-vent continues until a natural exit condition fires: outdoor rises, comfort floor hit, threshold exceeded.",
     "This scenario verifies: (1) away setback is applied, (2) nat-vent state is NOT prematurely exited.",
     "The assertion that nat-vent is still active after away transition documents production behavior.",
-    "Previously this scenario incorrectly asserted nat_vent_exit at the away transition â€” that was",
+    "Previously this scenario incorrectly asserted nat_vent_exit at the away transition — that was",
     "simulator-only fiction. Corrected in #229 investigation.",
     "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together)."
   ],
@@ -27,17 +27,17 @@
       "type": "temp_update",
       "indoor_f": 73.5,
       "outdoor_f": 65.0,
-      "note": "Morning: indoor 73.5F, outdoor 65F â€” nat-vent favorable"
+      "note": "Morning: indoor 73.5F, outdoor 65F — nat-vent favorable"
     },
     {
       "time": "2026-07-15T09:01:00",
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "note": "Warm-day classification at home",
+      "note": "Hot-day classification at home (classifier derives cool for a hot day)",
       "windows_recommended": false,
       "today_high": 88,
-      "today_low": 72
+      "today_low": 60
     },
     {
       "time": "2026-07-15T10:00:00",
@@ -56,7 +56,7 @@
       "at": "2026-07-15T10:00:00",
       "expect": "natural_ventilation",
       "track": "logic",
-      "reason": "[whole-house-fan twin] sensor_open: outdoor=65F < indoor=73.5F, indoor > comfort_heat=70F, threshold=77F â€” nat-vent activates"
+      "reason": "[whole-house-fan twin] sensor_open: outdoor=65F < indoor=73.5F, indoor > comfort_heat=70F, threshold=77F — nat-vent activates"
     },
     {
       "at": "2026-07-15T15:00:00",
@@ -68,13 +68,13 @@
       "at": "2026-07-15T15:00:00",
       "expect": "nat_vent_still_active",
       "track": "logic",
-      "reason": "[whole-house-fan twin] After away transition, nat-vent state flag must still be True. Production does not exit nat-vent on occupancy change â€” only the setpoint changes. Checks SimState.natural_vent_active directly."
+      "reason": "[whole-house-fan twin] After away transition, nat-vent state flag must still be True. Production does not exit nat-vent on occupancy change — only the setpoint changes. Reads the live engine _natural_vent_active attribute."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "[whole-house-fan twin] Away transition changes setpoint only; nat-vent continues running (production behavior)",
-    "observed_behavior": "occupancy_away fires -> setback_applied (79F); nat-vent flag remains active",
+    "observed_behavior": "occupancy_away fires -> hvac_write_blocked_whf_active (setback_cool 79F refused while the fan runs, rule 2); nat-vent flag remains active",
     "expected_behavior": "Leaving home while nat-vent is active: only setpoint changes. No explicit nat-vent exit event. Nat-vent exits naturally when outdoor conditions change."
   },
   "issue_followup": 1193

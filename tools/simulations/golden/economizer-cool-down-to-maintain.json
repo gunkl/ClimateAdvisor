@@ -22,8 +22,10 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
-      "note": "Hot day: hvac_mode=cool. Economizer eligibility requires this classification."
+      "windows_recommended": false,
+      "today_high": 90,
+      "today_low": 70,
+      "note": "Hot day (forecast high 90 / low 70, consistent with the 71-78F readings): the classifier gives hvac_mode=cool and never recommends windows on a hot day, so windows_recommended=false. Economizer eligibility requires this classification."
     },
     {
       "time": "2026-07-10T07:00:00",

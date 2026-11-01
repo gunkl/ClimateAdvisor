@@ -15,7 +15,10 @@
     "setback_heat": 62,
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
-    "fan_mode": "hvac_fan"
+    "fan_mode": "hvac_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
@@ -30,12 +33,12 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
+      "windows_recommended": true,
       "window_open_time": "06:00",
       "window_close_time": "10:00",
       "note": "Warm-day classification: the occupied comfort band [70/74] is armed. The thermostat pre-heats indoor 65F up to the comfort_heat floor (70F).",
       "today_high": 80,
-      "today_low": 72
+      "today_low": 50
     },
     {
       "time": "2026-05-15T08:00:00",
@@ -49,12 +52,12 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
+      "windows_recommended": true,
       "window_open_time": "06:00",
       "window_close_time": "10:00",
       "note": "30-min re-evaluation: the comfort band [70/74] is re-armed; the thermostat now holds the band with no change needed.",
       "today_high": 80,
-      "today_low": 72
+      "today_low": 50
     },
     {
       "time": "2026-05-15T18:00:00",
@@ -68,6 +71,13 @@
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
       "note": "User opens window — outdoor 65F < indoor 72F, indoor > comfort_heat=70F, outdoor < threshold 77F."
+    },
+    {
+      "time": "2026-05-15T18:05:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 65.0,
+      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
     }
   ],
   "assertions": [
@@ -106,5 +116,7 @@
     "observed_behavior": "comfort_band_applied [70/74] at 06:01 (thermostat pre-heats 65F->70F) -> comfort_band_applied [70/74] at 08:01 -> natural_ventilation at 18:05 (band stays armed)",
     "expected_behavior": "Thermostat holds the comfort band all day; nat-vent in the evening manages only the fan"
   },
-  "issue_followup": 1193
+  "issue_followup": 1193,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
 }

@@ -1,6 +1,6 @@
 {
   "name": "away_natvent_exits_at_comfort_ceiling__hvac_fan",
-  "description": "[hvac_fan twin of golden 'away_natvent_exits_at_comfort_ceiling'; Issue #1193] Nat-vent while away uses free cooling until indoor reaches comfort_cool (74F), then should exit and let HVAC setback handle it. The ceiling exit while away requires Issue #231 production fix to add a comfort_cool exit gate in check_natural_vent_conditions() for away occupancy.",
+  "description": "[hvac_fan twin of golden 'away_natvent_exits_at_comfort_ceiling'; Issue #1193] Nat-vent while away uses free cooling until indoor reaches comfort_cool (74F), then should exit and let HVAC setback handle it. The ceiling exit while away is the Issue #231 comfort_cool exit gate in check_natural_vent_conditions() for away occupancy (live in production).",
   "source": "Issue #1193: hvac_fan twin of golden 'away_natvent_exits_at_comfort_ceiling' (pre-#1140 version, fan configured). The golden is locked and now asserts the no-fan 'paused' result.",
   "issue": 231,
   "notes": [
@@ -25,22 +25,22 @@
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Warm-day classification: HVAC in cool mode",
+      "note": "Hot-day classification: HVAC in cool mode (classifier derives cool for a hot day)",
       "today_high": 88,
-      "today_low": 72
+      "today_low": 60
     },
     {
       "time": "2026-07-10T09:01:00",
       "type": "temp_update",
       "indoor_f": 72.0,
       "outdoor_f": 65.0,
-      "note": "Morning: indoor 72F within band [70F, 74F], outdoor 65F â€” nat-vent favorable"
+      "note": "Morning: indoor 72F within band [70F, 74F], outdoor 65F — nat-vent favorable"
     },
     {
       "time": "2026-07-10T09:01:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F â€” nat-vent activates"
+      "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F — nat-vent activates"
     },
     {
       "time": "2026-07-10T10:00:00",
@@ -68,7 +68,7 @@
       "expect": "natural_ventilation",
       "track": "logic",
       "simulator_support": true,
-      "reason": "[hvac_fan twin] sensor_open: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor 65F <= threshold 77F â€” nat-vent activates while occupancy is home"
+      "reason": "[hvac_fan twin] sensor_open: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor 65F <= threshold 77F — nat-vent activates while occupancy is home"
     },
     {
       "at": "2026-07-10T10:00:00",
@@ -76,7 +76,7 @@
       "expect_temp": 79.0,
       "track": "logic",
       "simulator_support": true,
-      "reason": "[hvac_fan twin] Away transition: setback_cool=79F applied. This is the only change production makes on occupancy_away â€” nat-vent is not exited."
+      "reason": "[hvac_fan twin] Away transition: setback_cool=79F applied. This is the only change production makes on occupancy_away — nat-vent is not exited."
     },
     {
       "at": "2026-07-10T14:01:35",

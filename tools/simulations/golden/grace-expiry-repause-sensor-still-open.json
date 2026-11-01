@@ -27,6 +27,7 @@
       "time": "2026-07-10T13:00:01",
       "type": "classification",
       "day_type": "hot",
+      "today_high": 90,
       "hvac_mode": "cool",
       "windows_recommended": false,
       "note": "Hot-day classification: HVAC cool (classifier.py derives cool for a hot day)."

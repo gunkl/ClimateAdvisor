@@ -13,7 +13,7 @@
     "(a) Scenario effectiveness: with nearest-edge arming deleted (origin/main comfort_family_decision.py), a hot day is natively 'cooling' and heat is the against-grain direction, which needs a floor breach beyond the hot-day deadband (5F; indoor 68F is AT the floor, not below it) plus recency and a 90 s sustain, so the 08:30 evaluation would re-arm cool at the ceiling. The never-cool assertion, last_hvac_mode=heat, comfort_family=heating and the comfort_band_applied(mode=heat) event would all fail.",
     "(b) Docs<->production alignment: docs/08 section 6f ('indoor <= floor + m -> heating, inclusive', 'strictly between -> the thermostat's actual current mode', restore paths 'no longer re-arm a day-type default; the next evaluation corrects the mode').",
     "(c) Occupant outcome if this test fails to catch a regression: after a free-cooling session the AC (or a cool/heat flapping thermostat) runs in a house that is already at its heating floor, wasting energy and overshooting cold, or the furnace never starts and the house keeps falling below the floor.",
-    "Classification fields: day_type=hot with hvac_mode=cool and windows_recommended=true match what classifier.py derives for DAY_TYPE_HOT. No thermal_model block (as in issue_696): the family decision no longer reads thermal confidence anyway.",
+    "Classification fields: day_type=hot with hvac_mode=cool and windows_recommended=false match what classifier.py derives for DAY_TYPE_HOT. No thermal_model block (as in issue_696): the family decision no longer reads thermal confidence anyway.",
     "Issue #1068: the 08:12 window close now re-arms heat immediately; no existing assertion type can pin a mode command to an instant (last_hvac_mode and event_emitted are at-or-before/whole-run checks and sensor_all_closed is the only event emitted), so this is covered by tests/test_nat_vent_exit_rearm.py rather than a new assertion here."
   ],
   "config": {
@@ -38,8 +38,10 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
-      "note": "Hot-day classification (classifier derives hvac_mode=cool, windows recommended). Indoor 73F is in the cooling zone, so nearest-edge arming arms cool at the ceiling."
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
+      "note": "Hot-day classification (classifier derives hvac_mode=cool, windows_recommended false). Indoor 73F is in the cooling zone, so nearest-edge arming arms cool at the ceiling."
     },
     {
       "time": "2026-08-31T08:00:02",
@@ -72,7 +74,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "Next periodic evaluation with the house at 68F: inside the heat zone (<= floor + m = 70F), so the nearer edge (floor) is armed and heat is commanded once. Cool must never be commanded at this handoff, even though the hot-day default edge is the ceiling."
     },
     {
@@ -87,7 +91,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 60,
       "note": "Routine cycle re-evaluation at 71F: still strictly between the margins, so the thermostat's actual mode (heat) is kept; no heat->cool flap."
     }
   ],

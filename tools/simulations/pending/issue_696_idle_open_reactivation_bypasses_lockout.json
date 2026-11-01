@@ -32,8 +32,9 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "windows_recommended": true,
-      "note": "Hot-day classification, hvac_mode=cool (classifier.py derives cool for a hot day). The AC is idle at this indoor temperature (70F, below the cooling band), which is what the window-open pause below records."
+      "today_high": 90,
+      "windows_recommended": false,
+      "note": "Hot-day classification, hvac_mode=cool and windows_recommended=false (classifier.py derives both for a hot day). The AC is idle at this indoor temperature (70F, below the cooling band), which is what the window-open pause below records."
     },
     {
       "time": "2026-08-23T06:00:02",

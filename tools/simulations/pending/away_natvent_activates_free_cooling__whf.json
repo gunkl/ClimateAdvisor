@@ -23,8 +23,12 @@
       "time": "2026-07-15T09:00:00",
       "type": "classification",
       "day_type": "warm",
-      "note": "Morning classification — warm day, comfort band armed (occupied); hvac_mode left to classifier.py (off for a warm day)",
-      "windows_recommended": false
+      "note": "Morning classification — warm day (high 80 / low 60 -> classify_day: warm, hvac_mode off, windows recommended 06:00-10:00), comfort band armed (occupied)",
+      "windows_recommended": true,
+      "today_high": 80,
+      "today_low": 60,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
     },
     {
       "time": "2026-07-15T10:00:00",

@@ -149,7 +149,7 @@ class OverrideGraceFsmInputs:
                                    classification's mode
       tolerance_f               -> OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
       within_planned_window     -> self._is_within_planned_window_period()
-      any_sensor_open            -> self._any_monitored_sensor_open()
+      any_sensor_open            -> self._any_monitored_sensor_holding_open() (Issue #1181)
       grace_source               -> self._last_resume_source of the EXPIRING grace
                                     ("manual" | "automation")
       grace_would_start           -> desired_state.decide_grace_start(source="manual", ...)

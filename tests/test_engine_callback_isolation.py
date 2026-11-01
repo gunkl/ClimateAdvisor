@@ -28,7 +28,7 @@ from custom_components.climate_advisor.automation import (  # noqa: E402
 _CALLBACK_ATTRS = (
     "_revisit_callback",
     "_sensor_check_callback",
-    "_sensors_known_closed_callback",
+    "_sensor_hold_callback",
     "_sensor_debounce_pending_callback",
     "_emit_event_callback",
     "_request_refresh_callback",
@@ -93,7 +93,7 @@ class TestCallbackBundleApplication:
         bundle = AutomationEngineCallbacks(
             revisit=_revisit,
             sensor_check=_sensor_check,
-            sensors_known_closed=_sensors_closed,
+            sensor_hold_check=_sensors_closed,
             sensor_debounce_pending=_sensor_debounce,
             emit_event=_emit,
             request_refresh=_refresh,
@@ -114,7 +114,7 @@ class TestCallbackBundleApplication:
         )
         assert engine._revisit_callback is _revisit
         assert engine._sensor_check_callback is _sensor_check
-        assert engine._sensors_known_closed_callback is _sensors_closed
+        assert engine._sensor_hold_callback is _sensors_closed
         assert engine._sensor_debounce_pending_callback is _sensor_debounce
         assert engine._emit_event_callback is _emit
         assert engine._request_refresh_callback is _refresh
@@ -153,7 +153,7 @@ class TestCoordinatorRefactorIsBehaviorPreserving:
         assert ae.role == "production"
         assert ae._revisit_callback == coordinator.async_request_refresh
         assert ae._sensor_check_callback == coordinator._any_sensor_open
-        assert ae._sensors_known_closed_callback == coordinator._all_sensors_known_closed
+        assert ae._sensor_hold_callback == coordinator._any_sensor_holding_open
         # build_headless_coordinator() intentionally overrides _emit_event_callback
         # post-construction (see its own docstring) to redirect into the flat
         # scenario event_log instead of coordinator._emit_event — so this one

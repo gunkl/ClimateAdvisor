@@ -28,6 +28,7 @@ and none fired. This module has no event dependency: the shell can ask it at any
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -42,6 +43,9 @@ WHF_ACTIVE_HVAC_MODES = frozenset({"heat", "cool", "heat_cool", "auto"})
 WHF_SETTLE_AFTER_ON_S = 10.0
 WHF_SEALED_CONFIRM_S = 10.0
 WHF_SENSOR_UNKNOWN_GRACE_S = 60.0
+# After a safety stop the enforcer re-checks this long later: a stop that did not take is retried, and a
+# command-only fan (no readable physical state) is treated as off from then on (Issue #1176).
+WHF_STOP_VERIFY_S = 12.0
 # An on-transition this close to Climate Advisor's own last real fan command is CA's, not the occupant's.
 WHF_OWN_COMMAND_ECHO_S = 45.0
 
@@ -133,6 +137,29 @@ class WhfSafetyDecision:
     retry_in_s: float | None = None
     stale_sensor_count: int = 0  # sensors counted closed because they were unknown for > 60 s
     sealed: bool = False
+
+
+def sensor_reading(
+    *, state: str | None, is_open: bool, age_s: float | None, since_start_s: float | None
+) -> SensorReading:
+    """One door/window sensor as every "is the house sealed" judge reads it (Issue #1177).
+
+    ``state`` is the raw HA state string, ``None`` when the entity is missing; ``is_open`` is the polarity-aware
+    "reads open" of a readable state; ``age_s`` is seconds since its ``last_changed`` (None when untracked);
+    ``since_start_s`` is seconds since the integration started (what a MISSING entity is aged from). An
+    unavailable/unknown/missing sensor carries ``unknown_for_s`` so ``house_is_sealed`` counts it open for
+    ``WHF_SENSOR_UNKNOWN_GRACE_S`` and closed after. When neither age is known the grace counts as long over
+    (rule 1 fails safe: an unreadable sensor of unknown age can never keep the fan running on a sealed house;
+    "just now" would have counted it open forever). The coordinator's snapshot builder and the promise adapter
+    both build their readings here, so they cannot disagree.
+    """
+    if state is None or state in ("unavailable", "unknown"):
+        since = age_s if state is not None else None
+        if since is None:
+            since = since_start_s
+        unknown_for = since if since is not None else math.inf
+        return SensorReading(is_open=False, unknown_for_s=unknown_for, stable_for_s=unknown_for)
+    return SensorReading(is_open=is_open, stable_for_s=age_s)
 
 
 def house_is_sealed(sensors: tuple[SensorReading, ...]) -> bool:

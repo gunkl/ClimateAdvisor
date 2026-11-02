@@ -281,7 +281,7 @@ class TestGraceNatVentBypass:
         """Grace active + outdoor > threshold → blocked, no HVAC change, no pause."""
         ae = _make_ae_stub(
             _grace_active=True,
-            _last_resume_source="automation",
+            _last_resume_source="manual",  # occupant-side grace (#1142: an automation grace no longer holds)
             _last_outdoor_temp=82.0,  # above threshold of 78 °F
         )
 
@@ -294,7 +294,7 @@ class TestGraceNatVentBypass:
         """Grace active + no outdoor data → blocked (safe fallback)."""
         ae = _make_ae_stub(
             _grace_active=True,
-            _last_resume_source="automation",
+            _last_resume_source="manual",  # occupant-side grace (#1142: an automation grace no longer holds)
             _last_outdoor_temp=None,
         )
 

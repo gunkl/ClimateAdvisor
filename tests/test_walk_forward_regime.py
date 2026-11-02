@@ -638,6 +638,34 @@ class TestWalkForwardRegimeCeilingGuardEscalation:
             "hours_to_breach=1.0h is within the 2.0h fallback lead time -> ESCALATE"
         )
 
+    def test_blower_session_never_escalates_to_cool_through_the_open_windows(self) -> None:
+        """Issue #1142 D7 (chart twin of the runtime rule): with the thermostat blower ventilating, the thermostat is
+        held Off, so the chart must not draw the ODE guard escalating to cool even once indoor passes the ceiling.
+        (The whole-house fan already skipped the guard.)"""
+        mod = _mod()
+        ts1 = _ts(12)
+        ts_breach = _ts(14)
+        day_modes = {date(2026, 7, 13): "off"}
+        band = _band([(ts1, 68.0, 76.0)])
+        predicted_indoor = _series([(ts1, 77.0), (ts_breach, 79.0)])  # already past the 76 ceiling threshold
+        forecast_outdoor = _series([(ts1, 70.0)])  # outdoor still below indoor: the session keeps running
+        thermal_model = {"k_passive": -1.0, "confidence_k_passive": "high"}
+
+        result = mod._walk_forward_regime(
+            day_modes,
+            predicted_indoor,
+            forecast_outdoor,
+            band,
+            _BASE_CONFIG,  # fan_mode hvac_fan
+            "home",
+            thermal_model,
+            False,
+            None,
+            76.0,
+            True,
+        )
+        assert result[ts1] == {"nat_vent_active": True, "hvac_mode": "off"}
+
     def test_dormancy_suppresses_escalation_when_nat_vent_active(self) -> None:
         """Same breach shape as above, but nat-vent is genuinely active and dormant
         (outdoor <= indoor <= ceiling_threshold) at the evaluated hour -> no escalation,
@@ -779,14 +807,24 @@ class TestWalkForwardRegimeGenuineReuseNotAParallelCopy:
 
     def test_patching_decide_ode_ceiling_guard_changes_walk_output(self) -> None:
         mod = _mod()
-        ts1 = _ts(12)
+        ts1 = _ts(12)  # fan disabled: no session is ever planned, so the guard is evaluated
         day_modes = {date(2026, 7, 13): "off"}
         band = _band([(ts1, 68.0, 76.0)])
         predicted_indoor = _series([(ts1, 70.0)])  # well under any breach threshold
         forecast_outdoor = _series([(ts1, 60.0)])
 
         baseline = mod._walk_forward_regime(
-            day_modes, predicted_indoor, forecast_outdoor, band, _BASE_CONFIG, "home", None, False, None, 76.0, False
+            day_modes,
+            predicted_indoor,
+            forecast_outdoor,
+            band,
+            {**_BASE_CONFIG, "fan_mode": "disabled"},
+            "home",
+            None,
+            False,
+            None,
+            76.0,
+            False,
         )
         assert baseline[ts1]["hvac_mode"] == "off", "sanity check: no breach, the real guard does not escalate"
 
@@ -801,7 +839,7 @@ class TestWalkForwardRegimeGenuineReuseNotAParallelCopy:
                 predicted_indoor,
                 forecast_outdoor,
                 band,
-                _BASE_CONFIG,
+                {**_BASE_CONFIG, "fan_mode": "disabled"},
                 "home",
                 None,
                 False,
@@ -1023,9 +1061,15 @@ class TestWalkForwardRegimeSealedWholeHouseFan:
         result = self._run(fan_mode, True, 77.0, 72.0)
         assert result[_ts(12)] == {"nat_vent_active": True, "hvac_mode": "off"}
 
-    def test_hvac_fan_home_with_the_same_inputs_still_escalates(self) -> None:
-        # Control: the skip is WHF-archetype only.
+    def test_planned_blower_session_hour_skips_the_guard_too(self) -> None:
+        # Issue #1142 D7: the blower session holds the thermostat Off (no AC assist), so the chart no longer draws the
+        # guard escalating to cool inside a planned blower session.
         result = self._run("hvac_fan", True, 77.0, 72.0)
+        assert result[_ts(12)] == {"nat_vent_active": True, "hvac_mode": "off"}
+
+    def test_blower_home_with_no_planned_session_still_escalates(self) -> None:
+        # Control: with no session planned (outdoor warmer than indoor) the blower home behaves like any other.
+        result = self._run("hvac_fan", False, 75.0, 80.0)
         assert result[_ts(12)] == {"nat_vent_active": False, "hvac_mode": "cool"}
 
     def test_unsealed_whf_home_is_given_no_ceiling_and_never_escalates(self) -> None:

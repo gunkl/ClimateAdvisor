@@ -121,19 +121,15 @@ class TestPauseRecordedWhenNatVentSkipped:
         assert engine._pre_pause_mode is None
 
     def test_grace_origin_skip_records_pause(self):
-        """GRACE origin: an automation grace is running and the forecast guard rules nat-vent out. Issue #1142 D3:
-        the grace holds the pause (the same answer as a gate failure inside a grace), and the pause is recorded
-        when the grace expires with the window still open."""
+        """GRACE origin: an automation grace is running and the forecast guard rules nat-vent out. Rule 3 (owner
+        decision, Issue #1142): CA's own grace is not a manual override, so the window is paused right away exactly as
+        outside a grace, and the pause is recorded."""
         engine = _engine()
         _forecast_peak_ahead(engine)
         engine._grace_active = True
         engine._last_grace_trigger = "automation"
         engine._last_resume_source = "automation"
         _open(engine)
-        assert engine._test_state.state == "cool" and engine._paused_by_door is False, "the grace holds the window"
-        engine._grace_active = False  # the grace ends with the window still open: the re-check pauses
-        with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
-            _run(engine._re_pause_for_open_sensor())
         assert engine._test_state.state == "off"
         assert engine._paused_by_door is True
         assert engine._pre_pause_mode == "cool"

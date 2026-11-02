@@ -203,26 +203,62 @@ class TestD2QuietPause:
 
 
 class TestD3GraceAgreement:
-    def test_forecast_veto_inside_automation_grace_does_not_pause(self):
+    """Owner decision (rule 3): a grace Climate Advisor started itself never holds an open window. Inside it the
+    window gets the same answer as outside: start when the nat-vent FSM says so, otherwise pause."""
+
+    def _automation_grace(self, engine):
+        engine._grace_active = True
+        engine._last_grace_trigger = "automation"
+        engine._last_resume_source = "automation"
+
+    def test_forecast_veto_inside_automation_grace_pauses(self):
         engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
         _forecast_peak_ahead(engine)
-        engine._grace_active = True
-        engine._last_grace_trigger = "automation"
-        engine._last_resume_source = "automation"
+        self._automation_grace(engine)
         notify = _notes(engine)
         _open(engine)
-        assert engine._paused_by_door is False, "the grace holds the window; the grace-expiry re-check decides"
-        assert engine._test_state.state == "cool"
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"
+        assert notify.called, "a pause that stays is announced"
+
+    def test_gate_failure_inside_automation_grace_pauses(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=85.0)
+        self._automation_grace(engine)
+        _open(engine)
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"
+
+    def test_a_start_inside_automation_grace_still_starts(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        self._automation_grace(engine)
+        notify = _notes(engine)
+        _open(engine)
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
         assert not notify.called
 
-    def test_control_gate_failure_inside_grace_does_not_pause(self):
+    def test_control_manual_grace_with_a_gate_failure_still_holds(self):
+        """The occupant-side grace keeps its behaviour: a dashboard-resume manual grace holds the pause."""
         engine = _engine(mode="cool", indoor=72.0, outdoor=85.0)
         engine._grace_active = True
-        engine._last_grace_trigger = "automation"
-        engine._last_resume_source = "automation"
+        engine._last_grace_trigger = "manual"
+        engine._last_resume_source = "manual"
         _open(engine)
         assert engine._paused_by_door is False
         assert engine._test_state.state == "cool"
+
+    def test_grace_expiry_recheck_agrees_with_the_handler(self):
+        """The mirror: with the same forecast veto, the grace-expiry re-check ends in the same pause."""
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        _forecast_peak_ahead(engine)
+        self._automation_grace(engine)
+        _open(engine)
+        handler_state = (engine._paused_by_door, engine._test_state.state)
+        engine2 = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        _forecast_peak_ahead(engine2)
+        engine2._grace_active = False
+        _at(lambda: engine2._re_pause_for_open_sensor())
+        assert (engine2._paused_by_door, engine2._test_state.state) == handler_state == (True, "off")
 
 
 # ---------------------------------------------------------------------------
@@ -698,9 +734,9 @@ class TestAwayCycleKeepsTheBlowerSessionOff:
 
 
 class TestBlowerActivePauseBranchStaysReachable:
-    """#1205 x #1142: the blower's thermostat is Off while it ventilates, so after a SESSION the pause is the idle shape.
-    The ACTIVE pause (a running cycle interrupted, restore target recorded) is still reached when the window opens
-    over an armed thermostat and a start is refused -- here the occupant's fan-off hold -- and its paused-branch
+    """#1205 x #1142: the blower's thermostat is Off while it ventilates, so after a SESSION the pause is the idle
+    shape. The ACTIVE pause (a running cycle interrupted, restore target recorded) is still reached when the window
+    opens over an armed thermostat and a start is refused -- here the occupant's fan-off hold -- and its paused-branch
     reactivation must still start the blower once the hold ends."""
 
     def test_window_over_an_armed_thermostat_with_the_fan_off_hold_is_an_active_pause_then_reactivates(self):

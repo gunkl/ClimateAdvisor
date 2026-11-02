@@ -153,3 +153,27 @@ async def test_soft_start_evening_gets_no_hvac_paused_message(make_house) -> Non
     assert engine._natural_vent_active, "precondition: the soft start ran"
     paused = [m for t, m in sent if t == "door_window_pause"]
     assert not paused, f"false 'HVAC paused' message before the fan started: {paused}"
+
+
+async def test_automation_grace_does_not_hold_an_open_window_when_nat_vent_is_refused(make_house) -> None:
+    """Rule 3 (owner decision): a grace Climate Advisor started itself is not a manual override. A window open past
+    the debounce inside it, with the nat-vent gate refusing (house below the comfort floor), is paused with the
+    thermostat Off."""
+    house = await make_house(**_MILD_EVENING)
+    await house.advance(minutes=6)
+    engine = house.coordinator.automation_engine
+    engine._start_grace_period("automation", trigger="test_automation_grace")
+    assert engine._grace_active and engine._last_resume_source == "automation", "precondition: an automation grace"
+    house.set_indoor(64.0)  # below the comfort floor: the nat-vent gate refuses (nothing to cool)
+    seen: list[tuple[bool, str]] = []
+    real_handler = engine.handle_door_window_open
+
+    async def _spy(entity_id):
+        await real_handler(entity_id)
+        seen.append((engine._paused_by_door, house.thermostat.mode))
+
+    engine.handle_door_window_open = _spy
+    await house.open("window")
+    await house.advance(seconds=_DEBOUNCE_S + 30)
+    assert seen, "precondition: the window-open handler ran"
+    assert seen[0] == (True, "off"), f"the automation grace held an open window (paused, thermostat mode): {seen[0]}"

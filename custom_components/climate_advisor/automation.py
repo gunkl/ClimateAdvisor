@@ -514,6 +514,10 @@ NAT_VENT_START_PAUSED_REACTIVATION = NatVentStartProfile(
 NAT_VENT_START_ROUTINE_RECHECK = NatVentStartProfile(
     "routine_recheck", paused_by_door=True, apply_reactivation_floor=True
 )
+# The "Next Automation" card's "Natural ventilation at HH:MM" prediction: the engine's idle-open / paused-reactivation
+# question asked at a FUTURE time (``at=``) on forecast temperatures. The scan already starts after any grace (the card
+# defers to the grace end), so the live grace flag is read as ended; override, lockout and the start guards stay live.
+NAT_VENT_START_PREDICTION = NatVentStartProfile("prediction", grace_active=False, apply_reactivation_floor=True)
 
 
 class HvacCommandResult(Enum):
@@ -6655,7 +6659,16 @@ class AutomationEngine:
             indoor = self._get_indoor_temp_f()
             _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_WINDOW_OPEN, indoor=indoor, outdoor=outdoor)
             _fan_off_hold = self._fan_off_hold_active()  # the occupant's off still in force (Issue #1205)
-            _grace_ignored = bool(self._grace_active and self._grace_protects_no_hvac_on_change())
+            # Issue #1142 (owner decision, rule 3): the only exception to "no heat/cool with a window open after the
+            # debounce" is the occupant's manual override (the protected-change branch below). A grace Climate Advisor
+            # started by its own action (``automation`` source: window-close resume, nat-vent exit resume, ...) is NOT
+            # one, so it never holds the pause -- a window open past the debounce gets the same answer inside such a
+            # grace as outside it (start when the nat-vent FSM says so, otherwise pause). The fan-off / blower-press
+            # graces (#1172, #1201) never held it either.
+            _automation_grace = bool(self._grace_active and self._last_resume_source == "automation")
+            _grace_ignored = bool(
+                self._grace_active and (self._grace_protects_no_hvac_on_change() or _automation_grace)
+            )
             _start_viable = _fsm_result.to_state in (
                 NatVentLifecycleState.ACTIVE_FULL_GATE,
                 NatVentLifecycleState.ACTIVE_SOFT_START,
@@ -6716,7 +6729,9 @@ class AutomationEngine:
                     "Door/window open (%s): %s grace does not hold off the pause — "
                     "HVAC stays off while a window is open (trigger=%s)",
                     entity_id,
-                    "fan-off" if self._grace_is_fan_off_grace() else "blower override",
+                    "fan-off"
+                    if self._grace_is_fan_off_grace()
+                    else ("automation" if _automation_grace else "blower override"),
                     self._last_grace_trigger,
                 )
 
@@ -12420,6 +12435,7 @@ class AutomationEngine:
         indoor: float | None,
         outdoor: float | None,
         override_cleared: bool = False,
+        at: datetime | None = None,
     ) -> NatVentTransition:
         """Ask the nat-vent FSM "may a fan session start now?" for one site's profile (Issue #1142).
 
@@ -12427,6 +12443,7 @@ class AutomationEngine:
         own ``NatVentTransition``. ``to_state`` is ``ACTIVE_FULL_GATE`` / ``ACTIVE_SOFT_START`` when a session
         may start, ``PAUSED_REACTIVATION_LOCKOUT`` when the lockout holds, and ``INACTIVE`` otherwise (with
         ``veto`` set when the temperature gate passed but a start rule refused it).
+        ``at``: ask as of a future time (the "Next Automation" prediction); default is now.
         """
         from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
         from .nat_vent_fsm import transition as _nat_vent_transition
@@ -12435,7 +12452,7 @@ class AutomationEngine:
             self.config.get(CONF_NAT_VENT_SOFT_START_ENABLED, DEFAULT_NAT_VENT_SOFT_START_ENABLED)
         )
         _inputs = self._build_nat_vent_fsm_inputs(
-            now=dt_util.now(),
+            now=at if at is not None else dt_util.now(),
             indoor=indoor,
             outdoor=outdoor,
             hysteresis=profile.hysteresis,
@@ -12464,7 +12481,9 @@ class AutomationEngine:
             for h in hourly
             if h.get("temperature") is not None
             and (parsed := _parse_forecast_dt(h.get("datetime"))) is not None
-            and now_dt < parsed <= now_dt + timedelta(hours=2)
+            and now_dt
+            < (parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC))
+            <= now_dt + timedelta(hours=2)
         ]
         return max(temps) if temps else None
 

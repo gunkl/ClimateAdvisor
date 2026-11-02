@@ -1430,6 +1430,8 @@ Natural ventilation and the economizer **no longer set `hvac_mode=off`** when th
 
 **Exits with a window still open (Issue #1142 D4/D8):** the outdoor-rise and ceiling exits, the comfort-floor exit (slow and fast loop) and the away-ceiling exit (slow and fast loop) all route through `_exit_nat_vent()`'s sensor-open branch: session ended, window pause recorded, thermostat switched Off right then (`_hold_thermostat_off_for_open_window`), reactivation lockout armed. Closing the window re-arms comfort in ONE write through the selector (away: the setback), so modes do not flap.
 
+**Prediction surfaces (Issue #1142 step 7):** the Next Automation card's "Natural ventilation at HH:MM" asks `AutomationEngine._nat_vent_start_decision(NAT_VENT_START_PREDICTION, at=<forecast time>)` -- the same nat-vent FSM answer the engine acts on (full gate, soft start, a fan exists, forecast-peak and thermal-floor guards, lockout, override) -- so it never promises a start the engine would veto. The chart's forecast walk (`_walk_forward_regime`) no longer draws the ODE ceiling guard escalating to cool inside a planned blower (`hvac_fan`) session, matching the runtime rule.
+
 **Sleep window (Issue #341) — historical:** the sleep-window deference only existed to avoid a double band write; with no band written it is moot.
 
 **Path B fix (re-activation from paused state):** Before Fix #338, when nat-vent re-activated from a paused state (all conditions met again after the 300 s lockout), `_apply_nat_vent_hvac_state()` was not called on that path. The band was not re-armed until the next 30-minute `apply_classification()` cycle — a window of up to 30 minutes during which the thermostat ran with no CA-programmed ceiling. Fix #338 calls `_apply_nat_vent_hvac_state()` in `check_natural_vent_conditions()` at the re-activate node (§12b in the flowchart).
@@ -3617,7 +3619,8 @@ This logic table MUST be kept current for any changes to automation behavior.
 | Window open past the debounce, a fan session may start (full gate or soft start) | Handler starts the session directly (no "HVAC paused" message first); HVAC suppressed | Handler starts the session; thermostat switched **Off**, blower on; never an armed band |
 | Same, but the start is vetoed (forecast peak, thermal floor), locked out, or the occupant's fan-off hold is in force | HVAC paused and announced | HVAC paused and announced |
 | Scheduled routine / comfort-band guard finds a window open and a fan session is about to take over | Pause kept, **no** notification | Pause kept, **no** notification |
-| A grace holds the pause (automation grace) | Held unless a fan session would really start now (the FSM's answer: a forecast veto no longer pauses inside the grace) | same |
+| Window opens inside Climate Advisor's OWN (automation) grace | Rule 3: no hold. Start if the nat-vent FSM says so (full or soft start), otherwise pause now (forecast veto and gate failure alike); notify unless a fan session is about to take over | same |
+| Window opens inside an occupant-side manual grace (dashboard resume, no override) | Held unless a fan session would really start now | same |
 | Ventilation ends (outdoor rise, ceiling, comfort floor, away ceiling) with a window still open | Window pause recorded, thermostat Off at that moment (away: setback lands when the window closes) | Same, plus the armed band (if any) is switched Off immediately; closing re-arms in one write (no flap) |
 | Indoor rises above `comfort_cool` during blower ventilation | n/a | AC stays off; one "close the windows" push per session |
 | The occupant changes the thermostat during ventilation | Their change is protected | Their change is protected (never overwritten) |

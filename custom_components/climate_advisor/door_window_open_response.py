@@ -7,7 +7,10 @@ returns. The chain is the handler's order, exactly:
 1. already paused                          -> ``ALREADY_PAUSED_NOOP``
 2. the occupant's thermostat change is protected (owner rule 1, #1133/#1148)  -> ``PROTECTED_CHANGE_NOOP``
 3. a grace that holds the pause and no fan session would start now             -> ``GRACE_SUPPRESSED``
-   (#655/#1142 D3: "would start" is the nat-vent FSM's answer, forecast/floor guards and lockout included)
+   (#655/#1142 D3: "would start" is the nat-vent FSM's answer, forecast/floor guards and lockout included).
+   Only a grace that answers to the occupant (manual / dashboard resume) can hold it: a grace Climate Advisor started
+   itself (automation source), the occupant's blower press and a fan-off grace are ``grace_ignored`` (rule 3: the
+   only exception is a manual override, which is step 2).
 4. the temperature gate refused            -> ``PAUSE``
 5. the occupant's fan-off hold             -> ``PAUSE_FAN_OFF_HOLD`` (#1006/#1205)
 6. the reactivation lockout                -> ``PAUSE_REACTIVATION_LOCKOUT`` (#699)
@@ -42,9 +45,10 @@ class DoorOpenResponseInputs:
     paused_by_door           -> self._paused_by_door
     manual_change_protected  -> self._manual_change_protected()
     grace_active             -> self._grace_active
-    grace_ignored            -> the running grace is the occupant's blower press or a fan-off grace
+    grace_ignored            -> the running grace is one that never holds the pause: CA's own automation grace
+                                (#1142, rule 3), the occupant's blower press or a fan-off grace
                                 (``_grace_protects_no_hvac_on_change()``): stopping or running a fan turns no HVAC
-                                on, so it is no reason to hold off the pause (#1172, #1201)
+                                on (#1172, #1201)
     start_viable             -> the nat-vent FSM's answer is a start (full gate or soft start)
     start_vetoed             -> the temperature gate passed but a start rule refused it (``veto`` is set)
     fan_off_hold_active      -> self._fan_off_hold_active()

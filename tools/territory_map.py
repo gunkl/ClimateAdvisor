@@ -51,7 +51,6 @@ _DECISION_METHODS = [
     "check_natural_vent_conditions",
     "fan_thermostat_check",
     "check_window_cooling_opportunity",
-    "_nat_vent_may_reactivate",  # sync gate helper (returns bool)
     "_re_pause_for_open_sensor",
     "handle_door_window_open",
     "handle_all_doors_windows_closed",

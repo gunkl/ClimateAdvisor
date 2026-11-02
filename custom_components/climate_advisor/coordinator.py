@@ -40,6 +40,7 @@ from homeassistant.util import dt as dt_util
 
 from . import log_capture
 from .automation import (
+    NAT_VENT_START_PREDICTION,
     AutomationEngine,
     AutomationEngineCallbacks,
     _in_sleep_window,
@@ -304,6 +305,7 @@ from .learning import (
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .nat_vent_lifecycle import NatVentLifecycleState
 from .nat_vent_plan import (
     compute_nat_vent_plan,
     nat_vent_ceiling_breach_reached,
@@ -12326,20 +12328,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _aggressive_savings = bool(self.config.get("aggressive_savings", False))
 
             def _nat_vent_gate_comparator(ts: datetime, outdoor: float, indoor: float) -> bool:
-                return decide_nat_vent_gate(
-                    NatVentGateInputs(
-                        outdoor=outdoor,
-                        indoor=indoor,
-                        comfort_heat_raw=_comfort_heat_raw,
-                        sleep_heat=_sleep_heat,
-                        in_sleep_window=_in_sleep_window(ts, self.config),
-                        comfort_cool=_comfort_cool,
-                        nat_vent_delta=_nat_vent_delta,
-                        hysteresis=_hysteresis,
-                        fan_mode=_fan_mode_val,
-                        aggressive_savings=_aggressive_savings,
-                    )
-                )
+                # Issue #1142 (step 7): the engine's own "may a fan session start?" question, asked as of ``ts`` on
+                # the forecast temperatures -- the same nat-vent FSM answer the engine acts on (full gate, soft start,
+                # a fan exists, forecast-peak / thermal-floor guards, lockout, override), so this card never promises
+                # a start the engine will veto and does not miss a soft start.
+                return ae._nat_vent_start_decision(
+                    NAT_VENT_START_PREDICTION, indoor=indoor, outdoor=outdoor, at=ts
+                ).to_state in (NatVentLifecycleState.ACTIVE_FULL_GATE, NatVentLifecycleState.ACTIVE_SOFT_START)
 
             _nat_vent_outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
             _nat_vent_dt = find_temperature_crossing(
@@ -13032,14 +13027,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "nat_vent_active": ae._natural_vent_active,
             # Issue #540: soft-start qualifier — only meaningful when nat_vent_active is True.
             "nat_vent_soft_start": ae._nat_vent_soft_start,
-            # Issue #338: AC assist status — true when nat-vent is active with FAN_MODE_HVAC
-            # and aggressive_savings is off (full comfort band armed, compressor may assist).
-            # FAN_MODE_BOTH excluded: _activate_fan() suppresses HVAC for BOTH (same as WHOLE_HOUSE).
-            "nat_vent_ac_assist": (
-                bool(ae._natural_vent_active)
-                and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
-                and not self.config.get("aggressive_savings", False)
-            ),
+            # Issue #338 / #1142 D7: AC assist is gone -- blower ventilation holds the thermostat Off (no heat/AC with
+            # a window open). The key stays (the debug tab reads it) and is always False.
+            "nat_vent_ac_assist": False,
             "nat_vent_target": _nat_vent_band["nat_vent_target"],
             "nat_vent_on_threshold": _nat_vent_band["nat_vent_on_threshold"],
             "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],
@@ -15191,7 +15181,10 @@ def _walk_forward_regime(
         # nat-vent/WHF session the windows are open and the fan owns the cooling, so the guard is
         # skipped -- matching classification_fsm.py's NOT_EVALUATED_WHF_ARCHETYPE defer. Unsealed WHF
         # homes have ceiling_threshold=None and could never escalate here, so this changes nothing there.
-        _whf_archetype_session = session_active and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+        # Issue #1142 D7: the blower is held to the same rule -- ventilating with a window open holds the
+        # thermostat Off,
+        # so the guard never escalates to cool inside a planned blower session either.
+        _whf_archetype_session = session_active and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH, FAN_MODE_HVAC)
         if day_mode == "off" and not _whf_archetype_session:
             _idx = predicted_indoor_index.get(ts_str)
             _remaining_predicted_indoor = predicted_indoor[_idx:] if _idx is not None else []

@@ -678,9 +678,10 @@ class TestApplyClassificationWhfEarlyReturn:
 
         engine._apply_nat_vent_hvac_state.assert_awaited_once()
 
-    def test_hvac_fan_nat_vent_active_still_calls_select_comfort_band(self):
-        """FAN_MODE_HVAC + nat-vent active + savings off -> select_comfort_band() IS called
-        (band stays armed; the guard is only for WHF's structural mutual-exclusion contract).
+    def test_hvac_fan_nat_vent_active_returns_before_select_comfort_band(self):
+        """FAN_MODE_HVAC + nat-vent active + savings off -> select_comfort_band() is NOT called (Issue #1142 D7:
+        blower ventilation holds the thermostat Off; the 30-minute cycle must not re-arm the band through the
+        open window, and the ODE ceiling guard's escalation to cool is off while ventilating).
         """
         engine = _make_engine(fan_mode=FAN_MODE_HVAC, current_hvac_mode="cool")
         engine._natural_vent_active = True
@@ -691,7 +692,8 @@ class TestApplyClassificationWhfEarlyReturn:
         with patch("custom_components.climate_advisor.automation.select_comfort_band") as mock_select:
             mock_select.return_value = MagicMock(active="ceiling", floor=70.0, ceiling=75.0, reason="test")
             asyncio.run(engine.apply_classification(classification))
-            mock_select.assert_called_once()
+            mock_select.assert_not_called()
+        engine._apply_nat_vent_hvac_state.assert_awaited_once()
 
     def test_whf_aggressive_savings_still_returns_early_before_select_comfort_band(self):
         """WHF + nat-vent + aggressive_savings=True -> already returned early for savings;

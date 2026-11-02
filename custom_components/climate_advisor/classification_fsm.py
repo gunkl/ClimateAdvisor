@@ -58,9 +58,10 @@ control flow exactly** (automation.py's early-return chain before the ceiling
 guard section is ever reached): ``DEFER_OCCUPANCY`` and ``DEFER_PAUSED`` both
 return before the predicted-indoor block; ``DEFER_NAT_VENT`` additionally
 short-circuits when ``aggressive_savings`` is on (savings mode never runs the
-compressor through open windows) or when the fan archetype is WHOLE_HOUSE/BOTH
-(Issue #392 Fix 1b — WHF is mutually exclusive with the compressor by design).
-Only ``PROCEED``, or ``DEFER_NAT_VENT`` with a HVAC-fan (or disabled-fan)
+compressor through open windows), when the fan archetype is WHOLE_HOUSE/BOTH
+(Issue #392 Fix 1b — WHF is mutually exclusive with the compressor by design) or
+HVAC (Issue #1142 D7 — blower ventilation holds the thermostat Off, no AC assist).
+Only ``PROCEED``, or ``DEFER_NAT_VENT`` with a disabled-fan
 archetype under non-aggressive savings, ever reaches the guard. This module
 encodes that exact same branch order as ``CeilingGuardEligibility`` — a pure
 mirror, not a reinterpretation.
@@ -77,6 +78,7 @@ from .ode_ceiling_guard import OdeCeilingGuardDecision, OdeCeilingGuardInputs, d
 
 _FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
 _FAN_MODE_BOTH = "both"
+_FAN_MODE_HVAC = "hvac_fan"
 
 
 class ClassificationFsmEventKind(Enum):
@@ -97,6 +99,8 @@ class CeilingGuardEligibility(Enum):
     NOT_EVALUATED_PAUSED_DEFER = "not_evaluated_paused_defer"
     NOT_EVALUATED_SAVINGS_NAT_VENT = "not_evaluated_savings_nat_vent"
     NOT_EVALUATED_WHF_ARCHETYPE = "not_evaluated_whf_archetype"
+    # Issue #1142 D7: blower ventilation holds the thermostat Off (no AC assist), so the ceiling guard never runs.
+    NOT_EVALUATED_BLOWER_NAT_VENT = "not_evaluated_blower_nat_vent"
     EVALUATED = "evaluated"
 
 
@@ -218,9 +222,12 @@ def transition(event: ClassificationFsmEvent) -> ClassificationDecision:
             return ClassificationDecision(
                 event.kind, gate, CeilingGuardEligibility.NOT_EVALUATED_WHF_ARCHETYPE, at=inputs.now
             )
-        # Falls through — DEFER_NAT_VENT with a HVAC-fan (or disabled-fan)
-        # archetype under non-aggressive savings still reaches the guard,
-        # matching apply_classification()'s own fallthrough.
+        if inputs.fan_mode == _FAN_MODE_HVAC:
+            return ClassificationDecision(
+                event.kind, gate, CeilingGuardEligibility.NOT_EVALUATED_BLOWER_NAT_VENT, at=inputs.now
+            )
+        # Falls through — DEFER_NAT_VENT with a disabled-fan archetype under non-aggressive savings
+        # still reaches the guard, matching apply_classification()'s own fallthrough.
 
     ceiling_decision = decide_ode_ceiling_guard(_ceiling_guard_inputs(inputs))
     return ClassificationDecision(event.kind, gate, CeilingGuardEligibility.EVALUATED, ceiling_decision, at=inputs.now)

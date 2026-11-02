@@ -60,10 +60,19 @@ def _fsm_inputs(**overrides) -> DoorWindowFsmInputs:
         "grace_active": False,
         "pre_pause_mode_active": False,
         "now": datetime(2026, 10, 28, 14, 0, tzinfo=UTC),
-        "nat_vent_gate_ruled_out": True,
     }
     base.update(overrides)
     return DoorWindowFsmInputs(**base)
+
+
+def _blower_press_grace(engine) -> None:
+    """A running grace that turns no HVAC on (the occupant's thermostat-blower press, #1172) plus a forecast peak:
+    the window is paused INSIDE that grace (it never holds the pause)."""
+    _forecast_peak_ahead(engine)
+    engine._grace_active = True
+    engine._last_grace_trigger = "fan_manual_override"
+    engine._fan_override_is_hvac_fan = True
+    engine._last_resume_source = "automation"
 
 
 def _sensor_opened(origin: DoorWindowLifecycleState, **overrides) -> DoorWindowLifecycleState:
@@ -177,10 +186,9 @@ class TestActivePauseRecordedAsActive:
 
     def test_grace_origin_pause_is_paused_during_grace(self):
         engine = _engine(mode="cool")
-        _forecast_peak_ahead(engine)
-        engine._grace_active = True
-        engine._last_grace_trigger = "automation"
-        engine._last_resume_source = "automation"
+        # Issue #1142 D3: an automation grace now HOLDS the pause when a start is vetoed; the grace that coexists
+        # with a pause is one that turns no HVAC on (here the occupant's thermostat-blower press, #1172).
+        _blower_press_grace(engine)
         _open(engine)
         assert engine._paused_by_door is True
         assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
@@ -225,10 +233,7 @@ class TestGraceExpiryKeepsActivePauseSubstate:
 
     def _paused_during_grace(self, mode):
         engine = _engine(mode=mode)
-        _forecast_peak_ahead(engine)
-        engine._grace_active = True
-        engine._last_grace_trigger = "automation"
-        engine._last_resume_source = "automation"
+        _blower_press_grace(engine)
         _open(engine)
         assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
         assert engine._paused_with_hvac_already_off is False

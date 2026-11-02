@@ -387,7 +387,9 @@ async def test_a3_deferred_then_applied_restart_then_its_own_off_is_held_and_lab
     assert len(_ca_starts(house, fan)) == 1 and not _fan_on(house, fan)
     assert engine._fan_rate_limited_until is not None, "precondition: the reactivation was deferred"
     assert engine._paused_by_door is True
-    assert bool(engine._paused_with_hvac_already_off) == (fan == "whf"), "precondition: the pause shape"
+    # Issue #1142 D7: the blower's thermostat is held Off while it ventilates, so after the first session the pause is
+    # the idle shape (HVAC already off) for BOTH fans; before, only the whole-house fan left it off.
+    assert engine._paused_with_hvac_already_off is True, "precondition: the pause shape"
 
     # the floor ends with the window still open: the retry applies the deferred start
     for _ in range(60):

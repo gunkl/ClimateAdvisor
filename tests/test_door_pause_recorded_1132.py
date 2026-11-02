@@ -8,7 +8,7 @@ house stays without heating/cooling until the occupant touches the thermostat.
 Three defects, all covered with the REAL ``AutomationEngine`` + the fake thermostat from
 ``tests.test_restore_resolved_band`` (nothing re-implements production logic):
 
-1. ``handle_door_window_open()`` dispatched the SENSOR_OPENED FSM event WITHOUT
+1. ``handle_door_window_open()`` dispatched the SENSOR_OPENED FSM event WITHOUT (Issue #1142 removed the field)
    ``nat_vent_gate_ruled_out=True``. The legacy decision had already chosen PAUSE (and turned HVAC off),
    but the FSM's simplified gate cannot see the forecast-peak/thermal-floor guards or a manual override
    and answered "nat-vent eligible" / "grace suppressed" -> no pause recorded. Both FSM origins
@@ -86,7 +86,8 @@ def _assert_pause_recorded_and_restored(engine: AutomationEngine, *, was: str = 
 
 
 # ---------------------------------------------------------------------------
-# 1. Missing nat_vent_gate_ruled_out at handle_door_window_open()
+# 1. A skipped nat-vent start is always recorded as a pause (was: missing nat_vent_gate_ruled_out; the field is gone
+#    since #1142 -- the door/window FSM no longer re-derives the gate, so this now holds by construction)
 # ---------------------------------------------------------------------------
 
 
@@ -120,8 +121,9 @@ class TestPauseRecordedWhenNatVentSkipped:
         assert engine._pre_pause_mode is None
 
     def test_grace_origin_skip_records_pause(self):
-        """GRACE origin: a live grace whose reactivation gate is viable falls through the grace
-        exemption, then a Phase 2 guard skips nat-vent -> pause must still be recorded."""
+        """GRACE origin: an automation grace is running and the forecast guard rules nat-vent out. Rule 3 (owner
+        decision, Issue #1142): CA's own grace is not a manual override, so the window is paused right away exactly as
+        outside a grace, and the pause is recorded."""
         engine = _engine()
         _forecast_peak_ahead(engine)
         engine._grace_active = True

@@ -21,7 +21,12 @@ import pytest
 import custom_components.climate_advisor.automation as _automation_mod
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
-from custom_components.climate_advisor.const import FAN_MODE_BOTH, FAN_MODE_HVAC, FAN_MODE_WHOLE_HOUSE
+from custom_components.climate_advisor.const import (
+    FAN_MODE_BOTH,
+    FAN_MODE_DISABLED,
+    FAN_MODE_HVAC,
+    FAN_MODE_WHOLE_HOUSE,
+)
 from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan
 from custom_components.climate_advisor.ode_ceiling_guard import OdeCeilingGuardOutcome
 from custom_components.climate_advisor.whf_safety_decision import SensorReading, WhfSafetySnapshot
@@ -350,9 +355,10 @@ class TestGuardLoggingAndEventPayload:
         assert any("ceiling=77.0, house_sealed=True" in r.getMessage() for r in caplog.records)
 
     def test_escalation_payload_carries_ceiling_and_the_legacy_key(self):
-        # Savings off, HVAC-fan home, nat-vent running but indoor already past the 75 ceiling: the guard
-        # ends the session and emits the escalation event.
-        engine = _make_engine(savings=False)
+        # Savings off, no-fan home (an HVAC-fan home no longer reaches the guard during nat-vent: Issue #1142 D7),
+        # nat-vent running but indoor already past the 75 ceiling: the guard ends the session and emits the
+        # escalation event.
+        engine = _make_engine(savings=False, fan_mode=FAN_MODE_DISABLED)
         engine._natural_vent_active = True
         engine._last_outdoor_temp = 70.0
         engine._deactivate_fan = AsyncMock(return_value=None)

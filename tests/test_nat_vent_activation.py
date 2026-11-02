@@ -1107,7 +1107,10 @@ class TestIssue641ExitReactivationFlipFlop:
         # Sanity: this really is the away-ceiling exit.
         assert any(e[0] == "nat_vent_away_ceiling_exit" for e in events)
         assert engine._natural_vent_active is False
-        assert engine._paused_by_door is False, "AWAY_CEILING deliberately never pauses — see class docstring"
+        # Issue #1142 D8: this engine's monitored sensor is still open, so (like the outdoor-rise exit) the exit
+        # records the window pause instead of letting the restore send `cool` into the open window. (With every
+        # sensor closed AWAY_CEILING still never pauses -- see class docstring.)
+        assert engine._paused_by_door is True
         assert engine._nat_vent_outdoor_exit_time == now, (
             "Issue #641: away-ceiling exit must arm the reactivation lockout "
             "(_nat_vent_outdoor_exit_time) directly — without this, nothing stops the "
@@ -1662,12 +1665,10 @@ class TestNatVentAcAssist:
 
         asyncio.run(engine.check_natural_vent_conditions())
 
+        # Issue #1142 D7: reactivation proceeds, but the "AC assist" band is gone -- the blower ventilates with the
+        # thermostat Off (no heat/cool with a window open); the occupant is asked to close the windows if it warms.
         assert engine._natural_vent_active is True
-        engine._apply_comfort_band.assert_called_once()
-        call_band = engine._apply_comfort_band.call_args[0][0]
-        assert call_band.active == "ceiling"
-        assert call_band.floor == 70.0
-        assert call_band.ceiling == 75.0
+        engine._apply_comfort_band.assert_not_called()
 
     # ------------------------------------------------------------------
     # Test 2: pause -> re-activate, savings ON -> floor-only (heat at comfort_heat)
@@ -1878,24 +1879,16 @@ class TestNatVentAcAssist:
 
 
 class TestNatVentSleepWindowBand:
-    """Issue #341: during sleep window, _apply_nat_vent_hvac_state() skips setpoint call.
+    """Issue #341 / #1142 D7: no AC-assist band is written during blower ventilation, in or out of the sleep window.
 
-    Before the fix: apply_classification() called _apply_nat_vent_hvac_state() (which wrote
-    comfort_cool=75°F to the thermostat) and then immediately called select_comfort_band()
-    (which wrote sleep_cool=78°F), generating two conflicting thermostat writes every 30 minutes
-    all night.
-
-    After the fix: _apply_nat_vent_hvac_state() emits nat_vent_ac_assist_armed but skips
-    the _apply_comfort_band() call during the sleep window. Only one setpoint write occurs per
-    cycle — the sleep band from select_comfort_band().
+    Issue #341 once made the sleep window skip the AC-assist band write so the overnight cycle made one setpoint
+    write instead of two conflicting ones. Issue #1142 removed the AC-assist band altogether (rule 3: no heat/cool
+    with a window open), so neither the nat-vent helper nor the 30-minute cycle arms any band while ventilating.
     """
 
-    # dt_util.now() inside automation.py is a child MagicMock; patch it so _in_sleep_window
-    # gets a real datetime and .time() comparisons work.
     _NOW = datetime(2026, 4, 20, 22, 30, 0)  # 22:30 — within a 22:00–07:00 sleep window
 
     def _make_sleep_engine(self) -> AutomationEngine:
-        """Engine with sleep window covering the patched 'now' (22:30)."""
         engine = _make_hvac_engine(
             fan_mode="hvac_fan",
             aggressive_savings=False,
@@ -1903,83 +1896,36 @@ class TestNatVentSleepWindowBand:
             comfort_cool=75.0,
             indoor_f=74.0,
         )
-        # 22:00–07:00 window includes _NOW (22:30)
         engine.config["sleep_time"] = "22:00"
         engine.config["wake_time"] = "07:00"
         return engine
 
-    def test_sleep_window_single_comfort_band_call(self):
-        """Nat-vent active + sleep window → _apply_comfort_band called once (sleep band only).
-
-        Occupant experience: after the fix, the thermostat receives one setpoint write per
-        30-minute cycle overnight — the sleep ceiling (72°F by default) — not two competing
-        writes at 74°F and 72°F that make the thermostat history look like the integration
-        is malfunctioning.
-        """
+    def test_sleep_window_writes_no_band_during_ventilation(self):
         engine = self._make_sleep_engine()
         engine._natural_vent_active = True
-
         engine._apply_comfort_band = AsyncMock()
         classification = _make_classification(day_type="warm", hvac_mode="off")
         with patch(_DT_NOW_PATH, return_value=self._NOW):
             asyncio.run(engine.apply_classification(classification))
+        engine._apply_comfort_band.assert_not_called()
 
-        assert engine._apply_comfort_band.call_count == 1, (
-            f"Expected 1 _apply_comfort_band call during sleep window; got {engine._apply_comfort_band.call_count}"
-        )
-        band = engine._apply_comfort_band.call_args[0][0]
-        # Sleep band uses DEFAULT_SLEEP_HEAT=64 / DEFAULT_SLEEP_COOL=72, not comfort band 68/74
-        assert band.floor == 64.0, f"Sleep band floor must be sleep_heat=64. Got: {band.floor}"
-        assert band.ceiling == 72.0, f"Sleep band ceiling must be sleep_cool=72. Got: {band.ceiling}"
-
-    def test_sleep_window_nat_vent_ac_assist_event_still_emitted(self):
-        """nat_vent_ac_assist_armed event fires during sleep window despite skipped setpoint.
-
-        The activity report and status card must still show nat-vent as active while the
-        fan is running overnight. Without the event, the occupant sees the fan on but the
-        report shows no nat-vent activity — a confusing gap.
-        """
-        engine = self._make_sleep_engine()
-        engine._natural_vent_active = True
-
-        emitted: list[tuple[str, dict]] = []
-        engine._emit_event_callback = lambda et, pl: emitted.append((et, pl))
-        engine._apply_comfort_band = AsyncMock()
-
-        classification = _make_classification(day_type="warm", hvac_mode="off")
-        with patch(_DT_NOW_PATH, return_value=self._NOW):
-            asyncio.run(engine.apply_classification(classification))
-
-        event_types = [e[0] for e in emitted]
-        assert "nat_vent_ac_assist_armed" in event_types, (
-            f"nat_vent_ac_assist_armed must still fire during sleep window. Got events: {event_types}"
-        )
-        armed_payload = next(pl for et, pl in emitted if et == "nat_vent_ac_assist_armed")
-        assert "fan_device" in armed_payload, "Issue #402: ac_assist_armed must identify the fan mechanism"
-
-    def test_awake_window_two_comfort_band_calls(self):
-        """Nat-vent active + awake hours → two _apply_comfort_band calls (regression guard).
-
-        During awake hours, _apply_nat_vent_hvac_state() still writes the full comfort band
-        so the thermostat's own deadband can let the compressor assist if the breeze alone
-        cannot hold the comfort ceiling.
-        """
+    def test_awake_window_writes_no_band_during_ventilation(self):
         engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=74.0)
-        # No sleep_time/wake_time in config → _in_sleep_window() returns False
         engine._natural_vent_active = True
-
         engine._apply_comfort_band = AsyncMock()
         classification = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(classification))
+        engine._apply_comfort_band.assert_not_called()
 
-        # Two calls: (1) nat-vent full comfort band, (2) apply_classification() comfort band
-        assert engine._apply_comfort_band.call_count == 2, (
-            f"Expected 2 _apply_comfort_band calls during awake hours; got {engine._apply_comfort_band.call_count}"
-        )
-        for call in engine._apply_comfort_band.call_args_list:
-            band = call[0][0]
-            assert band.floor == 70.0, f"Awake band floor must be comfort_heat=70. Got: {band.floor}"
-            assert band.ceiling == 75.0, f"Awake band ceiling must be comfort_cool=75. Got: {band.ceiling}"
+    def test_no_ac_assist_event_is_emitted_any_more(self):
+        engine = self._make_sleep_engine()
+        engine._natural_vent_active = True
+        emitted: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda et, pl: emitted.append((et, pl))
+        classification = _make_classification(day_type="warm", hvac_mode="off")
+        with patch(_DT_NOW_PATH, return_value=self._NOW):
+            asyncio.run(engine.apply_classification(classification))
+        assert "nat_vent_ac_assist_armed" not in [e[0] for e in emitted]
 
 
 # ---------------------------------------------------------------------------
@@ -2416,6 +2362,14 @@ class TestIssue504DebounceGatesIdleOpen:
 # ---------------------------------------------------------------------------
 
 
+def _temperature_gate(engine, **kwargs) -> bool:
+    """The shared 4-part temperature gate for the engine's config (Issue #1142: ``_nat_vent_may_reactivate()`` was
+    deleted -- it had no production caller left; the nat-vent FSM asks this same pure gate)."""
+    from custom_components.climate_advisor.nat_vent_gate import decide_nat_vent_gate  # noqa: PLC0415
+
+    return decide_nat_vent_gate(engine._nat_vent_gate_inputs(**kwargs))
+
+
 class TestNatVentMayReactivateDirect:
     """Direct unit tests of the extracted shared 4-part reactivation gate,
     _nat_vent_may_reactivate(), in isolation from any call site.
@@ -2427,24 +2381,24 @@ class TestNatVentMayReactivateDirect:
     def test_gate_passes_all_four_conditions_met(self):
         """All four sub-conditions satisfied -> True."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=68.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=68.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is True
 
     def test_gate_fails_on_missing_outdoor(self):
         """outdoor is None -> False (short-circuit before any other check)."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=None, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=None, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
     def test_gate_fails_on_missing_indoor(self):
         """indoor is None -> False (short-circuit before any other check)."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=68.0, indoor=None, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=68.0, indoor=None, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2454,8 +2408,8 @@ class TestNatVentMayReactivateDirect:
         outdoor=74, indoor=74, hysteresis=0 -> 74 < 74-0 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=74.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=74.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2465,8 +2419,8 @@ class TestNatVentMayReactivateDirect:
         outdoor=73.5, indoor=74.0, hysteresis=1.0 -> 73.5 < 73.0 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=73.5, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0, hysteresis=1.0
+        result = _temperature_gate(
+            engine, outdoor=73.5, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0, hysteresis=1.0
         )
         assert result is False
 
@@ -2476,8 +2430,8 @@ class TestNatVentMayReactivateDirect:
         indoor=70, comfort_heat=70 -> 70 > 70 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=70.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=65.0, indoor=70.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2487,8 +2441,8 @@ class TestNatVentMayReactivateDirect:
         outdoor=78, threshold=78 -> 78 < 78 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=78.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=78.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2498,8 +2452,8 @@ class TestNatVentMayReactivateDirect:
         indoor=76, comfort_cool=75 -> ceiling_threshold=75, 76 <= 75 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2510,8 +2464,8 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
-        result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=65.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is True, (
             "WHF archetype: _ceiling_threshold() returns None, so indoor far past comfort_cool "
@@ -2526,8 +2480,8 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
-        result = engine._nat_vent_may_reactivate(
-            outdoor=91.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=20.0
+        result = _temperature_gate(
+            engine, outdoor=91.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=20.0
         )
         assert result is False, "WHF still requires outdoor < indoor - hysteresis"
 
@@ -2656,8 +2610,8 @@ class TestIssue402ClassOscillationPrevention:
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
 
         # Reactivation gate: must allow (ceiling exempt), pure direction-only.
-        reactivate_ok = engine._nat_vent_may_reactivate(
-            outdoor=80.0, indoor=90.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=16.0
+        reactivate_ok = _temperature_gate(
+            engine, outdoor=80.0, indoor=90.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=16.0
         )
         assert reactivate_ok is True
 
@@ -2684,8 +2638,8 @@ class TestIssue402ClassOscillationPrevention:
         engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=76.0)
         # Default fan_mode is HVAC-fan archetype (not WHF/BOTH) in _make_engine.
 
-        reactivate_ok = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0
+        reactivate_ok = _temperature_gate(
+            engine, outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0
         )
         assert reactivate_ok is False, "HVAC-fan archetype: ceiling exceeded must block reactivation"
 

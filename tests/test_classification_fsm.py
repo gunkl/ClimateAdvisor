@@ -127,7 +127,7 @@ class TestNatVentDeferShortCircuits:
         assert decision.ceiling_eligibility == CeilingGuardEligibility.NOT_EVALUATED_WHF_ARCHETYPE
         assert decision.ceiling_decision is None
 
-    def test_hvac_fan_archetype_falls_through_to_guard(self) -> None:
+    def test_hvac_fan_archetype_short_circuits_blower_ventilation_holds_the_thermostat_off(self) -> None:
         decision = transition(
             _event(
                 natural_vent_active=True,
@@ -137,8 +137,8 @@ class TestNatVentDeferShortCircuits:
             )
         )
         assert decision.gate == ScheduledBandGate.DEFER_NAT_VENT
-        assert decision.ceiling_eligibility == CeilingGuardEligibility.EVALUATED
-        assert decision.ceiling_decision is not None
+        assert decision.ceiling_eligibility == CeilingGuardEligibility.NOT_EVALUATED_BLOWER_NAT_VENT
+        assert decision.ceiling_decision is None
 
     def test_disabled_fan_falls_through_to_guard(self) -> None:
         decision = transition(

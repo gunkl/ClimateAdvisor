@@ -47,9 +47,9 @@
 |---|---|---|---|---|
 | `INACTIVE` | Door/window opens, full gate passes | `ACTIVE_FULL_GATE` | `decide_nat_vent_gate()` | `~L2841` (`handle_door_window_open`) |
 | `INACTIVE` | Door/window opens, only soft-start gate passes | `ACTIVE_SOFT_START` | `decide_nat_vent_soft_start_gate()` | `~L3093-3094` |
-| `INACTIVE` / `PAUSED_REACTIVATION_LOCKOUT` | Idle-open re-eval, full gate passes | `ACTIVE_FULL_GATE` | `_nat_vent_may_reactivate()`, now preceded by an explicit lockout check (Issue #696 — this call site never consulted the lockout before, despite this row's prior claim) | `~L4147` (FSM), `~L4241` (legacy) |
+| `INACTIVE` / `PAUSED_REACTIVATION_LOCKOUT` | Idle-open re-eval, full gate passes | `ACTIVE_FULL_GATE` | `_nat_vent_start_decision(NAT_VENT_START_IDLE_OPEN)` (Issue #1142; was `_nat_vent_may_reactivate()`), now preceded by an explicit lockout check (Issue #696 — this call site never consulted the lockout before, despite this row's prior claim) | `~L4147` (FSM), `~L4241` (legacy) |
 | `INACTIVE` / `PAUSED_REACTIVATION_LOCKOUT` | Idle-open re-eval, soft-start only | `ACTIVE_SOFT_START` | same, soft-start variant — also now gated by the same lockout check (Issue #696) | `~L4147` (FSM), `~L4273` (legacy) |
-| `ACTIVE_SOFT_START` | Full gate independently clears | `ACTIVE_FULL_GATE` | `_nat_vent_may_reactivate()` | `~L3125` — label-only, fan/HVAC untouched |
+| `ACTIVE_SOFT_START` | Full gate independently clears | `ACTIVE_FULL_GATE` | `nat_vent_fsm.transition()` (full-gate escalation tick) | `~L3125` — label-only, fan/HVAC untouched |
 | `INACTIVE` | Fan already physically running at startup/reconcile, eligible | `ACTIVE_FULL_GATE` | `reconcile_fan_on_startup()` eligibility check | `~L3955` |
 
 **Exit transitions via the `_exit_nat_vent()` choke point** (`automation.py:5312-5367`, Issue #411/#417/#418): 9 call sites (door/window-closed, outdoor-rise, ceiling-threshold, nat-vent-temperature-check's session-force-close and hard-floor, fan_thermostat_check's outdoor-rise and direction-reversal-stop and cooled-to-floor, reconcile-on-startup, and RF-timer-boundary-settle in `on_fan_turned_off`). Always sets `_natural_vent_active=False, _nat_vent_soft_start=False`. Originally only the outdoor-rise-exit caller passed `set_outdoor_exit_time=True` (the sole path able to produce `PAUSED_REACTIVATION_LOCKOUT`); Issue #641 found and fixed two more call sites (the now-removed proactive-floor exit, and ceiling-threshold in `check_natural_vent_conditions()`) plus a third (`fan_thermostat_check()`'s tick-level direction-reversal stop) that handed into the same paused-reactivation race without arming it — see [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) below. Every call site's arming decision is now enforced by `tests/test_nat_vent_exit_lockout_coverage.py`'s AST coverage registry, not just documented — a new call site added later without an explicit classification fails that test immediately. **The proactive-floor exit itself, and its call site, were fully deleted in Issue #959** (see historical incident note below) — it no longer exists as a call site to classify.
@@ -139,8 +139,7 @@ read): the log's "Nat-vent proactive exit — floor in 0.98 hr" is the `PROACTIV
 exit reason (`nat_vent_exit.py`), which calls `_exit_nat_vent()` **without**
 `set_outdoor_exit_time=True`. With a monitored sensor still open, `_exit_nat_vent()`
 hands off into `_paused_by_door=True` with no lockout timestamp armed — so the very
-next tick's paused-reactivation block (the same `_nat_vent_may_reactivate()` instant
-check the entry gate always uses) finds no lockout and immediately reactivates,
+next tick's paused-reactivation block (the same nat-vent FSM start question, `_nat_vent_start_decision()`, the entry gate always uses) finds no lockout and immediately reactivates,
 producing another `PROACTIVE_FLOOR` exit next tick, repeating indefinitely. This is
 deterministic, not occasional: `PROACTIVE_FLOOR` is a *predictive* check
 (`time_to_floor_hr < 1.0`, driven by `k_passive`) independent of the *instant* gate

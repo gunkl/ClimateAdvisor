@@ -139,12 +139,11 @@ class TestSite1DoorWindowOpenEntry:
                 f"authoritative={authoritative}: hysteresis must be 0.0 at this call site"
             )
 
-    def test_authoritative_never_enters_soft_start_at_this_site(self):
-        """This call site has never modeled soft-start entry (no
-        _nat_vent_may_soft_start() call here) -- Phase 2b is wiring-only, so an
-        FSM-produced ACTIVE_SOFT_START result must be treated as "not entered"
-        here, same as legacy. outdoor==indoor (parity) satisfies the soft-start
-        sub-gate but not the full bulk-cooling gate."""
+    def test_authoritative_enters_soft_start_at_this_site(self):
+        """Issue #1142 D1 (owner decision 2026-11-01): after the debounce, the window-open handler may start a
+        soft-start session directly instead of pausing first (it used to treat the FSM's ACTIVE_SOFT_START as
+        "not entered", pause and notify, and the next refresh started the soft start seconds later).
+        outdoor==indoor (parity) satisfies the soft-start sub-gate but not the full bulk-cooling gate."""
         engine = _make_engine(
             comfort_heat=68.0,
             comfort_cool=74.0,
@@ -155,9 +154,9 @@ class TestSite1DoorWindowOpenEntry:
         engine._outdoor_temp_today_peak = 90.0
         engine._outdoor_temp_today_sample_count = 5
         asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
-        assert engine._natural_vent_active is False
-        assert engine._nat_vent_soft_start is False
-        assert engine._paused_by_door is True
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is True
+        assert engine._paused_by_door is False
 
     def test_authoritative_keeps_in_flight_soft_start_session_running(self):
         """Defect 1/2 regression (Issue #694 Verification): a second door/window

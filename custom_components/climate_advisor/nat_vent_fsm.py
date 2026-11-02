@@ -206,6 +206,10 @@ class NatVentFsmInputs:
     # grace-expiry re-check) pass a value, so each gets the guards by calling the FSM it
     # already calls, every tick.
     start_veto: NatVentStartVetoInputs | None = None
+    # Issue #1142: whether the soft start (outdoor at parity, past today's peak) may START a session at this
+    # site. ``CONF_NAT_VENT_SOFT_START_ENABLED`` and the per-site profile resolve it in the shell; the FSM only
+    # honors it. Default True keeps every caller that never set it (exit chain, startup adoption) unchanged.
+    soft_start_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -455,7 +459,9 @@ def _transition_from_inactive(current_state: NatVentLifecycleState, event: NatVe
     full_gate = decide_nat_vent_gate(_gate_inputs(inputs))
     if full_gate:
         next_state = NatVentLifecycleState.ACTIVE_FULL_GATE
-    elif decide_nat_vent_soft_start_gate(_soft_start_inputs(inputs, full_gate_active=full_gate)):
+    elif inputs.soft_start_enabled and decide_nat_vent_soft_start_gate(
+        _soft_start_inputs(inputs, full_gate_active=full_gate)
+    ):
         next_state = NatVentLifecycleState.ACTIVE_SOFT_START
     else:
         next_state = NatVentLifecycleState.INACTIVE

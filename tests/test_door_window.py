@@ -341,9 +341,11 @@ class TestHandleDoorWindowOpenWithGrace:
     """Tests for handle_door_window_open respecting grace periods."""
 
     def test_skips_pause_when_grace_active(self):
+        """A grace that answers to the occupant (a dashboard-resume manual grace, no override) still holds the pause.
+        Issue #1142 (rule 3): a grace Climate Advisor started itself (``automation``) no longer does."""
         engine = _make_automation_engine()
         engine._grace_active = True
-        engine._last_resume_source = "automation"
+        engine._last_resume_source = "manual"
 
         # Set up state so it would normally pause
         engine.hass.states.get.return_value = _make_state("heat")
@@ -353,6 +355,19 @@ class TestHandleDoorWindowOpenWithGrace:
         # Should NOT have paused
         assert engine._paused_by_door is False
         engine.hass.services.async_call.assert_not_called()
+
+    def test_automation_grace_does_not_hold_the_pause(self):
+        """Issue #1142 (owner decision, rule 3): the only exception is a manual override; CA's own grace is not one."""
+        engine = _make_automation_engine()
+        engine._grace_active = True
+        engine._last_resume_source = "automation"
+        engine._last_grace_trigger = "automation"
+        engine.hass.states.get.return_value = _make_state("heat")
+
+        with patch("custom_components.climate_advisor.automation.async_call_later"):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
 
     def test_pauses_when_no_grace(self):
         engine = _make_automation_engine()
@@ -1529,10 +1544,10 @@ class TestGracePeriodExpiry:
         assert notify_calls == [], f"No notification task should be scheduled, got: {notify_calls}"
 
     def test_door_open_during_grace_is_blocked(self):
-        """Opening a door during active grace period does not pause HVAC."""
+        """Opening a door during an active occupant-side (manual) grace period does not pause HVAC."""
         engine = _make_automation_engine()
         engine._grace_active = True
-        engine._last_resume_source = "automation"
+        engine._last_resume_source = "manual"
 
         # Set up a state so the engine could pause if it wanted to
         state_mock = MagicMock()
@@ -1556,7 +1571,8 @@ class TestGracePeriodExpiry:
         """
         engine = _make_automation_engine()
         engine._grace_active = True
-        engine._last_resume_source = "automation"
+        engine._last_resume_source = "manual"
+        # Issue #1142: an occupant-side (manual) grace; CA's own automation grace no longer holds the pause (rule 3).
         engine._last_outdoor_temp = 65.0  # cool enough per the old coarse proxy
 
         state_mock = MagicMock()

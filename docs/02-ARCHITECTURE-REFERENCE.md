@@ -74,7 +74,7 @@ custom_components/climate_advisor/
 │
 ├── door_window_fsm.py    # Door/window pause/grace lifecycle FSM — unified transition table (Issue #637). Drives DoorWindowLifecycleState from door_window_lifecycle.py.
 ├── door_window_lifecycle.py  # Pure session-state derivation for door/window pause/grace: DoorWindowLifecycleState (5 states — NORMAL, PAUSED_ACTIVE, PAUSED_IDLE, GRACE, PAUSED_DURING_GRACE) (Issue #637).
-├── door_window_open_response.py   # Pure decision core: a fresh door/window open event (Issue #637).
+├── door_window_open_response.py   # Pure decision chain of handle_door_window_open(): the handler dispatches on its enum (Issue #637, #1142).
 ├── door_window_close_response.py  # Pure decision core: all-doors-windows-closed (Issue #637).
 ├── door_window_pause_entry.py     # Pure decision core: entering a door/window pause (Issue #637).
 ├── door_window_grace_expiry.py    # Pure decision core: grace-period expiry (Issue #637).
@@ -205,6 +205,8 @@ All six concurrent types are tracked in `_pending_observations: dict[str, Pendin
 
 ## FSM Decision Layer
 
+
+**One owner for "ventilate or pause" an open door/window (Issue #1142).** The nat-vent FSM (`nat_vent_fsm._transition_from_inactive`: override, grace, lockout, full gate, soft start, "a fan exists", forecast-peak and thermal-floor guards, `fan_off_hold_active`) is the sole owner of "may a fan session start?". One shell helper, `AutomationEngine._nat_vent_start_decision(profile)`, builds its inputs from a `NatVentStartProfile` (`NAT_VENT_START_WINDOW_OPEN`, `_GRACE_RECHECK`, `_IDLE_OPEN`, `_PAUSED_REACTIVATION`, `_ROUTINE_RECHECK`) and returns the FSM's own transition; it is glue, not a second decision function. The door/window FSM only RECORDS a pause it is told about (`SENSOR_OPENED` = "the caller chose to pause"; `GRACE_TIMER_EXPIRED` reads `nat_vent_will_start` from the same helper). `door_window_open_response.decide_door_open_response()` is the handler's real guard chain (paused, protected change, grace, gate, fan-off hold, lockout, veto, start). The safety nets that pause outside the handler (scheduled-routine re-check, comfort-band guard) ask the helper and pause quietly when a start is due. Blower mode never heats/cools into an open window (`_apply_nat_vent_hvac_state` holds the thermostat Off; exits with a window open switch it Off at once). The planned window gates the pause (lazy sync only), never the start (#1139, #1211).
 Block 5's FSM migration (epic #594) built seven FSMs (five named-state, two deliberately stateless) — one per lifecycle already governed by ad-hoc boolean flags — driven by Issues #633, #637, #639, #742, #744, #746, and #731. During the migration, `_*_fsm_authoritative` flags (Issue #729) were introduced as an intermediate step to run legacy and FSM paths in parallel via `switch.climate_advisor_shadow_engine_primary`. Phase 6 graduation (Issue #757) completed in seven steps, removing all flags and the shadow engine infrastructure: each FSM is now the sole authoritative implementation with no toggle and no comparison. All automation decisions flow directly through the FSMs with zero legacy branches remaining.
 
 **Note on all rows below:** Each FSM path was permanently authoritative in production for weeks with zero corpus divergence before its legacy branch was removed in Phase 6 graduation (Issue #757).

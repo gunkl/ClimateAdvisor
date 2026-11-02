@@ -9,17 +9,14 @@ exactly:
   enum this module reuses unchanged.
 - ``door_window_pause_entry.decide_pause_entry()`` — the mode-gated
   active-vs-idle pause split (Issue #523).
-- ``door_window_open_response.decide_door_open_response()`` — the fresh-open
-  guard chain.
+- (Issue #1142: ``SENSOR_OPENED`` no longer calls ``door_window_open_response``; it means "the caller chose to
+  pause". The fresh-open guard chain is the handler's own decision, see that module.)
 - ``door_window_close_response.decide_door_close_response()`` — the
   all-closed pause-clear split.
 - ``door_window_grace_expiry.decide_grace_expiry_outcome()`` — the grace-expiry
   first-match-wins chain.
-- ``nat_vent_gate.decide_nat_vent_gate()`` (existing, reused unchanged) — the
-  shared reactivation gate, called from two sites (fresh-open eligibility and
-  the grace-expiry re-pause recheck), same as production calls
-  ``_nat_vent_may_reactivate()`` from both ``handle_door_window_open()`` and
-  ``_re_pause_for_open_sensor()``.
+- (Issue #1142: this module no longer owns a copy of the nat-vent gate. "May a fan session start?" is the
+  nat-vent FSM's question; ``GRACE_TIMER_EXPIRED`` is told the answer through ``nat_vent_will_start``.)
 
 **Refinement vs. the Phase 2 plan's file-by-file dependency list**: the plan
 noted ``door_window_open_response.py`` "reuses ``nat_vent_gate.decide_nat_vent_gate()``
@@ -174,13 +171,7 @@ from .door_window_grace_expiry import (
     decide_grace_expiry_outcome,
 )
 from .door_window_lifecycle import DoorWindowLifecycleState
-from .door_window_open_response import (
-    DoorOpenResponse,
-    DoorOpenResponseInputs,
-    decide_door_open_response,
-)
 from .door_window_pause_entry import PauseEntryInputs, PauseEntryOutcome, decide_pause_entry
-from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate, fan_available_for_nat_vent
 
 
 class DoorWindowFsmEventKind(Enum):
@@ -299,12 +290,10 @@ class DoorWindowFsmInputs:
                                              (``_pause_for_door_window_action()`` return value)
                                              on the SENSOR_OPENED dispatches that follow it;
                                              ``None`` elsewhere (Issue #1143).
-      nat_vent_gate_ruled_out               -> True for _pause_for_door_window()'s and
-                                             handle_door_window_open()'s pause fall-through
-                                             SENSOR_OPENED dispatches (Issue #757
-                                             Phase 6 Step 4) — see that field's own
-                                             comment below for the full incident this
-                                             closes.
+      nat_vent_will_start                   -> the nat-vent FSM's own answer to "may a fan session start
+                                             right now?" (Issue #1142), asked by the shell with the
+                                             grace-recheck profile; read only by GRACE_TIMER_EXPIRED
+                                             (the prediction of ``_re_pause_for_open_sensor()``'s outcome).
     """
 
     hvac_mode: str | None
@@ -330,38 +319,13 @@ class DoorWindowFsmInputs:
     # Issue #1119: see the docstring row above. Defaults False (the pre-#1119 shape) so every
     # existing hand-built input snapshot keeps its meaning.
     manual_override_owns_hvac: bool = False
-    # Issue #757 Phase 6 Step 4 fix: SENSOR_OPENED's transition independently
-    # re-derives TWO conditions that can override a pause — "is this within a
-    # windows-recommended planned window" and "would nat-vent activate" (via
-    # decide_nat_vent_gate() purely from raw outdoor/indoor/comfort readings) —
-    # correct for handle_door_window_open()'s real fresh-open scenario (where
-    # production hasn't yet decided whether to nat-vent or honor the planned-window
-    # exemption), but WRONG for _pause_for_door_window()'s two real callers
-    # (_apply_comfort_band()'s choke-point guard, _sync_paused_by_door_with_live_
-    # sensors()), which only ever call it after already independently ruling out both
-    # possibilities themselves — for reasons this FSM's own simple re-derivations
-    # cannot see (a user manually turning the WHF off, occupancy mode, config, Phase 2
-    # forecast/thermal guards; and, for _apply_comfort_band() specifically, a
-    # *deliberate* override of the planned-window exemption other layers already
-    # granted — see that method's own Issue #629 docstring for why re-honoring it here
-    # would silently undo the fix). Confirmed live via golden scenario
-    # issue_629_comfort_band_arm_through_open_window: a windows-recommended day with
-    # the WHF turned off manually while outdoor/indoor readings were STILL
-    # nat-vent-favorable landed on DoorOpenResponse.PLANNED_WINDOW_NOOP (blocked on
-    # ``within_planned_window`` before ``nat_vent_gate_entered`` was even reached),
-    # silently leaving _paused_by_door=False even though HVAC really was being
-    # suppressed (a real dashboard/status-consistency regression, not cosmetic —
-    # decide_scheduled_band_gate()'s DEFER_PAUSED never engaged). When True, both of
-    # SENSOR_OPENED's re-derived conditions are forced False rather than independently
-    # recomputed — this field is never read by any other event kind.
-    #
-    # Issue #1132: handle_door_window_open()'s pause fall-through is the second real caller
-    # that passes True. By the time it dispatches, the legacy decision has already chosen
-    # PAUSE (and turned HVAC off) — for reasons this FSM's simplified gate cannot see (the
-    # forecast-peak guard, the thermal-floor guard, a manual override). Without it the FSM
-    # answered NAT_VENT_ELIGIBLE (NORMAL origin) / GRACE_SUPPRESSED (GRACE origin) and no
-    # pause was recorded.
-    nat_vent_gate_ruled_out: bool = False
+    # Issue #1142: the nat-vent FSM's answer to "may a fan session start right now?", computed by the shell with
+    # the grace-recheck profile (``AutomationEngine._nat_vent_start_decision``). The door/window FSM no longer
+    # re-derives the nat-vent gate: SENSOR_OPENED means "the caller chose to pause" (the handler and
+    # ``_pause_for_door_window()`` ask the nat-vent FSM first), and GRACE_TIMER_EXPIRED reads this flag instead of
+    # a second, simplified copy of the gate (which could not see the forecast-peak/thermal-floor guards, the
+    # lockout or a soft start). Read only by GRACE_TIMER_EXPIRED from plain GRACE.
+    nat_vent_will_start: bool = False
     # Issue #1143: the authoritative "HVAC was already off when this pause started" reading, for
     # the SENSOR_OPENED dispatches that follow a pause ACTION (``_pause_for_door_window_action()``
     # returns it). ``hvac_mode`` above is read AFTER that action has already commanded the
@@ -390,33 +354,6 @@ class DoorWindowTransition:
     @property
     def changed(self) -> bool:
         return self.from_state != self.to_state
-
-
-def _nat_vent_gate_inputs(inputs: DoorWindowFsmInputs) -> NatVentGateInputs:
-    return NatVentGateInputs(
-        outdoor=inputs.outdoor,
-        indoor=inputs.indoor,
-        comfort_heat_raw=inputs.comfort_heat,
-        sleep_heat=inputs.comfort_heat,
-        in_sleep_window=False,
-        comfort_cool=inputs.comfort_cool,
-        nat_vent_delta=inputs.nat_vent_delta,
-        hysteresis=0.0,
-        fan_mode=inputs.fan_mode,
-        aggressive_savings=inputs.aggressive_savings,
-    )
-
-
-def _nat_vent_may_start(inputs: DoorWindowFsmInputs) -> bool:
-    """This module's prediction of the nat-vent start decision (Issue #1140).
-
-    The temperature gate plus the "a fan exists" rule the nat-vent FSM applies to every start
-    (``nat_vent_gate.fan_available_for_nat_vent``). The forecast-peak / thermal-floor guards are
-    NOT modeled here: every caller that needs the real answer already ran the nat-vent FSM and
-    either passes ``nat_vent_gate_ruled_out`` or corrects this prediction when the real
-    reactivation outcome arrives (``PAUSED_NAT_VENT_REACTIVATED`` / the idempotent re-pause).
-    """
-    return fan_available_for_nat_vent(inputs.fan_mode) and decide_nat_vent_gate(_nat_vent_gate_inputs(inputs))
 
 
 def _pause_entry_outcome(inputs: DoorWindowFsmInputs, *, hvac_already_off: bool | None = None) -> PauseEntryOutcome:
@@ -461,22 +398,10 @@ def _transition_from_normal(current_state: DoorWindowLifecycleState, event: Door
     kind = event.kind
 
     if kind == DoorWindowFsmEventKind.SENSOR_OPENED:
-        response = decide_door_open_response(
-            DoorOpenResponseInputs(
-                paused_by_door=False,
-                grace_active=False,
-                outdoor=inputs.outdoor,
-                comfort_cool=inputs.comfort_cool,
-                nat_vent_delta=inputs.nat_vent_delta,
-                nat_vent_gate_entered=(False if inputs.nat_vent_gate_ruled_out else _nat_vent_may_start(inputs)),
-            )
-        )
-        if response == DoorOpenResponse.PAUSE:
-            next_state = _pause_sub_state(_pause_entry_outcome(inputs))
-            next_state = next_state or current_state
-        else:
-            next_state = current_state
-        return DoorWindowTransition(current_state, next_state, kind, response.value, inputs.now)
+        # Issue #1142: the caller already chose PAUSE (the nat-vent FSM refused, or the open window is not
+        # nat-vent's to hold); this only records which kind of pause.
+        next_state = _pause_sub_state(_pause_entry_outcome(inputs)) or current_state
+        return DoorWindowTransition(current_state, next_state, kind, "pause", inputs.now)
 
     if kind == DoorWindowFsmEventKind.SYNC_RECONCILE:
         next_state = _sync_reconcile_next_state(current_state, inputs)
@@ -626,38 +551,15 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
     kind = event.kind
 
     if kind == DoorWindowFsmEventKind.SENSOR_OPENED:
-        response = decide_door_open_response(
-            DoorOpenResponseInputs(
-                paused_by_door=False,
-                # Issue #757 Phase 6 Step 4 fix: forced False (instead of the real
-                # True) when nat_vent_gate_ruled_out — GRACE_SUPPRESSED exists to let
-                # an active grace period tolerate a still-open sensor when
-                # reactivation isn't viable, which is the wrong exemption for
-                # _pause_for_door_window()'s always-pause callers (same incident as
-                # the within_planned_window/nat_vent_gate_entered forcing below — see
-                # DoorWindowFsmInputs.nat_vent_gate_ruled_out's docstring). The actual
-                # FSM transition below still correctly lands on PAUSED_DURING_GRACE
-                # (preserving that grace was running) regardless of this — only the
-                # pure decision function's GRACE_SUPPRESSED exemption is bypassed.
-                grace_active=not inputs.nat_vent_gate_ruled_out,
-                outdoor=inputs.outdoor,
-                comfort_cool=inputs.comfort_cool,
-                nat_vent_delta=inputs.nat_vent_delta,
-                nat_vent_gate_entered=(False if inputs.nat_vent_gate_ruled_out else _nat_vent_may_start(inputs)),
-            )
+        # Issue #1142: the caller already chose PAUSE. _pause_for_door_window() runs with grace untouched -- the
+        # confirmed-reachable violation path #1 (see module docstring).
+        sub = _pause_entry_outcome(inputs)
+        next_state = (
+            DoorWindowLifecycleState.PAUSED_DURING_GRACE
+            if sub != PauseEntryOutcome.NOOP_NOT_APPLICABLE
+            else current_state
         )
-        if response == DoorOpenResponse.PAUSE:
-            # _pause_for_door_window() runs with grace untouched — the
-            # confirmed-reachable violation path #1 (see module docstring).
-            sub = _pause_entry_outcome(inputs)
-            next_state = (
-                DoorWindowLifecycleState.PAUSED_DURING_GRACE
-                if sub != PauseEntryOutcome.NOOP_NOT_APPLICABLE
-                else current_state
-            )
-        else:
-            next_state = current_state
-        return DoorWindowTransition(current_state, next_state, kind, response.value, inputs.now)
+        return DoorWindowTransition(current_state, next_state, kind, "pause", inputs.now)
 
     if kind == DoorWindowFsmEventKind.SYNC_RECONCILE:
         next_state = _sync_reconcile_next_state(current_state, inputs)
@@ -686,7 +588,7 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
             # _re_pause_for_open_sensor() genuinely decides NORMAL (nat-vent
             # handoff) vs a plain paused state — unlike from
             # PAUSED_DURING_GRACE, see _transition_from_paused_during_grace().
-            if _nat_vent_may_start(inputs):
+            if inputs.nat_vent_will_start:
                 next_state = DoorWindowLifecycleState.NORMAL
             else:
                 sub = _pause_sub_state(_pause_entry_outcome(inputs))

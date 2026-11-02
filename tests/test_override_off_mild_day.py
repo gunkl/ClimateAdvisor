@@ -244,7 +244,6 @@ class TestOffWithCaDoorWindowPauseIsTreatedAsOnHotDays:
         with (
             s._patch_all(),
             patch(f"{_AUTOMATION}.is_reactivation_locked_out", return_value=True),
-            patch.object(type(e), "_nat_vent_may_reactivate", return_value=True),
         ):
             _run(e.handle_door_window_open("binary_sensor.window"))
 

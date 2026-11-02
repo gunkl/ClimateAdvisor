@@ -55,7 +55,6 @@ from .const import (
     ATTR_WHF_STATUS,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
-    CONF_FAN_MODE,
     CONF_GITHUB_REPO,
     CONF_GITHUB_TOKEN,
     CONFIG_METADATA,
@@ -63,8 +62,6 @@ from .const import (
     DEFAULT_AI_INVESTIGATOR_ENABLED,
     DOMAIN,
     EVENT_LOG_CAP,
-    FAN_MODE_DISABLED,
-    FAN_MODE_HVAC,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -335,11 +332,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             _nat_vent_on_threshold_display = display_temp(_nat_vent_band["nat_vent_on_threshold"], unit)
             _nat_vent_off_threshold_display = display_temp(_nat_vent_band["nat_vent_off_threshold"], unit)
             _nat_vent_active = bool(ae._natural_vent_active)
-            _nat_vent_ac_assist = (
-                _nat_vent_active
-                and coordinator.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
-                and not coordinator.config.get("aggressive_savings", False)
-            )
+            # Issue #1142 D7: AC assist no longer exists (blower ventilation holds the thermostat Off); key kept, False.
+            _nat_vent_ac_assist = False
 
             # Issue #527: pause_suppressed_classification had the identical "documented but
             # never wired in" gap as nat_vent_active above (see KNOWN_FIXES[367] in const.py) —

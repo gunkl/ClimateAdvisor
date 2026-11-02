@@ -1196,6 +1196,33 @@ class TestCancelViewsGraceCancellation:
         assert response.json_data["status"] == "ok"
         assert "cleared" in response.json_data["message"].lower()
 
+    def test_cancel_fan_override_view_ends_a_fan_off_pause_with_no_grace_behind_it(self):
+        """Issue #1205: the fan-off pause keeps its own deadline and can outlive every grace (e.g. a thermostat
+        override replaced the fan-off grace and then ended). The fan card's button must still end it and say so.
+        The engine paths that produce this state are covered in tests/test_stale_fan_marker_1205.py; this pins
+        the view and the status field the dashboard enables the button on."""
+        from datetime import timedelta
+
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.climate_advisor.api import ClimateAdvisorCancelFanOverrideView
+
+        ae = self._make_engine()
+        ae._fan_off_hold_until = dt_util.now() + timedelta(minutes=30)
+        assert ae._fan_off_hold_active() is True
+        assert ae._grace_active is False
+        assert ae._fan_override_active is False
+
+        coordinator = MagicMock()
+        coordinator.automation_engine = ae
+        coordinator._current_classification = None
+
+        response = self._post(ClimateAdvisorCancelFanOverrideView, coordinator)
+
+        assert ae._fan_off_hold_active() is False
+        assert response.json_data["status"] == "ok"
+        assert response.json_data["message"] == "Fan-off pause ended."
+
     def test_cancel_fan_override_view_noop_message_when_nothing_active(self):
         from custom_components.climate_advisor.api import ClimateAdvisorCancelFanOverrideView
 

@@ -783,6 +783,8 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
         listed = ep.end_ts is not None and _p4_end_is_listed(ep, inp)
         if ep.end_ts is None:
             until = inp.now
+            if ep.target == "fan" and ep.grace_end_ts is not None:
+                until = min(inp.now, ep.grace_end_ts)  # Issue #1205: a fan request ends at its own deadline
         elif listed:
             until = ep.end_ts
         else:

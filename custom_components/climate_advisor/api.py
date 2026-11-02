@@ -414,6 +414,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 # Issue #1095: lets the dashboard offer "End Grace Period" for a grace that has no
                 # override flag behind it (e.g. fan_off), which "Cancel Override" never enabled for.
                 "grace_active": bool(ae._grace_active),
+                # Issue #1205: the occupant's fan-off pause keeps its own deadline and can outlive every grace,
+                # so the dashboard must be able to offer "End Fan-Off Pause" with no grace or override running.
+                "fan_off_hold_active": ae._fan_off_hold_active() is True,
                 # Issue #486: QuietCool RF remote timer selection, null unless a timer set the
                 # active fan override's grace duration.
                 "fan_remote_timer_hours": data.get("fan_remote_timer_hours"),
@@ -867,13 +870,16 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
             # override behind it (e.g. fan_off) is ended by this same call, but "Override
             # cancelled" would misdescribe it.
             had_override = ae._occupant_override_active()
+            had_hold = ae._fan_off_hold_active()  # Issue #1205: a hold can run with no grace behind it
             cancelled = ae.cancel_override(reason="user_cancel_override")
             if not cancelled:
                 return self.json({"status": "ok", "message": "No active override or grace period to cancel"})
 
             _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
-            what = "Override cancelled" if had_override else "Grace period ended"
+            what = (
+                "Override cancelled" if had_override else ("Fan-off pause ended" if had_hold else "Grace period ended")
+            )
             return self.json(
                 {
                     "status": "ok",
@@ -931,12 +937,16 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
 
         with log_capture.zone_scope(coordinator.zone_label):
             ae = coordinator.automation_engine
+            had_fan_override = ae._fan_override_active
+            had_hold = ae._fan_off_hold_active()  # Issue #1205: the fan-off pause is a fan-side request too
             cancelled = ae.cancel_override(reason="user_cancel_fan_override")
             if not cancelled:
                 return self.json({"status": "ok", "message": "No active fan override to cancel."})
 
             _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
+            if had_hold and not had_fan_override:
+                return self.json({"status": "ok", "message": "Fan-off pause ended."})
             return self.json({"status": "ok", "message": "Fan override cleared."})
 
 

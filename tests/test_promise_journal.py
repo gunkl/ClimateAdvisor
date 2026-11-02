@@ -151,7 +151,7 @@ class TestMarks:
 
     def test_mapped_event_keeps_only_listed_keys(self):
         m = mark_from_event(at(0), "override_cleared", {"was_mode": "heat", "reason": "bedtime", "secret": "x"})
-        assert dict(m.attrs) == {"was_mode": "heat", "old_setpoint_f": None, "reason": "bedtime"}
+        assert dict(m.attrs) == {"was_mode": "heat", "old_setpoint_f": None, "reason": "bedtime", "continues": None}
 
     def test_non_scalar_payload_values_are_stringified(self):
         m = mark_from_event(at(0), "override_detected", {"detected_mode": ["a"], "source": {"b": 1}})
@@ -259,6 +259,47 @@ class TestEpisodes:
         )
         (ep,) = derive_episodes(marks)
         assert ep.end_reason == "bedtime"
+
+    # ── Issue #1205: a fan request (fan-off hold, occupant fan run) ends at its OWN deadline ──
+    def test_1205_fan_off_hold_survives_its_grace_being_superseded_and_a_thermostat_grace_expiring(self):
+        marks = self._marks(
+            (0, "grace_started", {"trigger": "fan_off", "source": "manual", "duration_seconds": 1800}),
+            (
+                5,
+                "grace_cancelled",
+                {"reason": "superseded", "trigger": "fan_off", "protects_override": False, "continues": True},
+            ),
+            (16, "grace_expired", {}),  # the thermostat override's grace: not the hold's end
+        )
+        (ep,) = derive_episodes(marks)
+        assert ep.kind == "fan_off" and ep.end_ts is None and ep.grace_end_ts == at(30)
+
+    def test_1205_fan_off_hold_closes_at_its_deadline_when_a_later_mark_proves_it_passed(self):
+        marks = self._marks(
+            (0, "grace_started", {"trigger": "fan_off", "source": "manual", "duration_seconds": 1800}),
+            (5, "grace_cancelled", {"reason": "superseded", "trigger": "fan_off", "continues": True}),
+            (45, "grace_expired", {}),
+        )
+        (ep,) = derive_episodes(marks)
+        assert ep.end_ts == at(30) and ep.end_reason == "grace_expired"
+
+    def test_1205_fan_side_cancel_of_the_hold_still_closes_it(self):
+        marks = self._marks(
+            (0, "grace_started", {"trigger": "fan_off", "source": "manual", "duration_seconds": 1800}),
+            (5, "grace_cancelled", {"reason": "user_cancel_override", "trigger": "fan_off", "continues": False}),
+        )
+        (ep,) = derive_episodes(marks)
+        assert ep.end_reason == "user_cancel_override"
+
+    def test_1205_pre_fix_superseded_fan_off_cancel_without_continues_still_closes(self):
+        marks = self._marks(
+            (0, "grace_started", {"trigger": "fan_off", "source": "manual", "duration_seconds": 1800}),
+            (5, "grace_cancelled", {"reason": "superseded", "trigger": "fan_off"}),
+        )
+        (ep,) = derive_episodes(marks)
+        assert ep.end_ts == at(5)
+
+    # (the fan-run episode over the REAL engine event stream: tests/test_stale_fan_marker_1205.py::test_journal_*)
 
     def test_non_occupant_grace_start_does_not_set_the_overrides_protected_window(self):
         marks = self._marks(

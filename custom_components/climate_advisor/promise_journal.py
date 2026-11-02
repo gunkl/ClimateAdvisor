@@ -138,10 +138,11 @@ EVENT_MARK_MAP: dict[str, tuple[str, ...]] = {
     "override_detected": ("detected_mode", "source"),
     "override_confirmed": ("mode", "confirm_delay_seconds"),
     "override_self_resolved": ("detected_mode", "current_mode"),
-    "override_cleared": ("was_mode", "old_setpoint_f", "reason"),
+    "override_cleared": ("was_mode", "old_setpoint_f", "reason", "continues"),
     "override_adopted": (),
     "grace_started": ("source", "duration_seconds", "trigger"),
-    "grace_cancelled": ("reason", "trigger", "grace_source", "remaining_minutes", "protects_override"),
+    "fan_off_hold_ended": ("reason", "hold_until"),
+    "grace_cancelled": ("reason", "trigger", "grace_source", "remaining_minutes", "protects_override", "continues"),
     "grace_expired": ("source", "re_paused"),
     "fan_manual_override": ("fan_before", "fan_after", "remote_timer_hours"),
     "fan_override_cleared": ("reason", "source", "remote_timer_hours"),
@@ -181,6 +182,7 @@ _EPISODE_KINDS = frozenset(
         "override_adopted",
         "grace_started",
         "grace_cancelled",
+        "fan_off_hold_ended",
         "grace_expired",
         "fan_manual_override",
         "fan_override_cleared",
@@ -324,6 +326,8 @@ def derive_episodes(
             # occupant replacing their own change (e.g. a second manual change during grace) -- a
             # legitimate ending, not CA ending it early.
             for e in cleared:
+                if mark_attr(m, "continues") is True and e.target == "fan":
+                    continue  # Issue #1205: the occupant's fan run goes on past the thermostat override's end
                 close(e, m.ts, "superseded" if replaced_soon(i, e.target) else reason)
         elif k == "fan_override_cleared":
             reason = str(mark_attr(m, "reason") or "unknown")
@@ -331,27 +335,52 @@ def derive_episodes(
                 close(e, m.ts, "superseded" if replaced_soon(i, e.target) else reason)
         elif k == "grace_expired":
             for e in open_eps():
-                close(e, m.ts, "grace_expired")
+                # Issue #1205: a fan request (the fan-off hold, an occupant's fan run) has its own deadline and
+                # outlives a thermostat override's grace; that grace expiring is not its end.
+                if e.target == "fan" and e.grace_end_ts is not None and (e.grace_end_ts - m.ts).total_seconds() > 2.0:
+                    continue
+                close(
+                    e,
+                    e.grace_end_ts if e.target == "fan" and e.grace_end_ts and e.grace_end_ts < m.ts else m.ts,
+                    "grace_expired",
+                )
         elif k == "grace_cancelled":
             reason = str(mark_attr(m, "reason") or "grace_cancelled")
             protects = mark_attr(m, "protects_override") is True
             fan_off = str(mark_attr(m, "trigger") or "") == "fan_off"
+            # Issue #1205: the engine says the request behind this grace goes on past it (the fan-off hold after a
+            # thermostat override replaced the grace, or an occupant's fan run kept past a thermostat override's
+            # grace): nothing ended, so the episode stays open until its own deadline.
+            continues = mark_attr(m, "continues") is True
             # A cancelled grace only ends an override episode when it was the one protecting it
             # (door/window resume, nat-vent exit ... graces are unrelated), and only ends a fan-off
             # episode when it was the fan-off grace.
             for e in open_eps():
                 if not ((e.kind == "override" and protects) or (e.kind == "fan_off" and fan_off)):
                     continue
+                if continues and e.target == "fan":
+                    continue
                 r = reason
                 if reason == "superseded" and not replaced_soon(i, e.target):
                     r = "superseded_unreplaced"
                 close(e, m.ts, r)
+        elif k == "fan_off_hold_ended":
+            # Issue #1205: the occupant ended the fan-off hold with no fan-off grace running to say so.
+            for e in open_eps("fan", "fan_off"):
+                close(e, m.ts, str(mark_attr(m, "reason") or "user_cancel"))
         elif k == "stuck_grace_recovered":
             for e in open_eps():
                 close(e, m.ts, "stuck_grace_recovered")
         elif k == "system_restarted":
             for e in open_eps():
                 close(e, m.ts, "restart")
+    # Issue #1205: a fan episode (fan-off hold, occupant fan run) whose own deadline has passed ended AT that deadline
+    # -- the hold can outlive the grace that carried it, so no grace event marks its end.
+    if marks:
+        last_ts = marks[-1].ts
+        for e in eps:
+            if e.end_ts is None and e.target == "fan" and e.grace_end_ts is not None and e.grace_end_ts <= last_ts:
+                close(e, e.grace_end_ts, "grace_expired")
     return tuple(e.freeze() for e in eps[-(MAX_OPEN_EPISODES * 4) :])
 
 

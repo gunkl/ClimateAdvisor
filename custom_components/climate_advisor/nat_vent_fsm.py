@@ -79,7 +79,8 @@ This module's grace short-circuit now models that same exception via
 ``_transition_from_inactive()``: grace blocks nat-vent UNLESS indoor is known
 and exceeds ``comfort_cool``, in which case the short-circuit does not fire.
 ``override_active`` is unaffected — a manual fan override always wins
-regardless of temperature.
+regardless of temperature. Issue #1205: the exception is for CA's own graces only; the occupant's fan-off
+hold (``fan_off_hold_active``) is never bypassed, however warm the house.
 
 This was originally shipped (Issue #687) as a known diagnostic-only gap,
 because at the time this FSM was shadow/diagnostic-only and the field
@@ -172,6 +173,11 @@ class NatVentFsmInputs:
     # real values rather than relying on the default.
     override_active: bool = False
     grace_active: bool = False
+    # Issue #1205 / #134: the OCCUPANT's fan-off hold is in force (``fan_off`` trigger, #1006). The
+    # #134 overheat exception exists for CA's OWN graces; it must never override the person's off. Set from
+    # ``AutomationEngine._fan_off_hold_active()`` by the production input builder (never by hand). The hold has its
+    # own deadline and outlives the grace timer when a thermostat override replaces it (Issue #1205).
+    fan_off_hold_active: bool = False
     # Issue #698 (Phase 2d): the live fan-hardware on/off flag (AutomationEngine's
     # ``_fan_active``) -- distinct from the session flag ``_natural_vent_active``
     # this FSM's states already model. Default False mirrors ``override_active``/
@@ -292,20 +298,44 @@ def _soft_start_inputs(inputs: NatVentFsmInputs, *, full_gate_active: bool) -> N
     )
 
 
+def overheat_bypasses_grace(
+    *, grace_active: bool, fan_off_hold_active: bool, indoor: float | None, comfort_cool: float | None
+) -> bool:
+    """Whether the Issue #134 overheat exception lets nat-vent past a running grace (Issue #1205).
+
+    The ONE definition shared by ``_grace_blocks_natvent()`` and production
+    (``AutomationEngine.check_natural_vent_conditions()``'s precondition and the Issue #1095 blocker log), so
+    the sites cannot drift. The exception applies only while a grace runs, indoor is known and genuinely above
+    ``comfort_cool`` (strict), and the grace is NOT the occupant's fan-off hold: #134 was written for Climate
+    Advisor's own graces (e.g. the 90-minute automation grace after CA stopped the fan at the comfort floor).
+    A person who switched the fan off keeps it off for the whole hold, even in a warm house.
+    """
+    return bool(
+        grace_active
+        and not fan_off_hold_active
+        and indoor is not None
+        and comfort_cool is not None
+        and indoor > comfort_cool
+    )
+
+
 def _grace_blocks_natvent(inputs: NatVentFsmInputs) -> bool:
     """Whether an active grace period should block nat-vent this tick (Issue #706,
     closes #688).
 
-    Grace blocks nat-vent UNLESS indoor is known and genuinely exceeds
-    ``comfort_cool`` — the Issue #134 overheat-during-grace exception production
-    applies (``automation.py``: ``self._grace_active and indoor is not None and
-    indoor > comfort_cool``). Shared by both ``_transition_from_active()`` and
-    ``_transition_from_inactive()`` so the exception can't drift between the two
-    call paths.
+    Grace blocks nat-vent UNLESS ``overheat_bypasses_grace()`` -- the Issue #134 overheat-during-grace
+    exception, which Issue #1205 scopes to CA's own graces (``fan_off_hold_active`` ignores it). Shared by both
+    ``_transition_from_active()`` and ``_transition_from_inactive()`` so the exception can't drift between the
+    two call paths.
     """
     if not inputs.grace_active:
         return False
-    return not (inputs.indoor is not None and inputs.comfort_cool is not None and inputs.indoor > inputs.comfort_cool)
+    return not overheat_bypasses_grace(
+        grace_active=inputs.grace_active,
+        fan_off_hold_active=inputs.fan_off_hold_active,
+        indoor=inputs.indoor,
+        comfort_cool=inputs.comfort_cool,
+    )
 
 
 def _transition_from_active(current_state: NatVentLifecycleState, event: NatVentFsmEvent) -> NatVentTransition:

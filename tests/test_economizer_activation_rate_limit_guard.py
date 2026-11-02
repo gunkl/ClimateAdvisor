@@ -106,7 +106,7 @@ def _make_hot_classification() -> DayClassification:
 
 
 class TestAppliesInactiveWhenCommandDidNotReachTheFan:
-    """OVERRIDDEN and RATE_LIMITED_NEW/RATE_LIMITED_DUP all mean the same thing for
+    """OVERRIDDEN, RATE_LIMITED_NEW/RATE_LIMITED_DUP and SUPPRESSED (#1205) all mean the same thing for
     this purpose: the real fan-ON command never actually reached the fan, so the
     pre-await COOL_DOWN/MAINTAIN decision is stale and must not be applied --
     INACTIVE is applied instead so the FSM's own eligibility re-check can retry on
@@ -118,6 +118,7 @@ class TestAppliesInactiveWhenCommandDidNotReachTheFan:
             FanCommandResult.OVERRIDDEN,
             FanCommandResult.RATE_LIMITED_NEW,
             FanCommandResult.RATE_LIMITED_DUP,
+            FanCommandResult.SUPPRESSED,
         ],
     )
     @pytest.mark.parametrize(
@@ -142,6 +143,7 @@ class TestAppliesInactiveWhenCommandDidNotReachTheFan:
             FanCommandResult.OVERRIDDEN,
             FanCommandResult.RATE_LIMITED_NEW,
             FanCommandResult.RATE_LIMITED_DUP,
+            FanCommandResult.SUPPRESSED,
         ],
     )
     def test_does_not_leave_a_stale_active_flag_set(self, result: FanCommandResult) -> None:
@@ -159,7 +161,7 @@ class TestAppliesInactiveWhenCommandDidNotReachTheFan:
 
 
 class TestAppliesDecisionWhenCommandActuallyReachedTheFan:
-    """EXECUTED, ALREADY_IN_STATE, DISABLED, and SUPPRESSED all mean no override
+    """EXECUTED, ALREADY_IN_STATE and DISABLED all mean no override
     intervened mid-await and no command was deferred -- the pre-await to_state
     decision is still correct and must be applied normally. Control group proving
     the RATE_LIMITED guard doesn't suppress the normal case."""
@@ -170,7 +172,6 @@ class TestAppliesDecisionWhenCommandActuallyReachedTheFan:
             FanCommandResult.EXECUTED,
             FanCommandResult.ALREADY_IN_STATE,
             FanCommandResult.DISABLED,
-            FanCommandResult.SUPPRESSED,
         ],
     )
     def test_applies_cool_down(self, result: FanCommandResult) -> None:
@@ -189,7 +190,6 @@ class TestAppliesDecisionWhenCommandActuallyReachedTheFan:
             FanCommandResult.EXECUTED,
             FanCommandResult.ALREADY_IN_STATE,
             FanCommandResult.DISABLED,
-            FanCommandResult.SUPPRESSED,
         ],
     )
     def test_applies_maintain(self, result: FanCommandResult) -> None:

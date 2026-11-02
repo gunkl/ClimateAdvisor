@@ -616,6 +616,28 @@ class TestP4OverrideRespected:
         inp = make_input([rd(0, fan_on=False)], [], marks, now=at(10))
         assert [h.key.split(":")[1] for h in hits_for("override_respected", inp)] == ["early_end"]
 
+    def _hold_with_replaced_grace(self, fan_start_min):
+        return events(
+            (0, "grace_started", {"trigger": "fan_off", "source": "manual", "duration_seconds": 1800}),
+            (2, "grace_cancelled", {"reason": "superseded", "trigger": "fan_off", "continues": True}),
+            (2, "grace_started", {"trigger": "override_confirmed", "source": "manual", "duration_seconds": 1800}),
+            (fan_start_min + 20, "grace_expired", {}),
+        )
+
+    def test_1205_ca_fan_start_inside_the_hold_after_its_grace_was_replaced_is_a_miss(self):
+        marks = self._hold_with_replaced_grace(0)
+        inp = make_input(
+            [rd(0, fan_on=False)], [cmd(20, target="fan", service="turn_on", fan_on=True)], marks, now=at(25)
+        )
+        assert len(hits_for("override_respected", inp)) == 1
+
+    def test_1205_ca_fan_start_after_the_hold_deadline_is_fine(self):
+        marks = self._hold_with_replaced_grace(0)
+        inp = make_input(
+            [rd(0, fan_on=False)], [cmd(35, target="fan", service="turn_on", fan_on=True)], marks, now=at(40)
+        )
+        assert hits_for("override_respected", inp) == []
+
     # ── Issue #1151: one hit per reversal instant; wording for overrides with no end ──
     def test_1151_mode_and_setpoint_reversal_in_the_same_tick_is_one_hit(self):
         inp = _thermostat_override(

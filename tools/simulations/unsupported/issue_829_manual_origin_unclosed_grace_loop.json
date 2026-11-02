@@ -35,7 +35,7 @@
     "the same marker via the same mechanism, so this still exercises the fix's real",
     "arming behavior through the full, unmodified production stack.",
     "",
-    "Closing the loop with a subsequent real fan-off and confirming no fresh grace starts",
+    "Closing the loop with a subsequent real fan-off (labelled as closing the earlier manual session, while the fan-off grace still starts -- Issue #1205: the marker is label-only)",
     "is proven precisely at the unit level instead",
     "(tests/test_whole_house_fan_hvac_suppression.py::TestFanManualOriginUnclosed) --",
     "attempts to script a second synthetic external_fan_state_change late in this same",
@@ -130,20 +130,13 @@
       "expect": "paused_by_door",
       "track": "integration",
       "simulator_support": false,
-      "reason": "Issue #1132: the grace-expiry activation is RATE_LIMITED at this instant (the backstop reconcile just toggled the fan), so the window is still open and the fan did not start: HVAC must stay paused (off) -- the pause is KEPT, nat_vent_reactivated_while_paused is not emitted. Reads the final engine flag; the timeline ends at 20:40, before the deferred activation at 20:42 could run, so the flag still reflects the refused-reactivation state. Before the fix the pause was cleared here, leaving HVAC off with no pause and no nat-vent session."
-    },
-    {
-      "at": "2026-09-02T20:37:00",
-      "expect": "manual_origin_unclosed",
-      "track": "integration",
-      "simulator_support": false,
-      "reason": "Issue #829's fix: the real production _re_pause_for_open_sensor() reactivation branch must arm _fan_manual_origin_unclosed on this handoff -- proving the marker is set by actual production control flow (grace timer, reconcile callback, reactivation gate all real), not only by a unit test's hand-set precondition. Issue #1132 note: at this instant the backstop reconcile has just toggled the fan, so the grace-expiry activation is RATE_LIMITED (deferred to 20:42). The door/window pause is therefore KEPT and no nat_vent_reactivated_while_paused event is emitted (a deferred command is not a reactivation); the marker is still armed because the deferred activation is CA's own and will run later without passing through this site. The earlier assertion that expected that event encoded the pre-#1132 defect of clearing the pause on a deferred fan command."
+      "reason": "Issue #1132: the grace-expiry activation is RATE_LIMITED at this instant (the backstop reconcile just toggled the fan), so the window is still open and the fan did not start: HVAC must stay paused (off) -- the pause is KEPT, nat_vent_reactivated_while_paused is not emitted. Reads the final engine flag; the timeline ends at 20:40, before the deferred activation at 20:42 could run, so the flag still reflects the refused-reactivation state. Before the fix the pause was cleared here, leaving HVAC off with no pause and no nat-vent session. Issue #1205: the manual-origin marker is NOT armed at this deferred instant (no assertion here expects it). The deferral is recorded as a pending fact (_fan_manual_origin_pending), which _activate_fan() promotes to the run-bound marker when the deferred start applies (and discards if the pause ends or another start intervenes); the marker is label-only and is covered at the unit level."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "A default-duration (no-timer) WHF-on whose grace expires while the fan is still running, and is then reactivated by CA's own grace-expiry logic, correctly arms the manual-origin-unclosed marker so its eventual real off is not misread as a fresh override (Issue #829)",
-    "observed_behavior": "WHF turned on externally (manual override armed, no RF timer) -> sensor opens -> 3h later grace expires, sensor still open -> real production _re_pause_for_open_sensor() reactivates nat-vent on its own initiative -> _fan_manual_origin_unclosed is armed",
-    "expected_behavior": "CA's own grace-expiry reactivation of a still-manually-originated fan session marks provenance so a later real off is recognized as closing that session, never as a fresh unexplained override -- the marker's consuming behavior is proven deterministically in tests/test_whole_house_fan_hvac_suppression.py::TestFanManualOriginUnclosed"
+    "observed_behavior": "WHF turned on externally (manual override armed, no RF timer) -> sensor opens -> 3h later grace expires, sensor still open -> real production _re_pause_for_open_sensor() reactivates nat-vent on its own initiative (here deferred by the toggle rate limit; Issue #1205: the marker is armed when the deferred start applies, not at the deferral)",
+    "expected_behavior": "CA's own grace-expiry reactivation of a still-manually-originated fan session marks provenance so a later real off is labelled as closing that session, not as a fresh unexplained override (it still starts the fan-off grace -- Issue #1205) -- the marker's consuming behavior is proven deterministically in tests/test_whole_house_fan_hvac_suppression.py::TestFanManualOriginUnclosed"
   }
 }

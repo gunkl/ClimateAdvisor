@@ -59,6 +59,7 @@ def _inputs(
     now: datetime = _NOW,
     override_active: bool = False,
     grace_active: bool = False,
+    fan_off_hold_active: bool = False,
     fan_hardware_active: bool = False,
 ) -> NatVentFsmInputs:
     return NatVentFsmInputs(
@@ -82,6 +83,7 @@ def _inputs(
         now=now,
         override_active=override_active,
         grace_active=grace_active,
+        fan_off_hold_active=fan_off_hold_active,
         fan_hardware_active=fan_hardware_active,
     )
 
@@ -514,6 +516,81 @@ class TestGraceOverheatException:
             ),
         )
         assert t.to_state == NatVentLifecycleState.INACTIVE
+
+
+class TestFanOffHoldBeatsOverheatException:
+    """Issue #1205 (owner decision 2026-11-01): the Issue #134 overheat exception is for CA's own graces; the
+    occupant's fan-off hold (``fan_off_hold_active``) is never bypassed, however warm the house."""
+
+    def test_fan_off_hold_blocks_entry_even_when_overheating(self) -> None:
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(
+                indoor=78.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                comfort_cool=76.0,
+                grace_active=True,
+                fan_off_hold_active=True,
+            ),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert not t.changed
+
+    def test_same_inputs_without_the_hold_still_enter(self) -> None:
+        # #134 preserved for CA's own graces: identical inputs, fan_off_hold_active=False.
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(
+                indoor=78.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                comfort_cool=76.0,
+                grace_active=True,
+                fan_off_hold_active=False,
+            ),
+        )
+        assert t.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+
+    def test_active_session_is_forced_inactive_by_the_hold_even_when_overheating(self) -> None:
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(
+                indoor=78.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                comfort_cool=76.0,
+                grace_active=True,
+                fan_off_hold_active=True,
+            ),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+
+    def test_the_hold_flag_alone_without_a_grace_blocks_nothing(self) -> None:
+        # the hold only matters while a grace runs (the production predicate requires grace_active)
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=78.0, outdoor=65.0, comfort_heat_raw=68.0, comfort_cool=76.0, fan_off_hold_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+
+    @pytest.mark.parametrize(
+        ("grace", "hold", "indoor", "cool", "expected"),
+        [
+            (True, False, 78.0, 76.0, True),
+            (True, True, 78.0, 76.0, False),
+            (True, False, 76.0, 76.0, False),  # strict >
+            (True, False, None, 76.0, False),
+            (False, False, 78.0, 76.0, False),
+        ],
+    )
+    def test_overheat_bypasses_grace_truth_table(self, grace, hold, indoor, cool, expected) -> None:
+        from custom_components.climate_advisor.nat_vent_fsm import overheat_bypasses_grace
+
+        assert (
+            overheat_bypasses_grace(grace_active=grace, fan_off_hold_active=hold, indoor=indoor, comfort_cool=cool)
+            is expected
+        )
 
 
 class TestSoftStartEscalation:

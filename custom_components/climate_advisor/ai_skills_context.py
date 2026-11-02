@@ -2427,6 +2427,13 @@ def _render_fan_orphan_released(p: dict, unit: str) -> tuple[str, str]:
     )
 
 
+def _render_fan_off_hold_ended(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1205: the occupant ended the fan-off pause while no fan-off grace was running (a thermostat override's
+    grace had replaced it). With the grace running, ``grace_cancelled`` already says so, so this row only exists for the
+    case that would otherwise leave no trace."""
+    return "Fan-off pause ended (you cancelled it)", ""
+
+
 def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
     """Issue #567: branch on `trigger` — not every fan_cancel event is a user action.
 
@@ -2459,10 +2466,28 @@ def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
     if trigger == "timer_boundary_settle":
         return "Fan cancel -- RF timer session ended", settings
     if trigger == "manual_origin_carryforward":
-        # Issue #829: this off closes a session CA silently adopted from an earlier manual
-        # fan-on (a default-duration override that expired, or grace-expiry reactivation)
-        # while the fan kept running -- not a fresh, independent user action.
-        return "Fan cancel -- closing session from earlier manual fan-on", settings
+        # Issue #829 / #1205: a PERSON turned off a fan Climate Advisor had taken over or restarted after an earlier
+        # manual fan-on. The marker only selects this wording; the fan-off hold starts exactly as for any
+        # occupant off, so the label says the fan is now being held off.
+        started = ""
+        raw_started = p.get("manual_origin_started")
+        if raw_started:
+            with contextlib.suppress(TypeError, ValueError):
+                started = f" (started {datetime.datetime.fromisoformat(str(raw_started)).strftime('%H:%M')})"
+        kind = p.get("manual_origin_kind")
+        if kind == "restart":
+            return (
+                f"Fan off -- you turned off the fan Climate Advisor restarted after your grace ended{started};"
+                " holding the fan off",
+                settings,
+            )
+        if kind == "takeover":
+            return (
+                f"Fan off -- you turned off the fan Climate Advisor took over from your earlier manual fan-on"
+                f"{started}; holding the fan off",
+                settings,
+            )
+        return "Fan off -- closing the session from your earlier manual fan-on; holding the fan off", settings
     return "Fan cancel (user turned off)", settings
 
 
@@ -3127,6 +3152,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "override_adopted": _render_override_adopted,
     "grace_started": _render_grace_started,
     "grace_cancelled": _render_grace_cancelled,
+    "fan_off_hold_ended": _render_fan_off_hold_ended,
     "fan_override_cleared": _render_fan_override_cleared,
     "outdoor_sensor_fallback": _render_outdoor_sensor_fallback,
     "outdoor_sensor_recovered": _render_outdoor_sensor_recovered,

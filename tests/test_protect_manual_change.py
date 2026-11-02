@@ -1683,7 +1683,7 @@ class TestFanOffGraceDoesNotBlockTheWindowPause:
             if svc in ("turn_on",) or d.get("fan_mode") == "on"
         ]
         assert starts == [], "no fan start command during the fan_off grace"
-        assert "fan_off grace active" in caplog.text
+        assert "fan-off hold active" in caplog.text
 
     def test_window_close_restores_hvac(self, timers, fan_mode):
         engine = _fan_off_house(fan_mode=fan_mode)

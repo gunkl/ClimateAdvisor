@@ -819,8 +819,9 @@ def check_assertion(
     # production engine's final _fan_manual_origin_unclosed flag directly. Confirms the
     # marker was genuinely armed by a real production handoff (clear_fan_override() or
     # _re_pause_for_open_sensor()'s reactivation branch) rather than only in a hand-picked
-    # unit-test precondition — the flag's CONSUMING behavior (on_fan_turned_off() routing
-    # a later real off through session-closing instead of a fresh grace) is proven
+    # unit-test precondition — the flag's CONSUMING behavior (on_fan_turned_off() labelling
+    # a later real off as closing the earlier manual session; since Issue #1205 that off
+    # still starts the fan-off grace, the marker is label-only) is proven
     # deterministically at the unit level instead
     # (tests/test_whole_house_fan_hvac_suppression.py::TestFanManualOriginUnclosed).
     if expect == "manual_origin_unclosed":

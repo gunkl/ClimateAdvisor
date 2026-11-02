@@ -306,9 +306,14 @@ class TestNotEngagedNamesTheFsmBlocker:
 
     def test_overheat_exception_is_not_blamed_on_grace(self, caplog):
         """Indoor above comfort_cool lets nat-vent through grace (Issue #134); the log must not
-        list grace_active as the reason then."""
+        list grace_active as the reason then.
+
+        Issue #1205: #134 is for CA's OWN graces, so this scenario now runs under an automation grace (CA's
+        nat-vent-exit resume), not the occupant's fan-off hold -- see the sibling test below for the hold."""
         engine = _make_engine(indoor_f=78.0)  # comfort_cool is 74
         _arm_fan_off_grace_while_paused(engine)
+        engine._last_resume_source = "automation"
+        engine._last_grace_trigger = "nat_vent_exit_resume"
         engine._paused_with_hvac_already_off = False
         engine._last_outdoor_temp = 80.0  # warmer than indoor: the gate itself says no
         caplog.set_level(logging.DEBUG, logger=_AUTOMATION_LOGGER)
@@ -319,6 +324,31 @@ class TestNotEngagedNamesTheFsmBlocker:
         assert len(msgs) == 1, msgs
         assert "grace_active" not in msgs[0].split("trigger=")[0]
         assert "outdoor_not_cooler_than_indoor" in msgs[0]
+
+    def test_overheat_does_not_lift_the_fan_off_hold_and_grace_is_the_blocker(self, caplog):
+        """Issue #1205: the same hot house under the OCCUPANT's fan-off hold: grace_active IS the blocker, and the
+        hold-beats-ceiling line is logged once at INFO (outcome first, then key=value)."""
+        engine = _make_engine(indoor_f=78.0)  # comfort_cool is 74
+        _arm_fan_off_grace_while_paused(engine)
+        # the hold has its own deadline (Issue #1205); this fixture writes the grace fields by hand, so it sets it too
+        engine._fan_off_hold_until = datetime.fromisoformat(_GRACE_END)
+        engine._paused_with_hvac_already_off = False
+        engine._last_outdoor_temp = 60.0  # the gate itself would say yes
+        caplog.set_level(logging.DEBUG, logger=_AUTOMATION_LOGGER)
+
+        _run_check(engine)
+        _run_check(engine)
+
+        msgs = [r.getMessage() for r in caplog.records if "Nat-vent evaluation" in r.getMessage()]
+        assert msgs and "grace_active" in msgs[0].split("trigger=")[0]
+        hold = [
+            r for r in caplog.records if "occupant's fan-off hold wins over comfort-ceiling bypass" in r.getMessage()
+        ]
+        assert len(hold) == 1 and hold[0].levelno == logging.INFO, [r.getMessage() for r in hold]
+        text = hold[0].getMessage()
+        assert text.startswith("Nat-vent not re-entered:")
+        assert "indoor=" in text and "comfort_cool=" in text and "grace_remaining_min=" in text
+        assert engine._natural_vent_active is False
 
     def test_paused_with_unavailable_temperature_is_logged(self, caplog):
         engine = _make_engine()

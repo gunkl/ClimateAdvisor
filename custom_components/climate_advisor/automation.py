@@ -224,6 +224,7 @@ from .nat_vent_exit import (
     NatVentExitReason,
     decide_nat_vent_exit,
 )
+from .nat_vent_fsm import overheat_bypasses_grace as _overheat_bypasses_grace
 from .nat_vent_gate import (
     FLOOR_IMMINENT,
     FORECAST_PEAK_ABOVE_THRESHOLD,
@@ -446,6 +447,14 @@ class FanCommandResult(Enum):
 # command was refused at run time: read-back gave up #1050, HVAC-fan restriction #835, no "on" fan mode
 # #893). No session is recorded; an open window then pauses HVAC like any other (household rule 3).
 _NAT_VENT_NO_WORKING_FAN_RESULTS = frozenset({FanCommandResult.DISABLED, FanCommandResult.SUPPRESSED})
+
+# Issue #1205 (C-b): the _activate_fan() results meaning "the fan-ON command was refused, no start happened". The
+# min-runtime cycle sets its "running" flag only when the start applied (EXECUTED, ALREADY_IN_STATE and the
+# rate-limiter's deferred results all count as applied).
+_FAN_START_NOT_APPLIED_RESULTS = frozenset(
+    {FanCommandResult.DISABLED, FanCommandResult.OVERRIDDEN, FanCommandResult.SUPPRESSED}
+)
+_MIN_RUNTIME_REFUSED_RETRY_S = 3600.0
 _NAT_VENT_ACTIVATION_NOT_APPLIED = (
     frozenset({FanCommandResult.OVERRIDDEN, FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP})
     | _NAT_VENT_NO_WORKING_FAN_RESULTS
@@ -1118,6 +1127,31 @@ class AutomationEngine:
     # attribute in __init__ below.
     role: str = "production"
 
+    # Issue #1205: class-level defaults (same object.__new__ test-fixture reason as ``role`` above) for the
+    # manual-origin marker's run binding / pending fact / start counter; __init__ sets the instance attributes.
+    _fan_manual_origin_unclosed: bool = False
+    _fan_manual_origin_run: str | None = None
+    _fan_manual_origin_kind: str | None = None
+    _fan_manual_origin_started: str | None = None
+    _fan_manual_origin_site: str | None = None
+    _fan_manual_origin_pending: tuple[datetime, int] | None = None
+    _fan_start_seq: int = 0
+    _door_pause_hold: int = 0  # see _holding_door_pause()
+    # Issue #1205/#134: once-per-hold log keys (class defaults for object.__new__ test engines).
+    _last_hold_beats_ceiling_grace_end: str | None = None  # keyed on the hold deadline (isoformat)
+    _last_fan_off_hold_refusal: tuple[str | None, frozenset[str]] | None = None  # (hold deadline, callers logged)
+    # Issue #1205 (owner decision 2026-11-01): the occupant's fan-off hold has its OWN deadline -- the fan-off
+    # grace's end time at the moment it started. ONE source of truth: every "is the occupant's off still in force?"
+    # check reads _fan_off_hold_active(), never the running grace (a later thermostat override replaces the grace
+    # timer, not the occupant's request).
+    _fan_off_hold_until: datetime | None = None
+    # Issue #1205 (F3): the occupant's fan override has its OWN deadline too (the fan_manual_override grace's end,
+    # RF timer duration included). A thermostat override's grace replacing that grace, and its expiry or cancel,
+    # must not end the fan run early. Same single-source-of-truth pattern as the fan-off hold.
+    _fan_override_until: datetime | None = None
+    # Issue #1205 (C-a): the cause of the last "Cannot activate HVAC fan" ERROR (logged once per cause).
+    _hvac_fan_no_on_logged_cause: tuple[Any, ...] | None = None
+
     # Issue #1102: shut-down latch (see _refuse_if_shut_down). Class-level default for
     # engines built via object.__new__ in tests; __init__ sets the instance attribute.
     _shut_down: bool = False
@@ -1415,21 +1449,39 @@ class AutomationEngine:
         # fan-off report is treated as the tail of that SAME timer boundary (not a fresh,
         # unexpected event) — see on_fan_turned_off() and _on_grace_expired().
         self._timer_boundary_settle_until: datetime | None = None
-        # Issue #829: state-based sibling of _timer_boundary_settle_until above. That
-        # window only ever arms for an override tied to a real RF-remote timer selection
-        # (_fan_remote_timer_hours is not None). A default-duration manual override (no
-        # timer selected — falls back to the configured manual_grace_seconds) has no
-        # numeric timer to anchor a short window to, so when ITS grace expires while the
-        # fan is still physically running (clear_fan_override()), or CA reactivates the
-        # fan on its own after a grace expiry with the sensor still open
-        # (_re_pause_for_open_sensor()/_reconcile_fan_on_startup_locked()), this flag marks
-        # that the run's provenance still traces back to a manual event CA hasn't seen the
-        # physical end of yet. Unlike the settle window, it is NOT time-boxed — the gap
-        # between the handoff and the eventual real off was observed live to be minutes to
-        # hours, not seconds — so it stays set until on_fan_turned_off() actually observes
-        # the fan go off, at which point it's consumed (one-shot) instead of starting a
-        # fresh "unprotected" grace as if the run had no history.
+        # Issue #829 / #1205: the manual-origin marker. LABEL-ONLY (owner decision 2026-11-01): it never decides
+        # whether the fan-off grace (hold) starts. CA always knows how a run should end: a selected RF timer is
+        # tracked by time (the settle window above recognizes its off); with no timer selected the QuietCool runs
+        # indefinitely, so CA applies a default timer (manual_grace_seconds) and at its expiry the reconcile either
+        # turns the fan off itself ("turn-off", CA's own command) or keeps it as CA's own run ("adopt-on"). Any
+        # other fan-off CA did not command is therefore a PERSON, and starts the normal fan-off grace. #829's
+        # original removal of that grace (to fix a misleading "another manual override" label) was wrong; this
+        # marker now only selects the Activity Record wording of that off ("you turned off the fan Climate Advisor
+        # took over/restarted ..."). It is armed when CA hands a still-running fan to itself
+        # (clear_fan_override() with no timer, reconcile adopt-on, grace-expiry reactivation) and bound to the run
+        # it was armed for (_fan_manual_origin_run), so CA stopping that run itself (its off never reaches
+        # on_fan_turned_off()) cannot leave a marker that labels a later, unrelated run.
         self._fan_manual_origin_unclosed: bool = False
+        # Issue #1205: the marker above is bound to the RUN it was armed for. This holds that run's
+        # ``_fan_on_since`` (stamped fresh on every successful start); on_fan_turned_off() honours the marker only
+        # when it equals the run turning off now. Always set/cleared together with the bool, through
+        # _arm_fan_manual_origin() / the consume in on_fan_turned_off(). Not persisted.
+        self._fan_manual_origin_run: str | None = None
+        # Issue #1205: label provenance carried with the marker ("takeover" = CA took over / adopted a running fan
+        # after an earlier manual fan-on; "restart" = CA restarted the fan after its grace ended), the start time
+        # shown in the label, and the arm site for the log. Set/cleared only together with the marker.
+        self._fan_manual_origin_kind: str | None = None
+        self._fan_manual_origin_started: str | None = None
+        self._fan_manual_origin_site: str | None = None
+        # Issue #1205: a grace-expiry reactivation that the toggle floor deferred (_re_pause_for_open_sensor()) is a
+        # PENDING fact, not a marker: no run exists yet. Holds (deferral ``applies_at``, ``_fan_start_seq`` when it was
+        # raised); promoted to the run-bound marker only when the deferred start actually applies
+        # (_activate_fan() on success, whichever caller retried it), discarded when the door/window pause ends,
+        # another start or the occupant gets in first. Not persisted.
+        self._fan_manual_origin_pending: tuple[datetime, int] | None = None
+        # Issue #1205: counts fans started (CA activation or reconcile adopt); lets a pending fact tell "my deferred
+        # start" from "some other start happened in between".
+        self._fan_start_seq: int = 0
         # HVAC mode captured before whole-house fan activation (Issue #277 Fix C).
         # Restored when the whole-house fan deactivates so AC/heat resumes.
         self._pre_fan_hvac_mode: str | None = None
@@ -1954,6 +2006,45 @@ class AutomationEngine:
                 )
 
     @property
+    def _paused_by_door(self) -> bool:
+        """Whether a door/window pause is recorded (Issue #1205: a property so there is ONE choke point).
+
+        ``_paused_by_door`` has many writers (the door/window FSM projection, the nat-vent FSM projection #717,
+        the pause helper, direct sets). Anything bound to "this pause episode" -- the pending manual-origin
+        fact -- must end with it however it ends, so the setter below owns that edge.
+        """
+        return getattr(self, "_paused_by_door_flag", False)
+
+    @_paused_by_door.setter
+    def _paused_by_door(self, value: bool) -> None:
+        _was_paused = getattr(self, "_paused_by_door_flag", False)
+        self._paused_by_door_flag = value
+        if (
+            _was_paused
+            and not value
+            and getattr(self, "_door_pause_hold", 0) == 0
+            and getattr(self, "_fan_manual_origin_pending", None) is not None
+        ):
+            self._discard_fan_manual_origin_pending("door_pause_ended")
+
+    @contextlib.contextmanager
+    def _holding_door_pause(self) -> Iterator[None]:
+        """Keep ``_paused_by_door`` as it is on entry across a same-handler write-and-restore (Issue #1205).
+
+        Two idle-open re-evaluation sites apply the nat-vent FSM state (whose projection clears the flag) and then
+        put the saved value back. That is not "the pause ended": nothing for the occupant changed, so the
+        setter must not discard the pending manual-origin fact on that transient edge. Inside the block the setter's
+        discard is suspended; on exit the saved value is restored directly, with no edge.
+        """
+        _saved = self._paused_by_door
+        self._door_pause_hold += 1
+        try:
+            yield
+        finally:
+            self._door_pause_hold -= 1
+            self._paused_by_door_flag = _saved
+
+    @property
     def is_paused_by_door(self) -> bool:
         """Whether HVAC is currently paused due to an open door/window."""
         return self._paused_by_door
@@ -2288,7 +2379,57 @@ class AutomationEngine:
         self._deferred_while_pending = False  # Issue #1133 L1: whatever waited on a pending change is moot now
         self._clear_manual_override_active(reason)
 
-    def _clear_manual_override_active(self, reason: str, *, announce_fan: bool = True) -> None:
+    def _parse_grace_end(self) -> datetime | None:
+        """The running grace's end as an aware datetime, or None when unknown."""
+        try:
+            end = dt_util.parse_datetime(self._grace_end_time) if self._grace_end_time else None
+        except TypeError, ValueError:
+            return None
+        if isinstance(end, datetime) and end.tzinfo is None:
+            end = end.replace(tzinfo=UTC)
+        return end if isinstance(end, datetime) else None
+
+    def _fan_override_deadline_active(self) -> bool:
+        """Whether the occupant's fan override still has time on its OWN deadline (Issue #1205 F3)."""
+        until = self._fan_override_until
+        return bool(self._fan_override_active and until is not None and dt_util.now() < until)
+
+    def _keep_fan_override_past_thermostat_grace(self, reason: str) -> bool:
+        """Re-arm the fan override's grace for its remaining time when a THERMOSTAT override's grace ended (F3).
+
+        The occupant's fan run and thermostat change are separate requests: the thermostat override's grace
+        replaced the fan override's grace, and its expiry, adoption or cancel must not end the fan run early (a
+        4 h remote-timer run was cut off 3.5 h early, and in ``hvac_fan`` mode CA then stopped the blower). The fan
+        override ends on its own deadline through the ordinary fan_manual_override grace, which is restarted here
+        for the remaining time. Returns whether the fan override was kept.
+        """
+        if not self._fan_override_deadline_active() or self._fan_override_until is None:
+            return False
+        remaining = (self._fan_override_until - dt_util.now()).total_seconds()
+        if remaining < 1:
+            return False
+        _LOGGER.info(
+            "Fan override continues past thermostat override grace: until=%s reason=%s hvac_fan=%s",
+            self._fan_override_until.isoformat(),
+            reason,
+            self._fan_override_is_hvac_fan,
+        )
+        if not self._start_grace_period_action("manual", trigger="fan_manual_override", duration_override=remaining):
+            return False
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+        # Same predicate handle_fan_manual_override() uses (_is_whf_press), so the re-armed grace reaches the FSM as
+        # the original press did.
+        self._resolve_override_grace_fsm_state(
+            kind=_OGFEventKind.FAN_OVERRIDE_DETECTED
+            if self._is_whf_press(bool(self._fan_override_is_hvac_fan))
+            else _OGFEventKind.HVAC_FAN_OVERRIDE_DETECTED
+        )
+        return True
+
+    def _clear_manual_override_active(
+        self, reason: str, *, announce_fan: bool = True, keep_fan_override: bool = False
+    ) -> None:
         """The ``_manual_override_active``-and-below half of ``clear_manual_override()``
         (Issue #664, extracted for reuse). None of these fields are part of the
         override/grace FSM's ``(OverrideConfirmState, GraceState)`` 2-tuple derivation
@@ -2296,18 +2437,27 @@ class AutomationEngine:
         documents) — always runs directly, unconditionally, regardless of which
         computation determined the confirm/grace flags for this event.
         """
-        self._clear_thermostat_override_flags(reason)
+        _keeps_run = bool(
+            keep_fan_override
+            and self._fan_override_deadline_active()
+            and self._fan_override_until is not None
+            and (self._fan_override_until - dt_util.now()).total_seconds() >= 1
+        )
+        self._clear_thermostat_override_flags(reason, fan_continues=_keeps_run)
         self._resumed_from_pause = False
+        if keep_fan_override and self._keep_fan_override_past_thermostat_grace(reason):
+            return
         self.clear_fan_override(reason=reason, announce=announce_fan)
 
     def _replace_thermostat_override(self, *, reason: str, fsm_kind=None, clear_fan: bool = False) -> bool:
         """A NEW manual override replaces the old thermostat override -- the one place this happens.
 
         Owner principle (2026-10-31, Issue #1133): the latest manual change creates the latest override; there is
-        no returning to an earlier one. Used by the coordinator's mode-to-mode supersession (``clear_fan=True``,
-        ``fsm_kind=OVERRIDE_SUPERSEDED`` dispatched here, before the flags clear, exactly as before) and by the
-        engine's whole-house-fan press (``clear_fan=False`` -- the fan override that is being created must not be
-        cleared -- and the FSM event dispatched by the caller once it knows whether a grace starts).
+        no returning to an earlier one. Used by the coordinator's mode-to-mode supersession and by the engine's
+        whole-house-fan press. Neither clears the occupant's fan run (``clear_fan=False``; since Issue #1205 a
+        thermostat mode change is a separate request from the fan and no production caller passes True): the
+        supersession dispatches ``fsm_kind=OVERRIDE_SUPERSEDED`` here, before the flags clear, and the WHF press leaves
+        the FSM event to its caller, once it knows whether a grace starts.
 
         Cancels a pending confirmation (timer, bookkeeping), optionally dispatches ``fsm_kind``, clears the
         confirmed override flags and the deferral marker. Returns whether a confirmation was pending.
@@ -2324,7 +2474,7 @@ class AutomationEngine:
         self._deferred_while_pending = False
         return was_pending
 
-    def _clear_thermostat_override_flags(self, reason: str) -> None:
+    def _clear_thermostat_override_flags(self, reason: str, *, fan_continues: bool = False) -> None:
         """The thermostat-override half of ``_clear_manual_override_active()`` -- never touches fan state.
 
         Also what an occupant fan press uses to REPLACE an earlier thermostat change (owner principle
@@ -2346,6 +2496,8 @@ class AutomationEngine:
                         # Issue #1128: the household-promise journal needs WHY an override ended
                         # (bedtime/wake-up vs user cancel vs occupancy ...); additive key.
                         "reason": reason,
+                        # Issue #1205: the occupant's fan run goes on past this thermostat override (journal).
+                        "continues": fan_continues,
                     },
                 )
             _LOGGER.info(
@@ -2393,20 +2545,33 @@ class AutomationEngine:
         """
         had_manual = self._manual_override_active
         had_fan = self._fan_override_active
+        # Issue #1205: a cancel targets the occupant's THERMOSTAT change when one is active or pending; only the fan
+        # card's own cancel (user_cancel_fan_override) or a cancel with no thermostat change behind it targets the
+        # fan side (the fan-off pause / the fan run).
+        _thermostat_change = self._manual_change_protected()
+        _fan_side_cancel = reason == "user_cancel_fan_override" or not _thermostat_change
         # Issue #1154: an unconfirmed change is protected (#1133), so it must be cancellable too.
-        if not (self._occupant_override_active() or self._grace_active):
+        # Issue #1205: a fan-off hold with no grace running (a thermostat override's grace came and went) is still
+        # something the occupant can end.
+        if not (self._occupant_override_active() or self._grace_active or self._fan_off_hold_active()):
             return False
+        if reason == "user_cancel_fan_override" and _thermostat_change:
+            return self._cancel_fan_side_only(reason)
         self._deferred_while_pending = False  # Issue #1133 F-E: cancelled -- nothing is waiting any more
 
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         if self._override_confirm_pending:
             self._clear_override_confirm_action()
-        self._cancel_grace_intentionally(reason)
+        if _fan_side_cancel:
+            # Whatever grace is running, a cancel aimed at the fan side ends the occupant's fan-off request.
+            self._end_fan_off_hold(f"grace_cancelled:{reason}")
+        self._cancel_grace_intentionally(reason, ends_fan_off_hold=_fan_side_cancel, keeps_fan_run=not _fan_side_cancel)
 
         self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
         # announce_fan=False: the supplemental fan-only "override_cleared" below already covers it.
-        self._clear_manual_override_active(reason, announce_fan=False)
+        self._clear_manual_override_active(reason, announce_fan=False, keep_fan_override=not _fan_side_cancel)
+        had_fan = had_fan and not self._fan_override_active  # Issue #1205 F3: a kept fan run is not "cleared"
 
         # clear_manual_override() only emits "override_cleared" when a thermostat-mode override
         # was active (guarded on _manual_override_active); a fan-only override cleared here would
@@ -2416,6 +2581,36 @@ class AutomationEngine:
 
         # Force the same reconciliation a natural grace expiry always performs, instead of
         # relying on the next incidental event or the next 30-min classification cycle.
+        if self._post_grace_fan_check_callback:
+            self._post_grace_fan_check_callback()
+        if self._request_refresh_callback:
+            self._request_refresh_callback()
+        return True
+
+    def _cancel_fan_side_only(self, reason: str) -> bool:
+        """The fan card's cancel while a THERMOSTAT change is active or pending (Issue #1205).
+
+        "Fan" and "thermostat" are separate requests: this ends the occupant's fan-off hold and fan run and the grace
+        that carries them, and leaves the thermostat change (pending confirmation, confirmed override, and the grace
+        that protects it) alone. Returns whether anything was ended.
+        """
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+        trigger = self._last_grace_trigger if self._grace_active else None
+        had_hold = self._fan_off_hold_active()
+        had_run = self._fan_override_active
+        fan_grace = trigger in ("fan_off", "fan_manual_override")
+        if not (had_hold or had_run or fan_grace):
+            return False
+        self._end_fan_off_hold(f"grace_cancelled:{reason}")
+        if fan_grace:
+            self._cancel_grace_intentionally(reason, ends_fan_off_hold=True)
+            # The FSM reads the cancelled grace's trigger to tell a fan grace from the occupant's own: restore it for
+            # that one read so a pending thermostat confirmation survives (the unprotected-grace-expiry path).
+            self._last_grace_trigger = trigger
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
+            self._last_grace_trigger = None
+        self.clear_fan_override(reason=reason)
         if self._post_grace_fan_check_callback:
             self._post_grace_fan_check_callback()
         if self._request_refresh_callback:
@@ -2527,6 +2722,11 @@ class AutomationEngine:
         # Issue #1050: the occupant (or an RF remote) turned the fan on -- it demonstrably reacts, so
         # a read-back give-up no longer blocks CA's own fan activation.
         self._note_fan_readback_recovered()
+        # Issue #1205: the occupant turning a fan ON is the newest fan action and ends their earlier fan-off hold.
+        self._end_fan_off_hold("occupant_fan_on")
+        # Issue #1205: the occupant's newest action owns the fan; a deferred CA start no longer carries provenance.
+        self._discard_fan_manual_origin_pending("occupant_fan_override")
+        self._clear_fan_manual_origin("occupant_fan_override")
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
         self._fan_override_is_hvac_fan = bool(hvac_fan)
@@ -2590,7 +2790,9 @@ class AutomationEngine:
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         _trigger = "fan_manual_override"
+        self._fan_override_until = None
         if self._start_grace_period_action("manual", trigger=_trigger, duration_override=duration_override):
+            self._fan_override_until = self._parse_grace_end()
             self._resolve_override_grace_fsm_state(
                 kind=_OGFEventKind.FAN_OVERRIDE_DETECTED if _whf_press else _OGFEventKind.HVAC_FAN_OVERRIDE_DETECTED
             )
@@ -2687,77 +2889,60 @@ class AutomationEngine:
         # of starting a brand-new fan-off grace (which the orphaned-grace watchdog cannot
         # distinguish from a genuinely stuck one) and re-litigating the whole decision
         # from scratch.
-        # Issue #829: the RF-timer settle window above only protects a fan-off tied to a
-        # real remote timer selection. _fan_manual_origin_unclosed is its state-based
-        # sibling for every other case where CA handed a still-running fan's ownership to
-        # itself (default-duration override expiring while still running, or a grace-expiry
-        # reactivation) without ever seeing the physical end — see its own docstring at the
-        # attribute definition for the incident this closes.
+        # Issue #829 / #1205: CA always knows how a run should end. A selected RF timer is tracked by time and its
+        # off is recognized by the settle window above. With no timer selected CA applies a default timer
+        # (manual_grace_seconds) and at its expiry the reconcile either turns the fan off ITSELF (decision
+        # "turn-off", CA's own command, never reaches this method) or keeps it as CA's own run (adopt-on). So any
+        # fan-off CA did not command that falls outside the settle window came from a PERSON, and it starts the
+        # normal fan-off grace below. #829 removed that grace to fix a misleading LABEL; the marker
+        # (_fan_manual_origin_unclosed, bound to a run, see _arm_fan_manual_origin) now selects the label only.
         _settle_until = getattr(self, "_timer_boundary_settle_until", None)
         _settle_active = _settle_until is not None and dt_util.now() <= _settle_until
-        _manual_origin_unclosed = getattr(self, "_fan_manual_origin_unclosed", False)
-        if _settle_active or _manual_origin_unclosed:
+        # Issue #1205: the occupant is acting on the fan, so a deferred-start fact is moot either way.
+        self._discard_fan_manual_origin_pending("occupant_fan_off")
+        # Issue #1205: label provenance only. The marker counts for the run it was armed for; a stale or unmatched
+        # one is dropped and the plain fan-off wording is used. It NEVER suppresses or shortens the grace.
+        _manual_origin = self._consume_fan_manual_origin()
+        if _settle_active:
             self._timer_boundary_settle_until = None  # one-shot — consumed
-            self._fan_manual_origin_unclosed = False  # one-shot — consumed
-            if _settle_active:
-                _LOGGER.info(
-                    "Fan turned off within the RF-timer boundary settle window (fan=%s->%s) —"
-                    " treating as the same timer session ending, not a new event",
-                    fan_before or "?",
-                    fan_after or "?",
-                )
-                _carryforward_trigger = "timer_boundary_settle"
-            else:
-                _LOGGER.info(
-                    "Fan turned off (fan=%s->%s) — closing a session that traces back to an"
-                    " earlier manual fan-on/reactivation CA hadn't yet seen the physical end"
-                    " of; not starting a fresh grace (Issue #829)",
-                    fan_before or "?",
-                    fan_after or "?",
-                )
-                _carryforward_trigger = "manual_origin_carryforward"
+            _LOGGER.info(
+                "Fan turned off within the RF-timer boundary settle window (fan=%s->%s) —"
+                " treating as the same timer session ending, not a new event",
+                fan_before or "?",
+                fan_after or "?",
+            )
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_cancel",
                     {
                         "fan_before": fan_before,
                         "fan_after": fan_after,
-                        "trigger": _carryforward_trigger,
+                        "trigger": "timer_boundary_settle",
                         "fan_device": _fan_device_label(self.config),
                         "event_context_id": event_context_id,
                     },
                 )
-            # Issue #731 Phase 5: origin_state captured before this block's writes —
-            # routed through _resolve_fan_fsm_state(). Group-1 wiring, kept distinct
-            # from USER_FAN_OFF per fan_fsm.py's own docstring (this settle branch
-            # deliberately does NOT start a fresh fan-off grace and may route through
-            # _exit_nat_vent() instead of _clear_fan_flags_and_start_grace()). Issue #829:
-            # the manual-origin-carryforward case shares this same TIMER_BOUNDARY_SETTLE
-            # kind/shape — both mean "this off closes a session CA already has context
-            # for, don't start a fresh grace" — they differ only in what armed them
-            # (a short RF-timer window vs. a state-based manual-origin marker). The
-            # nat-vent-active branch's real flag change happens asynchronously inside
-            # the scheduled _exit_nat_vent() task (not captured synchronously here —
-            # this dispatch documents that the settle event itself fired); the else
-            # branch's _fan_active/_fan_on_since clear IS synchronous and is reflected
-            # in the post-state re-derivation below.
+            # Issue #731 Phase 5: origin_state captured before this block's writes, routed through
+            # _resolve_fan_fsm_state(). Kept distinct from USER_FAN_OFF: the settle branch deliberately does NOT
+            # start a fresh fan-off grace and may route through _exit_nat_vent() instead of
+            # _clear_fan_flags_and_start_grace(). The nat-vent-active branch's real flag change happens
+            # asynchronously inside the scheduled _exit_nat_vent() task; the else branch's
+            # _fan_active/_fan_on_since clear IS synchronous and is reflected in the post-state re-derivation.
             from .fan_fsm import FanFsmEventKind
 
             _settle_origin_state = self.fan_lifecycle_state
 
             if self._natural_vent_active:
-                # The post-grace reconcile adopted this fan as a nat-vent session moments
-                # ago (it was still physically on when the grace's software clock
-                # expired) — let the single choke point for ending a session decide
-                # pause-vs-restore against live sensor state, instead of starting a fresh
+                # The post-grace reconcile adopted this fan as a nat-vent session moments ago (it was still
+                # physically on when the grace's software clock expired) — let the single choke point for ending
+                # a session decide pause-vs-restore against live sensor state, instead of starting a fresh
                 # fan-off grace that only gets fought by the orphaned-grace watchdog.
-                _exit_reason_suffix = "RF timer boundary" if _settle_active else "manual origin carryforward"
                 self.hass.async_create_task(
-                    self._exit_nat_vent(reason=f"fan={fan_before or '?'}->{fan_after or '?'} ({_exit_reason_suffix})")
+                    self._exit_nat_vent(reason=f"fan={fan_before or '?'}->{fan_after or '?'} (RF timer boundary)")
                 )
             else:
-                # Reconcile didn't adopt the fan (or it was already off) — nothing further
-                # to reconcile; just make sure the flags reflect reality.
+                # Reconcile didn't adopt the fan (or it was already off) — nothing further to reconcile; just make
+                # sure the flags reflect reality.
                 self._fan_active = False
                 self._fan_on_since = None
 
@@ -2767,11 +2952,23 @@ class AutomationEngine:
             )
             return
 
-        _LOGGER.info(
-            "Fan turned off by user: fan=%s->%s, trigger=fan_off",
-            fan_before or "?",
-            fan_after or "?",
-        )
+        if _manual_origin is not None:
+            _LOGGER.info(
+                "Fan turned off by occupant — holding fan off (fan_off grace); closes session from earlier manual"
+                " fan-on: fan=%s->%s kind=%s run=%s started=%s armed_site=%s (Issue #829/#1205)",
+                fan_before or "?",
+                fan_after or "?",
+                _manual_origin["kind"],
+                _manual_origin["run"],
+                _manual_origin["started"],
+                _manual_origin["site"],
+            )
+        else:
+            _LOGGER.info(
+                "Fan turned off by occupant — holding fan off (fan_off grace): fan=%s->%s trigger=fan_off",
+                fan_before or "?",
+                fan_after or "?",
+            )
 
         # _fan_override_active must NOT be set here (it is the "user turned fan ON" flag).
         # If it is somehow already True at this point that indicates a missed transition
@@ -2794,6 +2991,7 @@ class AutomationEngine:
                 fan_after or "?",
             )
             self._fan_override_active = False
+            self._fan_override_until = None
             self._fan_override_time = None
             self._whf_press_time = None
             self._fan_remote_timer_hours = None
@@ -2805,17 +3003,21 @@ class AutomationEngine:
             )
 
         if self._emit_event_callback:
-            self._emit_event_callback(
-                "fan_cancel",
-                {
-                    "fan_before": fan_before,
-                    "fan_after": fan_after,
-                    "trigger": "fan_off",
-                    "fan_device": _fan_device_label(self.config),
-                    "event_context_id": event_context_id,
-                },
-            )
+            _cancel_payload: dict[str, Any] = {
+                "fan_before": fan_before,
+                "fan_after": fan_after,
+                # Issue #1205: the trigger/label is the ONLY thing the manual-origin marker changes.
+                "trigger": "manual_origin_carryforward" if _manual_origin is not None else "fan_off",
+                "fan_device": _fan_device_label(self.config),
+                "event_context_id": event_context_id,
+            }
+            if _manual_origin is not None:
+                _cancel_payload["manual_origin_kind"] = _manual_origin["kind"]
+                _cancel_payload["manual_origin_started"] = _manual_origin["started"]
+            self._emit_event_callback("fan_cancel", _cancel_payload)
 
+        # Issue #1205: the SAME path for the plain and the marker-matched occupant off -- the fan-off grace (hold)
+        # always starts, ends the nat-vent session (preserve_nat_vent_session=False), clears _fan_active/_fan_on_since.
         self._clear_fan_flags_and_start_grace(
             reason=f"fan={fan_before or '?'}->{fan_after or '?'}",
             trigger_label="fan_off",
@@ -2908,6 +3110,203 @@ class AutomationEngine:
             origin_state=_clear_origin_state,
         )
 
+    def _arm_fan_manual_origin(
+        self, site: str, reason: str, *, kind: str = "takeover", started: str | None = None
+    ) -> bool:
+        """Arm the manual-origin marker (Issue #829) for the run that is live right now (Issue #1205).
+
+        Issue #1205 (owner decision 2026-11-01): the marker is LABEL-ONLY. It selects the Activity Record wording
+        of the occupant's later off and never decides whether the fan-off grace starts. ``kind`` is "takeover"
+        (CA took over a running fan after an earlier manual fan-on) or "restart" (CA restarted the fan after its
+        grace ended); ``started`` is the start time shown in the label (defaults to the run's stamp).
+
+        The single writer of ``_fan_manual_origin_unclosed``/``_fan_manual_origin_run``: the marker is bound to
+        ``_fan_on_since``, the stamp of the run being handed to CA, so it cannot outlive that run. Without a run
+        identity nothing is armed (the occupant's later off then gets the normal fan-off grace). Idempotent for the
+        same run.
+        """
+        run = self._fan_on_since
+        if run is None:
+            if self._fan_manual_origin_unclosed:
+                self._fan_manual_origin_unclosed = False
+                self._fan_manual_origin_run = None
+                self._fan_manual_origin_kind = None
+                self._fan_manual_origin_started = None
+                self._fan_manual_origin_site = None
+            _LOGGER.info(
+                "Fan manual-origin marker not armed, no live run to bind it to: site=%s reason=%s fan_active=%s",
+                site,
+                reason,
+                self._fan_active,
+            )
+            return False
+        if self._fan_manual_origin_unclosed and self._fan_manual_origin_run == run:
+            # Issue #1205: the newest arm for this run owns the label. Keeping the first kind/site made a later
+            # clear_fan_override() re-arm (a "restart") read as the earlier "takeover".
+            if (self._fan_manual_origin_kind, self._fan_manual_origin_site) == (kind, site):
+                _LOGGER.debug("Fan manual-origin marker already armed: site=%s reason=%s run=%s", site, reason, run)
+            else:
+                _LOGGER.info(
+                    "Fan manual-origin marker re-armed for the same run (label only): site=%s->%s kind=%s->%s "
+                    "reason=%s run=%s (Issue #1205)",
+                    self._fan_manual_origin_site,
+                    site,
+                    self._fan_manual_origin_kind,
+                    kind,
+                    reason,
+                    run,
+                )
+                self._fan_manual_origin_kind = kind
+                self._fan_manual_origin_site = site
+                if started is not None:
+                    self._fan_manual_origin_started = started
+            return True
+        self._fan_manual_origin_unclosed = True
+        self._fan_manual_origin_run = run
+        self._fan_manual_origin_kind = kind
+        self._fan_manual_origin_started = started or run
+        self._fan_manual_origin_site = site
+        _LOGGER.info(
+            "Fan manual-origin marker armed (label only): site=%s reason=%s kind=%s run=%s (Issue #829/#1205)",
+            site,
+            reason,
+            kind,
+            run,
+        )
+        return True
+
+    def _clear_fan_manual_origin(self, reason: str) -> None:
+        """Drop an armed marker because the occupant now owns the fan (Issue #1205, label only).
+
+        Mirror of ``_discard_fan_manual_origin_pending()``: that drops the not-yet-armed fact, this drops the
+        armed, run-bound marker. Without it, a person who turns the fan on again (or selects a remote timer) on a
+        run CA restarted, and later switches it off, was told "restarted after your grace ended" about a run that
+        is theirs now. The off still starts the normal fan-off grace either way; only the wording is at stake.
+        """
+        if not self._fan_manual_origin_unclosed:
+            return
+        _LOGGER.info(
+            "Fan manual-origin marker cleared: reason=%s kind=%s site=%s run=%s (Issue #1205)",
+            reason,
+            self._fan_manual_origin_kind,
+            self._fan_manual_origin_site,
+            self._fan_manual_origin_run,
+        )
+        self._fan_manual_origin_unclosed = False
+        self._fan_manual_origin_run = None
+        self._fan_manual_origin_kind = None
+        self._fan_manual_origin_started = None
+        self._fan_manual_origin_site = None
+
+    def _consume_fan_manual_origin(self) -> dict[str, str | None] | None:
+        """One-shot consume at the fan-off (Issue #829); the label provenance when the marker belongs to the run
+        going off now, else None.
+
+        Issue #1205: LABEL-ONLY. The marker is dropped either way and the caller starts the fan-off grace either
+        way. A marker armed for another run, or with no identity, is stale: the caller uses the plain wording.
+        """
+        if not self._fan_manual_origin_unclosed:
+            return None
+        armed_run = self._fan_manual_origin_run
+        current_run = self._fan_on_since
+        kind = self._fan_manual_origin_kind or "takeover"
+        started = self._fan_manual_origin_started or armed_run
+        site = self._fan_manual_origin_site
+        self._fan_manual_origin_unclosed = False  # one-shot — consumed
+        self._fan_manual_origin_run = None
+        self._fan_manual_origin_kind = None
+        self._fan_manual_origin_started = None
+        self._fan_manual_origin_site = None
+        if armed_run is not None and armed_run == current_run:
+            _LOGGER.info(
+                "Fan manual-origin marker consumed, run matched (label only): armed_run=%s current_run=%s",
+                armed_run,
+                current_run,
+            )
+            return {"kind": kind, "run": armed_run, "started": started, "site": site}
+        _LOGGER.info(
+            "Fan manual-origin marker discarded as stale (plain label): reason=%s armed_run=%s current_run=%s"
+            " (Issue #1205)",
+            "no_run_identity" if armed_run is None else "different_run",
+            armed_run,
+            current_run,
+        )
+        return None
+
+    def _raise_fan_manual_origin_pending(self, site: str, reason: str) -> None:
+        """Record that a grace-expiry reactivation was deferred by the toggle floor (Issue #1205).
+
+        Not a marker: no run exists yet, and the deferral may be abandoned. Bound to the recorded deferral and
+        to the start count; ``_resolve_fan_manual_origin_pending_on_start()`` promotes it when the start applies.
+        """
+        applies_at = self._fan_rate_limited_until
+        if not isinstance(applies_at, datetime):
+            return
+        if self._fan_manual_origin_pending is not None and self._fan_manual_origin_pending[0] == applies_at:
+            _LOGGER.debug(
+                "Fan manual-origin pending already raised: site=%s reason=%s applies_at=%s", site, reason, applies_at
+            )
+            return
+        self._fan_manual_origin_pending = (applies_at, self._fan_start_seq)
+        _LOGGER.info(
+            "Fan manual-origin pending raised, not armed until the deferred start applies: site=%s reason=%s "
+            "applies_at=%s start_seq=%s (Issue #1205)",
+            site,
+            reason,
+            applies_at.strftime("%H:%M:%S"),
+            self._fan_start_seq,
+        )
+
+    def _discard_fan_manual_origin_pending(self, reason: str) -> None:
+        """Drop the pending fact and the abandoned deferral record it was raised for (Issue #1205)."""
+        pending = self._fan_manual_origin_pending
+        if pending is None:
+            return
+        self._fan_manual_origin_pending = None
+        # The deferral record this pending was raised for is abandoned with it: left behind, a later unrelated
+        # start would log "applying deferred activation" and the status card could show an activation pending.
+        _record_cleared = self._fan_rate_limited_direction == "activate" and self._fan_rate_limited_until == pending[0]
+        if _record_cleared:
+            self._fan_rate_limited_until = None
+            self._fan_rate_limited_direction = None
+        _LOGGER.info(
+            "Fan manual-origin pending discarded: reason=%s applies_at=%s deferral_record_cleared=%s (Issue #1205)",
+            reason,
+            pending[0].strftime("%H:%M:%S"),
+            _record_cleared,
+        )
+
+    def _resolve_fan_manual_origin_pending_on_start(
+        self, *, deferral_applied_at: datetime | None, seq_before: int
+    ) -> None:
+        """Resolve the pending fact when a fan start has just landed (Issue #1205).
+
+        Called by ``_activate_fan()`` on a successful start, right after the run is stamped and before any caller
+        can change ``_paused_by_door`` -- so promotion does not depend on which caller's retry it was (the
+        paused-reactivation helper, the idle-open re-evaluation, ...). The pending fact is promoted to the
+        run-bound marker only when this start applied the very deferral it was raised for (``deferral_applied_at``
+        equals the pending's ``applies_at``) and no other start happened since (``seq_before`` equals the count
+        recorded with it). Any other start makes it stale. A refused or still-rate-limited attempt never gets
+        here and leaves the pending untouched: it ends with the pause, the occupant's fan action, or the next
+        start, and cannot be promoted by anything but its own deferral.
+        """
+        pending = self._fan_manual_origin_pending
+        if pending is None:
+            return
+        if deferral_applied_at is None or deferral_applied_at != pending[0]:
+            self._discard_fan_manual_origin_pending("start_not_the_deferred_one")
+            return
+        if pending[1] != seq_before:
+            self._discard_fan_manual_origin_pending("other_start_since_raised")
+            return
+        self._fan_manual_origin_pending = None
+        _LOGGER.info(
+            "Fan manual-origin pending promoted, deferred start applied: applies_at=%s run=%s (Issue #1205)",
+            pending[0].strftime("%H:%M:%S"),
+            self._fan_on_since,
+        )
+        self._arm_fan_manual_origin("deferred_reactivation_applied", "grace_expiry_reactivation_retry", kind="restart")
+
     def clear_fan_override(self, reason: str = "unspecified", *, announce: bool = True) -> None:
         """Clear the fan override flag (called at transition points, Issue #327).
 
@@ -2936,23 +3335,24 @@ class AutomationEngine:
                 reason,
                 self._fan_override_time,
             )
-            # Issue #829: this override's grace expired while the fan is still physically
-            # running (fan_active True — otherwise on_fan_turned_off() already handled the
-            # off and cleared this override itself) and it was never tied to a real RF
-            # remote timer (_fan_remote_timer_hours is None) — a default-duration manual
-            # override falls back to the configured manual_grace_seconds with no numeric
-            # timer to anchor the existing settle window to. Mark that this still-running
-            # session's provenance traces back to a manual fan-on, so whenever it actually
-            # turns off later — confirmed live to be anywhere from minutes to hours from
-            # here, not the settle window's few-seconds assumption — on_fan_turned_off()
-            # recognizes it as this session ending rather than a fresh unexplained override.
+            # Issue #829: this override's grace expired while the fan is still physically running (fan_active True --
+            # otherwise on_fan_turned_off() already handled the off and cleared this override itself) and it was never
+            # tied to a real RF remote timer (_fan_remote_timer_hours is None): a default-duration manual override
+            # falls back to the configured manual_grace_seconds. Mark that this still-running session traces back to
+            # a manual fan-on so the occupant's later off is LABELED as closing that session. Issue #1205: label
+            # only -- that later off always starts the normal fan-off grace.
+            # Issue #1205: bound to the running run's _fan_on_since (stamped when CA started or adopted it, so
+            # present whenever _fan_active is True here; an occupant-started run never sets _fan_active and never
+            # reaches this arm). CA's own stop of this run never reaches the consume, so only that run's off counts.
             if self._fan_active and self._fan_remote_timer_hours is None:
-                self._fan_manual_origin_unclosed = True
-                _LOGGER.debug(
-                    "Fan override cleared while still physically running with no RF timer to"
-                    " anchor a settle window — marking manual origin unclosed (Issue #829)"
+                self._arm_fan_manual_origin(
+                    "clear_fan_override",
+                    f"override_expired_while_running reason={reason}",
+                    kind="takeover",
+                    started=self._fan_override_time,
                 )
             self._fan_override_active = False
+            self._fan_override_until = None
             self._fan_override_time = None
             self._whf_press_time = None
             self._fan_remote_timer_hours = None
@@ -3084,14 +3484,59 @@ class AutomationEngine:
             self._fan_min_cycle_cancel = async_call_later(self.hass, WHF_SEALED_CYCLE_RETRY_S, _sealed_retry)
             return
 
-        if outcome is FanCycleOutcome.ACTIVATE_ALWAYS_ON:
-            await self._activate_fan(reason="min_runtime_cycle")
-            self._fan_min_runtime_active = True
+        # Issue #1205: the occupant's fan-off hold also holds off the min-runtime cycle (it restarts when the person
+        # switches the fan off, and used to switch the fan back on inside the hold). Same shape as the sealed-house
+        # deferral above: nothing is started and no "cycle running" flag is set; the cycle retries when the hold ends,
+        # so the hour's minimum runtime is not lost.
+        if outcome in (FanCycleOutcome.ACTIVATE_ALWAYS_ON, FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER) and (
+            self._fan_off_hold_active()
+        ):
+            # The retry is keyed on the hold's OWN deadline (it outlives the fan-off grace when a thermostat override
+            # replaced it), not on whichever grace is running.
+            _retry_s = WHF_SEALED_CYCLE_RETRY_S
+            try:
+                _hold_end = self._fan_off_hold_until
+                if _hold_end is not None:
+                    _retry_s = max(30.0, (_hold_end - dt_util.now()).total_seconds() + 5.0)
+            except TypeError, ValueError, AttributeError:
+                _retry_s = WHF_SEALED_CYCLE_RETRY_S
+            _LOGGER.info(
+                "Min-runtime cycle deferred: occupant's fan-off hold active (retry in %ds) role=%s",
+                round(_retry_s),
+                self.role,
+            )
+
+            @callback
+            def _hold_retry(_now: Any) -> None:
+                self._fan_min_cycle_cancel = None
+                self._spawn_whf_task(self._fan_cycle_on())
+
+            self._fan_min_cycle_cancel = async_call_later(self.hass, _retry_s, _hold_retry)
             return
 
-        if outcome is FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER:
-            await self._activate_fan(reason="min_runtime_cycle")
+        if outcome in (FanCycleOutcome.ACTIVATE_ALWAYS_ON, FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER):
+            _start = await self._activate_fan(reason="min_runtime_cycle")
+            if _start in _FAN_START_NOT_APPLIED_RESULTS:
+                # Issue #1205 (C-b): the start was refused (a hold, an override, no working fan), so the cycle is NOT
+                # running: the "cycle running" flag stays False and no off phase is scheduled for a fan that never
+                # started. Retry the start next hour, which is also the cycle's own cadence.
+                _LOGGER.info(
+                    "Min-runtime cycle start not applied: result=%s (retry in %ds) role=%s",
+                    _start.value,
+                    _MIN_RUNTIME_REFUSED_RETRY_S,
+                    self.role,
+                )
+
+                @callback
+                def _refused_retry(_now: Any) -> None:
+                    self._fan_min_cycle_cancel = None
+                    self._spawn_whf_task(self._fan_cycle_on())
+
+                self._fan_min_cycle_cancel = async_call_later(self.hass, _MIN_RUNTIME_REFUSED_RETRY_S, _refused_retry)
+                return
             self._fan_min_runtime_active = True
+            if outcome is FanCycleOutcome.ACTIVATE_ALWAYS_ON:
+                return
 
             @callback
             def _turn_off(_now: Any) -> None:
@@ -6118,7 +6563,8 @@ class AutomationEngine:
 
             # Issue #1201: a fan_off grace keeps the fan OFF (Issue #1006) but not HVAC running -- the pause
             # proceeds and the nat-vent start below is refused for as long as that grace runs.
-            _fan_off_hold = self._grace_is_fan_off_grace()
+            _fan_off_grace_running = self._grace_is_fan_off_grace()  # which grace timer runs (log label only)
+            _fan_off_hold = self._fan_off_hold_active()  # the occupant's off still in force (Issue #1205)
             if self._grace_active and self._grace_protects_no_hvac_on_change():
                 # Issue #1172: the occupant's blower press turns no HVAC on, so its grace is no reason to
                 # hold off the pause (owner rule 3, after the sensor debounce). The blower keeps running (#1180).
@@ -6127,7 +6573,7 @@ class AutomationEngine:
                     "Door/window open (%s): %s grace does not hold off the pause — "
                     "HVAC stays off while a window is open (trigger=%s)",
                     entity_id,
-                    "fan-off" if _fan_off_hold else "blower override",
+                    "fan-off" if _fan_off_grace_running else "blower override",
                     self._last_grace_trigger,
                 )
             elif self._grace_active:
@@ -6259,9 +6705,10 @@ class AutomationEngine:
                 # Issue #1201 / #1006: the occupant just stopped the fan -- leave it stopped. The grace passes
                 # grace_active=False to the FSM above, so refuse the start here explicitly.
                 _LOGGER.info(
-                    "Nat vent not started (%s): fan_off grace active — fan stays off (Issue #1006), "
+                    "Nat vent not started (%s): fan-off hold active (until %s) — fan stays off (Issue #1006), "
                     "pausing HVAC for the open window instead",
                     entity_id,
+                    self._fan_off_hold_until.strftime("%H:%M") if self._fan_off_hold_until else "?",
                 )
                 _nat_vent_gate_entered = False
                 _start_veto = None
@@ -6605,6 +7052,7 @@ class AutomationEngine:
                 # Comfort-ceiling override (Issue #134): if grace is active and indoor has
                 # risen above comfort_cool, allow re-evaluation so nat-vent can engage.
                 # Grace still blocks rapid door-open/close cycling below the comfort ceiling.
+                # Issue #1205: that override is for CA's OWN graces only -- never the occupant's fan-off hold.
                 _indoor = self._get_indoor_temp_f()
                 _cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
                 # Issue #244: a contact sensor open while HVAC is idle (door opened with
@@ -6680,7 +7128,17 @@ class AutomationEngine:
                     and not self._grace_active
                     and not _locked_out_244
                 )
-                if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
+                # Issue #1205: the #134 overheat bypass is for CA's own graces; the occupant's fan-off hold wins.
+                # ONE predicate (nat_vent_fsm.overheat_bypasses_grace) shared with the FSM's grace short-circuit.
+                _hot_bypass = _overheat_bypasses_grace(
+                    grace_active=self._grace_active,
+                    fan_off_hold_active=self._fan_off_hold_active(),
+                    indoor=_indoor,
+                    comfort_cool=_cool,
+                )
+                if self._fan_off_hold_active():
+                    self._log_fan_off_hold_beats_ceiling_bypass(indoor=_indoor, comfort_cool=_cool)
+                if not (_hot_bypass or _idle_open):
                     # Issue #1095: this was a silent return. Name every blocker that is true so
                     # the occupant/developer can see WHY nat-vent was not evaluated (e.g. a
                     # fan-off grace period holding it back) instead of inferring it.
@@ -6815,9 +7273,9 @@ class AutomationEngine:
                     # Issue #706 (Bug F): routed through
                     # _apply_nat_vent_fsm_state_after_activation() — an override
                     # arriving during the await above must not be silently overwritten.
-                    _pre_paused_by_door = self._paused_by_door
-                    self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
-                    self._paused_by_door = _pre_paused_by_door
+                    # Issue #1205: a same-handler restore is not the pause ending.
+                    with self._holding_door_pause():
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                     # Issue #1140: no working fan -> no session and nothing to report. (Deferred and
                     # overridden commands keep their pre-#1140 reporting; see handle_door_window_open().)
                     if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS:
@@ -6853,9 +7311,9 @@ class AutomationEngine:
                     # comment on the ACTIVE_FULL_GATE branch above for the rationale.
                     # Issue #706 (Bug F): same override-race guard as the
                     # ACTIVE_FULL_GATE branch above.
-                    _pre_paused_by_door = self._paused_by_door
-                    self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
-                    self._paused_by_door = _pre_paused_by_door
+                    # Issue #1205: a same-handler restore is not the pause ending.
+                    with self._holding_door_pause():
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                     if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS:
                         await self._apply_nat_vent_hvac_state()
                         if self._emit_event_callback:
@@ -8722,6 +9180,8 @@ class AutomationEngine:
             # also sets _natural_vent_active, which _apply_fan_fsm_state() does not own).
             # Stays a direct write.
             _already_adopted = self._natural_vent_active
+            if not self._fan_active:
+                self._fan_start_seq += 1  # Issue #1205: a fan start for the pending-fact bookkeeping
             self._fan_active = True
             if self._fan_on_since is None:
                 self._fan_on_since = dt_util.now().isoformat()
@@ -8729,14 +9189,16 @@ class AutomationEngine:
             # Issue #829: this is the same "CA reactivates on its own initiative right
             # after a grace expiry" pattern _re_pause_for_open_sensor() has, reached via
             # the live post_grace_expiry reconcile trigger instead. Mark provenance so a
-            # later real off is recognized as closing this session rather than starting a
-            # fresh one. Scoped to post_grace_expiry only — ha_restart already has its own
+            # later real off is LABELED as closing this session (Issue #1205: label only, that off always
+            # starts the fan-off grace). Scoped to post_grace_expiry only — ha_restart already has its own
             # narrower RF-timer-provenance handling (Issue #677) above, and
             # backstop_30min/thermostat_state_change adopting an already-running fan is a
             # different situation (routine reconciliation, not a grace-expiry handoff) not
             # covered by this incident.
+            # Issue #1205: bound to this run's _fan_on_since (kept if an earlier owner stamped it, else stamped just
+            # above), so CA stopping the adopted session itself cannot leave a marker for the next run.
             if trigger == "post_grace_expiry":
-                self._fan_manual_origin_unclosed = True
+                self._arm_fan_manual_origin("reconcile_adopt", "post_grace_expiry", kind="takeover")
             # Issue #821: a fresh session activating — reset the exit sustain-confirmation
             # state (stale candidate/timing from a prior session must never leak into a
             # new one) and arm the family-switch lockout's dwell clock.
@@ -8882,6 +9344,8 @@ class AutomationEngine:
             # system that never actually ran natural ventilation in that window
             # (Issue #893/#984).
             decision = "adopt-circulation"
+            if not self._fan_active:
+                self._fan_start_seq += 1  # Issue #1205: a fan start for the pending-fact bookkeeping
             self._fan_active = True
             if self._fan_on_since is None:
                 self._fan_on_since = dt_util.now().isoformat()
@@ -9094,6 +9558,21 @@ class AutomationEngine:
         self._last_grace_trigger = trigger
         self._grace_duration_seconds = duration
         self._grace_end_time = grace.at.isoformat()
+        if trigger == "fan_off":
+            # Issue #1205: the occupant's off starts the hold with its own deadline (also the restart re-arm, which
+            # comes through here). A newer fan-off simply restarts it.
+            self._fan_off_hold_until = grace.at
+            self._last_fan_off_hold_refusal = None
+        elif self._fan_off_hold_active():
+            # The grace timer that carried the hold has been replaced (e.g. by the thermostat override's own
+            # grace); the hold is a separate request and runs to its own deadline.
+            _LOGGER.info(
+                "Fan-off hold continues past %s grace: hold_until=%s override_mode=%s override_active=%s",
+                trigger or "unlabelled",
+                self._fan_off_hold_until.isoformat() if self._fan_off_hold_until else None,
+                self._manual_override_mode or self._override_confirm_mode,
+                self._manual_override_active,
+            )
 
         @callback
         def _grace_expired(_now: Any) -> None:
@@ -9189,13 +9668,20 @@ class AutomationEngine:
         Extracted from the inner callback in ``_start_grace_period`` so it can
         also be invoked from ``_reschedule_grace_timer`` after an HA restart.
         """
+        if self._last_grace_trigger == "fan_off":
+            self._end_fan_off_hold("expired")  # the fan-off grace ran its course: the hold ends with it
+        _expiring_trigger = self._last_grace_trigger
         # Issue #530: snapshot whether this grace was tied to an RF-remote timer BEFORE
         # clear_manual_override() (called in every branch below) wipes
         # _fan_remote_timer_hours. If so, arm a short settle window: a fan-off report
         # arriving shortly after is the tail of this SAME timer boundary — the timer's
         # own hardware side completing a few seconds after CA's software clock — not a
         # fresh, independent event. See on_fan_turned_off().
-        if source == "manual" and getattr(self, "_fan_remote_timer_hours", None) is not None:
+        if (
+            source == "manual"
+            and getattr(self, "_fan_remote_timer_hours", None) is not None
+            and _expiring_trigger == "fan_manual_override"  # Issue #1205 F3: a thermostat grace is not the timer's end
+        ):
             self._timer_boundary_settle_until = dt_util.now() + timedelta(seconds=TIMER_BOUNDARY_SETTLE_SECONDS)
             _LOGGER.debug(
                 "RF-timer-linked grace expiring — arming %ss timer-boundary settle window",
@@ -9282,7 +9768,9 @@ class AutomationEngine:
                 kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
                 origin_state=_origin_state,
             )
-            self._clear_manual_override_active("grace_expired")
+            self._clear_manual_override_active(
+                "grace_expired", keep_fan_override=_expiring_trigger != "fan_manual_override"
+            )
             if self._request_refresh_callback:
                 self._request_refresh_callback()
             if self._post_grace_fan_check_callback:
@@ -9323,7 +9811,10 @@ class AutomationEngine:
             kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
             origin_state=_origin_state,
         )
-        self._clear_manual_override_active("adopted_matching_decision" if _adopted else "grace_expired")
+        self._clear_manual_override_active(
+            "adopted_matching_decision" if _adopted else "grace_expired",
+            keep_fan_override=_expiring_trigger != "fan_manual_override",
+        )
         if self._request_refresh_callback:
             self._request_refresh_callback()
         if self._post_grace_fan_check_callback:
@@ -9425,6 +9916,8 @@ class AutomationEngine:
         *,
         cancel_timers: bool = True,
         remote_timer_hours: float | None = None,
+        ends_fan_off_hold: bool = False,
+        keeps_fan_run: bool = False,
     ) -> None:
         """Cancel (or announce the replacement of) an active grace and make it visible (Issue #1029).
 
@@ -9445,6 +9938,16 @@ class AutomationEngine:
         grace_source = self._last_resume_source
         end_iso = self._grace_end_time
         protects_override = self._grace_protects_override
+        if trigger == "fan_off" and cancel_timers and ends_fan_off_hold:
+            # Issue #1205: only a cancel that targets the FAN-OFF request ends the hold (dashboard cancel of the
+            # fan-off pause, a WHF safety stop). Ending a thermostat override -- adopted, cancelled, replaced -- or a
+            # superseding grace never does.
+            self._end_fan_off_hold(f"grace_cancelled:{reason}")
+        # Issue #1205: does the request behind this grace go on past it? (journal: the episode stays open)
+        _continues = bool(
+            (trigger == "fan_off" and self._fan_off_hold_until is not None)
+            or ((reason == "superseded" or keeps_fan_run) and self._fan_override_deadline_active())
+        )
         # Caller-supplied value wins: bedtime/wake-up clear the fan override (and its
         # RF-timer hours) before this runs, so they pass the pre-clear snapshot in.
         if remote_timer_hours is None:
@@ -9484,6 +9987,7 @@ class AutomationEngine:
                     "grace_source": grace_source,
                     "remaining_minutes": remaining_minutes,
                     "protects_override": protects_override,
+                    "continues": _continues,
                     "remote_timer_hours": remote_timer_hours,
                     "grace_end_time": end_iso,
                 },
@@ -9610,24 +10114,40 @@ class AutomationEngine:
                         FanCommandResult.RATE_LIMITED_DUP,
                     )
                     if _activation_rate_limited and _activation_deferred:
-                        # Issue #1196: armed only when a deferred activation is really recorded
+                        # Issue #1196: raised only when a deferred activation is really recorded
                         # (_fan_rate_limited_until, direction "activate"); a refusal that is not a pending
-                        # CA run must leave no marker, or the occupant's later blower-off is misread (#829).
-                        # Issue #829 provenance: a rate-limited command is CA's own deferred
-                        # grace-expiry reactivation (it WILL run when the 5-minute floor ends, via a
-                        # later _activate_fan() call that does not pass through this site), so arm the
-                        # marker now exactly as before -- otherwise that eventual run's real off would be
-                        # misread as a fresh manual override (the #829 loop). OVERRIDDEN means the
-                        # occupant owns the fan right now: nothing of CA's is pending, nothing to mark.
-                        self._fan_manual_origin_unclosed = True
+                        # CA run must leave no pending fact, or the occupant's later blower-off is misread (#829).
+                        # Issue #829 provenance: a rate-limited command is CA's own deferred grace-expiry
+                        # reactivation, and its eventual run's real off must not be misread as a fresh manual
+                        # override (the #829 loop). Issue #1205: but nothing runs yet, and nothing guarantees it
+                        # will -- the next cycle retries only while the pause lasts, and the window may close
+                        # first -- so no marker is armed here. The pending fact is promoted to the run-bound marker
+                        # by _activate_fan() when the deferred start applies, and
+                        # discarded when the pause ends or anything else starts the fan. OVERRIDDEN means the
+                        # occupant owns the fan right now: nothing of CA's is pending, nothing to record.
+                        self._raise_fan_manual_origin_pending("re_pause_for_open_sensor", "reactivation_rate_limited")
             if _reactivates:
                 # Issue #829: this fan run is CA reactivating on its own initiative right
                 # after a grace expiry, with the monitored sensor still open — not a fresh
                 # user action. Mark provenance so that whenever this run eventually turns
                 # off (confirmed live to be up to ~90 minutes later, not seconds),
-                # on_fan_turned_off() treats it as closing an already-known session instead
-                # of starting a brand-new fresh grace, the loop this issue reported.
-                self._fan_manual_origin_unclosed = True
+                # on_fan_turned_off() LABELS it as closing an already-known session instead of
+                # "another manual override" (the #829 label complaint). Issue #1205: label only -- that
+                # off is a person and always starts the normal fan-off grace.
+                # Issue #1205: bound to this run's _fan_on_since. If CA stops the run itself (window closes,
+                # safety or mutex stop) the off never reaches on_fan_turned_off(), and the marker then matches no
+                # later run.
+                # Issue #1205: a re-arm for the same run now overwrites the kind. A fan that was already running
+                # (ALREADY_IN_STATE) and is already marked (the post-grace reconcile adopted the person's run a moment
+                # ago: "takeover") was not restarted by CA, so it must not be relabelled "restart". An unmarked run
+                # (another CA path started it first) still gets the restart label.
+                # A marker left by an EARLIER run does not count (it matches no live run): only one bound to this
+                # run means the person's run was adopted, so a stale one must not suppress the "restart" label.
+                _marker_is_this_run = (
+                    self._fan_manual_origin_unclosed and self._fan_manual_origin_run == self._fan_on_since
+                )
+                if _activation_result is not FanCommandResult.ALREADY_IN_STATE or not _marker_is_this_run:
+                    self._arm_fan_manual_origin("re_pause_for_open_sensor", "reactivation_applied", kind="restart")
                 # Issue #821: same fresh-session reset as the other activation site.
                 self._nat_vent_exit_candidate_reason = None
                 self._nat_vent_exit_candidate_since = None
@@ -10873,7 +11393,7 @@ class AutomationEngine:
         ):
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-            self._cancel_grace_intentionally(reason)
+            self._cancel_grace_intentionally(reason, ends_fan_off_hold=True)
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
         if (
             self._fan_override_active
@@ -11452,6 +11972,9 @@ class AutomationEngine:
             fan_hardware_active=_fan_hardware_active,
             override_active=_override_active,
             grace_active=_grace_active,
+            # Issue #1205: the #134 overheat exception never overrides the occupant's fan-off hold. Read live from
+            # the engine (not from the grace_active override above, which a caller may force False).
+            fan_off_hold_active=self._fan_off_hold_active(),
             manual_override_active=bool(self._manual_override_active),
             manual_override_mode=self._manual_override_mode,
             start_veto=self._build_nat_vent_start_veto_inputs(now=now, indoor=indoor, outdoor=outdoor)
@@ -11632,8 +12155,8 @@ class AutomationEngine:
         -- keeps the pause. Returns ``(applied, result)``; callers clear the pause only if ``applied``.
         """
         result = await self._activate_fan(reason=reason)
-        self._apply_nat_vent_fsm_state_after_activation(to_state, result, keep_door_pause=True)
         applied = self._nat_vent_activation_applied(result)
+        self._apply_nat_vent_fsm_state_after_activation(to_state, result, keep_door_pause=True)
         if not applied:
             self._keep_pause_after_refused_reactivation(result, outdoor, indoor)
         return applied, result
@@ -12034,8 +12557,50 @@ class AutomationEngine:
         return bool(self._grace_protects_override) and self._last_grace_trigger != "fan_manual_override"
 
     def _grace_is_fan_off_grace(self) -> bool:
-        """Whether the running grace is the occupant stopping a fan (``fan_off``, Issues #1006/#359)."""
+        """Whether the running grace TIMER is the occupant stopping a fan (``fan_off``, Issues #1006/#359).
+
+        Answers "which grace is running" only (grace-protection and log-label questions). It is NOT the question
+        "is the occupant's off still in force?": a thermostat override replaces the grace timer but not that
+        request. Every hold check uses ``_fan_off_hold_active()`` (Issue #1205).
+        """
         return bool(self._grace_active and self._last_grace_trigger == "fan_off")
+
+    def _fan_off_hold_active(self) -> bool:
+        """Whether the occupant's fan-off hold is still in force (Issue #1205, owner decision 2026-11-01).
+
+        "Fan off" and "thermostat X" are separate occupant requests, so the hold has its OWN deadline
+        (``_fan_off_hold_until``: the fan-off grace's end time when it started) and survives a later thermostat
+        override replacing the grace. Ends at its deadline (checked here, so the lapse is logged by whichever check
+        first sees it), when the occupant turns a fan on, or when the fan-off grace is cancelled (see
+        ``_end_fan_off_hold()``). While it is in force Climate Advisor never starts a fan, by any path.
+        """
+        until = self._fan_off_hold_until
+        if until is None:
+            return False
+        if dt_util.now() < until:
+            return True
+        self._end_fan_off_hold("expired")
+        return False
+
+    def _end_fan_off_hold(self, reason: str) -> None:
+        """End the occupant's fan-off hold (no-op when none is running) and say why (Issue #1205)."""
+        until = self._fan_off_hold_until
+        if until is None:
+            return
+        self._fan_off_hold_until = None
+        _LOGGER.info("Fan-off hold ended: reason=%s hold_until=%s role=%s", reason, until.isoformat(), self.role)
+        # Issue #1205: an occupant's cancel that ends the hold while NO fan-off grace is running (a thermostat
+        # override's grace replaced it) has no grace_cancelled event to tell the journal, so say so here. When the
+        # fan-off grace IS running, its own grace_cancelled follows and closes the episode (no double row).
+        if (
+            reason.startswith("grace_cancelled:")
+            and not self._grace_is_fan_off_grace()
+            and self._emit_event_callback is not None
+        ):
+            self._emit_event_callback(
+                "fan_off_hold_ended",
+                {"reason": reason.split(":", 1)[1], "source": "manual", "hold_until": until.isoformat()},
+            )
 
     def _grace_protects_no_hvac_on_change(self) -> bool:
         """Whether the running grace protects NO heating/cooling change of the occupant (Issues #1172, #1201).
@@ -12422,8 +12987,13 @@ class AutomationEngine:
         reasons: list[str] = []
         if self._fan_override_active or self._manual_override_active:
             reasons.append("override_active")
-        if self._grace_active and not (indoor is not None and indoor > comfort_cool):
+        _fan_off_hold = self._fan_off_hold_active()
+        if self._grace_active and not _overheat_bypasses_grace(
+            grace_active=True, fan_off_hold_active=_fan_off_hold, indoor=indoor, comfort_cool=comfort_cool
+        ):
             reasons.append("grace_active")
+        if _fan_off_hold:
+            self._log_fan_off_hold_beats_ceiling_bypass(indoor=indoor, comfort_cool=comfort_cool)
         if to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT:
             reasons.append("reactivation_lockout")
         if veto is not None:
@@ -12445,6 +13015,33 @@ class AutomationEngine:
             )
         values.update(indoor=indoor, outdoor=outdoor, comfort_floor=comfort_heat, threshold=threshold)
         self._log_nat_vent_eval("not engaged", reasons or ["fsm_declined"], **values)
+
+    def _log_fan_off_hold_beats_ceiling_bypass(self, *, indoor: float | None, comfort_cool: float) -> None:
+        """INFO, once per fan-off hold: the occupant's off beat the Issue #134 comfort-ceiling bypass (Issue #1205).
+
+        Only when the bypass WOULD have applied (indoor above ``comfort_cool``), so a cool house stays quiet. The
+        hold is keyed by its end time: a new fan-off grace logs again, the periodic re-checks inside one hold do not.
+        """
+        if indoor is None or not indoor > comfort_cool or not self._fan_off_hold_active():
+            return
+        _hold_key = self._fan_off_hold_until.isoformat() if self._fan_off_hold_until else None
+        if self._last_hold_beats_ceiling_grace_end == _hold_key:
+            return
+        self._last_hold_beats_ceiling_grace_end = _hold_key
+        remaining_min = None
+        try:
+            _end = self._fan_off_hold_until
+            if _end is not None:
+                remaining_min = round(max(0.0, (_end - dt_util.now()).total_seconds()) / 60.0, 1)
+        except TypeError, ValueError, AttributeError:
+            remaining_min = None
+        _LOGGER.info(
+            "Nat-vent not re-entered: occupant's fan-off hold wins over comfort-ceiling bypass "
+            "indoor=%s comfort_cool=%s grace_remaining_min=%s",
+            self._t(indoor),
+            self._t(comfort_cool),
+            remaining_min,
+        )
 
     def _log_nat_vent_eval(self, outcome: str, reasons: list[str], **values: Any) -> None:
         """Log a nat-vent entry-evaluation outcome with its reason (Issue #1095).
@@ -14845,6 +15442,28 @@ class AutomationEngine:
             _LOGGER.info("Fan override active — skipping fan activation")
             return FanCommandResult.OVERRIDDEN
 
+        # Issue #1205 (defense in depth): the occupant's fan-off hold (#1006) forbids EVERY CA-initiated start,
+        # whatever path asked (nat-vent, economizer, min-runtime cycle, cycling-on, reactivation). The path-level
+        # guards decide earlier and say why; this is the backstop for a path that has none (the economizer's
+        # window-cooling start had no grace check at all). Starts only: a stop is never refused, and the
+        # occupant's own fan-on never comes through here (handle_fan_manual_override).
+        if self._fan_off_hold_active():
+            # One INFO per hold per caller. The reason text embeds live temperatures, so key on the caller: the
+            # reason up to its first " — " or ":" ("economizer maintain", "natural ventilation", "min_runtime_cycle").
+            _caller = reason.split(" — ")[0].split(":")[0].strip()
+            _hold_key = self._fan_off_hold_until.isoformat() if self._fan_off_hold_until else None
+            _logged_end, _logged_callers = self._last_fan_off_hold_refusal or (None, frozenset())
+            if _logged_end != _hold_key:
+                _logged_callers = frozenset()
+            _log = _LOGGER.debug if _caller in _logged_callers else _LOGGER.info
+            self._last_fan_off_hold_refusal = (_hold_key, _logged_callers | {_caller})
+            _log(
+                "Fan activation refused: occupant's fan-off hold active reason=%s hold_until=%s",
+                reason,
+                _hold_key,
+            )
+            return FanCommandResult.SUPPRESSED
+
         # Issue #714: a manual override to an active HVAC mode (heat/cool/heat_cool)
         # structurally conflicts with WHF — starting the fan would call
         # _suppress_hvac_for_whf() below and force the thermostat straight back to "off",
@@ -14971,6 +15590,10 @@ class AutomationEngine:
         _was_deferred = (
             isinstance(self._fan_rate_limited_until, datetime) and self._fan_rate_limited_direction == "activate"
         )
+        # Issue #1205: which deferral this start applies (None when it applies none) and the start count before it,
+        # for the pending manual-origin fact -- resolved below, once the run is stamped.
+        _deferral_applied_at = self._fan_rate_limited_until if _was_deferred else None
+        _start_seq_before = self._fan_start_seq
         if _was_deferred:
             _LOGGER.info(
                 "5-minute floor expired — applying deferred activation (original reason: %s)",
@@ -15032,12 +15655,20 @@ class AutomationEngine:
                     _fan_modes_on = list(hvac_state.attributes.get("fan_modes") or []) if hvac_state else []
                     _on_value = resolve_fan_mode_command(_fan_modes_on, "on")
                     if _on_value is None:
-                        _LOGGER.error(
+                        # Issue #1205 (C-a): the economizer retries about twice an hour, so the same unchanged cause
+                        # is an ERROR once and a DEBUG line after that. The cause is the thermostat, its offered
+                        # fan_modes and the configured fan mode, so a different thermostat/config logs ERROR again;
+                        # a successful command re-arms it.
+                        _cause = (self.climate_entity, tuple(_fan_modes_on), fan_mode)
+                        _log_no_on = _LOGGER.debug if self._hvac_fan_no_on_logged_cause == _cause else _LOGGER.error
+                        self._hvac_fan_no_on_logged_cause = _cause
+                        _log_no_on(
                             "Cannot activate HVAC fan — entity's fan_modes=%s has no 'on' value or "
                             "named speed tier (Issue #893) — skipping command",
                             _fan_modes_on,
                         )
                     else:
+                        self._hvac_fan_no_on_logged_cause = None
                         await self._call_service_with_context(
                             "climate",
                             "set_fan_mode",
@@ -15075,6 +15706,12 @@ class AutomationEngine:
             # _activate_fan() and _deactivate_fan(), same reasoning both places.
             self._fan_active = True
             self._fan_on_since = dt_util.now().isoformat()
+            self._fan_start_seq += 1  # Issue #1205: a fan start for the pending-fact bookkeeping
+            # Issue #1205: the ONE place every deferred activation lands, whichever caller retried it. Resolved here,
+            # synchronously after the run is stamped, so no caller's later _paused_by_door write can pre-empt it.
+            self._resolve_fan_manual_origin_pending_on_start(
+                deferral_applied_at=_deferral_applied_at, seq_before=_start_seq_before
+            )
             self._record_action("Fan activated", reason)
             if emit_event and self._emit_event_callback:
                 self._emit_event_callback(
@@ -16370,7 +17007,7 @@ class AutomationEngine:
 
     def _apply_economizer_fsm_state_after_activation(
         self, to_state: EconomizerLifecycleState, activation_result: FanCommandResult
-    ) -> None:
+    ) -> bool:
         """Apply an FSM decision computed BEFORE an ``await self._activate_fan(...)``
         call, guarding against the same Issue #935 rate-limit race this mirrors on
         the nat-vent side (Issue #936).
@@ -16391,15 +17028,26 @@ class AutomationEngine:
         direction: on entry, applying INACTIVE here is what lets the FSM's own
         eligibility re-check naturally retry activation on its own next cycle.
 
-        Every other ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``,
-        ``DISABLED``, ``SUPPRESSED``) means no override intervened mid-await and
-        no command was deferred, so the pre-await ``to_state`` is still correct
-        to apply.
+        Issue #1205 (the start-side mirror of #935/#936 for ``SUPPRESSED``): a refused start
+        (the occupant's fan-off hold, a sealed house, the HVAC-fan restriction, a fan switch
+        that ignored CA's command) leaves the fan off, so recording MAINTAIN/COOL_DOWN would
+        claim ventilation is running while the fan is not -- and, as above, ``result.changed``
+        would then be False on every later tick, so the economizer would never start the fan
+        once the refusal ended. ``SUPPRESSED`` is applied as INACTIVE for every cause: none of
+        them runs a fan, and ``_economizer_active`` only means "this fan run is the
+        economizer's" (``_fan_owner()``), so there is nothing for it to claim.
+
+        Every other ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``, ``DISABLED``)
+        means no override intervened mid-await and no command was deferred, so the pre-await
+        ``to_state`` is still correct to apply.
+
+        Returns True when ``to_state`` was applied, False when INACTIVE was applied instead.
         """
         if activation_result in (
             FanCommandResult.OVERRIDDEN,
             FanCommandResult.RATE_LIMITED_NEW,
             FanCommandResult.RATE_LIMITED_DUP,
+            FanCommandResult.SUPPRESSED,
         ):
             # Same WARNING(anomaly)/INFO(fresh)/DEBUG(repeat) split as
             # _apply_nat_vent_fsm_state_after_activation() (#935) and
@@ -16411,16 +17059,18 @@ class AutomationEngine:
             elif activation_result is FanCommandResult.RATE_LIMITED_NEW:
                 _log = _LOGGER.info
             else:
+                # RATE_LIMITED_DUP, and SUPPRESSED (Issue #1205): the refusal itself was already logged by
+                # _activate_fan() (once per hold per caller for the fan-off hold), so a per-tick retry stays quiet.
                 _log = _LOGGER.debug
             _log(
-                "Economizer FSM state application skipped: fan command was %s"
-                " during activation — applying INACTIVE instead of stale %s decision",
+                "Economizer stays inactive: fan start not applied, retrying next tick result=%s skipped_state=%s",
                 activation_result.name,
                 to_state,
             )
             self._apply_economizer_fsm_state(EconomizerLifecycleState.INACTIVE)
-        else:
-            self._apply_economizer_fsm_state(to_state)
+            return False
+        self._apply_economizer_fsm_state(to_state)
+        return True
 
     async def _check_window_cooling_opportunity_fsm(
         self,
@@ -16481,7 +17131,8 @@ class AutomationEngine:
 
         if result.to_state == EconomizerLifecycleState.MAINTAIN:
             activation_result = await self._activate_fan(reason="economizer maintain — fan assists ventilation")
-            self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result)
+            if not self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result):
+                return True  # the FSM did decide to engage; the fan start was not applied
             if aggressive_savings:
                 _LOGGER.info(
                     "Economizer (savings): ventilation only, outdoor=%s, band stays armed",
@@ -16500,7 +17151,8 @@ class AutomationEngine:
                     f" outdoor {format_temp(outdoor_temp, unit)} assisting"
                 )
             )
-            self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result)
+            if not self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result):
+                return True  # the FSM did decide to engage; the fan start was not applied
             _LOGGER.info(
                 "Economizer phase=cool-down: indoor=%s, outdoor=%s — band holds comfort_cool=%s, fan assists",
                 format_temp(indoor_temp, unit),
@@ -16768,6 +17420,8 @@ class AutomationEngine:
         self._grace_duration_seconds = None
         self._last_resume_source = None
         self._last_grace_trigger = None
+        self._fan_off_hold_until = None  # re-armed below by _maybe_restore_fan_off_grace() when still in force
+        self._fan_override_until = None
 
         # Issue #680: route the 3 FSM-modeled flags (_override_confirm_pending /
         # _grace_active / _grace_protects_override) through
@@ -16856,6 +17510,7 @@ class AutomationEngine:
         """
         persisted = self._persisted_manual_grace(state, "fan_off")
         if persisted is None:
+            self._restore_fan_off_hold(state)
             return
         remaining_seconds, grace_end_time = persisted
         _LOGGER.info(
@@ -16864,6 +17519,31 @@ class AutomationEngine:
             grace_end_time,
         )
         self._start_grace_period("manual", trigger="fan_off", duration_override=remaining_seconds)
+
+    def _restore_fan_off_hold(self, state: dict[str, Any]) -> None:
+        """Re-arm the fan-off hold on its own when its grace is not the one persisted (Issue #1205).
+
+        The hold survives a thermostat override replacing its grace, so a restart can land with the override's
+        grace persisted and the hold still running; the grace is not restored (override-protecting), the hold is.
+        A restart in the ordinary case (the fan-off grace itself persisted) re-arms the hold through the grace.
+        """
+        raw = state.get("fan_off_hold_until")
+        if not raw:
+            return
+        try:
+            until = datetime.fromisoformat(raw)
+        except TypeError, ValueError:
+            return
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=UTC)
+        if until <= dt_util.now():
+            return
+        self._fan_off_hold_until = until
+        _LOGGER.info(
+            "Fan-off hold restored across restart: hold_until=%s remaining=%.0fs (no fan-off grace running)",
+            until.isoformat(),
+            (until - dt_util.now()).total_seconds(),
+        )
 
     @staticmethod
     def _persisted_manual_grace(state: dict[str, Any], trigger: str) -> tuple[float, str] | None:
@@ -16906,7 +17586,18 @@ class AutomationEngine:
         self._pending_override_rearm_end = None
         persisted = self._persisted_manual_grace(state, "fan_manual_override")
         if persisted is None:
-            return
+            # Issue #1205 F3: a thermostat override's grace may have replaced the fan grace before the restart; the
+            # fan run's own persisted deadline still re-arms it (same reconcile, same checks).
+            _own = state.get("fan_override_until")
+            try:
+                _own_dt = datetime.fromisoformat(_own) if _own else None
+            except TypeError, ValueError:
+                _own_dt = None
+            if _own_dt is not None and _own_dt.tzinfo is None:
+                _own_dt = _own_dt.replace(tzinfo=UTC)
+            if _own_dt is None or _own_dt <= dt_util.now():
+                return
+            persisted = ((_own_dt - dt_util.now()).total_seconds(), _own_dt.isoformat())
         remaining_seconds, grace_end_time = persisted
         self._pending_override_rearm_end = grace_end_time
         _LOGGER.info(
@@ -16945,6 +17636,12 @@ class AutomationEngine:
             "grace_duration_seconds": self._grace_duration_seconds,
             "last_grace_trigger": self._last_grace_trigger,
             "last_resume_source": self._last_resume_source,
+            # Issue #1205: the fan-off hold's own deadline (it can outlive the grace a thermostat override replaced).
+            "fan_off_hold_until": self._fan_off_hold_until.isoformat() if self._fan_off_hold_until else None,
+            # Issue #1205 F3: the occupant's fan run keeps its own deadline across a thermostat override's grace.
+            "fan_override_until": (
+                self._fan_override_until.isoformat() if self._fan_override_active and self._fan_override_until else None
+            ),
             "fan_on_since": self._fan_on_since,
             # Issue #835: NOT clean-slate — restored on restart (see restore_state()).
             "last_hvac_heating_active": self._last_hvac_heating_active,

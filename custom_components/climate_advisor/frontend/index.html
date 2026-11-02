@@ -1229,7 +1229,10 @@
       // "End Grace Period" only when nothing else is being cancelled: cancel_override() also clears a
       // fan override, so a fan override present means the action is still an override cancel.
       cancelBtn.textContent = (!data.manual_override_active && !data.fan_override_active && data.grace_active) ? 'End Grace Period' : 'Cancel Override';
-      document.getElementById('cancel-fan-override-btn').disabled = !data.fan_override_active;
+      // Issue #1205: the fan-off pause keeps its own deadline and can run with no grace or override behind it.
+      const fanBtn = document.getElementById('cancel-fan-override-btn');
+      fanBtn.disabled = !(data.fan_override_active || data.fan_off_hold_active);
+      fanBtn.textContent = (!data.fan_override_active && data.fan_off_hold_active) ? 'End Fan-Off Pause' : 'Cancel Fan Override';
       document.getElementById('resume-pause-btn').disabled = !data.paused_by_door;
     } catch (e) {
       // Issue #812 fix: a stored-but-now-stale zone selection (the saved

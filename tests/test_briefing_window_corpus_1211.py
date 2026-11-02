@@ -19,8 +19,8 @@ Invariants asserted on every rendered briefing:
 * no temperature quoted that is not a configured/armed value, a forecast value or a documented fallback
   (catches the old hard-coded ``comfort_heat - 2``).
 
-Cases the current tree still gets wrong are selected by ``_known_bad`` and marked strict xfail (so the corpus
-is proven to catch the bug before the fix lands); the commit that fixes a behaviour narrows that predicate.
+Before the fix this whole corpus was committed as strict xfail (proving it catches the bug); the briefing
+commit removed the marks once every case rendered correctly.
 """
 
 from __future__ import annotations
@@ -54,7 +54,9 @@ _OCCUPANCY = ("home", "guest", "away", "vacation")
 _WINDOW_PHRASES = (
     "open south and east windows",
     "windows are open to catch",
-    "close up",
+    "close up by",
+    "close up at",
+    "close up now",
     "reopen windows",
     "boost cross-ventilation",
     "good airflow",
@@ -224,23 +226,6 @@ def _violations(case: Case) -> list[str]:
     return problems
 
 
-def _known_bad(case: Case) -> bool:
-    """True while the tree still renders this case wrongly. Before the fix commits: every case does
-    (each carries "HVAC is off / no energy impact" or an unbacked promise, and the window cases also
-    follow a classifier that always recommends mild days)."""
-    return True
-
-
-def _params():
-    for case in CASES:
-        marks = (
-            [pytest.mark.xfail(strict=True, reason="Issue #1211: fixed in the briefing commit")]
-            if _known_bad(case)
-            else []
-        )
-        yield pytest.param(case, id=case.id, marks=marks)
-
-
-@pytest.mark.parametrize("case", _params())
+@pytest.mark.parametrize("case", [pytest.param(c, id=c.id) for c in CASES])
 def test_briefing_only_talks_about_windows_when_they_help(case: Case) -> None:
     assert _violations(case) == []

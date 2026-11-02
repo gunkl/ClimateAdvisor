@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.35] — 2026-11-02
+
+- Fix #1212: when Climate Advisor gives up on a fan start or stop it had held back for the 5-minute fan switching limit (because you turned the fan on or off yourself, a door or window pause ended, every window closed, or it changed its mind), the whole-house fan card no longer keeps saying "(on pending …)" or "(off pending …)", and a later, unrelated fan start or stop is no longer logged as "applying deferred activation" or "applying deferred exit" hours afterwards. A start it still means to make, such as restarting the fan after your fan pause ends while a window is open, is kept and applied as before. No fan or heating/cooling decision changes.
+
 ## [0.8.34] — 2026-11-02
 
 - Fix #1240: switching the thermostat to heat or cool no longer counts as heating or cooling time when the thermostat itself says it is idle. Before, a day where the thermostat sat in heat mode without heating and was then switched off showed hours of "HVAC Runtime" that never happened (one zone showed 361 minutes on a day with no heating at all). Those minutes also went into the average on the compliance card, the "high runtime on mild days" suggestion, the AI reports, the time-of-use summary and the thermal-learning warning. Real heating and cooling are counted exactly as before, including on thermostats that do not report whether they are running. A heating or cooling run on a thermostat that reports only its fan now also stops counting when the thermostat goes idle, instead of counting until you switch it off. The same applies to fan-only mode.

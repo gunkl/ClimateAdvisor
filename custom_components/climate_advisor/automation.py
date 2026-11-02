@@ -1246,6 +1246,9 @@ class AutomationEngine:
         # _is_within_planned_window_period()'s docstring.
         self._nat_vent_cutoff: datetime | None = None
         self._paused_by_door = False
+        # Issue #1211 (O4): was the planned window period active at the last exit check? See
+        # ``consume_planned_window_exit_edge()``.
+        self._planned_window_was_active = False
         self._pre_pause_mode: str | None = None
         # Issue #523: distinguishes "_paused_by_door=True with HVAC already off" (nothing
         # was interrupted, no grace/resume timer exists) from a genuine mode-change pause —
@@ -1994,8 +1997,11 @@ class AutomationEngine:
         2. HVAC mode is "off" (no active heating/cooling to protect)
         3. Current time is between window_open_time and window_close_time
 
-        When True, door/window sensor events should NOT trigger pause,
-        grace periods, or notifications — the user is following the plan.
+        When True, the lazy ``_sync_paused_by_door_with_live_sensors()`` reconcile does not pause for an open
+        sensor -- the user is following the plan. Issue #1211 (A3): the EVENT handlers no longer use it as an
+        exemption (``handle_door_window_open()``, grace expiry and ``_re_pause_for_open_sensor()`` run the
+        nat-vent gate and pause when it refuses); ``consume_planned_window_exit_edge()`` and
+        ``async_sync_after_planned_window_exit()`` cover the period ending with a window still open.
 
         Issue #629 investigation note: condition #2 was considered for a live-thermostat-mode
         check instead of ``classification.hvac_mode``, but that would invert the deliberate
@@ -2028,6 +2034,31 @@ class AutomationEngine:
             return False
         now_time = dt_util.now().time()
         return c.window_open_time <= now_time <= window_close_time
+
+    def consume_planned_window_exit_edge(self) -> bool:
+        """True once when the planned window period has just ENDED (Issue #1211, owner decision O4).
+
+        Mirror of the open-side change (A3): the planned period used to end silently -- the clock passing
+        ``window_close_time`` / the ODE cutoff, or the live outdoor gate / classifier turning
+        ``windows_recommended`` off -- fires no event, so a window left open past the end of the period was
+        only paused when some later coordinator cycle happened to run the lazy reconcile (up to 30 minutes
+        with the HVAC running against the open window, household rule 3). Synchronous and cheap so the
+        coordinator can call it from its 5-minute tick; it returns True only on the active -> inactive edge.
+        """
+        now_active = self._is_within_planned_window_period()
+        was_active = self._planned_window_was_active
+        self._planned_window_was_active = now_active
+        return was_active and not now_active
+
+    async def async_sync_after_planned_window_exit(self) -> None:
+        """Run the existing pause-only reconcile after the planned window period ended (Issue #1211, O4).
+
+        ``_sync_paused_by_door_with_live_sensors()`` is already debounce-aware and respects manual override,
+        nat-vent and WHF ownership, so it pauses only for a sensor open past the debounce.
+        """
+        _LOGGER.info("Planned window period ended — reconciling door/window pause with live sensors")
+        async with self._decision_pass("async_sync_after_planned_window_exit"):
+            await self._sync_paused_by_door_with_live_sensors()
 
     def _record_action(self, action: str, reason: str) -> None:
         """Record an HVAC action with timestamp and reason, and schedule a revisit."""
@@ -5891,13 +5922,19 @@ class AutomationEngine:
         pre-conditioning paths ran this re-check ahead of their own ``DEFER_OVERRIDE`` gate and
         switched the occupant's heat/cool off inside a grace CA had just announced. A grace with
         no manual override (fan-off / automation grace) does NOT block the re-check (D16).
+
+        Issue #1211: the planned window period is the one exemption left here -- this lazy reconcile (no event,
+        no occupant action) does not pause for an open sensor inside the period. The EVENT handlers no longer
+        honor that exemption (``handle_door_window_open()`` runs the nat-vent gate and pauses when it refuses),
+        so it is NOT "the same exception" they make; when the period ends,
+        ``async_sync_after_planned_window_exit()`` runs this reconcile once so a window left open is paused.
         """
         if self._manual_change_protected():
             return  # the occupant owns the thermostat; grace expiry / the gate decide, not this
         if self._paused_by_door:
             return  # already paused
         if self._is_within_planned_window_period():
-            return  # windows intentionally open — same exception handle_door_window_open() honors
+            return  # this lazy reconcile only: the event handlers decide (gate / pause) inside the period
         if not decide_open_sensor_hold(
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
@@ -6124,14 +6161,18 @@ class AutomationEngine:
                 # else: real gate says reactivation is viable — fall through to the
                 # nat-vent-vs-pause decision below, same as before.
 
+            # Issue #1211 (A3, owner decision O8b): the planned window period is NOT an early return here
+            # any more. It used to return silently and let the coordinator's NEXT refresh start nat-vent (via
+            # the comfort-band guard + paused re-activation) -- observed 14.5 min late with the AC cooling
+            # into the open window. The one nat-vent entry gate below now decides: start nat-vent when it
+            # passes, pause right here when it refuses. The planned window only exempts the lazy
+            # ``_sync_paused_by_door_with_live_sensors()`` reconcile (no event, no occupant action).
             if self._is_within_planned_window_period():
                 _LOGGER.info(
-                    "Door/window open (%s) during planned window period — not pausing "
-                    "(windows recommended, HVAC off, day_type=%s)",
+                    "Door/window open (%s) during planned window period — running the nat-vent gate (day_type=%s)",
                     entity_id,
                     self._current_classification.day_type if self._current_classification else "unknown",
                 )
-                return
 
             # Check for natural ventilation opportunity before falling through to pause
             outdoor = self._last_outdoor_temp
@@ -9221,33 +9262,8 @@ class AutomationEngine:
             self._cancel_grace_timers_action()
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
 
-        # If within planned window period, sensors open is expected — just clear grace
-        if self._is_within_planned_window_period():
-            _LOGGER.info(
-                "%s grace expired during planned window period — sensors open as expected, clearing grace",
-                source,
-            )
-            _dispatch_override_grace_expired()
-            self._resolve_door_window_pause_flags(
-                kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
-                origin_state=_origin_state,
-            )
-            self._clear_manual_override_active("grace_expired")
-            if self._request_refresh_callback:
-                self._request_refresh_callback()
-            if self._post_grace_fan_check_callback:
-                self._post_grace_fan_check_callback()
-            # Shadow-feed completion (door/window Step 1b's documented residual): this
-            # was the one GRACE_TIMER_EXPIRED outcome with no event emit at all, so it
-            # never fed the shadow door/window FSM. Reuses the same "grace_expired"
-            # event type the sibling branches below already emit — no wiring changes
-            # to _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES needed — with a payload key
-            # distinguishing this outcome from a real sensor re-check.
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "grace_expired", {"source": source, "within_planned_window": True, "re_paused": False}
-                )
-            return
+        # Issue #1211 (A3): no planned-window branch here -- a sensor still open at grace expiry is
+        # re-paused (or handed to nat-vent by the nested gate) inside the planned window period too.
 
         # If any contact sensor is still open, re-pause instead of clearing
         if self._any_monitored_sensor_holding_open():
@@ -9498,11 +9514,6 @@ class AutomationEngine:
                 # task ran replaces that pause (the HVAC is running at the occupant's choice).
                 if self._paused_by_door:
                     self._discard_pause_record_for_manual_change()
-                return
-            if self._is_within_planned_window_period():
-                _LOGGER.info(
-                    "Skipping re-pause — within planned window period (windows recommended)",
-                )
                 return
             outdoor = self._last_outdoor_temp
             comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
@@ -12092,7 +12103,6 @@ class AutomationEngine:
             current_setpoint_f=current_setpoint_f,
             target_setpoint_f=target_setpoint_f,
             tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-            within_planned_window=self._is_within_planned_window_period(),
             any_sensor_open=self._any_monitored_sensor_holding_open(),
             # Issue #757 Phase 6 Step 3 correction: for GRACE_TIMER_EXPIRED specifically,
             # _cancel_grace_timers_action() already set _last_resume_source=None before

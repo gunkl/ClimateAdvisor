@@ -1441,6 +1441,7 @@ class TestBriefingRegeneration:
         coord._briefing_sent_today = True
         coord._briefing_day_type = DAY_TYPE_WARM
         coord._briefing_today_high = 85
+        coord._briefing_windows_recommended = None  # Issue #1211 drift trigger: bare MagicMock otherwise
         # Issue #847: _maybe_regenerate_briefing_for_drift() gained a third
         # nat_vent_cutoff/nat_vent_cutoff_reason drift trigger, which reads these
         # three fields via getattr(..., None)/self._nat_vent_plan directly. `coord`
@@ -1531,6 +1532,42 @@ class TestBriefingRegeneration:
         assert coord._last_briefing == REGEN_FULL
         assert coord._last_briefing_short == REGEN_SHORT
         assert coord._briefing_day_type == DAY_TYPE_HOT
+
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator._build_predicted_indoor_future",
+        return_value=[],
+    )
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_regen,
+    )
+    def test_regenerated_when_the_classifiers_windows_answer_flips(self, mock_gen, mock_pred, mock_outdoor):
+        """Issue #1211: the header/windows row/tips depend on whether windows are recommended, so a flip of
+        the CLASSIFIER's answer (same day type, same high) must regenerate the text."""
+        coord = self._make_coord()
+        coord._briefing_windows_recommended = False
+        c = _make_classification(day_type=DAY_TYPE_WARM, today_high=85)
+        c.forecast_windows_recommended = True
+        coord._current_classification = c
+
+        assert coord._maybe_regenerate_briefing_for_drift() is True
+        assert coord._briefing_windows_recommended is True
+
+    def test_not_regenerated_when_only_the_live_gated_flag_flaps(self):
+        """Issue #1211: the live outdoor gate clears ``windows_recommended`` several times a day; that must
+        not regenerate (the classifier's own answer is unchanged)."""
+        coord = self._make_coord()
+        coord._briefing_windows_recommended = True
+        c = _make_classification(day_type=DAY_TYPE_WARM, today_high=85)
+        c.forecast_windows_recommended = True
+        c.windows_recommended = False  # cleared by the live gate
+        coord._current_classification = c
+
+        assert coord._maybe_regenerate_briefing_for_drift() is False
 
     def test_not_regenerated_when_same_day_type_and_high(self):
         """When neither day_type nor today_high has meaningfully changed, no regeneration."""

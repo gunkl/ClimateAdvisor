@@ -618,9 +618,11 @@ class TestColdDayBriefing:
             trend_magnitude=10,
         )
         result = _generate(c)
-        # Should mention pre-heating / banking heat
         low = result.lower()
-        assert "pre-heat" in low or "bank" in low or "extra heat" in low or "extra warm" in low
+        # Issue #1211: the "bump to X around 7pm / banking extra heat" promise has no code behind it (the intent
+        # was written to config and never read), so only the true statement remains.
+        assert "colder" in low and "heater" in low
+        assert "around 7pm" not in low and "bank" not in low
 
     def test_no_preheat_on_stable_trend(self):
         c = _make_classification("cold", today_high=38, today_low=22, trend_direction="stable", trend_magnitude=1)
@@ -836,7 +838,12 @@ class TestFreshAirSection:
         c = _make_classification("warm", today_high=80, today_low=60)
         result = _generate(c)
         low = result.lower()
-        assert "no energy impact" in low or "hvac is off" in low
+        # Issue #1211: hvac_mode "off" on a warm day still has the comfort band armed, so the briefing must not
+        # claim "no energy impact" / "HVAC is off today"; it says what is held and keeps the debounce explanation.
+        assert "no energy impact" not in low
+        assert "hvac is off today" not in low
+        assert "thermostat is holding" in low
+        assert "pause until you close up" in low
 
     def test_includes_minimize_impact_tip(self):
         """Active HVAC modes should suggest how to minimize impact."""
@@ -2482,13 +2489,23 @@ class TestWarmDayPlanOvernightHeatWording:
     below raise TypeError against current code, the expected TDD failure here.
     """
 
-    def test_no_overnight_heat_keeps_hvac_off_wording(self):
+    def test_no_overnight_heat_states_the_held_band_not_hvac_off(self):
+        # Issue #1211: not a windows day (low 75 is too warm to cool the house) -> no window wording, and no
+        # "HVAC is off" claim while the comfort band is armed.
         c = _make_classification("warm", today_high=80, today_low=75)
         lines = _warm_day_plan(
-            c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=None, overnight_heat_engaged=False
+            c,
+            COMFORT_COOL,
+            DEFAULT_WAKE,
+            DEFAULT_SLEEP,
+            warm_events=None,
+            overnight_heat_engaged=False,
+            armed_heat=68.0,
+            armed_cool=74.0,
         )
         text = "\n".join(lines)
-        assert "HVAC is off this morning." in text
+        assert "HVAC is off" not in text
+        assert "holds 68" in text and "74" in text
 
     def test_overnight_heat_engaged_drops_hvac_off_claim(self):
         c = _make_classification("warm", today_high=80, today_low=75)
@@ -2821,7 +2838,6 @@ class TestBriefingShowsSavingsBand:
     def test_cool_day_hold_sentence_quotes_floor(self):
         body = self._body("cool", 52)
         assert "I'll hold 68" in body
-        assert "return to 68" in body
         assert "I'll hold 70" not in body
 
     def test_mild_day_opener_quotes_floor(self):
@@ -2942,3 +2958,49 @@ class TestWarmDayAcHandoffQuotesSavingsCeiling:
         assert "Indoor temps are forecast to reach 77\u00b0F around" in on
         assert "Indoor temps are forecast to reach 75\u00b0F around" in off
         assert on.split("reach 77\u00b0F around")[1][:9] != off.split("reach 75\u00b0F around")[1][:9]
+
+
+class TestWindowAdviceGating1211:
+    """Issue #1211: window advice needs a recommendation AND someone home; the near-miss softening (O7)."""
+
+    def test_away_gets_no_window_advice_even_with_the_flag_set(self):
+        from custom_components.climate_advisor.briefing import _gives_window_advice
+
+        c = _make_classification("mild", today_high=72, today_low=50)
+        assert c.windows_recommended is True
+        assert _gives_window_advice(c, "home") is True
+        assert _gives_window_advice(c, "guest") is True
+        assert _gives_window_advice(c, "away") is False
+        assert _gives_window_advice(c, "vacation") is False
+
+    def test_near_miss_window_is_five_degrees_below_the_floor(self):
+        from custom_components.climate_advisor.briefing import _is_mild_near_miss
+
+        def near(high, occupancy="home", **kw):
+            c = _make_classification("mild", today_high=high, today_low=50)
+            for k, v in kw.items():
+                setattr(c, k, v)
+            return _is_mild_near_miss(c, 68.0, occupancy, advice=c.windows_recommended)
+
+        assert near(63) is True  # exactly 5 below
+        assert near(67.9) is True
+        assert near(62.9) is False  # too far below: silence
+        assert near(68) is False  # at the floor windows are advised, not softened
+        assert near(65, occupancy="away") is False
+        assert near(65, low_is_estimated=True) is False
+
+    def test_flag_still_set_with_nobody_home_prints_no_window_row(self):
+        c = _make_classification("mild", today_high=72, today_low=50)
+        text = _generate(c, occupancy_mode="away")
+        assert "Close by" not in text
+        assert "Open south and east windows" not in text
+
+    def test_briefing_follows_the_forecast_answer_not_the_live_gate(self):
+        """The live outdoor gate may clear ``windows_recommended`` for a few hours; the day's plan text must not
+        depend on whether the briefing happened to render during that stretch."""
+        c = _make_classification("mild", today_high=72, today_low=50)
+        assert c.forecast_windows_recommended is True
+        c.windows_recommended = False  # cleared by the live gate (cold house, colder outdoor)
+        text = _generate(c)
+        assert "(windows day)" in text
+        assert "Close by" in text

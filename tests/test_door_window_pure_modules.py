@@ -85,7 +85,6 @@ class TestDecideDoorOpenResponse:
             outdoor=70.0,
             comfort_cool=78.0,
             nat_vent_delta=2.0,
-            within_planned_window=False,
             nat_vent_gate_entered=False,
         )
         base.update(overrides)
@@ -117,10 +116,6 @@ class TestDecideDoorOpenResponse:
         result = decide_door_open_response(self._inputs(grace_active=True, outdoor=65.0, nat_vent_gate_entered=True))
         assert result == DoorOpenResponse.NAT_VENT_ELIGIBLE
 
-    def test_planned_window_noop(self):
-        result = decide_door_open_response(self._inputs(within_planned_window=True))
-        assert result == DoorOpenResponse.PLANNED_WINDOW_NOOP
-
     def test_nat_vent_eligible(self):
         result = decide_door_open_response(self._inputs(nat_vent_gate_entered=True))
         assert result == DoorOpenResponse.NAT_VENT_ELIGIBLE
@@ -131,13 +126,13 @@ class TestDecideDoorOpenResponse:
 
     def test_precedence_already_paused_beats_everything(self):
         result = decide_door_open_response(
-            self._inputs(paused_by_door=True, grace_active=True, within_planned_window=True, nat_vent_gate_entered=True)
+            self._inputs(paused_by_door=True, grace_active=True, nat_vent_gate_entered=True)
         )
         assert result == DoorOpenResponse.ALREADY_PAUSED_NOOP
 
-    def test_precedence_planned_window_beats_nat_vent(self):
-        result = decide_door_open_response(self._inputs(within_planned_window=True, nat_vent_gate_entered=True))
-        assert result == DoorOpenResponse.PLANNED_WINDOW_NOOP
+    def test_planned_window_no_longer_exists_as_an_outcome(self):
+        """Issue #1211 (A3): the planned window is not a door-open outcome any more."""
+        assert not hasattr(DoorOpenResponse, "PLANNED_WINDOW_NOOP")
 
 
 class TestDecideDoorCloseResponse:
@@ -161,7 +156,6 @@ class TestDecideDoorCloseResponse:
 class TestDecideGraceExpiryOutcome:
     def _inputs(self, **overrides):
         base = dict(
-            within_planned_window=False,
             any_sensor_open=False,
             source="manual",
             override_matches_current_decision=False,
@@ -169,17 +163,13 @@ class TestDecideGraceExpiryOutcome:
         base.update(overrides)
         return GraceExpiryInputs(**base)
 
-    def test_planned_window_clears(self):
-        result = decide_grace_expiry_outcome(self._inputs(within_planned_window=True))
-        assert result == GraceExpiryOutcome.CLEAR_PLANNED_WINDOW
-
     def test_sensor_still_open_re_pauses(self):
         result = decide_grace_expiry_outcome(self._inputs(any_sensor_open=True))
         assert result == GraceExpiryOutcome.RE_PAUSE
 
-    def test_planned_window_beats_sensor_open(self):
-        result = decide_grace_expiry_outcome(self._inputs(within_planned_window=True, any_sensor_open=True))
-        assert result == GraceExpiryOutcome.CLEAR_PLANNED_WINDOW
+    def test_planned_window_is_not_an_expiry_outcome(self):
+        """Issue #1211 (A3): a sensor still open at expiry re-pauses inside the planned period too."""
+        assert not hasattr(GraceExpiryOutcome, "CLEAR_PLANNED_WINDOW")
 
     def test_manual_source_matching_decision_adopts(self):
         result = decide_grace_expiry_outcome(self._inputs(source="manual", override_matches_current_decision=True))

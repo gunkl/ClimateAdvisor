@@ -11,7 +11,7 @@ These are example briefings for each day type, showing the tone, structure, and 
 | When does the grace period paragraph appear in a briefing, and what language does it use? | Only when a grace period is active at send time. Manual grace uses "hands-off window"; automation grace uses "settling period". The word "grace period" is never used in the body text. | [§Example: Active Automation Grace Period](04-BRIEFING-EXAMPLES.md#example-active-automation-grace-period) |
 | What triggers the adaptive thermal timing sentence in the briefing footer? | `adaptive_thermal_active=True` in coordinator data — set when thermal model confidence is "low" or better for both heat and cool rates. The sentence is absent while the model is still collecting data. | [§Example: Adaptive Thermal Timing Active](04-BRIEFING-EXAMPLES.md#example-adaptive-thermal-timing-active) |
 | What are the key voice rules for briefing text? | First person from the system ("I'll…"), affirm user choices first then explain system response, cause-and-effect framing, numerals for all temps/times, no emoji in the conversational body, scannable in 30 seconds. | [§Voice Rules](04-BRIEFING-EXAMPLES.md#voice-rules) |
-| How does the fresh air paragraph differ by HVAC mode? | When HVAC is off: "no energy impact at all". When HVAC is heating or cooling: explains the debounce duration, says the system will pause after that time, and suggests minimizing impact (shorter bursts, close other windows). | [§Example: Mild Day with Warming Trend](04-BRIEFING-EXAMPLES.md#example-mild-day-with-warming-trend) |
+| How does the fresh air paragraph differ by HVAC mode? | When no heat/cool is planned (warm and mild days): says the thermostat is holding the comfort band (never "no energy impact" or "HVAC is off" — the band is armed) and that a window left open past the debounce pauses it. When HVAC is heating or cooling: explains the debounce duration, says the system will pause after that time, and suggests minimizing impact (shorter bursts, close other windows). | [§Example: Mild Day with Warming Trend](04-BRIEFING-EXAMPLES.md#example-mild-day-with-warming-trend) |
 
 ## Structure (every briefing)
 
@@ -52,9 +52,9 @@ Through the afternoon, no HVAC needed at all. Enjoy the break!
 
 Close up the windows by 5:00 PM to trap the warmth before the sun drops. The house should coast comfortably through dinner. If it dips below 68°F later tonight, I'll gently kick the heater back on — but that's all automatic.
 
-If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+If you head out, not much changes today — after about 15 minutes I'll widen the band to 63–79°F to save energy, and restore comfort when you're back.
 
-If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+If you want to open a window for some fresh air, go for it — the thermostat is holding 68–74°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
 
 Looking ahead — tomorrow's warmer at 78°F, so I'm going to set back a bit more aggressively tonight. Less heating needed means energy saved while you sleep.
 ```
@@ -78,7 +78,7 @@ Tomorrow: High 82°F / Low 62°F
 Day Type: Warm | Trend: Stable
 
   Day Type: Warm (80°F)
-  HVAC Mode: Off — windows day
+  HVAC Mode: Comfort band 68–74°F (windows day)
   Windows: Open 6 AM – 10 AM
   Bedtime Setback: No setback
   Tomorrow: Stable (82°F)
@@ -87,9 +87,9 @@ Open windows around 6:00 AM to catch the cool morning air. Close up at 10:00 AM 
 
 Indoor temps are forecast to reach 75°F around 2:30 PM. Once windows are closed, the AC will step in automatically if it's needed to hold that ceiling.
 
-If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+If you head out, not much changes today — after about 15 minutes I'll widen the band to 63–79°F to save energy, and restore comfort when you're back.
 
-If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+If you want to open a window for some fresh air, go for it — the thermostat is holding 68–74°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
 
 Tomorrow looks pretty similar to today — 82°F for a high. Nothing special planned overnight.
 ```

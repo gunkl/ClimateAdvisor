@@ -69,7 +69,7 @@
     "issue": 136
   },
   "warm_day_ceiling_breach_ac_defense": {
-    "sha256": "8d5e146ec5d50900028a7bb07d686111a8f60fde08ba0e1de1b014783e1af055",
+    "sha256": "581155f204555ebe7c5559beed34b28eef7a96f738f2e0e205b3265d19412b66",
     "signed": "2026-11-01",
     "issue": 136
   },
@@ -89,18 +89,18 @@
     "issue": 220
   },
   "nat_vent_active_indoor_in_band_guard_dormant": {
-    "sha256": "c15aae3a90e5ab9a8b420ff500eff77c7ffe8e1afe2f5106a92d14dce0764e12",
+    "sha256": "2b8905256c061c74051e9d8bd71771d0f962fd006ba4fb3f0c8a5fb17c1912b8",
     "signed": "2026-11-01",
     "issue": 218
   },
   "nat_vent_ceiling_breach_hvac_escalation": {
-    "sha256": "88fbf366b5e9e7bb80b7af7411e2d37758c74077e5eb7bee075f14d2e6e28b58",
+    "sha256": "a09a89a9bbd12fce6a32a4a7d1daa04472e1a0ab70bf13544ed3fc1b23c355cb",
     "signed": "2026-11-01",
     "issue": 218
   },
   "startup_indoor_above_cool_nat_vent_not_running": {
-    "sha256": "894a9ac68a0e79cf79c6d896a9a453fc92f9ad75eb34fc8863479c831c2f92c8",
-    "signed": "2026-07-02",
+    "sha256": "d72554fe0a326230d9808fdcc44a050e7460e341857070f4ed80a617fa8b189f",
+    "signed": "2026-11-01",
     "issue": 218
   },
   "startup_indoor_above_cool_sensors_closed": {
@@ -124,7 +124,7 @@
     "issue": 249
   },
   "p3_warm_day_natvent_band_stays_armed": {
-    "sha256": "89227bf5bc6dcd5e32f37775cb7f30662de57b809adb942c0dca2654aa33d1dc",
+    "sha256": "55c5f9ac959e6605163a7c76d3a13664e45cd36fe92f2bdaa7f831e874b97c35",
     "signed": "2026-11-01",
     "issue": 249
   },
@@ -144,19 +144,9 @@
     "issue": 229
   },
   "away_natvent_exits_at_comfort_ceiling": {
-    "sha256": "6fcc1f7281855401ecdb4ad8788d4c5b34e133a62c894ffd9225399d4015ac27",
+    "sha256": "0cb107221f21a53d2177fe80f56a9f4feb8694eca639359f4f10ba5453a46e23",
     "signed": "2026-11-01",
     "issue": 231
-  },
-  "mild_day_planned_window_no_pause": {
-    "sha256": "4f2fc4aa772f55ea299b4d45ceb1108afb8ed3f50ae83a0cf8b64f56025e15a5",
-    "signed": "2026-06-10",
-    "issue": 229
-  },
-  "warm_day_planned_window_no_pause": {
-    "sha256": "decd0f9b97e6d8062445c116003107b81e1f9cca31baa4360f5f815609436f1d",
-    "signed": "2026-06-10",
-    "issue": 229
   },
   "away_morning_wakeup_skipped_assertion": {
     "sha256": "e2da9031d1034ed556fc6c813731bd863f090b147ecec390258a7348c80746a4",
@@ -184,7 +174,7 @@
     "issue": 226
   },
   "ceiling_guard_dormancy_nat_vent_active_in_band": {
-    "sha256": "f5a8d6ddd3120860547b90f362127468f9b22fd995034491e4696b60c7c66640",
+    "sha256": "70ad2a2de4a82165913d190422edeaf15ae0875ac44a2af6b071823789001aa7",
     "signed": "2026-11-01",
     "issue": 218
   },
@@ -306,11 +296,6 @@
   "grace_full_lifecycle_sensor_still_open": {
     "sha256": "ea90e2fdd0c21780e13b0da4deee07e5739015fb5e8d7234be033ef96d02afdf",
     "signed": "2026-11-01",
-    "issue": 229
-  },
-  "grace_window_period_no_repause": {
-    "sha256": "33d4b570ca7a6d6f74e08ea0df9ee03aec84b6154909dfed23f81c775da252b4",
-    "signed": "2026-07-12",
     "issue": 229
   },
   "issue-359-fan-state-machine": {
@@ -467,5 +452,20 @@
     "sha256": "253552818e6e451211d6be478c8261c9b6f0bc22701c5ab4dfe6db53d29c546c",
     "signed": "2026-11-01",
     "issue": 1193
+  },
+  "mild_day_planned_window_no_fan_pauses": {
+    "sha256": "e423c600f4cd21554d10036f0971eb05c3d99eb5cafc1475a20310f76561921a",
+    "signed": "2026-11-01",
+    "issue": 229
+  },
+  "warm_day_planned_window_no_fan_pauses": {
+    "sha256": "78afc437683409223982cc82cd0c429547124047020069cf8e926e737037786d",
+    "signed": "2026-11-01",
+    "issue": 229
+  },
+  "grace_window_period_no_fan_pauses_once": {
+    "sha256": "1b64dbd0d2c2ce4ed1839b1268f5709506ced2e59bd4657342acb2aee7ca3bc5",
+    "signed": "2026-11-01",
+    "issue": 229
   }
 }

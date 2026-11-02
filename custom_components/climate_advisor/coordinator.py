@@ -340,6 +340,7 @@ from .temperature import (
     ha_system_unit,
     is_sensor_stale,
     next_fallback_episode,
+    outdoor_direction_ok,
     read_attribute_temp_f,
     read_sensor_state_f,
     read_state_temp_f,
@@ -801,6 +802,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # alongside _briefing_day_type so the mid-day regen gate can also
         # fire on a meaningful value drift, not just a category change.
         self._briefing_today_high: float | None = None
+        # Issue #1211: the classifier's windows answer baked into the last briefing text (drift trigger #4).
+        self._briefing_windows_recommended: bool | None = None
         # nat_vent_cutoff/reason baked into the last-generated briefing text (Issue #847,
         # extended to HOT days and evening_open_time by Issue #876) — tracked alongside
         # _briefing_day_type/_briefing_today_high so the mid-day regen gate can also fire
@@ -1542,6 +1545,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _async_thermal_sample_tick(self, now: datetime) -> None:
         """Sample active thermal observations on the 5-min tick."""
         self._refresh_outdoor_temp()
+        # Issue #1211 (O4): the planned window period can end with the clock; nothing else fires then.
+        self._schedule_planned_window_exit_check()
         # Issue #1128: the household promises' heartbeat (a 45 minute rule cannot ride a 30 minute poll).
         self._tick_household_promises()
         # Issue #1033: health monitoring must never abort thermal sampling.
@@ -1813,6 +1818,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cls_data = None if unit_changed else state.get("classification")
         if cls_data:
             try:
+                _cfg = getattr(self, "config", None) or {}
                 wot = cls_data.get("window_open_time")
                 wct = cls_data.get("window_close_time")
                 self._current_classification = DayClassification(
@@ -1830,7 +1836,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     window_open_time=(time.fromisoformat(wot) if wot else None),
                     window_close_time=(time.fromisoformat(wct) if wct else None),
                     setback_modifier=cls_data.get("setback_modifier", 0.0),
+                    low_is_estimated=bool(cls_data.get("low_is_estimated", False)),
+                    tomorrow_low_is_estimated=bool(cls_data.get("tomorrow_low_is_estimated", False)),
+                    comfort_heat=float(_cfg.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
+                    comfort_cool=float(_cfg.get("comfort_cool", DEFAULT_COMFORT_COOL)),
                 )
+                # Issue #1211: the constructor's ``__post_init__`` recomputes ``windows_recommended`` from the
+                # forecast, which would resurrect a flag the live outdoor gate had cleared (the exemption
+                # briefly back on after a restart, mid open window). Put the persisted values back.
+                self._current_classification.windows_recommended = bool(cls_data.get("windows_recommended", False))
+                self._current_classification.forecast_windows_recommended = bool(
+                    cls_data.get("forecast_windows_recommended", self._current_classification.windows_recommended)
+                )
+                # Issue #1211: the windows hysteresis seed (``_classify_kwargs``) needs the time the restored
+                # classification was fetched, or the first post-restart classification has no seed and a forecast
+                # sitting on the threshold can flip the recommendation. Same day only: this restore already runs
+                # only for today's persisted state, and a stamp from another date is dropped, so yesterday's
+                # answer never seeds today.
+                _fetched_raw = state.get("classification_fetched_at")
+                if isinstance(_fetched_raw, str):
+                    _fetched = datetime.fromisoformat(_fetched_raw)
+                    # A stamp whose timezone-awareness differs from ``dt_util.now()`` (hand-edited state) would
+                    # make the briefing's ``dt_util.now() - _fetched_at`` raise, so it is dropped like a stale one.
+                    _now = dt_util.now()
+                    if (_fetched.tzinfo is None) == (_now.tzinfo is None) and _fetched.date() == _now.date():
+                        self._classification_fetched_at = _fetched
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.warning("Failed to restore classification: %s", err)
 
@@ -1868,6 +1898,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing_short = briefing.get("last_text_short", "")
         self._briefing_day_type = briefing.get("briefing_day_type")
         self._briefing_today_high = briefing.get("briefing_today_high")
+        self._briefing_windows_recommended = briefing.get("briefing_windows_recommended")
         _restored_nat_vent_cutoff = briefing.get("briefing_nat_vent_cutoff")
         try:
             self._briefing_nat_vent_cutoff = (
@@ -2008,9 +2039,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "pre_condition": c.pre_condition,
                 "pre_condition_target": c.pre_condition_target,
                 "windows_recommended": c.windows_recommended,
+                "forecast_windows_recommended": c.forecast_windows_recommended,
                 "window_open_time": (c.window_open_time.isoformat() if c.window_open_time else None),
                 "window_close_time": (c.window_close_time.isoformat() if c.window_close_time else None),
                 "setback_modifier": c.setback_modifier,
+                "low_is_estimated": c.low_is_estimated,
+                "tomorrow_low_is_estimated": c.tomorrow_low_is_estimated,
                 "window_opportunity_morning": c.window_opportunity_morning,
                 "window_opportunity_evening": c.window_opportunity_evening,
                 "window_opportunity_morning_start": (
@@ -2040,6 +2074,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # under a different unit can discard them instead of misreading them.
             "temp_unit": (getattr(self, "config", None) or {}).get("temp_unit", "fahrenheit"),
             "classification": cls_dict,
+            # Issue #1211: seeds the windows hysteresis (see _classify_kwargs); same-day only on restore.
+            "classification_fetched_at": (
+                self._classification_fetched_at.isoformat()
+                if getattr(self, "_classification_fetched_at", None) is not None
+                else None
+            ),
             "temp_history": {
                 "outdoor": list(self._outdoor_temp_history),
                 "indoor": list(self._indoor_temp_history),
@@ -2052,6 +2092,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "last_text_short": self._last_briefing_short,
                 "briefing_day_type": self._briefing_day_type,
                 "briefing_today_high": getattr(self, "_briefing_today_high", None),
+                "briefing_windows_recommended": getattr(self, "_briefing_windows_recommended", None),
                 "briefing_nat_vent_cutoff": (
                     getattr(self, "_briefing_nat_vent_cutoff", None).isoformat()
                     if getattr(self, "_briefing_nat_vent_cutoff", None)
@@ -2883,18 +2924,64 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return True
         return False
 
+    def _classify_kwargs(self, *, seed_hysteresis: bool = True) -> dict[str, Any]:
+        """Keyword arguments every ``classify_day()`` call shares (day-type thresholds, comfort band, hysteresis).
+
+        Issue #1211: the occupant's configured comfort band feeds the shared outside-air rule that decides
+        ``windows_recommended`` (the old warm rule used the DEFAULT ceiling). ``previous_windows_recommended``
+        seeds that rule's hysteresis from this day's previous classification only, so a forecast sitting on a
+        threshold does not flip the recommendation every cycle (yesterday's answer is never carried over).
+        """
+        prev = self._current_classification
+        fetched = getattr(self, "_classification_fetched_at", None)
+        same_day = fetched is not None and fetched.date() == dt_util.now().date()
+        return {
+            "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
+            "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
+            "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
+            "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
+            "comfort_heat": float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
+            "comfort_cool": float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            "previous_windows_recommended": bool(
+                seed_hysteresis and prev is not None and same_day and prev.forecast_windows_recommended
+            ),
+        }
+
+    def _schedule_planned_window_exit_check(self) -> None:
+        """Pause for a window left open when the planned window period ends (Issue #1211, owner decision O4).
+
+        The period ends silently (clock past ``window_close_time``/the ODE cutoff, or the flag cleared by the
+        live gate or a reclassification); the engine detects that edge and runs its pause-only reconcile.
+        Scheduled as a task because the callers are synchronous (the 5-minute tick, ``_apply_outdoor_temp``).
+        """
+        engine = getattr(self, "automation_engine", None)
+        if engine is None or engine.consume_planned_window_exit_edge() is not True:
+            return
+        self._spawn(self._async_planned_window_exit_sync())
+
+    async def _async_planned_window_exit_sync(self) -> None:
+        try:
+            await self.automation_engine.async_sync_after_planned_window_exit()
+        except Exception:
+            _LOGGER.warning("Planned-window exit reconcile failed; the next cycle retries", exc_info=True)
+
     def _apply_outdoor_windows_gate(self) -> None:
-        """Gate windows_recommended against current outdoor temp (Issue #111).
+        """Gate windows_recommended against the live outdoor/indoor readings (Issues #111, #1211).
 
-        The classifier sets windows_recommended based on forecast day-type only.
-        This method clears the flag when current outdoor conditions would push
-        indoor temps outside the comfort zone:
-          - outdoor > comfort_cool  → opening windows would overheat the house
-          - outdoor < comfort_heat - _WINDOWS_EXTREME_COLD_MARGIN  → extreme cold
+        The classifier decides ``windows_recommended`` from the day's FORECAST range (the shared
+        ``outdoor_air_helps`` rule). This method clears the flag when the air outside right now would move
+        the house the wrong way:
+          - outdoor > comfort_cool -> opening windows would overheat the house;
+          - indoor known: ``outdoor_direction_ok`` (stage B of the shared rule) -- a house below the floor needs
+            warmer air, a house above the ceiling cooler air. Replaces the old "outdoor more than 15 F below
+            the floor" cutoff, which ignored the house entirely (Issue #1211, owner decision O3);
+          - no indoor reading: the old extreme-cold cutoff (``_WINDOWS_EXTREME_COLD_MARGIN``) still applies.
 
-        Called after every classify_day() in _async_update_data() and
-        async_send_briefing(). No-op when classification is None,
-        windows_recommended is already False, or outdoor temp is unavailable.
+        Only ever clears (the next classification restores it), so the 5-minute tick cannot flap it back on.
+        Clearing it ends the planned window period, so the pause-only reconcile is scheduled (O4).
+
+        Called after every classify_day() in _async_update_data() and async_send_briefing(). No-op when
+        classification is None, windows_recommended is already False, or outdoor temp is unavailable.
         """
         c = self._current_classification
         if c is None or not c.windows_recommended:
@@ -2906,21 +2993,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
         comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        indoor = self._get_indoor_temp()
 
+        reason: str | None = None
         if outdoor > comfort_cool:
-            _LOGGER.debug(
-                "windows_recommended → False: outdoor %.1f°F above comfort_cool %.1f°F",
-                outdoor,
-                comfort_cool,
-            )
-            c.windows_recommended = False
+            reason = f"outdoor {outdoor:.1f}°F above comfort_cool {comfort_cool:.1f}°F"
+        elif indoor is not None:
+            if not outdoor_direction_ok(outdoor, indoor, comfort_heat, comfort_cool):
+                reason = f"outdoor {outdoor:.1f}°F would move indoor {indoor:.1f}°F the wrong way"
         elif outdoor < comfort_heat - _WINDOWS_EXTREME_COLD_MARGIN:
-            _LOGGER.debug(
-                "windows_recommended → False: outdoor %.1f°F below extreme-cold threshold %.1f°F",
-                outdoor,
-                comfort_heat - _WINDOWS_EXTREME_COLD_MARGIN,
+            reason = (
+                f"outdoor {outdoor:.1f}°F below extreme-cold threshold "
+                f"{comfort_heat - _WINDOWS_EXTREME_COLD_MARGIN:.1f}°F (no indoor reading)"
             )
-            c.windows_recommended = False
+        if reason is None:
+            return
+        _LOGGER.debug("windows_recommended → False: %s", reason)
+        c.windows_recommended = False
+        self._schedule_planned_window_exit_check()
 
     def _apply_outdoor_temp(self, value: float | None, *, record_history: bool) -> None:
         """Propagate a newly-read outdoor temperature to every downstream consumer.
@@ -3260,23 +3350,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         await self._refresh_hourly_forecast()
         if forecast:
             prev_type = self._current_classification.day_type if self._current_classification else None
-            _thresh = {
-                "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
-                "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
-                "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
-                "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
-            }
-            self._current_classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
+            self._current_classification = classify_day(
+                forecast, previous_day_type=prev_type, **self._classify_kwargs()
+            )
             self._classification_fetched_at = dt_util.now()
+            # record_history=True here; the 5-min tick (Issue #511) always passes False
+            # so _outdoor_temp_history keeps its existing 30-min cadence.
+            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=True)
             # Issue #602: ensure today's DailyRecord exists on this already-resilient,
             # every-30-min classification path — not only the once-daily briefing_time
             # trigger, which has no retry and previously left setpoint-override detection
             # (and every other _today_record-gated bookkeeping counter) silently dark for
             # the rest of the day whenever weather was unavailable at that one moment.
+            # Issue #1211 (O5): AFTER the outdoor update, because that is where the live gate runs. The record's
+            # "windows recommended today" flag (the compliance denominator) must read the same gated flag the
+            # credit in the door-open handler uses, not the raw forecast answer: a day the gate vetoes all day
+            # is not a windows day.
             self._ensure_today_record(self._current_classification)
-            # record_history=True here; the 5-min tick (Issue #511) always passes False
-            # so _outdoor_temp_history keeps its existing 30-min cadence.
-            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=True)
 
             # Chart log: emit classification_change event when day type changes
             if prev_type is not None and prev_type != self._current_classification.day_type:
@@ -4724,6 +4814,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         today_low = _resolve_forecast_temp_f(today_fc, "templow", "tempLow", current_outdoor - 15)
         tomorrow_high = _resolve_forecast_temp_f(tomorrow_fc, "temperature", "tempHigh", current_outdoor)
         tomorrow_low = _resolve_forecast_temp_f(tomorrow_fc, "templow", "tempLow", current_outdoor - 15)
+        # Issue #1211: remember when a low is the (outdoor - 15) stand-in above, so nothing claims
+        # "windows help" or trains the weather bias from an invented number. The value is unchanged.
+        low_is_estimated = not (
+            today_fc and _first_non_none(today_fc.get("templow"), today_fc.get("tempLow")) is not None
+        )
+        tomorrow_low_is_estimated = not (
+            tomorrow_fc and _first_non_none(tomorrow_fc.get("templow"), tomorrow_fc.get("tempLow")) is not None
+        )
 
         # The forecast API returns "remaining period" data — as the day
         # progresses, today's high drops to the current temp and today's low
@@ -4767,6 +4865,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         observed_high - today_high,
                     )
             today_high = max(today_high, observed_high)
+            if observed_low < today_low:
+                # A sensor reading is a real upper bound on the day's low, unlike the stand-in.
+                low_is_estimated = False
             today_low = min(today_low, observed_low)
 
         # Apply learned weather bias correction to tomorrow's forecast
@@ -4812,6 +4913,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             current_indoor_temp=float(current_indoor) if current_indoor is not None else None,
             current_humidity=attrs.get("humidity"),
             timestamp=dt_util.now(),
+            low_is_estimated=low_is_estimated,
+            tomorrow_low_is_estimated=tomorrow_low_is_estimated,
         )
 
     def _maybe_regenerate_briefing_for_drift(self) -> bool:
@@ -4853,6 +4956,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         day_type_changed = self._briefing_day_type is not None and classification.day_type != self._briefing_day_type
         high_drifted = today_high_drift >= BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F
+        # Issue #1211: whether windows are recommended is part of what the text says (header, windows row,
+        # tips). Keyed on the CLASSIFIER's answer (with its hysteresis), not the live-gated flag, which
+        # legitimately flaps within a day and would regenerate the text constantly.
+        briefing_windows = getattr(self, "_briefing_windows_recommended", None)
+        windows_flipped = (
+            briefing_windows is not None
+            and classification.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD)
+            and briefing_windows != classification.forecast_windows_recommended
+        )
 
         # nat_vent_cutoff/reason/evening_open_time drift — only meaningful on
         # HOT/WARM/MILD days, the only day types whose briefing text
@@ -4891,13 +5003,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif briefing_evening_open != live_evening_open:
                 evening_open_drifted = True
 
-        if not (day_type_changed or high_drifted or cutoff_drifted or reason_flipped or evening_open_drifted):
+        if not (
+            day_type_changed
+            or high_drifted
+            or windows_flipped
+            or cutoff_drifted
+            or reason_flipped
+            or evening_open_drifted
+        ):
             return False
 
         _LOGGER.info(
-            "Regenerating briefing text — day_type %s → %s, today_high drift %.1f°F (%s → %s),"
+            "Regenerating briefing text — windows_recommended flipped=%s (%s → %s),"
+            " day_type %s → %s, today_high drift %.1f°F (%s → %s),"
             " nat_vent_cutoff %s → %s (drift %.1fmin), nat_vent_cutoff_reason %s → %s,"
             " evening_open_time %s → %s",
+            windows_flipped,
+            briefing_windows,
+            classification.forecast_windows_recommended,
             self._briefing_day_type,
             classification.day_type,
             today_high_drift,
@@ -4914,6 +5037,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing, self._last_briefing_short = self._build_briefing_text(classification)
         self._briefing_day_type = classification.day_type
         self._briefing_today_high = classification.today_high
+        self._briefing_windows_recommended = classification.forecast_windows_recommended
         self._briefing_nat_vent_cutoff = live_cutoff
         self._briefing_nat_vent_cutoff_reason = live_cutoff_reason
         self._briefing_evening_open_time = live_evening_open
@@ -5009,6 +5133,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         _today_str = dt_util.now().strftime("%Y-%m-%d")
         if self._today_record is not None and self._today_record.date == _today_str:
+            # Issue #1211 (O5): the record's flag means "windows were recommended at any point today". It used
+            # to be frozen at the day's first classification, so a window opened on a day that only became a
+            # windows day later was credited (windows_opened) against a record that said "not recommended".
+            if classification.windows_recommended and not self._today_record.windows_recommended:
+                self._today_record.windows_recommended = True
             return
         _prev = self._today_record if (self._today_record and self._today_record.date == _today_str) else None
         self._today_record = DailyRecord(
@@ -5034,7 +5163,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Capture raw forecast high/low for weather bias learning
         if self.config.get("learning_enabled", True):
             self._today_record.forecast_high_f = classification.today_high
-            self._today_record.forecast_low_f = classification.today_low
+            # Issue #1211: never train the weather bias from the (outdoor - 15) stand-in.
+            self._today_record.forecast_low_f = None if classification.low_is_estimated else classification.today_low
 
     async def _async_send_briefing(
         self,
@@ -5105,13 +5235,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     return
 
                 prev_type = self._current_classification.day_type if self._current_classification else None
-                _thresh = {
-                    "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
-                    "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
-                    "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
-                    "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
-                }
-                classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
+                classification = classify_day(forecast, previous_day_type=prev_type, **self._classify_kwargs())
                 self._current_classification = classification
                 self._classification_fetched_at = dt_util.now()
                 # Issue #511: also mirrors to automation_engine now (previously this call
@@ -5204,6 +5328,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self._briefing_day_type = classification.day_type
             self._briefing_today_high = classification.today_high
+            self._briefing_windows_recommended = classification.forecast_windows_recommended
             # Issue #847 (extended to evening_open_time by #876): bake in this cycle's
             # nat_vent_cutoff/reason/evening_open_time alongside day_type/today_high so
             # _maybe_regenerate_briefing_for_drift()'s drift triggers have a correct
@@ -5954,6 +6079,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_sent_today = False
         self._briefing_day_type = None
         self._briefing_today_high = None
+        self._briefing_windows_recommended = None
         self._briefing_nat_vent_cutoff = None
         self._briefing_nat_vent_cutoff_reason = None
         self._briefing_evening_open_time = None
@@ -6080,6 +6206,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             # Track window compliance — credit any open during a windows-recommended day
                             c = self._current_classification
                             if c and c.windows_recommended and not self._today_record.windows_opened:
+                                self._today_record.windows_recommended = True  # credit and denominator agree (O5)
                                 self._today_record.windows_opened = True
                                 self._today_record.window_open_actual_time = dt_util.now().isoformat()
 
@@ -10574,6 +10701,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _armed_heat, _armed_cool = _armed.floor, _armed.ceiling
         cooling_needed = indoor_temp is not None and indoor_temp > _armed_cool
         heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
+        # Issue #1211: ONE direction rule for both directions (stage B of the shared outside-air rule): above the
+        # armed ceiling outdoor must be cooler, below the armed floor warmer. The same function the live windows
+        # gate uses, applied here to the band the thermostat is ARMED with (the gate uses the configured band, so
+        # the two can differ when Prefer savings widens it). The card follows this live direction; the briefing
+        # follows the classifier's forecast answer, so the two can legitimately differ for part of a day.
+        direction_ok = outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool)
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
@@ -10611,7 +10744,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if heating_needed:
             if windows_physically_open:
                 return _decide("Close windows to enable the heater.")
-            if outdoor_temp is not None and outdoor_temp > indoor_temp:
+            if outdoor_temp is not None and direction_ok:
                 return _decide(
                     f"Open windows briefly — outdoor's warmer ({format_temp(outdoor_temp, unit)} vs"
                     f" {format_temp(indoor_temp, unit)}).",
@@ -12165,14 +12298,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             tomorrow_high=c.tomorrow_high,
             tomorrow_low=c.tomorrow_low,
             current_outdoor_temp=c.today_low,
+            low_is_estimated=c.tomorrow_low_is_estimated,
+            tomorrow_low_is_estimated=c.tomorrow_low_is_estimated,
         )
-        tomorrow_class = classify_day(
-            tomorrow_forecast,
-            threshold_hot=self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
-            threshold_warm=self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
-            threshold_mild=self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
-            threshold_cool=self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
-        )
+        tomorrow_class = classify_day(tomorrow_forecast, **self._classify_kwargs(seed_hysteresis=False))
 
         return {
             "date": tomorrow_str,

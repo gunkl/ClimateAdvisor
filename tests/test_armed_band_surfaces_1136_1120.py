@@ -266,3 +266,23 @@ class TestNextActionReadsTheEnginesResolvedBand:
 
     def test_without_an_engine_the_bare_resolver_is_used(self):
         assert self._card(77.0, None) != "Comfortable — no action needed."
+
+
+class TestNextActionDirectionRule1211:
+    """Issue #1211: the card judges direction with the same shared rule as the live windows gate, in BOTH
+    directions. Mild day, daytime band 68-74."""
+
+    def test_cold_house_warmer_outdoor_suggests_opening_briefly(self):
+        assert _next_action(14, 0, indoor=65.0, outdoor=70.0).startswith("Open windows briefly")
+
+    def test_cold_house_equal_outdoor_does_not(self):
+        assert _next_action(14, 0, indoor=65.0, outdoor=65.0).startswith("Keep windows and doors closed")
+
+    def test_cold_house_colder_outdoor_keeps_windows_closed(self):
+        assert _next_action(14, 0, indoor=65.0, outdoor=50.0).startswith("Keep windows and doors closed")
+
+    def test_hot_house_cooler_outdoor_suggests_opening(self):
+        assert _next_action(14, 0, indoor=77.0, outdoor=70.0).startswith("Open windows")
+
+    def test_hot_house_warmer_outdoor_says_it_will_not_help(self):
+        assert "won't help" in _next_action(14, 0, indoor=77.0, outdoor=80.0)

@@ -80,13 +80,15 @@ class TestFromNormal:
         )
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
 
-    def test_sensor_opened_planned_window_noop(self):
+    def test_sensor_opened_planned_window_is_not_exempt(self):
+        """Issue #1211 (A3): a window opened inside the planned period gets the same nat-vent-or-pause
+        decision as any other (the exemption now only covers the lazy sync)."""
         t = transition(
             DoorWindowLifecycleState.NORMAL,
-            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, within_planned_window=True),
+            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, within_planned_window=True, outdoor=60.0, fan_mode="disabled"),
         )
-        assert t.to_state == DoorWindowLifecycleState.NORMAL
-        assert t.outcome == "planned_window_noop"
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+        assert t.outcome == "pause"
 
     def test_all_sensors_closed_noop(self):
         t = transition(DoorWindowLifecycleState.NORMAL, _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED))
@@ -318,13 +320,14 @@ class TestFromGrace:
         t = transition(DoorWindowLifecycleState.GRACE, _ev(DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN))
         assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
 
-    def test_grace_timer_expired_planned_window_clears(self):
+    def test_grace_timer_expired_planned_window_is_not_a_special_branch(self):
+        """Issue #1211 (A3): inside the planned period a sensor still open at grace expiry re-pauses."""
         t = transition(
             DoorWindowLifecycleState.GRACE,
             _ev(DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED, within_planned_window=True),
         )
-        assert t.to_state == DoorWindowLifecycleState.NORMAL
-        assert t.outcome == "clear_planned_window"
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+        assert t.outcome == "re_pause"
 
     def test_grace_timer_expired_re_pause_nat_vent_ineligible(self):
         t = transition(
@@ -395,7 +398,7 @@ class TestFromPausedDuringGrace:
         )
         assert t.to_state == DoorWindowLifecycleState.PAUSED_IDLE
 
-    def test_grace_timer_expired_planned_window_still_leaves_pause(self):
+    def test_grace_timer_expired_planned_window_no_longer_clears_the_pause_outcome(self):
         t = transition(
             DoorWindowLifecycleState.PAUSED_DURING_GRACE,
             _ev(
@@ -406,7 +409,7 @@ class TestFromPausedDuringGrace:
             ),
         )
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
-        assert t.outcome == "clear_planned_window"
+        assert t.outcome == "re_pause"
 
     def test_all_sensors_closed_lands_on_grace(self):
         t = transition(DoorWindowLifecycleState.PAUSED_DURING_GRACE, _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED))

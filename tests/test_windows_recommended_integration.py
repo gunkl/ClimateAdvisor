@@ -147,26 +147,27 @@ def _make_dt(hour: int, minute: int = 0) -> datetime:
 
 
 class TestWindowsRecommendedPauseSuppression:
-    """Validate that door/window open events do NOT pause HVAC when the
-    classifier has recommended windows and the current time falls within
-    the planned window period.
+    """Door/window events inside the planned window period (Issue #1211, A3, owner decision O8b).
 
-    The gap being tested: if the user manually put HVAC into "cool" mode on a
-    warm morning (before the classifier ran, or via an override), the thermostat
-    state is "cool" while windows_recommended=True and the time is inside the
-    window period.  Without the new suppression method, `handle_door_window_open`
-    would incorrectly turn HVAC off and send a notification.
+    The planned window period is no longer an exemption in the door/window EVENT handlers: a window opened (past
+    the debounce) inside the period gets the same decision as any other -- the nat-vent entry gate starts
+    nat-vent when it passes, and the HVAC pauses right there when it refuses (these engines have no fan, so it
+    refuses). Only the lazy ``_sync_paused_by_door_with_live_sensors()`` reconcile, which has no event and no
+    occupant action, is still exempt inside the period; when the period ends,
+    ``async_sync_after_planned_window_exit()`` runs it once.
 
-    Tests 1, 2, 4, 7, and the first part of 6 are expected to FAIL until
-    `_is_within_planned_window_period()` is implemented and wired into
-    `handle_door_window_open`.
+    The tests in this class were written for the pre-#1211 design (the handler returned silently inside the
+    period) and now pin the post-#1211 outcomes; the class name is kept so history and references still
+    resolve. Original scenario for context: the occupant put HVAC in "cool" on a warm morning with
+    windows_recommended=True inside the window period; the open window must be dealt with in the handler, not
+    left to the next coordinator refresh.
     """
 
     # ------------------------------------------------------------------
     # Test 1 — warm day, HVAC=cool (manual override), inside window period
     # ------------------------------------------------------------------
 
-    def test_no_pause_when_windows_recommended_warm_day(self):
+    def test_pauses_inside_warm_planned_window_when_gate_refuses(self):
         """Warm day, windows_recommended=True, HVAC currently 'cool' (manual override),
         time inside window period (8 AM, window is 6–10 AM).
 
@@ -200,18 +201,23 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        # Suppression must have prevented the pause
-        assert engine._paused_by_door is False, (
-            "HVAC should NOT be paused during a planned warm-day window period "
-            "even when the thermostat is in 'cool' mode"
+        # Issue #1211: no exemption -- the open window pauses the cooling (rule 3), nat-vent being refused
+        assert engine._paused_by_door is True, (
+            "HVAC must be paused by an open window inside a planned warm-day period when nat-vent is refused"
         )
-        engine.hass.services.async_call.assert_not_called()
+        engine.hass.services.async_call.assert_any_call(
+            "climate",
+            "set_hvac_mode",
+            {"entity_id": "climate.thermostat", "hvac_mode": "off"},
+            blocking=True,
+            context=ANY,
+        )
 
     # ------------------------------------------------------------------
     # Test 2 — mild day, HVAC=heat (manual override), inside window period
     # ------------------------------------------------------------------
 
-    def test_no_pause_when_windows_recommended_mild_day(self):
+    def test_pauses_inside_mild_planned_window_when_gate_refuses(self):
         """Mild day, windows_recommended=True, HVAC currently 'heat' (manual override),
         time inside window period (12 PM, window is 10 AM–5 PM).
 
@@ -236,11 +242,9 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is False, (
-            "HVAC should NOT be paused during a planned mild-day window period "
-            "even when the thermostat is in 'heat' mode"
+        assert engine._paused_by_door is True, (
+            "HVAC must be paused by an open window inside a planned mild-day period when nat-vent is refused"
         )
-        engine.hass.services.async_call.assert_not_called()
 
     # ------------------------------------------------------------------
     # Test 3 — hot day (regression guard): pause DOES fire
@@ -286,7 +290,7 @@ class TestWindowsRecommendedPauseSuppression:
     # Test 4 — warm day, HVAC=cool, inside window period: _grace_active stays False
     # ------------------------------------------------------------------
 
-    def test_no_grace_when_windows_recommended(self):
+    def test_pause_without_grace_inside_planned_window(self):
         """When suppression is active, handle_door_window_open must NOT start
         a grace period (since it never paused in the first place).
 
@@ -305,14 +309,14 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is False, "No pause should occur during the planned window period"
-        assert engine._grace_active is False, "No grace period should be started when window suppression is active"
+        assert engine._paused_by_door is True, "Issue #1211: the planned window period no longer suppresses the pause"
+        assert engine._grace_active is False, "A pause does not start a grace period"
 
     # ------------------------------------------------------------------
     # Test 5 — grace expiry with sensor open during window period: no re-pause
     # ------------------------------------------------------------------
 
-    def test_grace_expiry_no_repause_during_window_period(self):
+    def test_grace_expiry_repauses_during_window_period(self):
         """When grace expires and sensor is still open, _re_pause_for_open_sensor
         must NOT re-pause if _is_within_planned_window_period() is True.
 
@@ -370,18 +374,16 @@ class TestWindowsRecommendedPauseSuppression:
         # Grace should be cleared (callback ran to completion)
         assert engine._grace_active is False
 
-        # Must NOT have enqueued _re_pause_for_open_sensor
-        assert engine._paused_by_door is False, (
-            "_re_pause_for_open_sensor must be suppressed during a planned window period"
-        )
-        # _apply_current_scheduled_state is allowed (grace expiry convergence fix #230).
-        # What must NOT be called is _re_pause_for_open_sensor.
+        # Issue #1211 (A3): the re-pause IS enqueued inside the planned window period (it runs the nat-vent gate
+        # and pauses when it refuses); the planned window is no longer a grace-expiry exemption.
+        names = []
         for call_args in engine.hass.async_create_task.call_args_list:
             coro = call_args[0][0]
-            coro_name = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "")
-            assert "_re_pause_for_open_sensor" not in coro_name, (
-                "_re_pause_for_open_sensor must be suppressed during a planned window period"
-            )
+            names.append(getattr(coro, "__qualname__", "") or getattr(coro, "__name__", ""))
+            close = getattr(coro, "close", None)
+            if close:
+                close()  # never awaited here; avoid the "never awaited" warning
+        assert any("_re_pause_for_open_sensor" in n for n in names), names
 
     # ------------------------------------------------------------------
     # Test 6 — classification changes warm→hot: pause re-enabled
@@ -410,9 +412,11 @@ class TestWindowsRecommendedPauseSuppression:
             mock_dt_util.now.return_value = mock_now_inside
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is False, (
-            "Part A: Should NOT pause on warm day inside window period when thermostat is 'cool'"
+        assert engine._paused_by_door is True, (
+            "Part A: Issue #1211 -- pauses on a warm day inside the window period when nat-vent is refused"
         )
+        engine._paused_by_door = False  # reset for part B
+        engine._pre_pause_mode = None
 
         # --- Part B: Hot day, suppression inactive ---
         hot_cls = _hot_day_classification()
@@ -529,8 +533,12 @@ def _make_gate_coord_stub(
     today_low=55.0,
     comfort_cool=75.0,
     comfort_heat=70.0,
+    indoor=None,
 ):
-    """Create a minimal coordinator stub for _apply_outdoor_windows_gate() tests."""
+    """Create a minimal coordinator stub for _apply_outdoor_windows_gate() tests.
+
+    ``indoor`` is the live indoor reading (None = no sensor): Issue #1211 made the gate indoor-aware.
+    """
     coord_mod = _importlib.import_module("custom_components.climate_advisor.coordinator")
     coord = object.__new__(coord_mod.ClimateAdvisorCoordinator)
 
@@ -547,6 +555,8 @@ def _make_gate_coord_stub(
 
     coord._current_classification = cls_obj
     coord._last_outdoor_temp = outdoor_temp
+    coord._get_indoor_temp = MagicMock(return_value=indoor)
+    coord._schedule_planned_window_exit_check = MagicMock()
     coord.config = {
         "comfort_cool": comfort_cool,
         "comfort_heat": comfort_heat,
@@ -634,3 +644,74 @@ class TestOutdoorTempGate:
         assert coord._current_classification.windows_recommended is False, (
             "WARM day with outdoor=80 > comfort_cool=75 should disable windows_recommended"
         )
+
+
+class TestOutdoorGateIsIndoorAware:
+    """Issue #1211 (owner decision O3): with an indoor reading the gate asks which way the air moves the house,
+    instead of only "outdoor more than 15 F below the floor"."""
+
+    def test_cold_house_and_colder_outdoor_clears(self):
+        # indoor 65 < floor 70; outdoor 60 is colder -> windows would chill it further. (60 is not under the old
+        # floor-15 = 55 cutoff, so this is the new behaviour.)
+        coord = _make_gate_coord_stub(60.0, comfort_heat=70.0, indoor=65.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is False
+        coord._schedule_planned_window_exit_check.assert_called_once()
+
+    def test_cold_house_and_warmer_outdoor_keeps(self):
+        coord = _make_gate_coord_stub(68.0, comfort_heat=70.0, indoor=65.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is True
+        coord._schedule_planned_window_exit_check.assert_not_called()
+
+    def test_hot_house_and_warmer_outdoor_clears(self):
+        coord = _make_gate_coord_stub(74.0, comfort_cool=75.0, indoor=78.0 + 1.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is True  # 74 < 79: cooler, helps
+        coord = _make_gate_coord_stub(74.0, comfort_cool=72.0, indoor=73.0 - 0.5)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is False  # outdoor 74 > comfort_cool 72
+
+    def test_in_band_house_is_not_vetoed_by_cold_outdoor(self):
+        coord = _make_gate_coord_stub(45.0, comfort_heat=70.0, comfort_cool=75.0, indoor=72.0)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is True
+
+    def test_no_indoor_reading_keeps_the_extreme_cold_cutoff(self):
+        coord = _make_gate_coord_stub(52.0, comfort_heat=70.0, indoor=None)
+        coord._apply_outdoor_windows_gate()
+        assert coord._current_classification.windows_recommended is False
+
+
+class TestClassifyKwargs:
+    """Issue #1211: every classify_day() call passes the configured comfort band and a same-day hysteresis seed."""
+
+    def _coord(self, *, forecast_flag, fetched):
+        coord_mod = _importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = object.__new__(coord_mod.ClimateAdvisorCoordinator)
+        coord.config = {"comfort_heat": 66, "comfort_cool": 78}
+        cls_obj = _mild_day_classification()
+        cls_obj.forecast_windows_recommended = forecast_flag
+        coord._current_classification = cls_obj
+        coord._classification_fetched_at = fetched
+        return coord
+
+    def test_passes_the_configured_comfort_band(self):
+        coord = self._coord(forecast_flag=False, fetched=None)
+        kwargs = coord._classify_kwargs()
+        assert kwargs["comfort_heat"] == 66.0
+        assert kwargs["comfort_cool"] == 78.0
+
+    def test_seeds_hysteresis_from_todays_previous_classification(self):
+        now = datetime(2026, 4, 22, 12, 0, tzinfo=UTC)
+        coord = self._coord(forecast_flag=True, fetched=now)
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as dt:
+            dt.now.return_value = now
+            assert coord._classify_kwargs()["previous_windows_recommended"] is True
+            assert coord._classify_kwargs(seed_hysteresis=False)["previous_windows_recommended"] is False
+
+    def test_yesterdays_answer_is_never_carried_over(self):
+        coord = self._coord(forecast_flag=True, fetched=datetime(2026, 4, 21, 12, 0, tzinfo=UTC))
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as dt:
+            dt.now.return_value = datetime(2026, 4, 22, 6, 0, tzinfo=UTC)
+            assert coord._classify_kwargs()["previous_windows_recommended"] is False

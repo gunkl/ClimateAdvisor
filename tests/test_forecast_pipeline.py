@@ -371,3 +371,39 @@ class TestForecastNullFieldHandling:
 
         assert result is not None
         assert any("null templow field" in rec.message for rec in caplog.records)
+
+
+class TestLowIsEstimatedProvenance:
+    """Issue #1211: the (outdoor - 15) stand-in keeps its value but is labelled as estimated."""
+
+    def test_real_forecast_low_is_not_estimated(self):
+        coord = _make_coordinator_stub([_make_entry(_TODAY, 70.0), _make_entry(_TOMORROW, 72.0)])
+        coord._outdoor_temp_history = []
+        result = _run_get_forecast(coord)
+        assert result.today_low == pytest.approx(55.0)
+        assert result.low_is_estimated is False
+        assert result.tomorrow_low_is_estimated is False
+
+    def test_missing_forecast_is_estimated_and_value_kept(self):
+        coord = _make_coordinator_stub([])
+        coord._outdoor_temp_history = []
+        result = _run_get_forecast(coord)
+        assert result.today_low == pytest.approx(_CURRENT_OUTDOOR - 15)
+        assert result.low_is_estimated is True
+        assert result.tomorrow_low_is_estimated is True
+
+    def test_null_low_is_estimated(self):
+        entry = {"datetime": f"{_TODAY.isoformat()}T12:00:00-07:00", "temperature": 78.0, "templow": None}
+        coord = _make_coordinator_stub([entry])
+        coord._outdoor_temp_history = []
+        result = _run_get_forecast(coord)
+        assert result.low_is_estimated is True
+        assert result.today_low == pytest.approx(_CURRENT_OUTDOOR - 15)
+
+    def test_observed_reading_below_the_stand_in_makes_the_low_real(self):
+        coord = _make_coordinator_stub([])
+        coord._outdoor_temp_history = [("2026-05-15T05:00:00", 40.0)]
+        result = _run_get_forecast(coord)
+        assert result.today_low == pytest.approx(40.0)
+        assert result.low_is_estimated is False
+        assert result.tomorrow_low_is_estimated is True

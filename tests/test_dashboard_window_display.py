@@ -136,7 +136,8 @@ class TestMildDayWindowFields:
         assert isinstance(c.window_close_time, time)
 
     def test_mild_day_windows_recommended(self):
-        c = classify_day(_make_forecast(today_high=THRESHOLD_MILD + 2, today_low=45))
+        # Issue #1211: recommended only when the high reaches the comfort floor (68 F default)
+        c = classify_day(_make_forecast(today_high=70, today_low=45))
         assert c.windows_recommended is True
 
     def test_mild_day_no_opportunity_fields(self):

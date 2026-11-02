@@ -18,7 +18,10 @@
     "k_passive": -0.04,
     "k_active_cool": -11.8,
     "k_active_heat": 6.78,
-    "ode_enabled": true
+    "ode_enabled": true,
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
@@ -26,8 +29,12 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
-      "note": "Warm-day classification: HVAC off"
+      "windows_recommended": true,
+      "note": "Warm-day classification: HVAC off [Issue #1211: classifier-true setup -- high 80 / low 60 on a warm day means windows ARE recommended 06:00-10:00 (classify_day); the open window below is therefore inside the planned period]",
+      "today_high": 80,
+      "today_low": 60,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
     },
     {
       "time": "2026-07-10T09:01:00",
@@ -65,5 +72,10 @@
       "simulator_support": true,
       "reason": "Issue #1140 (#1142 D1, owner decision): this install has no fan (fan_mode is disabled), so an open window pauses HVAC like any other open window (household rule 3) instead of starting windows-only nat-vent. Previously expected 'nat_vent_still_active': temp_update with nat-vent active and indoor 73F within band [70F, 74F], outdoor 65F < indoor: no exit condition fires (indoor > comfort_heat, outdoor < indoor, outdoor < threshold). Ceiling guard is bypassed by simulator routing when nat_vent_active=True. Nat-vent continues as expected."
     }
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Issue #1211 (C1): this scenario used to hand-set windows_recommended=false on a warm day with a 60 F low, which classify_day never produces; with A3 the planned-window period no longer exempts the handler, so the setup is made classifier-true (flag, 06:00-10:00 times, forecast high 80 / low 60) and the outcomes are unchanged: with no fan configured the handler pauses at the open window."
   ]
 }

@@ -45,13 +45,6 @@
       "note": "Window opens: outdoor 65F < indoor 72.5F, indoor > comfort_heat 70F, outdoor <= threshold 77F — nat vent activates"
     },
     {
-      "time": "2026-05-25T08:05:00",
-      "type": "temp_update",
-      "indoor_f": 72.5,
-      "outdoor_f": 65.0,
-      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
-    },
-    {
       "time": "2026-05-25T10:00:00",
       "type": "temp_update",
       "indoor_f": 73.0,

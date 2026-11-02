@@ -1,6 +1,6 @@
 {
-  "name": "grace_window_period_no_repause",
-  "description": "Warm day with planned window period 06:00–10:00 (windows_recommended=True, hvac_mode=off). Sensor opens at 07:00 during window — planned window gate suppresses pause. Grace might start; sensor opens again at 07:05 during window → no re-pause (within window). No pause fires at any point during the window period.",
+  "name": "grace_window_period_no_fan_pauses_once",
+  "description": "Warm day with planned window period 06:00–10:00 (windows_recommended=True, hvac_mode=off), no fan configured. Sensor opens at 07:00 during the window. Issue #1211 (A3): the planned window is no longer an exemption — the nat-vent gate runs, refuses (no fan) and the handler pauses at once; the second window at 07:05 finds the HVAC already paused (no second pause).",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -30,9 +30,8 @@
     "callback's result so advance_to()'s existing coroutine check can see and enqueue it.",
     "This was a real, previously-silent bug — any scenario spanning briefing_time/wake_time/",
     "sleep_time/midnight would have silently dropped that callback's entire effect.",
-    "Revert test: temporarily disabled _is_within_planned_window_period()'s check in",
-    "handle_door_window_open (automation.py) — both 07:00/07:05 assertions correctly failed (fell",
-    "through to nat-vent activation instead of no-op). Restored; git diff confirmed clean."
+    "Issue #1211 (A3, owner decision O8b): the planned-window early return in handle_door_window_open() (and the matching grace-expiry / _re_pause_for_open_sensor exemptions) is gone. The 07:00 open now runs the nat-vent entry gate; with no fan configured it refuses and the handler pauses (paused). 07:05: already paused, nothing new.",
+    "Revert test (original #476 migration): disabling the planned-window exemption used to fail the 07:00/07:05 assertions; the assertions now encode the post-#1211 behaviour and fail if the handler stops pausing (or silently does nothing)."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -45,7 +44,10 @@
     "briefing_time": "04:15",
     "natural_vent_delta": 3.0,
     "manual_grace_seconds": 300,
-    "door_window_sensors": ["binary_sensor.living_room_window", "binary_sensor.bedroom_window"]
+    "door_window_sensors": [
+      "binary_sensor.living_room_window",
+      "binary_sensor.bedroom_window"
+    ]
   },
   "events": [
     {
@@ -69,13 +71,13 @@
       "time": "2026-07-15T07:00:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens at 07:00, within planned window period (06:00–10:00). Window gate should suppress pause."
+      "note": "Window opens at 07:00, within planned window period (06:00–10:00). Issue #1211: the handler runs the nat-vent gate (refused: no fan) and pauses."
     },
     {
       "time": "2026-07-15T07:05:00",
       "type": "sensor_open",
       "entity": "binary_sensor.bedroom_window",
-      "note": "Second window opens at 07:05. Still within window period — no pause, no change."
+      "note": "Second window opens at 07:05. Already paused — no change."
     },
     {
       "time": "2026-07-15T08:00:00",
@@ -94,22 +96,22 @@
     },
     {
       "at": "2026-07-15T07:00:00",
-      "expect": "classification_applied",
-      "reason": "Sensor opens at 07:00, within planned window period 06:00–10:00. _is_within_planned_window_period() returns True (classification.hvac_mode='off', windows_recommended=True, 07:00 is in [06:00,10:00]) — no pause, no nat vent, so the outcome stays the carried-forward classification_applied from 05:31. Corrected from legacy 'no_action' — see notes.",
+      "expect": "paused",
+      "reason": "Sensor opens at 07:00 inside the planned window with no working fan: nat-vent is refused and the handler pauses right there (Issue #1211 A3 / O8b).",
       "track": "integration"
     },
     {
       "at": "2026-07-15T07:05:00",
-      "expect": "classification_applied",
-      "reason": "Second sensor opens at 07:05, still within window period. Already suppressed — same carried-forward outcome.",
+      "expect": "paused",
+      "reason": "Second sensor opens at 07:05: HVAC is already paused by the first; the carried-forward outcome stays paused.",
       "track": "integration"
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Planned window period gate suppresses pause when sensor opens during the scheduled window",
-    "observed_behavior": "classification_applied (off, windows_recommended) → no_action on sensor_open (07:00, within window) → no_action on second sensor_open (07:05)",
-    "expected_behavior": "During planned window hours, sensor openings are expected and do not trigger pause or nat-vent logic"
+    "summary": "Window opened inside the planned period with no fan: pause recorded by the handler; a second window adds nothing",
+    "observed_behavior": "classification_applied → sensor_open 07:00 → paused → sensor_open 07:05 → paused (unchanged)",
+    "expected_behavior": "Pause on the first open window past the debounce; no repeated pause for the second window"
   },
   "pending_issue": 245
 }

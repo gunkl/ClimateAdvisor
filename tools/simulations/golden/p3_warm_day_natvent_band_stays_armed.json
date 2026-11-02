@@ -13,7 +13,8 @@
     "(c) Occupant experience: without band-armed during nat-vent, the thermostat drops to off and the",
     "    home could overheat if outdoor temps rise mid-day. Band arm ensures a ceiling fallback.",
     "Regression proof: remove comfort_band_applied from sensor_opened path → comfort_band_armed at",
-    "18:05 fails; set _natural_vent_active=False → nat_vent_still_active fails."
+    "18:05 fails; set _natural_vent_active=False → nat_vent_still_active fails.",
+    "Issue #1211 (C1): this scenario used to hand-set windows_recommended=false on a warm day with a 60 F low, which classify_day never produces; with A3 the planned-window period no longer exempts the handler, so the setup is made classifier-true (flag, 06:00-10:00 times, forecast high 80 / low 60) and the outcomes are unchanged: with no fan configured the handler pauses at the open window."
   ],
   "config": {
     "comfort_heat": 70,
@@ -21,7 +22,9 @@
     "setback_heat": 62,
     "setback_cool": 82,
     "natural_vent_delta": 3.0,
-    "door_window_sensors": ["binary_sensor.living_room_window"]
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ]
   },
   "events": [
     {
@@ -36,8 +39,12 @@
       "type": "classification",
       "day_type": "warm",
       "hvac_mode": "off",
-      "windows_recommended": false,
-      "note": "Warm-day classification. Band armed at [62/76]. windows_recommended=false so sensor_open goes through the nat-vent eligibility check (not the planned-period bypass)."
+      "windows_recommended": true,
+      "note": "Warm-day classification. Band armed at [62/76]. windows_recommended=true (classifier-true), and the planned period no longer bypasses the handler: sensor_open goes through the nat-vent eligibility check. [Issue #1211: classifier-true setup -- high 80 / low 60 on a warm day means windows ARE recommended 06:00-10:00 (classify_day); the open window below is therefore inside the planned period]",
+      "today_high": 80,
+      "today_low": 60,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00"
     },
     {
       "time": "2026-06-15T08:05:00",
@@ -75,7 +82,10 @@
     {
       "at": "2026-06-15T10:00:00",
       "expect": "expect_band",
-      "expect_band": {"floor": 70.0, "ceiling": 76.0},
+      "expect_band": {
+        "floor": 70.0,
+        "ceiling": 76.0
+      },
       "reason": "Band must still be [comfort_heat=70/comfort_cool=76] at 10 AM — nat-vent does not change the thermostat's band setpoints. Occupied+awake uses the full comfort band.",
       "track": "logic"
     }
@@ -85,5 +95,7 @@
     "summary": "P3: nat-vent activates (fan on) and comfort band stays armed [70/76] — no HVAC-off command on window open",
     "observed_behavior": "classification_applied; sensor_opened→natural_ventilation; _natural_vent_active=True; comfort_band_applied [70/76] persists; no set_hvac_mode(off)",
     "expected_behavior": "Occupant opens windows per recommendation — fan circulates; thermostat self-manages within the full comfort band. If outdoor eventually rises, ceiling guard escalates to AC with the band already set."
-  }
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
 }

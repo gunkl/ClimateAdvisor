@@ -25,7 +25,6 @@ from enum import Enum
 
 
 class GraceExpiryOutcome(Enum):
-    CLEAR_PLANNED_WINDOW = "clear_planned_window"
     RE_PAUSE = "re_pause"
     ADOPT_OVERRIDE = "adopt_override"
     CLEAR_NORMAL = "clear_normal"
@@ -35,7 +34,6 @@ class GraceExpiryOutcome(Enum):
 class GraceExpiryInputs:
     """Field-by-field correspondence to ``_on_grace_expired()``:
 
-    within_planned_window            -> self._is_within_planned_window_period()
     any_sensor_open                   -> self._any_monitored_sensor_holding_open() (Issue #1181)
     source                             -> the grace's own source ("manual" | "automation")
     override_matches_current_decision -> self._override_matches_current_decision(
@@ -43,7 +41,6 @@ class GraceExpiryInputs:
                                           consulted when source == "manual"
     """
 
-    within_planned_window: bool
     any_sensor_open: bool
     source: str
     override_matches_current_decision: bool
@@ -51,9 +48,8 @@ class GraceExpiryInputs:
 
 def decide_grace_expiry_outcome(inputs: GraceExpiryInputs) -> GraceExpiryOutcome:
     """Pure reimplementation of ``_on_grace_expired()``'s first-match-wins chain."""
-    if inputs.within_planned_window:
-        return GraceExpiryOutcome.CLEAR_PLANNED_WINDOW
-
+    # Issue #1211 (A3): no planned-window exemption -- a sensor still open at grace expiry is re-paused (or
+    # handed to nat-vent by the nested gate) inside the planned window period too.
     if inputs.any_sensor_open:
         return GraceExpiryOutcome.RE_PAUSE
 

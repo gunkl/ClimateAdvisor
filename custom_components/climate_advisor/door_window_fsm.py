@@ -468,7 +468,6 @@ def _transition_from_normal(current_state: DoorWindowLifecycleState, event: Door
                 outdoor=inputs.outdoor,
                 comfort_cool=inputs.comfort_cool,
                 nat_vent_delta=inputs.nat_vent_delta,
-                within_planned_window=False if inputs.nat_vent_gate_ruled_out else inputs.within_planned_window,
                 nat_vent_gate_entered=(False if inputs.nat_vent_gate_ruled_out else _nat_vent_may_start(inputs)),
             )
         )
@@ -644,7 +643,6 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
                 outdoor=inputs.outdoor,
                 comfort_cool=inputs.comfort_cool,
                 nat_vent_delta=inputs.nat_vent_delta,
-                within_planned_window=False if inputs.nat_vent_gate_ruled_out else inputs.within_planned_window,
                 nat_vent_gate_entered=(False if inputs.nat_vent_gate_ruled_out else _nat_vent_may_start(inputs)),
             )
         )
@@ -678,7 +676,6 @@ def _transition_from_grace(current_state: DoorWindowLifecycleState, event: DoorW
     if kind == DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED:
         outcome = decide_grace_expiry_outcome(
             GraceExpiryInputs(
-                within_planned_window=inputs.within_planned_window,
                 any_sensor_open=inputs.any_sensor_open,
                 source=inputs.grace_source,
                 override_matches_current_decision=inputs.override_matches_current_decision,
@@ -722,7 +719,6 @@ def _transition_from_paused_during_grace(
         # pre_pause_mode_active is truthy only when CA turned HVAC off (restore target).
         outcome = decide_grace_expiry_outcome(
             GraceExpiryInputs(
-                within_planned_window=inputs.within_planned_window,
                 any_sensor_open=inputs.any_sensor_open,
                 source=inputs.grace_source,
                 override_matches_current_decision=inputs.override_matches_current_decision,

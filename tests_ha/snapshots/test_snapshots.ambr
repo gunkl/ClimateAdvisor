@@ -8,18 +8,15 @@
         Day Type: Warm (84°F)
         HVAC Mode: Off — away
         Occupancy: Away — setback active
-        Windows: Close by 9:00 AM
+        Windows: Closed all day
         Bedtime Setback: No setback
         Tomorrow: Stable (84°F)
       
-      Close up at 9:00 AM before outdoor air warms past indoor.
+      A warm day, and the house is empty, so the away settings below are what apply.
       
-      Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
-      Reopen windows around 9:00 PM when the evening air cools back down.
+      You're currently away. I'm holding the wider energy-saving band (60–80°F) while you're out, so not much should run. Comfort will be restored when you return.
       
-      You're currently away. The HVAC is off today, so not much changes. If it kicks on as a safety net, it'll set back on its own.
-      
-      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      If you want to open a window for some fresh air, go for it. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
       
       Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
     ''',
@@ -27,7 +24,7 @@
         Day Type: Warm (84°F)
         HVAC Mode: Off — away
         Occupancy: Away — setback active
-        Windows: Close by 9:00 AM
+        Windows: Closed all day
         Bedtime Setback: No setback
         Tomorrow: Stable (84°F)
     ''',
@@ -40,7 +37,7 @@
             Day Type: Warm (84°F)
             HVAC Mode: Off — away
             Occupancy: Away — setback active
-            Windows: Close by 9:00 AM
+            Windows: Closed all day
             Bedtime Setback: No setback
             Tomorrow: Stable (84°F)
         ''',
@@ -57,7 +54,7 @@
       ========================================
       
         Day Type: Warm (29°C)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 21–24°C (windows day)
         Windows: Close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (29°C)
@@ -67,15 +64,15 @@
       Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 24°C.
       Reopen windows around 9:00 PM when the evening air cools back down.
       
-      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      If you head out, not much changes today — after about 15 minutes I'll widen the band to 16–27°C to save energy, and restore comfort when you're back.
       
-      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      If you want to open a window for some fresh air, go for it — the thermostat is holding 21–24°C today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
       
       Tomorrow looks pretty similar to today — 29°C for a high. Nothing special planned overnight.
     ''',
     'briefing_tldr': '''
         Day Type: Warm (29°C)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 21–24°C (windows day)
         Windows: Close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (29°C)
@@ -87,7 +84,7 @@
       dict({
         'message': '''
             Day Type: Warm (29°C)
-            HVAC Mode: Off — windows day
+            HVAC Mode: Comfort band 21–24°C (windows day)
             Windows: Close by 9:00 AM
             Bedtime Setback: No setback
             Tomorrow: Stable (29°C)
@@ -105,7 +102,7 @@
       ========================================
       
         Day Type: Mild (72°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F (windows day)
         Windows: Close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
@@ -114,17 +111,17 @@
       
       Open south and east windows for a natural cross-breeze that freshens the air and warms the house for free.
       
-      Close up by 12:00 PM before outdoor air warms past indoor. If it dips below 68°F tonight, I'll bring the heater back on automatically.
+      Close up by 12:00 PM before outdoor air warms past indoor. If the house dips below 70°F tonight, the heater comes back on automatically.
       
-      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
       
-      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      If you want to open a window for some fresh air, go for it — the thermostat is holding 70–75°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
       
       Tomorrow looks pretty similar to today — 72°F for a high. Nothing special planned overnight.
     ''',
     'briefing_tldr': '''
         Day Type: Mild (72°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F (windows day)
         Windows: Close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
@@ -189,24 +186,22 @@
       ========================================
       
         Day Type: Mild (62°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F
         Windows: Closed all day
         Bedtime Setback: No setback
         Tomorrow: Stable (62°F)
       
-      A day where the house practically takes care of itself — it held at or above 70°F on its own overnight, so HVAC stayed off and the weather did the rest.
+      A mild day. Outside air isn't going to warm the house, so the thermostat holds 70–75°F and steps in if it drifts.
       
-      Close up now since indoor's already down to your comfort floor. If it dips below 68°F tonight, I'll bring the heater back on automatically.
+      If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
       
-      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
-      
-      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      If you want to open a window for some fresh air, go for it — the thermostat is holding 70–75°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
       
       Tomorrow looks pretty similar to today — 62°F for a high. Nothing special planned overnight.
     ''',
     'briefing_tldr': '''
         Day Type: Mild (62°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F
         Windows: Closed all day
         Bedtime Setback: No setback
         Tomorrow: Stable (62°F)
@@ -218,7 +213,7 @@
       dict({
         'message': '''
             Day Type: Mild (62°F)
-            HVAC Mode: Off — windows day
+            HVAC Mode: Comfort band 70–75°F
             Windows: Closed all day
             Bedtime Setback: No setback
             Tomorrow: Stable (62°F)
@@ -287,7 +282,7 @@
       ========================================
       
         Day Type: Mild (72°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F (windows day)
         Windows: Close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
@@ -296,17 +291,17 @@
       
       Open south and east windows for a natural cross-breeze that freshens the air and warms the house for free.
       
-      Close up by 12:00 PM before outdoor air warms past indoor. If it dips below 68°F tonight, I'll bring the heater back on automatically.
+      Close up by 12:00 PM before outdoor air warms past indoor. If the house dips below 70°F tonight, the heater comes back on automatically.
       
-      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
       
-      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      If you want to open a window for some fresh air, go for it — the thermostat is holding 70–75°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
       
       Tomorrow looks pretty similar to today — 72°F for a high. Nothing special planned overnight.
     ''',
     'briefing_tldr': '''
         Day Type: Mild (72°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F (windows day)
         Windows: Close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
@@ -318,7 +313,7 @@
       dict({
         'message': '''
             Day Type: Mild (72°F)
-            HVAC Mode: Off — windows day
+            HVAC Mode: Comfort band 70–75°F (windows day)
             Windows: Close by 12:00 PM
             Bedtime Setback: No setback
             Tomorrow: Stable (72°F)
@@ -336,7 +331,7 @@
       ========================================
       
         Day Type: Warm (84°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F (windows day)
         Windows: Close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (84°F)
@@ -346,15 +341,15 @@
       Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
       Reopen windows around 9:00 PM when the evening air cools back down.
       
-      If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+      If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
       
-      If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+      If you want to open a window for some fresh air, go for it — the thermostat is holding 70–75°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
       
       Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
     ''',
     'briefing_tldr': '''
         Day Type: Warm (84°F)
-        HVAC Mode: Off — windows day
+        HVAC Mode: Comfort band 70–75°F (windows day)
         Windows: Close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (84°F)
@@ -366,7 +361,7 @@
       dict({
         'message': '''
             Day Type: Warm (84°F)
-            HVAC Mode: Off — windows day
+            HVAC Mode: Comfort band 70–75°F (windows day)
             Windows: Close by 9:00 AM
             Bedtime Setback: No setback
             Tomorrow: Stable (84°F)
@@ -385,7 +380,7 @@
         ========================================
         
           Day Type: Warm (84°F)
-          HVAC Mode: Off — windows day
+          HVAC Mode: Comfort band 70–75°F (windows day)
           Windows: Close by 9:00 AM
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
@@ -395,15 +390,15 @@
         Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
         Reopen windows around 9:00 PM when the evening air cools back down.
         
-        If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+        If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
         
-        If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+        If you want to open a window for some fresh air, go for it — the thermostat is holding 70–75°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
         
         Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
       ''',
       'briefing_tldr': '''
           Day Type: Warm (84°F)
-          HVAC Mode: Off — windows day
+          HVAC Mode: Comfort band 70–75°F (windows day)
           Windows: Close by 9:00 AM
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
@@ -419,26 +414,26 @@
         ========================================
         
           Day Type: Warm (84°F)
-          HVAC Mode: Off — windows day
-          Windows: Closed all day
+          HVAC Mode: Comfort band 70–75°F (windows day)
+          Windows: Close by now
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
         
-        HVAC is off this morning.
+        Close up now — outdoor's already warmed past indoor.
         
         Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
         Reopen windows around 9:00 PM when the evening air cools back down.
         
-        If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+        If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
         
-        If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+        If you want to open a window for some fresh air, go for it — the thermostat is holding 70–75°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
         
         Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
       ''',
       'briefing_tldr': '''
           Day Type: Warm (84°F)
-          HVAC Mode: Off — windows day
-          Windows: Closed all day
+          HVAC Mode: Comfort band 70–75°F (windows day)
+          Windows: Close by now
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
       ''',
@@ -453,26 +448,26 @@
         ========================================
         
           Day Type: Warm (84°F)
-          HVAC Mode: Off — windows day
-          Windows: Closed all day
+          HVAC Mode: Comfort band 70–75°F (windows day)
+          Windows: Close by now
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
         
-        HVAC is off this morning.
+        Close up now — outdoor's already warmed past indoor.
         
         Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
         Reopen windows around 9:00 PM when the evening air cools back down.
         
-        If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
+        If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
         
-        If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
+        If you want to open a window for some fresh air, go for it — the thermostat is holding 70–75°F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.
         
         Tomorrow looks pretty similar to today — 84°F for a high. Nothing special planned overnight.
       ''',
       'briefing_tldr': '''
           Day Type: Warm (84°F)
-          HVAC Mode: Off — windows day
-          Windows: Closed all day
+          HVAC Mode: Comfort band 70–75°F (windows day)
+          Windows: Close by now
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
       ''',

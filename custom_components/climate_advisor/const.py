@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.26"
+VERSION = "0.8.27"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -179,6 +179,15 @@ TIMER_BOUNDARY_SETTLE_SECONDS = 120  # 2 minutes
 
 # Economizer (window cooling) threshold
 ECONOMIZER_TEMP_DELTA = 3  # °F — activate when outdoor temp within this delta of comfort_cool
+
+# Issue #1211: "would outside air help?" (temperature.outdoor_air_helps). A day's windows stay
+# recommended until the range slips this far past the threshold, so a forecast sitting on the
+# comfort floor does not flip the recommendation every 30-minute cycle.
+WINDOWS_RECOMMENDED_HYSTERESIS_F = 1.5
+# A mild forecast high this close below the comfort floor is a "near miss": the briefing says
+# outside air may help later in the afternoon instead of going silent (the forecast ran 5-10 F low
+# on every recorded flip day).
+WINDOWS_NEAR_MISS_F = 5.0
 
 # Economizer time boundaries for hot-day window cooling
 ECONOMIZER_MORNING_START_HOUR = 6  # 6:00 AM

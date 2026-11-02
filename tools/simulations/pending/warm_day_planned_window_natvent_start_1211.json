@@ -1,0 +1,62 @@
+{
+  "name": "warm_day_planned_window_natvent_start_1211",
+  "description": "Warm morning, windows recommended 06:00–10:00, whole-house fan configured, outdoor 66F cooler than indoor 72F. A window opens at 08:00 inside the planned window. Issue #1211 (A3): the handler runs the nat-vent entry gate itself and starts natural ventilation.",
+  "source": "Issue #1211 pending scenario (promote only with owner review)",
+  "issue": 1211,
+  "notes": [
+    "Issue #1211 (A3): fan-configured twin of golden warm_day_planned_window_no_fan_pauses. The gate passes (temperature + a working fan), so the handler starts nat-vent from the event itself.",
+    "Three-exercise protocol: (a) effectiveness: with the A3 change reverted the handler returns silently and the 12:00/08:00 assertion fails (no natural_ventilation); (b) docs: docs/08 and plans/1142 now say the planned window gates only the lazy sync; (c) occupant: if this regresses, the fan starts up to 30 minutes late against an open window while the AC cools into it."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 66.0,
+      "note": "Early morning: indoor 72F, outdoor 66F — conditions favorable for natural ventilation"
+    },
+    {
+      "time": "2026-07-15T06:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "note": "Warm-day classification: windows recommended 06:00–10:00, hvac_mode=off for the window period"
+    },
+    {
+      "time": "2026-07-15T08:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens at 08:00 — inside the planned 06:00–10:00 window. Issue #1211: the handler runs the nat-vent gate (refused: no fan) and pauses."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T06:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied: hvac_mode=off, windows_recommended=True with 06:00–10:00 window"
+    },
+    {
+      "at": "2026-07-15T08:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opened inside the planned period with a working fan and favourable temperatures: the handler starts nat-vent directly (Issue #1211 A3)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Window inside the planned period starts nat-vent from the handler",
+    "observed_behavior": "classification_applied → sensor_open → natural_ventilation",
+    "expected_behavior": "Nat-vent starts at the debounce expiry, not at the next refresh"
+  }
+}

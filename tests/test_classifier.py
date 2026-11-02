@@ -321,7 +321,7 @@ class TestRecommendations:
         assert result.windows_recommended is True
 
     def test_warm_windows_recommended_at_boundary(self):
-        # Boundary = DEFAULT_COMFORT_COOL(74) - ECONOMIZER_TEMP_DELTA(3) = 71.
+        # Boundary = comfort_cool(74, the default here) - ECONOMIZER_TEMP_DELTA(3) = 71.
         # today_low=71 == boundary → exactly at boundary (<=), windows_recommended=True
         result = self._classify(today_high=80, today_low=71)
         assert result.windows_recommended is True
@@ -333,8 +333,59 @@ class TestRecommendations:
         assert result.hvac_mode == "off"
 
     def test_mild_windows_recommended(self):
-        result = self._classify(today_high=67)
+        # Issue #1211: high 70 reaches the 68 F comfort floor -> outside air can warm the house
+        result = self._classify(today_high=70)
         assert result.windows_recommended is True
+        assert result.forecast_windows_recommended is True
+
+    def test_mild_windows_not_recommended_when_high_never_reaches_the_floor(self):
+        # Issue #1211: the 10-27 day (high 65, floor 68). Times stay set; only the recommendation is off.
+        result = self._classify(today_high=65, today_low=49)
+        assert result.windows_recommended is False
+        assert result.forecast_windows_recommended is False
+        assert result.window_open_time == time(10, 0)
+        assert result.window_close_time == time(17, 0)
+
+    def test_mild_windows_recommended_at_the_floor_but_not_just_below(self):
+        assert self._classify(today_high=68).windows_recommended is True
+        assert self._classify(today_high=67.9).windows_recommended is False
+
+    def test_mild_uses_the_configured_floor(self):
+        snap = ForecastSnapshot(
+            today_high=66, today_low=50, tomorrow_high=66, tomorrow_low=50, current_outdoor_temp=60.0
+        )
+        assert classify_day(snap, comfort_heat=64, comfort_cool=74).windows_recommended is True
+        assert classify_day(snap, comfort_heat=68, comfort_cool=74).windows_recommended is False
+
+    def test_warm_uses_the_configured_ceiling_not_the_default(self):
+        # ceiling 78 -> a 75 F low still cools the house; with the default 74 ceiling it would not
+        snap = ForecastSnapshot(
+            today_high=82, today_low=75, tomorrow_high=82, tomorrow_low=75, current_outdoor_temp=75.0
+        )
+        assert classify_day(snap, comfort_heat=68, comfort_cool=78).windows_recommended is True
+        assert classify_day(snap, comfort_heat=68, comfort_cool=74).windows_recommended is False
+
+    def test_estimated_low_never_recommends_windows(self):
+        snap = ForecastSnapshot(
+            today_high=72,
+            today_low=50,
+            tomorrow_high=72,
+            tomorrow_low=50,
+            current_outdoor_temp=60.0,
+            low_is_estimated=True,
+        )
+        assert classify_day(snap).windows_recommended is False
+
+    def test_hysteresis_keeps_a_recommended_day_recommended(self):
+        snap = ForecastSnapshot(
+            today_high=67, today_low=50, tomorrow_high=67, tomorrow_low=50, current_outdoor_temp=60.0
+        )
+        assert classify_day(snap, previous_windows_recommended=False).windows_recommended is False
+        assert classify_day(snap, previous_windows_recommended=True).windows_recommended is True
+
+    def test_non_windows_day_types_never_recommend(self):
+        for high in (90, 50, 30):
+            assert self._classify(today_high=high).windows_recommended is False
 
     def test_mild_window_open_time(self):
         result = self._classify(today_high=67)
@@ -1044,3 +1095,26 @@ class TestAppliedThresholdAndMargin:
         """If standard threshold gives same as previous, no hysteresis needed."""
         result = classify_day(make_forecast(90), previous_day_type=DAY_TYPE_HOT)
         assert result.day_type == DAY_TYPE_HOT
+
+
+class TestLowIsEstimatedPropagation:
+    """Issue #1211: the provenance flag rides from the snapshot onto the classification."""
+
+    def test_flag_propagates(self):
+        snap = ForecastSnapshot(
+            today_high=65,
+            today_low=50,
+            tomorrow_high=65,
+            tomorrow_low=50,
+            current_outdoor_temp=65,
+            low_is_estimated=True,
+            tomorrow_low_is_estimated=True,
+        )
+        c = classify_day(snap)
+        assert c.low_is_estimated is True
+        assert c.tomorrow_low_is_estimated is True
+
+    def test_flag_defaults_false(self):
+        snap = ForecastSnapshot(today_high=65, today_low=50, tomorrow_high=65, tomorrow_low=50, current_outdoor_temp=65)
+        c = classify_day(snap)
+        assert c.low_is_estimated is False

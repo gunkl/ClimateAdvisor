@@ -124,6 +124,7 @@ from tools.sim_harness.scenario_model import (  # noqa: E402
     build_classification_from_event,
     merged_scenario_config,
     parse_event_time,
+    pin_scenario_thermal_model,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
@@ -399,6 +400,8 @@ class FakeHassSession:
         #   "hourly_forecast": list of {"datetime": ISO8601, "temperature": float}
         if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict):
             engine._thermal_model = scenario["thermal_model"]
+            if coordinator is not None:
+                pin_scenario_thermal_model(coordinator, scenario["thermal_model"])
         if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
             engine._hourly_forecast_temps = scenario["hourly_forecast"]
             if coordinator is not None:
@@ -662,7 +665,7 @@ def _dispatch_event(
             # it waits for all_closed() to be called.
 
     elif etype == "classification":
-        classification = _build_classification_from_event(event)
+        classification = _build_classification_from_event(event, config)
         # Issue #295: pass the current injected indoor temp so apply_classification
         # can evaluate the pre-cool achievement gate — mirrors coordinator behaviour
         # where _get_indoor_temp() is always passed on each cycle.

@@ -115,10 +115,10 @@ python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status,sensor
 ## Common Debugging Scenarios
 
 ### "HVAC paused but I opened windows as planned"
-1. Check `sensor.climate_advisor_status` — should show "windows open (as planned)" during recommended window period
-2. Check `sensor.climate_advisor_day_type` — should be "warm" or "mild"
-3. Check `sensor.climate_advisor_last_action_reason` — look for "planned window period" in the reason
-4. If status shows "paused — door/window open" during a windows-recommended period, this is Bug #51
+1. Check `sensor.climate_advisor_day_type` — should be "warm" or "mild"
+2. Check whether windows were actually recommended today: the briefing header says "(windows day)" and the Windows row shows "Close by …" only when outside air helps (Issue #1211: mild days are no longer always windows days; look for `windows_recommended` in the Debug tab or the `Regenerating briefing text — windows_recommended flipped` log line)
+3. Since Issue #1211 a window opened past the debounce inside the planned period is NOT exempt: the handler starts nat-vent when the gate passes (fan configured, outdoor cooler than indoor, indoor above the floor, hvac_fan not above the ceiling) and **pauses** when it refuses. A pause there is expected when no fan is configured or the gate fails — check the log line "Nat vent not started … primary gates failed"
+4. If a window stayed open past the end of the planned period with the HVAC still running, look for "Planned window period ended — reconciling door/window pause with live sensors" (the exit-edge reconcile, also run when the live outdoor gate clears the recommendation)
 
 ### "Got unexpected notifications"
 1. Check `sensor.climate_advisor_last_action_reason` for the notification trigger
@@ -541,9 +541,9 @@ See [Chart Log Spec — Regression Decision Tree](chart-log-spec.md#regression-d
 ## Diagnostic Logging
 
 Key decision points in automation.py emit debug/info logs:
-- `handle_door_window_open()` — logs classification context, planned window period check
-- `_grace_expired()` — logs whether sensors are still open, planned window check
-- `_re_pause_for_open_sensor()` — logs planned window period suppression
+- `handle_door_window_open()` — logs classification context; inside a planned window period it logs "running the nat-vent gate" (Issue #1211: no exemption, it then starts nat-vent or pauses)
+- `_grace_expired()` — logs whether sensors are still open (no planned-window branch since Issue #1211)
+- `_re_pause_for_open_sensor()` — logs the nat-vent gate result; "Planned window period ended — reconciling door/window pause with live sensors" comes from the exit-edge reconcile (Issue #1211, O4)
 - `_async_door_window_changed()` (coordinator) — logs classification, windows_recommended, planned_window_active
 
 To see these in real-time:

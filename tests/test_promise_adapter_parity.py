@@ -170,7 +170,9 @@ def _parity_days() -> list[int]:
     out = list(range(4))
     for i in range(400):
         kinds = {k for _, k, _ in build_plan(day_seed_of(7, i), "coordinator").timed} & wanted
-        for k in kinds:
+        # sorted(): a set of strings iterates in per-process hash order, so each xdist worker would
+        # otherwise collect different [index] params ("Different tests were collected between gwN and gwM").
+        for k in sorted(kinds):
             if seen.get(k, 0) < 3 and i not in out:
                 seen[k] = seen.get(k, 0) + 1
                 out.append(i)

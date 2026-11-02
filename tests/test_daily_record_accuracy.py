@@ -781,3 +781,56 @@ class TestIssue912ThermostatFanOnlyRuntimeField:
 def _freeze_module_now(frozen_now):
     """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
     frozen_now(_frozen_now_value())
+
+
+class TestEstimatedLowNotRecorded:
+    """Issue #1211: a forecast low that is only the (outdoor - 15) stand-in must never reach
+    the learning record, where it would train the weather bias."""
+
+    def _record_for(self, **cls_kwargs):
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._today_record = None
+        coord.config = {"learning_enabled": True}
+        coord._ensure_today_record = types.MethodType(ClimateAdvisorCoordinator._ensure_today_record, coord)
+        cls = _make_classification(day_type="mild", hvac_mode="off", today_low=50.0, **cls_kwargs)
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util:
+            mock_dt_util.now.return_value = datetime(2026, 4, 5, 8, 0, 0)
+            coord._ensure_today_record(cls)
+        return coord._today_record
+
+    def test_real_low_is_recorded(self):
+        assert self._record_for().forecast_low_f == 50.0
+
+    def test_estimated_low_is_not_recorded(self):
+        record = self._record_for(low_is_estimated=True)
+        assert record.forecast_low_f is None
+        assert record.forecast_high_f is not None  # the high is still a real forecast
+
+
+class TestRecordWindowsFlagIsAnyTimeToday:
+    """Issue #1211 (O5): the record's windows_recommended means "recommended at any point today"."""
+
+    def _coord(self, record):
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._today_record = record
+        coord.config = {"learning_enabled": False}
+        coord._ensure_today_record = types.MethodType(ClimateAdvisorCoordinator._ensure_today_record, coord)
+        return coord
+
+    def _call(self, coord, windows_recommended):
+        cls = _make_classification(day_type="mild", hvac_mode="off", windows_recommended=windows_recommended)
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util:
+            mock_dt_util.now.return_value = datetime(2026, 4, 5, 13, 0, 0)
+            coord._ensure_today_record(cls)
+
+    def test_later_recommendation_turns_the_flag_on(self):
+        coord = self._coord(_make_today_record(date="2026-04-05", windows_recommended=False))
+        self._call(coord, True)
+        assert coord._today_record.windows_recommended is True
+
+    def test_flag_never_turns_back_off(self):
+        coord = self._coord(_make_today_record(date="2026-04-05", windows_recommended=True))
+        self._call(coord, False)
+        assert coord._today_record.windows_recommended is True

@@ -72,7 +72,7 @@ class WhfHvacOwnership(Enum):
 
 class FanRateLimitState(Enum):
     """Whether the next fan toggle command is currently deferred by the
-    rapid-cycling backstop, per ``_fan_toggle_rate_limited()``."""
+    rapid-cycling backstop (the FSM's DEFER_NEW write in ``_activate_fan``/``_deactivate_fan``)."""
 
     NOT_DEFERRED = "not_deferred"
     DEFERRED_ACTIVATE = "deferred_activate"
@@ -207,8 +207,9 @@ def _derive_hvac_ownership(inputs: FanLifecycleInputs) -> WhfHvacOwnership:
 
 
 def _derive_rate_limit(inputs: FanLifecycleInputs) -> FanRateLimitState:
-    """Pure reimplementation of the rate-limit bookkeeping set by
-    _fan_toggle_rate_limited() (Issue #641/#649)."""
+    """Pure reimplementation of the rate-limit bookkeeping set by the
+    FSM's DEFER_NEW write in _activate_fan/_deactivate_fan and cleared by _clear_fan_deferral_record()
+    (Issue #641/#649/#1212)."""
     if inputs.fan_rate_limited_until is None:
         return FanRateLimitState.NOT_DEFERRED
     if inputs.fan_rate_limited_direction == "activate":

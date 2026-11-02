@@ -1,7 +1,7 @@
 """Pure decision core for the fan toggle rapid-cycling backstop (Issue #641/#649,
 extracted for Issue #731 Phase 1).
 
-Pure reimplementation of ``_fan_toggle_rate_limited()``'s decision logic — the
+Pure decision logic of the rate-limit backstop (formerly ``_fan_toggle_rate_limited()``, deleted in Issue #1212) — the
 hard safety backstop against rapid fan on/off/on cycling. Templated on
 ``nat_vent_gate.py``'s style (a simple pure-decision module): every field on
 ``FanToggleRateLimitInputs`` corresponds to a value the real method reads, and
@@ -12,9 +12,8 @@ logging: logging is a shell-only concern in every pure module in this codebase
 (see ``fan_drift_reconciliation.py``'s and ``nat_vent_gate.py``'s docstrings for
 the same convention).
 
-Scope: this is a pure decision extraction only. ``_fan_toggle_rate_limited()``
-itself is NOT changed to delegate to this module in this phase — that wiring is
-a later phase in the Issue #731 plan.
+Scope: a pure decision extraction. ``automation.py`` reaches it through ``fan_fsm`` (``_resolve_fan_fsm_state``);
+the record writes happen in ``_activate_fan``/``_deactivate_fan`` and the clears in ``_clear_fan_deferral_record``.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from enum import Enum
 
 
 class FanToggleRateLimitOutcome(Enum):
-    """The three real outcomes _fan_toggle_rate_limited() can produce."""
+    """The three real outcomes the fan toggle rate-limit decision can produce."""
 
     ALLOW = "allow"
     DEFER_NEW = "defer_new"
@@ -63,7 +62,7 @@ class FanToggleRateLimitInputs:
 def decide_fan_toggle_rate_limit(
     inputs: FanToggleRateLimitInputs,
 ) -> tuple[FanToggleRateLimitOutcome, datetime | None]:
-    """Pure reimplementation of _fan_toggle_rate_limited()'s decision logic.
+    """The pure fan toggle rate-limit decision (the FSM path's rate-limit step).
 
     Returns (outcome, applies_at). ``applies_at`` is non-None only for
     DEFER_NEW/DEFER_DUPLICATE (the moment the deferral window ends); it is

@@ -11914,7 +11914,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         Issue #649: reworded from the original "(rate-limited Xs ago)", which didn't say
         what was pending or when it would resolve — this names the direction (using the
-        same "activate"/"deactivate" strings _fan_toggle_rate_limited() already tracks)
+        same "activate"/"deactivate" strings the fan FSM path already tracks)
         and the exact clock time the deferred toggle will apply.
         """
         until = getattr(ae, "_fan_rate_limited_until", None)

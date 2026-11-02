@@ -542,3 +542,188 @@ class TestIsWithinPlannedWindowPeriodOdeCutoff:
             # the static classifier close time (11:00) hasn't arrived yet.
             mock_dt.now.return_value = datetime(2026, 7, 10, 9, 15, 1)
             assert ae._is_within_planned_window_period() is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #1231 / #1218: the planned window period must END on time
+# ---------------------------------------------------------------------------
+
+
+class TestPlannedWindowPeriodEndsOnTime_1231:
+    """Occupant: the briefing says "close windows by 17:00", but after 17:00 the Status card kept saying "windows
+    open (as planned)" until 19:00-23:00 and the background open-window check was skipped for those hours. The
+    forward-only nat-vent scan re-resolves the cutoff to "now + 1 h" on every recompute once the crossing is
+    behind us (``nat_vent_cutoff_already_reached=True``), and the engine compared only the cutoff's time of day.
+    """
+
+    @staticmethod
+    def _engine(*, static_close, cutoff, already_reached=False):
+        ae = _make_ae_stub()
+        ae._is_within_planned_window_period = types.MethodType(
+            _ae_mod.AutomationEngine._is_within_planned_window_period, ae
+        )
+        ae._current_classification = _make_warm_classification(window_close_time=static_close)
+        ae._nat_vent_cutoff = cutoff
+        ae._nat_vent_cutoff_already_reached = already_reached
+        return ae
+
+    @staticmethod
+    def _within(ae, now):
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            return ae._is_within_planned_window_period()
+
+    def test_already_reached_ends_the_period_even_though_cutoff_is_an_hour_ahead(self):
+        now = datetime(2026, 7, 10, 18, 0, 0)
+        ae = self._engine(static_close=time(17, 0), cutoff=datetime(2026, 7, 10, 19, 0, 0), already_reached=True)
+        assert self._within(ae, now) is False
+
+    def test_not_already_reached_cutoff_today_still_governs(self):
+        ae = self._engine(static_close=time(17, 0), cutoff=datetime(2026, 7, 10, 19, 0, 0), already_reached=False)
+        assert self._within(ae, datetime(2026, 7, 10, 18, 0, 0)) is True
+
+    def test_cutoff_dated_tomorrow_early_falls_back_to_todays_static_close(self):
+        ae = self._engine(static_close=time(17, 0), cutoff=datetime(2026, 7, 11, 11, 0, 0))
+        assert self._within(ae, datetime(2026, 7, 10, 14, 0, 0)) is True
+
+    def test_cutoff_dated_tomorrow_late_does_not_extend_todays_period(self):
+        ae = self._engine(static_close=time(17, 0), cutoff=datetime(2026, 7, 11, 18, 0, 0))
+        assert self._within(ae, datetime(2026, 7, 10, 17, 30, 0)) is False
+
+    def test_cutoff_dated_yesterday_falls_back_to_todays_static_close(self):
+        ae = self._engine(static_close=time(17, 0), cutoff=datetime(2026, 7, 9, 11, 0, 0))
+        assert self._within(ae, datetime(2026, 7, 10, 14, 0, 0)) is True
+
+    def test_before_open_time_is_not_within(self):
+        ae = self._engine(static_close=time(17, 0), cutoff=None)
+        assert self._within(ae, datetime(2026, 7, 10, 5, 59, 0)) is False
+
+    def test_default_flag_value_on_a_fresh_engine_is_false(self):
+        from tests.test_dry_run import _make_automation_engine
+
+        assert _make_automation_engine()._nat_vent_cutoff_already_reached is False
+
+
+def _reached_classification():
+    return _make_warm_classification(window_close_time=time(17, 0))
+
+
+class TestApplyClassificationStoresAlreadyReached_1231:
+    def test_apply_classification_stores_the_flag(self):
+        from tests.test_dry_run import _make_automation_engine
+
+        engine = _make_automation_engine()
+        cutoff = datetime(2026, 7, 10, 19, 0, 0)
+        asyncio.run(
+            engine.apply_classification(
+                _reached_classification(), nat_vent_cutoff=cutoff, nat_vent_cutoff_already_reached=True
+            )
+        )
+        assert engine._nat_vent_cutoff == cutoff
+        assert engine._nat_vent_cutoff_already_reached is True
+
+    def test_a_caller_passing_no_cutoff_resets_both(self):
+        from tests.test_dry_run import _make_automation_engine
+
+        engine = _make_automation_engine()
+        engine._nat_vent_cutoff = datetime(2026, 7, 10, 19, 0, 0)
+        engine._nat_vent_cutoff_already_reached = True
+        asyncio.run(engine.apply_classification(_reached_classification()))
+        assert engine._nat_vent_cutoff is None
+        assert engine._nat_vent_cutoff_already_reached is False
+
+    def test_the_engines_own_re_pass_keeps_the_flag(self):
+        """Structural (AST): the reactive re-pass in automation.py re-applies the stored cutoff, so it must carry
+        the stored flag too, else one reactive tick silently re-opens the period."""
+        import ast
+        from pathlib import Path
+
+        src = Path(_ae_mod.__file__).read_text(encoding="utf-8")
+        passes = []
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "apply_classification":
+                kws = {k.arg: k.value for k in node.keywords}
+                if "nat_vent_cutoff" in kws:
+                    passes.append(
+                        (node.lineno, ast.unparse(kws.get("nat_vent_cutoff_already_reached", ast.Constant(None))))
+                    )
+        assert passes, "expected the reactive re-pass call site"
+        assert all(flag == "self._nat_vent_cutoff_already_reached" for _, flag in passes), passes
+
+
+class TestEveryProductionCallerKeepsThePlansClose_1231:
+    def test_no_production_apply_classification_call_drops_the_cutoff_or_flag(self):
+        """Structural (AST): a caller that passes neither value resets the engine to the static close, which
+        re-opens a planned window period the plan already ended (grace expiry and the cancel-override follow-up
+        did this until #1231). Every production call must carry both."""
+        import ast
+        from pathlib import Path
+
+        pkg = Path(__file__).resolve().parents[1] / "custom_components" / "climate_advisor"
+        missing, sites = [], 0
+        for path in sorted(pkg.glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "apply_classification":
+                    sites += 1
+                    kws = {k.arg for k in node.keywords}
+                    if not {"nat_vent_cutoff", "nat_vent_cutoff_already_reached"} <= kws:
+                        missing.append(f"{path.name}:{node.lineno}")
+        assert sites >= 7, sites
+        assert not missing, missing
+
+
+class TestCoordinatorPassesAlreadyReached_1231:
+    def test_reassert_setpoint_now_passes_the_flag(self):
+        import importlib
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = MagicMock()
+        coord.automation_engine.apply_classification = AsyncMock()
+        coord._current_classification = _reached_classification()
+        coord._last_predicted_indoor = []
+        coord._get_indoor_temp = MagicMock(return_value=72.0)
+        cutoff = datetime(2026, 7, 10, 19, 0, 0)
+        coord._nat_vent_plan = {"nat_vent_cutoff": cutoff, "nat_vent_cutoff_already_reached": True}
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_reassert_setpoint_now, coord)
+        asyncio.run(method("test"))
+        kw = coord.automation_engine.apply_classification.await_args.kwargs
+        assert kw["nat_vent_cutoff"] == cutoff
+        assert kw["nat_vent_cutoff_already_reached"] is True
+
+    def test_every_coordinator_site_that_passes_a_cutoff_also_passes_the_flag(self):
+        """Structural: a new/edited call site cannot pass the cutoff without the flag (AST, not a re-implementation)."""
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "custom_components" / "climate_advisor" / "coordinator.py"
+        sites = 0
+        for node in ast.walk(ast.parse(src.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "apply_classification":
+                kws = {k.arg for k in node.keywords}
+                if "nat_vent_cutoff" in kws:
+                    sites += 1
+                    assert "nat_vent_cutoff_already_reached" in kws, f"line {node.lineno}: cutoff without the flag"
+        assert sites == 4, f"expected 4 coordinator sites, found {sites}"
+
+
+class TestExitEdgeFiresOnceWhenPeriodEndsViaAlreadyReached_1231:
+    """The exit-edge reconcile (pauses HVAC for a window left open) must still fire exactly once when the period
+    ends because the plan reports the crossing already behind us."""
+
+    def test_edge_fires_once_then_not_again(self):
+        ae = _make_ae_stub()
+        for name in ("_is_within_planned_window_period", "consume_planned_window_exit_edge"):
+            setattr(ae, name, types.MethodType(getattr(_ae_mod.AutomationEngine, name), ae))
+        ae._planned_window_was_active = False
+        ae._current_classification = _make_warm_classification(window_close_time=time(17, 0))
+        ae._nat_vent_cutoff = datetime(2026, 7, 10, 16, 30, 0)
+        ae._nat_vent_cutoff_already_reached = False
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 7, 10, 16, 0, 0)
+            assert ae.consume_planned_window_exit_edge() is False  # period starts active: no edge
+            assert ae._planned_window_was_active is True
+            mock_dt.now.return_value = datetime(2026, 7, 10, 17, 5, 0)
+            ae._nat_vent_cutoff = datetime(2026, 7, 10, 18, 0, 0)  # next grid point after "now"
+            ae._nat_vent_cutoff_already_reached = True
+            assert ae.consume_planned_window_exit_edge() is True
+            assert ae.consume_planned_window_exit_edge() is False

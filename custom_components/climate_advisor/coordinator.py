@@ -3169,6 +3169,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=indoor_temp,
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+                nat_vent_cutoff_already_reached=bool(
+                    (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
+                ),
             )
             _LOGGER.debug("[coalesce-diag] after apply_classification() [coalesce path]")
             hvac_commanded = True
@@ -3690,6 +3693,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     predicted_indoor=self._last_predicted_indoor,
                     indoor_temp=self._get_indoor_temp(),
                     nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+                    nat_vent_cutoff_already_reached=bool(
+                        (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
+                    ),
                 )
                 _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
 
@@ -5369,6 +5375,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+                nat_vent_cutoff_already_reached=bool(
+                    (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
+                ),
             )
 
             # Initialize today's learning record, preserving any counters already accumulated
@@ -5873,6 +5882,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         held_plan["nat_vent_cutoff"] = previous_plan.get("nat_vent_cutoff")
         held_plan["nat_vent_cutoff_reason"] = previous_reason
         held_plan["evening_open_time"] = previous_plan.get("evening_open_time")
+        # Issue #1231: the flag describes the held cutoff, so it is held with it (the engine reads the pair).
+        held_plan["nat_vent_cutoff_already_reached"] = previous_plan.get("nat_vent_cutoff_already_reached", False)
         return held_plan
 
     def _target_band_lower_upper_now(self) -> tuple[float | None, float | None]:
@@ -8123,6 +8134,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+                nat_vent_cutoff_already_reached=bool(
+                    (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
+                ),
             )
             _LOGGER.info(
                 "Setpoint re-asserted after %s: reasserted day_type=%s hvac_mode=%s",

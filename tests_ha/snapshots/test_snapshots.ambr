@@ -9,7 +9,7 @@
         HVAC Mode: Off — away
         Occupancy: Away — setback active
         Windows: Closed all day
-        Bedtime Setback: No setback
+        Bedtime Setback: away setback held
         Tomorrow: Stable (84°F)
       
       A warm day, and the house is empty, so the away settings below are what apply.
@@ -25,7 +25,7 @@
         HVAC Mode: Off — away
         Occupancy: Away — setback active
         Windows: Closed all day
-        Bedtime Setback: No setback
+        Bedtime Setback: away setback held
         Tomorrow: Stable (84°F)
     ''',
     'fan': 'disabled',
@@ -38,7 +38,7 @@
             HVAC Mode: Off — away
             Occupancy: Away — setback active
             Windows: Closed all day
-            Bedtime Setback: No setback
+            Bedtime Setback: away setback held
             Tomorrow: Stable (84°F)
         ''',
         'title': '🏠 Your Home Climate Plan for Today',
@@ -61,7 +61,7 @@
       
       Close up at 9:00 AM before outdoor air warms past indoor.
       
-      Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 24°C.
+      Close up by 9:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 24°C.
       Reopen windows around 9:00 PM when the evening air cools back down.
       
       If you head out, not much changes today — after about 15 minutes I'll widen the band to 16–27°C to save energy, and restore comfort when you're back.
@@ -146,7 +146,7 @@
       
       Cold day — heater runs all day. Help it out: close north-side curtains, open south-facing ones for free solar heat, and minimize time holding exterior doors open.
       
-      Tonight I'm using a conservative setback — 66°F instead of the usual 60°F. When it's this cold, a deeper setback takes too long to recover from in the morning.
+      At bedtime I'll set back to 66°F.
       
       If you head out, I'll drop to 60°F after about 15 minutes. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.
       
@@ -338,7 +338,7 @@
       
       Close up at 9:00 AM before outdoor air warms past indoor.
       
-      Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+      Close up by 9:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
       Reopen windows around 9:00 PM when the evening air cools back down.
       
       If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
@@ -387,7 +387,7 @@
         
         Close up at 9:00 AM before outdoor air warms past indoor.
         
-        Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+        Close up by 9:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
         Reopen windows around 9:00 PM when the evening air cools back down.
         
         If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
@@ -421,7 +421,7 @@
         
         Close up now — outdoor's already warmed past indoor.
         
-        Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+        The AC will step in above 75°F to hold your comfort ceiling.
         Reopen windows around 9:00 PM when the evening air cools back down.
         
         If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.
@@ -455,7 +455,7 @@
         
         Close up now — outdoor's already warmed past indoor.
         
-        Close up by 10:00 AM before outdoor temps climb — seal the cool air inside so the AC can take over above 75°F.
+        The AC will step in above 75°F to hold your comfort ceiling.
         Reopen windows around 9:00 PM when the evening air cools back down.
         
         If you head out, not much changes today — after about 15 minutes I'll widen the band to 60–80°F to save energy, and restore comfort when you're back.

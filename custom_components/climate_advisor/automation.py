@@ -255,6 +255,7 @@ from .nat_vent_lifecycle import (
     NatVentLifecycleState,
     derive_nat_vent_lifecycle_state,
 )
+from .nat_vent_plan import effective_window_close
 from .nat_vent_reactivation_lockout import is_reactivation_locked_out
 from .occupancy_fsm import (
     AwayVacationDecision,
@@ -1376,6 +1377,9 @@ class AutomationEngine:
         # self._nat_vent_plan by apply_classification() — see
         # _is_within_planned_window_period()'s docstring.
         self._nat_vent_cutoff: datetime | None = None
+        # Issue #1231 (absorbs #1218): the plan's "crossing already behind us" flag, mirrored with the cutoff.
+        # When True the cutoff is only the next grid point after "now", not a real close -- the period is over.
+        self._nat_vent_cutoff_already_reached: bool = False
         self._paused_by_door = False
         # Issue #1211 (O4): was the planned window period active at the last exit check? See
         # ``consume_planned_window_exit_edge()``.
@@ -2207,7 +2211,7 @@ class AutomationEngine:
         Returns True when ALL conditions hold:
         1. Classification exists with windows_recommended=True
         2. HVAC mode is "off" (no active heating/cooling to protect)
-        3. Current time is between window_open_time and window_close_time
+        3. Current time is between window_open_time and the window close (dated compare, see below)
 
         When True, the lazy ``_sync_paused_by_door_with_live_sensors()`` reconcile does not pause for an open
         sensor -- the user is following the plan. Issue #1211 (A3): the EVENT handlers no longer use it as an
@@ -2224,6 +2228,18 @@ class AutomationEngine:
         ``_apply_comfort_band()`` below, which stops CA's own comfort-band arm from writing an
         active mode through open windows in the first place — it does not rely on this
         function's behavior.
+
+        Issue #1231 (absorbs #1218): the close is resolved by ``nat_vent_plan.effective_window_close()`` -- the
+        same helper the briefing uses -- and compared as DATED datetimes, never as a bare time of day:
+
+        - the plan's forward-only scan sets ``nat_vent_cutoff_already_reached`` once the outdoor/indoor
+          crossing is behind us, and its cutoff is then just "the next grid point after now". Reading that as a
+          close kept this period open for hours past the briefed 17:00 (Status "windows open (as planned)" until
+          19:00-23:00, background open-window pause skipped). Already reached means the period has ended;
+        - a cutoff dated another day says nothing about when TODAY's period ends (a cutoff tomorrow 11:00 used
+          to end today's period early, tomorrow 16:00 used to keep it open) -> today's static close applies.
+
+        The upper bound stays inclusive (``<=``) at exactly the close, as before.
         """
         c = self._current_classification
         if not c or not c.windows_recommended:
@@ -2241,11 +2257,23 @@ class AutomationEngine:
         # this gate could stay exempt past the displayed close time (the exact #818
         # condition — ODE cutoff earlier than the static hour).
         _cutoff = getattr(self, "_nat_vent_cutoff", None)
-        window_close_time = _cutoff.time() if _cutoff is not None else c.window_close_time
-        if not window_close_time:
+        if _cutoff is not None and getattr(self, "_nat_vent_cutoff_already_reached", False) is True:
+            return False  # Issue #1231: the crossing is behind us; the "cutoff" is only the next grid point
+        now = dt_util.now()
+        close_dt = effective_window_close(_cutoff, False, c.window_close_time, now)
+        if close_dt is None:
             return False
-        now_time = dt_util.now().time()
-        return c.window_open_time <= now_time <= window_close_time
+        open_dt = now.replace(hour=c.window_open_time.hour, minute=c.window_open_time.minute, second=0, microsecond=0)
+        try:
+            return open_dt <= now <= close_dt
+        except TypeError:  # naive vs aware: never let a mixed pair raise out of a control gate
+            _LOGGER.warning(
+                "Planned window period: naive/aware mix (open=%s now=%s close=%s) -- comparing wall-clock values",
+                open_dt,
+                now,
+                close_dt,
+            )
+            return open_dt.replace(tzinfo=None) <= now.replace(tzinfo=None) <= close_dt.replace(tzinfo=None)
 
     def consume_planned_window_exit_edge(self) -> bool:
         """True once when the planned window period has just ENDED (Issue #1211, owner decision O4).
@@ -4460,6 +4488,7 @@ class AutomationEngine:
         predicted_indoor: list[dict] | None = None,
         indoor_temp: float | None = None,
         nat_vent_cutoff: datetime | None = None,
+        nat_vent_cutoff_already_reached: bool = False,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -4483,10 +4512,16 @@ class AutomationEngine:
                 door/window pause exemption ends at the same moment the occupant was
                 actually told nat-vent stops helping — not a possibly-later static
                 hour. None (the pre-#817 default) falls back to the static bound.
+            nat_vent_cutoff_already_reached: Issue #1231 (absorbs #1218) -- the plan's
+                ``nat_vent_cutoff_already_reached`` flag (the forward-only scan found the outdoor/indoor
+                crossing already behind us, so ``nat_vent_cutoff`` is only the next grid point after "now").
+                When True the planned window period is over. Callers that pass no cutoff reset both to
+                None/False.
         """
         async with self._decision_pass("apply_classification"):
             self._current_classification = classification
             self._nat_vent_cutoff = nat_vent_cutoff
+            self._nat_vent_cutoff_already_reached = bool(nat_vent_cutoff_already_reached)
             # Reset here only — see self._comfort_mode_family_changed_this_tick's own
             # __init__ comment for the precise (coarser-than-the-name-suggests) scope
             # this actually has: a family change from a call site outside
@@ -9085,6 +9120,7 @@ class AutomationEngine:
             predicted_indoor=predicted_indoor,
             indoor_temp=current_temp,
             nat_vent_cutoff=self._nat_vent_cutoff,
+            nat_vent_cutoff_already_reached=self._nat_vent_cutoff_already_reached,
         )
 
     async def reconcile_fan_on_startup(
@@ -10777,7 +10813,12 @@ class AutomationEngine:
         # Otherwise apply current classification
         if self._current_classification:
             _LOGGER.info("Grace expired: applying current classification")
-            await self.apply_classification(self._current_classification)
+            # Issue #1231: carry the plan's close through, or the reset reopens the planned window period.
+            await self.apply_classification(
+                self._current_classification,
+                nat_vent_cutoff=self._nat_vent_cutoff,
+                nat_vent_cutoff_already_reached=self._nat_vent_cutoff_already_reached,
+            )
 
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""

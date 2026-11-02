@@ -37,13 +37,18 @@ _HOUSE = {
 }
 
 
-async def _house_in_period(make_house, *, suppress_refresh: bool = True, **overrides):
+async def _house_in_period(make_house, *, suppress_refresh: bool = True, in_period: bool = True, **overrides):
     house = await make_house(**{**_HOUSE, **overrides})
     await house.advance(minutes=6)  # past the start-up window that suppresses override detection
     engine = house.coordinator.automation_engine
     c = engine._current_classification
     assert c is not None and c.windows_recommended and c.hvac_mode == "off", "precondition: a windows day"
-    assert engine._is_within_planned_window_period(), "precondition: inside the planned window period"
+    if in_period:
+        assert engine._is_within_planned_window_period(), "precondition: inside the planned window period"
+    else:
+        # Issue #1231 (#1218): the plan reports its crossing already behind us, so the planned period has ended.
+        assert engine._nat_vent_cutoff_already_reached, "precondition: the plan's crossing is already reached"
+        assert not engine._is_within_planned_window_period(), "precondition: the planned period has ended"
     if suppress_refresh:
         house.coordinator.async_request_refresh = AsyncMock()
     return house, engine
@@ -70,10 +75,15 @@ async def test_positive_control_with_refresh_allowed_natvent_also_starts(make_ho
     assert house.fan.is_on
 
 
-async def test_window_in_period_with_gate_refusing_pauses_in_the_handler(make_house) -> None:
+async def test_window_on_a_windows_day_with_gate_refusing_pauses_in_the_handler(make_house) -> None:
     """Outdoor 71 is warmer than indoor 70 (both inside the 68-74 band, so the windows day stands), so nat-vent is
-    refused: the handler pauses right there."""
-    house, engine = await _house_in_period(make_house, initial_indoor_f=70.0, outdoor_f=71.0)
+    refused: the handler pauses right there.
+
+    Issue #1231 (#1218): outdoor already above indoor IS the plan's close crossing, already reached, so the planned
+    window period has ended by the time the window opens (before #1231 the forward-only cutoff kept it open). A
+    temperature refusal of the gate always coincides with a reached crossing, so this is the reachable form of the
+    case; the occupant outcome is unchanged: the handler itself pauses within the debounce, with no refresh."""
+    house, engine = await _house_in_period(make_house, in_period=False, initial_indoor_f=70.0, outdoor_f=71.0)
     await house.open("window")
     await house.advance(seconds=_DEBOUNCE_S + 30)
 

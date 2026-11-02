@@ -2881,6 +2881,13 @@ def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
         # Issue #508's watchdog mirror: grace_end_time is typically still in the future here
         # (the timer would have fired correctly on its own) — "expired" would be misleading.
         return "Grace period recovered (no override was active)", settings
+    # Issue #1199: grace end instants are stored as UTC; show the occupant's local time.
+    try:
+        _end = dt_util.parse_datetime(grace_end) if grace_end else None
+        if isinstance(_end, datetime.datetime):
+            grace_end = dt_util.as_local(_end).isoformat()
+    except TypeError, ValueError, AttributeError:
+        pass
     return f"Grace period recovered (expired {grace_end})", settings
 
 

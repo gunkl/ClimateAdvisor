@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -194,9 +194,9 @@ def _arm_fan_off_grace_while_paused(engine: AutomationEngine) -> None:
     engine._grace_end_time = _GRACE_END
 
 
-def _run_check(engine: AutomationEngine) -> None:
+def _run_check(engine: AutomationEngine, now: datetime = _NOW) -> None:
     with (
-        patch(f"{_DT_PATH}.now", return_value=_NOW),
+        patch(f"{_DT_PATH}.now", return_value=now),
         patch(f"{_DT_PATH}.parse_datetime", side_effect=lambda s: datetime.fromisoformat(s)),
         patch(f"{_DT_PATH}.as_local", side_effect=lambda x: x),
     ):
@@ -373,14 +373,16 @@ class TestEvalLogKeyResets:
         _run_check(engine)
         _run_check(engine)  # repeat -> DEBUG
 
+        # Issue #1199: grace end instants are aware (UTC); the shared naive fixture end is made aware for this restart.
+        engine._grace_end_time = datetime.fromisoformat(engine._grace_end_time).replace(tzinfo=UTC).isoformat()
         with (
             patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()),
-            patch(f"{_DT_PATH}.now", return_value=_NOW),
+            patch(f"{_DT_PATH}.now", return_value=_NOW.replace(tzinfo=UTC)),  # aware, like dt_util.now() (Issue #1199)
             patch(f"{_DT_PATH}.parse_datetime", side_effect=lambda s: datetime.fromisoformat(s)),
             patch(f"{_DT_PATH}.as_local", side_effect=lambda x: x),
         ):
             engine._start_grace_period_action("manual", trigger="fan_off", duration_override=10800)
-        _run_check(engine)
+        _run_check(engine, _NOW.replace(tzinfo=UTC))
 
         levels = [r.levelno for r in caplog.records if "Nat-vent evaluation" in r.getMessage()]
         assert levels == [logging.INFO, logging.DEBUG, logging.INFO]

@@ -207,13 +207,22 @@ class TestOffWithOpenWindowIsTreatedAsOnHotDays:
 
     @_DAYS
     def test_off_during_heat_grace_with_window_open_is_confirmed(self, day, indoor, ca_first):
+        """The occupant changes away from CA's mode (a first change), then switches Off inside its grace.
+
+        Issue #1209: the first change used to be "heat" in every row. In the ``mild_ca_in_heat`` row CA itself had
+        commanded heat, so "the occupant sets heat" was no change at all: the coordinator's detector fires only when the
+        live mode differs from ``ca_expected_mode(commanded, label)`` (coordinator ``_async_thermostat_changed``), so
+        that input is unreachable in production, and at expiry a live heat equal to CA's commanded heat now
+        self-resolves. The first change is therefore the occupant's heat, or cool when CA is already in heat.
+        """
+        first = "cool" if ca_first == "heat" else "heat"
         s = _Scene(day=day, indoor=indoor, ca_first=ca_first)
-        s.occupant_sets("heat", old_mode=ca_first)
+        s.occupant_sets(first, old_mode=ca_first)
         s.confirm_elapses()
-        assert s.engine._manual_override_mode == "heat"
+        assert s.engine._manual_override_mode == first
         s.window(open_=True)
 
-        s.occupant_sets("off", old_mode="heat")
+        s.occupant_sets("off", old_mode=first)
         s.confirm_elapses()
 
         assert s.events.count("override_confirmed") == 2

@@ -116,3 +116,74 @@ class TestIsAlwaysConfirmOrigin:
 
         assert not is_always_confirm_origin("normal")
         assert not is_always_confirm_origin(None)
+
+
+# ---------------------------------------------------------------------------
+# Issue #1209: the expiry also honours the mode Climate Advisor itself commanded.
+# Occupant story: on a warm or mild day the day label is "off" while CA runs cool (or heat) on the comfort band. A
+# thermostat glitch that returns to CA's own mode must not become a 1 h manual override.
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+CONFIRM = OverrideConfirmPathOutcome.CONFIRM
+DISCARD = OverrideConfirmPathOutcome.DISCARD_SELF_RESOLVED
+
+# (id, setpoint_override, live, label, commanded, expected)
+_1209_MATRIX = [
+    ("warm-back-to-commanded-cool", False, "cool", "off", "cool", DISCARD),
+    ("warm-back-to-commanded-heat", False, "heat", "off", "heat", DISCARD),
+    ("warm-back-to-commanded-heat_cool", False, "heat_cool", "off", "heat_cool", DISCARD),
+    ("warm-still-the-glitch-mode", False, "heat", "off", "cool", CONFIRM),
+    ("warm-occupant-off-1159", False, "off", "off", "cool", CONFIRM),
+    ("warm-occupant-off-never-commanded-1159", False, "off", "off", None, CONFIRM),
+    ("warm-glitch-mode-never-commanded", False, "cool", "off", None, CONFIRM),
+    ("hot-back-to-label-commander-differs", False, "cool", "cool", "heat", DISCARD),
+    ("hot-back-to-label-never-commanded", False, "cool", "cool", None, DISCARD),
+    ("hot-occupant-off", False, "off", "cool", "cool", CONFIRM),
+    # #1159 (verification finding): an Off equal to CA's own commanded Off (nat-vent exit Off-hold, door/window pause)
+    # is reachable as the occupant's change (their heat/cool in the pause, then Off) and is still confirmed.
+    ("mild-off-equals-commanded-off-1159", False, "off", "off", "off", CONFIRM),
+    ("hot-off-equals-commanded-off-1159", False, "off", "cool", "off", CONFIRM),
+    ("setpoint-origin-always-confirms", True, "cool", "off", "cool", CONFIRM),
+    ("unavailable-discards", False, "unavailable", "off", "cool", DISCARD),
+]
+
+
+@pytest.mark.parametrize(
+    ("setpoint", "live", "label", "commanded", "expected"),
+    [
+        pytest.param(
+            sp,
+            live,
+            label,
+            cmd,
+            exp,
+            id=rid,
+        )
+        for rid, sp, live, label, cmd, exp in _1209_MATRIX
+    ],
+)
+def test_expiry_split_honours_the_commanded_mode_1209(setpoint, live, label, commanded, expected):
+    assert (
+        decide_override_confirm_path(
+            setpoint_override=setpoint, current_mode=live, classification_mode=label, commanded_mode=commanded
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("commanded", "label", "expected"),
+    [
+        ("cool", "off", "cool"),  # warm day: CA runs cool on the band, label off
+        ("heat_cool", "cool", "heat_cool"),  # heat_cool is never a label
+        (None, "off", "off"),  # never commanded: the label
+        (None, None, None),
+    ],
+)
+def test_ca_expected_mode_is_the_commanded_mode_first_1209(commanded, label, expected):
+    """The detector's definition: a live mode equal to this is not a change, so it can never reach the expiry."""
+    from custom_components.climate_advisor.override_confirm_split import ca_expected_mode
+
+    assert ca_expected_mode(commanded, label) == expected

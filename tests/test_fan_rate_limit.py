@@ -10,7 +10,7 @@ upstream decision logic asked for the reversal.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
@@ -128,7 +128,7 @@ class TestFanToggleRateLimitSuppression:
         """_fan_rate_limited_until is set to command_time + interval — the field the
         status-tab suffix (_whf_rate_limit_suffix) reads."""
         engine = _make_engine()
-        t0 = datetime(2026, 8, 15, 6, 36, 0)
+        t0 = datetime(2026, 8, 15, 6, 36, 0, tzinfo=UTC)  # aware, like dt_util.now() (Issue #1199)
         with patch(_DT_NOW_PATH, return_value=t0):
             asyncio.run(engine._activate_fan(reason="initial activation"))
 

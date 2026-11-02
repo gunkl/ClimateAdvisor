@@ -48,10 +48,11 @@ a datetime it doesn't otherwise need.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 
 from .const import UNAVAILABLE_STATES
+from .time_utils import instant_after
 
 
 @dataclass(frozen=True)
@@ -157,7 +158,7 @@ def decide_grace_start(
     if duration <= 0:
         return None
 
-    return GraceUntil(at=now + timedelta(seconds=duration), source=source, should_notify=should_notify)
+    return GraceUntil(at=instant_after(duration, now=now), source=source, should_notify=should_notify)
 
 
 @dataclass(frozen=True)
@@ -249,7 +250,7 @@ def decide_revisit(*, has_revisit_callback: bool, delay_seconds: float, now: dat
     """
     if not has_revisit_callback:
         return None
-    return ScheduledReevaluation(at=now + timedelta(seconds=delay_seconds), reason="revisit")
+    return ScheduledReevaluation(at=instant_after(delay_seconds, now=now), reason="revisit")
 
 
 def decide_override_confirm(
@@ -264,7 +265,7 @@ def decide_override_confirm(
     """
     if confirm_seconds <= 0:
         return None
-    return OverrideConfirmPending(at=now + timedelta(seconds=confirm_seconds), mode=detected_mode)
+    return OverrideConfirmPending(at=instant_after(confirm_seconds, now=now), mode=detected_mode)
 
 
 def decide_fan_thermo_backstop(
@@ -280,7 +281,7 @@ def decide_fan_thermo_backstop(
     """
     if not fan_running:
         return None
-    return ScheduledReevaluation(at=now + timedelta(seconds=delay_seconds), reason="fan_thermo_backstop")
+    return ScheduledReevaluation(at=instant_after(delay_seconds, now=now), reason="fan_thermo_backstop")
 
 
 _FAN_MODE_DISABLED = "disabled"  # mirrors const.FAN_MODE_DISABLED — duplicated locally per the
@@ -389,7 +390,7 @@ def decide_setpoint_retry_schedule(
     current, unchanged behavior — this function does not add a give-up path.
     """
     return PendingSetpointRetry(
-        at=now + timedelta(seconds=delay_seconds),
+        at=instant_after(delay_seconds, now=now),
         temperature=temperature,
         mode=mode,
         write_seq=write_seq,

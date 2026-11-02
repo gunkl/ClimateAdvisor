@@ -170,12 +170,15 @@ class TestArrivingHomeHold:
         eng._manual_override_active = True  # a new unrelated override must not look like a stale hold
         assert eng.occupancy_restore_hold_reason() is None
 
-    def test_off_day_has_nothing_to_defer(self):
-        eng, events, _call = _engine()
+    def test_off_day_defers_like_any_other_day(self):
+        """Issue #1208: warm/mild days (label "off") arm the comfort band, so the arrival restore exists and the
+        #1050 hold applies to it. Rewritten from ``test_off_day_has_nothing_to_defer`` (its premise was the bug)."""
+        eng, events, call = _engine()
         eng._current_classification = _classification("off")
         eng._manual_override_active = True
         _home(eng)
-        assert "occupancy_restore_deferred" not in _names(events)
+        assert "occupancy_restore_deferred" in _names(events)
+        assert "occupancy_comfort_restored" not in _names(events)
 
 
 class TestLeavingWithPendingChange:

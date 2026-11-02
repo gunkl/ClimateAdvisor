@@ -314,6 +314,7 @@ from .nat_vent_plan import (
 )
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
+from .override_confirm_split import ca_expected_mode
 from .promise_journal import (
     Command as _PromiseCommand,
 )
@@ -354,6 +355,7 @@ from .temperature import (
     unit_key_from_attr,
     unit_mismatch,
 )
+from .time_utils import instant_after
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
     WHF_OWN_COMMAND_ECHO_S,
@@ -1340,7 +1342,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
 
         # Startup coalescing: suppress override detection for 5 minutes, then evaluate state (Issue #321)
-        _coalesce_expiry = dt_util.now() + timedelta(seconds=300)
+        _coalesce_expiry = instant_after(300)
         self._startup_coalesce_expiry = _coalesce_expiry.isoformat()
 
         @callback
@@ -1355,7 +1357,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         _LOGGER.info(
             "Startup coalescing window started — override detection suppressed for 300s, coalescing at %s",
-            _coalesce_expiry.strftime("%H:%M:%S"),
+            dt_util.as_local(_coalesce_expiry).strftime("%H:%M:%S"),
         )
 
         # Start minimum fan runtime rolling cycle (Issue #77) — not clock-aligned
@@ -3613,7 +3615,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             # Populate first-write-wins prediction archive (PRED_ARCHIVE_HORIZON_HOURS lookahead).
             # setdefault ensures the earliest (most advance) prediction is kept per 30-min slot.
-            _archive_cutoff = dt_util.now() + timedelta(hours=PRED_ARCHIVE_HORIZON_HOURS)
+            _archive_cutoff = instant_after(PRED_ARCHIVE_HORIZON_HOURS * 3600)
             for _ae in self._last_predicted_indoor:
                 try:
                     _ae_dt = datetime.fromisoformat(_ae["ts"])
@@ -5615,7 +5617,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if _pc_modifier is not None:
             _pc_trigger_time = self._compute_pre_cool_trigger_time()
             if _pc_trigger_time is not None:
-                _pc_trigger_h = _pc_trigger_time.hour + _pc_trigger_time.minute / 60.0
+                _pc_local = dt_util.as_local(_pc_trigger_time)
+                _pc_trigger_h = _pc_local.hour + _pc_local.minute / 60.0
                 _pc_target = compute_pre_cool_target(self.config, _pc_modifier)
 
         return list(
@@ -5991,7 +5994,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         now = dt_util.now()
         if trigger_time <= now:
-            _LOGGER.info("Pre-cool trigger time %s already passed; skipping scheduling", trigger_time.strftime("%H:%M"))
+            _LOGGER.info(
+                "Pre-cool trigger time %s already passed; skipping scheduling",
+                dt_util.as_local(trigger_time).strftime("%H:%M"),
+            )
             return
 
         # Build the pre-cool target for status display
@@ -6007,7 +6013,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_target = pre_cool_target
         self._pre_cool_status = (
             f"Pre-cool scheduled ({format_temp(pre_cool_target, self.config.get('temp_unit', 'fahrenheit'))} "
-            f"@ {trigger_time.strftime('%I:%M %p').lstrip('0')})"
+            f"@ {dt_util.as_local(trigger_time).strftime('%I:%M %p').lstrip('0')})"
         )
 
     async def _async_pre_cool_trigger(self, now: datetime) -> None:
@@ -6059,12 +6065,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.hass, self._zone_scoped(self._async_pre_cool_trigger), new_trigger
         )
         self._pre_cool_trigger_dt = new_trigger
+        _local_trigger = dt_util.as_local(new_trigger)
         self._pre_cool_status = (
-            f"Pre-cool rescheduled ({new_trigger.strftime('%I:%M %p').lstrip('0')}) — nat-vent exited early"
+            f"Pre-cool rescheduled ({_local_trigger.strftime('%I:%M %p').lstrip('0')}) — nat-vent exited early"
         )
         _LOGGER.info(
             "Pre-cool trigger pulled earlier to %s — nat-vent exited ahead of its scheduled window close",
-            new_trigger.strftime("%H:%M"),
+            _local_trigger.strftime("%H:%M"),
         )
 
     async def _async_end_of_day(self, now: datetime) -> None:
@@ -6204,14 +6211,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return  # Timer already pending for this sensor
 
             debounce_sec = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS)
-            _expiry_time = dt_util.now() + timedelta(seconds=debounce_sec)
+            _expiry_time = instant_after(debounce_sec)
             _expiry_iso = _expiry_time.isoformat()
             self._door_open_timer_expiry[entity_id] = _expiry_iso
             _LOGGER.info(
                 "Contact sensor opened: %s — debounce started (%ds), nat vent eval at %s",
                 entity_id,
                 debounce_sec,
-                _expiry_time.strftime("%H:%M:%S"),
+                dt_util.as_local(_expiry_time).strftime("%H:%M:%S"),
             )
 
             @callback
@@ -6606,9 +6613,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # already-working handling for "turned out to match what CA wants anyway." See the
             # PR discussion for this issue for the full analysis.
             and new_state.state
-            != (
-                self.automation_engine._last_commanded_hvac_mode
-                or (self._current_classification.hvac_mode if self._current_classification else None)
+            != ca_expected_mode(
+                self.automation_engine._last_commanded_hvac_mode,
+                self._current_classification.hvac_mode if self._current_classification else None,
             )
         ):
             # Mode changed outside of door/window pause to something
@@ -7121,8 +7128,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Use _last_commanded_hvac_mode so heat_cool mode is handled (classification.hvac_mode
             # is always "cool"/"heat"/"off" — never "heat_cool" — so the old check missed heat_cool).
             ae = self.automation_engine
-            _ca_active_mode = ae._last_commanded_hvac_mode or (
-                self._current_classification.hvac_mode if self._current_classification else None
+            _ca_active_mode = ca_expected_mode(
+                ae._last_commanded_hvac_mode,
+                self._current_classification.hvac_mode if self._current_classification else None,
             )
             if not _setpoint_numeric:
                 # Not a real setpoint pair: nothing was counted above, so nothing may be registered as an
@@ -11925,7 +11933,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return ""
         direction = getattr(ae, "_fan_rate_limited_direction", None)
         pending = "on" if direction == "activate" else "off"
-        return f" ({pending} pending — 5-min floor, applies at {until.strftime('%H:%M:%S')})"
+        return f" ({pending} pending — 5-min floor, applies at {dt_util.as_local(until).strftime('%H:%M:%S')})"
 
     def _append_indoor_blind_suffix(self, status: str | None, *, card: str) -> str | None:
         """Append the blind-fan note to a Fan (WHF)/(HVAC) card value (Issue #1037).
@@ -12893,8 +12901,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 except ValueError:
                     until_dt = None
             if until_dt is None:
-                until_dt = now + timedelta(minutes=max(0.0, float(window) - float(ran)))
-            until = until_dt.strftime("%H:%M")
+                until_dt = instant_after(max(0.0, float(window) - float(ran)) * 60.0, now=now)
+            until = dt_util.as_local(until_dt).strftime("%H:%M")
             tol_txt = format_temp_delta(float(tolerance), unit, 1)
             if hold.get("zone") == "margin":
                 where = f"near the {side}, still inside the comfort range"
@@ -13206,7 +13214,7 @@ def _decide_pre_cool_reschedule(
         return None
     if not pre_cool_eligible:
         return None
-    candidate = now + timedelta(minutes=nat_vent_close_delay_minutes)
+    candidate = instant_after(nat_vent_close_delay_minutes * 60.0, now=now)
     if candidate >= current_trigger_at:
         return None
     return candidate
@@ -13660,10 +13668,10 @@ def _compute_pre_cool_trigger_time_pure(
         # If window close is before midnight (typical), use today; else tomorrow
         if wct_dt < now:
             wct_dt = wct_dt + timedelta(days=1)
-        trigger = wct_dt + timedelta(minutes=PRE_COOL_POST_NAT_VENT_DELAY_MINUTES)
+        trigger = instant_after(PRE_COOL_POST_NAT_VENT_DELAY_MINUTES * 60.0, now=wct_dt)  # Issue #1199: UTC
         _LOGGER.info(
             "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
-            trigger.strftime("%H:%M"),
+            dt_util.as_local(trigger).strftime("%H:%M"),
             c.window_close_time.strftime("%H:%M"),
             PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
             pre_cool_target,
@@ -13677,10 +13685,10 @@ def _compute_pre_cool_trigger_time_pure(
     # If wake_time already passed, schedule for tomorrow night
     if wake_dt < now:
         wake_dt = wake_dt + timedelta(days=1)
-    trigger = wake_dt - timedelta(hours=PRE_COOL_WAKE_OFFSET_HOURS)
+    trigger = instant_after(-PRE_COOL_WAKE_OFFSET_HOURS * 3600.0, now=wake_dt)  # Issue #1199: UTC
     _LOGGER.info(
         "Pre-cool scheduled for %s (wake_time %s - %.0fh fallback); target %.1f°F",
-        trigger.strftime("%H:%M"),
+        dt_util.as_local(trigger).strftime("%H:%M"),
         wake_str,
         PRE_COOL_WAKE_OFFSET_HOURS,
         pre_cool_target,

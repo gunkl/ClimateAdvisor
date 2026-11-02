@@ -443,3 +443,39 @@ class TestHvacFanOverrideDetected:
     def test_idle_lands_protecting_like_the_whf_press(self):
         t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.HVAC_FAN_OVERRIDE_DETECTED, confirm_seconds=600.0))
         assert t.to_state == _IDLE_PROTECTING
+
+
+class TestConfirmExpiryHonoursTheCommandedMode1209:
+    """Issue #1209: a change back on the mode CA commanded (warm day: label off, CA cooling) is not confirmed."""
+
+    _EXPIRED = OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED
+
+    def test_from_no_grace_back_on_the_commanded_mode_discards(self):
+        t = transition(
+            _PENDING_NONE,
+            _ev(self._EXPIRED, current_mode="cool", classification_mode="off", commanded_mode="cool"),
+        )
+        assert t.to_state == _IDLE_NONE
+        assert t.outcome == "discard_self_resolved"
+
+    def test_from_unprotected_grace_back_on_the_commanded_mode_leaves_that_grace_running(self):
+        t = transition(
+            _PENDING_UNPROTECTED,
+            _ev(self._EXPIRED, current_mode="cool", classification_mode="off", commanded_mode="cool"),
+        )
+        assert t.to_state == _IDLE_UNPROTECTED
+        assert t.outcome == "discard_self_resolved"
+
+    def test_control_still_divergent_from_the_commanded_mode_confirms(self):
+        t = transition(
+            _PENDING_NONE,
+            _ev(self._EXPIRED, current_mode="heat", classification_mode="off", commanded_mode="cool"),
+        )
+        assert t.to_state == _IDLE_PROTECTING
+
+    def test_control_off_when_ca_commanded_cool_still_confirms_1159(self):
+        t = transition(
+            _PENDING_NONE,
+            _ev(self._EXPIRED, current_mode="off", classification_mode="off", commanded_mode="cool"),
+        )
+        assert t.to_state == _IDLE_PROTECTING

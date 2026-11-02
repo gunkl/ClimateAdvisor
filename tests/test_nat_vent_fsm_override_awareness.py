@@ -150,14 +150,15 @@ class TestBugDInputsReflectRealState:
         and reconstructing NatVentFsmInputs by hand (which would silently
         reintroduce Bug D at that one site).
 
-        Count is 6, not 5: Issue #708's fix to _re_pause_for_open_sensor() added a
-        6th real call site, correctly reusing this shared builder rather than
-        hand-rolling inputs — which is exactly why that site automatically picked
-        up Bug D's override/grace wiring fix too."""
+        Count is 3: Issue #1142 folded the four START sites (window-open handler,
+        grace-expiry re-check, idle-open re-entry, paused-by-door reactivation) into ONE
+        ``_nat_vent_start_decision()`` helper that calls this builder once; the two other
+        callers are the soft-start escalation tick and startup adoption. Every start
+        site still reaches the builder, through the helper."""
         import inspect
 
         src = inspect.getsource(_automation_mod)
-        assert src.count("self._build_nat_vent_fsm_inputs(") == 6
+        assert src.count("self._build_nat_vent_fsm_inputs(") == 3
 
 
 # ---------------------------------------------------------------------------

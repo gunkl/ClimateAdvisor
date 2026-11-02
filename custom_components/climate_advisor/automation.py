@@ -153,6 +153,7 @@ if TYPE_CHECKING:
     from .door_window_fsm import DoorWindowFsmEventKind
     from .economizer_fsm import EconomizerFsmInputs, EconomizerTransition
     from .fan_fsm import FanFsmEventKind, FanFsmInputs, FanTransition
+    from .nat_vent_fsm import NatVentTransition
     from .override_grace_fsm import OverrideGraceFsmEventKind
 
 from .classification_fsm import (
@@ -464,6 +465,48 @@ _MIN_RUNTIME_REFUSED_RETRY_S = 3600.0
 _NAT_VENT_ACTIVATION_NOT_APPLIED = (
     frozenset({FanCommandResult.OVERRIDDEN, FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP})
     | _NAT_VENT_NO_WORKING_FAN_RESULTS
+)
+
+
+@dataclass(frozen=True)
+class NatVentStartProfile:
+    """The per-site knobs of the ONE nat-vent start question "may a fan session start now?" (Issue #1142).
+
+    The decision itself is the nat-vent FSM's (``nat_vent_fsm._transition_from_inactive``: override, grace,
+    reactivation lockout, full gate, soft start, "a fan exists", forecast-peak and thermal-floor guards).
+    ``AutomationEngine._nat_vent_start_decision()`` only builds the FSM inputs from a profile and asks; a site
+    differs from another in nothing but these fields. Not a second decision function.
+
+    * ``hysteresis``: ``None`` reads the configured value; ``0.0`` is the "fresh open" sites that never applied it.
+    * ``grace_active``: ``None`` reads the live flag; ``False`` when the caller already decided the grace question.
+    * ``paused_by_door``: ``None`` reads the live flag (applies the reactivation lockout while paused);
+      ``False`` for the sites that deliberately never consult the lockout.
+    * ``apply_reactivation_floor``: use the sleep-aware reactivation floor (sites re-arming a session that ran).
+    * ``live_lifecycle_state``: ask from the live nat-vent state; ``False`` asks the pure entry question from INACTIVE
+      (a second window opening during a live session must not route through the exit chain).
+    * ``soft_start``: whether a soft start may start a session here (also needs the config switch).
+    """
+
+    name: str
+    hysteresis: float | None = None
+    grace_active: bool | None = None
+    paused_by_door: bool | None = None
+    apply_reactivation_floor: bool = False
+    live_lifecycle_state: bool = False
+    soft_start: bool = True
+
+
+# The window-open handler: a fresh open, hysteresis never applied, the grace question already answered above it.
+NAT_VENT_START_WINDOW_OPEN = NatVentStartProfile("window_open", hysteresis=0.0, grace_active=False, soft_start=False)
+# The grace-expiry re-check: hysteresis never applied, the lockout never consulted (grace just ended).
+NAT_VENT_START_GRACE_RECHECK = NatVentStartProfile(
+    "grace_recheck", hysteresis=0.0, paused_by_door=False, apply_reactivation_floor=True, soft_start=False
+)
+# The idle-open re-entry (a sensor open while HVAC idles) and the paused-by-door reactivation: re-arming a session
+# that already ran, so the sleep-aware floor and the configured hysteresis apply and the lockout is consulted.
+NAT_VENT_START_IDLE_OPEN = NatVentStartProfile("idle_open", apply_reactivation_floor=True, live_lifecycle_state=True)
+NAT_VENT_START_PAUSED_REACTIVATION = NatVentStartProfile(
+    "paused_reactivation", apply_reactivation_floor=True, live_lifecycle_state=True
 )
 
 
@@ -6666,59 +6709,11 @@ class AutomationEngine:
                 indoor is not None and indoor > comfort_heat,
                 outdoor is not None and outdoor < nat_vent_threshold,
             )
-            # Issue #411 (Pass 4): shared reactivation gate, previously hand-copied here as
-            # "Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy condition on
-            # reactivation." No hysteresis applied at this call site (default 0.0).
-            #
-            # Issue #757 Phase 6 Step 5: this boolean is decided by
-            # nat_vent_fsm.transition() instead of the legacy direct call, restricted to
-            # its ACTIVE_FULL_GATE outcome only. This call site has never modeled
-            # soft-start entry (no _nat_vent_may_soft_start() call here) — the FSM wiring
-            # here is wiring-only, not new decision authority — so an FSM-produced
-            # ACTIVE_SOFT_START result is treated the same as "not entered" here, matching
-            # this site's pre-existing scope.
-            from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
-            from .nat_vent_fsm import transition as _nat_vent_transition
-
-            # The FSM's current_state is deliberately forced to INACTIVE rather than
-            # read from self.nat_vent_lifecycle_state: this call site fires on ANY
-            # window opening, including a second opening during an already-active
-            # nat-vent session, but the question asked here is a pure entry-gate
-            # question ("should nat-vent start now"), not an exit question. Reading
-            # the live lifecycle state would route an in-flight active session
-            # through the FSM's exit chain (decide_nat_vent_exit()) instead of the
-            # entry gate, killing sessions that should have kept running. Same
-            # always-fresh-compute semantics as _nat_vent_may_reactivate() and the
-            # same INACTIVE-forcing already used in reconcile_fan_on_startup (see
-            # that method's rationale comment above its transition() call).
-            _fsm_current_state = NatVentLifecycleState.INACTIVE
-            # hysteresis=0.0: this call site is one of the 2 (of 5)
-            # _nat_vent_may_reactivate() callers that deliberately omits hysteresis
-            # (see that method's docstring) — _build_nat_vent_fsm_inputs()'s default
-            # would otherwise read the configured value, diverging from legacy here.
-            #
-            # grace_active=False: Issue #757 Phase 6 Step 5 fix — the grace-active
-            # pre-check above (Fix 2/#249) already resolved whether grace should
-            # block nat-vent here (temperature-based bypass); this FSM call must not
-            # re-block on the still-True self._grace_active via the unrelated
-            # overheat-exception rule. See _build_nat_vent_fsm_inputs()'s
-            # grace_active docstring for the full incident.
-            #
-            # Issue #1138/#1140 (#1142): ``start_guards=True`` -- the forecast-peak and thermal-floor
-            # guards and the "a fan exists" rule are part of the FSM's start decision (this used to be
-            # inline code here, so only this site had the guards). ``_fsm_result.veto`` is set when the
-            # temperature gate passed but the start was refused.
-            _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                now=dt_util.now(),
-                indoor=indoor,
-                outdoor=outdoor,
-                hysteresis=0.0,
-                grace_active=False,
-                start_guards=True,
-            )
-            _fsm_result = _nat_vent_transition(
-                _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
-            )
+            # Issue #1142: the ONE start question, asked of the nat-vent FSM with this site's profile
+            # (``NAT_VENT_START_WINDOW_OPEN``): a fresh open, hysteresis never applied, grace forced off (the
+            # pre-check above already answered it), asked from INACTIVE (a second window opening during a live
+            # session must not route through the exit chain), start guards on, soft start not yet accepted here.
+            _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_WINDOW_OPEN, indoor=indoor, outdoor=outdoor)
             # Full-gate only, as before: a vetoed soft start is "not entered" for this site.
             _start_veto = (
                 _fsm_result.veto if _fsm_result.vetoed_state == NatVentLifecycleState.ACTIVE_FULL_GATE else None
@@ -7235,39 +7230,13 @@ class AutomationEngine:
                 # or non-qualifying case simply falls through with no matching ``if/elif``
                 # below and this block does nothing — the same externally-observable
                 # outcome as the deleted legacy branches.
-                from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
-                from .nat_vent_fsm import transition as _nat_vent_transition
-
-                _fsm_current_state = self.nat_vent_lifecycle_state
-                # Issue #696: previously hardcoded paused_by_door=False here, on the
-                # premise that this idle-open re-entry site only ever runs when
-                # _actively_paused is False and so could never legitimately have
-                # _paused_by_door=True. That premise missed the
-                # _paused_with_hvac_already_off=True case Issue #523 deliberately made
-                # reachable here: _actively_paused (= paused_by_door AND NOT
-                # hvac_already_off) is False even while the real _paused_by_door flag
-                # is True (sensor still open, HVAC was already idle at exit) — exactly
-                # what a COMFORT_FLOOR exit with an open sensor produces. Passing the
-                # real flag lets the FSM's existing PAUSED_REACTIVATION_LOCKOUT branch
-                # (_transition_from_inactive(), nat_vent_fsm.py) apply here the same way
-                # it already does at the paused-by-door reactivation call site below —
-                # outdoor_exit_time/lockout_seconds are unaffected by this parameter and
-                # were already correctly populated either way.
-                _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                    now=dt_util.now(), indoor=_indoor, outdoor=outdoor, apply_reactivation_floor=True, start_guards=True
-                )
-                _fsm_result = _nat_vent_transition(
-                    _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
-                )
+                # Issue #1142: the ONE start question with this site's profile (``NAT_VENT_START_IDLE_OPEN``):
+                # asked from the live lifecycle state, the real ``_paused_by_door`` (Issue #696: the
+                # PAUSED_REACTIVATION_LOCKOUT branch applies here as it does at the paused-reactivation site),
+                # the sleep-aware floor, start guards on, soft start per ``CONF_NAT_VENT_SOFT_START_ENABLED``
+                # (resolved inside the helper, so the caller-side patch that used to downgrade it is gone).
+                _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_IDLE_OPEN, indoor=_indoor, outdoor=outdoor)
                 _to_state = _fsm_result.to_state
-                if _to_state == NatVentLifecycleState.ACTIVE_SOFT_START and not self.config.get(
-                    CONF_NAT_VENT_SOFT_START_ENABLED, DEFAULT_NAT_VENT_SOFT_START_ENABLED
-                ):
-                    # CONF_NAT_VENT_SOFT_START_ENABLED has no FSM-side field —
-                    # decide_nat_vent_soft_start_gate() always evaluates the condition;
-                    # same caller-side-guard treatment as the Phase 2c forecast/thermal
-                    # guards (nat_vent_fsm.py does not gain a new field for this).
-                    _to_state = NatVentLifecycleState.INACTIVE
 
                 # Issue #757 Phase 6 Step 5: the former legacy ``elif`` chain here (a
                 # direct ``_paused_by_door``/``is_reactivation_locked_out()`` check, then
@@ -7705,15 +7674,11 @@ class AutomationEngine:
                 # is_reactivation_locked_out() call, then _nat_vent_may_reactivate(), then
                 # _nat_vent_may_soft_start()) is provably subsumed by the FSM's own
                 # PAUSED_REACTIVATION_LOCKOUT transition and has been removed.
-                from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
-                from .nat_vent_fsm import transition as _nat_vent_transition
-
-                _fsm_current_state = self.nat_vent_lifecycle_state
-                _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                    now=dt_util.now(), indoor=indoor, outdoor=outdoor, apply_reactivation_floor=True, start_guards=True
-                )
-                _fsm_result = _nat_vent_transition(
-                    _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
+                # Issue #1142: the ONE start question with this site's profile
+                # (``NAT_VENT_START_PAUSED_REACTIVATION``): live lifecycle state, the real ``_paused_by_door``
+                # (the lockout applies), the sleep-aware floor, start guards on, soft start per config.
+                _fsm_result = self._nat_vent_start_decision(
+                    NAT_VENT_START_PAUSED_REACTIVATION, indoor=indoor, outdoor=outdoor
                 )
                 _to_state = _fsm_result.to_state
 
@@ -7739,14 +7704,6 @@ class AutomationEngine:
                         threshold=threshold,
                     )
                     return
-
-                if _to_state == NatVentLifecycleState.ACTIVE_SOFT_START and not self.config.get(
-                    CONF_NAT_VENT_SOFT_START_ENABLED, DEFAULT_NAT_VENT_SOFT_START_ENABLED
-                ):
-                    # CONF_NAT_VENT_SOFT_START_ENABLED has no FSM-side field — see the
-                    # identical caller-side-guard treatment at the idle-open re-entry
-                    # site above.
-                    _to_state = NatVentLifecycleState.INACTIVE
 
                 if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
                     # Issue #706 (Bug F): route through
@@ -10071,35 +10028,10 @@ class AutomationEngine:
             # to NORMAL from any origin state, so it doesn't matter whether the flags
             # it's dispatched against already agree with this decision); nat-vent's
             # own FSM governs its own reactivation question.
-            from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
-            from .nat_vent_fsm import transition as _nat_vent_transition
-
-            # The FSM's current_state is forced to INACTIVE, matching the other
-            # two "pure entry-gate question" sites (handle_door_window_open,
-            # reconcile_fan_on_startup) rather than read from
-            # self.nat_vent_lifecycle_state: this legacy call never consulted the
-            # reactivation lockout (unlike the paused-by-door reactivation site in
-            # check_natural_vent_conditions), and never modeled soft-start entry
-            # (no _nat_vent_may_soft_start() call at this site) — an
-            # FSM-produced ACTIVE_SOFT_START result is treated the same as "not
-            # eligible," matching this site's pre-existing scope exactly.
-            # hysteresis=0.0 and paused_by_door=False mirror the legacy call's own
-            # omissions (see _nat_vent_may_reactivate()'s docstring: this is one of the
-            # 2-of-5 callers that never applied hysteresis, and this site never
-            # consulted _paused_by_door either).
-            _fsm_inputs = self._build_nat_vent_fsm_inputs(
-                now=dt_util.now(),
-                indoor=indoor,
-                outdoor=outdoor,
-                hysteresis=0.0,
-                paused_by_door=False,
-                apply_reactivation_floor=True,
-                start_guards=True,
-            )
-            _fsm_result = _nat_vent_transition(
-                NatVentLifecycleState.INACTIVE,
-                NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs),
-            )
+            # Issue #1142: the ONE start question, asked with this site's profile
+            # (``NAT_VENT_START_GRACE_RECHECK``): asked from INACTIVE, hysteresis 0, the lockout never consulted
+            # (``paused_by_door=False``), the sleep-aware floor, start guards on, soft start not yet accepted.
+            _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_GRACE_RECHECK, indoor=indoor, outdoor=outdoor)
             _reactivates = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
             if not _reactivates and _fsm_result.veto is not None:
                 # Issue #1138/#1140: the temperature gate passed but a start rule refused it (no working
@@ -12129,6 +12061,7 @@ class AutomationEngine:
         grace_active: bool | None = None,
         apply_reactivation_floor: bool = False,
         start_guards: bool = False,
+        soft_start_enabled: bool = True,
     ):
         """Build the FSM's input snapshot from current engine state (Issue #594
         Phase R, Step 2). Issue #757 Phase 6 Step 5: this was previously also shared
@@ -12138,6 +12071,8 @@ class AutomationEngine:
         axes, so this is now the sole builder.
 
         Args:
+            soft_start_enabled: Issue #1142. ``NatVentFsmInputs.soft_start_enabled``: the start sites resolve it
+                from their profile and ``CONF_NAT_VENT_SOFT_START_ENABLED``; every other caller keeps True.
             start_guards: Issue #1138 (#1142 D2). ``True`` at the four sites that can START
                 nat-vent (window-open handler, paused-by-door reactivation, idle-open re-entry,
                 grace-expiry re-check) fills ``NatVentFsmInputs.start_veto`` so the FSM applies
@@ -12285,7 +12220,38 @@ class AutomationEngine:
             start_veto=self._build_nat_vent_start_veto_inputs(now=now, indoor=indoor, outdoor=outdoor)
             if start_guards
             else None,
+            soft_start_enabled=soft_start_enabled,
         )
+
+    def _nat_vent_start_decision(
+        self, profile: NatVentStartProfile, *, indoor: float | None, outdoor: float | None
+    ) -> NatVentTransition:
+        """Ask the nat-vent FSM "may a fan session start now?" for one site's profile (Issue #1142).
+
+        Shell glue: builds the FSM inputs from ``profile`` (always with the start guards) and returns the FSM's
+        own ``NatVentTransition``. ``to_state`` is ``ACTIVE_FULL_GATE`` / ``ACTIVE_SOFT_START`` when a session
+        may start, ``PAUSED_REACTIVATION_LOCKOUT`` when the lockout holds, and ``INACTIVE`` otherwise (with
+        ``veto`` set when the temperature gate passed but a start rule refused it).
+        """
+        from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
+        from .nat_vent_fsm import transition as _nat_vent_transition
+
+        _soft_start = profile.soft_start and bool(
+            self.config.get(CONF_NAT_VENT_SOFT_START_ENABLED, DEFAULT_NAT_VENT_SOFT_START_ENABLED)
+        )
+        _inputs = self._build_nat_vent_fsm_inputs(
+            now=dt_util.now(),
+            indoor=indoor,
+            outdoor=outdoor,
+            hysteresis=profile.hysteresis,
+            grace_active=profile.grace_active,
+            paused_by_door=profile.paused_by_door,
+            apply_reactivation_floor=profile.apply_reactivation_floor,
+            start_guards=True,
+            soft_start_enabled=_soft_start,
+        )
+        _state = self.nat_vent_lifecycle_state if profile.live_lifecycle_state else NatVentLifecycleState.INACTIVE
+        return _nat_vent_transition(_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_inputs))
 
     def _forecast_peak_next_2h(self, now: datetime) -> float | None:
         """Highest hourly-forecast temperature in the next 2 hours, or None (Issue #1138).

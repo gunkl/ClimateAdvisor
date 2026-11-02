@@ -1848,6 +1848,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._current_classification.forecast_windows_recommended = bool(
                     cls_data.get("forecast_windows_recommended", self._current_classification.windows_recommended)
                 )
+                # Issue #1211: the windows hysteresis seed (``_classify_kwargs``) needs the time the restored
+                # classification was fetched, or the first post-restart classification has no seed and a forecast
+                # sitting on the threshold can flip the recommendation. Same day only: this restore already runs
+                # only for today's persisted state, and a stamp from another date is dropped, so yesterday's
+                # answer never seeds today.
+                _fetched_raw = state.get("classification_fetched_at")
+                if isinstance(_fetched_raw, str):
+                    _fetched = datetime.fromisoformat(_fetched_raw)
+                    if _fetched is not None and _fetched.date() == dt_util.now().date():
+                        self._classification_fetched_at = _fetched
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.warning("Failed to restore classification: %s", err)
 
@@ -2061,6 +2071,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # under a different unit can discard them instead of misreading them.
             "temp_unit": (getattr(self, "config", None) or {}).get("temp_unit", "fahrenheit"),
             "classification": cls_dict,
+            # Issue #1211: seeds the windows hysteresis (see _classify_kwargs); same-day only on restore.
+            "classification_fetched_at": (
+                self._classification_fetched_at.isoformat()
+                if getattr(self, "_classification_fetched_at", None) is not None
+                else None
+            ),
             "temp_history": {
                 "outdoor": list(self._outdoor_temp_history),
                 "indoor": list(self._indoor_temp_history),
@@ -3335,15 +3351,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 forecast, previous_day_type=prev_type, **self._classify_kwargs()
             )
             self._classification_fetched_at = dt_util.now()
+            # record_history=True here; the 5-min tick (Issue #511) always passes False
+            # so _outdoor_temp_history keeps its existing 30-min cadence.
+            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=True)
             # Issue #602: ensure today's DailyRecord exists on this already-resilient,
             # every-30-min classification path — not only the once-daily briefing_time
             # trigger, which has no retry and previously left setpoint-override detection
             # (and every other _today_record-gated bookkeeping counter) silently dark for
             # the rest of the day whenever weather was unavailable at that one moment.
+            # Issue #1211 (O5): AFTER the outdoor update, because that is where the live gate runs. The record's
+            # "windows recommended today" flag (the compliance denominator) must read the same gated flag the
+            # credit in the door-open handler uses, not the raw forecast answer: a day the gate vetoes all day
+            # is not a windows day.
             self._ensure_today_record(self._current_classification)
-            # record_history=True here; the 5-min tick (Issue #511) always passes False
-            # so _outdoor_temp_history keeps its existing 30-min cadence.
-            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=True)
 
             # Chart log: emit classification_change event when day type changes
             if prev_type is not None and prev_type != self._current_classification.day_type:
@@ -10679,8 +10699,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cooling_needed = indoor_temp is not None and indoor_temp > _armed_cool
         heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
         # Issue #1211: ONE direction rule for both directions (stage B of the shared outside-air rule): above the
-        # armed ceiling outdoor must be cooler, below the armed floor warmer. The same function the live
-        # windows gate uses, so the card and the gate cannot disagree.
+        # armed ceiling outdoor must be cooler, below the armed floor warmer. The same function the live windows
+        # gate uses, applied here to the band the thermostat is ARMED with (the gate uses the configured band, so
+        # the two can differ when Prefer savings widens it). The card follows this live direction; the briefing
+        # follows the classifier's forecast answer, so the two can legitimately differ for part of a day.
         direction_ok = outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool)
 
         if cooling_needed:

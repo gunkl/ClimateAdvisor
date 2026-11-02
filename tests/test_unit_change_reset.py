@@ -348,6 +348,45 @@ class TestRestoredWindowsFlag:
         assert saved["low_is_estimated"] is True
 
 
+class TestRestoredHysteresisSeed:
+    """Issue #1211: the windows hysteresis seed (``_classify_kwargs``) needs the time the classification was
+    fetched. Not restored, the first classification after a restart had no seed and a forecast sitting on the
+    threshold could flip the recommendation (restart -> briefing/window flap). Same day only."""
+
+    def _restored(self, fetched_at):
+        coord = _make_coordinator(FAHRENHEIT)
+        coord.config.update({"comfort_heat": 68.0, "comfort_cool": 74.0})
+        coord._classify_kwargs = types.MethodType(_get_coordinator_class()._classify_kwargs, coord)
+        state = _saved_state()
+        state["classification"].update({"windows_recommended": True, "forecast_windows_recommended": True})
+        if fetched_at is not None:
+            state["classification_fetched_at"] = fetched_at.isoformat()
+        _run_restore(coord, state)
+        return coord
+
+    def test_same_day_stamp_restores_and_seeds_the_first_classification(self):
+        coord = self._restored(_FIXED_NOW.replace(hour=9))
+        assert coord._classification_fetched_at == _FIXED_NOW.replace(hour=9)
+        with patch(f"{_COORD_LOGGER}.dt_util", _make_dt_mock()):
+            assert coord._classify_kwargs()["previous_windows_recommended"] is True
+
+    def test_yesterdays_stamp_is_dropped_and_never_seeds_today(self):
+        coord = self._restored(_FIXED_NOW - timedelta(days=1))
+        assert getattr(coord, "_classification_fetched_at", None) is None
+        with patch(f"{_COORD_LOGGER}.dt_util", _make_dt_mock()):
+            assert coord._classify_kwargs()["previous_windows_recommended"] is False
+
+    def test_old_state_without_the_stamp_restores_unseeded(self):
+        coord = self._restored(None)
+        assert getattr(coord, "_classification_fetched_at", None) is None
+
+    def test_the_stamp_is_saved(self):
+        coord = _make_coordinator(FAHRENHEIT)
+        coord._classification_fetched_at = _FIXED_NOW.replace(hour=9)
+        with patch(f"{_COORD_LOGGER}.dt_util", _make_dt_mock()):
+            assert coord._build_state_dict()["classification_fetched_at"] == _FIXED_NOW.replace(hour=9).isoformat()
+
+
 class TestSaveIncludesUnit:
     @pytest.mark.parametrize("unit", [FAHRENHEIT, CELSIUS])
     def test_build_state_dict_has_temp_unit(self, unit):

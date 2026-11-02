@@ -166,6 +166,13 @@ Known consequences (accepted, not defects):
 
 ---
 
+**Setpoint offset (Issue #1194 a) never feeds thermal learning.** The remote-sensor outer loop raises the thermostat's
+setpoint above the comfort target while the bedroom is cold. Learning keeps reading `primary_value` only, and the
+swing (`swing_heat_f` / `swing_cool_f`) is used by the loop READ-ONLY as its hysteresis at the remote sensor
+(`AutomationEngine._remote_swing_f()`, default `THERMAL_SWING_DEFAULT_F`). How the swing is learned is unchanged by
+#1194 (it is #1234's subject); a swing that mis-measures the thermostat's real hysteresis therefore mis-sizes the loop's
+dead-band, which is why #1234 lands first.
+
 ## Observation Types
 
 All six types run concurrently in `_pending_observations: dict[str, PendingObservation]`. The dict is keyed by the `OBS_TYPE_*` string constant.
@@ -456,8 +463,8 @@ averaged across all intervals, where `rate_i = (T_in[i+1] − T_in[i]) / dt_hour
 | `vent_window_decay` | 2-param OLS (`compute_k_env_solar`) attempted first (when `sf_range >= 0.30`); if fails, 1-param (`compute_k_passive`) fallback | `k_vent_window`, `observation_count_vent_window`; `k_solar` additionally when `two_param=True` | `"vent_window"` |
 | `vent_fan_decay` | Same commit path as `vent_window_decay` — identical logic, shared via the `_decay_tag_map`/2-param guard widening (Issue #587); the two types differ only in which fan state triggered the observation, not in how the samples are processed once collected | `k_vent_fan`, `observation_count_vent_fan`; `k_solar` additionally when `two_param=True` | `"vent_fan"` |
 | `solar_gain` | `compute_k_solar(samples, k_passive)` — subtracts `k_passive`'s conductive contribution per interval before attributing the remainder to solar (Issue #587 Defect B); rejects with `REJECT_NO_K_PASSIVE` if no `k_passive` is cached | `k_solar`, `observation_count_solar` | `"solar"` |
-| `hvac_heat` | 2-param path: `compute_k_passive(post_samples, pre_samples)` → `compute_k_active(active_samples, k_p)`; bridge proxy and single-point fallback applied when OLS returns None | `k_active_heat`, `k_passive` (when not from proxy), `observation_count_heat`, `swing_heat_f` | `"heat"` |
-| `hvac_cool` | Same as hvac_heat; `session_mode = "cool"` | `k_active_cool`, `k_passive` (when not from proxy), `observation_count_cool`, `swing_cool_f` | `"cool"` |
+| `hvac_heat` | 2-param path: `compute_k_passive(post_samples, pre_samples)` → `compute_k_active(active_samples, k_p)`; bridge proxy and single-point fallback applied when OLS returns None | `k_active_heat`, `k_passive` (when not from proxy), `observation_count_heat` | `"heat"` |
+| `hvac_cool` | Same as hvac_heat; `session_mode = "cool"` | `k_active_cool`, `k_passive` (when not from proxy), `observation_count_cool` | `"cool"` |
 
 **Retired (Issue #587):** `fan_only_decay` — 1-param OLS on `event["samples"]`, wrote `k_vent`/`observation_count_fan_only`, tagged `"fan_only"`. Confirmed dead code (its sole live-forecast consumer, `_simulate_indoor_physics_v3`, was always called with `ventilation_active=False` hardcoded) — removed outright, not deprecated. Old persisted `thermal_observations` entries with `hvac_mode == "fan_only"` are inert historical data; the frontend keeps a legacy label entry so old history still renders.
 
@@ -510,8 +517,8 @@ First observation initialises the cache field directly (no EWMA).
 
 | `hvac_mode` tag | Updates | Guard |
 |---|---|---|
-| `"heat"` | `k_passive` (EWMA if `k_p` not None), `avg_r_squared_passive`, `k_active_heat` (EWMA if `k_a` not None), `observation_count_heat`, `swing_heat_f` (if `swing_f` present) | `_envelope_modes = True` — k_passive EWMA runs |
-| `"cool"` | `k_passive`, `avg_r_squared_passive`, `k_active_cool`, `observation_count_cool`, `swing_cool_f` | `_envelope_modes = True` |
+| `"heat"` | `k_passive` (EWMA if `k_p` not None), `avg_r_squared_passive`, `k_active_heat` (EWMA if `k_a` not None), `observation_count_heat` | `_envelope_modes = True` — k_passive EWMA runs |
+| `"cool"` | `k_passive`, `avg_r_squared_passive`, `k_active_cool`, `observation_count_cool` | `_envelope_modes = True` |
 | `"passive"` | `k_passive`, `avg_r_squared_passive`, `observation_count_passive` | `_envelope_modes = True` |
 | `"vent_window"` | `k_vent_window` (EWMA of `obs["k_passive"]`), `k_solar` (EWMA of `obs["k_solar"]` when `two_param=True`), `observation_count_vent_window` | `_envelope_modes = False` — k_passive EWMA does NOT run |
 | `"vent_fan"` | `k_vent_fan` (EWMA of `obs["k_passive"]`), `k_solar` (EWMA of `obs["k_solar"]` when `two_param=True`), `observation_count_vent_fan` | `_envelope_modes = False` |
@@ -519,7 +526,7 @@ First observation initialises the cache field directly (no EWMA).
 
 **Retired (Issue #587):** `"fan_only"` mode — previously updated `k_vent` (EWMA of `obs["k_passive"]`) and `observation_count_fan_only`. The `elif mode in ("vent_window", "vent_fan"):` branch resolves the target field name (`k_vent_window`/`k_vent_fan`) and count field once via a shared `_ewma_update_field()` helper, rather than two copy-pasted branches — see [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587).
 
-**Swing update:** Applied for `"heat"` and `"cool"` modes only. Both `swing_heat_f` / `swing_cool_f` and their counters (`observation_count_swing_heat` / `observation_count_swing_cool`) are updated with the same alpha as the primary parameters.
+**Swing update (Issue #1234):** not part of the observation commit. `swing_heat_f` / `swing_cool_f` and their counters are updated by `LearningEngine.record_swing_sample()` from the real on-transition samples (see [Swing Detection](#swing-detection)); a legacy `swing_f` on an old observation is ignored.
 
 ---
 
@@ -621,29 +628,32 @@ This is a real, intentional behavior change: houses that previously got confiden
 
 ## Swing Detection
 
-**Formula:** `swing_f = abs(T_end − T_start) / 2`
+*Redefined by Issue #1234 (v0.8.34); full description in [05-LEARNING-ENGINE-DESIGN.md](05-LEARNING-ENGINE-DESIGN.md) "Thermostat Swing Detection".*
 
-**T_start:** `event["start_indoor_f"]` — indoor temperature at HVAC-on event.
+**Definition:** the thermostat's own hysteresis, sampled at each real on-transition:
+`swing_heat_f = setpoint - indoor` at `hvac_action` -> heating; `swing_cool_f = indoor - setpoint` at `hvac_action` -> cooling. One-sided; heat and cool independent. Replaces `abs(T_end - T_start) / 2` (half the rise per run).
 
-**T_end definitions by mode:**
-- `hvac_heat`: `active_samples[-1]["indoor_temp_f"]` — temperature at HVAC shutoff (last active sample), NOT the global peak. Using the global peak would include post-heat overshoot and bias swing high.
-- `hvac_cool`: `min(s["indoor_temp_f"] for s in active_samples)` — trough temperature during active cooling.
+**Not on the k-fit path:** sampled by `coordinator._track_swing_edges()` at the edge, judged when the cycle ends via the shared pure `swing.evaluate_swing_cycle`. A rejected k_active fit no longer drops the sample, and `THERMAL_HVAC_MIN_SIGNAL_F` no longer gates it.
 
-**Minimum signal gate:** `abs(T_end − T_start) >= THERMAL_HVAC_MIN_SIGNAL_F (0.5°F)`. If the delta is below this threshold, no swing value is written.
+**Exclusions:** on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` (120 s) of a setpoint/HVAC-mode change; phantom (mode-fallback, `hvac_action` idle/off) sessions; `hvac_action` flapping (on-transition within `THERMAL_SWING_REARM_WINDOW_S` (60 s) of the previous off-transition in the same direction); wrong-direction runs; non-positive values; values outside `[THERMAL_SWING_MIN_F (0.1), THERMAL_SWING_MAX_F (5.0)]`.
 
-**Valid range:** `[THERMAL_SWING_MIN_F (0.1°F), THERMAL_SWING_MAX_F (5.0°F)]`. Values outside this range are discarded.
+**Thermostats with no `hvac_action`:** sampling uses only real `hvac_action` heating/cooling edges, so a thermostat that never reports `hvac_action` never learns a swing and stays at `THERMAL_SWING_DEFAULT_F` (1.5 F, "estimated").
 
-**Storage:** `swing_heat_f` and `swing_cool_f` fields in `thermal_model_cache`. Both are EWMA-accumulated independently using the same alpha as k_active for that observation.
+**Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` (15) samples, on the primary indoor reading (never the sleep-window swap). Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2.
 
-**Default for display:** `THERMAL_SWING_DEFAULT_F = 1.5°F` — used when the observed value is None (`swing_heat_f_display` / `swing_cool_f_display` in `get_thermal_model()` output).
+**Coast overshoot:** not collected yet (#1233).
+
+**Storage (`thermal_model_cache`):** `swing_heat_f`/`swing_cool_f`, `swing_*_samples`, `swing_*_resolution_f`, `swing_*_off_point_f` (stop point, kept separate), `observation_count_swing_*`, `swing_definition_version` (migration marker: caches without the current value are nulled on load).
+
+**Default for display:** `THERMAL_SWING_DEFAULT_F = 1.5 F` - used when the observed value is None (`swing_heat_f_display` / `swing_cool_f_display` in `get_thermal_model()` output).
 
 **Confidence tiers:**
 
 | `observation_count_swing_heat` or `_cool` | Grade |
 |---|---|
 | 0 (`< THERMAL_SWING_CONF_LOW = 1`) | `"none"` |
-| 1–2 (`< THERMAL_SWING_CONF_MEDIUM = 3`) | `"low"` |
-| 3–9 (`< THERMAL_SWING_CONF_HIGH = 10`) | `"medium"` |
+| 1-2 (`< THERMAL_SWING_CONF_MEDIUM = 3`) | `"low"` |
+| 3-9 (`< THERMAL_SWING_CONF_HIGH = 10`) | `"medium"` |
 | 10+ | `"high"` |
 
 ---

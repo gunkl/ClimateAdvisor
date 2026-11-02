@@ -173,6 +173,23 @@ def _pad(text: str, width: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _load_swing_module():
+    """``custom_components/climate_advisor/swing.py`` loaded by path (the package needs Home Assistant).
+
+    Same approach as ``tools/thermal_replay.py``: one implementation of the swing rules, reused here.
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "swing.py"
+    spec = importlib.util.spec_from_file_location("_ca_swing_standalone", path)
+    if spec.name in sys.modules:
+        return sys.modules[spec.name]
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolves string annotations via sys.modules
+    spec.loader.exec_module(module)
+    return module
+
+
 def _print_model_summary(db: dict) -> None:
     cache = db.get("thermal_model_cache")
     if not isinstance(cache, dict):
@@ -210,16 +227,28 @@ def _print_model_summary(db: dict) -> None:
     print(f"k_solar:       {_model_field('k_solar', 'F/hr', 'n_solar')}")
     if "k_vent" in cache or "observation_count_fan_only" in cache:
         print("WARNING: legacy k_vent/observation_count_fan_only key(s) present in cache (Issue #587)")
+    if _load_swing_module().needs_swing_migration(cache):
+        print(
+            "WARNING: swing values below are from the RETIRED definition (half the rise per run) - no"
+            " swing_definition_version yet; Climate Advisor >= 0.8.34 nulls them on its next load (Issue #1234)"
+        )
 
-    def _swing_field(key: str, cnt_key: str) -> str:
-        val = cache.get(key)
-        cnt = cache.get(cnt_key, 0)
+    def _swing_field(mode: str) -> str:
+        # Issue #1234: swing = the thermostat's own one-sided hysteresis (heat: F below setpoint at
+        # heat-on; cool: F above at cool-on), median of recent real starts; +/- resolution/2 on
+        # whole-degree readings. The stop point is kept separate and never mixed into the swing.
+        val = cache.get(f"swing_{mode}_f")
+        cnt = cache.get(f"observation_count_swing_{mode}", 0)
         if val is None:
-            return f"None  ({cnt} obs)"
-        return f"{val:.2f} F  ({cnt} obs)"
+            return f"None  ({cnt} samples)"
+        res = cache.get(f"swing_{mode}_resolution_f") or 0.0
+        off = cache.get(f"swing_{mode}_off_point_f")
+        interval = f" +/-{res / 2:.2f}" if res else ""
+        off_txt = f", stops {abs(off):.2f} F {'short of' if off >= 0 else 'past'} setpoint" if off is not None else ""
+        return f"{val:.2f} F{interval} {'below' if mode == 'heat' else 'above'} setpoint  ({cnt} samples{off_txt})"
 
-    print(f"swing_heat:    {_swing_field('swing_heat_f', 'observation_count_swing_heat')}")
-    print(f"swing_cool:    {_swing_field('swing_cool_f', 'observation_count_swing_cool')}")
+    print(f"swing_heat:    {_swing_field('heat')}")
+    print(f"swing_cool:    {_swing_field('cool')}")
     print(f"conf_passive:  {conf_passive}")
     print(f"conf_hvac:     {conf_hvac}")
     print(f"last_obs:      {last_obs}")

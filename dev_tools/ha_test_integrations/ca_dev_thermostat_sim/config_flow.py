@@ -35,6 +35,8 @@ from .const import (
     CONF_MIN_OFF_SECONDS,
     CONF_MIN_RUN_SECONDS,
     CONF_OCCUPANCY_SCHEDULES,
+    CONF_OFF_OFFSET_COOL_F,
+    CONF_OFF_OFFSET_HEAT_F,
     CONF_OUTDOOR_SOURCE,
     CONF_TICK_SECONDS,
     DEFAULT_COMFORT_COOL,
@@ -118,6 +120,14 @@ def _build_schema(*, defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_DEADBAND_COOL_F, default=defaults.get(CONF_DEADBAND_COOL_F, DEFAULT_DEADBAND_COOL_F)
             ): _num(min_=0.1, max_=10.0, step=0.1, unit="°F"),
+            # Issue #1234: optional asymmetric deadband - where the compressor STOPS relative to the target
+            # (signed, in the direction of travel). Leave empty for the symmetric default.
+            vol.Optional(
+                CONF_OFF_OFFSET_HEAT_F, description={"suggested_value": defaults.get(CONF_OFF_OFFSET_HEAT_F)}
+            ): _num(min_=-10.0, max_=10.0, step=0.1, unit="°F"),
+            vol.Optional(
+                CONF_OFF_OFFSET_COOL_F, description={"suggested_value": defaults.get(CONF_OFF_OFFSET_COOL_F)}
+            ): _num(min_=-10.0, max_=10.0, step=0.1, unit="°F"),
             vol.Required(
                 CONF_MIN_RUN_SECONDS, default=defaults.get(CONF_MIN_RUN_SECONDS, DEFAULT_MIN_RUN_SECONDS)
             ): _num(min_=0, max_=1800, step=10, unit="s"),

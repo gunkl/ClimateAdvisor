@@ -127,6 +127,10 @@ See [temperature-conversion.md](temperature-conversion.md#unit-change-handling-i
 6. **File permissions are set.** After `os.replace()`, `save()` calls `os.chmod(str(self._path), 0o600)` (guarded by `hasattr(os, "chmod")`, so it's a no-op on platforms without it, e.g. Windows) — satisfying the CLAUDE.md security rule requiring `0o600` on persisted state files. Fixed in Issue #384 (v0.4.53); this section previously described a gap that no longer exists — verified directly against `state.py` during the 2026-09-16 documentation staleness audit.
 7. **Additive coordinator keys do not bump `STATE_VERSION`.** `temp_unit` (Issue #1015) is read defensively (type-checked, missing = no-op) so older and newer code can share one file.
 
+### Not persisted: the memory of CA's own setpoint writes (Issue #1232)
+
+`AutomationEngine._own_setpoint_writes` (entity, attribute, value, time, Context id of each setpoint CA wrote, kept 180 s so a late thermostat echo is recognised) is deliberately transient. It lives 180 s and is only about to be compared with a thermostat report that is itself a reaction to a write made moments ago; a restart ends both, and the startup coalescing window already suppresses override detection for the first 5 minutes after a restart (Issue #1235). Persisting it would add a state-file field, a version question and a stale-entry risk for no occupant benefit. No `STATE_VERSION` change.
+
 ## Disclosure Path
 
 ← Tier 1 parent: [02-ARCHITECTURE-REFERENCE.md](02-ARCHITECTURE-REFERENCE.md) (see "Integration Version" and "Coordinator State Listeners" sections)

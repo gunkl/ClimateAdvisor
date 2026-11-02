@@ -199,6 +199,7 @@ from .const import (
     REMOTE_BURST_WINDOW_SECONDS,
     REMOTE_CONFIRM_SECONDS,
     REMOTE_EVENT_MAX_AGE_SECONDS,
+    REMOTE_OFFSET_CHECK_INTERVAL_S,
     REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -250,6 +251,7 @@ from .const import (
     THERMAL_SOLAR_PHASE_OFFSET_MAX,
     THERMAL_SOLAR_PHASE_OFFSET_MIN,
     THERMAL_SOLAR_SAMPLE_INTERVAL_S,
+    THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F,
     THERMAL_VENT_MIN_SAMPLES,
     THERMAL_VENT_MIN_SIGNAL_F,
     THERMAL_VENTILATED_MIN_DELTA_F,
@@ -335,6 +337,7 @@ from .scheduler import (
     resolve_tou_phase,
 )
 from .state import StatePersistence
+from .swing import evaluate_swing_cycle
 from .temperature import (
     convert_delta,
     display_delta,
@@ -436,6 +439,9 @@ _ONTOLOGY_TIME_EXCEPTIONS: Final[set[str]] = set()
 # this conversion and converted again via _conv(e["target"]) -- converting them here would
 # double-convert effective_target_history). tests/test_chart_celsius.py structurally requires
 # every temperature field ChartStateLog.append() emits to be listed here or on its allowlist.
+# ``indoor_primary`` (Issue #1234, hvac_action_change rows only): no frontend or post-conversion
+# reader uses it (tools/thermal_replay.py reads the raw file), so it is converted like any
+# display-facing temperature and a Celsius state_log never carries a stray F value.
 _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "pred_outdoor",
     "pred_indoor",
@@ -443,6 +449,7 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "pred_indoor_avg",
     "lower",
     "upper",
+    "indoor_primary",
 )
 
 
@@ -639,6 +646,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # lazily created) so coordinators built via object.__new__ in tests still work. Not
     # persisted -- a restart restarts the 3 h clock, matching confirmed_transition.py.
     _equipment_last_active: dict[str, datetime] | None = None  # "heat"/"cool" -> last hvac_action seen
+    # Issue #1234: swing sampling state (class-level defaults so object.__new__ test stubs work).
+    # Open heat/cool cycles awaiting their off-transition ("heat"/"cool" -> candidate dict); and when
+    # the thermostat's setpoint or HVAC mode last changed (a restart restarts it - not persisted).
+    _swing_candidates: dict[str, dict] | None = None
+    _last_setpoint_change_ts: datetime | None = None
+    _swing_last_off_ts: dict[str, datetime] | None = None  # "heat"/"cool" -> last real off-edge (flap guard)
     _stall_direction: str | None = None
     _stall_since: datetime | None = None
     _stall_announced_direction: str | None = None
@@ -1280,6 +1293,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.hass,
                     _sleep_indoor_entity,
                     self._zone_scoped(self._on_sleep_indoor_temp_changed),
+                )
+            )
+            # Issue #1194 (a): the remote-sensor outer loop's 1-minute floor. The listener above fires only when the
+            # bedroom sensor reports, which can be 100+ minutes apart; the startup wait, step-down and the
+            # stale-reading fallback must not wait for the next report. The loop itself is a cheap no-op whenever
+            # the remote sensor is not the indoor source or nothing would change.
+            self._unsub_listeners.append(
+                async_track_time_interval(
+                    self.hass,
+                    self._zone_scoped(self._async_remote_offset_tick),
+                    timedelta(seconds=REMOTE_OFFSET_CHECK_INTERVAL_S),
                 )
             )
 
@@ -6401,6 +6425,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not _in_sleep_window(dt_util.now(), self.config):
             return
         await self._async_run_temp_reactive_checks()
+        # Issue #1194 (a): every remote-sensor update is also a check of the outer loop's offset.
+        await self.automation_engine.remote_offset_check()
+
+    async def _async_remote_offset_tick(self, _now: Any) -> None:
+        """1-minute floor under the remote-sensor listener (Issue #1194 a)."""
+        await self.automation_engine.remote_offset_check()
 
     @_whf_safety_after_event(_whf_after_thermostat_event)
     async def _async_thermostat_changed(self, event: Event) -> None:
@@ -6442,6 +6472,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # (per direction) for the comfort stall alert. Before any early return so a short
         # cycle between two 30-min coordinator updates is never missed.
         self._note_equipment_activity(new_state.attributes.get("hvac_action"), old_state.attributes.get("hvac_action"))
+
+        # Issue #1234: sample the thermostat's own hysteresis at each REAL hvac_action edge. Before any
+        # early return (like the equipment-activity stamp) so a short cycle is never missed; never raises.
+        await self._track_swing_edges(old_state, new_state)
 
         # Bug 1 (Issue #321): Suppress override detection during startup coalescing window
         if self._suppress_during_startup_coalescing(f"thermostat override detection for {new_state.state}"):
@@ -6741,6 +6775,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._hvac_session_mode = session_mode
             if session_mode in self._RUNTIME_TRACKING:
                 self._start_runtime_timer(session_mode)
+            # Issue #1234: a phantom session (mode change while hvac_action reads idle/off) never reaches
+            # here since #1240 gates is_running on is_hvac_action_reported_idle, so it opens no observation
+            # and no swing sample; the real hvac_action edge starts the observation.
             if session_mode in ("heat", "cool"):
                 await self._start_hvac_observation(session_mode)
         elif was_running and not is_running:
@@ -6895,10 +6932,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._fan_is_running(),
                 )
                 _band_lower_hac, _band_upper_hac = self._target_band_lower_upper_now()
+                # Issue #1234: the always-primary reading (never the sleep-window swap) that live swing
+                # sampling uses, so thermal_replay's swing backfill reads the same sensor.
+                _primary_hac = self._get_indoor_temp_with_provenance().primary_value
                 self._chart_log.append(
                     hvac=new_action,
                     fan=self._fan_is_running(),
                     indoor=self._get_indoor_temp(),
+                    indoor_primary=_primary_hac if isinstance(_primary_hac, int | float) else None,
                     outdoor=None,
                     windows_open=self._any_sensor_open(),
                     windows_recommended=(
@@ -7017,6 +7058,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             old_temp = old_state.attributes.get("temperature")
             _setpoint_changed = new_temp != old_temp
 
+        # Issue #1232: a cloud thermostat can report Climate Advisor's own setpoint write 30-120 s after it was sent,
+        # past the 30 s recency guards below. Recognise it by Context, else by value (after rounding to the
+        # thermostat's step) against the engine's bounded memory of what CA wrote, inside the 180 s echo window.
+        # ``is True`` keeps MagicMock-stubbed engines inert. Computed only for a real setpoint change; a recognised
+        # echo is consumed from the memory here, whichever other guard would also have suppressed it.
+        _own_setpoint_echo = False
+        if _setpoint_changed and not _is_availability_recovery:
+            _ev_context = getattr(event, "context", None)
+            _own_setpoint_echo = (
+                self.automation_engine.recognise_own_setpoint_echo(
+                    {_a: new_state.attributes.get(_a) for _a in _sp_attrs},
+                    step=new_state.attributes.get("target_temp_step"),
+                    event_context_id=getattr(_ev_context, "id", None),
+                    event_context_parent_id=getattr(_ev_context, "parent_id", None),
+                    event_context_user_id=getattr(_ev_context, "user_id", None),
+                )
+                is True
+            )
+
         _setpoint_candidate = bool(
             _setpoint_changed
             # Issue #1049: a reconnecting thermostat has no prior setpoint — that is a reading
@@ -7029,6 +7089,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self.automation_engine._fan_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not self._is_recent_temp_command(threshold_seconds=30.0)
+            and not _own_setpoint_echo  # Issue #1232: CA's own write echoing back late (value/Context match)
             and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _fan_cancel_in_this_event  # Issue #359 Fix A: fan-off echo suppresses grace
         )
@@ -8809,6 +8870,122 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not hasattr(self, "_pending_observations"):
             self._pending_observations = {}
 
+    def _read_thermostat_setpoint_f(self, state: Any, mode: str) -> float | None:
+        """The thermostat's setpoint for ``mode`` ("heat"/"cool") in internal °F, or None.
+
+        Single-setpoint ``temperature`` first, else the heat_cool low/high pair (Issue #1048:
+        climate entities expose ``temperature``, not ``target_temperature``).
+        """
+        unit = self.config.get("temp_unit", "fahrenheit")
+        sp_f = read_state_temp_f(state, "temperature", unit)
+        if sp_f is None:
+            sp_f = read_state_temp_f(state, "target_temp_low" if mode == "heat" else "target_temp_high", unit)
+        return sp_f
+
+    def _swing_reading_resolution_f(self) -> float:
+        """SOURCE-implied granularity of the primary indoor reading (a fallback only).
+
+        ``swing.summarize_swing_samples`` infers the real granularity from the readings themselves
+        (``infer_resolution_f``, in the configured unit) once there are enough distinct ones; this
+        value is used only before that: a configured sensor / input_number is taken as fine, the
+        climate_fallback ``current_temperature`` as one whole degree of the configured unit.
+        """
+        if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) != TEMP_SOURCE_CLIMATE_FALLBACK:
+            return 0.0
+        unit = self.config.get("temp_unit", "fahrenheit")
+        return THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F * (1.8 if unit == "celsius" else 1.0)
+
+    def _note_setpoint_change(self, old_state: Any, new_state: Any, now: datetime) -> None:
+        """Stamp when the thermostat's setpoint or HVAC mode last changed (Issue #1234).
+
+        Both are commands (CA's or the occupant's) that can start equipment at once from wherever
+        the room is, so an on-transition shortly after is a jump, not the thermostat's hysteresis.
+        """
+        changed = old_state.state != new_state.state or any(
+            old_state.attributes.get(_a) != new_state.attributes.get(_a)
+            for _a in ("temperature", "target_temp_low", "target_temp_high")
+        )
+        if changed:
+            self._last_setpoint_change_ts = now
+
+    async def _track_swing_edges(self, old_state: Any, new_state: Any) -> None:
+        """Open/close swing-sample cycles on REAL ``hvac_action`` edges only (Issue #1234).
+
+        On a heating/cooling start: remember the setpoint and the finest indoor reading of the
+        thermostat's own temperature. On the matching stop: judge the cycle with the shared pure
+        ``swing.evaluate_swing_cycle`` and record the sample in the learning engine. Independent
+        of the k_active observation pipeline (a rejected k fit no longer drops the sample), and
+        a mode-fallback "phantom" session never has a real edge, so it never opens a cycle.
+        Never raises: a bug here must not break override detection.
+        """
+        try:
+            now = dt_util.now()
+            self._note_setpoint_change(old_state, new_state, now)
+            old_action = str(old_state.attributes.get("hvac_action", "")).lower()
+            new_action = str(new_state.attributes.get("hvac_action", "")).lower()
+            dirs = {"heating": "heat", "cooling": "cool"}
+            old_dir = dirs.get(old_action) if is_hvac_compressor_active(old_action) else None
+            new_dir = dirs.get(new_action) if is_hvac_compressor_active(new_action) else None
+            if old_dir == new_dir:
+                return
+            if self._swing_candidates is None:
+                self._swing_candidates = {}
+            if self._swing_last_off_ts is None:
+                self._swing_last_off_ts = {}
+            if old_dir is not None:
+                self._swing_last_off_ts[old_dir] = now
+                await self._close_swing_cycle(old_dir, new_state, now)
+            if new_dir is not None:
+                indoor = self._get_indoor_temp_with_provenance().primary_value
+                setpoint = self._read_thermostat_setpoint_f(new_state, new_dir)
+                since = (
+                    (now - self._last_setpoint_change_ts).total_seconds()
+                    if self._last_setpoint_change_ts is not None
+                    else None
+                )
+                last_off = self._swing_last_off_ts.get(new_dir)
+                self._swing_candidates[new_dir] = {
+                    "ts": now.isoformat(),
+                    "setpoint_f": setpoint,
+                    "on_indoor_f": indoor,
+                    "seconds_since_setpoint_change": since,
+                    "seconds_since_previous_off": (now - last_off).total_seconds() if last_off is not None else None,
+                    "resolution_f": self._swing_reading_resolution_f(),
+                }
+        except Exception:  # noqa: BLE001 - diagnostic learning must never break the listener
+            _LOGGER.warning("Swing sampling edge handling failed", exc_info=True)
+
+    async def _close_swing_cycle(self, mode: str, new_state: Any, now: datetime) -> None:
+        """Judge the cycle that just ended and record its swing sample (if it earned one)."""
+        cand = (self._swing_candidates or {}).pop(mode, None)
+        if cand is None:
+            return
+        verdict = evaluate_swing_cycle(
+            mode=mode,
+            ts=cand["ts"],
+            setpoint_f=cand["setpoint_f"],
+            on_indoor_f=cand["on_indoor_f"],
+            off_indoor_f=self._get_indoor_temp_with_provenance().primary_value,
+            off_setpoint_f=self._read_thermostat_setpoint_f(new_state, mode),
+            seconds_since_setpoint_change=cand["seconds_since_setpoint_change"],
+            resolution_f=cand["resolution_f"],
+            seconds_since_previous_off=cand.get("seconds_since_previous_off"),
+            reading_unit=self.config.get("temp_unit", "fahrenheit"),
+        )
+        if verdict.sample is None:
+            _LOGGER.debug("Swing sample skipped: mode=%s reason=%s", mode, verdict.reason)
+            return
+        self.learning.record_swing_sample(mode, verdict.sample)
+        await self._executor_job(self.learning.save_state)
+        _LOGGER.info(
+            "Swing sample recorded: mode=%s value=%.2f resolution=%.1f setpoint=%.1f off_point=%s",
+            mode,
+            verdict.sample["value_f"],
+            verdict.sample["resolution_f"],
+            verdict.sample["setpoint_f"],
+            verdict.sample["off_point_f"],
+        )
+
     async def _start_hvac_observation(self, session_mode: str) -> None:
         """Begin a new HVAC thermal observation (heat or cool)."""
         self._ensure_pending_observations()
@@ -8921,18 +9098,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         obs["active_samples"].append(first_sample)
         obs["start_outdoor_f"] = first_sample["outdoor_temp_f"]
 
-        # Capture setpoint for diagnostic storage — not used in swing formula
+        # Capture setpoint for diagnostic storage (swing is sampled separately, at the real on-transition)
         _climate_id = self.config.get("climate_entity", "")
         _cs_sw = self.hass.states.get(_climate_id) if _climate_id else None
         if _cs_sw is not None:
-            # Issue #1048: climate entities expose "temperature" (not "target_temperature"); read it
-            # unit-aware so setpoint_f is really °F.
-            _sp_unit = self.config.get("temp_unit", "fahrenheit")
-            _sp_f = read_state_temp_f(_cs_sw, "temperature", _sp_unit)
-            if _sp_f is None:
-                _sp_f = read_state_temp_f(
-                    _cs_sw, "target_temp_low" if session_mode == "heat" else "target_temp_high", _sp_unit
-                )
+            _sp_f = self._read_thermostat_setpoint_f(_cs_sw, session_mode)
             if _sp_f is not None:
                 obs["setpoint_f"] = round(_sp_f, 1)
 
@@ -10159,10 +10329,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         now = dt_util.now()
 
-        # Capture indoor temp at the exact HVAC-off moment so swing uses the true shutoff
-        # temperature. Issue #895: .primary_value, not .value — see
-        # _get_current_sample()'s docstring for why thermal-learning must never see the
-        # sleep-window sensor swap.
+        # Capture indoor temp at the exact HVAC-off moment as the active phase's true final sample
+        # (the swing is sampled separately at the on/off edges, Issue #1234).
+        # Issue #895: .primary_value, not .value — see _get_current_sample()'s docstring for why
+        # thermal-learning must never see the sleep-window sensor swap.
         _final_indoor = self._get_indoor_temp_with_provenance().primary_value
         if _final_indoor is not None:
             try:
@@ -11108,6 +11278,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     ae._last_hvac_heating_active = iso
                 else:
                     ae._last_hvac_cooling_active = iso
+                # Issue #1194 (a): the thermostat starting after an offset raise is the loop's actuation feedback.
+                ae.note_remote_offset_actuation(direction, stamp)
 
     def _update_comfort_stall(
         self, indoor: float | None, comfort_heat: float | None, comfort_cool: float | None, now: datetime
@@ -12741,6 +12913,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "swing_cool": display_delta(thermal_model.get("swing_cool_f_display", 1.5), unit, 2),
                 "swing_heat_measured": thermal_model.get("swing_heat_f") is not None,
                 "swing_cool_measured": thermal_model.get("swing_cool_f") is not None,
+                # Issue #1234: reading granularity (the swing is +/- resolution/2) and the stop point
+                # (kept separate from the swing; None until a cycle with an unchanged setpoint ends).
+                "swing_heat_resolution": display_delta(thermal_model.get("swing_heat_resolution_f", 0.0), unit, 2),
+                "swing_cool_resolution": display_delta(thermal_model.get("swing_cool_resolution_f", 0.0), unit, 2),
+                "swing_heat_off_point": (
+                    display_delta(thermal_model["swing_heat_off_point_f"], unit, 2)
+                    if thermal_model.get("swing_heat_off_point_f") is not None
+                    else None
+                ),
+                "swing_cool_off_point": (
+                    display_delta(thermal_model["swing_cool_off_point_f"], unit, 2)
+                    if thermal_model.get("swing_cool_off_point_f") is not None
+                    else None
+                ),
                 "observation_count_swing_heat": thermal_model.get("observation_count_swing_heat", 0),
                 "observation_count_swing_cool": thermal_model.get("observation_count_swing_cool", 0),
                 "confidence_swing_heat": thermal_model.get("confidence_swing_heat", "none"),

@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.35"
+VERSION = "0.8.38"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -461,6 +461,21 @@ COMFORT_MODE_CHANGE_LOG_CAP = 200
 # change rather than a new one (``_record_commanded_mode``).
 COMFORT_RECENT_COMMAND_WINDOW_S = 30.0
 
+# Issue #1232: how long Climate Advisor remembers one of its own thermostat setpoint writes so the
+# thermostat reporting it back late (cloud thermostats echo 30-120 s after the write) is recognised as
+# CA's own echo and never read as the occupant changing the setpoint (a false manual override pauses
+# automation for the manual grace period). Owner decision 2026-11-02: 180 s. See own_write_echo.py.
+SETPOINT_ECHO_WINDOW_S = 180.0
+
+# Issue #1232: cap on the remembered-writes list (several writes in flight, echoed in order, are each recognised; the
+# cap only bounds memory if a thermostat never answers).
+SETPOINT_ECHO_MEMORY_MAX = 16
+
+# Issue #1232: setpoint rounding step assumed when the thermostat does not advertise
+# ``target_temp_step`` (Celsius thermostats commonly round to 0.5, Fahrenheit ones to 1).
+SETPOINT_ECHO_DEFAULT_STEP_C = 0.5
+SETPOINT_ECHO_DEFAULT_STEP_F = 1.0
+
 # Issue #1073 (S7): cap on the persisted settling-guard hold-episode log
 # (AutomationEngine.comfort_holds), read by the control-quality report.
 COMFORT_HOLD_LOG_CAP = 100
@@ -550,6 +565,31 @@ OUTDOOR_SENSOR_STALE_HOURS = 6.0
 # Uncalibrated: 10 days of the install's only dedicated indoor-type sensor showed a max 2 h gap
 # between value-change records (true report cadence unknown) — revisit with real history.
 INDOOR_SENSOR_STALE_HOURS = 12.0
+
+# Issue #1194 (a): remote-sensor outer loop. While the comfort-facing indoor reading comes from a REMOTE
+# sensor (today: the bedroom sensor in the sleep window) CA nudges the thermostat's setpoint so the
+# thermostat -- which only sees its own sensor -- produces the target at the remote sensor.
+# Step and cap are DISPLAY-unit deltas (F installs 2 / 4, C installs 1 / 2); remote_offset.py converts.
+REMOTE_OFFSET_STEP_F: float = 2.0
+REMOTE_OFFSET_STEP_C: float = 1.0
+REMOTE_OFFSET_CAP_F: float = 4.0  # at most this far beyond the target in the gap direction
+REMOTE_OFFSET_CAP_C: float = 2.0
+# Freshness of the remote reading, measured on ``last_reported`` (not last_changed: this class of sensor
+# reports on change in ~0.18F steps and was observed idle for up to 105 min). Older -> plain setpoint.
+# Separate from (and much tighter than) the 12 h INDOOR_SENSOR_STALE_HOURS fallback rule above.
+REMOTE_OFFSET_FRESHNESS_MINUTES: float = 120.0
+REMOTE_OFFSET_CHECK_INTERVAL_S: int = 60  # the 1-minute floor under the remote-sensor update listener
+# Startup wait after a raise before a further raise is allowed (thermostat actuation feedback): the
+# measured thermostat latency plus a margin, never below the minimum, and this default where unmeasured.
+REMOTE_OFFSET_DEFAULT_WAIT_S: float = 300.0
+REMOTE_OFFSET_MIN_WAIT_S: float = 120.0
+REMOTE_OFFSET_WAIT_MARGIN_S: float = 60.0
+REMOTE_OFFSET_LATENCY_EWMA_ALPHA: float = 0.3
+# Delay before a setpoint write is retried: the read-back verify's retry after a rejected setpoint, and the outer
+# loop's back-off after one of its own writes was not executed (it also waits for a new remote report).
+SETPOINT_RETRY_DELAY_S: int = 900
+# The remote-context label carried by IndoorTempReading.remote_context for the sleep-window bedroom sensor.
+REMOTE_CONTEXT_SLEEP: str = "sleep"
 
 # Sensor attributes
 ATTR_DAY_TYPE = "day_type"
@@ -1423,10 +1463,34 @@ THERMAL_HVAC_MIN_DECAY_F = 0.3
 # Minimum ΔT for single-point k_active estimate (filters sensor noise / no-effect cycles)
 THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
 
-# Thermostat swing (deadband half-amplitude) detection constants
+# Thermostat swing = the thermostat's OWN hysteresis (Issue #1234): how far past the setpoint the
+# room is allowed to drift before the equipment starts (heat: setpoint - indoor at the heat-on
+# transition; cool: indoor - setpoint at the cool-on transition). One-sided, so heat and cool are
+# independent and NOT symmetric around the setpoint. See swing.py for the pure rules.
 THERMAL_SWING_DEFAULT_F: float = 1.5
 THERMAL_SWING_MIN_F: float = 0.1
 THERMAL_SWING_MAX_F: float = 5.0
+# An on-transition within this many seconds after a setpoint (or HVAC mode) change is a jump
+# commanded by CA or the occupant, not the room drifting to the thermostat's trigger point, so it
+# is not a hysteresis sample. Covers the measured 2-5 s thermostat start-up latency plus margin.
+THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S: float = 120.0
+# An on-transition within this many seconds after the previous off-transition in the same direction
+# is the thermostat's hvac_action flapping (heating -> idle -> heating), not the room drifting back to
+# the trigger point (a real thermostat's minimum off time is minutes), so it is not a sample.
+THERMAL_SWING_REARM_WINDOW_S: float = 60.0
+# Robust estimator: median of the last K accepted samples (also the retained-sample cap). A median
+# ignores the occasional long-recovery outlier without an alpha to tune, and follows a changed
+# thermostat setting within ~K/2 cycles (an EWMA at alpha 0.05 needs ~20+).
+THERMAL_SWING_ESTIMATOR_WINDOW: int = 15
+# Reading-granularity FALLBACK for the climate_fallback indoor source (the thermostat's own
+# current_temperature), used only until there are enough distinct readings to infer the real
+# granularity from the readings themselves (swing.infer_resolution_f: whole F -> 1.0, whole C ->
+# 1.8 F, half C -> 0.9 F, finer -> 0.0). One whole degree of the configured unit, in F (x1.8 for
+# Celsius). A quantised sample `setpoint - k` has its true value within +/- resolution/2.
+THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F: float = 1.0
+# Persisted-cache marker for the swing DEFINITION. Caches without it (or older) hold the retired
+# |T_off - T_on| / 2 values, which are nulled on load so they re-learn (Issue #1234).
+THERMAL_SWING_DEFINITION_VERSION: int = 2
 THERMAL_SWING_CONF_LOW: int = 1
 THERMAL_SWING_CONF_MEDIUM: int = 3
 THERMAL_SWING_CONF_HIGH: int = 10

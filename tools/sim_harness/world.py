@@ -34,9 +34,18 @@ class HouseParams:
     overshoot_f: float  # coast past the stop point after the equipment cuts out
     whole_degree: bool  # thermostat reports whole degrees (else 0.5)
     window_k_mult: float = 5.0  # envelope coupling multiplier with a door/window open
+    # Issue #1234: asymmetric deadband. ``swing_f`` is where the equipment STARTS (heat: setpoint -
+    # swing_f; cool: setpoint + swing_f). ``off_offset_f`` is where it STOPS, as a signed distance past
+    # the setpoint in the direction of travel (heat stops at setpoint + off_offset_f, cool at setpoint -
+    # off_offset_f), so a real thermostat that starts at setpoint-1.4 and stops at setpoint-0.9 is
+    # swing_f=1.4, off_offset_f=-0.9. None keeps the original symmetric deadband (stop at +swing_f).
+    off_offset_f: float | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if d.get("off_offset_f") is None:  # the symmetric default serialises exactly as before Issue #1234
+            d.pop("off_offset_f", None)
+        return d
 
     @classmethod
     def draw(cls, rng: random.Random) -> HouseParams:
@@ -121,16 +130,18 @@ class ToyHouse:
     def decide_action(self, mode: str | None, setpoint_f: float | None) -> str:
         """The thermostat's own control loop; returns the ``hvac_action`` it would report.
 
-        Single-setpoint heat / cool with hysteresis ``swing_f`` around the setpoint; any other
-        mode (off, fan_only, unavailable, ...) runs nothing.
+        Single-setpoint heat / cool with hysteresis ``swing_f`` around the setpoint (start point;
+        the stop point is ``off_offset_f`` when set, else the same ``swing_f`` on the far side);
+        any other mode (off, fan_only, unavailable, ...) runs nothing.
         """
         shown = self.reported_f()
+        stop_f = self.p.swing_f if self.p.off_offset_f is None else self.p.off_offset_f
         if mode not in ("heat", "cool") or setpoint_f is None:
             self.running = None
             return "off" if mode == "off" else "idle"
         if mode == "heat":
             if self.running == "heating":
-                if shown >= setpoint_f + self.p.swing_f:
+                if shown >= setpoint_f + stop_f:
                     self.running = None
             elif shown <= setpoint_f - self.p.swing_f:
                 self.running = "heating"
@@ -138,7 +149,7 @@ class ToyHouse:
                 self.running = None
         else:
             if self.running == "cooling":
-                if shown <= setpoint_f - self.p.swing_f:
+                if shown <= setpoint_f - stop_f:
                     self.running = None
             elif shown >= setpoint_f + self.p.swing_f:
                 self.running = "cooling"

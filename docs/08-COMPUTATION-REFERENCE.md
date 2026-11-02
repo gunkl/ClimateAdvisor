@@ -36,6 +36,7 @@ The automation logic table and all threshold constants in this document are expr
 | Why must `_async_thermostat_changed()` check all three command-pending flags, not just `_hvac_command_pending`? | Automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()`. The fan command sets `_fan_command_pending` but leaves `_hvac_command_pending` False. Checking only `_hvac_command_pending` bypasses the override-detection guard during that window. | [§9b Compound command-pending guard](08-COMPUTATION-REFERENCE.md#compound-command-pending-guard-in-_async_thermostat_changed-issue-205206) |
 | Why was a manual mode override not detected on dual-setpoint (`heat_cool`) thermostats? | CA commands `heat_cool` mode but the old code compared the thermostat's `hvac_mode` against `classification.hvac_mode` (e.g., `"cool"`). A user switching from `heat_cool` to `cool` evaluated as equal and was ignored. Fix: compare against `_last_commanded_hvac_mode` first. | [§9b Mode Override Detection — `_last_commanded_hvac_mode`](08-COMPUTATION-REFERENCE.md#mode-override-detection--_last_commanded_hvac_mode-issue-269-bug-c) |
 | Why was a manual setpoint change not detected on dual-setpoint (`heat_cool`) thermostats? | In `heat_cool` mode the `temperature` attribute is `None`; only `target_temp_low`/`target_temp_high` are populated. The setpoint override check now reads those attributes when mode is `heat_cool`. | [§9b Dual Setpoint Override Detection](08-COMPUTATION-REFERENCE.md#dual-setpoint-override-detection--heat_cool-mode-issue-269-bug-d) |
+| Why does a cloud thermostat reporting Climate Advisor's own setpoint 30-120 s late no longer start a manual override (Issue #1232)? | `AutomationEngine` remembers each `climate.set_temperature` it sends (entity, attribute, value in the thermostat's unit, time, HA Context id) for `SETPOINT_ECHO_WINDOW_S` = 180 s; `coordinator._async_thermostat_changed` asks `recognise_own_setpoint_echo()` (pure rule `own_write_echo.decide_setpoint_echo`) and a change matching by Context, else by value after rounding to `target_temp_step` (default 0.5 C / 1 F), is CA's echo, not the occupant. Different value or outside the window is still judged as before; the 30 s guards stay as the backstop. | [§9b Setpoint echo recognition](#setpoint-echo-recognition-by-value-issue-1232) |
 | Why do cloud thermostats (Nest, Ecobee) falsely trigger fan overrides after HVAC mode changes? | Cloud polling echoes `fan_mode` attribute changes as delayed side-effects 30–120 s after the command, outside the 30 s `_is_recent_hvac_command(30)` window of the `fan_mode` path (the mode path uses 3 s). The `_is_expected_confirmation` flag extends suppression to 120 s for the `fan_mode` path. | [§9b `_is_expected_confirmation`](08-COMPUTATION-REFERENCE.md#_is_expected_confirmation-issue-269-bug-a) |
 | What is the comfort-band programming model introduced in Issue #249? | CA programs a floor+ceiling band every 30 min via one `select_comfort_band` decision and one `_apply_comfort_band` actuation; the thermostat's own deadband holds the house inside the band continuously — no more off+supervisor pattern. | [§6e Comfort-Band Programming](08-COMPUTATION-REFERENCE.md#6e-comfort-band-programming-issue-249) |
 | What command shape does `_apply_comfort_band` emit per thermostat capability? | One single-setpoint write (Issue #301): `cool` + `set_temperature(ceiling)` or `heat` + `set_temperature(floor)`, family chosen by §6f; no `heat_cool` dual-band write even on dual-capable devices. | [§6e — `_apply_comfort_band` command shapes](08-COMPUTATION-REFERENCE.md#_apply_comfort_band-command-shapes) |
@@ -601,35 +602,46 @@ python tools/thermal_replay.py --hvac --days 60             # commit to learning
 | Proxy-aware gate in `_check_hvac_stabilization()` | `coordinator.py` ~line 2951 |
 | `run_hvac_replay_ols()` | `tools/thermal_replay.py` ~line 817 |
 
-#### 5e-vii. Thermostat Swing — Deadband Auto-Detection (Issue #102)
+#### 5e-vii. Thermostat Swing - the thermostat's own hysteresis (Issue #102, redefined by Issue #1234)
 
-**Formula:** `swing_f = abs(T_end - T_start) / 2`
+**Formula (one-sided, per real on-transition):**
+```
+swing_heat_f = setpoint - indoor     at hvac_action -> heating
+swing_cool_f = indoor - setpoint     at hvac_action -> cooling
+```
+Retired: `abs(T_end - T_start) / 2` (half the rise per run) and its `THERMAL_HVAC_MIN_SIGNAL_F` gate.
 
 **Bounds:**
 | Parameter | Min | Max | Notes |
 |---|---|---|---|
-| `swing_heat_f` | 0.1°F | 5.0°F | `THERMAL_SWING_MIN_F` / `THERMAL_SWING_MAX_F` |
-| `swing_cool_f` | 0.1°F | 5.0°F | Same bounds, independent EWMA |
+| `swing_heat_f` | 0.1 F | 5.0 F | `THERMAL_SWING_MIN_F` / `THERMAL_SWING_MAX_F`; non-positive (on at/inside the setpoint) gives no sample |
+| `swing_cool_f` | 0.1 F | 5.0 F | Same bounds, independent |
 
-**Minimum signal:** `abs(T_end - T_start) >= THERMAL_HVAC_MIN_SIGNAL_F` (0.5°F).
-Cycles below this produce no swing observation.
+**Exclusions:** on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` of a setpoint/HVAC-mode change; phantom (mode-fallback) sessions; `hvac_action` flapping (on within `THERMAL_SWING_REARM_WINDOW_S` of the previous off, same direction); wrong-direction runs (heat that cooled / cool that warmed). Rules: `swing.evaluate_swing_cycle` (shared by `coordinator.py` and `tools/thermal_replay.py`).
 
-**Unit conversion:** Swing is a temperature delta — use `convert_delta()` (multiply
+**Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` samples. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot is not collected yet (#1233).
+
+**Thermostats with no `hvac_action`:** sampling uses only real `hvac_action` heating/cooling edges, so a thermostat that never reports `hvac_action` never learns a swing and stays at `THERMAL_SWING_DEFAULT_F` (1.5 F, "estimated").
+
+**Unit conversion:** Swing is a temperature delta - use `convert_delta()` (multiply
 by 5/9 for Celsius), never `from_fahrenheit()`. The +32 offset does not apply.
 
 **Display rule:**
-- `swing_heat_f is None` → show `±1.5°F (estimated)` in gray italic
-- `swing_heat_f is not None` → show `±X.X°F` with no hint
+- `swing_heat_f is None` -> show `1.5 F below setpoint (estimated)` in gray italic
+- `swing_heat_f is not None` -> show `X.X F below setpoint` (heat) / `above setpoint` (cool), no hint
 
 **Constants:**
 | Constant | Value | Purpose |
 |---|---|---|
 | `THERMAL_SWING_DEFAULT_F` | 1.5 | Default before any learning |
 | `THERMAL_SWING_MIN_F` | 0.1 | Sanity lower bound |
-| `THERMAL_SWING_MAX_F` | 5.0 | Sanity upper bound (rejects multi-cycle blur) |
-| `THERMAL_SWING_CONF_LOW` | 1 | none → low threshold |
-| `THERMAL_SWING_CONF_MEDIUM` | 3 | low → medium threshold |
-| `THERMAL_SWING_CONF_HIGH` | 10 | medium → high threshold |
+| `THERMAL_SWING_MAX_F` | 5.0 | Sanity upper bound |
+| `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` | 120 | Setpoint/mode-change jump window |
+| `THERMAL_SWING_ESTIMATOR_WINDOW` | 15 | Median window / retained samples |
+| `THERMAL_SWING_REARM_WINDOW_S` | 60 | On within this long of the previous off = `hvac_action` flap, not a sample |
+| `THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F` | 1.0 | Fallback quantisation of the climate_fallback reading until 3 distinct readings exist (x1.8 = 1.8 F on Celsius); otherwise inferred from the readings |
+| `THERMAL_SWING_DEFINITION_VERSION` | 2 | Cache marker; older caches are nulled on load |
+| `THERMAL_SWING_CONF_LOW` / `_MEDIUM` / `_HIGH` | 1 / 3 / 10 | none -> low -> medium -> high thresholds |
 
 #### 5e-viii. Solar Phase Offset — Two-EWMA Architecture (Issue #312)
 
@@ -2056,6 +2068,19 @@ The fix (Issue #206) expands the guard at both the pause-path and normal-path de
 | `_is_recent_hvac_command()` | Timestamp check | HVAC mode changes: 3 s (default). Setpoint and thermostat `fan_mode` changes: 30 s | 3 s / 30 s | Secondary: catches races where the HVAC flag cleared before the HA event arrived |
 | `_is_expected_confirmation` | Boolean flag | Fan_mode attribute changes from HVAC mode transitions | 120 s | Tertiary: suppresses delayed fan_mode echoes from HVAC mode changes on cloud thermostats |
 | `_is_recent_fan_command(threshold_seconds=30.0)` | Timestamp check | Fan mode changes (`climate.set_fan_mode`) | 30 s | Quaternary: suppresses fan echo races where `_fan_command_pending` cleared before the HA event arrived |
+| `recognise_own_setpoint_echo()` (Issue #1232) | Context / value match against a bounded memory of CA's own setpoint writes | Thermostat setpoint changes (`temperature`, `target_temp_low`, `target_temp_high`) | 180 s | Late cloud echo of CA's own setpoint write; added to the setpoint path alongside, not replacing, the 30 s guards |
+
+#### Setpoint echo recognition by value (Issue #1232)
+
+The person at home must not get a false "manual override" and a 1 h automation pause from Climate Advisor's own late setpoint echo (cloud thermostats report 30-120 s after the write, past the 30 s guards), and a real occupant change must still be caught. Full rule table, memory lifecycle, rounding and aliasing: [grace-periods-spec.md](grace-periods-spec.md#setpoint-echo-recognition-by-value-issue-1232).
+
+- Constants (`const.py`): `SETPOINT_ECHO_WINDOW_S = 180.0`, `SETPOINT_ECHO_MEMORY_MAX = 16`, `SETPOINT_ECHO_DEFAULT_STEP_C = 0.5`, `SETPOINT_ECHO_DEFAULT_STEP_F = 1.0`.
+- Pure module `own_write_echo.py`: `OwnSetpointWrite`, `decide_setpoint_echo()`, `values_match()`, `resolve_step()`, `prune_own_writes()` and `context_id_matches()`; the last is also the predicate `AutomationEngine.command_context_matches()` (the #482/#561 fan check, and the climate kind) uses, so there is one Context comparison.
+- Engine: `_own_setpoint_writes` (transient), `_remember_own_setpoint_write()` (called from `_call_service_with_context` for `climate.set_temperature`), `_settle_own_setpoint_write()` (restart the window when the call returns; forget a failed/rejected write), `recognise_own_setpoint_echo()` (decide, consume, INFO-log `Setpoint change recognised as Climate Advisor's own write echoing back`).
+- Coordinator: one site, computed ahead of `_setpoint_candidate` and added to its conjunction; `is True` keeps MagicMock-stubbed engines inert.
+- Occupant who sets the SAME value CA just wrote (no distinguishing Context) is read as the echo; a Context with a `user_id` is never an echo by value. HA keeps a service call's Context on the entity's state writes for only 5 s (`CONTEXT_RECENT_TIME_SECONDS`), so a cloud echo 30-120 s late carries a fresh Context (no parent, no user): late echoes are recognised by value alone, and a signed-in person's change reported that late is not protected by the `user_id` rule.
+- Superseded writes (owner decision 2026-11-02, D3): when an echo is recognised, `decide_setpoint_echo` also returns `superseded` -- the remembered writes of the same entity and recorded attribute sent before the newest write the echo answers (memory/send order) -- and the engine forgets them. An occupant dialling back to a superseded CA value is caught; an older echo arriving after a newer one is then judged as the occupant (accepted). Other attributes are not pruned.
+- Mode echoes need no equivalent: already recognised by value against `_last_commanded_hvac_mode` (known gap: two mode writes in flight).
 
 #### `_set_hvac_mode("off")` fan_command_time Guard (Issue #277 Bug A1)
 
@@ -3046,7 +3071,7 @@ change as CA's own echo:
 | Mode, 0–2 s or 10–12 s after | `_is_recent_hvac_command()` default 3 s | Not detected; the comfort-edge selector restores the plan's mode about 2.5 min later |
 | Mode, 3–9 s, or from 13 s | — | Detected: override, confirm window, grace |
 | Setpoint, 0–39 s after | `_is_recent_hvac_command(30)` / `_is_recent_temp_command(30)` | Not detected. A change before the +10 s write is overwritten by it; a later one stays until CA's next setpoint write (the next 30-min cycle), which restores the plan's setpoint with no override and no notice |
-| Setpoint, from 41 s | — | Detected |
+| Setpoint, from 41 s | — | Detected, unless it is CA's own write reported late (Issue #1232: the value CA wrote, or its HA Context, for 180 s after each write, is recognised as CA's echo) |
 | Thermostat `fan_mode` (blower, `hvac_fan`) | `_is_recent_hvac_command(30)` | Same 30 s rule (from the code, not measured) |
 
 None of this is specific to restarts: the same 3 s (mode) and 30 s (setpoint, blower) windows follow **every** CA
@@ -3863,8 +3888,11 @@ module-level `_sleep_sensor_miss_streaks` dict (an INFO-then-WARNING escalation 
 dependent and shared across zones using one sensor) was **removed in Issue #1033**.
 The failure is reported in `IndoorTempReading.sleep_reason` and announced once per
 episode by `_refresh_indoor_sensor_health()` (INFO log, `indoor_sensor_unavailable`
-with `role=sleep`). An `INFO` line (`"Using sleep indoor sensor" entity=<id>
-value=<X.X>°F`) still fires whenever the sleep reading is actually used.
+with `role=sleep`). The `"Using sleep indoor sensor" entity=<id> value=<X.X>°F` line is `INFO` only when the
+comfort-facing source changes for that zone (and `"Indoor reading source changed to the primary source"` on the way
+back); every other call logs it at `DEBUG` (Issue #1194 a: the outer loop resolves every minute, which made the old
+per-call `INFO` ~600 lines a night). The per-zone memory behind this (`indoor_temp._logged_indoor_source`, keyed by
+climate entity) is log-only: it never changes a reading or a decision.
 
 **Provenance, computed once.** `resolve_indoor_temp_with_provenance()` returns
 an `IndoorTempReading(value, source_entity, primary_value, reason, sleep_reason)` — `value`/
@@ -3963,6 +3991,106 @@ sleep-sensor streak lines (`Sleep sensor unavailable (n/2)`, `... available agai
 owns the push notification for a missing/unavailable primary sensor; the Activity Log owns
 the timeline, reason and recovery (see `docs/entity-health-brief.md`).
 
+### Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)
+
+**Occupant outcome.** The hallway thermostat only sees its own sensor. On a sleep-sensor night the bedroom can sit
+below the sleep floor (measured: 64.0 F against a 66 F floor, 624 of 640 minutes below it) while the hallway reads at
+its setpoint and the furnace never starts. While CA is using a REMOTE sensor reading for a context, it therefore acts
+as an outer loop on that sensor: it nudges the setpoint it writes in small steps so the thermostat, on its own sensor
+and its own hysteresis, produces the target at the remote sensor, and steps the nudge back down as soon as the
+remote room is warm enough. The thermostat is never asked to do anything it does not already do (no on/off cycling
+by CA), and the occupant gets the sleep temperature in the bedroom.
+
+**Scope and keying (generic).** Keyed on `indoor_temp` provenance, not on "sleep": `IndoorTempReading.remote_context`
+is set (today `"sleep"`, `REMOTE_CONTEXT_SLEEP`) exactly when the comfort-facing `value` came from a remote sensor
+instead of `primary_value`. A future remote-sensor context sets it in `indoor_temp.py` and adds its configured-entity
+test to `AutomationEngine._remote_sensor_configured()`; nothing else changes. No separate toggle: on whenever the
+sleep sensor is configured, for that sensor's context. Installs without one run none of this.
+
+**The single setpoint path.** `AutomationEngine._set_temperature_impl()` is the ONE place the offset is applied.
+Every CA setpoint writer reaches it (`_apply_comfort_band`, `_set_temperature_for_mode`, wake-up, bedtime, pre-cool,
+TOU pre-conditioning, restores, the post-fan verify repair, the setpoint retry, and the outer loop itself), so no
+caller carries a copy. `temperature` stays the comfort TARGET for everything that judges comfort (sanity check,
+retry, re-asserts); the thermostat is told `target + offset` (heat) / `target - offset` (cool).
+`_pending_setpoint_single` is the COMMANDED value (what the read-back verify compares and diagnostics quote);
+`_pending_setpoint_target` is the target a re-asserting writer passes back in, so the offset is never applied twice.
+
+**The rule (heat; cool mirrors).** `swing` = learned `swing_heat_f` / `swing_cool_f` read from the engine's thermal
+model (read-only; default `THERMAL_SWING_DEFAULT_F` = 1.5 F when unlearned; learning of the swing is #1234, not
+touched here). `gap` = `target - remote` (heat) or `remote - target` (cool).
+
+| Remote vs target | Equipment | Since last raise | Action | New offset |
+|---|---|---|---|---|
+| `gap > swing` | idle | never, or at least the startup wait | RAISE one step | `min(offset + step, cap)` |
+| `gap > swing` | idle | less than the startup wait | hold (`awaiting_startup`) | unchanged |
+| `gap > swing` | running (heating/cooling) | any | hold (`equipment_running`: the step worked) | unchanged |
+| `gap > swing` | any | any, offset already at cap | hold (`at_cap`) | unchanged |
+| `-swing <= gap <= swing` | any | any | hold (`in_band`) | unchanged |
+| `gap < -swing`, offset > 0 | any | any (not delayed by the wait) | STEP DOWN one step | `max(offset - step, 0)` |
+| `gap < -swing`, offset = 0 | any | any | hold (`nothing_to_lower`) | 0 |
+
+At most one step per check; a write is made only when the commanded value changes. `step` = 2 F / 1 C (1.8 F
+internal), applied as a delta (`remote_offset.step_f(unit)`); the cap below is likewise a delta.
+
+**Caps (the tighter wins).** At most +4 F / +2 C (3.6 F internal) beyond the target in the gap direction, and never past
+the OPPOSITE comfort-band edge: heating never above the resolved band's ceiling, cooling never below its floor
+(`remote_offset.max_magnitude_f()`, band from `_resolved_comfort_band()`, flat `comfort_heat`/`comfort_cool` when there
+is no classification yet). A target already past the opposite edge (TOU banking) gets no offset. The cap is evaluated
+for the target of EACH write, so a writer with a different target is clamped on its own. Because CA writes a single
+setpoint in heat or cool mode (Issue #301), a heat_cool/auto dead-band is never in play; there is no minimum-dead-band
+constant in the integration to enforce.
+
+**Startup wait and actuation feedback.** After a raise CA waits for the thermostat to start before raising again:
+`startup_wait_s(latency)` = the thermostat's MEASURED raise-to-start latency plus 60 s, never below 120 s and never above
+the 300 s default used where nothing has been measured. The coordinator's equipment-activity hook
+(`_note_equipment_activity` -> `AutomationEngine.note_remote_offset_actuation()`) records the first heating/cooling
+`hvac_action` after a raise and feeds an EWMA of the latency (measured on the reference thermostat: 2-5 s); it only
+refines the wait. The hold comes from the live `hvac_action`: no raise while the equipment is running. Owner decision
+2026-11-02 ("fired -> hold", as built): once that cycle ends, a remote reading still below target - swing allows the next
+raise after the startup wait; the offset is not frozen at the step that fired. Restart: in-memory only, clean slate.
+
+**Freshness.** The remote reading is used only if `last_reported` (falling back to `last_updated`, via
+`temperature.is_sensor_stale`) is within `REMOTE_OFFSET_FRESHNESS_MINUTES` = 120 min (`indoor_temp.remote_reading_fresh()`);
+`input_number` helpers are exempt. Older -> the offset is dropped and the next check rewrites the plain setpoint
+(today's behaviour). This is separate from, and much tighter than, the 12 h `INDOOR_SENSOR_STALE_HOURS` fallback above.
+The measured sensor reports on change in ~0.18 F steps and idled up to 105 min, which is why `last_reported` is used.
+
+**Checks.** `AutomationEngine.remote_offset_check()` runs on every remote-sensor update (the `#964`
+`_on_sleep_indoor_temp_changed` listener, inside the sleep window, after the reactive checks) and from a 1-minute
+`async_track_time_interval` floor (`REMOTE_OFFSET_CHECK_INTERVAL_S`, registered next to that listener). Re-entrancy
+guarded; a no-op in dry-run, after shutdown, with no setpoint written yet, or when the thermostat is not in the
+target's mode (the loop never changes the mode).
+
+**Gates in this increment (safe default).** No offset is applied or written while the shared scheduled-band gate says
+defer (`desired_state.decide_scheduled_band_gate`: away/vacation, manual override, door/window pause, nat-vent or WHF
+ownership) or an override confirmation is pending. A closed gate resets the offset to 0 and marks the thermostat's
+held value unknown. While it is unknown, the first check after the gate reopens compares the thermostat's LIVE setpoint
+with what CA would command now and re-writes it once unless it already matches within half a step, so an offset can
+never stay on the thermostat after the episode that closed the gate (a stranded +4 F) waiting for some unrelated
+writer.
+
+**Failed loop write: roll back and back off.** When the loop's own write is not `EXECUTED` (failed, rejected,
+blocked, superseded, unconfirmed) the offset goes back to the value the thermostat holds (no silent climb to the cap)
+and the startup-wait clock is not started. The loop then waits until the LATER of `SETPOINT_RETRY_DELAY_S` (900 s,
+the same interval as the read-back verify's setpoint retry) and the next remote-sensor report after the failure (only
+the interval when the remote sensor is no longer in use), so a refusing thermostat sees about 4 attempts an hour instead
+of 60, and the first write after recovery is one step. Any executed setpoint write, from any writer, ends the back-off.
+
+Full gate coverage in both fan modes, context
+entry/exit transitions, the Status "clamped" display and the chart target/commanded split are the later increments
+(#1194 b, c, d); the simulation bedroom node and Tier A/B scenarios are (e). Cool mode is simulation-tested only.
+
+**Before / after (heat, sleep window, bedroom 64.0 F, target 66 F, hallway at setpoint).**
+
+| Situation | Before | After |
+|---|---|---|
+| Bedroom below target - swing | setpoint 66 F, furnace idle all night | 68 F, then 70 F (cap) if the thermostat has not started within the wait |
+| Furnace started, bedroom rises above target + swing | n/a | offset steps down one step per check; cycle ends on the thermostat's own hysteresis |
+| Bedroom inside the band | setpoint 66 F | setpoint 66 F (offset unchanged, no write) |
+| Remote sensor silent for > 120 min | setpoint 66 F | setpoint 66 F (offset dropped) |
+| Occupant changes the setpoint / window opens / WHF runs | CA stands down | CA stands down, offset forgotten |
+| Sleep window ends | wake band written | wake band written with no offset (the indoor reading is primary again) |
+
 ### Test coverage
 
 | Test | File |
@@ -3982,6 +4110,7 @@ the timeline, reason and recovery (see `docs/entity-health-brief.md`).
 | `TestSleepSensorOverrideBothCallPaths` | `tests/test_indoor_temp_helper.py` |
 | Indoor sensor failure: resolver reasons, `next_fallback_episode`, funnel announcements, Settings suffix (Issue #1033) | `tests/test_indoor_temp_helper.py`, `tests/test_indoor_sensor_fallback.py`, `tests/test_fallback_episode.py`, `tests/test_api.py`, `tests/test_activity_renderers.py` (written by the implementing agents; names not verified at doc time) |
 | `issue_895_sleep_indoor_sensor_swap` (pending scenario) | `tools/simulations/pending/` |
+| Remote-sensor outer loop offset core (Issue #1194 a): pure decision, units, provenance, heat/cool, caps, swing source, freshness, startup wait, single-path callers, gates, coordinator wiring | `tests/test_remote_offset_1194a.py` |
 
 ---
 

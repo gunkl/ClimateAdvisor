@@ -343,6 +343,7 @@ async def build_house(
     initial_hvac_mode: str | None = None,
     before_ca_setup: Any = None,
     weather: bool = True,
+    sim_config: dict[str, Any] | None = None,
 ) -> House:
     """Build the house and return it with Climate Advisor LOADED.
 
@@ -359,6 +360,7 @@ async def build_house(
     world has none: Climate Advisor then finds no forecast and does not classify the day on its own.
     ``before_ca_setup``: optional ``async def (house)`` run after the sim is loaded and before Climate Advisor
     sets up (the real-HA scenario adapter adds the scenario's own devices here).
+    ``sim_config``: overlaid on the simulated thermostat's entry data (e.g. an asymmetric deadband, Issue #1234).
     ``startup``: ``"cold"`` (setup only; the 300 s override-suppression window is open) or ``"settled"``.
     """
     assert units in ("us", "metric"), units
@@ -429,6 +431,7 @@ async def build_house(
             "comfort_cool": 75.0,
             "outdoor_source": OUTDOOR_F_SENSOR,
             "tick_seconds": int(SIM_STEP.total_seconds()),
+            **(sim_config or {}),
         },
     )
     house.sim_entry.add_to_hass(hass)

@@ -32,10 +32,10 @@ from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature
 from homeassistant.components.climate.const import FAN_AUTO, FAN_ON
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
@@ -50,6 +50,8 @@ from .const import (
     CONF_K_PASSIVE,
     CONF_MIN_OFF_SECONDS,
     CONF_MIN_RUN_SECONDS,
+    CONF_OFF_OFFSET_COOL_F,
+    CONF_OFF_OFFSET_HEAT_F,
     CONF_OUTDOOR_SOURCE,
     CONF_TICK_SECONDS,
     DEFAULT_DEADBAND_COOL_F,
@@ -74,8 +76,13 @@ def _decide_compressor_state(
     min_run_seconds: float,
     min_off_seconds: float,
     now: datetime,
+    off_offset: float | None = None,
 ) -> tuple[bool, datetime | None, datetime | None]:
     """Pure compressor on/off deadband + dwell-timer decision.
+
+    ``deadband`` is the START distance from the target; ``off_offset`` (Issue #1234) is the STOP
+    point as a signed distance past the target in the direction of travel (heat stops at
+    target + off_offset, cool at target - off_offset). ``None`` = symmetric (stop at +/-deadband).
 
     Extracted from _async_tick() so it can be hand-verified in test_compressor_state.py
     without importing this module (which requires the `homeassistant` package — see
@@ -101,8 +108,9 @@ def _decide_compressor_state(
             return True, now, last_off_ts
         return compressor_on, last_on_ts, last_off_ts
 
-    wants_off = (mode == "heat" and current_temp >= target_temp + deadband) or (
-        mode == "cool" and current_temp <= target_temp - deadband
+    stop = deadband if off_offset is None else off_offset
+    wants_off = (mode == "heat" and current_temp >= target_temp + stop) or (
+        mode == "cool" and current_temp <= target_temp - stop
     )
     can_turn_off = last_on_ts is None or (now - last_on_ts).total_seconds() >= min_run_seconds
     if wants_off and can_turn_off:
@@ -193,6 +201,10 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # unmodified until reconfigured.
         self._deadband_heat_f: float = float(data.get(CONF_DEADBAND_HEAT_F, DEFAULT_DEADBAND_HEAT_F))
         self._deadband_cool_f: float = float(data.get(CONF_DEADBAND_COOL_F, DEFAULT_DEADBAND_COOL_F))
+        _off_heat = data.get(CONF_OFF_OFFSET_HEAT_F)
+        _off_cool = data.get(CONF_OFF_OFFSET_COOL_F)
+        self._off_offset_heat_f: float | None = None if _off_heat is None else float(_off_heat)
+        self._off_offset_cool_f: float | None = None if _off_cool is None else float(_off_cool)
         self._min_run_seconds: float = float(data.get(CONF_MIN_RUN_SECONDS, DEFAULT_MIN_RUN_SECONDS))
         self._min_off_seconds: float = float(data.get(CONF_MIN_OFF_SECONDS, DEFAULT_MIN_OFF_SECONDS))
 
@@ -219,6 +231,12 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._compressor_on: bool = False
         self._last_on_ts: datetime | None = None
         self._last_off_ts: datetime | None = None
+
+        # Cloud-thermostat echo delay (Issue #1232): seconds between a ``set_temperature`` call and the thermostat
+        # reporting it (real cloud thermostats answer 30-120 s late, with no Context of the caller's). 0 = the
+        # historical instant, Context-carrying behaviour; only the test house turns it on (``set_echo_delay``).
+        self._echo_delay_s: float = 0.0
+        self._cancel_echo: list[Any] = []
 
     async def async_added_to_hass(self) -> None:
         """Restore prior simulated state (if any) and start the tick timer."""
@@ -270,6 +288,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self.async_on_remove(
             async_track_time_interval(self.hass, self._async_tick, timedelta(seconds=self._tick_seconds))
         )
+        self.async_on_remove(self._cancel_pending_echoes)
 
     def apply_manual_temperature_override(self, value: float) -> None:
         """Jump the simulated indoor temperature directly (Issue #898) — called by
@@ -335,6 +354,8 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             "compressor_on": self._compressor_on,
             "deadband_heat_f": self._deadband_heat_f,
             "deadband_cool_f": self._deadband_cool_f,
+            "off_offset_heat_f": self._off_offset_heat_f,
+            "off_offset_cool_f": self._off_offset_cool_f,
             "min_run_seconds": self._min_run_seconds,
             "min_off_seconds": self._min_off_seconds,
         }
@@ -388,6 +409,28 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         Issue #830 traced to: the sim entity, not CA's decision logic, silently discarded
         every heat/cool command sent through the (correct, by-design) combined call path.
         """
+        if self._echo_delay_s > 0:
+            pending = dict(kwargs)
+
+            @callback
+            def _answer(_now: datetime) -> None:  # @callback: runs in the event loop (it writes entity state)
+                self._apply_set_temperature(pending)
+
+            self._cancel_echo.append(async_call_later(self.hass, self._echo_delay_s, _answer))
+            return
+        self._apply_set_temperature(kwargs)
+
+    def _cancel_pending_echoes(self) -> None:
+        for cancel in self._cancel_echo:
+            cancel()
+        self._cancel_echo.clear()
+
+    def set_echo_delay(self, seconds: float) -> None:
+        """Make the thermostat report a ``set_temperature`` ``seconds`` after the call (0 = instant, the default)."""
+        self._echo_delay_s = float(seconds)
+
+    def _apply_set_temperature(self, kwargs: dict[str, Any]) -> None:
+        """Apply (and report) one ``set_temperature`` call -- immediately, or when its cloud echo is due."""
         hvac_mode = kwargs.get("hvac_mode")
         if hvac_mode is not None:
             new_mode = HVACMode(hvac_mode) if not isinstance(hvac_mode, HVACMode) else hvac_mode
@@ -455,11 +498,11 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             return
 
         if self._hvac_mode == HVACMode.HEAT:
-            mode, deadband = "heat", self._deadband_heat_f
+            mode, deadband, off_offset = "heat", self._deadband_heat_f, self._off_offset_heat_f
         elif self._hvac_mode == HVACMode.COOL:
-            mode, deadband = "cool", self._deadband_cool_f
+            mode, deadband, off_offset = "cool", self._deadband_cool_f, self._off_offset_cool_f
         else:
-            mode, deadband = None, None
+            mode, deadband, off_offset = None, None, None
 
         # Compressor on/off state machine: deadband thresholds decide when the
         # compressor *wants* to change state; min_run/min_off dwell timers can delay
@@ -480,6 +523,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             min_run_seconds=self._min_run_seconds,
             min_off_seconds=self._min_off_seconds,
             now=now,
+            off_offset=off_offset,
         )
         if self._compressor_on and not was_on:
             _LOGGER.info(
@@ -506,7 +550,8 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # comparison above unreachable — see Issue #887).
         clamp_bound = None
         if mode is not None and self._target_temp is not None and deadband is not None:
-            clamp_bound = self._target_temp + deadband if mode == "heat" else self._target_temp - deadband
+            _stop = deadband if off_offset is None else off_offset
+            clamp_bound = self._target_temp + _stop if mode == "heat" else self._target_temp - _stop
 
         self._current_temp = _simulate_indoor_physics(
             self._current_temp,

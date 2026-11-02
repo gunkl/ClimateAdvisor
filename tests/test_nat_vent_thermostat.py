@@ -680,7 +680,7 @@ class TestNatVentSleepWindowCycling:
 #
 # Real incident: comfort_heat=68, sleep_heat=64, sleep window 20:30-06:30. Indoor
 # hovered at 67-70F overnight — above the correct sleep floor (64) but flapping
-# across the wrong flat daytime floor (68) that _nat_vent_may_reactivate() and its
+# across the wrong flat daytime floor (68) that the (since-deleted) _nat_vent_may_reactivate() and its
 # callers used unconditionally. Config below mirrors the real incident values.
 
 

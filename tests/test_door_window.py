@@ -1733,7 +1733,8 @@ class TestRePauseForOpenSensorFsmAuthoritative:
     An earlier version of this class (and of the production code) asserted that
     _paused_by_door's already-applied value (set by _on_grace_expired()'s dispatcher
     call before this method was scheduled) could be read directly instead of
-    independently recomputing _nat_vent_may_reactivate(). That's only true from a
+    independently recomputing the nat-vent gate (the since-deleted
+    _nat_vent_may_reactivate(), Issue #1142). That's only true from a
     plain-GRACE origin — _on_grace_expired()'s GRACE_TIMER_EXPIRED handling for the
     PAUSED_DURING_GRACE composite state always lands on a paused sub-state regardless
     of the nested nat-vent outcome (door_window_fsm.py's
@@ -1742,7 +1743,7 @@ class TestRePauseForOpenSensorFsmAuthoritative:
     nat-vent should genuinely reactivate. Caught live by
     tests/test_resume_from_pause.py's
     test_repause_clears_paused_by_door_on_nat_vent_reactivation and 2 siblings.
-    Restored to always independently recompute via _nat_vent_may_reactivate() (when
+    Restored to always independently recompute the nat-vent decision (when
     _natvent_fsm_authoritative is off, the default) — correct regardless of origin."""
 
     def _make_engine(self, *, paused_by_door: bool) -> AutomationEngine:

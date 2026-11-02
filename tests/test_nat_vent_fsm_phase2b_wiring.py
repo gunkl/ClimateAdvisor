@@ -127,8 +127,8 @@ class TestSite1DoorWindowOpenEntry:
             assert engine._paused_by_door is True, f"authoritative={authoritative}"
 
     def test_authoritative_uses_zero_hysteresis_matching_legacy(self):
-        """This call site is one of only 2 (of 5) _nat_vent_may_reactivate() callers
-        that always uses hysteresis=0.0, not the configured value (here 1.0F).
+        """This call site is one of only 2 (of 5) callers of the since-deleted
+        _nat_vent_may_reactivate() (Issue #1142) that always uses hysteresis=0.0, not the configured value (here 1.0F).
         outdoor=69.5, indoor=70.0: with hysteresis=0 the gate clears (69.5 < 70);
         with the configured 1.0F hysteresis it would NOT (69.5 is not < 69.0). Both
         paths must activate — proving the FSM branch was fed hysteresis=0.0, not

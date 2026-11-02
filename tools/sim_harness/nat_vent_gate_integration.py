@@ -1,8 +1,8 @@
 """nat_vent_gate_integration — production load-bearing proof for the reactivation gate.
 
 Updated for Issue #757 Phase 6 Step 5 (strangler-fig graduation): 9 of the 10
-real nat-vent trigger sites in automation.py no longer call
-`_nat_vent_may_reactivate()` at all — they call `nat_vent_fsm.transition()`
+real nat-vent trigger sites in automation.py no longer called
+the (since-deleted, Issue #1142) `_nat_vent_may_reactivate()` at all — they call `nat_vent_fsm.transition()`
 directly, which reaches `decide_nat_vent_gate()` via `nat_vent_fsm.py`'s own
 separate top-level import of the same name (a different module-level
 reference than `automation.py`'s). Patching `automation.decide_nat_vent_gate`

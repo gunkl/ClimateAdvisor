@@ -548,11 +548,10 @@ class TestReactivationFsmDispatch:
         assert engine._paused_entity is None
 
     def test_soft_start_reactivation_routes_through_dispatcher(self):
-        """Same dispatcher, reached via the soft-start branch instead of the full
-        gate — isolated by forcing the full gate to decline and the soft-start gate
-        to accept, rather than reconstructing the exact peak/decline outdoor history
-        _nat_vent_may_soft_start() itself requires (that logic has its own dedicated
-        coverage elsewhere)."""
+        """Same dispatcher, reached through the real nat-vent FSM (Issue #1142: soft start is
+        an FSM input, so the old method mocks that forced the soft-start branch no longer
+        exist). This pins the PAUSED_NAT_VENT_REACTIVATED dispatch, not which gate branch
+        admitted the start; soft-start admission has its own coverage in the FSM tests."""
         from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
 
         engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
@@ -560,8 +559,6 @@ class TestReactivationFsmDispatch:
         engine._paused_by_door = True
         engine._natural_vent_active = False
         engine._last_outdoor_temp = 68.0
-        engine._nat_vent_may_reactivate = MagicMock(return_value=False)
-        engine._nat_vent_may_soft_start = MagicMock(return_value=True)
 
         with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
             asyncio.run(engine.check_natural_vent_conditions())
@@ -2358,7 +2355,7 @@ class TestIssue504DebounceGatesIdleOpen:
 
 
 # ---------------------------------------------------------------------------
-# Issue #411 (Pass 4) — _nat_vent_may_reactivate() direct unit tests
+# Issue #411 (Pass 4) — shared 4-part nat-vent gate, direct unit tests (was _nat_vent_may_reactivate())
 # ---------------------------------------------------------------------------
 
 
@@ -2371,8 +2368,8 @@ def _temperature_gate(engine, **kwargs) -> bool:
 
 
 class TestNatVentMayReactivateDirect:
-    """Direct unit tests of the extracted shared 4-part reactivation gate,
-    _nat_vent_may_reactivate(), in isolation from any call site.
+    """Direct unit tests of the extracted shared 4-part reactivation gate
+    (``_temperature_gate()``; formerly ``_nat_vent_may_reactivate()``), in isolation from any call site.
 
     Gate: outdoor < indoor - hysteresis AND indoor > comfort_heat AND
     outdoor < threshold AND (ceiling_threshold is None OR indoor <= ceiling_threshold).
@@ -2570,7 +2567,7 @@ class TestIssue402ClassOscillationPrevention:
     decided to reactivate nat-vent -- an off->cool->off->cool fight.
 
     Issue #411 Pass 4 fixes the *structural* cause: both the ODE ceiling guard and
-    _nat_vent_may_reactivate() now call the exact same self._ceiling_threshold() method
+    the nat-vent gate (formerly _nat_vent_may_reactivate()) now call the exact same self._ceiling_threshold() method
     for the ceiling sub-condition, rather than each re-implementing the archetype check.
     This test confirms that structural guarantee directly, rather than attempting to
     re-simulate the ODE guard's full predicted-indoor-curve machinery in this file
@@ -2590,8 +2587,8 @@ class TestIssue402ClassOscillationPrevention:
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
 
         # The ODE ceiling guard code path (automation.py ~L1293) calls
-        # self._ceiling_threshold(comfort_cool) directly. _nat_vent_may_reactivate()
-        # (automation.py ~L3710) also calls self._ceiling_threshold(comfort_cool)
+        # self._ceiling_threshold(comfort_cool) directly. The nat-vent gate inputs builder
+        # (_nat_vent_gate_inputs()) also calls self._ceiling_threshold(comfort_cool)
         # internally. Confirm they are the same bound method on the same engine instance
         # (not two separate implementations that happen to agree today).
         assert engine._ceiling_threshold(74.0) == engine._ceiling_threshold(74.0)
@@ -2600,7 +2597,7 @@ class TestIssue402ClassOscillationPrevention:
         assert engine._ceiling_threshold(74.0) is None
 
     def test_whf_ceiling_exempt_agrees_between_reactivation_gate_and_guard_dormancy(self):
-        """WHF archetype: _nat_vent_may_reactivate()'s ceiling sub-condition and the ODE
+        """WHF archetype: the nat-vent gate's ceiling sub-condition and the ODE
         guard's own dormancy condition must reach the same "ceiling doesn't matter" verdict
         for the identical inputs that produced #402 (outdoor < indoor, indoor far past
         comfort_cool, WHF fan mode) -- confirming reactivation is never blocked by a ceiling
@@ -2629,7 +2626,7 @@ class TestIssue402ClassOscillationPrevention:
 
     def test_hvac_fan_ceiling_blocks_reactivation_when_guard_would_also_escalate(self):
         """FAN_MODE_HVAC (ceiling-relevant archetype): once indoor exceeds the ceiling,
-        _nat_vent_may_reactivate() blocks reactivation -- consistent with the ODE guard's
+        the nat-vent gate blocks reactivation -- consistent with the ODE guard's
         dormancy condition also lifting (indoor > ceiling_threshold means the guard's
         `indoor <= ceiling_threshold` dormancy clause is False), so the guard
         would proceed to evaluate escalation rather than staying dormant. Both sides agree

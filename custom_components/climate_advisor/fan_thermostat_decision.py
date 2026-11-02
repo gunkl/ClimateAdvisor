@@ -14,7 +14,7 @@ each with a different action shape in production — captured here as an enum,
 the smallest step toward the plan's `DesiredState` design without building the
 full general schema yet (that's Step 3). This function does NOT decide whether
 the fan is active or overridden — those are cheap precondition checks the shell
-keeps, mirroring `_nat_vent_may_reactivate()`'s own precedent ("callers keep
+keeps, mirroring the precedent of the nat-vent gate (``nat_vent_gate.py``; "callers keep
 their own additional guards; this function returns only the shared gate").
 
 Every field on ``FanThermostatInputs`` traces to a real production read; in

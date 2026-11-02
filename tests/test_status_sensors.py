@@ -1262,12 +1262,11 @@ class TestNatVentStartCandidate:
         c = _make_classification(day_type="warm", hvac_mode="off")
         config = {"fan_mode": "whole_house_fan"}
         indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
-        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
         # the gate alone would cross at 15:00 (outdoor 70 < indoor 80), but a 98F hour follows inside the 2 h look-ahead
         outdoor = _curve([85.0, 82.0, 70.0, 98.0], start_hour=13, ts_key="datetime", temp_key="temperature")
         action, _t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
         assert action != "Natural ventilation"
-        # control: without the forecast spike the same card promises 3:00 PM (see the first test above)
+        # (the no-spike counterpart, which promises 3:00 PM, is the first test in this class)
 
     def test_absent_when_nothing_open(self):
         """Nat-vent cannot start with everything closed — no candidate, even if the

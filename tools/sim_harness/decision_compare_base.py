@@ -4,7 +4,7 @@ Factors out the shape shared by differential comparators that prove a pure
 ``decide_*()`` module is behavior-identical to the production method it
 replaces, for the common case where that production method RETURNS a value
 (a bool, float, or small dataclass) rather than expressing its outcome only
-through side effects. ``nat_vent_gate_compare.py`` is the first instance of
+through side effects. ``nat_vent_gate_compare.py`` (since deleted) was the first instance of
 this shape; the architecture-consolidation Phase A extractions (sleep-aware
 floor resolver, fan-suppression predicate, occupancy-defer predicate,
 comfort-band branch) all return a value too, so each gets a comparator by
@@ -12,7 +12,7 @@ supplying ``(engine_cls, method_name, reconstruct_inputs, pure_fn)`` here
 instead of hand-rolling a new ``Call``/``ComparisonRun`` pair and
 instrumentation contextmanager.
 
-Two modes, mirroring ``nat_vent_gate_compare.py``'s original split:
+Two modes, mirroring the original (deleted) ``nat_vent_gate_compare.py`` split:
 
 - **Shadow mode** (``instrumented_value_decision`` / ``compare_scenario``):
   the real production method runs and its answer drives the live engine; the

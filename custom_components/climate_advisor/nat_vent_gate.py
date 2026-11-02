@@ -2,8 +2,9 @@
 
 This is the first proof slice of the functional-core approach: a pure
 reimplementation of the exact boolean gate already unified across 5 production
-call sites in ``automation.py`` (``_nat_vent_may_reactivate()``,
-``_ceiling_threshold()``, ``_nat_vent_reactivation_floor()`` — consolidated by
+call sites in ``automation.py`` (formerly ``_nat_vent_may_reactivate()``, deleted in
+Issue #1142 -- see ``_nat_vent_start_decision()``; plus ``_ceiling_threshold()``,
+``_nat_vent_reactivation_floor()`` — consolidated by
 Issues #411/#417 after the site-drift bug class documented in project memory).
 
 Scope: this module answers exactly one question — "given current conditions,
@@ -14,7 +15,7 @@ reconciliation) — those stay in ``automation.py`` for now; expanding the pure
 core to cover them is a later step (see the architecture-reset plan's Step 3).
 
 Every field on ``NatVentGateInputs`` corresponds to a value the real
-``_nat_vent_may_reactivate()`` call chain reads (directly, or via
+gate's production call chain reads (directly, or via
 ``self.config``/``dt_util.now()``) — nothing is hidden or implicit. In
 particular ``in_sleep_window`` replaces the real code's internal
 ``dt_util.now()`` read: the caller resolves wall-clock time once, the pure core
@@ -24,8 +25,8 @@ The savings margin is imported from ``const.py`` (``CEILING_ESCALATION_SAVINGS_M
 source -- ``const.py`` is a leaf (it imports only ``typing``), so this module stays free of any
 engine/coordinator import while no longer carrying its own copy of the number (Issue #1093 review).
 
-Validated via differential replay against the real production method — see
-``tools/nat_vent_gate_diff.py`` and the Step-2 status report for results.
+Validated (historically) via differential replay against the production method that
+Issue #1142 later deleted; the replay tool is gone and the FSM now calls this module directly.
 """
 
 from __future__ import annotations
@@ -45,15 +46,15 @@ class NatVentGateInputs:
     """Every input the reactivation gate may read — explicit, nothing hidden.
 
     Field-by-field correspondence to the real code:
-      outdoor, indoor          -> _nat_vent_may_reactivate(outdoor=, indoor=)
+      outdoor, indoor          -> the old _nat_vent_may_reactivate(outdoor=, indoor=)
       comfort_heat_raw         -> the caller's raw config comfort_heat (before sleep adjustment)
       sleep_heat               -> config CONF_SLEEP_HEAT, falls back to comfort_heat_raw
       in_sleep_window          -> replaces _in_sleep_window(dt_util.now(), config) — resolved
                                    by the caller, never read from the wall clock in here
-      comfort_cool             -> _nat_vent_may_reactivate(comfort_cool=) / _ceiling_threshold(comfort_cool)
+      comfort_cool             -> the old _nat_vent_may_reactivate(comfort_cool=) / _ceiling_threshold(comfort_cool)
       nat_vent_delta           -> used to compute threshold = comfort_cool + nat_vent_delta
                                    (every real call site computes this identically)
-      hysteresis               -> _nat_vent_may_reactivate(hysteresis=) — 0.0 at 2 call sites
+      hysteresis               -> the old _nat_vent_may_reactivate(hysteresis=) — 0.0 at 2 call sites
                                    (handle_door_window_open, _re_pause_for_open_sensor),
                                    the configured value at the other 3
       fan_mode                 -> _ceiling_threshold()'s archetype branch
@@ -134,11 +135,10 @@ def explain_nat_vent_gate(inputs: NatVentGateInputs) -> list[str]:
 
 
 def decide_nat_vent_gate(inputs: NatVentGateInputs) -> bool:
-    """Pure reimplementation of _nat_vent_may_reactivate() (Issue #411 Pass 4).
+    """Pure 4-part nat-vent gate (Issue #411 Pass 4; replaced the deleted _nat_vent_may_reactivate()).
 
     Same 4-part gate, same boundary semantics (strict '<', '<=' on the ceiling
-    check) as production — this function exists to be differentially validated
-    against the real method, not to introduce new behavior. Implemented as
+    check) as the original production method; no new behavior. Implemented as
     ``not explain_nat_vent_gate()`` (Issue #1095) so there is one definition.
     """
     return not explain_nat_vent_gate(inputs)

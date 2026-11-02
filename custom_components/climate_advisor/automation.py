@@ -1734,6 +1734,8 @@ class AutomationEngine:
         # alongside every _natural_vent_active = False assignment (see _exit_nat_vent()
         # and its documented bypass sites).
         self._nat_vent_soft_start: bool = False
+        # Issue #1142: one 'close the windows' push per blower ventilation session.
+        self._close_windows_advised: bool = False
         # Today's observed outdoor peak-so-far and sample count, mirrored from the
         # coordinator's _outdoor_temp_history (single source of truth — see
         # coordinator._apply_outdoor_temp()). Not serialized — rebuilt from the
@@ -4540,9 +4542,13 @@ class AutomationEngine:
                 # Issue #392 Fix 1b: WHF/BOTH is mutually exclusive with the compressor by
                 # design (_activate_fan suppresses HVAC) — skip select_comfort_band()/the ODE
                 # ceiling guard entirely rather than letting the choke-point guard silently drop
-                # the write. FAN_MODE_HVAC keeps falling through (fan/AC coexist safely).
+                # the write.
+                # Issue #1142 D7: the blower (FAN_MODE_HVAC) is no longer the exception that falls through to
+                # select_comfort_band()/_apply_comfort_band()/the ODE ceiling guard: ventilating with a window open
+                # holds the thermostat Off (see _apply_nat_vent_hvac_state()) and tells the occupant to close the
+                # windows if the house gets too warm. The disabled-fan case alone still falls through.
                 _fan_cfg_cls = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-                if _fan_cfg_cls in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+                if _fan_cfg_cls in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH, FAN_MODE_HVAC):
                     return
 
             _cs = self.hass.states.get(self.climate_entity)
@@ -7397,15 +7403,21 @@ class AutomationEngine:
                 comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
                 indoor = self._get_indoor_temp_f()
                 if indoor is not None and comfort_cool is not None and indoor > comfort_cool:
-                    # Issue #247: the ODE ceiling guard now ESCALATES to AC on the classification cycle
-                    # when indoor breaches the ceiling under active nat-vent (its three-condition dormancy
-                    # lifts), so this is an informational heads-up, not a stuck state.
-                    _LOGGER.info(
-                        "Nat-vent active but indoor %.1fF > comfort_cool %.1fF --"
-                        " ceiling guard will escalate to AC this classification cycle",
-                        indoor,
-                        comfort_cool,
-                    )
+                    if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC:
+                        # Issue #1142 D7: blower mode never cools into an open window (the AC-assist band and the
+                        # ODE ceiling guard's escalation are both off while ventilating); the remedy is the
+                        # occupant's: close the windows.
+                        await self._advise_close_windows_if_too_warm()
+                    else:
+                        # Issue #247: the ODE ceiling guard ESCALATES to AC on the classification cycle when
+                        # indoor breaches the ceiling under active nat-vent (its three-condition dormancy lifts),
+                        # so this is an informational heads-up, not a stuck state.
+                        _LOGGER.info(
+                            "Nat-vent active but indoor %.1fF > comfort_cool %.1fF --"
+                            " ceiling guard will escalate to AC this classification cycle",
+                            indoor,
+                            comfort_cool,
+                        )
 
                 # Issue #757 Phase 6 Step 5: the soft-start escalation check (skipped
                 # above) is computed here via nat_vent_fsm.transition() instead of the
@@ -7481,6 +7493,34 @@ class AutomationEngine:
                         mode=self._manual_override_mode,
                         indoor_temp=indoor,
                         event_source=None,
+                    )
+                    return
+
+                if (
+                    exit_decision.reason == NatVentExitReason.COMFORT_FLOOR
+                    and self._any_monitored_sensor_holding_open()
+                ):
+                    # Issue #1142 D4 (mirror of the fast loop, which already routes this exit through
+                    # _exit_nat_vent()): with a window still open the comfort restore below would write heat/cool
+                    # into it (rule 3) and record no pause. The choke point ends the session, records the window
+                    # pause and leaves the thermostat Off; closing the window re-arms comfort in one write.
+                    _LOGGER.info(
+                        "Natural vent exit (comfort floor, window still open): indoor %.1f°F ≤ floor %.1f°F --"
+                        " pausing instead of restoring comfort",
+                        indoor,
+                        exit_decision.vent_floor,
+                    )
+                    await self._exit_nat_vent(
+                        reason=f"natural vent exit: {self._indoor_le_comfort_floor(indoor, exit_decision.vent_floor)}",
+                        set_outdoor_exit_time=True,
+                        event_type="nat_vent_comfort_floor_exit",
+                        event_payload={
+                            "indoor_temp": indoor,
+                            "comfort_heat": exit_decision.vent_floor,
+                            "fan_device": _fan_device_label(self.config),
+                            "fan_mode_change": _fan_transition_text(self.config, activating=False),
+                            "hvac_mode_restored": "unchanged (window still open)",
+                        },
                     )
                     return
 
@@ -7587,6 +7627,22 @@ class AutomationEngine:
                         indoor,
                         comfort_cool,
                     )
+                    if self._any_monitored_sensor_holding_open():
+                        # Issue #1142 D8: with a window still open this exit used to stop the fan and let the
+                        # restore send `cool` at the comfort setpoint into it (never the away setback, no pause
+                        # recorded). Same as the outdoor-rise exit: end the session, record the window pause, leave
+                        # the thermostat Off; the away setback lands when the window closes.
+                        await self._exit_nat_vent(
+                            reason="nat-vent ceiling exit (away mode), window still open",
+                            set_outdoor_exit_time=True,
+                            event_type="nat_vent_away_ceiling_exit",
+                            event_payload={
+                                "indoor": indoor,
+                                "comfort_cool": comfort_cool,
+                                "fan_device": _fan_device_label(self.config),
+                            },
+                        )
+                        return
                     # Issue #757 Phase 6 Step 5 fix: arms the same reactivation-lockout
                     # timer every other exit reason already arms (via _exit_nat_vent()'s
                     # set_outdoor_exit_time — this branch bypasses that choke point, so
@@ -7960,6 +8016,20 @@ class AutomationEngine:
                         current_temp,
                         comfort_cool,
                     )
+                    if self._any_monitored_sensor_holding_open():
+                        # Issue #1142 D8: see check_natural_vent_conditions()'s matching AWAY_CEILING branch.
+                        await self._exit_nat_vent(
+                            reason="nat-vent ceiling exit (away mode) via temp_check, window still open",
+                            set_outdoor_exit_time=True,
+                            event_type="nat_vent_away_ceiling_exit",
+                            event_payload={
+                                "indoor": current_temp,
+                                "comfort_cool": comfort_cool,
+                                "fan_device": _fan_device_label(self.config),
+                                "source": "temp_check",
+                            },
+                        )
+                        return
                     # Issue #757 Phase 6 Step 5 fix: see check_natural_vent_conditions()'s
                     # matching AWAY_CEILING branch for the full incident this closes —
                     # arms the same reactivation lockout every other exit reason already
@@ -11769,6 +11839,7 @@ class AutomationEngine:
             return False
         self._natural_vent_active = False
         self._nat_vent_soft_start = False
+        self._close_windows_advised = False  # Issue #1142: the next ventilation session may advise once again
         return True
 
     def _schedule_deferred_closed_exit_retry(
@@ -11981,6 +12052,12 @@ class AutomationEngine:
             # so the next tick's retry re-enters this branch and records the pause once the fan-off
             # ran; if the window closes first, the sensors-closed branch below completes the session.
             if self._end_nat_vent_session(result):
+                # Issue #1142 D4 (cool side) and its heat-side mirror: the window pause is recorded below, so the
+                # thermostat must be Off NOW, not at the next 30-minute cycle. A blower session's former AC-assist
+                # band (and any mode a comfort restore armed) would otherwise keep heating/cooling into the open
+                # window. Written BEFORE the restore target is read: nothing is left to restore (None), so closing
+                # the window re-arms through the selector in ONE write (the #1068 nat-vent-exit path) -- no flap.
+                await self._hold_thermostat_off_for_open_window(reason)
                 state = self.hass.states.get(self.climate_entity)
                 self._pre_pause_mode = state.state if state and state.state != "off" else None
                 # Write-shape divergence fix (found while scoping #637 Step 3): this branch
@@ -12073,6 +12150,24 @@ class AutomationEngine:
             self._emit_event_callback(event_type, payload)
 
         return result
+
+    async def _hold_thermostat_off_for_open_window(self, reason: str) -> None:
+        """Switch an armed thermostat Off because a nat-vent exit left a window open (Issue #1142 D4/D8).
+
+        Rule 3: no heat/cool with a window open after the debounce unless the occupant overrides it. Every exit that
+        records the window pause goes through here so the thermostat is Off at that moment. A whole-house-fan
+        session already left it Off (``_suppress_hvac_for_whf``), so this is a no-op there; for the blower it removes
+        the armed band, and for an away-ceiling exit the ``cool`` the fan-off restore would have sent.
+        """
+        if self._manual_change_protected():
+            return
+        state = self.hass.states.get(self.climate_entity)
+        mode = state.state if state else None
+        if mode in (None, "off", "unavailable", "unknown"):
+            return
+        _LOGGER.info("Nat-vent exit (%s): window still open -- thermostat %s -> off", reason, mode)
+        with self._mode_change_context("pause"):
+            await self._set_hvac_mode("off", reason=f"nat-vent exit with a window open ({reason}), was {mode}")
 
     def _nat_vent_reactivation_floor(self) -> float:
         """Sleep-aware comfort floor for nat-vent reactivation/eligibility gates (Issue #417).
@@ -15378,99 +15473,93 @@ class AutomationEngine:
         Called immediately after nat-vent activates (all paths) and on every
         30-minute apply_classification() cycle while nat-vent is active.
 
-        FAN_MODE_WHOLE_HOUSE: no-op — HVAC is already suppressed by _activate_fan().
-        FAN_MODE_HVAC + aggressive_savings=False: re-arm the full comfort band so the
-            thermostat self-arbitrates and the compressor can assist if the breeze alone
-            cannot hold the comfort ceiling.
-        FAN_MODE_HVAC + aggressive_savings=True: no-op (Issue #843 — previously armed
-            heat at comfort_heat directly; removed as a redundant, windows-open-violating
-            duplicate of decide_nat_vent_exit()'s COMFORT_FLOOR exit, which already
-            provides floor protection for every fan_mode/aggressive_savings combination).
+        FAN_MODE_WHOLE_HOUSE: no-op -- HVAC is already suppressed by _activate_fan().
+
+        FAN_MODE_HVAC (the thermostat's own blower): the thermostat is held OFF while the blower ventilates
+        (Issue #1142 D7, owner decision 2026-11-01; rule 3: no heat/cool with a window open after the debounce,
+        unless the occupant overrides). This replaces Feat #338's "AC assist" (the full occupied comfort band
+        armed so the compressor could back up the breeze), which ran the AC with the window open and, while
+        away, wrote the occupied ceiling below the away setback. When the house still gets too warm, Climate
+        Advisor tells the occupant to close the windows (``_advise_close_windows_if_too_warm()``) instead of
+        cooling into them. Nothing else is written: ending the session restores through
+        ``_set_temperature_for_mode()`` (the selector, away- and sleep-aware) in ONE write once the windows are
+        closed, or leaves the thermostat Off with the window pause recorded while one is still open.
+        Applies to ``aggressive_savings`` on and off alike (Issue #843 already made savings mode arm nothing,
+        but it left whatever band was armed before the session in place).
+
+        A change the occupant made at the thermostat is theirs (the same exception rule 3 makes everywhere):
+        nothing is written over it.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode in (FAN_MODE_DISABLED, FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             # WHOLE_HOUSE and BOTH: _activate_fan() already called _set_hvac_mode("off") to prevent
-            # fighting the exhaust fan — re-arming a band here would immediately contradict that.
+            # fighting the exhaust fan.
             _LOGGER.info(
                 "_apply_nat_vent_hvac_state: no-op (fan_mode=%s — HVAC suppressed by _activate_fan or disabled)",
                 fan_mode,
             )
             return
 
-        aggressive_savings = bool(self.config.get("aggressive_savings", False))
-        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-
-        if not aggressive_savings:
-            # Sleep window: skip the full-band setpoint call — apply_classification() will arm
-            # the sleep band immediately after, so a prior full-band write would be overwritten
-            # and would cause redundant thermostat calls all night.  Emit the status event so
-            # the status card and activity report still show nat-vent as active.
-            _in_sleep = _in_sleep_window(dt_util.now(), self.config)
-            if _in_sleep:
-                _LOGGER.info(
-                    "_apply_nat_vent_hvac_state: sleep window in effect — skipping full-band setpoint"
-                    " (deferring to sleep band); nat_vent_ac_assist_armed emitted comfort_heat=%.1f comfort_cool=%.1f",
-                    comfort_heat,
-                    comfort_cool,
-                )
-                _assist_sig = ("sleep_window", round(comfort_heat, 2), round(comfort_cool, 2))
-                if self._emit_event_callback and not self._recent_duplicate("nat_vent_ac_assist_armed", _assist_sig):
-                    self._emit_event_callback(
-                        "nat_vent_ac_assist_armed",
-                        {
-                            "comfort_heat": comfort_heat,
-                            "comfort_cool": comfort_cool,
-                            "fan_device": _fan_device_label(self.config),
-                        },
-                    )
-                return
-
-            # Full comfort band — compressor may assist if breeze cannot hold the ceiling.
+        if self._manual_change_protected():
+            self._note_deferred_to_protected_change()
             _LOGGER.info(
-                "_apply_nat_vent_hvac_state: AC assist armed — full band comfort_heat=%.1f comfort_cool=%.1f"
-                " (aggressive_savings=off)",
-                comfort_heat,
-                comfort_cool,
+                "_apply_nat_vent_hvac_state: thermostat left alone -- the occupant's manual change is protected "
+                "override_active=%s confirm_pending=%s",
+                self._manual_override_active,
+                self._override_confirm_pending,
             )
-            _nat_vent_band = ComfortBand(
-                floor=comfort_heat,
-                ceiling=comfort_cool,
-                active="ceiling",
-                reason="nat-vent AC assist — full comfort band",
+            return
+
+        state = self.hass.states.get(self.climate_entity)
+        mode = state.state if state else None
+        if mode in (None, "off", "unavailable", "unknown"):
+            _LOGGER.info(
+                "_apply_nat_vent_hvac_state: thermostat already %s -- blower ventilation, no heat/cool armed", mode
             )
-            await self._apply_comfort_band(
-                _nat_vent_band,
-                reason="nat-vent AC assist: full band armed (aggressive_savings=off)",
-            )
-            _assist_sig = ("full_band", round(comfort_heat, 2), round(comfort_cool, 2))
-            if self._emit_event_callback and not self._recent_duplicate("nat_vent_ac_assist_armed", _assist_sig):
-                self._emit_event_callback(
-                    "nat_vent_ac_assist_armed",
-                    {
-                        "comfort_heat": comfort_heat,
-                        "comfort_cool": comfort_cool,
-                        "fan_device": _fan_device_label(self.config),
-                    },
-                )
         else:
-            # Issue #843: savings mode is now a no-op here — no longer arms heat at
-            # the comfort floor. It used to, but that force-commanded heat while
-            # nat-vent (windows open) was still the active session, contradicting
-            # this project's "no HVAC while windows are open, absent a manual
-            # override" principle, and it was redundant with a mechanism that
-            # already exists and is fan_mode/aggressive_savings-agnostic:
-            # decide_nat_vent_exit()'s COMFORT_FLOOR exit reason already ends the
-            # nat-vent session and restores heat (through the properly FSM-routed
-            # _set_temperature_for_mode(), which now also carries the recency-gated
-            # deadband from Issue #843) the moment indoor actually crosses the
-            # floor. Nat-vent's own thermostatic exit evaluation is the sole floor
-            # protection while windows are open — this branch no longer needs a
-            # separate, contradictory floor guard.
             _LOGGER.info(
-                "_apply_nat_vent_hvac_state: savings mode — no HVAC arm (aggressive_savings=on);"
-                " floor protection comes from decide_nat_vent_exit()'s COMFORT_FLOOR exit,"
-                " not this function"
+                "_apply_nat_vent_hvac_state: blower ventilation with a window open -- thermostat %s -> off "
+                "(no AC assist; the occupant is asked to close the windows if the house gets too warm)",
+                mode,
+            )
+            with self._mode_change_context("nat_vent"):
+                await self._set_hvac_mode("off", reason=f"blower ventilation, window open (was {mode})")
+        await self._advise_close_windows_if_too_warm()
+
+    async def _advise_close_windows_if_too_warm(self) -> None:
+        """Tell the occupant to close the windows when blower ventilation is not enough (Issue #1142 D7).
+
+        The blower-mode replacement for AC assist: Climate Advisor will not heat or cool into an open window, so
+        once the house is above the comfort ceiling while the blower ventilates, the only remedy is the
+        occupant's. One push per ventilation session (re-armed when the session ends); no email.
+        """
+        if not self._natural_vent_active or self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_HVAC:
+            return
+        if self._close_windows_advised:
+            return
+        indoor = self._get_indoor_temp_f()
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+        if indoor is None or indoor <= comfort_cool:
+            return
+        self._close_windows_advised = True
+        _LOGGER.info(
+            "Close-windows advice: blower ventilation active but indoor %.1f°F > comfort ceiling %.1f°F "
+            "-- the AC stays off with the windows open",
+            indoor,
+            comfort_cool,
+        )
+        await self._notify(
+            f"It's {self._t(indoor)} inside, above your {self._t(comfort_cool)} comfort limit, and the windows are "
+            "open. Climate Advisor won't run the air conditioning with the windows open. Close the windows and "
+            "it will cool the house.",
+            "Climate Advisor — close the windows",
+            notification_type="door_window_pause",
+            email=False,
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "close_windows_advised",
+                {"indoor": indoor, "comfort_cool": comfort_cool, "fan_device": _fan_device_label(self.config)},
             )
 
     async def _command_whf_control_entity(self, desired_on: bool, *, reason: str, safety: bool = False) -> bool:

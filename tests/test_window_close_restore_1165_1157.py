@@ -89,7 +89,9 @@ class TestOccupantsOffSurvivesTheWindowClosing:
     @pytest.mark.parametrize("grace_s", [1800, 0], ids=["grace", "no_grace"])
     def test_close_writes_nothing_over_the_off(self, timers, pre_mode, day, confirm_s, grace_s):  # noqa: F811
         engine = _nat_vent_exit_pause(live_mode=pre_mode, day=day, indoor=70.0, confirm_s=confirm_s, grace_s=grace_s)
-        assert engine._pre_pause_mode == pre_mode
+        # Issue #1142: the exit leaves the thermostat Off at once, so nothing is left to restore (the #1068 path
+        # re-arms through the selector). A real whole-house-fan session had it Off already.
+        assert engine._pre_pause_mode is None
         _occupant_sets_off(engine, pre_mode)
         assert engine._manual_change_protected()
         engine.hass.services.async_call.reset_mock()

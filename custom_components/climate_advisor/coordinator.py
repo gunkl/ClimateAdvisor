@@ -13032,14 +13032,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "nat_vent_active": ae._natural_vent_active,
             # Issue #540: soft-start qualifier — only meaningful when nat_vent_active is True.
             "nat_vent_soft_start": ae._nat_vent_soft_start,
-            # Issue #338: AC assist status — true when nat-vent is active with FAN_MODE_HVAC
-            # and aggressive_savings is off (full comfort band armed, compressor may assist).
-            # FAN_MODE_BOTH excluded: _activate_fan() suppresses HVAC for BOTH (same as WHOLE_HOUSE).
-            "nat_vent_ac_assist": (
-                bool(ae._natural_vent_active)
-                and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
-                and not self.config.get("aggressive_savings", False)
-            ),
+            # Issue #338 / #1142 D7: AC assist is gone -- blower ventilation holds the thermostat Off (no heat/AC with
+            # a window open). The key stays (the debug tab reads it) and is always False.
+            "nat_vent_ac_assist": False,
             "nat_vent_target": _nat_vent_band["nat_vent_target"],
             "nat_vent_on_threshold": _nat_vent_band["nat_vent_on_threshold"],
             "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],

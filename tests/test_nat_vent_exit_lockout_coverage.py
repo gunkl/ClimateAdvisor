@@ -66,10 +66,18 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "which never consults the paused-reactivation lockout at all"
     ),
     ("check_natural_vent_conditions", 1): (
+        "arms lockout -- Issue #1142 D4: COMFORT_FLOOR with a window still open (routed through the choke point "
+        "like the fast loop's twin) so the pause is recorded and the thermostat left Off"
+    ),
+    ("check_natural_vent_conditions", 2): (
+        "arms lockout -- Issue #1142 D8: AWAY_CEILING with a window still open; the same exit that bypassed "
+        "the choke point (and armed the lockout directly) when every sensor is closed"
+    ),
+    ("check_natural_vent_conditions", 3): (
         "arms lockout — original outdoor-rise exit (Issue #115/#411), the lockout mechanism's "
         "first and originally-only use case"
     ),
-    ("check_natural_vent_conditions", 2): (
+    ("check_natural_vent_conditions", 4): (
         "arms lockout — Issue #641 (CEILING_THRESHOLD): outdoor hovering near "
         "comfort_cool + nat_vent_delta can cross the boundary tick-to-tick from sensor/weather "
         "noise, flip-flopping against the reactivation gate's own outdoor < threshold check"
@@ -80,6 +88,9 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "takes the sensors-closed grace-period branch, lockout never consulted"
     ),
     ("nat_vent_temperature_check", 2): (
+        "arms lockout -- Issue #1142 D8: AWAY_CEILING with a window still open (mirror of the slow loop's branch)"
+    ),
+    ("nat_vent_temperature_check", 3): (
         "exempted: this ordinal is ONE shared _exit_nat_vent() call site serving all 3 of "
         "this function's exit reasons (COMFORT_FLOOR/OUTDOOR_RISE/CEILING_THRESHOLD) via a "
         "per-branch local (`_set_outdoor_exit_time`), not a literal "

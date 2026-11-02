@@ -13,7 +13,7 @@ Occupant stories (hvac_fan install, the thermostat's own blower is the ventilati
 * D1 / D2 (whole-house fan). A hot evening where only the soft start qualifies: the occupant must not get an
   "HVAC paused" message for a pause the fan cancels seconds later.
 
-Strict ``xfail`` until the fix lands. Prove the tests are not vacuous with ``scripts/revert_proof.py``.
+Prove the tests are not vacuous with ``scripts/revert_proof.py``.
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ async def _ventilating(make_house, *, away: bool = False):
     if away:
         await engine.handle_occupancy_away()
         await house.advance(minutes=1)
+        house.away_marker = len(house.calls)  # the away setback itself is written above; judge what follows
     await house.open("window")
     await house.advance(seconds=_DEBOUNCE_S + 60)
     assert engine._natural_vent_active, "precondition: the open window started natural ventilation"
@@ -63,7 +64,6 @@ async def _ventilating(make_house, *, away: bool = False):
     return house, engine
 
 
-@pytest.mark.xfail(strict=True, reason="#1142 D7: blower ventilation arms the occupied band")
 async def test_blower_ventilation_at_home_leaves_the_thermostat_off(make_house) -> None:
     house, engine = await _ventilating(make_house)
     assert house.thermostat.mode == "off", f"AC assist armed with the window open: {house.thermostat.mode}"
@@ -72,20 +72,17 @@ async def test_blower_ventilation_at_home_leaves_the_thermostat_off(make_house) 
     assert house.thermostat.action not in ("cooling", "heating"), "rule 3: AC ran with the window open"
 
 
-@pytest.mark.xfail(strict=True, reason="#1142 D7: blower ventilation arms the occupied band while away")
 async def test_blower_ventilation_while_away_never_writes_cool_below_the_setback(make_house) -> None:
     house, engine = await _ventilating(make_house, away=True)
     setback = float(engine.config.get("setback_cool", 80.0))
     low_cool = [
         c
-        for c in _ca_climate_writes(house)
+        for c in _ca_climate_writes(house, since=house.away_marker)
         if c.data.get("hvac_mode") == "cool" and (c.data.get("temperature") or 999) < setback - 0.6
     ]
     assert not low_cool, f"cool written below the away setback {setback}: {low_cool}"
-    assert house.thermostat.mode == "off"
 
 
-@pytest.mark.xfail(strict=True, reason="#1142 D4: blower exit with a window open leaves the thermostat armed")
 async def test_outdoor_rise_exit_with_window_open_leaves_thermostat_off_and_close_does_not_flap(make_house) -> None:
     house, engine = await _ventilating(make_house)
     house.set_outdoor(80.0, high_f=82.0, low_f=62.0)

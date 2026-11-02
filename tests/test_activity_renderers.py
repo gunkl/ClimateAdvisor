@@ -636,6 +636,8 @@ class TestEventRenderersCoverage:
                 # Removed in v0.4.47 (Issue #374 — Priority 0 exit deleted).
                 # Kept to render historical events in persisted logs from v0.4.46.
                 "nat_vent_sleep_ceiling_reached",
+                # Removed in Issue #1142 (AC assist replaced by "thermostat Off + close the windows").
+                "nat_vent_ac_assist_armed",
             }
         )
 

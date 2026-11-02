@@ -24,13 +24,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.const import (
     CONF_FAN_MODE,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
     OCCUPANCY_AWAY,
 )
+from custom_components.climate_advisor.nat_vent_lifecycle import NatVentLifecycleState
 from tests.test_door_pause_recorded_1132 import (
     _AUTOMATION,
     _DAY,
@@ -44,9 +45,6 @@ from tests.test_restore_resolved_band import _classification, _make_engine
 _AWAY_SETBACK_COOL = 80.0
 
 _XF_D3 = pytest.mark.xfail(strict=True, reason="#1142 D3: grace pre-check and nat-vent FSM disagree")
-_XF_D4 = pytest.mark.xfail(strict=True, reason="#1142 D4: blower exit with a window open leaves the thermostat armed")
-_XF_D7 = pytest.mark.xfail(strict=True, reason="#1142 D7: blower ventilation arms the occupied band")
-_XF_D8 = pytest.mark.xfail(strict=True, reason="#1142 D8: away-ceiling exit sends cool with the window open")
 
 
 def _blower_engine(
@@ -235,7 +233,6 @@ class TestD3GraceAgreement:
 # ---------------------------------------------------------------------------
 
 
-@_XF_D4
 class TestD4BlowerExitWithWindowOpen:
     def test_cool_side_outdoor_rise_exit_leaves_thermostat_off(self):
         engine = _blower_engine()
@@ -249,7 +246,7 @@ class TestD4BlowerExitWithWindowOpen:
         assert engine._test_state.state == "off", "rule 3: not left armed to cool into the open window"
 
     def test_cool_side_close_after_exit_does_not_flap(self):
-        engine = _blower_engine()
+        engine = _blower_engine(day="hot")  # a cool-classified day: closing the window re-arms cooling
         _open(engine)
         engine._last_outdoor_temp = 80.0
         for seconds in (60, 200, 400):
@@ -273,7 +270,7 @@ class TestD4BlowerExitWithWindowOpen:
         assert engine._paused_by_door is True
 
     def test_heat_side_close_after_exit_does_not_flap(self):
-        engine = _blower_engine(mode="heat", indoor=72.5, outdoor=56.0, day="cool")
+        engine = _blower_engine(mode="heat", indoor=72.5, outdoor=56.0, day="cold")  # a heat-classified day
         _open(engine)
         engine._test_state.attributes["current_temperature"] = 66.0
         for seconds in (60, 200, 400):
@@ -291,7 +288,6 @@ class TestD4BlowerExitWithWindowOpen:
 # ---------------------------------------------------------------------------
 
 
-@_XF_D7
 class TestD7BlowerNeverArmsHvacWithOpenWindow:
     @pytest.mark.parametrize("mode", ["cool", "heat", "off"])
     def test_start_on_open_leaves_thermostat_off(self, mode):
@@ -341,7 +337,6 @@ class TestD7BlowerNeverArmsHvacWithOpenWindow:
 # ---------------------------------------------------------------------------
 
 
-@_XF_D8
 class TestD8AwayCeilingExitWithWindowOpen:
     @pytest.mark.parametrize("fan_mode", [FAN_MODE_WHOLE_HOUSE, FAN_MODE_HVAC])
     def test_no_cool_while_the_window_is_open(self, fan_mode):
@@ -515,3 +510,115 @@ class TestQuietPauseEdges:
             "sensor_opened",
             {"entity": "monitored door/window", "result": "paused", "hvac_mode_change": "cool→off"},
         ) in events
+
+
+# ---------------------------------------------------------------------------
+# Step 5 -- blower mode edges: guidance, savings mode, the occupant's own change, the whole-house-fan mirror
+# ---------------------------------------------------------------------------
+
+
+def _warm_up(engine, temp: float = 76.0) -> None:
+    engine._test_state.attributes["current_temperature"] = temp
+
+
+class TestCloseTheWindowsGuidance:
+    def test_blower_session_above_the_ceiling_asks_once_in_plain_words(self):
+        engine = _blower_engine()
+        notify = _notes(engine)
+        events = _record(engine)
+        _open(engine)
+        assert not notify.called, "precondition: 72F is under the 74F ceiling, nothing to say yet"
+        _warm_up(engine)
+        for seconds in (60, 120, 180, 240):
+            _tick(engine, seconds)
+        assert notify.await_count == 1, "one message per ventilation session, not one per check"
+        message, title = notify.call_args.args[0], notify.call_args.args[1]
+        assert "close the windows" in message.lower() and "close the windows" in title.lower()
+        assert "76" in message and "74" in message
+        assert engine._test_state.state == "off", "no air conditioning while the window is open"
+        assert [name for name, _ in events].count("close_windows_advised") == 1
+        assert notify.call_args.kwargs.get("email") is False, "push only, no email"
+
+    def test_below_the_ceiling_says_nothing(self):
+        engine = _blower_engine()
+        notify = _notes(engine)
+        _open(engine)
+        _warm_up(engine, 73.5)
+        _tick(engine, 60)
+        assert not notify.called
+
+    def test_whole_house_fan_never_gets_this_advice(self):
+        engine = _blower_engine(**{CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        notify = _notes(engine)
+        _open(engine)
+        _warm_up(engine)
+        _tick(engine, 60)
+        assert not notify.called, "the fan keeps the house; the blower-mode advice is not for it"
+
+    def test_a_new_session_may_advise_again(self):
+        engine = _blower_engine()
+        notify = _notes(engine)
+        _open(engine)
+        _warm_up(engine)
+        _tick(engine, 60)
+        assert notify.await_count == 1
+        engine._end_nat_vent_session(FanCommandResult.EXECUTED)
+        engine._apply_nat_vent_fsm_state(NatVentLifecycleState.ACTIVE_FULL_GATE)
+        _tick(engine, 120)
+        assert notify.await_count == 2
+
+
+class TestBlowerEdges:
+    def test_savings_mode_also_holds_the_thermostat_off(self):
+        engine = _blower_engine(aggressive_savings=True)
+        _open(engine)
+        assert engine._natural_vent_active is True
+        assert engine._test_state.state == "off"
+
+    def test_the_occupants_own_thermostat_change_is_not_overwritten(self):
+        engine = _blower_engine()
+        _open(engine)
+        assert engine._test_state.state == "off", "precondition"
+        engine._manual_override_active = True
+        engine._manual_override_mode = "cool"
+        engine._test_state.state = "cool"
+        before = len(_climate_calls(engine))
+        _at(lambda: engine._apply_nat_vent_hvac_state())
+        assert engine._test_state.state == "cool"
+        assert _climate_calls(engine, before) == []
+
+    def test_exit_with_the_window_open_while_the_thermostat_was_re_armed_is_switched_off(self):
+        """Defence in depth: whatever armed the thermostat during the session, the exit that records the window
+        pause leaves it Off at that moment."""
+        engine = _blower_engine()
+        _open(engine)
+        engine._test_state.state = "cool"  # something re-armed it
+        engine._last_outdoor_temp = 80.0
+        for seconds in (60, 200, 400):
+            _tick(engine, seconds)
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"
+
+    def test_whole_house_fan_floor_exit_with_the_window_open_pauses_instead_of_restoring_cool(self):
+        """Mirror found while proving D4: the slow-loop comfort-floor exit wrote `cool` into the open window and
+        recorded no pause (also for the whole-house fan)."""
+        engine = _blower_engine(indoor=72.0, outdoor=60.0, **{CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        _open(engine)
+        assert engine._natural_vent_active is True, "precondition"
+        _warm_up(engine, 66.0)
+        for seconds in (60, 200, 400):
+            _tick(engine, seconds)
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+        assert engine._test_state.state == "off"
+
+    def test_floor_exit_with_the_window_closed_still_restores_comfort(self):
+        """Control: only an OPEN window changes the exit."""
+        engine = _blower_engine(mode="heat", indoor=72.5, outdoor=56.0, day="cold")
+        _open(engine)
+        engine._sensor_check_callback = lambda: False
+        _warm_up(engine, 66.0)
+        for seconds in (60, 200, 400):
+            _tick(engine, seconds)
+        assert engine._paused_by_door is False
+        assert engine._test_state.state == "heat"

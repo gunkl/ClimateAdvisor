@@ -2648,7 +2648,18 @@ def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
 
 
 def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[str, str]:
+    # Legacy (Issue #1142 D7): AC assist was removed; kept so persisted logs from earlier versions still render.
     return "Nat-vent + AC assist armed (full band)", ""
+
+
+def _render_close_windows_advised(p: dict, unit: str) -> tuple[str, str]:
+    # Issue #1142 D7: blower ventilation never cools into an open window; the occupant was asked to close it.
+    indoor = p.get("indoor")
+    ceiling = p.get("comfort_cool")
+    detail = (
+        f"indoor {format_temp(indoor, unit)}, comfort limit {format_temp(ceiling, unit)}" if indoor and ceiling else ""
+    )
+    return "Asked the occupant to close the windows (AC stays off while they are open)", detail
 
 
 # Legacy event, no current emitter (Issue #593 audit) -- kept only to render
@@ -3189,6 +3200,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_reactivated_while_paused": _render_nat_vent_reactivated_while_paused,
     "nat_vent_ceiling_escalation": _render_nat_vent_ceiling_escalation,
     "nat_vent_ac_assist_armed": _render_nat_vent_ac_assist_armed,
+    "close_windows_advised": _render_close_windows_advised,
     "nat_vent_sleep_ceiling_reached": _render_nat_vent_sleep_ceiling_reached,
     "nat_vent_bedtime_continue": _render_nat_vent_bedtime_continue,
     "sensor_opened": _render_sensor_opened,

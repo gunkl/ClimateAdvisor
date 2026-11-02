@@ -448,10 +448,17 @@ def _window_event_available(events: dict | None, key: str, opportunity_flag: boo
 def _gives_window_advice(c: DayClassification, occupancy_mode: str) -> bool:
     """Whether the briefing may talk about opening/closing windows today (Issue #1211).
 
-    Only when windows are actually recommended (outside air helps today) AND someone is home: an empty house
+    Only when windows are recommended for the day (outside air helps today) AND someone is home: an empty house
     (away/vacation) gets no window instructions even though the flag stays set for the automation.
     """
-    return bool(c.windows_recommended) and occupancy_mode not in ("away", "vacation")
+    # The briefing is the day's plan, so it follows the classifier's forecast-based answer. The coordinator's
+    # live outdoor gate can clear ``windows_recommended`` for a few hours (a cold house on a cool morning) and
+    # restore it later; the briefing text neither flaps with it nor depends on the moment it was rendered, and
+    # the regeneration trigger keys on the same ``forecast_windows_recommended``. (The live direction is the
+    # Next User Action card's job.) ``windows_recommended`` alone still counts, for callers that build a
+    # classification by hand.
+    recommended = bool(c.forecast_windows_recommended or c.windows_recommended)
+    return recommended and occupancy_mode not in ("away", "vacation")
 
 
 def _band_text(floor: float, ceiling: float, temp_unit: str) -> str:

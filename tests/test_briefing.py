@@ -2994,3 +2994,13 @@ class TestWindowAdviceGating1211:
         text = _generate(c, occupancy_mode="away")
         assert "Close by" not in text
         assert "Open south and east windows" not in text
+
+    def test_briefing_follows_the_forecast_answer_not_the_live_gate(self):
+        """The live outdoor gate may clear ``windows_recommended`` for a few hours; the day's plan text must not
+        depend on whether the briefing happened to render during that stretch."""
+        c = _make_classification("mild", today_high=72, today_low=50)
+        assert c.forecast_windows_recommended is True
+        c.windows_recommended = False  # cleared by the live gate (cold house, colder outdoor)
+        text = _generate(c)
+        assert "(windows day)" in text
+        assert "Close by" in text

@@ -9,6 +9,8 @@ from __future__ import annotations
 import sys
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 if "homeassistant" not in sys.modules:
     from conftest import install_ha_stubs
 
@@ -85,6 +87,15 @@ class TestReadingStorage:
         j = PromiseJournal()
         j.record_reading(rd(0))
         assert j.record_reading(rd(1, setpoint_f=70.0)) is True
+
+    @pytest.mark.parametrize("field", ["setpoint_low_f", "setpoint_high_f"])
+    def test_dual_setpoint_change_is_stored_and_noise_is_not(self, field):
+        """Issue #1260: P7's deadband exception reads the heat_cool setpoints, so a real change must be stored."""
+        j = PromiseJournal()
+        j.record_reading(rd(0, **{field: 68.0}))
+        assert j.record_reading(rd(1, **{field: 68.2})) is False  # under the 0.5 F store threshold
+        assert j.record_reading(rd(2, **{field: 66.0})) is True
+        assert j.record_reading(rd(3, **{field: None})) is True  # becoming unknown is a change too
 
 
 class TestCapsAndRetention:
@@ -346,6 +357,87 @@ class TestPromiseStats:
         assert stats["settling_flip"]["hits"] == 2
         assert stats["settling_flip"]["first_ts"] == at(0).isoformat()
         assert stats["settling_flip"]["last_ts"] == at(5).isoformat()
+
+
+class TestExcusedStatsRoundTrip:
+    """Issue #1260: excused time survives save -> JSON -> restore, apart from hits; bad rows are dropped."""
+
+    ALLOWED = frozenset({"comfort_kept", "settling_flip"})
+
+    def test_save_and_restore_keep_the_excused_counts(self):
+        import json  # noqa: PLC0415
+
+        from custom_components.climate_advisor.promise_journal import bump_promise_excused  # noqa: PLC0415
+
+        stats: dict = {}
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(10), 10.0, new_run=True)
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(40), 30.0, new_run=False)
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(200), 20.0, new_run=True)
+        bump_promise_stats(stats, "settling_flip", at(5))
+        restored = sanitize_promise_stats(json.loads(json.dumps(stats)), self.ALLOWED)
+        assert restored == stats
+        row = restored["comfort_kept"]["excused"]["thermostat_deadband"]
+        assert row == {"runs": 2, "minutes": 60.0, "last_ts": at(200).isoformat()}
+        assert restored["comfort_kept"]["hits"] == 0  # excused-only: never a hit
+        assert "excused" not in restored["settling_flip"]
+
+    def test_a_restored_entry_keeps_counting_from_where_it_left_off(self):
+        from custom_components.climate_advisor.promise_journal import bump_promise_excused  # noqa: PLC0415
+
+        stats: dict = {}
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(10), 10.0, new_run=True)
+        restored = sanitize_promise_stats(stats, self.ALLOWED)
+        bump_promise_excused(restored, "comfort_kept", "thermostat_deadband", at(20), 5.0, new_run=True)
+        assert restored["comfort_kept"]["excused"]["thermostat_deadband"]["runs"] == 2
+        assert restored["comfort_kept"]["excused"]["thermostat_deadband"]["minutes"] == 15.0
+
+    def test_malformed_excused_rows_are_dropped_and_the_hits_kept(self):
+        good = {"runs": 1, "minutes": 5.0, "last_ts": "t"}
+        raw = {
+            "comfort_kept": {
+                "hits": 3,
+                "first_ts": "a",
+                "last_ts": "b",
+                "excused": {
+                    "thermostat_deadband": good,
+                    "bool_runs": {"runs": True, "minutes": 1.0},
+                    "neg_runs": {"runs": -1, "minutes": 1.0},
+                    "str_minutes": {"runs": 1, "minutes": "lots"},
+                    "neg_minutes": {"runs": 1, "minutes": -2.0},
+                    "nan_minutes": {"runs": 1, "minutes": float("nan")},
+                    "inf_minutes": {"runs": 1, "minutes": float("inf")},
+                    "not_a_row": 7,
+                    5: good,
+                },
+            },
+        }
+        out = sanitize_promise_stats(raw, self.ALLOWED)
+        assert out == {
+            "comfort_kept": {"hits": 3, "first_ts": "a", "last_ts": "b", "excused": {"thermostat_deadband": good}}
+        }
+        assert sanitize_promise_stats({"comfort_kept": {"hits": 1, "excused": ["x"]}}, self.ALLOWED) == {
+            "comfort_kept": {"hits": 1, "first_ts": None, "last_ts": None}
+        }
+        bad_ts = {
+            "comfort_kept": {"hits": 0, "excused": {"thermostat_deadband": {"runs": 1, "minutes": 2, "last_ts": 9}}}
+        }
+        assert sanitize_promise_stats(bad_ts, self.ALLOWED)["comfort_kept"]["excused"]["thermostat_deadband"] == {
+            "runs": 1,
+            "minutes": 2.0,
+            "last_ts": None,
+        }
+
+    def test_the_number_of_excused_reasons_is_bounded(self):
+        from custom_components.climate_advisor.promise_journal import MAX_EXCUSED_REASONS  # noqa: PLC0415
+
+        rows = {f"reason_{i}": {"runs": 1, "minutes": 1.0, "last_ts": None} for i in range(MAX_EXCUSED_REASONS + 5)}
+        out = sanitize_promise_stats({"comfort_kept": {"hits": 0, "excused": rows}}, self.ALLOWED)
+        assert len(out["comfort_kept"]["excused"]) == MAX_EXCUSED_REASONS
+        assert list(out["comfort_kept"]["excused"]) == [f"reason_{i}" for i in range(MAX_EXCUSED_REASONS)]
+
+    def test_the_excused_rows_cannot_smuggle_an_unknown_promise_in(self):
+        raw = {"evil": {"hits": 0, "excused": {"thermostat_deadband": {"runs": 1, "minutes": 1.0}}}}
+        assert sanitize_promise_stats(raw, self.ALLOWED) == {}
 
 
 class TestObserveOnlySealedNotices:

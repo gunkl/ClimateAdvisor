@@ -19,6 +19,7 @@ if "homeassistant" not in sys.modules:
     install_ha_stubs()
 
 from custom_components.climate_advisor import invariant_watchdog as _iw  # noqa: E402
+from custom_components.climate_advisor import promise_journal as _pj  # noqa: E402
 from custom_components.climate_advisor.const import FAN_MODE_HVAC, FAN_MODE_WHOLE_HOUSE  # noqa: E402
 from custom_components.climate_advisor.invariant_watchdog import (  # noqa: E402
     LEVEL_ALERT,
@@ -915,6 +916,228 @@ class TestP7ComfortKept:
         (h,) = hits_for("comfort_kept", make_input(_cold_house(60)), cfg)
         assert dict(h.evidence)["worst_f"] == pytest.approx(3.0)
         assert "1.7" in h.detail  # 3 F expressed as a delta in C
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P7 thermostat-deadband exception (Issue #1260; owner-approved wording in the issue)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _db_house(minutes, *, indoor=66.6, mode="heat", action="idle", setpoint=68.0, step=10, **kw):
+    """Readings every ``step`` min; the heat floor is 68 F and the cool ceiling 74 F (P7's own 1 F slack on top)."""
+    kw.setdefault("forecast_high_f", 50.0)
+    return [
+        rd(m, hvac_mode=mode, hvac_action=action, indoor_f=indoor, setpoint_f=setpoint, **kw)
+        for m in range(0, minutes + 1, step)
+    ]
+
+
+def _excused(inp, cfg=None, scope=SCOPE_TEST):
+    return [x for x in _iw.run_promise_excused(inp, cfg or PromiseConfig(), scope=scope) if x.promise == "comfort_kept"]
+
+
+class TestP7ThermostatDeadband:
+    # ── must stop hitting ────────────────────────────────────────────────────
+    def test_heat_idle_setpoint_at_floor_room_1_4_below_is_the_thermostats_own_deadband(self):
+        assert hits_for("comfort_kept", make_input(_db_house(60))) == []
+
+    def test_cool_mirror(self):
+        rs = _db_house(60, indoor=75.4, mode="cool", setpoint=74.0)
+        assert hits_for("comfort_kept", make_input(rs)) == []
+
+    def test_exactly_2_5_past_the_edge_is_still_excused(self):
+        assert hits_for("comfort_kept", make_input(_db_house(60, indoor=65.5))) == []
+
+    def test_heat_cool_uses_the_low_setpoint_below_the_floor(self):
+        rs = _db_house(60, mode="heat_cool", setpoint=None, setpoint_low_f=68.0, setpoint_high_f=76.0)
+        assert hits_for("comfort_kept", make_input(rs)) == []
+
+    def test_auto_uses_the_high_setpoint_above_the_ceiling(self):
+        rs = _db_house(60, indoor=75.4, mode="auto", setpoint=None, setpoint_low_f=66.0, setpoint_high_f=74.0)
+        assert hits_for("comfort_kept", make_input(rs)) == []
+
+    def test_setpoint_inside_the_band_edge_also_qualifies(self):
+        # 69 F is inside the band and the room (66.6) is 2.4 F from it (condition 5). At 70 F it would be 3.4 F.
+        assert hits_for("comfort_kept", make_input(_db_house(60, setpoint=69.0))) == []
+
+    # ── must STILL hit ───────────────────────────────────────────────────────
+    def test_thermostat_off_still_hits(self):
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, mode="off")))) == 1
+
+    def test_opposite_mode_still_hits(self):
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, mode="cool")))) == 1
+        rs = _db_house(60, indoor=75.4, mode="heat", setpoint=74.0)
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    def test_unknown_mode_still_hits(self):
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, mode="dry")))) == 1
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, mode="fan_only")))) == 1
+
+    def test_idle_beyond_2_5_still_hits(self):
+        (h,) = hits_for("comfort_kept", make_input(_db_house(60, indoor=65.4)))
+        assert dict(h.evidence)["side"] == "below"
+
+    def test_setpoint_written_below_the_floor_still_hits(self):
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, setpoint=64.0)))) == 1
+
+    def test_cool_setpoint_written_above_the_ceiling_still_hits(self):
+        rs = _db_house(60, indoor=75.4, mode="cool", setpoint=78.0)
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    def test_unknown_setpoint_is_strict(self):
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, setpoint=None)))) == 1
+
+    def test_heat_cool_without_the_matching_dual_setpoint_is_strict(self):
+        rs = _db_house(60, mode="heat_cool", setpoint=68.0)  # only the single setpoint is known
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+        rs = _db_house(60, mode="heat_cool", setpoint=None, setpoint_low_f=64.0, setpoint_high_f=76.0)
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    def test_not_idle_is_not_the_new_exception(self):
+        # heating is excused by the existing equipment rule; an unknown action is not "idle"
+        assert hits_for("comfort_kept", make_input(_db_house(60, action="heating"))) == []
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, action="fan")))) == 1
+
+    def test_an_off_action_in_the_matching_mode_is_not_idle(self):
+        # P7's equipment() reads "off" as idle (the room is in control), but the exception needs exactly "idle".
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, action="off")))) == 1
+        rs = _db_house(60, indoor=75.4, mode="cool", action="off", setpoint=74.0)
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    def test_an_unreported_action_is_not_idle(self):
+        # heat_cool so equipment() cannot infer heating from the single setpoint: the reading stays in control.
+        rs = _db_house(60, mode="heat_cool", action=None, setpoint=None, setpoint_low_f=68.0, setpoint_high_f=76.0)
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    def test_auto_above_the_ceiling_without_the_high_setpoint_is_strict(self):
+        rs = _db_house(60, indoor=75.4, mode="auto", setpoint=74.0)  # only the single setpoint is known
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    # ── condition 5 (owner-approved tightening): within 2.5 F of the thermostat's own setpoint too ──────────
+    def test_heat_idle_far_below_its_own_setpoint_is_not_its_deadband(self):
+        # 2.4 F under the floor (inside condition 4) but 8.4 F under the thermostat's own setpoint: a real miss.
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, indoor=65.6, setpoint=74.0)))) == 1
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, setpoint=70.0)))) == 1  # 3.4 F from 70
+
+    def test_cool_idle_far_above_its_own_setpoint_is_not_its_deadband(self):
+        rs = _db_house(60, indoor=76.4, mode="cool", setpoint=68.0)
+        assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    def test_heat_cool_measures_from_the_matching_low_or_high_setpoint(self):
+        below = _db_house(60, indoor=65.6, mode="heat_cool", setpoint=None, setpoint_low_f=72.0, setpoint_high_f=76.0)
+        assert len(hits_for("comfort_kept", make_input(below))) == 1
+        above = _db_house(60, indoor=76.4, mode="auto", setpoint=None, setpoint_low_f=64.0, setpoint_high_f=70.0)
+        assert len(hits_for("comfort_kept", make_input(above))) == 1
+        # the same rooms with the matching setpoint at the band edge are the thermostat's own deadband
+        ok_lo = _db_house(60, indoor=65.6, mode="heat_cool", setpoint=None, setpoint_low_f=68.0, setpoint_high_f=76.0)
+        assert hits_for("comfort_kept", make_input(ok_lo)) == []
+        ok_hi = _db_house(60, indoor=76.4, mode="auto", setpoint=None, setpoint_low_f=64.0, setpoint_high_f=74.0)
+        assert hits_for("comfort_kept", make_input(ok_hi)) == []
+
+    def test_exactly_2_5_from_the_setpoint_is_excused_and_2_6_is_not(self):
+        assert hits_for("comfort_kept", make_input(_db_house(60, indoor=66.5, setpoint=69.0))) == []
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, indoor=66.4, setpoint=69.0)))) == 1
+        cool_ok = _db_house(60, indoor=75.5, mode="cool", setpoint=73.0)
+        assert hits_for("comfort_kept", make_input(cool_ok)) == []
+        cool_miss = _db_house(60, indoor=75.6, mode="cool", setpoint=73.0)
+        assert len(hits_for("comfort_kept", make_input(cool_miss))) == 1
+
+    def test_the_edge_limit_still_binds_when_the_setpoint_sits_a_float_hair_under_the_edge(self):
+        # Condition 4 is implied by 3 + 5 except inside the 0.01 F edge epsilon: 67.99 counts as "at" the 68 floor,
+        # the room is 2.50 F from that setpoint but 2.51 F past the edge, so it is NOT the deadband.
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, indoor=65.49, setpoint=67.99)))) == 1
+
+    def test_the_setpoint_at_the_edge_case_is_still_excused(self):
+        inp = make_input(_db_house(60, indoor=66.6, setpoint=68.0))
+        assert hits_for("comfort_kept", inp) == []
+        assert _excused(inp)
+
+    def test_aggressive_savings_does_not_widen_the_exception_edge(self):
+        cfg = PromiseConfig.from_config({"aggressive_savings": True})
+        assert len(hits_for("comfort_kept", make_input(_db_house(60, indoor=64.0)), cfg)) == 1
+
+    # ── no clock reset ───────────────────────────────────────────────────────
+    def test_a_run_that_starts_excused_and_leaves_is_timed_from_the_first_reading_out_of_band(self):
+        rs = _db_house(40) + [
+            rd(m, hvac_mode="heat", hvac_action="idle", indoor_f=64.0, setpoint_f=68.0, forecast_high_f=50.0)
+            for m in (50, 60)
+        ]
+        (h,) = hits_for("comfort_kept", make_input(rs))
+        assert h.ts == at(50)  # crosses 45 min after the FIRST out-of-band reading at 0, not 45 after the exit
+        assert dict(h.evidence)["minutes"] == pytest.approx(50.0)
+
+    def test_control_twenty_minutes_out_of_band_is_inside_the_allowance(self):
+        rs = [
+            rd(m, hvac_mode="heat", hvac_action="idle", indoor_f=64.0, setpoint_f=68.0, forecast_high_f=50.0)
+            for m in (40, 50, 60)
+        ]
+        assert hits_for("comfort_kept", make_input(rs)) == []
+
+    def test_an_excused_reading_does_not_end_the_run_or_restart_the_clock(self):
+        rs = (
+            _db_house(10, indoor=64.0)  # 0..10 unexcused (beyond 2.5)
+            + [rd(m, hvac_mode="heat", hvac_action="idle", indoor_f=66.6, setpoint_f=68.0) for m in (20, 30, 40)]
+            + [rd(50, hvac_mode="heat", hvac_action="idle", indoor_f=64.0, setpoint_f=68.0)]
+        )
+        (h,) = hits_for("comfort_kept", make_input(rs))
+        assert h.ts == at(50) and dict(h.evidence)["minutes"] == pytest.approx(50.0)
+
+    def test_leaving_by_mode_change_or_setpoint_or_equipment_keeps_the_original_start(self):
+        # Climate Advisor itself makes the change (an occupant's change would be excluded for an hour).
+        base = {"hvac_mode": "heat", "hvac_action": "idle", "indoor_f": 66.6, "setpoint_f": 68.0}
+        for tail, ca in (
+            ({"hvac_mode": "off"}, cmd(49.9, service="set_hvac_mode", mode="off")),
+            ({"setpoint_f": 64.0}, cmd(49.9, service="set_temperature", setpoint_f=64.0)),
+            ({"hvac_action": "fan"}, None),
+        ):
+            rs = _db_house(40) + [rd(50, **{**base, **tail})]
+            (h,) = hits_for("comfort_kept", make_input(rs, [ca] if ca else []))
+            assert h.ts == at(50), tail
+
+    def test_a_fully_excused_run_never_hits_however_long_it_lasts(self):
+        assert hits_for("comfort_kept", make_input(_db_house(300, step=10))) == []
+
+    # ── visible: the excused time is counted apart from hits ────────────────
+    def test_excused_time_is_recorded_as_thermostat_deadband(self):
+        (x,) = _excused(make_input(_db_house(60)))
+        assert x.excused_by == "thermostat_deadband" and x.minutes == pytest.approx(60.0)
+        assert dict(x.evidence)["side"] == "below"
+
+    def test_excused_time_is_not_a_hit(self):
+        inp = make_input(_db_house(60))
+        assert hits_for("comfort_kept", inp) == []
+        assert _excused(inp)
+
+    def test_a_run_that_later_hits_still_reports_its_excused_part_separately(self):
+        rs = _db_house(40) + [rd(50, hvac_mode="heat", hvac_action="idle", indoor_f=64.0, setpoint_f=68.0)]
+        inp = make_input(rs)
+        assert len(hits_for("comfort_kept", inp)) == 1
+        (x,) = _excused(inp)
+        assert x.minutes == pytest.approx(50.0)  # the 40 excused min plus the interval to the next reading
+
+    def test_nothing_is_excused_when_the_house_is_strictly_out(self):
+        inp = make_input(_cold_house(60))
+        assert len(hits_for("comfort_kept", inp)) == 1
+        assert _excused(inp) == []
+
+    def test_excused_key_is_stable_while_the_run_is_open(self):
+        a = _excused(make_input(_db_house(30)))[0]
+        b = _excused(make_input(_db_house(60)))[0]
+        assert a.key.series == b.key.series and b.key.start <= a.key.end
+
+    def test_home_scope_also_reports_excused_time(self):
+        assert _excused(make_input(_db_house(60)), scope=SCOPE_HOME)
+
+    def test_journal_records_excused_minutes_once_per_run_growth(self):
+        stats: dict = {}
+        j = PromiseJournal()
+        for upto in (30, 60):
+            (x,) = _excused(make_input(_db_house(upto)))
+            new_run, added = j.excused_progress(x.key, x.minutes)
+            _pj.bump_promise_excused(stats, x.promise, x.excused_by, x.ts, added, new_run=new_run)
+        e = stats["comfort_kept"]["excused"]["thermostat_deadband"]
+        assert e["runs"] == 1 and e["minutes"] == pytest.approx(60.0)
+        assert stats["comfort_kept"]["hits"] == 0
 
 
 class TestPromiseConfig:

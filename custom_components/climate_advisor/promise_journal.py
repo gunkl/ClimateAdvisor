@@ -31,6 +31,7 @@ MAX_EPISODE_MARKS = 64
 MAX_NOTICES = 16
 MAX_OPEN_EPISODES = 8
 MAX_SEEN_KEYS = 256
+MAX_EXCUSED_REASONS = 4  # excused_by reasons kept per promise in the persisted stats
 # A reading is stored when a discrete field changed, indoor moved this far, or this long passed.
 READING_STORE_DELTA_F = 0.5
 READING_STORE_INTERVAL = timedelta(minutes=5)
@@ -70,6 +71,11 @@ class Reading:
     outdoor_f: float | None = None
     forecast_high_f: float | None = None
     setpoint_f: float | None = None
+    # Issue #1260: the thermostat's own dual setpoints (``target_temp_low`` / ``target_temp_high``), read from its
+    # attributes like ``setpoint_f``. None when the thermostat reports none; P7's deadband exception then does not
+    # apply in heat_cool / auto (strict default).
+    setpoint_low_f: float | None = None
+    setpoint_high_f: float | None = None
     fan_on: bool | None = None
     contacts_open: bool | None = None
     # Issue #1144: False while automation is switched off (observe-only). Climate Advisor commands nothing then,
@@ -438,6 +444,8 @@ class PromiseJournal:
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._notices: deque[list] = deque(maxlen=MAX_NOTICES)  # [opened, closed|None]
         self._runs: dict[str, datetime] = {}  # run series -> end of the last reported span
+        # Issue #1260: excused-time series -> (end of the last counted span, minutes already counted for that run)
+        self._excused_runs: dict[str, tuple[datetime, float]] = {}
 
     # ── recording ────────────────────────────────────────────────────────────
     def record_reading(self, reading: Reading) -> bool:
@@ -462,6 +470,9 @@ class PromiseJournal:
             or (last.indoor_f is None) != (new.indoor_f is None)
         ):
             return True
+        for a, b in ((last.setpoint_low_f, new.setpoint_low_f), (last.setpoint_high_f, new.setpoint_high_f)):
+            if a != b and (a is None or b is None or abs(a - b) >= 0.5):
+                return True
         if last.setpoint_f != new.setpoint_f and (
             last.setpoint_f is None or new.setpoint_f is None or abs(last.setpoint_f - new.setpoint_f) >= 0.5
         ):
@@ -552,6 +563,21 @@ class PromiseJournal:
             self._seen.popitem(last=False)
         return True
 
+    def excused_progress(self, key: RunKey, minutes: float) -> tuple[bool, float]:
+        """``(new_run, added_minutes)`` for an excused-time record (Issue #1260), counting each minute once.
+
+        Same run semantics as ``is_new``: a span starting at or before the last counted span's end is the same,
+        still-open run and only its growth is added; otherwise a new run opens and all its minutes are added. The
+        window slides, so the minutes seen may shrink; they are never counted down.
+        """
+        prev = self._excused_runs.get(key.series)
+        if prev is not None and key.start <= prev[0]:
+            counted = max(prev[1], minutes)
+            self._excused_runs[key.series] = (max(prev[0], key.end), counted)
+            return False, counted - prev[1]
+        self._excused_runs[key.series] = (key.end, minutes)
+        return True, minutes
+
     # ── introspection (tests, diagnostics) ───────────────────────────────────
     def sizes(self) -> dict[str, int]:
         return {
@@ -582,6 +608,30 @@ def sanitize_promise_stats(raw: Any, allowed_keys: frozenset[str] | set[str]) ->
             "first_ts": first_ts if isinstance(first_ts, str) else None,
             "last_ts": last_ts if isinstance(last_ts, str) else None,
         }
+        excused = _sanitize_excused(val.get("excused"))
+        if excused:
+            out[key]["excused"] = excused
+    return out
+
+
+def _sanitize_excused(raw: Any) -> dict[str, dict[str, Any]]:
+    """Type-validate ``{excused_by: {runs:int, minutes:float, last_ts}}`` (Issue #1260); bad rows are dropped."""
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for by, row in raw.items():
+        if not isinstance(by, str) or not isinstance(row, dict) or len(out) >= MAX_EXCUSED_REASONS:
+            continue
+        runs, minutes, last_ts = row.get("runs"), row.get("minutes"), row.get("last_ts")
+        if not isinstance(runs, int) or isinstance(runs, bool) or runs < 0:
+            continue
+        if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or not 0 <= minutes < 1e9:
+            continue
+        out[by] = {
+            "runs": runs,
+            "minutes": round(float(minutes), 1),
+            "last_ts": last_ts if isinstance(last_ts, str) else None,
+        }
     return out
 
 
@@ -593,3 +643,18 @@ def bump_promise_stats(stats: dict[str, dict[str, Any]], key: str, ts: datetime)
     if entry.get("first_ts") is None:
         entry["first_ts"] = iso
     entry["last_ts"] = iso
+
+
+def bump_promise_excused(
+    stats: dict[str, dict[str, Any]], key: str, excused_by: str, ts: datetime, minutes: float, *, new_run: bool
+) -> None:
+    """Count excused time for ``key`` under ``excused_by`` (in place), apart from hits (Issue #1260).
+
+    Never touches ``hits``: an entry that was only ever excused has ``hits == 0``.
+    """
+    entry = stats.setdefault(key, {"hits": 0, "first_ts": None, "last_ts": None})
+    row = entry.setdefault("excused", {}).setdefault(excused_by, {"runs": 0, "minutes": 0.0, "last_ts": None})
+    if new_run:
+        row["runs"] = int(row.get("runs", 0)) + 1
+    row["minutes"] = round(float(row.get("minutes", 0.0)) + max(0.0, minutes), 1)
+    row["last_ts"] = ts.isoformat()

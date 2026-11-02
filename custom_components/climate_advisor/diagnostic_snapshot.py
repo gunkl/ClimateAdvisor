@@ -336,7 +336,13 @@ def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_qu
     promise_stats = getattr(coordinator, "_promise_stats", None)
     if isinstance(promise_stats, dict) and promise_stats:
         snapshot["promise_stats"] = {
-            str(k): {"hits": v.get("hits"), "first_ts": v.get("first_ts"), "last_ts": v.get("last_ts")}
+            str(k): {
+                "hits": v.get("hits"),
+                "first_ts": v.get("first_ts"),
+                "last_ts": v.get("last_ts"),
+                # Issue #1260: time excused by a named exception, counted apart from hits.
+                **({"excused": v["excused"]} if isinstance(v.get("excused"), dict) else {}),
+            }
             for k, v in promise_stats.items()
             if isinstance(v, dict)
         }

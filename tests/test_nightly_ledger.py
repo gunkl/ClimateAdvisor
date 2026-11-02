@@ -401,3 +401,63 @@ def test_the_run_verdict_is_red_for_an_unlisted_hit_and_green_for_a_waived_one(
     assert judge_with_ledger(new, str(ledger_path), "offline", str(state_file), 0, today=TODAY) == 1
     assert "UNWAIVED override_respected day_seed=9" in capsys.readouterr().out
     assert judge_with_ledger(waived, str(ledger_path), "offline", str(state_file), 1, today=TODAY) == 1  # a crashed day
+
+
+# ── Issue #1260: time the thermostat's own deadband excused is counted apart from hits ──────────────────────────
+class _DeadbandSource:
+    """A house whose room sits 1.4 F under the heat floor while the thermostat is in heat, idle, set to the floor."""
+
+    def __init__(self, minutes: int) -> None:
+        self._rs = [
+            Reading(
+                ts=T0 + timedelta(minutes=m),
+                hvac_mode="heat",
+                hvac_action="idle",
+                indoor_f=66.6,
+                setpoint_f=68.0,
+                forecast_high_f=50.0,
+                fan_on=False,
+            )
+            for m in range(0, minutes + 1, 10)
+        ]
+        self._i = 0
+
+    def config(self):
+        from custom_components.climate_advisor.invariant_watchdog import PromiseConfig  # noqa: PLC0415
+
+        return PromiseConfig()
+
+    def now(self):
+        return self._rs[min(self._i, len(self._rs) - 1)].ts
+
+    def poll(self, now):
+        from tools.sim_harness.promise_probe import SourceBatch  # noqa: PLC0415
+
+        r = self._rs[self._i]
+        self._i += 1
+        return SourceBatch(readings=[r])
+
+
+class TestExcusedDeadbandIsCountedApartFromHits:
+    def _probe(self, minutes: int):
+        from tools.sim_harness.promise_probe import PromiseProbe  # noqa: PLC0415
+
+        src = _DeadbandSource(minutes)
+        probe = PromiseProbe(scenario_name="deadband")
+        probe.attach_source(src)
+        for i in range(len(src._rs)):
+            probe.step(f"event[{i}]")
+        return probe.report()
+
+    def test_an_hour_in_the_deadband_is_excused_time_and_not_a_hit(self):
+        rep = self._probe(60)
+        assert rep.hard == [] and rep.warnings == [] and rep.stats == {}
+        assert rep.excused == {"comfort_kept": {"thermostat_deadband": {"runs": 1, "minutes": 60.0}}}
+
+    def test_batch_summary_carries_the_excused_time_beside_hits(self):
+        from tools.sim_harness.generator import BatchResult  # noqa: PLC0415
+
+        res = BatchResult(master_seed=1, days=1, seconds=0.0)
+        res.excused = {"comfort_kept": {"thermostat_deadband": {"runs": 2, "minutes": 90.0}}}
+        s = res.to_summary()
+        assert s["excused_by_promise"] == res.excused and s["hits_by_promise"] == {}

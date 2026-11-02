@@ -19,6 +19,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 if "homeassistant" not in sys.modules:
     from conftest import install_ha_stubs
 
@@ -138,6 +140,86 @@ class TestPromiseMissIsLoggedNotAlerted:
         c = _make_coord()
         c._promise_journal = None  # simulate a corrupted attribute
         c._tick_household_promises()  # must not raise
+
+
+class TestDualSetpointsAreRead:
+    """Issue #1260: the reading carries target_temp_low/high, converted like ``setpoint_f``."""
+
+    @pytest.mark.parametrize(
+        ("unit", "attrs", "want"),
+        [
+            ("fahrenheit", {"target_temp_low": 68.0, "target_temp_high": 76.0}, (68.0, 76.0)),
+            ("celsius", {"target_temp_low": 20.0, "target_temp_high": 24.5}, (68.0, 76.1)),
+            ("fahrenheit", {}, (None, None)),
+        ],
+    )
+    def test_low_and_high_setpoints(self, unit, attrs, want):
+        c = _make_coord(unit=unit)
+        climate = SimpleNamespace(state="heat_cool", attributes={"hvac_action": "idle", **attrs})
+        c.hass.states.get = lambda eid: climate if eid == "climate.t" else None
+        r = c._promise_reading_now(NOW)
+        got = (r.setpoint_low_f, r.setpoint_high_f)
+        if want[0] is None:
+            assert got == want
+        else:
+            assert got == pytest.approx(want)
+        assert r.setpoint_f is None
+
+
+class TestExcusedDeadbandTimeAtHome:
+    """Issue #1260: the coordinator counts the thermostat-deadband time apart from hits, each minute once."""
+
+    @staticmethod
+    def _feed(c, minutes):
+        from custom_components.climate_advisor.invariant_watchdog import PromiseConfig  # noqa: PLC0415
+        from custom_components.climate_advisor.promise_journal import Reading  # noqa: PLC0415
+
+        floor = PromiseConfig.from_config(c.config).floor_lo(NOW)
+        for m in minutes:
+            c._promise_journal.record_reading(
+                Reading(
+                    ts=NOW + timedelta(minutes=m),
+                    hvac_mode="heat",
+                    hvac_action="idle",
+                    indoor_f=floor - 1.4,
+                    setpoint_f=floor,
+                    forecast_high_f=50.0,
+                    fan_on=False,
+                    contacts_open=False,
+                )
+            )
+
+    def test_excused_time_is_counted_once_and_never_reported_as_a_miss(self, caplog):
+        c = _make_coord()
+        self._feed(c, range(-60, 1, 10))
+        with _now_patch(), caplog.at_level(logging.INFO):
+            assert c._evaluate_household_promises() == []
+            assert c._evaluate_household_promises() == []  # same window again: nothing added
+        row = c._promise_stats["comfort_kept"]["excused"]["thermostat_deadband"]
+        assert row["runs"] == 1 and row["minutes"] == 60.0
+        assert c._promise_stats["comfort_kept"]["hits"] == 0
+        c._emit_event.assert_not_called()
+        assert not any("Household promise missed" in r.message for r in caplog.records)
+        assert sum("Household promise excused: promise=comfort_kept" in r.message for r in caplog.records) == 1
+        c._spawn.assert_called_once()  # the run opening is persisted
+
+        self._feed(c, (10, 20))
+        with patch(f"{COORD_MOD}.dt_util.now", return_value=NOW + timedelta(minutes=20)):
+            assert c._evaluate_household_promises() == []
+        row = c._promise_stats["comfort_kept"]["excused"]["thermostat_deadband"]
+        assert row["runs"] == 1 and row["minutes"] == 80.0  # only the growth was added
+        c._spawn.assert_called_once()  # growth rides along with a later save
+
+    def test_a_broken_excused_channel_never_hides_a_real_miss(self):
+        """The excused bookkeeping is visibility only: if it fails, the hits are still reported that tick."""
+        c = _make_coord(automation_enabled=False)
+        self._feed(c, range(-60, 1, 10))
+        c._promise_journal.excused_progress = MagicMock(side_effect=RuntimeError("boom"))
+        with _now_patch():
+            c._promise_observe_command("climate", "set_hvac_mode", {"hvac_mode": "off"}, "climate")
+            reported = c._evaluate_household_promises()
+        assert [h.promise for h in reported] == ["observe_only_silence"]
+        assert c._promise_stats["observe_only_silence"]["hits"] == 1
 
 
 def _overlap_began_a_minute_ago(c):
@@ -327,6 +409,25 @@ class TestPersistence:
         stats = {"settling_flip": {"hits": 2, "first_ts": "a", "last_ts": "b"}}
         with _now_patch():
             assert self._state(stats)["promise_stats"] == stats
+
+    def test_excused_time_round_trips_through_save_and_restore(self):
+        """Issue #1260: the coordinator's own save dict, through JSON, restored with the coordinator's own call."""
+        import json  # noqa: PLC0415
+
+        from custom_components.climate_advisor.invariant_watchdog import PROMISES  # noqa: PLC0415
+        from custom_components.climate_advisor.promise_journal import (  # noqa: PLC0415
+            bump_promise_excused,
+            sanitize_promise_stats,
+        )
+
+        stats: dict = {}
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", NOW, 42.0, new_run=True)
+        with _now_patch():
+            saved = json.loads(json.dumps(self._state(stats)["promise_stats"]))
+        restored = sanitize_promise_stats(saved, {p.key for p in PROMISES})
+        assert restored == stats
+        assert restored["comfort_kept"]["hits"] == 0
+        assert restored["comfort_kept"]["excused"]["thermostat_deadband"]["minutes"] == 42.0
 
     def test_missing_attribute_persists_as_empty(self):
         cls = _coordinator_class()

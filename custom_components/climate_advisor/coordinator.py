@@ -295,6 +295,7 @@ from .invariant_watchdog import (
     PromiseConfig,
     run_invariant_checks,
     run_promise_checks,
+    run_promise_excused,
 )
 from .learning import (
     SHUTDOWN_KIND_HA_STOP,
@@ -322,6 +323,7 @@ from .promise_journal import (
 )
 from .promise_journal import (
     PromiseJournal,
+    bump_promise_excused,
     bump_promise_stats,
     sanitize_promise_stats,
 )
@@ -8457,6 +8459,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             outdoor_f=getattr(self, "_last_outdoor_temp", None),
             forecast_high_f=classification.today_high if classification is not None else None,
             setpoint_f=read_state_temp_f(cs, "temperature", unit) if cs is not None else None,
+            setpoint_low_f=read_state_temp_f(cs, "target_temp_low", unit) if cs is not None else None,
+            setpoint_high_f=read_state_temp_f(cs, "target_temp_high", unit) if cs is not None else None,
             fan_on=self._get_fan_physical_state(),
             contacts_open=contacts,
             automation_enabled=bool(self._automation_enabled),
@@ -8557,11 +8561,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         now = dt_util.now()
         window = journal.window(now)
-        hits = run_promise_checks(
-            window,
-            PromiseConfig.from_config(self.config, p2_min_overlap_s=AC_WHF_OVERLAP_TOLERANCE_S),
-            scope=SCOPE_HOME,
-        )
+        cfg = PromiseConfig.from_config(self.config, p2_min_overlap_s=AC_WHF_OVERLAP_TOLERANCE_S)
+        hits = run_promise_checks(window, cfg, scope=SCOPE_HOME)
+        # Issue #1260: time a promise did not count under a named exception, counted apart from hits.
+        excused_changed = False
+        try:  # bookkeeping only: a failure here must never stop the hits below (P9 alerts) from being reported
+            for ex in run_promise_excused(window, cfg, scope=SCOPE_HOME):
+                new_run, added = journal.excused_progress(ex.key, ex.minutes)
+                if new_run or added > 0:
+                    bump_promise_excused(self._promise_stats, ex.promise, ex.excused_by, ex.ts, added, new_run=new_run)
+                    if new_run:
+                        excused_changed = True  # persist when a run opens; its growth rides along with later saves
+                        _LOGGER.info(
+                            "Household promise excused: promise=%s excused_by=%s side=%s",
+                            ex.promise,
+                            ex.excused_by,
+                            dict(ex.evidence).get("side"),
+                        )
+        except Exception:
+            _LOGGER.warning("Household promise excused-time bookkeeping failed", exc_info=True)
         reported = []
         for hit in hits:
             if hit.promise == "ac_whf_mutex":
@@ -8597,7 +8615,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "invariant_violation",
                 )
             reported.append(hit)
-        if reported:
+        if reported or excused_changed:
             self._spawn(self._async_save_state())
         return reported
 

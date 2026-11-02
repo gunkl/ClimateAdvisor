@@ -89,6 +89,8 @@ def _reading_key(r) -> tuple:
         r.indoor_f,
         r.forecast_high_f,
         r.setpoint_f,
+        r.setpoint_low_f,  # Issue #1260: P7's deadband exception reads the dual setpoints
+        r.setpoint_high_f,
         r.fan_on,
         r.contacts_open,
     )

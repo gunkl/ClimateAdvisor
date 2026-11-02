@@ -1160,6 +1160,8 @@ class AutomationEngineCallbacks:
     # pause-ENDING read). None falls back to ``sensor_check``.
     sensor_hold_check: Callable[[], bool] | None = None
     sensor_debounce_pending: Callable[[], bool] | None = None
+    # Issue #1227: per-sensor "holds open and past its own delay". None falls back to the house-wide form.
+    sensor_settled_open: Callable[[], bool] | None = None
     emit_event: Callable[..., None] | None = None
     request_refresh: Callable[[], None] | None = None
     post_grace_fan_check: Callable[[], None] | None = None
@@ -1961,6 +1963,8 @@ class AutomationEngine:
         # is still within its CONF_SENSOR_DEBOUNCE settle window. None/unset (e.g. tests that
         # don't wire a coordinator) is treated as "not pending", matching pre-#504 behavior.
         self._sensor_debounce_pending_callback: Any | None = None
+        # Issue #1227: set by coordinator -- any monitored sensor holds open AND is past its own delay.
+        self._sensor_settled_open_callback: Any | None = None
 
         # Issue #423: physical fan ground-truth callbacks — set by coordinator after
         # construction, mirroring _sensor_check_callback/_emit_event_callback above.
@@ -2017,6 +2021,7 @@ class AutomationEngine:
         self._sensor_check_callback = callbacks.sensor_check
         self._sensor_hold_callback = callbacks.sensor_hold_check
         self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
+        self._sensor_settled_open_callback = callbacks.sensor_settled_open
         self._emit_event_callback = callbacks.emit_event
         self._request_refresh_callback = callbacks.request_refresh
         self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
@@ -4531,10 +4536,9 @@ class AutomationEngine:
                 # ownership" directly from logs, without reading code, next time this fires for
                 # much longer than expected.
                 _LOGGER.info(
-                    "apply_classification: zone=%s nat-vent active — enforcing nat-vent band ac_assist=%s"
+                    "apply_classification: zone=%s nat-vent active — enforcing nat-vent state"
                     " day_type=%s natural_vent_active=%s whf_owns_hvac=%s",
                     self.climate_entity,
-                    not _aggressive,
                     classification.day_type,
                     self._natural_vent_active,
                     self._whf_owns_hvac(),
@@ -7268,7 +7272,7 @@ class AutomationEngine:
                 _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
                 # Issue #411 Pass 4: this was a 4th hand-copied instance of the shared
                 # reactivation gate (found after the initial 3-site extraction) — folded
-                # into _nat_vent_may_reactivate() for consistency, not left as a copy.
+                # into the old reactivation gate (#1142) for consistency, not left as a copy.
                 #
                 # Issue #757 Phase 6 Step 5: both the full-gate reactivation and the
                 # soft-start sub-gate below are decided by a single
@@ -7277,7 +7281,7 @@ class AutomationEngine:
                 # decide_nat_vent_soft_start_gate() only if that fails), same pure
                 # functions underneath. The former legacy ``elif`` chain (a direct
                 # ``_paused_by_door``/``is_reactivation_locked_out()`` check, then
-                # ``_nat_vent_may_reactivate()``, then ``_nat_vent_may_soft_start()``) is
+                # the old reactivation gate (#1142), then ``_nat_vent_may_soft_start()``) is
                 # provably subsumed by this FSM branch's own ``to_state`` handling —
                 # the FSM's ``_transition_from_inactive()`` already applies the identical
                 # reactivation-lockout check (``PAUSED_REACTIVATION_LOCKOUT``) before ever
@@ -7295,7 +7299,7 @@ class AutomationEngine:
 
                 # Issue #757 Phase 6 Step 5: the former legacy ``elif`` chain here (a
                 # direct ``_paused_by_door``/``is_reactivation_locked_out()`` check, then
-                # ``_nat_vent_may_reactivate()``, then ``_nat_vent_may_soft_start()``) is
+                # the old reactivation gate (#1142), then ``_nat_vent_may_soft_start()``) is
                 # provably subsumed by ``_to_state`` above — ``_transition_from_inactive()``
                 # (nat_vent_fsm.py) already applies the identical reactivation-lockout
                 # check (``PAUSED_REACTIVATION_LOCKOUT``) before ever considering
@@ -7402,7 +7406,7 @@ class AutomationEngine:
             # with the exit-chain decision immediately below, via a single
             # ``nat_vent_fsm.transition()`` call — the same pure escalation check
             # (Issue #540, mirrored into ``nat_vent_fsm.py``), read from one shared
-            # place. The former legacy twin here (a direct ``_nat_vent_may_reactivate()``
+            # place. The former legacy twin here (a direct call to the old reactivation gate, deleted in #1142
             # call, run only while non-authoritative) has been removed — see the
             # ``self._nat_vent_soft_start:`` block below (formerly gated on
             # ``_natvent_fsm_authoritative`` too) for the surviving single path.
@@ -7514,7 +7518,7 @@ class AutomationEngine:
 
                 if (
                     exit_decision.reason == NatVentExitReason.COMFORT_FLOOR
-                    and self._any_monitored_sensor_holding_open()
+                    and self._any_monitored_sensor_settled_open()
                 ):
                     # Issue #1142 D4 (mirror of the fast loop, which already routes this exit through
                     # _exit_nat_vent()): with a window still open the comfort restore below would write heat/cool
@@ -7643,7 +7647,7 @@ class AutomationEngine:
                         indoor,
                         comfort_cool,
                     )
-                    if self._any_monitored_sensor_holding_open():
+                    if self._any_monitored_sensor_settled_open():
                         # Issue #1142 D8: with a window still open this exit used to stop the fan and let the
                         # restore send `cool` at the comfort setpoint into it (never the away setback, no pause
                         # recorded). Same as the outdoor-rise exit: end the session, record the window pause, leave
@@ -7776,7 +7780,7 @@ class AutomationEngine:
                 # nat_vent_fsm.transition() call — the FSM's PAUSED_REACTIVATION_LOCKOUT
                 # branch re-implements the same is_reactivation_locked_out() check this
                 # block used to call directly. The former legacy twin here (a direct
-                # is_reactivation_locked_out() call, then _nat_vent_may_reactivate(), then
+                # is_reactivation_locked_out() call, then the old reactivation gate (#1142), then
                 # _nat_vent_may_soft_start()) is provably subsumed by the FSM's own
                 # PAUSED_REACTIVATION_LOCKOUT transition and has been removed.
                 # Issue #1142: the ONE start question with this site's profile
@@ -8032,7 +8036,7 @@ class AutomationEngine:
                         current_temp,
                         comfort_cool,
                     )
-                    if self._any_monitored_sensor_holding_open():
+                    if self._any_monitored_sensor_settled_open():
                         # Issue #1142 D8: see check_natural_vent_conditions()'s matching AWAY_CEILING branch.
                         await self._exit_nat_vent(
                             reason="nat-vent ceiling exit (away mode) via temp_check, window still open",
@@ -9171,7 +9175,7 @@ class AutomationEngine:
                 restore_hvac=(
                     not self._paused_by_door
                     and not recent_hvac_session_ended
-                    and not self._any_monitored_sensor_holding_open()
+                    and not self._any_monitored_sensor_settled_open()
                 ),
                 release_suppression=True,
             )
@@ -9203,7 +9207,7 @@ class AutomationEngine:
             return
 
         # Evaluate nat-vent eligibility
-        # Issue #417: folded into the shared _nat_vent_may_reactivate() gate instead of a
+        # Issue #417: folded into the shared reactivation gate (the old one, #1142) instead of a
         # 5th hand-rolled copy — this hand-rolled version was also missing the sleep-aware
         # floor and the ceiling dormancy check the shared gate already accounts for.
         #
@@ -9217,7 +9221,7 @@ class AutomationEngine:
         # ("should today's already-physically-running fan be trusted as CA-owned nat-vent"),
         # independent of whatever _natural_vent_active/_paused_by_door happen to read at
         # reconcile time (e.g. restored-but-stale post-restart state) — exactly the same
-        # always-fresh-compute semantics _nat_vent_may_reactivate() has. Forcing INACTIVE
+        # always-fresh-compute semantics the old reactivation gate (#1142) has. Forcing INACTIVE
         # routes transition() through _transition_from_inactive(), the FSM branch that calls
         # the same two pure functions (decide_nat_vent_gate(), decide_nat_vent_soft_start_gate())
         # in the same priority order the legacy call here always used.
@@ -9288,6 +9292,8 @@ class AutomationEngine:
             self._fan_active = True
             if self._fan_on_since is None:
                 self._fan_on_since = dt_util.now().isoformat()
+            if not self._natural_vent_active:
+                self._close_windows_advised = False  # Issue #1225 item 3: session-start edge
             self._natural_vent_active = True
             # Issue #829: this is the same "CA reactivates on its own initiative right
             # after a grace expiry" pattern _re_pause_for_open_sensor() has, reached via
@@ -9861,8 +9867,10 @@ class AutomationEngine:
         # Issue #1211 (A3): no planned-window branch here -- a sensor still open at grace expiry is
         # re-paused (or handed to nat-vent by the nested gate) inside the planned window period too.
 
-        # If any contact sensor is still open, re-pause instead of clearing
-        if self._any_monitored_sensor_holding_open():
+        # If any contact sensor is still open, re-pause instead of clearing.
+        # Issue #1227: a sensor still inside its open delay is not yet open (a brief open must never pause or
+        # start ventilation). The grace ends normally here and the post-delay handler decides when the delay ends.
+        if self._any_monitored_sensor_settled_open():
             _LOGGER.info(
                 "%s grace expired but sensor(s) still open — re-pausing HVAC",
                 source,
@@ -11046,6 +11054,18 @@ class AutomationEngine:
         """
         return bool(self._sensor_check_callback and self._sensor_check_callback())
 
+    def _any_monitored_sensor_settled_open(self) -> bool:
+        """A monitored sensor holds open AND is past its own open delay (Issue #1227).
+
+        Asked per sensor by the coordinator: a window open for hours stays open while a second door is
+        still inside its delay (a house-wide "nothing pending" test would hide it and let HVAC run into it).
+        Without a coordinator (bare engines, the simulator) it falls back to holding-open AND nothing pending.
+        """
+        settled_cb = getattr(self, "_sensor_settled_open_callback", None)  # partially built engines in tests
+        if settled_cb is not None:
+            return bool(settled_cb())
+        return self._any_monitored_sensor_holding_open() and not self._sensor_debounce_pending
+
     def _any_monitored_sensor_holding_open(self) -> bool:
         """Return True if any monitored sensor must keep a door/window pause alive (Issue #1181, owner decision D1).
 
@@ -12008,7 +12028,7 @@ class AutomationEngine:
         self._arm_comfort_family("cooling", dt_util.now())
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
-        sensor_open = self._any_monitored_sensor_holding_open()
+        sensor_open = self._any_monitored_sensor_settled_open()
         # emit_event=False on both branches: the caller's own specific exit event
         # (nat_vent_comfort_floor_exit, nat_vent_outdoor_rise_exit, etc.) is emitted
         # below, by this method, once the
@@ -12073,9 +12093,14 @@ class AutomationEngine:
                 # band (and any mode a comfort restore armed) would otherwise keep heating/cooling into the open
                 # window. Written BEFORE the restore target is read: nothing is left to restore (None), so closing
                 # the window re-arms through the selector in ONE write (the #1068 nat-vent-exit path) -- no flap.
-                await self._hold_thermostat_off_for_open_window(reason)
-                state = self.hass.states.get(self.climate_entity)
-                self._pre_pause_mode = state.state if state and state.state != "off" else None
+                _held_off = await self._hold_thermostat_off_for_open_window(reason)
+                # Issue #1225 item 5: when the hold wrote Off there is nothing to restore -- do not read the mode back
+                # (a cloud thermostat's state lags the service call and could still read cool/heat, replayed on close).
+                if _held_off:
+                    self._pre_pause_mode = None
+                else:
+                    state = self.hass.states.get(self.climate_entity)
+                    self._pre_pause_mode = state.state if state and state.state != "off" else None
                 # Write-shape divergence fix (found while scoping #637 Step 3): this branch
                 # used to set only _paused_by_door, unlike _pause_for_door_window()'s full
                 # field set. _pre_pause_mode's own truthiness (nothing to restore means the
@@ -12167,8 +12192,10 @@ class AutomationEngine:
 
         return result
 
-    async def _hold_thermostat_off_for_open_window(self, reason: str) -> None:
+    async def _hold_thermostat_off_for_open_window(self, reason: str) -> bool:
         """Switch an armed thermostat Off because a nat-vent exit left a window open (Issue #1142 D4/D8).
+
+        Returns True when the hold wrote Off (Issue #1225 item 5: the caller then records no restore mode).
 
         Rule 3: no heat/cool with a window open after the debounce unless the occupant overrides it. Every exit that
         records the window pause goes through here so the thermostat is Off at that moment. A whole-house-fan
@@ -12176,21 +12203,22 @@ class AutomationEngine:
         the armed band, and for an away-ceiling exit the ``cool`` the fan-off restore would have sent.
         """
         if self._manual_change_protected():
-            return
+            return False
         state = self.hass.states.get(self.climate_entity)
         mode = state.state if state else None
         if mode in (None, "off", "unavailable", "unknown"):
-            return
+            return False
         _LOGGER.info("Nat-vent exit (%s): window still open -- thermostat %s -> off", reason, mode)
         with self._mode_change_context("pause"):
             await self._set_hvac_mode("off", reason=f"nat-vent exit with a window open ({reason}), was {mode}")
+        return True
 
     def _nat_vent_reactivation_floor(self) -> float:
         """Sleep-aware comfort floor for nat-vent reactivation/eligibility gates (Issue #417).
 
         Mirrors the sleep-window branch already used correctly by
         ``nat_vent_temperature_check()`` and ``fan_thermostat_check()``'s comfort-floor
-        check. Every reactivation-gate call site (``_nat_vent_may_reactivate()`` and its
+        check. Every reactivation-gate call site (the old reactivation gate, #1142, and its
         4 callers, plus ``reconcile_fan_on_startup``) previously hardcoded the flat
         daytime ``comfort_heat`` floor with no sleep-window branch — during the sleep
         window, indoor temp sitting between ``sleep_heat`` and ``comfort_heat`` would
@@ -12264,7 +12292,7 @@ class AutomationEngine:
                 ``_grace_blocks_natvent()``'s overheat exception (Issue #134/#706 —
                 "is indoor hot enough that grace shouldn't block nat-vent"). When
                 ``handle_door_window_open()``'s own pre-check (calling
-                ``_nat_vent_may_reactivate()`` directly, temperature-only, no grace
+                the old reactivation gate (#1142) directly, temperature-only, no grace
                 awareness) already decided reactivation is favorable and fell
                 through, the immediately-following FSM gate call must not re-block
                 on the STILL-True ``self._grace_active`` via the unrelated
@@ -12310,11 +12338,11 @@ class AutomationEngine:
                 where there is no live session's own cycling band to hold a restart to.
                 ``True`` pre-resolves ``comfort_heat_raw`` through
                 ``self._nat_vent_reactivation_floor()`` (the same daytime
-                cycling-off-threshold fix ``_nat_vent_may_reactivate()``'s 4 legacy
+                cycling-off-threshold fix the old reactivation gate (#1142)'s 4 legacy
                 callers already apply) and forces ``in_sleep_window=False`` as a
                 pass-through, so the gate's own sleep-window branch doesn't re-resolve
                 an already-resolved value — same convention documented on
-                ``_nat_vent_may_reactivate()``. Set at the 3 call sites that are
+                the old reactivation gate (#1142). Set at the 3 call sites that are
                 genuinely re-arming a session that already ran and exited: the
                 idle-open re-entry check, the paused-by-door reactivation block, and
                 ``_re_pause_for_open_sensor``'s reactivation check.
@@ -12358,7 +12386,7 @@ class AutomationEngine:
             # formula _nat_vent_reactivation_floor() already applies for every other
             # reactivation call site, then force in_sleep_window=False so the gate's
             # own sleep-window branch treats this as already-resolved (same
-            # pass-through convention documented on _nat_vent_may_reactivate()). Note
+            # pass-through convention documented on the old reactivation gate (#1142)). Note
             # this reassigns comfort_heat_raw AFTER _sleep_heat's own raw-comfort_heat
             # fallback above is computed, so _sleep_heat is never accidentally
             # derived from the already-tightened value.
@@ -12421,12 +12449,54 @@ class AutomationEngine:
             NatVentLifecycleState.ACTIVE_SOFT_START,
         )
         if take_over:
+            # Issue #1225 item 1: the FSM's fan-available check is config-only. If ``_activate_fan()`` would refuse
+            # the start at runtime the fan never takes over, and a pause kept quiet on that promise would never be
+            # announced -- the house sits unconditioned in silence. Say so loudly instead.
+            refusal = self._fan_start_runtime_refusal()
+            if refusal is not None:
+                _LOGGER.info(
+                    "%s: door/window pause stays loud -- the fan session cannot start right now (%s)", caller, refusal
+                )
+                return False
+        if take_over:
             _LOGGER.info(
                 "%s: door/window pause will be quiet -- a fan session is about to take over (to_state=%s)",
                 caller,
                 transition.to_state.value,
             )
         return take_over
+
+    def _occupant_fan_press_blocks_start(self, fan_mode: str) -> bool:
+        """The occupant just pressed the whole-house-fan remote and the fan is still on its way up (Issue #1215).
+
+        One definition for ``_activate_fan()``'s refusal and ``_fan_start_runtime_refusal()``.
+        """
+        return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._occupant_fan_action_pending()
+
+    def _fan_start_runtime_refusal(self) -> str | None:
+        """Why ``_activate_fan()`` would refuse a CA start right now, or None (Issue #1225 item 1).
+
+        The runtime refusals the nat-vent FSM cannot see (its fan-available check is config-only). Pure read of
+        the same state ``_activate_fan()`` consults, in its order: a fan override, the occupant's fan-off hold
+        (#1205), a pending occupant fan press (whole-house fan, #1215), the occupant's protected thermostat change
+        (#714/#1133), a fan switch that gave up (#1050) and the blower's heat/cool restriction (#1196).
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode == FAN_MODE_DISABLED:
+            return "fan disabled"
+        if self._fan_override_active:
+            return "fan override active"
+        if self._fan_off_hold_active():
+            return "occupant fan-off hold"
+        if self._occupant_fan_press_blocks_start(fan_mode):
+            return "occupant fan press settling"
+        if self._protected_active_mode() is not None:
+            return "occupant's thermostat change protected"
+        if self._fan_readback_gave_up:
+            return "fan switch ignored the on-command"
+        if fan_mode == FAN_MODE_HVAC:
+            return self._hvac_fan_restriction_block_reason() or None
+        return None
 
     def _nat_vent_start_decision(
         self,
@@ -12608,10 +12678,15 @@ class AutomationEngine:
         spurious DOOR_PAUSE_ENDED/STARTED pair for a pause that never ended.
         """
         _paused_before = bool(self._paused_by_door)
+        _session_was_active = bool(self._natural_vent_active)
         self._natural_vent_active = state in (
             NatVentLifecycleState.ACTIVE_FULL_GATE,
             NatVentLifecycleState.ACTIVE_SOFT_START,
         )
+        if self._natural_vent_active and not _session_was_active:
+            # Issue #1225 item 3: reset on the session-START edge, not on each way a session can end (the occupant
+            # fan-off path, the reconcile no-fan path and this writer's own stop never did): "once per session".
+            self._close_windows_advised = False
         self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
         self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT or (
             keep_door_pause and _paused_before
@@ -12803,7 +12878,7 @@ class AutomationEngine:
             comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
             nat_vent_delta=float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
             # Issue #757 Phase 6 Step 4 fix: every other fan_mode config read in this
-            # file (25+ call sites, e.g. _nat_vent_may_reactivate() at line ~8073)
+            # file (25+ call sites, e.g. the old reactivation gate at line ~8073)
             # defaults to FAN_MODE_DISABLED when unset — this builder used
             # "whole_house_fan" instead (introduced #637, copy-pasted from the
             # nat-vent FSM builder's own identical mistake, #633). Dormant while
@@ -12820,7 +12895,7 @@ class AutomationEngine:
             fan_mode=str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             within_planned_window=self._is_within_planned_window_period(),
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_open=self._any_monitored_sensor_settled_open(),
             sensor_debounce_pending=bool(self._sensor_debounce_pending),
             override_matches_current_decision=self._override_matches_current_decision(self._current_classification),
             grace_source=self._last_resume_source or "automation",
@@ -13142,7 +13217,7 @@ class AutomationEngine:
             current_setpoint_f=current_setpoint_f,
             target_setpoint_f=target_setpoint_f,
             tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_open=self._any_monitored_sensor_settled_open(),
             # Issue #757 Phase 6 Step 3 correction: for GRACE_TIMER_EXPIRED specifically,
             # _cancel_grace_timers_action() already set _last_resume_source=None before
             # this dispatch, so this read is always "automation" for that kind. Confirmed
@@ -13482,7 +13557,7 @@ class AutomationEngine:
     ) -> bool:
         """Shared soft-start sub-gate for nat-vent (Issue #540, scoped from #533).
 
-        Distinct from ``_nat_vent_may_reactivate()``/``decide_nat_vent_gate()`` — allows
+        Distinct from the old reactivation gate (#1142)/``decide_nat_vent_gate()`` — allows
         WHF purge/comfort activation at outdoor/indoor parity once today's outdoor temp
         is confirmed past its peak and declining, without waiting for the full
         bulk-cooling gate's hysteresis-cleared delta. Opt-out via
@@ -13495,9 +13570,9 @@ class AutomationEngine:
             outdoor: Current outdoor temperature (°F), or None if unavailable.
             indoor: Current indoor temperature (°F), or None if unavailable.
             comfort_heat: Comfort floor (°F) — already sleep-window-resolved by the
-                caller, same as ``_nat_vent_may_reactivate()``'s ``comfort_heat`` arg.
+                caller, same as the old reactivation gate (#1142)'s ``comfort_heat`` arg.
             comfort_cool: Comfort ceiling (°F).
-            full_gate_active: The caller's own ``_nat_vent_may_reactivate(...)`` result
+            full_gate_active: The caller's own full-gate result (``_nat_vent_start_decision()``)
                 for the same inputs — soft-start stands down once the full gate would
                 already apply, so the two gates never compete for the same activation.
         """
@@ -15471,6 +15546,14 @@ class AutomationEngine:
             )
             return
 
+        if not self._any_monitored_sensor_settled_open():
+            # Issue #1225 (minor): nothing is open past its delay (every window shut, or one still inside its delay),
+            # so there is no window to hold Off for -- leave the band to the normal path.
+            _LOGGER.info(
+                "_apply_nat_vent_hvac_state: no window open past its delay -- thermostat left to the normal path"
+            )
+            return
+
         state = self.hass.states.get(self.climate_entity)
         mode = state.state if state else None
         if mode in (None, "off", "unavailable", "unknown"):
@@ -15497,6 +15580,11 @@ class AutomationEngine:
         if not self._natural_vent_active or self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_HVAC:
             return
         if self._close_windows_advised:
+            return
+        if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
+            # Issue #1225 item 2: while away the setpoint is the setback, not the occupied comfort ceiling, and
+            # closing the windows only re-arms that setback -- "close the windows and it will cool the house" is
+            # neither useful nor true. Not marked advised: the occupant may come home during the same session.
             return
         indoor = self._get_indoor_temp_f()
         comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
@@ -16006,7 +16094,7 @@ class AutomationEngine:
 
         # Issue #1215: the occupant just pressed the remote (the RF event is seen at once, the power reading follows
         # 5-20 s later) -- the fan is on its way up, and a start here would send off then on to a fan that is starting.
-        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._occupant_fan_action_pending():
+        if self._occupant_fan_press_blocks_start(fan_mode):
             _LOGGER.info(
                 "Fan activation skipped: occupant fan press still settling pending_s=%.0f reason=%s role=%s",
                 WHF_OCCUPANT_PRESS_PENDING_S,

@@ -1,7 +1,8 @@
 """Regression test for the nat-vent gate production integration.
 
-automation.py's `_nat_vent_may_reactivate()` now calls `decide_nat_vent_gate()`
-directly (mirroring Issue #435's fan_thermostat_check extraction) — production
+the nat-vent FSM (`nat_vent_fsm.py`) calls `decide_nat_vent_gate()` directly
+(Issue #1142 deleted the old `_nat_vent_may_reactivate()` wrapper; the extraction
+mirrors Issue #435's fan_thermostat_check one) — production
 simply IS the pure function's caller now, so the shadow/substitution
 distinction Step 1/2 built for this gate has collapsed into one. What remains
 to prove is that the extraction is genuinely LOAD-BEARING: if
@@ -59,7 +60,7 @@ def test_corrupting_the_pure_function_changes_real_production_behavior():
     """The actual load-bearing proof: inverting decide_nat_vent_gate()'s outcome
     (preserving its None-input safety guarantee, which downstream formatting code
     relies on) must cascade into a real, detectable full-scenario divergence —
-    proving automation.py's _nat_vent_may_reactivate() really does call this
+    proving production (the nat-vent FSM) really does call this
     function to decide, not some other code path that happens to agree.
     """
     scen = _load(_PROBE_GOLDEN)

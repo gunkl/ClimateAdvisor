@@ -2725,7 +2725,9 @@ class TestFanThermostatCheck:
         )
         assert engine._natural_vent_active is False
         assert engine._paused_by_door is True
-        assert engine._pre_pause_mode is not None, "Issue #418: _pre_pause_mode must be captured on pause"
+        # Issue #1225 item 5 (supersedes #418 here): the Off-hold wrote Off at this exit, so nothing is left to restore
+        # (closing the window re-arms through the selector in one write); the mocked state still reads "cool".
+        assert engine._pre_pause_mode is None, "the Off-hold wrote Off: no restore mode is recorded"
         assert engine._nat_vent_outdoor_exit_time is not None, (
             "Issue #418: set_outdoor_exit_time=True must set the reactivation lockout timer"
         )

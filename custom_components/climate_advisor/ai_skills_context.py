@@ -3379,7 +3379,6 @@ def _render_timeline_events(
 
     # Fan ownership tracker: updated per-event to detect when nat_vent_fan_off fires
     # while the user is still running the fan manually (misleading if shown as CA fan-off).
-    _fan_ca_owns = False
     _fan_user_owns = False
 
     for entry in filtered:
@@ -3394,29 +3393,13 @@ def _render_timeline_events(
 
         # Update fan ownership state before rendering
         if event_type in ("nat_vent_fan_on", "fan_activated"):
-            _fan_ca_owns = True
             _fan_user_owns = False
-        elif event_type == "fan_manual_override" and str(payload.get("fan_after", "")).strip() == "on":
-            _fan_user_owns = True
-            _fan_ca_owns = False
+        elif event_type == "fan_manual_override":
+            # The occupant's own fan-off ends their ownership too; otherwise a later CA fan-off would be
+            # annotated "fan may still be running -- user-controlled" for a fan the occupant already stopped.
+            _fan_user_owns = str(payload.get("fan_after", "")).strip() == "on"
         elif event_type == "fan_cancel":
             _fan_user_owns = False
-        elif event_type in (
-            "nat_vent_fan_off",
-            "fan_deactivated",
-            # Issue #957 mirror-check: these four are also confirmed real fan-off exits
-            # (routed through _exit_nat_vent() -> _deactivate_fan()) — the tracker
-            # previously only cleared on the two types above, leaving it stale (still
-            # True) after any of these fired.
-            "nat_vent_comfort_floor_exit",
-            "nat_vent_outdoor_rise_exit",
-            "nat_vent_away_ceiling_exit",
-            "nat_vent_manual_override_exit",
-            # Issue #1037: the blind-fan timeout ends a CA-owned nat-vent session the
-            # same way (routed through _exit_nat_vent() -> _deactivate_fan()).
-            "fan_blind_stopped",
-        ):
-            _fan_ca_owns = False
 
         renderer = EVENT_RENDERERS.get(event_type)
         try:
@@ -3984,6 +3967,12 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
                     _own_ca = False
                     _fan_override_count += 1
                     fan_ownership_lines.append(f"  {_ts_str}: User owns fan (fan_manual_override, fan->on)")
+            elif _etype == "fan_manual_override":
+                # Issue #1226 mirror: the occupant's own fan-off ends their ownership too (same rule as
+                # _render_timeline_events()); otherwise the history kept saying "User owns fan".
+                if _own_user:
+                    _own_user = False
+                    fan_ownership_lines.append(f"  {_ts_str}: Fan ownership cleared (fan_manual_override, fan->off)")
             elif _etype == "fan_cancel":
                 if _own_user:
                     _own_user = False

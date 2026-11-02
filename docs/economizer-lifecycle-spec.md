@@ -74,7 +74,8 @@ def _apply_economizer_fsm_state_after_activation(
         FanCommandResult.OVERRIDDEN,
         FanCommandResult.RATE_LIMITED_NEW,
         FanCommandResult.RATE_LIMITED_DUP,
-        FanCommandResult.SUPPRESSED,  # Issue #1205: the occupant's fan-off hold, sealed house, HVAC-fan restriction, ignored command
+        # Issue #1205: the occupant's fan-off hold, sealed house, HVAC-fan restriction, ignored command
+        FanCommandResult.SUPPRESSED,
     ):
         self._apply_economizer_fsm_state(EconomizerLifecycleState.INACTIVE)
         return False

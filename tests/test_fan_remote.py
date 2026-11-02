@@ -1093,6 +1093,83 @@ class TestFanRemoteEchoGuard:
         ae.handle_fan_manual_override.assert_called_once()
 
 
+class TestFanRemoteEchoGuardIsTypeAware:
+    """Issue #1215: an echo is the same kind of event as the CA command it echoes.
+
+    Occupant: at 15:07 on 2026-11-01 he pressed ``timer_1h`` 22 s after CA's stop; the whole-remote 30 s echo guard
+    dropped it and he got the 180 minute default instead of one hour. A timer / speed / on token can never be the
+    echo of CA's ``turn_off``; the genuine echo (15:04:16.5, a ``low`` right after CA's ``turn_on``) stays dropped.
+    """
+
+    @staticmethod
+    def _coord(direction, *, seconds_ago, physical_on=False, fan_on_at_flush=True):
+        coord = _make_coordinator_stub(physical_on=physical_on, fan_on_at_flush=fan_on_at_flush)
+        ae = coord.automation_engine
+        ae._fan_command_time = _FIXED_NOW - timedelta(seconds=seconds_ago)
+        ae.last_whf_command_direction = MagicMock(return_value=direction)
+        coord._cancel_fan_remote_burst = MagicMock()
+        return coord, ae
+
+    @staticmethod
+    def _press(coord, token):
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": token})
+        with patch(_PATCH_COORDINATOR_DT_NOW, return_value=_FIXED_NOW):
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+    def test_timer_press_22s_after_ca_turn_off_gives_the_occupants_one_hour(self):
+        coord, ae = self._coord("off", seconds_ago=22)
+        self._press(coord, "timer_1h")
+        ae.handle_fan_manual_override.assert_called_once()
+        assert ae.handle_fan_manual_override.call_args.kwargs["remote_timer_hours"] == 1.0
+
+    @pytest.mark.parametrize("token", ["low", "medium", "high", "timer_2h", "timer_none"])
+    def test_no_timer_or_speed_token_is_an_echo_of_a_turn_off(self, token):
+        coord, ae = self._coord("off", seconds_ago=5)
+        self._press(coord, token)
+        ae.handle_fan_manual_override.assert_called_once()
+
+    def test_an_off_token_after_ca_turn_off_is_its_echo_and_is_dropped(self):
+        coord, ae = self._coord("off", seconds_ago=3)
+        self._press(coord, "off")
+        ae.handle_fan_manual_override.assert_not_called()
+        coord._cancel_fan_remote_burst.assert_not_called()  # dropped before the off handling
+
+    def test_a_low_right_after_ca_turn_on_is_the_genuine_echo_and_is_dropped(self):
+        """15:04:16.5: the device re-announced the speed CA's turn_on started it at."""
+        coord, ae = self._coord("on", seconds_ago=1, physical_on=True, fan_on_at_flush=False)
+        self._press(coord, "low")
+        ae.handle_fan_manual_override.assert_not_called()
+        ae.handle_fan_speed_observed.assert_not_called()
+
+    def test_an_off_press_after_ca_turn_on_is_the_occupant_stopping_it(self):
+        coord, ae = self._coord("on", seconds_ago=4, physical_on=True, fan_on_at_flush=False)
+        self._press(coord, "off")
+        coord._cancel_fan_remote_burst.assert_called_once()
+
+    def test_an_off_press_during_a_forced_start_cycle_is_never_an_echo(self):
+        coord, ae = self._coord("cycle", seconds_ago=3, physical_on=False, fan_on_at_flush=False)
+        self._press(coord, "off")
+        coord._cancel_fan_remote_burst.assert_called_once()
+        ae.note_occupant_fan_action.assert_called_once()
+
+    def test_every_processed_remote_event_is_noted_as_an_occupant_action(self):
+        coord, ae = self._coord("off", seconds_ago=22)
+        self._press(coord, "timer_1h")
+        ae.note_occupant_fan_action.assert_called_once()
+
+    def test_a_dropped_echo_is_not_noted_as_an_occupant_action(self):
+        coord, ae = self._coord("on", seconds_ago=1, physical_on=True, fan_on_at_flush=False)
+        self._press(coord, "low")
+        ae.note_occupant_fan_action.assert_not_called()
+
+    @pytest.mark.parametrize("token", ["low", "timer_8h", "off"])
+    def test_unknown_direction_keeps_every_event_suppressed(self, token):
+        """A blower command (or none recorded) owns the echo window: the pre-#1215 behaviour."""
+        coord, ae = self._coord(None, seconds_ago=5)
+        self._press(coord, token)
+        ae.handle_fan_manual_override.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # 8. _read_live_remote_timer_provenance() (Issue #677)
 # ---------------------------------------------------------------------------

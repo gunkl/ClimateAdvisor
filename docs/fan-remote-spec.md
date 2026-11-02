@@ -324,7 +324,7 @@ fan on a sealed house is stopped by the WHF safety enforcer
 (`AutomationEngine._enforce_whf_safety_locked`), which calls
 `_deactivate_fan(safety=True)`: that call skips the RF-timer-absolute guard above, ends the fan
 override (`_fan_remote_timer_hours` is cleared with it) and its fan-owned grace, and logs an
-INFO `WHF safety stop` line plus a `whf_safety_stop` event. No other path may stop an
+INFO `WHF safety stop sending plain turn_off` line (one per attempt) plus a `whf_safety_stop` event. No other path may stop an
 RF-timer fan; the comfort guards above stay as they are. CA also never *starts* the
 whole-house fan on a sealed house (entry gate in `_activate_fan()`). See
 [08-COMPUTATION-REFERENCE.md §9e-H](08-COMPUTATION-REFERENCE.md#h-sealed-house-guard--override-sessions-are-not-exempt-issue-882).
@@ -398,8 +398,15 @@ receive-only — CA never calls an HA service on it, so HA never attaches a CA-i
 its state-changed events. The time-window heuristic is the correct mechanism for this entity, not
 a fallback shortcut.
 
-**Tradeoff:** a genuine human remote press landing within 30 seconds of a CA-issued fan command
-is silently dropped instead of acted on. This is the same tradeoff already accepted for the
+**Type-aware (Issue #1215, v0.8.29).** The 30 s window no longer drops every event. An echo is the same kind of event as the CA command it echoes (`fan_status.remote_event_is_echo_of(direction, event_type)`, direction from `AutomationEngine.last_whf_command_direction()`): after CA's `turn_off` only an `off` token is dropped; a `timer_*`, speed or `on` token is the occupant (2026-11-01 15:07: a `timer_1h` press 22 s after CA's stop was dropped and the occupant got the 180 minute default instead of one hour). After CA's `turn_on` every token except `off` is still dropped (the 15:04:16.5 `low`). With no recent WHF command (a blower command owns the window) everything stays suppressed as before. The physical fan-entity listener uses the sibling `fan_transition_is_echo_of()`: the fan turning ON after CA's stop is the occupant.
+
+**Transmitter entity is not an occupant witness (Issue #1215).** With the new firmware the transmitter entity follows remote presses immediately and corrects itself from the power reading after a lag (defaults 20 s on, 25 s off, 90 s hard timeout on a start). On a dual-entity install CA therefore detects the occupant only from the power entity (`input_boolean.quietcool_detectpower`) and the RF remote events: a press reaches CA first as the RF event (burst, then confirmed when the power entity reads on, recorded once); a wall-switch off is seen on the power entity only and starts the fan-off hold. Transmitter flips (including firmware corrections) never start a hold or an override. See 08-COMPUTATION-REFERENCE.md "Dual-entity occupant detection".
+
+**Firmware dependency (Issue #1215).** CA stops the fan with a plain `turn_off` and never with an "on" first. That only transmits if the controller's fan entity follows the remote's real power state, so a fan started from the remote reads "on" (QuietCool firmware option 1; flash it BEFORE installing CA v0.8.29). With older firmware a remote-started fan still reads "off", the plain off transmits nothing (an ESPHome template fan acts on a state change only), and CA reports it: WARNING "whole-house fan could not be stopped: control entity already reads off (firmware may not reflect remote power state)" plus one occupant alert. Once the known lag has passed the power entity (`input_boolean.quietcool_detectpower`) is authoritative for "running".
+
+**Tradeoff:** a genuine human remote press landing within 30 seconds of a CA-issued fan START (the `on`
+direction, or an unknown/blower command) is silently dropped instead of acted on; since Issue #1215 a press of the
+opposite kind (anything after CA's stop, an `off` after CA's start or during a forced-start cycle) is never dropped. This is the same tradeoff already accepted for the
 physical-entity path since Fix #239 — timer/speed presses are deliberate, non-urgent actions, so
 a 30s silent window is a small cost against a guaranteed-false override every time CA's own
 command echoes back.

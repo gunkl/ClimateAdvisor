@@ -66,6 +66,11 @@
       "type": "sensor_close",
       "entity": "binary_sensor.window",
       "note": "The window closes 45 minutes into the still-active 2-hour RF-remote-timer override (grace expires ~07:00:26) -- mirrors the live incident's window-closes-mid-session timing. With the Issue #882 fix, the coordinator's real sensor-changed listener calls handle_all_doors_windows_closed() immediately, which now routes through _enforce_sealed_house_whf_guard() and stops the fan within this same event-handling cycle instead of leaving it running for the rest of the timer."
+    },
+    {
+      "time": "2026-09-09T05:45:12",
+      "type": "coordinator_refresh",
+      "note": "Issue #1215: lets simulated time pass the 6 s quiet window (WHF_RESTORE_QUIET_S) after the fan reads off plus the 5 s post-release settle. The harness fires timers only as time advances to an event, and the restore timers lie after the window-close event."
     }
   ],
   "assertions": [
@@ -75,7 +80,7 @@
       "reason": "The whole-house fan must be off within the same event-driven cycle as the sensor-closed event, even though it was running under an absolute RF-remote-timer override -- this is the sealed-house invariant taking precedence over Issue #486's override-absolute rule, via the same bypass_absolute_override=True precedent Issue #748 established for the hard AC/WHF mutex. Note: _fan_active alone is not distinguishing here (an override session never sets it), so the last_hvac_mode assertion below is what actually proves the guard ran -- confirmed via a deliberate revert-test during authoring (see the scenario effectiveness note)."
     },
     {
-      "at": "2026-09-09T05:45:01",
+      "at": "2026-09-09T05:45:12",
       "expect": "last_hvac_mode",
       "mode": "cool",
       "reason": "_deactivate_fan()'s default restore_hvac=True restores the pre-fan HVAC mode ('cool', captured from the classification) once the guard actually deactivates the fan. Pre-fix, nothing ever calls _deactivate_fan() for an override-only session, so the thermostat stays stranded at 'off' (the WHF-suppressed mode) indefinitely -- this is the assertion that actually distinguishes pre-fix from post-fix behavior, since _fan_active was never True for an override session in either case."

@@ -127,8 +127,8 @@ Rule 2 (the whole-house fan and heating/cooling never run together) used to be b
 
 | Fan reading | Release |
 |---|---|
-| physically on (`_fan_physically_on_for_release()`, the same check `_release_whf_and_reclassify()` uses) | blocked; the enforcer's verify (`WHF_STOP_VERIFY_S`, 12 s) stops it again if it ignored the command |
-| physically off | released at once (same pass if the entity already reads off; otherwise on the fan-state event, the 15 s tick or the verify) |
+| physically on (`_fan_physically_on_for_release()`, the same check `_release_whf_and_reclassify()` uses) | blocked; the enforcer's verify (`WHF_STOP_VERIFY_S`, 20.5 s, after the 20 s convergence window; Issue #1215) retries a plain `turn_off` if it ignored the command, then also waits `WHF_RESTORE_QUIET_S` (6 s) of physical off |
+| physically off | released once it has stayed off for `WHF_RESTORE_QUIET_S` (6 s, Issue #1215); asked again by the `restore_quiet` timer, the fan-state event, the 15 s tick or the verify. No other path may restore HVAC meanwhile: `_deactivate_fan` defers any restore/suppression release to this one release while it is pending (or the house is sealed and the fan reads on) |
 | unreadable (command-only fan) | released by the `stop_verify` re-check, i.e. after the verify window has passed; that trigger is never coalesced away |
 
 `request_whf_safety_check()` no longer short-circuits on "fan reads off" while a restore is pending, since that reading is what releases it. A mutex stop (`STOP_MUTEX_FAN`) is unchanged: it never restores. Tests: `tests/test_unreadable_sensors_1181.py::TestRestoreWaitsForTheFanToReadOff`. `_whf_restore_pending` is not persisted; after a restart the startup fan reconcile owns the state.

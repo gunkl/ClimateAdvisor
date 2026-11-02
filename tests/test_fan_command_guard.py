@@ -314,6 +314,105 @@ class TestFanEntityChangedGuard:
 
         coord.automation_engine.handle_fan_manual_override.assert_called_once()
 
+    def test_the_fan_turning_on_22s_after_ca_turn_off_is_the_occupant_not_an_echo(self):
+        """Issue #1215: only a transition the same way as CA's last command is its lagging echo. The fan turning ON
+        seconds after CA's stop is the occupant at the remote (15:07), so it is an override, not swallowed."""
+        coord = _make_coord(fan_command_time=_NOW - timedelta(seconds=22))
+        coord.automation_engine._fan_active = False
+        coord.automation_engine.last_whf_command_direction = MagicMock(return_value="off")
+
+        with _fixed_now(_NOW):
+            asyncio.run(coord._async_fan_entity_changed(_make_fan_entity_event("off", "on")))
+
+        coord.automation_engine.handle_fan_manual_override.assert_called_once()
+
+    def test_a_promise_reading_is_taken_at_every_fan_transition(self):
+        """Issue #1215: P9 needs a reading AT the transition to measure a sealed-house run (87 s vs 177 s)."""
+        coord = _make_coord(fan_command_time=_NOW)
+        coord._record_promise_reading = MagicMock()
+        with _fixed_now(_NOW):
+            asyncio.run(coord._async_fan_entity_changed(_make_fan_entity_event("off", "on")))
+        coord._record_promise_reading.assert_called()
+
+    def test_the_lagging_off_reading_after_ca_turn_off_is_still_its_echo(self):
+        coord = _make_coord(fan_command_time=_NOW - timedelta(seconds=15))
+        coord.automation_engine._fan_active = True
+        coord.automation_engine.on_fan_turned_off = MagicMock()
+        coord.automation_engine.last_whf_command_direction = MagicMock(return_value="off")
+
+        with _fixed_now(_NOW):
+            asyncio.run(coord._async_fan_entity_changed(_make_fan_entity_event("on", "off")))
+
+        coord.automation_engine.on_fan_turned_off.assert_not_called()
+        coord.automation_engine.handle_fan_manual_override.assert_not_called()
+
+
+class TestDualEntityTransmitterIsNotAnOccupantWitness:
+    """Issue #1215: with a separate power entity, only it and the RF remote events detect the occupant.
+
+    The QuietCool firmware flips its transmitter entity on its own: a remote press sets it at once, and it corrects
+    itself from the power reading after a lag (off at 90 s for a start that never produced power; a brief on when an
+    off lags past 25 s). None of those is a person at the fan.
+    """
+
+    @staticmethod
+    def _event(entity_id, old, new):
+        ev = _make_fan_entity_event(old, new)
+        ev.data["entity_id"] = entity_id
+        return ev
+
+    @staticmethod
+    def _dual():
+        coord = _make_coord(fan_command_time=None)
+        coord.config["fan_entity"] = "fan.whf"
+        coord.config["fan_state_entity"] = "binary_sensor.whf_power"
+        coord.automation_engine.on_fan_turned_off = MagicMock()
+        return coord
+
+    def _run(self, coord, event):
+        with _fixed_now(_NOW):
+            asyncio.run(coord._async_fan_entity_changed(event))
+
+    def test_example_a_firmware_flips_the_entity_off_after_a_failed_start_no_hold(self):
+        coord = self._dual()
+        coord.automation_engine._fan_active = True  # CA started the fan; the power never came on
+        self._run(coord, self._event("fan.whf", "on", "off"))
+        coord.automation_engine.on_fan_turned_off.assert_not_called()
+        coord.automation_engine.handle_fan_manual_override.assert_not_called()
+
+    def test_example_b_a_brief_on_flicker_from_a_lagging_off_no_override(self):
+        coord = self._dual()
+        coord.automation_engine._fan_active = False
+        self._run(coord, self._event("fan.whf", "off", "on"))
+        coord.automation_engine.handle_fan_manual_override.assert_not_called()
+
+    def test_a_wall_switch_off_seen_only_on_the_power_entity_starts_the_hold(self):
+        coord = self._dual()
+        coord.automation_engine._fan_active = True
+        self._run(coord, self._event("binary_sensor.whf_power", "on", "off"))
+        coord.automation_engine.on_fan_turned_off.assert_called_once()
+
+    def test_the_power_entity_turning_on_is_an_occupant_press(self):
+        coord = self._dual()
+        coord.automation_engine._fan_active = False
+        self._run(coord, self._event("binary_sensor.whf_power", "off", "on"))
+        coord.automation_engine.handle_fan_manual_override.assert_called_once()
+
+    def test_single_entity_install_is_unchanged(self):
+        coord = _make_coord(fan_command_time=None)
+        coord.config["fan_entity"] = "fan.whf"  # no fan_state_entity
+        coord.automation_engine._fan_active = False
+        self._run(coord, self._event("fan.whf", "off", "on"))
+        coord.automation_engine.handle_fan_manual_override.assert_called_once()
+
+    def test_state_entity_equal_to_the_fan_entity_is_not_dual(self):
+        coord = _make_coord(fan_command_time=None)
+        coord.config["fan_entity"] = "fan.whf"
+        coord.config["fan_state_entity"] = "fan.whf"
+        coord.automation_engine._fan_active = False
+        self._run(coord, self._event("fan.whf", "off", "on"))
+        coord.automation_engine.handle_fan_manual_override.assert_called_once()
+
 
 class TestPostStartupUntrackedFanReconcile:
     """Post-startup untracked fan reconcile (Issue #347).

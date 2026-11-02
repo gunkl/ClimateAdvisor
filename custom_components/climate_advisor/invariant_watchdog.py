@@ -922,10 +922,15 @@ def check_p9_whf_sealed(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
     # enforcer must stop the fan) is still reported.
     notices = inp.observe_notices
 
-    def flush(run: list[Reading], ongoing: bool) -> None:
+    def flush(run: list[Reading], ongoing: bool, closed_at: datetime | None = None) -> None:
         if not run:
             return
-        end = inp.now if ongoing else run[-1].ts
+        # Issue #1215: readings are stored on change (or every 5 min), so the last STORED reading inside a run can be
+        # minutes before the run really ended -- 2026-11-01 reported 87 s for a fan that ran 177 s, and a run with a
+        # single stored reading could never be reported at all. A closed run ends at the reading that closed it (the
+        # fan read off, or a door/window read open): the coordinator takes a reading at both transitions, so that
+        # reading's time is the transition's.
+        end = inp.now if ongoing else (closed_at or run[-1].ts)
         # The notice span [opened, closed) is closed by the first reading with the fan off or a window open, so
         # a run is the noticed one when its start lies inside a span, or it contains the notice (opened inside
         # the run). A run whose start has aged out of the window is still inside its span.
@@ -953,7 +958,7 @@ def check_p9_whf_sealed(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
         if r.fan_on is True and r.contacts_open is False:
             run.append(r)
         else:
-            flush(run, False)
+            flush(run, False, r.ts)
             run = []
     flush(run, bool(rs) and rs[-1].fan_on is True and rs[-1].contacts_open is False)
     return hits

@@ -25,7 +25,11 @@ from custom_components.climate_advisor.const import (
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
 )
-from custom_components.climate_advisor.whf_safety_decision import SensorReading, WhfSafetySnapshot
+from custom_components.climate_advisor.whf_safety_decision import (
+    WHF_STOP_VERIFY_S,
+    SensorReading,
+    WhfSafetySnapshot,
+)
 
 T0 = datetime(2026, 10, 30, 21, 32, 0, tzinfo=UTC)
 CLOSED = SensorReading(is_open=False, stable_for_s=3600.0)
@@ -225,10 +229,11 @@ class TestAfterTheStop:
 
         with patch("custom_components.climate_advisor.automation.async_call_later", side_effect=_later):
             assert _run(engine) is FanCommandResult.EXECUTED
-            verify = [t for t in timers if t[0] == 12.0]
-            assert verify, f"no 12 s verify-and-retry timer armed after the stop: {[t[0] for t in timers]}"
-            # the fan ignored the stop and still reads on; the verify timer fires and asks again
-            clock.advance(12)
+            verify = [t for t in timers if t[0] == WHF_STOP_VERIFY_S]
+            assert verify, f"no verify-and-retry timer armed after the stop: {[t[0] for t in timers]}"
+            # the fan ignored the stop and still reads on; the verify timer fires (after the convergence window,
+            # Issue #1215: it used to fire at 12 s, before a 15.5 s power-reading lag could ever confirm a stop)
+            clock.advance(WHF_STOP_VERIFY_S)
             verify[0][1](clock.now())
         assert engine._whf_safety_queued is False or engine.hass.async_create_task.called
 
@@ -466,6 +471,10 @@ class TestEntryGate:
         engine.config[CONF_FAN_MIN_RUNTIME_PER_HOUR] = 10
         world["fan_on"] = False
         world["sensors"] = (OPEN,)
+        # The fan is off, so its control entity reads off: a plain turn_on is a genuine transition. (The fixture's
+        # static "on" modelled an entity that disagrees with an off fan, i.e. the #449 drift, which now correctly
+        # starts with an off and finishes the turn_on 5 s later.)
+        engine.hass.states.get("fan.whf").state = "off"
         with patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()):
             asyncio.run(engine._fan_cycle_on())
         assert _fan_on_calls(engine)

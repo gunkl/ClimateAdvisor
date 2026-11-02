@@ -1160,6 +1160,8 @@ class AutomationEngineCallbacks:
     # pause-ENDING read). None falls back to ``sensor_check``.
     sensor_hold_check: Callable[[], bool] | None = None
     sensor_debounce_pending: Callable[[], bool] | None = None
+    # Issue #1227: per-sensor "holds open and past its own delay". None falls back to the house-wide form.
+    sensor_settled_open: Callable[[], bool] | None = None
     emit_event: Callable[..., None] | None = None
     request_refresh: Callable[[], None] | None = None
     post_grace_fan_check: Callable[[], None] | None = None
@@ -1961,6 +1963,8 @@ class AutomationEngine:
         # is still within its CONF_SENSOR_DEBOUNCE settle window. None/unset (e.g. tests that
         # don't wire a coordinator) is treated as "not pending", matching pre-#504 behavior.
         self._sensor_debounce_pending_callback: Any | None = None
+        # Issue #1227: set by coordinator -- any monitored sensor holds open AND is past its own delay.
+        self._sensor_settled_open_callback: Any | None = None
 
         # Issue #423: physical fan ground-truth callbacks — set by coordinator after
         # construction, mirroring _sensor_check_callback/_emit_event_callback above.
@@ -2017,6 +2021,7 @@ class AutomationEngine:
         self._sensor_check_callback = callbacks.sensor_check
         self._sensor_hold_callback = callbacks.sensor_hold_check
         self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
+        self._sensor_settled_open_callback = callbacks.sensor_settled_open
         self._emit_event_callback = callbacks.emit_event
         self._request_refresh_callback = callbacks.request_refresh
         self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
@@ -11050,13 +11055,15 @@ class AutomationEngine:
         return bool(self._sensor_check_callback and self._sensor_check_callback())
 
     def _any_monitored_sensor_settled_open(self) -> bool:
-        """A monitored sensor holds open AND no sensor is still inside its open/close delay (Issue #1227).
+        """A monitored sensor holds open AND is past its own open delay (Issue #1227).
 
-        The debounce-safe form of ``_any_monitored_sensor_holding_open()``: a door/window opened for less than its
-        delay (600 s default) is not open yet, so no path that changes the HVAC or starts a fan may act on it. The
-        post-delay handler fires when the delay ends and decides then. Use this for every decision that writes
-        HVAC or starts/stops a fan; the raw form is for reads that only keep something as it is.
+        Asked per sensor by the coordinator: a window open for hours stays open while a second door is
+        still inside its delay (a house-wide "nothing pending" test would hide it and let HVAC run into it).
+        Without a coordinator (bare engines, the simulator) it falls back to holding-open AND nothing pending.
         """
+        settled_cb = getattr(self, "_sensor_settled_open_callback", None)  # partially built engines in tests
+        if settled_cb is not None:
+            return bool(settled_cb())
         return self._any_monitored_sensor_holding_open() and not self._sensor_debounce_pending
 
     def _any_monitored_sensor_holding_open(self) -> bool:

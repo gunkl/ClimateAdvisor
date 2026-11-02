@@ -3967,6 +3967,12 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
                     _own_ca = False
                     _fan_override_count += 1
                     fan_ownership_lines.append(f"  {_ts_str}: User owns fan (fan_manual_override, fan->on)")
+            elif _etype == "fan_manual_override":
+                # Issue #1226 mirror: the occupant's own fan-off ends their ownership too (same rule as
+                # _render_timeline_events()); otherwise the history kept saying "User owns fan".
+                if _own_user:
+                    _own_user = False
+                    fan_ownership_lines.append(f"  {_ts_str}: Fan ownership cleared (fan_manual_override, fan->off)")
             elif _etype == "fan_cancel":
                 if _own_user:
                     _own_user = False

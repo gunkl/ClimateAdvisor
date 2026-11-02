@@ -255,3 +255,32 @@ class TestProviderRegistration:
         names = [p.name for p in registry.select()]
         assert "state_cross_validation" in names
         assert "override_details" in names
+
+
+class TestFanOwnershipHistoryOccupantFanOff:
+    """Issue #1226 mirror: the occupant's own fan-off ends their ownership in the AI history section too."""
+
+    def _ctx(self, events):
+        coord = _make_coordinator()
+        coord._event_log = events
+        with patch("custom_components.climate_advisor.ai_skills_context.dt_util.as_local", side_effect=lambda x: x):
+            return asyncio.run(build_override_details_context(None, coord, hours=24))
+
+    def test_occupant_fan_off_clears_user_ownership(self):
+        now = datetime.datetime.now(datetime.UTC)
+        ctx = self._ctx(
+            [
+                {"type": "fan_manual_override", "fan_after": "on", "time": now - datetime.timedelta(minutes=20)},
+                {"type": "fan_manual_override", "fan_after": "off", "time": now - datetime.timedelta(minutes=10)},
+            ]
+        )
+        assert "User owns fan" in ctx
+        assert "Fan ownership cleared (fan_manual_override, fan->off)" in ctx
+
+    def test_occupant_fan_on_alone_keeps_user_ownership(self):
+        now = datetime.datetime.now(datetime.UTC)
+        ctx = self._ctx(
+            [{"type": "fan_manual_override", "fan_after": "on", "time": now - datetime.timedelta(minutes=5)}]
+        )
+        assert "User owns fan" in ctx
+        assert "Fan ownership cleared" not in ctx

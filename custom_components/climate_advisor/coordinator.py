@@ -1037,6 +1037,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # _sensor_debounce_pending()'s docstring for why last_changed is also
             # checked.
             sensor_debounce_pending=self._sensor_debounce_pending,
+            # Issue #1227: per-sensor "open and past its own delay" for every HVAC-changing decision.
+            sensor_settled_open=self._any_sensor_settled_open,
             emit_event=self._emit_event,
             request_refresh=lambda: self.hass.async_create_task(self.async_request_refresh()),
             # Issue #359: post-grace fan check callback — called by engine when any
@@ -2890,6 +2892,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _any_sensor_open(self) -> bool:
         """Return True if any monitored contact sensor is currently open."""
         return any(self._is_sensor_open(s) for s in self._resolved_sensors)
+
+    def _sensor_in_debounce(self, entity_id: str) -> bool:
+        """True while THIS sensor is open and still inside its own open delay (Issue #1227).
+
+        Same signals as ``_sensor_debounce_pending`` (the timer registry, plus last_changed for the
+        #623 registration race and the #645 reconnect-blip exclusion), asked for one sensor.
+        """
+        if entity_id in self._door_open_timers:
+            return True
+        if not self._is_sensor_open(entity_id):
+            return False
+        state = self.hass.states.get(entity_id)
+        last_changed = getattr(state, "last_changed", None) if state else None
+        if last_changed is None or self._sensor_reconnect_blip_last_changed.get(entity_id) == last_changed:
+            return False
+        debounce_sec = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS)
+        return (dt_util.now() - last_changed).total_seconds() < debounce_sec
+
+    def _any_sensor_settled_open(self) -> bool:
+        """True when any monitored sensor holds open AND is past its OWN delay (Issue #1227).
+
+        Per sensor, never house-wide: a window open for hours stays open while a second door is still
+        inside its delay, and a door opened moments ago is not open yet even if another window is settled.
+        """
+        return any(self._sensor_holds_open(s) and not self._sensor_in_debounce(s) for s in self._resolved_sensors)
 
     def _sensor_debounce_pending(self) -> bool:
         """True if any monitored sensor is open and still within its debounce window.

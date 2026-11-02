@@ -437,6 +437,8 @@ class TestP9WhfSealed:
         assert hits_for("whf_sealed", make_input(rs), self.WHF) == []
 
     def test_twin_zero_sensors_the_rule_does_not_apply(self):
+        # Issue #1200: a whole-house fan with zero door/window sensors is an unsupported configuration;
+        # this pins today's unchanged behaviour, not a supported promise.
         rs = [rd(m, fan_on=True, contacts_open=None) for m in range(0, 30, 5)]
         assert hits_for("whf_sealed", make_input(rs), self.WHF) == []
 

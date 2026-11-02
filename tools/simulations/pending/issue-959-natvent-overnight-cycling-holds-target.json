@@ -9,7 +9,8 @@
     "No thermal_model supplied (confidence defaults to 'none') -- this scenario is about the cycling ladder's own on/off thresholds, not any ODE/thermal-model-driven prediction; omitting it keeps handle_door_window_open's unrelated thermal-model floor-imminence pre-activation guard out of play.",
     "outdoor is held at a fixed 58-60F throughout, always well below both indoor (66-72F) and the 77F ceiling threshold (comfort_cool 76 + nat_vent_delta 3) -- this keeps OUTDOOR_RISE and CEILING_THRESHOLD out of play entirely, isolating the cycling-ladder behavior this scenario targets from the exit-chain mechanisms the issue_821/issue_931 rewrites already cover separately.",
     "Three-exercise protocol (CLAUDE.md Sec.10): (a) Scenario effectiveness: if decide_nat_vent_cycling() were reverted to use a stale/flat threshold (e.g. the old daytime midpoint formula instead of the sleep-aware target during the sleep window), the fan would cycle around a different setpoint than 66-68F -- the scripted indoor trajectory here assumes 66/68 crossings. This scenario cannot mechanically detect every such failure mode given the harness limitation noted above (only final state is checked) -- what it DOES mechanically prove: the session survives the full night without any of the exit reasons firing, even though indoor gets to within 1F of the hard floor on 4 separate occasions across the 3.5 cycles. (b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's nat-vent cycling section should reference this scenario as the overnight-holds-near-target regression reference once promoted. (c) User outcome if this regresses: the occupant's bedroom would swing lower overnight than intended (toward the bare floor) before the fan cycles back on, the exact discomfort/inefficiency pattern PROACTIVE_FLOOR's removal (#959) was meant to fix at the source.",
-    "Recommend running python tools/simulate.py --pending -v against this scenario before promotion to golden/, and treating the harness-limitation note above as a real, disclosed caveat rather than a resolved gap."
+    "Recommend running python tools/simulate.py --pending -v against this scenario before promotion to golden/, and treating the harness-limitation note above as a real, disclosed caveat rather than a resolved gap.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.bedroom_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -22,6 +23,9 @@
     "sleep_time": "22:00",
     "wake_time": "06:30",
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "thermal_model": {

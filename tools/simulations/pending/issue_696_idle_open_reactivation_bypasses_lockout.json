@@ -8,7 +8,8 @@
     "Classification is a hot day with hvac_mode=cool (classifier.py derives cool for a hot day; an earlier draft hand-set off). The window-open pause happens with the AC idle (indoor 70F is below the cooling band), so the idle-open re-entry path is the one that governs the 06:34:10 re-evaluation. Revert check (Issue #1193): making is_reactivation_locked_out() always return False (deleting both lockout layers) makes the fan_not_active assertion FAIL, so the lockout is what this scenario depends on.",
     "No thermal_model block on purpose -- omitting it means no PROACTIVE_FLOOR prediction is available, so the 68F reading triggers the hard COMFORT_FLOOR exit specifically, matching the real incident's log line (\"Nat-vent hard exit [daytime] via temp-check (comfort_floor)\").",
     "The second temp_update lands 250s after the exit -- comfortably inside the 300s default lockout window, unlike the real incident's ~300.02s edge case (that timing-margin question is tracked separately, out of scope for this fix per the #696 plan). Indoor is 71F there: above the 70F reactivation floor, so ONLY the lockout stops the fan reactivating (at the earlier 69F the raw floor/hysteresis check could also have blocked it, masking a missing lockout). The 06:30 exit comes through the fan thermostat comfort-floor check (the 68F reading hits the hard COMFORT_FLOOR exit), not the Issue #739 branch.",
-    "Occupant framing: before the fix, the WHF would have been commanded on again at 71F -- pulling in cool outside air for several minutes within moments of having stopped at the comfort floor -- purely because the lockout was ignored, not because conditions called for it. After the fix, it stays off until the lockout clears."
+    "Occupant framing: before the fix, the WHF would have been commanded on again at 71F -- pulling in cool outside air for several minutes within moments of having stopped at the comfort floor -- purely because the lockout was ignored, not because conditions called for it. After the fix, it stays off until the lockout clears.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.bedroom_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -17,6 +18,9 @@
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [

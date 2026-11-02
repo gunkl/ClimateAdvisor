@@ -6,6 +6,7 @@
 
 | Question | Short answer | → Full answer |
 |---|---|---|
+| Is a whole-house fan with no door/window sensor supported (Issue #1200)? | No. Rules 1 and 3 need window state; a fan that ignores CA's stop can be misread as an occupant fan-on, which rule 2 then obeys. Documented only, no code change. | [Supported Configuration](#supported-configuration-a-whole-house-fan-needs-a-doorwindow-sensor-issue-1200) |
 | Why 5 composed axes instead of one flat enum, unlike nat-vent's 4-state enum? | A WHF session can occupy several axes at once (on, overridden, HVAC-suppressing, rate-limited) simultaneously. Flattening to one enum would combinatorially explode or drop states a status card needs. | [State Model](#state-model) |
 | What are the 16 event kinds and where does each one's real call site live? | One per real production entry point in `automation.py` — see the table in [Event Kinds](#event-kinds). | [Event Kinds](#event-kinds) |
 | Why do 2 of the 16 kinds never move `to_state` away from `from_state`? | `THERMO_BACKSTOP_TICK`/`THERMOSTAT_CHECK_TICK` only inform a downstream routing decision (`_exit_nat_vent()`/`_deactivate_fan()` selection between several possible event types) this FSM's 5 axes cannot represent without duplicating that routing logic — the same "sibling threshold drift" trap Issues #400/#402/#417/#456/#458 already document for this codebase. | [Deliberately Unreachable Kinds](#deliberately-unreachable-kinds) |
@@ -27,6 +28,18 @@
 - The WHF/AC mutual-exclusion choke-point guard (`_whf_owns_hvac()`) — see `docs/08-COMPUTATION-REFERENCE.md` §"Structural WHF/AC Mutual Exclusion" for that mechanism's own history (Issue #392 Fix 1b); this spec covers only the `hvac_ownership` axis's read-only derivation, now re-expressed in terms of `fan_lifecycle_state` (Phase 4).
 - Nat-vent's own session lifecycle (`_natural_vent_active`/`_nat_vent_soft_start`) — owned by `nat-vent-lifecycle-spec.md`. This spec only documents the one cross-lifecycle read (`natural_vent_active` as a plain boolean input) — see [Nat-Vent Coupling](#nat-vent-coupling).
 - Pause/grace/override lifecycles — owned by `grace-periods-spec.md`. Fan/WHF grace starts (`_start_grace_period()`, "unprotected" grace triggers) are a real coupling point but are not modeled as a fan_fsm.py axis.
+
+## Supported Configuration: a Whole-House Fan Needs a Door/Window Sensor (Issue #1200)
+
+**Occupant first:** on a whole-house-fan home with no door or window sensor, Climate Advisor cannot know whether the house is open or sealed. If the fan ignores one of Climate Advisor's stop commands and keeps running, Climate Advisor can later read its own earlier start of that fan as "you turned the fan on". Rule 2 ("the newest occupant action wins") then sides with that phantom press: Climate Advisor switches its own heating or cooling off while the stuck fan keeps running.
+
+**Owner decision (2026-11-01): document only.** `fan_mode: whole_house_fan` requires at least one door/window sensor; a sensorless WHF is unsupported. Nothing in the fan-stop or rule-2 logic changed, the config flow still only warns (`whf_no_sensors_warning`, accepted on an identical resubmit), and there is no repair notice.
+
+- **Why not fix the stamp:** dropping the phantom occupant fan-on stamp makes `decide_whf_safety` return `NONE`, so the fan and HVAC run together, which breaks rule 2 outright.
+- **Why it is safe with a sensor:** a window open: rule 3 pauses HVAC after the sensor debounce, so nothing runs against the fan. Every sensor closed: rule 1 keeps stopping the fan, and the Issue #1215 give-up alert tells the occupant when it will not stop.
+- **Why it cannot be made safe without one:** rules 1 and 3 both need window state. With zero sensors neither rule can apply, so the entry gate, the sealed-house stop and the rule-3 pause are all inert, and the only remaining safety rule (2) is the one the phantom stamp can mislead.
+- **Mechanism (for the record):** `coordinator._occupant_fan_on_at_from_ground_truth` excludes a fan on-time only within `WHF_OWN_COMMAND_ECHO_S` (45 s) of the LATEST fan toggle (`ae._fan_toggle_command_time`). After an ignored stop that stamp is the stop, so the CA-started run's on-time reads as an occupant press.
+- **Known residuals (accepted):** on sensor homes the mislabelled "occupant turned the fan on" log line can still appear; the outcome is safe. The thermostat mirror, `_occupant_hvac_on_at_from_ground_truth`, has the same latest-command-only exclusion; it is reachable only inside the 300 s startup coalescing window and has not been shown to be reachable.
 
 ## State Model
 

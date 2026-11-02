@@ -7,13 +7,17 @@
     "Closes one of the 3 Step-1 blind spots named in the architecture-reset plan: reconcile_fan_on_startup() had zero golden coverage -- a boundary bug here would have shipped undetected, and this is exactly the function documented (Issue #327) to exist so a running fan always has an explicit owner, never silent limbo.",
     "Required adding a new reconcile_fan_on_startup event type to tools/sim_harness/run_production.py -- unlike the other two Step-1 blind spots, no existing event type dispatched to this function at all.",
     "Uses two new custom assertion types (reconcile_adopted_fan / reconcile_turned_off_fan / reconcile_no_fan in outcomes.py), scanned directly from reason-string/event-type combinations unique to this function -- purely additive, no existing outcome mapping touched.",
-    "thermostat_fan_running is passed as an already-resolved boolean (matching the coordinator's archetype-aware resolution per Issue #423) -- this scenario is not testing that resolution logic, only reconcile_fan_on_startup()'s own decision given the resolved signal."
+    "thermostat_fan_running is passed as an already-resolved boolean (matching the coordinator's archetype-aware resolution per Issue #423) -- this scenario is not testing that resolution logic, only reconcile_fan_on_startup()'s own decision given the resolved signal.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), and the reconcile event already passed any_sensor_open=true, but that tracker read closed. The premise's open window is now a real sensor_open at 06:00:30, so the engine's own sensor view agrees with it. Assertions are unchanged. The event log changes as owner rule 3 requires: the window opening pauses the cool mode the classification armed (thermostat_mode_set cool->off, sensor_opened result=paused)."
   ],
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 75,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [
@@ -24,6 +28,12 @@
       "hvac_mode": "off",
       "windows_recommended": false,
       "note": "Mild day: HVAC off. Coordinator runs classification before startup-coalesce reconcile."
+    },
+    {
+      "time": "2026-07-10T06:00:30",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "Issue #1200: the window the reconcile premise (any_sensor_open=true) describes."
     },
     {
       "time": "2026-07-10T06:01:00",

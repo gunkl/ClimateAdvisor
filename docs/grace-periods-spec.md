@@ -494,6 +494,33 @@ household promise P4 lists as an allowed ending for fan overrides
 be suppressed *by* a grace: a safety stop never consults `_grace_active` or
 `_fan_override_active`.
 
+**The rule-2 stand-down ends the older fan override too (Issue #1204, owner decision A3).** Occupant
+impact: you press the whole-house fan on, then set Cool; Climate Advisor stops the fan for your Cool (rule 2).
+The fan card used to keep saying "off (manual override)" afterwards: for 3 h or more with Manual Change Pause 0,
+and about 25 min past the fan run's own deadline with a pause (the override then waited for the Cool's grace).
+`_stand_down_whf_for_override_conflict()` (the one implementation for all four manual-override-conflict call sites)
+now calls `_end_fan_override_for_rule2_stop(result)` once the stop has gone out: the fan override is cleared with
+reason `whf_safety_stop`, keep-grace semantics (no grace is cancelled; it covers the occupant's HVAC change next, and
+blocks a nat-vent restart over a still-pending change, since pending is not a nat-vent blocker). It deliberately does
+not wait for `_manual_change_protected()` like `_end_fan_override_and_grace()` does. The override-detected caller is a
+task scheduled from `start_override_confirmation()` and clears only after its `await _deactivate_fan()`, by which time the
+change is usually already pending; the clear does not rely on that ordering. A rate-limited (not sent) stop keeps the
+override (#931 mirror). Observe-only (`dry_run`) keeps it too: `_deactivate_fan()` reports EXECUTED without sending, so
+the fan is still running (the WHF safety enforcer likewise does nothing in observe-only). Only a whole-house-fan
+override is ended (`_is_whf_press()`): the thermostat blower never conflicts with heating/cooling, so a newer blower
+override is never ended by a stand-down.
+**The same applies to the WHF safety enforcer's own rule-2 (mutex) stop** (`_after_whf_safety_stop()`, sealed=False).
+`_end_fan_override_and_grace(keep_grace=True)` leaves the fan override armed when its grace protects it and no
+thermostat change is pending or confirmed, which is the case for an occupant heat/cool made while start-up coalescing
+suppresses override detection (the fan card then read "off (manual override)" until the fan's grace ended, hours with
+an RF timer). After the mutex stop the enforcer now ends the fan override the same way (`whf_safety_stop`) and, if
+nothing is then protected, ends the grace via `_end_grace_left_protecting_nothing("whf_safety_stop")`; a pending or
+confirmed change keeps its grace. The sealed-house (rule 1) stop is unchanged.
+Edge: if the pending change then self-resolves (Cool on a hot day, inside the sensor debounce), the kept grace
+protects nothing; PATH B ends it on purpose (`_end_grace_left_protecting_nothing()`, `grace_cancelled` reason
+`override_self_resolved`, the `decide_orphaned_grace` predicate) instead of the orphaned-grace watchdog's ERROR.
+Tests: `tests/test_p4_fan_override_end_1204.py`, `tests_ha/test_p4_fan_override_end_1204.py`.
+
 ---
 
 ## Orphaned Grace Self-Heal (Issue #508)

@@ -7,7 +7,8 @@
     "Three-exercise protocol (CLAUDE.md §10):",
     "(a) Scenario effectiveness: reverting the #775 fix in _nat_vent_reactivation_floor() (daytime branch back to raw comfort_heat) causes the final assertion (nat_vent_not_active at 08:10) to FAIL -- the fan wrongly reactivates at indoor=69F, reproducing the reported incident exactly.",
     "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's nat-vent reactivation-floor description is updated alongside this fix to state the daytime branch matches the live cycling off_threshold, not raw comfort_heat, for the reactivation-only call sites.",
-    "(c) Occupant experience: without this fix, the whole-house fan restarts the moment indoor ticks 1F above the raw comfort_heat floor, cooling the home further below the daytime comfort band the occupant configured and expects the automation to hold. With the fix, the fan only restarts once indoor is back above the same threshold a continuously-running session would have cycled at -- no unexpected overshoot below the daytime band. First-time daily activation (no live session to protect yet) is deliberately unaffected -- see docs for the scope rationale."
+    "(c) Occupant experience: without this fix, the whole-house fan restarts the moment indoor ticks 1F above the raw comfort_heat floor, cooling the home further below the daytime comfort band the occupant configured and expects the automation to hold. With the fix, the fan only restarts once indoor is back above the same threshold a continuously-running session would have cycled at -- no unexpected overshoot below the daytime band. First-time daily activation (no live session to protect yet) is deliberately unaffected -- see docs for the scope rationale.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.door_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -20,7 +21,10 @@
     "wake_time": "06:30",
     "natural_vent_delta": 3.0,
     "nat_vent_hysteresis_f": 1.0,
-    "fan_mode": "whole_house_fan"
+    "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.door_window"
+    ]
   },
   "events": [
     {

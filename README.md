@@ -158,6 +158,7 @@ Choose where indoor and outdoor temperature readings come from:
 - Configure sensor polarity (for inverted sensors)
 - Set debounce time (default 5 minutes) and grace periods
 - **Fan control**: Choose fan mode (disabled, whole-house fan, HVAC fan, or both) and select fan entity
+- **Whole-house fan needs at least one door/window sensor.** Without one Climate Advisor cannot tell an open house from a sealed one, so it cannot keep the fan off in a closed-up house or keep heating/cooling off while a window is open. Setup warns but lets you continue; that configuration is not supported (#1200)
 
 ### Step 6: Occupancy
 - Home/away toggle entity (optional)

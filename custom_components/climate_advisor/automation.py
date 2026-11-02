@@ -3769,6 +3769,7 @@ class AutomationEngine:
         # updated comment for why the "observe it ended within the same tick" property
         # is no longer guaranteed there).
         self._end_nat_vent_session(result)
+        self._end_fan_override_for_rule2_stop(result)
         if self._emit_event_callback:
             payload = {
                 "indoor_temp": indoor_temp,
@@ -3993,6 +3994,7 @@ class AutomationEngine:
                         "override_self_resolved",
                         {"detected_mode": detected_mode, "current_mode": current_mode},
                     )
+                self._end_grace_left_protecting_nothing("override_self_resolved")
                 # Issue #1133 follow-up: while the change was pending, a window that opened was
                 # skipped (the occupant's change was protected). Now that it has self-resolved
                 # nothing protects it, so apply the window pause right away instead of waiting up
@@ -9638,7 +9640,7 @@ class AutomationEngine:
         if self._grace_active and (self._last_resume_source == "manual" or self._grace_protects_override):
             _sup_end = dt_util.parse_datetime(self._grace_end_time) if self._grace_end_time else None
             if _sup_end is not None and (_sup_end - dt_util.now()).total_seconds() >= 60:
-                self._cancel_grace_intentionally("superseded", cancel_timers=False)
+                self._cancel_grace_intentionally("superseded", cancel_timers=False, replaced_by=trigger)
 
         self._cancel_grace_timers()
 
@@ -10046,6 +10048,7 @@ class AutomationEngine:
         remote_timer_hours: float | None = None,
         ends_fan_off_hold: bool = False,
         keeps_fan_run: bool = False,
+        replaced_by: str | None = None,
     ) -> None:
         """Cancel (or announce the replacement of) an active grace and make it visible (Issue #1029).
 
@@ -10056,6 +10059,8 @@ class AutomationEngine:
         to replace this one and the caller cancels the timers itself). No-op beyond the
         timer cancel when no grace is active. Never calls the override/grace FSM
         dispatcher — callers keep their own ``_resolve_override_grace_fsm_state()``.
+
+        ``replaced_by`` is the trigger of the grace about to replace this one (``superseded`` only).
         """
         if not self._grace_active:
             if cancel_timers:
@@ -10075,6 +10080,10 @@ class AutomationEngine:
         _continues = bool(
             (trigger == "fan_off" and self._fan_off_hold_until is not None)
             or ((reason == "superseded" or keeps_fan_run) and self._fan_override_deadline_active())
+            # Issue #1204 (decision A2): the occupant's blower press replaces the setpoint's grace with the fan
+            # override's grace, and the thermostat change stays protected until that grace ends (a whole-house-fan
+            # press clears the thermostat change first, rule 2, so it never reaches here protected).
+            or (reason == "superseded" and replaced_by == "fan_manual_override" and self._manual_change_protected())
         )
         # Caller-supplied value wins: bedtime/wake-up clear the fan override (and its
         # RF-timer hours) before this runs, so they pass the pre-clear snapshot in.
@@ -11653,6 +11662,17 @@ class AutomationEngine:
         if self._natural_vent_active:
             self._end_nat_vent_session(result)
         self._end_fan_override_and_grace(reason="whf_safety_stop", keep_grace=not sealed)
+        if not sealed and self._fan_override_active:
+            # Issue #1204 mirror of the rule-2 stand-down: the occupant's newer HVAC change won and the fan is off, so
+            # its override is over. ``_end_fan_override_and_grace()`` leaves it armed when its grace protects it and
+            # no thermostat change is pending or confirmed yet -- the 300 s start-up coalescing window, where the
+            # occupant's heat/cool is neither -- and the fan card read "off (manual override)" until that grace
+            # ended (hours with an RF timer). End it as the stand-down does, then end the grace if it now protects
+            # nothing (else the orphaned-grace watchdog reaps it with a "Stuck grace" ERROR). A pending or confirmed
+            # change keeps its grace (the watchdog's own predicate decides).
+            self._end_fan_override_for_rule2_stop(result)
+            if not self._fan_override_active:
+                self._end_grace_left_protecting_nothing("whf_safety_stop")
         # Sealed: the restore + reclassify waits for the fan to read physically off (Issue #1176); the caller
         # asks ``_complete_whf_safety_release`` right after this, and the verify below asks again.
 
@@ -11782,6 +11802,60 @@ class AutomationEngine:
             self._reclassify_callback()
         return True
 
+    def _end_grace_left_protecting_nothing(self, reason: str) -> None:
+        """End, on purpose, an override grace that no longer protects anything (Issue #1204 edge).
+
+        ``_end_fan_override_for_rule2_stop()`` keeps the fan override's grace for the occupant's pending HVAC change
+        (it blocks a nat-vent restart over it). When that change then self-resolves, the grace protects nothing:
+        the coordinator's orphaned-grace watchdog would reap it with an ERROR meant for a real inconsistency. End it
+        here instead, through the same cancel + FSM pair ``_end_fan_override_and_grace()`` uses. The predicate is
+        the watchdog's own (``decide_orphaned_grace``), so the two can never disagree.
+        """
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+        from .override_orphaned_grace import decide_orphaned_grace
+
+        if not decide_orphaned_grace(
+            grace_active=bool(self._grace_active),
+            grace_protects_override=bool(self._grace_protects_override),
+            manual_override_active=bool(self._manual_override_active),
+            fan_override_active=bool(self._fan_override_active),
+            override_confirm_pending=bool(self._override_confirm_pending),
+        ):
+            return
+        self._cancel_grace_intentionally(reason)
+        self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
+
+    def _end_fan_override_for_rule2_stop(self, result: FanCommandResult) -> None:
+        """End the occupant's older fan override once rule 2's stop for their newer HVAC change has gone out.
+
+        Issue #1204 (owner decision A3). The one place for all four ``_stand_down_whf_for_override_conflict()``
+        callers, and for the WHF safety enforcer's rule-2 stop (``_after_whf_safety_stop()``). The fan is off, so
+        its override is over: left armed, the fan card read "off (manual override)" for 3 h or more (Manual
+        Change Pause 0) or about 25 min past the run's own deadline (pause 900 s). Reason
+        ``whf_safety_stop`` (a listed P4 fan ending), keep_grace semantics: the grace is never cancelled here, since
+        the occupant's HVAC change is what it protects next. Unlike ``_end_fan_override_and_grace()`` this does not
+        wait for ``_manual_change_protected()``: the override-detected caller is a task scheduled from
+        ``start_override_confirmation()``, and the clear runs only after its ``await _deactivate_fan()``, by which
+        time the change is usually already pending (or confirmed, with no confirm window). The clear does not rely
+        on that ordering, and that guard would leave the override armed for the whole grace on any path where
+        neither is set. The kept grace is not orphaned: a pending change is exempt in
+        ``decide_orphaned_grace()`` (Issue #1216); if that change self-resolves,
+        ``_end_grace_left_protecting_nothing()`` ends the grace. A stop that did not go out (rate-limited, never
+        for a safety stop today) keeps the override, mirroring ``_end_nat_vent_session()`` (Issue #931).
+
+        Two guards keep the clear to the case it is for. Observe-only (``dry_run``): ``_deactivate_fan()`` reports
+        EXECUTED without sending, so the occupant's fan is still running and its override stays (same as the WHF
+        safety enforcer, which does nothing in observe-only). And only a WHOLE-HOUSE fan override is ended
+        (``_is_whf_press()``, the one fan-identity predicate): the thermostat's blower never conflicts with
+        heating/cooling, so a stand-down must never end an occupant's newer blower override.
+        """
+        if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+            return
+        if self.dry_run:
+            return
+        if self._fan_override_active and self._is_whf_press(bool(self._fan_override_is_hvac_fan)):
+            self.clear_fan_override(reason="whf_safety_stop")
+
     def _end_fan_override_and_grace(self, *, reason: str, keep_grace: bool = False) -> None:
         """End the fan override and the grace period it started (Issue #1144, owner decision 4).
 
@@ -11809,7 +11883,8 @@ class AutomationEngine:
         ):
             # Clearing the fan override now would leave its grace "orphaned": _check_orphaned_grace() would
             # force-cancel it and, through the override/grace FSM, drop a pending thermostat confirmation too.
-            # The grace expires on its own and ends the fan override with it.
+            # The grace expires on its own and ends the fan override with it. Issue #1204: the rule-2 (mutex) caller,
+            # _after_whf_safety_stop(), then ends the override itself and ends the grace on purpose.
             _LOGGER.debug(
                 "WHF safety stop: fan override left to expire with its grace (shared grace) role=%s", self.role
             )

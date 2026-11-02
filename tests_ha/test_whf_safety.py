@@ -227,7 +227,11 @@ async def test_press_equal_to_the_days_plan_under_a_fan_grace_self_resolves_and_
 
 
 async def test_zero_configured_sensors_the_fan_is_never_stopped(make_house) -> None:
-    """Owner decision 1: with no door/window sensor configured sealed-ness cannot be judged."""
+    """Owner decision 1: with no door/window sensor configured sealed-ness cannot be judged.
+
+    Issue #1200: a whole-house fan with zero door/window sensors is an unsupported configuration; this pins
+    today's unchanged behaviour, not a supported promise.
+    """
     house = await make_house(fan="whf", **_sealed_house(contacts=[]))
     await _press_after_refresh(house, True)
     calls_before = len(house.calls)

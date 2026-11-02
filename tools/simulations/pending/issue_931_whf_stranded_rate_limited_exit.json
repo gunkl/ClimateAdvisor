@@ -11,7 +11,8 @@
     "Window opens at nat-vent activation and is never closed in this scenario -- puts the exit through _exit_nat_vent()'s sensor-still-open PAUSE branch, not the sensors-closed restore branch, matching the original scenario's own precondition.",
     "The fan-toggle rate limiter (Issue #641, FAN_MIN_TOGGLE_INTERVAL_S=300s) keys off the LAST REAL fan command -- here, the activation itself at 02:00:02. The CEILING_THRESHOLD exit is confirmed (after the 90s NAT_VENT_EXIT_SUSTAIN_S sustain gate) at 02:01:38, ~96s after that activation -- well inside the 300s window, so the first deactivate attempt is genuinely rate-limited, not a scenario artifact.",
     "Final tick at 02:05:08 is 306s past the 02:00:02 activation toggle -- past the 300s rate-limit window -- so the real command should finally go through here, confirming the fix keeps the session flags (and therefore the retry) alive across the deferred window.",
-    "fan_not_active reads final engine state (_fan_active), not a decision-log string -- the assertion is on the observable OUTCOME (did the fan actually stop), not on which internal exit-reason branch handled it."
+    "fan_not_active reads final engine state (_fan_active), not a decision-log string -- the assertion is on the observable OUTCOME (did the fan actually stop), not on which internal exit-reason branch handled it.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.bedroom_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -23,6 +24,9 @@
     "wake_time": "06:00",
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "thermal_model": {

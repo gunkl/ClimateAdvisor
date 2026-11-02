@@ -152,7 +152,10 @@ def test_a_second_change_back_to_cas_plan_self_resolves_and_the_old_grace_is_rea
 @pytest.mark.parametrize("fan_mode", _MODES)
 def test_the_occupants_fan_run_still_ends_at_its_deadline_after_a_self_resolved_second_change(clock, sched, fan_mode):  # noqa: F811
     """A 1 h fan run, Cool confirmed (its grace replaces the run's), then back to Heat (CA's plan) a minute before
-    Cool's grace ends. The run is a separate request (#1205 F3): it must end at its own deadline, not run on."""
+    Cool's grace ends. The run is a separate request (#1205 F3): it must end at its own deadline, not run on.
+
+    Whole-house fan: the Cool is newer than the fan, so rule 2 stops the fan and (Issue #1204, owner decision A3) the
+    run ends with that stop; nothing is left to end at the deadline."""
     home = _Home(fan_mode, clock, **{CONF_OVERRIDE_CONFIRM_PERIOD: _CONFIRM_S, CONF_MANUAL_GRACE_PERIOD: 900})
     engine = home.engine
     engine._current_classification = _classification("cold")
@@ -173,6 +176,9 @@ def test_the_occupants_fan_run_still_ends_at_its_deadline_after_a_self_resolved_
     _set_thermostat(home, "cool")
     _step(home, sched, _CONFIRM_S + 30, watchdog=False)
     assert engine._manual_override_mode == "cool" and engine._last_grace_trigger == "override_confirmed"
+    if not home.hvac_fan:
+        assert not engine._fan_override_active, "rule 2 stopped the whole-house fan; its run ended with the stop"
+        return
     _step(home, sched, 900 - 60 - 30, watchdog=False)
     _fix_d(home, "heat")
     _step(home, sched, _CONFIRM_S + 30, watchdog=False)

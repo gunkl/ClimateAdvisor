@@ -9,7 +9,8 @@
     "(b) Docs<->production alignment: docs/07-AUTOMATION-FLOWCHART.md §12b and docs/08-COMPUTATION-REFERENCE.md 'Exit Hierarchy'/'Idle re-eval note' now document this hvac_action-based gate (updated alongside this fix).",
     "(c) Occupant experience: without this fix, the whole-house fan silently stops managing the home's temperature for the rest of the night the moment it first reaches the comfort floor, even though outdoor air remains ideal for free cooling and indoor drifts back up — the occupant gets neither free WHF cooling nor compressor assist for hours. With the fix, WHF correctly resumes.",
     "Note: fan_thermostat_check() (Issue #402 Part 1 — the more-frequent tick-level floor check that was the proximate cause of the premature exit in production) has no harness dispatch event and cannot be exercised here; it is covered directly by tests/test_fan_control.py::TestFanThermostatCheck's sleep-window tests. This scenario validates Part 2 (the idle-reactivation gate fix in check_natural_vent_conditions(), which the harness's temp_update event does exercise) and the correct comfort-floor-exit threshold that Part 1 also uses.",
-    "Issue #867 re-sign (user-confirmed): this zone is warm-classified (hvac_mode=\"off\"), so it was ALSO silently exempted from Issue #858's reactive comfort-family check by the same guard bug Issue #867 fixed. With that fix, comfort_family_temperature_check() now correctly fires immediately after nat-vent's floor-exit at 02:20:00 (same tick), finds the window still open, and pauses — 4 minutes sooner than the previously-scripted 02:24:00 classification event used to. Same final outcome, faster protection. The 02:20:00 assertion was updated from nat_vent_comfort_floor_exit to classification_suppressed_paused to match the new true last-decision-at-that-instant (both events still fire at that tick; production_outcome_at() only surfaces the last one) — confirmed by the user as correct HVAC behavior before re-signing."
+    "Issue #867 re-sign (user-confirmed): this zone is warm-classified (hvac_mode=\"off\"), so it was ALSO silently exempted from Issue #858's reactive comfort-family check by the same guard bug Issue #867 fixed. With that fix, comfort_family_temperature_check() now correctly fires immediately after nat-vent's floor-exit at 02:20:00 (same tick), finds the window still open, and pauses — 4 minutes sooner than the previously-scripted 02:24:00 classification event used to. Same final outcome, faster protection. The 02:20:00 assertion was updated from nat_vent_comfort_floor_exit to classification_suppressed_paused to match the new true last-decision-at-that-instant (both events still fire at that tick; production_outcome_at() only surfaces the last one) — confirmed by the user as correct HVAC behavior before re-signing.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -22,7 +23,10 @@
     "wake_time": "07:00",
     "natural_vent_delta": 3.0,
     "nat_vent_hysteresis_f": 1.0,
-    "fan_mode": "whole_house_fan"
+    "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.window"
+    ]
   },
   "events": [
     {

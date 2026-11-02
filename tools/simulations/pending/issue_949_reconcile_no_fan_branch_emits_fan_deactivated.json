@@ -9,13 +9,17 @@
     "Event 2 is spaced 2 minutes after event 1 -- deliberately NOT 30 minutes as an earlier draft of this scenario had it. The adopted session's own 5-minute self-rescheduling thermostatic backstop (_start_fan_thermo_backstop(), armed by the adopt-on branch) independently stops the fan on its own tick well before 30 minutes elapse under these indoor/outdoor values, which meant a 30-minute gap let an UNRELATED mechanism deactivate the fan first -- _fan_active was already False by the time event 2 fired, so the scenario passed for the wrong reason (any _fan_active value produces the same _deactivate_fan() outcome once the fix stopped forcing _fan_active=True unconditionally, since a real off-transition and 'nothing was ever on' both reach _deactivate_fan(), just via different guard outcomes). Caught this by re-running the scenario after Craftsman's second revision (deleting the flag write entirely instead of forcing True) and seeing it fail: the earlier 30-minute version was accidentally testing the wrong thing. 2 minutes keeps the second reconcile inside the 5-minute backstop window (so the adoption is still genuinely active) while staying safely past the Issue #733 recent-fan-command guard's 30-second window.",
     "The 'expect': 'unknown:fan_deactivated' assertion uses check_assertion's documented fallback to production_outcome_at() rather than a new outcomes.py custom assertion type -- fan_activated/fan_deactivated are both intentionally left in _map_event_to_outcome's generic unknown:<type> catch-all (confirmed by reading outcomes.py: neither has a dedicated mapping, and reconcile_adopted_fan/reconcile_turned_off_fan already scan event_log directly for their own specific cases instead of relying on this fallback) -- this is purely additive against existing, documented harness behavior, no sim_harness code changed.",
     "This scenario would fail (assertion 3 would see 'unknown:fan_activated' or an earlier decision instead of 'unknown:fan_deactivated', since no fan_deactivated event would exist in event_log at all) if Issue #949's fix were reverted -- verified by inspecting the pre-fix code path directly (self._fan_active=False sets immediately before the guarded call), not just by assumption.",
-    "Three-exercise protocol (per CLAUDE.md): (a) scenario effectiveness -- fails without the fix, per above; (b) docs/production alignment -- docs/08-COMPUTATION-REFERENCE.md's fan reconcile section and this scenario now agree the no-fan branch always emits an observable off-event; (c) occupant outcome -- none directly (this is an observability-only fix; HVAC/fan physical behavior is unchanged), but without it the Activity Report and AI investigator silently under-report every fan-off transition reached via this branch, defeating the developer's ability to diagnose real fan behavior using the tooling this project's CLAUDE.md mandates (ha_logs.py / learning_db.py / Activity Report) for exactly this class of investigation."
+    "Three-exercise protocol (per CLAUDE.md): (a) scenario effectiveness -- fails without the fix, per above; (b) docs/production alignment -- docs/08-COMPUTATION-REFERENCE.md's fan reconcile section and this scenario now agree the no-fan branch always emits an observable off-event; (c) occupant outcome -- none directly (this is an observability-only fix; HVAC/fan physical behavior is unchanged), but without it the Activity Report and AI investigator silently under-report every fan-off transition reached via this branch, defeating the developer's ability to diagnose real fan behavior using the tooling this project's CLAUDE.md mandates (ha_logs.py / learning_db.py / Activity Report) for exactly this class of investigation.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), and the reconcile event already passed any_sensor_open=true, but that tracker read closed. The premise's open window is now a real sensor_open at 06:00:30, so the engine's own sensor view agrees with it. Assertions are unchanged. The event log changes as owner rule 3 requires: the window opening pauses the cool mode the classification armed (thermostat_mode_set cool->off, sensor_opened result=paused)."
   ],
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 75,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [
@@ -26,6 +30,12 @@
       "hvac_mode": "off",
       "windows_recommended": false,
       "note": "Mild day: HVAC off. Coordinator runs classification before any reconcile call."
+    },
+    {
+      "time": "2026-07-10T06:00:30",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "Issue #1200: the window the reconcile premise (any_sensor_open=true) describes."
     },
     {
       "time": "2026-07-10T06:01:00",

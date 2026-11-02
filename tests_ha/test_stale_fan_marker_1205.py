@@ -61,12 +61,6 @@ async def _house(make_house, fan: str, caplog, ca_extra: dict | None = None, **o
     caplog.set_level(logging.INFO, logger="custom_components.climate_advisor")
     ca_config = {"fan_min_runtime_per_hour": 0, "sensor_debounce_seconds": 30, "manual_grace_seconds": _GRACE_S}
     ca_config.update(ca_extra or {})
-    if fan == "hvac_fan":
-        # The thermostat blower has no fan entity. The harness stores fan_entity=None, which makes the fan-drift
-        # backstop (_reconcile_fan_physical_drift) raise AttributeError on hass.states.get(None) once a session is
-        # stranded -- a harness-only defect (real config flows omit the key), Issue #1213; leave the key out so this
-        # file isolates #1205.
-        ca_config["fan_entity"] = ...
     house = await make_house(
         fan=fan,
         ca_config=ca_config,

@@ -405,6 +405,18 @@ def check_integrity() -> int:
         elif manifest[name].get("sha256") != actual_hash:
             errors.append(f"  MODIFIED  {name}.json — hash mismatch (run --sign {name} after human review)")
 
+    # A signed golden that has left golden/ (moved to unsupported/, deleted) is no longer validated by anything.
+    # Report it on every check so it cannot drop out silently. A notice, not a failure: MANIFEST changes only
+    # through --sign, so a stale entry has no other way out, and older removals already left some behind.
+    present = {p.stem for p in golden_files}
+    for name in sorted(k for k in set(manifest) - present if not k.startswith("_")):
+        moved_to = next(
+            (state for state, d in STATE_DIRS.items() if state != "golden" and (d / f"{name}.json").exists()),
+            None,
+        )
+        where = f"now in {moved_to}/" if moved_to else "file not found"
+        print(f"  REMOVED   {name}.json — signed in MANIFEST but no longer in golden/ ({where}); not validated")
+
     if errors:
         print("Golden integrity check FAILED:")
         for e in errors:

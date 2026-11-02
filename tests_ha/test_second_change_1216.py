@@ -72,8 +72,6 @@ async def _house(make_house, fan: str, caplog, grace_s: int):
         "manual_grace_seconds": grace_s,
         "override_confirm_seconds": _CONFIRM_S,
     }
-    if fan == "hvac_fan":
-        ca_config["fan_entity"] = ...  # harness-only defect (#1213); see test_stale_fan_marker_1205
     house = await make_house(fan=fan, ca_config=ca_config, **_HOUSE)
     await _steps(house, 360)  # past the start-up window and >120 s after CA's own commands
     return house

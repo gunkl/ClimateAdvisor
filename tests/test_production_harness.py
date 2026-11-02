@@ -53,3 +53,25 @@ def test_golden_passes_production_engine(scenario_path: Path) -> None:
 def test_all_goldens_discovered() -> None:
     """Guard against an empty parametrization silently passing."""
     assert len(_GOLDEN_FILES) >= 20, f"expected the full golden set, found {len(_GOLDEN_FILES)}"
+
+
+def test_no_scenario_runs_an_unsupported_sensorless_whole_house_fan() -> None:
+    """Issue #1200: a whole-house fan install requires at least one door/window sensor.
+
+    Without one Climate Advisor cannot enforce rule 1 (stop the fan on a sealed house) or rule 3 (pause HVAC
+    with a window open), so a sensorless WHF is an unsupported configuration. The bare-engine harness hides
+    this: its open-sensor tracker always gives the engine one sensor reading, whatever the config says, so a
+    scenario with ``door_window_sensors: []`` silently runs as a one-sensor house. Scenarios that genuinely
+    need zero sensors belong in ``unsupported/``, which no default run validates.
+    """
+    import json  # noqa: PLC0415
+
+    offenders = []
+    for state in ("golden", "pending", "pending-fix", "synthetic"):
+        for path in sorted((TOOLS / "simulations" / state).glob("*.json")):
+            if path.name == "MANIFEST.json":
+                continue
+            config = json.loads(path.read_text(encoding="utf-8")).get("config") or {}
+            if config.get("fan_mode") in ("whole_house_fan", "both") and not config.get("door_window_sensors"):
+                offenders.append(f"{state}/{path.stem}")
+    assert not offenders, f"whole-house fan scenarios with no door/window sensor configured: {offenders}"

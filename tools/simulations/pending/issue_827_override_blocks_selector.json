@@ -12,7 +12,8 @@
     "Three-exercise protocol (CLAUDE.md section 10):",
     "(a) Scenario effectiveness: with the selector's override skip removed, the 60.5F reading at 08:30:01 arms heat (breach) and comfort_family becomes heating, so comfort_family=cooling fails (demonstrated by the negative control above). With nearest-edge arming deleted entirely (origin/main), the old machinery also held an override breach inside 2x the deadband, so this particular assertion would NOT discriminate between old and new designs; what it protects is the override-priority contract of Design D itself. override_detected/override_confirmed/override_active prove the override premise is real and still alive at the assertion time.",
     "(b) Docs<->production alignment: docs/08 section 6f 'What keeps priority' (Manual override / override grace: comfort_family_temperature_check() returns early while an override or override confirmation is pending).",
-    "(c) Occupant outcome if this test fails to catch a regression: CA fights the occupant's manual thermostat change (flips the mode back at the first reading outside the band), the 'revealed preference' principle of the project is violated and the user loses trust in manual control."
+    "(c) Occupant outcome if this test fails to catch a regression: CA fights the occupant's manual thermostat change (flips the mode back at the first reading outside the band), the 'revealed preference' principle of the project is violated and the user loses trust in manual control.",
+    "Issue #1200 (2026-11-01): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.bedroom_window, seeded closed at the first event (the real coordinator listener now sees its sensor events). Assertions unchanged. The scenario's own bedroom-window open/close events now reach the real listener: the event log gains two sensor_all_closed entries and, at the 08:30:02 close, an incident_detected (comfort_undertemp, indoor 60.5F) that the all-closed path records."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -23,12 +24,21 @@
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
     "fan_entity": "fan.whole_house",
     "manual_grace_seconds": 7200,
     "override_confirm_seconds": 300,
     "initial_thermostat_mode": "cool"
   },
   "events": [
+    {
+      "time": "2026-09-01T08:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Issue #1200: seeds the configured sensor closed so the coordinator reads a known state."
+    },
     {
       "time": "2026-09-01T08:00:00",
       "type": "classification",

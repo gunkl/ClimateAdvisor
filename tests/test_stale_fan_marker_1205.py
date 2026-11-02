@@ -1947,7 +1947,9 @@ def test_fix_d_call_site_does_not_ask_to_clear_the_fan_run():
 def test_thermostat_off_then_heat_or_cool_does_not_cut_the_fan_run_short(clock, sched, fan_mode, second):
     """A 4 h remote-timer run, thermostat Off (confirmed), then heat or cool: the run survives the replacement, is kept
     at the thermostat grace's end and ends at its own deadline with the RF settle window armed. In hvac_fan mode
-    nothing conflicts at all; in whole_house_fan mode the WHF safety mutex (not a silent clear) handles heat/cool."""
+    nothing conflicts at all; in whole_house_fan mode the WHF safety mutex (not a silent clear) handles heat/cool:
+    rule 2's newer heat/cool stops the fan, and since Issue #1204 (owner decision A3) the run ends with that stop
+    (``whf_safety_stop``) instead of staying armed, fan off, until its old deadline."""
     home = _Home(fan_mode, clock)
     engine = home.engine
     run_end = _timer_run_then_thermostat_off(home, sched)
@@ -1957,6 +1959,11 @@ def test_thermostat_off_then_heat_or_cool_does_not_cut_the_fan_run_short(clock, 
 
     _fix_d(home, second)
 
+    if fan_mode == FAN_MODE_WHOLE_HOUSE:
+        _confirm_override(home, sched)
+        # (this harness configures no fan entity, so the stand-down's stop is EXECUTED without a service call)
+        assert not engine._fan_override_active and engine._fan_override_until is None, "the stopped run has ended"
+        return
     assert engine._fan_override_active and engine._fan_override_until == run_end
     assert len(_fan_off_commands(home)) == stops_before
     _confirm_override(home, sched)

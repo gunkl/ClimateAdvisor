@@ -394,7 +394,9 @@ async def build_house(
     # --- contacts and fan
     for name in contacts:
         hass.states.async_set(f"binary_sensor.house_{name}", "off")
-    ca_fan: dict[str, Any] = {"fan_mode": "disabled", "fan_entity": None}
+    # Issue #1213: no fan entity means no ``fan_entity`` key, as the real config flow stores it (an empty optional
+    # selector is left out; the options flow pops cleared keys). Never ``None``.
+    ca_fan: dict[str, Any] = {"fan_mode": "disabled"}
     if fan in ("whf", "whf_dual", "whf_command_only"):
         house.fan = WholeHouseFan(
             hass,
@@ -408,7 +410,7 @@ async def build_house(
             "fan_state_feedback": fan != "whf_command_only",
         }
     elif fan == "hvac_fan":
-        ca_fan = {"fan_mode": "hvac_fan", "fan_entity": None}
+        ca_fan = {"fan_mode": "hvac_fan"}  # the thermostat's own blower: no fan entity (Issue #1213)
     else:
         assert fan is None, fan
 
@@ -447,6 +449,8 @@ async def build_house(
     # --- Climate Advisor
     seed = _seed_entry()
     data = dict(seed["data"])
+    if "fan_entity" not in ca_fan:
+        data.pop("fan_entity", None)  # Issue #1213: the seed entry carries ``fan_entity: null``; the flow never does
     data.update(
         {
             "climate_entity": CLIMATE_ENTITY,

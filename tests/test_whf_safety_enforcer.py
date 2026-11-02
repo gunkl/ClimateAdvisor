@@ -155,6 +155,8 @@ class TestSealedHouseStop:
         assert len(_fan_off(engine)) == 2
 
     def test_zero_configured_sensors_never_stop(self, clock):
+        # Issue #1200: a whole-house fan with zero door/window sensors is an unsupported configuration;
+        # this pins today's unchanged behaviour, not a supported promise.
         engine, world = _engine()
         world["sensors"] = ()
 
@@ -295,9 +297,34 @@ class TestRule2Mutex:
 
         assert result is FanCommandResult.EXECUTED
         assert len(_fan_off(engine)) == 1
-        assert engine._fan_override_active is True, (
-            "the HVAC change has its own grace; the fan override expires with it"
-        )
+        # Issue #1204 mirror: the fan is off, so its override ends (it used to stay armed and the fan card read
+        # "off (manual override)" until the grace ended). Nothing pending or confirmed is left for the grace to
+        # protect (the start-up coalescing shape), so it ends on purpose instead of being reaped as "Stuck grace".
+        assert engine._fan_override_active is False
+        assert engine._grace_active is False
+
+    @pytest.mark.parametrize("protected", ["_override_confirm_pending", "_manual_override_active"])
+    def test_issue_1204_a_pending_or_confirmed_hvac_change_keeps_its_grace(self, clock, protected):
+        """Control for the mirror: the occupant's own HVAC change still has its grace after the fan is stopped."""
+        engine, world = _engine(thermostat_mode="heat")
+        world["sensors"] = (OPEN,)
+        engine._fan_override_active = True
+        engine._fan_override_time = engine._whf_press_time = clock.now().isoformat()
+        engine._grace_active = True
+        engine._grace_protects_override = True
+        clock.advance(60)
+        engine._occupant_hvac_on_at = clock.now()
+        setattr(engine, protected, True)
+        if protected == "_manual_override_active":
+            engine._manual_override_mode = "heat"
+        else:
+            engine._override_confirm_mode = "heat"
+
+        with patch.object(AutomationEngine, "_occupant_fan_on_at", return_value=T0):
+            assert _run(engine, "thermostat_mode") is FanCommandResult.EXECUTED
+
+        assert engine._fan_override_active is False
+        assert engine._grace_active is True, "the occupant's HVAC change keeps its grace"
 
     def test_1205_mode_to_mode_override_keeps_the_fan_run_and_the_mutex_still_stops_the_whf(self, clock):
         """Coordinator Fix D (a different thermostat mode replaces a confirmed override) no longer clears the
@@ -422,6 +449,8 @@ class TestEntryGate:
         assert engine._fan_active is True
 
     def test_zero_configured_sensors_means_the_rule_does_not_apply(self, clock):
+        # Issue #1200: a whole-house fan with zero door/window sensors is an unsupported configuration;
+        # this pins today's unchanged behaviour, not a supported promise.
         engine, world = _engine()
         world["fan_on"] = False
         world["sensors"] = ()

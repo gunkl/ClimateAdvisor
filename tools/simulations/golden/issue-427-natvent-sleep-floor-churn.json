@@ -8,7 +8,8 @@
     "Occupant impact (why this still matters): a resident who briefly closes a bedroom window overnight (checking on a kid, a noise outside, etc.) and reopens it relies on the system correctly judging whether it's still worth turning the fan back on. Before #427's fix, the system used the wrong (daytime) floor for that judgment overnight, incorrectly refusing to resume free cooling for hours after a brief window closure, even with plenty of thermal margin left before the real overnight floor (sleep_heat).",
     "Config: comfort_heat=68F (daytime floor) vs sleep_heat=64F (overnight floor) -- kept several degrees apart, matching #427's original divergence. sleep_time=22:00, wake_time=06:30. No thermal_model supplied (confidence defaults to 'none'), which deliberately keeps handle_door_window_open's separate, still-live 'Phase 2 Guard 2' (thermal-model floor-imminence pre-activation skip) out of play -- that guard is NOT what #427/#959 concern and must not be allowed to interfere with or be mistaken for the mechanism under test here.",
     "Three-exercise protocol (CLAUDE.md Sec.10): (a) Scenario effectiveness: reverting _nat_vent_reactivation_floor() to unconditionally return comfort_heat (removing its sleep-window branch) makes the 22:05:01 assertion fail -- production_outcome_at would show the window staying paused (no natural_ventilation decision) since indoor(66) would no longer exceed the reactivation floor. (b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md's nat-vent reactivation-gate section should note the surviving call sites (handle_door_window_open plus 4 others) and that PROACTIVE_FLOOR's removal (#959) did not touch this function. (c) User outcome if this regresses: an overnight window reopening at a still-comfortable indoor temperature would incorrectly stay paused instead of resuming free cooling, costing the occupant hours of unnecessary HVAC energy use (or discomfort, if HVAC is off) for no real benefit -- silently, since nothing alerts them their window is open and the fan isn't running.",
-    "Promote to golden/ only after the user reviews and confirms this rewritten scenario per the Golden Simulation Test Policy (locked-golden files require explicit sign-off before modification)."
+    "Promote to golden/ only after the user reviews and confirms this rewritten scenario per the Golden Simulation Test Policy (locked-golden files require explicit sign-off before modification).",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.bedroom_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -21,6 +22,9 @@
     "sleep_time": "22:00",
     "wake_time": "06:30",
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "thermal_model": {

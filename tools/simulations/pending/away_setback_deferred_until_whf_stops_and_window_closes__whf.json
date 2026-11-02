@@ -4,7 +4,8 @@
   "source": "Issue #1193: whole-house-fan extension of golden 'away_with_active_natvent_transition' (pre-#1140 version, fan configured) pinning the deferral of the away setback.",
   "issue": 229,
   "notes": [
-    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together)."
+    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together).",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.living_room_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 70,
@@ -13,6 +14,9 @@
     "setback_cool": 79,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [

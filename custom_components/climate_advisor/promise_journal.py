@@ -214,10 +214,26 @@ def mark_attr(mark: Mark, key: str, default: Scalar = None) -> Scalar:
     return default
 
 
+def _carried_ends_early(e: _Ep, ts: datetime) -> bool:
+    """Issue #1204: a carried thermostat episode ending more than 2 s before the later of its two grace ends."""
+    return bool(e.carried and e.grace_end_ts is not None and (e.grace_end_ts - ts).total_seconds() > 2.0)
+
+
 class _Ep:
     """Mutable episode builder."""
 
-    __slots__ = ("id", "target", "kind", "start_ts", "value", "grace_end_ts", "end_ts", "end_reason", "setpoint_f")
+    __slots__ = (
+        "id",
+        "target",
+        "kind",
+        "start_ts",
+        "value",
+        "grace_end_ts",
+        "end_ts",
+        "end_reason",
+        "setpoint_f",
+        "carried",
+    )
 
     def __init__(self, idx: int, target: str, kind: str, ts: datetime, value: Scalar) -> None:
         # Identity is the start time, never the position in the (prunable) mark list: pruning an
@@ -231,6 +247,9 @@ class _Ep:
         self.end_ts: datetime | None = None
         self.end_reason: str | None = None
         self.setpoint_f: float | None = None
+        # Issue #1204: a thermostat override whose grace a fan-override grace replaced while the engine kept the
+        # setpoint protected (``continues``); it is protected until the later of the two grace ends.
+        self.carried = False
 
     def freeze(self) -> Episode:
         return Episode(
@@ -310,6 +329,11 @@ def derive_episodes(
                 target = "fan" if "fan" in trigger else "thermostat"
                 for e in open_eps(target, "override"):
                     e.grace_end_ts = end
+                if target == "fan" and end is not None:
+                    # Issue #1204 (decision A2): a carried setpoint stays protected until max(own end, this end).
+                    for e in open_eps("thermostat", "override"):
+                        if e.carried:
+                            e.grace_end_ts = max(e.grace_end_ts or end, end)
         elif k == "override_self_resolved":
             for e in open_eps("thermostat", "override"):
                 close(e, m.ts, "self_resolved")
@@ -328,6 +352,12 @@ def derive_episodes(
             for e in cleared:
                 if mark_attr(m, "continues") is True and e.target == "fan":
                     continue  # Issue #1205: the occupant's fan run goes on past the thermostat override's end
+                if _carried_ends_early(e, m.ts) and reason == "grace_expired":
+                    # Issue #1204: the replacing grace ended before the setpoint's own grace would have. Production
+                    # emits this ``override_cleared`` BEFORE the ``grace_expired`` (``_on_grace_expired()`` clears the
+                    # override first), so this is where a carried episode actually closes.
+                    close(e, m.ts, "grace_expired_early")
+                    continue
                 close(e, m.ts, "superseded" if replaced_soon(i, e.target) else reason)
         elif k == "fan_override_cleared":
             reason = str(mark_attr(m, "reason") or "unknown")
@@ -338,6 +368,11 @@ def derive_episodes(
                 # Issue #1205: a fan request (the fan-off hold, an occupant's fan run) has its own deadline and
                 # outlives a thermostat override's grace; that grace expiring is not its end.
                 if e.target == "fan" and e.grace_end_ts is not None and (e.grace_end_ts - m.ts).total_seconds() > 2.0:
+                    continue
+                if _carried_ends_early(e, m.ts):
+                    # Issue #1204: the replacing grace ended before the setpoint's own grace would have (reached only
+                    # when no ``override_cleared`` closed the episode first, see that branch).
+                    close(e, m.ts, "grace_expired_early")
                     continue
                 close(
                     e,
@@ -350,7 +385,8 @@ def derive_episodes(
             fan_off = str(mark_attr(m, "trigger") or "") == "fan_off"
             # Issue #1205: the engine says the request behind this grace goes on past it (the fan-off hold after a
             # thermostat override replaced the grace, or an occupant's fan run kept past a thermostat override's
-            # grace): nothing ended, so the episode stays open until its own deadline.
+            # grace): nothing ended, so the episode stays open until its own deadline. Issue #1204: also a thermostat
+            # override on a ``superseded`` cancel (a blower press replaced its grace, the setpoint stays protected).
             continues = mark_attr(m, "continues") is True
             # A cancelled grace only ends an override episode when it was the one protecting it
             # (door/window resume, nat-vent exit ... graces are unrelated), and only ends a fan-off
@@ -359,6 +395,11 @@ def derive_episodes(
                 if not ((e.kind == "override" and protects) or (e.kind == "fan_off" and fan_off)):
                     continue
                 if continues and e.target == "fan":
+                    continue
+                if continues and reason == "superseded" and e.target == "thermostat":
+                    # Issue #1204 (decision A2): the occupant's fan press replaced the setpoint's grace, and the engine
+                    # says the setpoint stays protected (hvac_fan blower press): it is protected until the later end.
+                    e.carried = True
                     continue
                 r = reason
                 if reason == "superseded" and not replaced_soon(i, e.target):

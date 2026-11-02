@@ -139,8 +139,8 @@
     "issue": 249
   },
   "away_with_active_natvent_transition": {
-    "sha256": "7d9a3c2de3aaa9b73507135e0dc7bd1a15f20f8c1d29beeed9989bc74ab290ad",
-    "signed": "2026-11-01",
+    "sha256": "7f2a85266d0fa3418ea996f7e28b6bdba67f14e1557fd618122245b234171752",
+    "signed": "2026-11-02",
     "issue": 229
   },
   "away_natvent_exits_at_comfort_ceiling": {
@@ -159,8 +159,8 @@
     "issue": 229
   },
   "away_natvent_activates_free_cooling": {
-    "sha256": "8deceed9281c2b83a390345b6f169040f2d69e3e37d7816019c0116e461cc479",
-    "signed": "2026-11-01",
+    "sha256": "2b4163f27dadb6d5d1464bc0c039288bc41fd49d28ef6ca636bc9e93a192ce85",
+    "signed": "2026-11-02",
     "issue": 231
   },
   "away_cold_day_setback_heat": {
@@ -209,13 +209,13 @@
     "issue": 229
   },
   "whole_house_fan_hvac_suppression": {
-    "sha256": "076988910659e8552004754f5a9f1271c57f8a70fb7ec6a71c4eb0251cd2c54f",
-    "signed": "2026-07-09",
+    "sha256": "e63c824e966c9deb7d1f16e1ec11e6cefd335463cd9d9f79e5b0d3f605965be0",
+    "signed": "2026-11-02",
     "issue": 277
   },
   "window_close_stops_whole_house_fan": {
-    "sha256": "2ee77b7860f481e5759f488308fd2bb22f08358ccd8cad3b92dedebbd2a4914a",
-    "signed": "2026-09-02",
+    "sha256": "029fc26a2bfa76420dd6dca60ec905cb890977599ad460a72e77e3356193001c",
+    "signed": "2026-11-02",
     "issue": 277
   },
   "nat_vent_thermostat_cycling": {
@@ -234,8 +234,8 @@
     "issue": 258
   },
   "whf_reactivates_after_sleep_floor_exit": {
-    "sha256": "8ff111ccdf646168970f31c58f57cbaa819e23525e2409f6f343bf843a55b99b",
-    "signed": "2026-09-06",
+    "sha256": "91e80eb3c76a8f3d026e7eacf19e74c444e68e03d68afc85de672de8762cb35c",
+    "signed": "2026-11-02",
     "issue": 402
   },
   "economizer-cool-down-to-maintain": {
@@ -254,13 +254,13 @@
     "issue": 429
   },
   "reconcile-adopts-running-fan-as-nat-vent": {
-    "sha256": "43c83578abe3a8d6c677dd01ad84f750bbca06c156d97d4172c586e164cc912f",
-    "signed": "2026-07-09",
+    "sha256": "57bcd3305c3434907fd95da0fb927e51b8dd124bc675775afd3bab6f0c24f067",
+    "signed": "2026-11-02",
     "issue": 429
   },
   "reconcile-turns-off-unwarranted-fan": {
-    "sha256": "ef6028a26dcd55f2c91f7314aa357a7e167b0c04e4ba1aea375dce4ca954ebad",
-    "signed": "2026-07-09",
+    "sha256": "f83a41b042347fee37c35fdc2c08dd981d5e239f357d124558c13cc889e56d7d",
+    "signed": "2026-11-02",
     "issue": 429
   },
   "away_setpoint_change_not_override": {
@@ -279,8 +279,8 @@
     "issue": 229
   },
   "fan_fast_stop_on_outdoor_rise": {
-    "sha256": "42949b0c8fa39e0f33785a09376282c0fa7e0acddedeff745f3019e0fb810129",
-    "signed": "2026-07-12",
+    "sha256": "c430140ba061c003d4f08de090f0b77a2dd28f7b4619d4782177cbc7e80e60b0",
+    "signed": "2026-11-02",
     "issue": 327
   },
   "fan_off_provenance_context_and_bookkeeping": {
@@ -304,8 +304,8 @@
     "issue": 359
   },
   "issue-392-natvent-ceiling-oscillation": {
-    "sha256": "cafaf8836df1d314c976b0abba834e84b0c0d34c25c18b0bd4818d99cf72221b",
-    "signed": "2026-11-01",
+    "sha256": "6aec5b777820004d8ba690f42b27a44ef7bfb4ce3f1cda56f4344772b522c429",
+    "signed": "2026-11-02",
     "issue": 392
   },
   "issue-411-natvent-floor-exit-consistency": {
@@ -314,8 +314,8 @@
     "issue": 411
   },
   "issue-427-natvent-sleep-floor-churn": {
-    "sha256": "e28b0c626f9261fd3d52cca63463388da4b45076785418a24180c4dfae8a2fda",
-    "signed": "2026-09-21",
+    "sha256": "3f76c1b8de250ad2beccfea58ecc4d2faa6c62886e8aacfa3db4597a8be43c35",
+    "signed": "2026-11-02",
     "issue": 427
   },
   "issue-481-sleep-band-no-false-undertemp-incident": {

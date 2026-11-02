@@ -272,7 +272,7 @@ The virtual clock `start` must be timezone-aware (`FakeScheduler.__init__` raise
 1. Merges `scenario["config"]` over `_DEFAULT_CONFIG`
 2. Determines `start_dt` from the first event time (minus 1 second)
 3. Calls `build_headless_engine()` with merged config and initial thermostat mode
-4. Creates a `_SensorTracker` and wires it to `engine._sensor_check_callback`
+4. Creates a `_SensorTracker` and wires it to `engine._sensor_check_callback` (bare-engine mode only). The tracker is wired whatever `door_window_sensors` says, so the engine's WHF safety snapshot always holds exactly one sensor reading (closed until a `sensor_open`). A bare-engine scenario therefore cannot model a zero-sensor house. That is fine because a whole-house fan with zero sensors is unsupported (Issue #1200): every `whole_house_fan` scenario outside `unsupported/` must configure at least one sensor, enforced by `tests/test_production_harness.py::test_no_scenario_runs_an_unsupported_sensorless_whole_house_fan`. In coordinator mode the configured list is real; seed each sensor with a `sensor_close` at the first event so it does not read as unknown.
 5. Injects `thermal_model` and `hourly_forecast` from top-level scenario keys if present
 6. Enters `scheduler.installed()` context
 7. For each event (sorted by time): `scheduler.advance_to(event_dt)`, then `_dispatch_event(...)`
@@ -458,6 +458,7 @@ There is no `--engine` flag. The only engine is production.
 | `golden/` | `test_production_harness.py` parametrized test | (stays golden) or FAIL | FAIL = regression; code or scenario needs investigation |
 | `golden/` | User authorizes modification | modified `golden/` | `--sign <name>` required; `--check-integrity` confirms |
 | `pending/` | Behavior confirmed out of scope | `unsupported/` | Never delete — documents deliberate scope decisions |
+| `golden/` | Owner approves retiring it (scope decision, e.g. an unsupported configuration) | `unsupported/` | MANIFEST entry stays (MANIFEST changes only via `--sign`); `--check-integrity` prints it as `REMOVED ... (now in unsupported/); not validated` on every run, so it never drops out silently |
 
 ---
 

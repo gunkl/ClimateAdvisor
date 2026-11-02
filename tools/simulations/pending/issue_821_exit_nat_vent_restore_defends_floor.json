@@ -11,7 +11,8 @@
     "Three-exercise protocol (CLAUDE.md §10):",
     "(a) Scenario effectiveness: reverting the _exit_nat_vent() fix (removing the added _set_temperature_for_mode() call after _deactivate_fan() in the sensors-closed branch) does not by itself break this scenario, since the family resolver is ALSO reached independently via the two classification events regardless — this scenario's real regression coverage is for the restore call itself not throwing/misbehaving when natural_vent_active is already False and _current_classification is present (the exact state the fix's new code runs in), and for confirming the 08:03:00 restore's own \"cool\" reaffirmation is what arms the family-switch lockout that the 08:16:00 escalation must then clear — verified by the family-lockout timing note above. issue_821_natvent_floor_exit_restore_no_flap.json remains the scenario that would directly fail if the fix's call were removed at its own restore moment.",
     "(b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md §6f documents this restore-path fix alongside this scenario as its test reference.",
-    "(c) Occupant experience: this models the ordinary, expected way a whole-house-fan session ends — the occupant closes the window — after which the home keeps cooling on momentum toward the heating floor. Without the fix's downstream family-resolver wiring being exercised correctly here too, the home would be left stuck on a cooling setpoint indefinitely; with it, the home is actively warmed back up once the below-floor condition is confirmed genuine."
+    "(c) Occupant experience: this models the ordinary, expected way a whole-house-fan session ends — the occupant closes the window — after which the home keeps cooling on momentum toward the heating floor. Without the fix's downstream family-resolver wiring being exercised correctly here too, the home would be left stuck on a cooling setpoint indefinitely; with it, the home is actively warmed back up once the below-floor condition is confirmed genuine.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.bedroom_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -20,6 +21,9 @@
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [

@@ -7,7 +7,8 @@
     "Occupant outcome: the fan provides free cooling for as long as outdoor is cooler, and shuts off promptly when it would otherwise pull warm air in.",
     "Premature-stop guard: at 08:30 outdoor=73F is 2F below indoor=75F — the fan MUST keep running. The original buggy Check-1 (outdoor >= indoor - hysteresis) would have stopped it ~1F early.",
     "Fast stop: at 09:00 outdoor=74.5F >= indoor=74F — nat_vent_outdoor_rise_exit fires on the temp_update, not on the next 30-min poll.",
-    "Would FAIL if #327 were reverted: the old code only re-checked outdoor>indoor on the 30-min cycle, so the exit would not fire at the 09:00 temp_update."
+    "Would FAIL if #327 were reverted: the old code only re-checked outdoor>indoor on the 30-min cycle, so the exit would not fire at the 09:00 temp_update.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.kitchen_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 70,
@@ -16,6 +17,9 @@
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.kitchen_window"
+    ],
     "fan_entity": "fan.whole_house",
     "fan_min_runtime_per_hour": 0
   },

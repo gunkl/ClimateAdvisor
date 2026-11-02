@@ -6,7 +6,8 @@
   "notes": [
     "Issue #1211 (A3, single behaviour): the classification states no windows_recommended; the harness fills it from classify_day (high 72 / low 52 on a mild day with a 70 F floor -> True, times 10:00/17:00), so the planned period is genuinely active at 12:00. The gate refuses on temperature (indoor 69 < floor 70) with a working fan configured, so the only thing that can make the HVAC pause is the handler itself.",
     "Revert-check: restoring the planned-window early return in handle_door_window_open() makes the 12:00 assertion fail (the handler returns silently; no pause). Reverting the classifier alone does not change this scenario (flag True either way), so it pins A3 only. The classifier's cold-forecast answer (mild 65/49 -> not recommended) is pinned by tests/test_classifier.py and the briefing corpus: once A3 landed, no scenario decision depends on the flag except the lazy reconcile, which a scenario cannot reach without an unhandled open window.",
-    "Three-exercise protocol: (a) effectiveness: see the revert-check; (b) docs: docs/08 C2/C5 rows say the open window pauses when the gate refuses; (c) occupant: if it regressed the HVAC would keep heating into an open window until the next coordinator refresh."
+    "Three-exercise protocol: (a) effectiveness: see the revert-check; (b) docs: docs/08 C2/C5 rows say the open window pauses when the gate refuses; (c) occupant: if it regressed the HVAC would keep heating into an open window until the next coordinator refresh.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.living_room_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 70,
@@ -15,6 +16,9 @@
     "setback_cool": 79,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [

@@ -14,7 +14,8 @@
     "(b) Docs<->production alignment: docs/08 section 6f ('indoor <= floor + m -> heating, inclusive', 'strictly between -> the thermostat's actual current mode', restore paths 'no longer re-arm a day-type default; the next evaluation corrects the mode').",
     "(c) Occupant outcome if this test fails to catch a regression: after a free-cooling session the AC (or a cool/heat flapping thermostat) runs in a house that is already at its heating floor, wasting energy and overshooting cold, or the furnace never starts and the house keeps falling below the floor.",
     "Classification fields: day_type=hot with hvac_mode=cool and windows_recommended=false match what classifier.py derives for DAY_TYPE_HOT. No thermal_model block (as in issue_696): the family decision no longer reads thermal confidence anyway.",
-    "Issue #1068: the 08:12 window close now re-arms heat immediately; no existing assertion type can pin a mode command to an instant (last_hvac_mode and event_emitted are at-or-before/whole-run checks and sensor_all_closed is the only event emitted), so this is covered by tests/test_nat_vent_exit_rearm.py rather than a new assertion here."
+    "Issue #1068: the 08:12 window close now re-arms heat immediately; no existing assertion type can pin a mode command to an instant (last_hvac_mode and event_emitted are at-or-before/whole-run checks and sensor_all_closed is the only event emitted), so this is covered by tests/test_nat_vent_exit_rearm.py rather than a new assertion here.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.bedroom_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 68,
@@ -23,6 +24,9 @@
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [

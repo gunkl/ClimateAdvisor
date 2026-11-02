@@ -44,6 +44,8 @@ class TestRule1Sealed:
         assert decide_whf_safety(_inputs(fan_on=False)).action is WhfSafetyAction.NONE
 
     def test_zero_sensors_rule_does_not_apply(self):
+        # Issue #1200: a whole-house fan with zero door/window sensors is an unsupported configuration;
+        # this pins today's unchanged behaviour, not a supported promise.
         assert decide_whf_safety(_inputs(sensors=())).action is WhfSafetyAction.NONE
 
     def test_not_a_whf_install(self):

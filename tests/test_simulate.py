@@ -379,3 +379,44 @@ class TestBackwardCompatibility:
         print_result(result)  # no state kwarg — must not raise
         captured = capsys.readouterr()
         assert "PASS" in captured.out
+
+
+class TestCheckIntegrityRemovedGoldens:
+    """Issue #1200: a signed golden moved out of golden/ (e.g. to unsupported/) is reported, never silent."""
+
+    def _setup(self, tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+        golden = tmp_path / "golden"
+        unsupported = tmp_path / "unsupported"
+        golden.mkdir()
+        unsupported.mkdir()
+        monkeypatch.setattr(_sim, "STATE_DIRS", {"golden": golden, "unsupported": unsupported})
+        monkeypatch.setattr(_sim, "MANIFEST_PATH", golden / "MANIFEST.json")
+        return golden, unsupported
+
+    def test_moved_golden_is_reported_with_its_new_state(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        golden, unsupported = self._setup(tmp_path, monkeypatch)
+        kept = golden / "kept.json"
+        kept.write_text("{}\n", encoding="utf-8")
+        (unsupported / "moved.json").write_text("{}\n", encoding="utf-8")
+        manifest = {
+            "_meta": {"policy": "x"},
+            "kept": {"sha256": _sim._file_sha256(kept)},
+            "moved": {"sha256": "0" * 64},
+        }
+        (golden / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc = _sim.check_integrity()
+
+        out = capsys.readouterr().out
+        assert "REMOVED   moved.json" in out
+        assert "now in unsupported/" in out
+        assert "_meta" not in out
+        assert rc == 0, "a stale MANIFEST entry is a notice (MANIFEST changes only via --sign), not a failure"
+
+    def test_deleted_golden_is_reported_as_not_found(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        golden, _ = self._setup(tmp_path, monkeypatch)
+        (golden / "MANIFEST.json").write_text(json.dumps({"gone": {"sha256": "0" * 64}}), encoding="utf-8")
+
+        _sim.check_integrity()
+
+        assert "REMOVED   gone.json" in capsys.readouterr().out

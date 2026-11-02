@@ -13,7 +13,6 @@ here re-implements a promise.
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import random
@@ -257,21 +256,12 @@ _FAST_ORDER = "fan_on_then_occupant_hvac_on_fast"
 _ECHO_MAX_COMMAND_AGE_S = 60.0
 
 
-@functools.lru_cache(maxsize=32)
-def _day_events(day_seed: int) -> tuple:
-    return tuple(run_day(day_seed).event_log)
-
-
-def _events_near(events, kind: str, ts, *, before_s: float = 1.0, after_s: float = 1.0) -> list:
-    return [e for e in events if e[0] == kind and -before_s <= (e[2] - ts).total_seconds() <= after_s]
-
-
 def _excused(hit, plan, events) -> str | None:
-    """Issue #1179 calibration: the production findings the new generated orders surfaced (#1203, #1204).
+    """Issue #1179 calibration: the production finding the new generated orders surfaced (#1203).
 
-    Matched on the MECHANISM the hit carries plus the day's own order / event log, never on a seed; every other
-    hit still fails the smoke run.  #1203 is a documented limitation (closed, accepted); #1204 is open - remove
-    its two branches when it lands (a fixed defect must not stay tolerated).
+    Matched on the MECHANISM the hit carries plus the day's own order, never on a seed; every other hit still fails
+    the smoke run.  #1203 is a documented limitation (closed, accepted).  The two #1204 branches were removed when
+    #1204 was fixed (0.8.33): a fixed defect must not stay tolerated.
     """
     m = hit.mechanism or {}
     whf = plan.whf or {}
@@ -288,43 +278,13 @@ def _excused(hit, plan, events) -> str | None:
         return (
             "Documented limitation (closed #1203), rule 2: a press within ~3 s of CA's own suppression reads as an echo"
         )
-    if hit.promise != "override_respected":
-        return None
-    if m.get("episode_end_reason") == "superseded_unreplaced":
-        # The journal does not record the replacing grace's trigger, so read it from the day's own event log: the
-        # cancellation at the hit must be followed at once by the fan_manual_override grace.
-        cancelled = [
-            e
-            for e in _events_near(events, "grace_cancelled", hit.ts)
-            if e[1].get("reason") == "superseded" and e[1].get("protects_override") is True
-        ]
-        replaced = [
-            e
-            for e in _events_near(events, "grace_started", hit.ts, before_s=0.0, after_s=5.0)
-            if e[1].get("trigger") == "fan_manual_override"
-        ]
-        if cancelled and replaced:
-            return "Issue #1204, P4 false positive: a fan press (blower or whole-house fan) replaces the setpoint grace"
-    if (
-        m.get("command_service") == "turn_off"
-        and m.get("command_target") == "fan"
-        and m.get("command_origin") == "ca"
-        and [
-            e
-            for e in _events_near(events, "nat_vent_manual_override_exit", hit.ts)
-            if e[1].get("source") == "override_detected"
-        ]
-        and _events_near(events, "override_detected", hit.ts)
-    ):
-        # The hit carries no end reason for this stop (episode_end_reason is None); the exit event is the evidence.
-        return "Issue #1204, P4 vs rule 2: the newer HVAC press stops the older fan override via the nat-vent exit path"
     return None
 
 
 def _open_defect(day_seed: int, hit) -> str | None:
-    if hit.promise not in ("ac_whf_mutex", "override_respected"):
+    if hit.promise != "ac_whf_mutex":
         return None
-    return _excused(hit, build_plan(day_seed), _day_events(day_seed))
+    return _excused(hit, build_plan(day_seed), ())
 
 
 # Nightly / epic-#1125 seeds that each broke ``override_respected`` before the "protect the occupant's manual
@@ -809,20 +769,15 @@ def test_known_limitation_hvac_press_seconds_after_suppression_leaves_ac_and_fan
     assert not [h for h in rec.report.hard if h.promise == "ac_whf_mutex"]
 
 
-_P4_OPEN_DEFECT_SEEDS = (303000022, 102000023)  # nat-vent exit stops the older fan override; blower press
+# Issue #1204 (found by the #1179 calibration): days that used to report a false P4 miss. 303000022: rule 2's newer
+# Cool stops the older whole-house-fan override (decision A3: the stand-down ends that override, whf_safety_stop).
+# The rest: an hvac_fan blower press replaces the setpoint's grace (decision A2: protected until the later end).
+_P4_FIXED_1204_SEEDS = (303000022, 102000023, 302000001, 302000008, 311000012, 311000015, 313000019)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issue #1204 (found by Issue #1179 calibration): override_respected (P4) reports Climate Advisor ending an "
-        "occupant's fan override when the stop is rule 2's newest-action-wins, or when a blower press replaces the "
-        "setpoint grace with the longer fan grace.  Remove this xfail and the two #1204 excuses when it is fixed."
-    ),
-)
-@pytest.mark.parametrize("day_seed", _P4_OPEN_DEFECT_SEEDS)
-def test_open_defect_1204_override_respected_false_positive(day_seed) -> None:
-    assert not [h for h in run_day(day_seed).report.hard if h.promise == "override_respected"]
+@pytest.mark.parametrize("day_seed", _P4_FIXED_1204_SEEDS)
+def test_1204_fan_press_and_rule2_stop_days_keep_override_respected(day_seed) -> None:
+    assert not [(h.ts, h.detail) for h in run_day(day_seed).report.hard if h.promise == "override_respected"]
 
 
 def _hits_of(day_seed: int, promise: str) -> list:
@@ -877,38 +832,6 @@ def test_the_1203_excuse_does_not_follow_a_widened_echo_guard(day_seed, monkeypa
     hits = [h for h in run_plan(plan).report.hard if h.promise == "ac_whf_mutex"]
     assert hits, "a 5 s echo guard no longer breaks rule 2 on this seed; pick another clean seed"
     assert all(_excused(h, plan, ()) is None for h in hits)
-
-
-def test_the_1204_excuses_still_cover_the_real_hits_and_nothing_broader() -> None:
-    from types import SimpleNamespace
-
-    for seed in (303000022, 102000023):
-        hits = _hits_of(seed, "override_respected")
-        assert hits and all("#1204" in (_open_defect(seed, h) or "") for h in hits)
-    plan = build_plan(102000023)
-    blower = _hits_of(102000023, "override_respected")[0]
-    events = list(_day_events(102000023))
-    assert _excused(blower, plan, events) is not None
-    # the same hit, but the replacing grace is some other grace: not the #1204 mechanism
-    other = [
-        (e[0], {**e[1], "trigger": "override_confirmed"} if e[0] == "grace_started" else e[1], e[2]) for e in events
-    ]
-    assert _excused(blower, plan, other) is None
-    assert _excused(blower, plan, []) is None
-    # a fan turn_off by CA on an override without the nat-vent manual-override exit is not excused
-    stop = _hits_of(303000022, "override_respected")[0]
-    stop_events = list(_day_events(303000022))
-    assert _excused(stop, build_plan(303000022), stop_events) is not None
-    no_exit = [e for e in stop_events if e[0] != "nat_vent_manual_override_exit"]
-    assert _excused(stop, build_plan(303000022), no_exit) is None
-    assert (
-        _excused(
-            SimpleNamespace(promise="override_respected", ts=stop.ts, mechanism=stop.mechanism),
-            build_plan(303000022),
-            no_exit,
-        )
-        is None
-    )
 
 
 def test_a_blower_press_under_whole_house_fan_is_not_a_fan_override_and_does_not_suppress_the_hvac() -> None:

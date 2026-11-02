@@ -7,7 +7,8 @@
     "Occupant outcome: the home pre-cools for free off the open window + configured fan while away, cutting the AC load on return. The user chose this by configuring a fan; not configuring a fan is how a user opts out of nat-vent.",
     "Design note: nat-vent activation is gated on fan configuration + temperature, NOT occupancy. (An earlier change, #254, wrongly added an occupancy block; reverted — fan config is the opt-in.)",
     "Regression proof: if an occupancy guard is (re-)added to nat-vent activation, the 14:00 assertion flips from 'natural_ventilation' to 'paused' and this scenario fails.",
-    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together)."
+    "whole_house_fan twin (Issue #1193): with a whole-house fan configured, an open window with usable outdoor air runs the fan and suppresses HVAC (rule 2: fan and HVAC never together).",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.living_room_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 70,
@@ -16,6 +17,9 @@
     "setback_cool": 79,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [

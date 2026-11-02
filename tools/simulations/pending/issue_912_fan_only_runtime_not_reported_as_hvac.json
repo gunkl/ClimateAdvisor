@@ -63,7 +63,8 @@
     "    with its fan-only minutes shown separately and correctly labeled -- never blended into a",
     "    number that implies the heater or AC ran, and never triggers a false 'thermal learning",
     "    found no observations despite N minutes of HVAC runtime' warning for a night when the",
-    "    compressor/burner never engaged at all."
+    "    compressor/burner never engaged at all.",
+    "Issue #1200 (2026-11-01): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.window, seeded closed at the first event (the real coordinator listener now sees its sensor events). Assertions unchanged; the event log gains sensor bookkeeping only."
   ],
   "config": {
     "comfort_heat": 68,
@@ -75,9 +76,18 @@
     "sleep_time": "22:00",
     "wake_time": "06:30",
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.window"
+    ],
     "fan_entity": "fan.whf"
   },
   "events": [
+    {
+      "time": "2026-06-10T22:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.window",
+      "note": "Issue #1200: seeds the configured sensor closed so the coordinator reads a known state."
+    },
     {
       "time": "2026-06-10T22:00:00",
       "type": "temp_update",
@@ -117,7 +127,10 @@
     {
       "at": "2026-06-11T04:45:00",
       "expect": "hvac_mode_never_commanded",
-      "forbidden_modes": ["cool", "heat"],
+      "forbidden_modes": [
+        "cool",
+        "heat"
+      ],
       "since": "2026-06-10T22:05:00",
       "track": "logic",
       "simulator_support": true,

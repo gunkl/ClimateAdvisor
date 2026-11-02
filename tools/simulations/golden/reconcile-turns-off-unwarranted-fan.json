@@ -7,13 +7,17 @@
     "Closes one of the 3 Step-1 blind spots named in the architecture-reset plan: reconcile_fan_on_startup() had zero golden coverage.",
     "Uses the reconcile_adopted_fan / reconcile_turned_off_fan custom assertion types added to outcomes.py for this closure -- purely additive.",
     "The turn-off branch routes through the canonical _exit_nat_vent() choke point (Issue #411/#417) rather than hand-rolling pause/grace here -- this scenario only asserts the reconcile-specific event (nat_vent_reconcile_exit) and the resulting _natural_vent_active=False state, not _exit_nat_vent()'s own internal pause-vs-grace branching (already covered by other goldens).",
-    "The third branch (no-fan / thermostat_fan_running=False, including the stranded-HVAC-suppression release from Issue #405) is already exercised directly at the unit level in tests/test_fan_control.py (real, unmocked calls to reconcile_fan_on_startup()) -- not repeated here, since a meaningful end-to-end version needs a genuinely stranded _pre_fan_hvac_mode precondition (a real prior WHF activation + mid-session cycling-off) that would have diluted this scenario's focus on the two novel, previously-uncovered end-to-end branches."
+    "The third branch (no-fan / thermostat_fan_running=False, including the stranded-HVAC-suppression release from Issue #405) is already exercised directly at the unit level in tests/test_fan_control.py (real, unmocked calls to reconcile_fan_on_startup()) -- not repeated here, since a meaningful end-to-end version needs a genuinely stranded _pre_fan_hvac_mode precondition (a real prior WHF activation + mid-session cycling-off) that would have diluted this scenario's focus on the two novel, previously-uncovered end-to-end branches.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), and the reconcile event already passed any_sensor_open=true, but that tracker read closed. The premise's open window is now a real sensor_open at 06:00:30, so the engine's own sensor view agrees with it. Assertions are unchanged. The event log changes as owner rule 3 requires: the window opening pauses the cool mode the classification armed (thermostat_mode_set cool->off, sensor_opened result=paused), and the post-reconcile nat_vent_exit_resume grace no longer starts because HVAC stays paused while the window is open."
   ],
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 75,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [
@@ -24,6 +28,12 @@
       "hvac_mode": "off",
       "windows_recommended": false,
       "note": "Mild day: HVAC off."
+    },
+    {
+      "time": "2026-07-10T06:00:30",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "Issue #1200: the window the reconcile premise (any_sensor_open=true) describes."
     },
     {
       "time": "2026-07-10T06:01:00",

@@ -5,7 +5,8 @@
   "issue": 1211,
   "notes": [
     "Issue #1211 (A3): fan-configured twin of golden warm_day_planned_window_no_fan_pauses. The gate passes (temperature + a working fan), so the handler starts nat-vent from the event itself.",
-    "Three-exercise protocol: (a) effectiveness: with the A3 change reverted the handler returns silently and the 12:00/08:00 assertion fails (no natural_ventilation); (b) docs: docs/08 and plans/1142 now say the planned window gates only the lazy sync; (c) occupant: if this regresses, the fan starts up to 30 minutes late against an open window while the AC cools into it."
+    "Three-exercise protocol: (a) effectiveness: with the A3 change reverted the handler returns silently and the 12:00/08:00 assertion fails (no natural_ventilation); (b) docs: docs/08 and plans/1142 now say the planned window gates only the lazy sync; (c) occupant: if this regresses, the fan starts up to 30 minutes late against an open window while the AC cools into it.",
+    "Issue #1200 (2026-11-01, pending owner approval): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.living_room_window so it runs in a supported configuration. In the engine-only harness the WHF safety logic already saw one sensor (the harness's open-sensor tracker), so this edit only makes the config say what the run already modelled: assertions and the full event log are unchanged."
   ],
   "config": {
     "comfort_heat": 70,
@@ -14,6 +15,9 @@
     "setback_cool": 79,
     "natural_vent_delta": 3.0,
     "fan_mode": "whole_house_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_room_window"
+    ],
     "fan_entity": "fan.whole_house"
   },
   "events": [

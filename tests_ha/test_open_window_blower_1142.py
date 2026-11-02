@@ -81,6 +81,16 @@ async def test_blower_ventilation_while_away_never_writes_cool_below_the_setback
         if c.data.get("hvac_mode") == "cool" and (c.data.get("temperature") or 999) < setback - 0.6
     ]
     assert not low_cool, f"cool written below the away setback {setback}: {low_cool}"
+    assert house.thermostat.mode == "off"
+    session_marker = len(house.calls)  # ventilation is running: from here on nothing may arm heat or cool
+    await house.advance(minutes=40)  # through the 30-minute cycle, whose away redirect used to re-arm the setback
+    if engine._natural_vent_active:
+        assert house.thermostat.mode == "off", f"away setback armed through the open window: {house.thermostat.mode}"
+        assert house.thermostat.action not in ("cooling", "heating")
+    armed = [c for c in _ca_climate_writes(house, since=session_marker) if c.data.get("hvac_mode") in ("cool", "heat")]
+    assert not armed or not engine._natural_vent_active, (
+        f"heat/cool written during ventilation: {[(str(c.at), c.data) for c in armed]}"
+    )
 
 
 async def test_outdoor_rise_exit_with_window_open_leaves_thermostat_off_and_close_does_not_flap(make_house) -> None:

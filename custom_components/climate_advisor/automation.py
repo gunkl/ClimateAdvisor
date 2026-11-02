@@ -4637,6 +4637,19 @@ class AutomationEngine:
                 self._revisit_cancel = None
             _LOGGER.debug("apply_classification: revisit canceled — 30-min cycle handles re-evaluation")
 
+    def _blower_session_holds_hvac_off(self) -> bool:
+        """A thermostat-blower ventilation session is running with a monitored window open (Issue #1142 D7).
+
+        The condition under which no heat/cool band may be armed: the session is live, the fan is the thermostat
+        blower, a monitored sensor is holding open, and the occupant's own thermostat change is not in force.
+        """
+        return bool(
+            self._natural_vent_active
+            and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
+            and self._any_monitored_sensor_holding_open()
+            and not self._manual_change_protected()
+        )
+
     async def _apply_comfort_band(self, band: ComfortBand, *, reason: str) -> HvacCommandResult | None:
         """Arm the thermostat with the comfort band (always single-setpoint).
 
@@ -4701,6 +4714,22 @@ class AutomationEngine:
                 quiet=self._fan_session_about_to_take_over(caller="_apply_comfort_band"),
             )
             return None  # paused instead of armed: no write attempted
+
+        # Issue #1142 D7 (owner decision): while a blower session ventilates through an open window NEITHER heat nor
+        # AC runs -- no exception for a setback band that merely sits above/below the comfort band (an AC armed at the
+        # 80F away ceiling still runs on a hot afternoon). Every writer that reaches this choke point (the 30-minute
+        # cycle's away/vacation redirect, bedtime, wake-up, TOU) therefore keeps the thermostat Off; the setback /
+        # comfort band lands when the window closes or the session ends with the windows closed (the exit restore
+        # goes through ``_set_temperature_for_mode`` -> here, with ``_natural_vent_active`` already cleared).
+        if self._blower_session_holds_hvac_off():
+            _LOGGER.info(
+                "_apply_comfort_band: blower ventilation with a window open — %s band not armed, thermostat held Off "
+                "(%s)",
+                band.active,
+                reason,
+            )
+            await self._apply_nat_vent_hvac_state()
+            return None
 
         caps = self._get_thermostat_capabilities()
 

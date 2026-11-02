@@ -654,3 +654,67 @@ class TestFanOffHoldStillBeatsSoftStart:
         engine._pre_pause_mode = "cool"
         _tick(engine, 0)
         assert engine._natural_vent_active is False
+
+
+# ---------------------------------------------------------------------------
+# Away / vacation setback must not re-arm heat or cool through an open window during blower ventilation
+# ---------------------------------------------------------------------------
+
+
+class TestAwayCycleKeepsTheBlowerSessionOff:
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    @pytest.mark.parametrize("day", ["hot", "cold"], ids=["cool_day", "heat_day"])
+    def test_30_minute_cycle_does_not_arm_a_setback_with_the_window_open(self, occupancy, day):
+        engine = _blower_engine(mode="cool" if day == "hot" else "heat", day=day)
+        engine._occupancy_mode = occupancy
+        _open(engine)
+        assert engine._natural_vent_active is True, "precondition"
+        assert engine._test_state.state == "off", "precondition"
+        before = len(_climate_calls(engine))
+        _at(lambda: engine.apply_classification(_classification(day)), 1800)
+        assert engine._test_state.state == "off", "no setback band (cool 80 / heat 62) with the window open"
+        assert _mode_writes(_climate_calls(engine, before)) == []
+
+    def test_away_setback_lands_when_the_window_closes(self):
+        engine = _blower_engine(day="hot")
+        engine._occupancy_mode = "away"
+        _open(engine)
+        _at(lambda: engine.apply_classification(_classification("hot")), 1800)
+        assert engine._test_state.state == "off", "precondition"
+        before = len(_climate_calls(engine))
+        _close(engine)
+        calls = _climate_calls(engine, before)
+        assert any(s == "set_temperature" and d.get("temperature") >= _AWAY_SETBACK_COOL for s, d in calls), calls
+        assert _below_away_setback(calls) == []
+
+    def test_a_session_with_every_window_closed_still_arms_the_setback(self):
+        """Control: the guard needs a window holding open."""
+        engine = _blower_engine(day="hot")
+        engine._occupancy_mode = "away"
+        _open(engine)
+        engine._sensor_check_callback = lambda: False
+        _at(lambda: engine.apply_classification(_classification("hot")), 1800)
+        assert engine._test_state.state != "off" or not engine._natural_vent_active
+
+
+class TestBlowerActivePauseBranchStaysReachable:
+    """#1205 x #1142: the blower's thermostat is Off while it ventilates, so after a SESSION the pause is the idle shape.
+    The ACTIVE pause (a running cycle interrupted, restore target recorded) is still reached when the window opens
+    over an armed thermostat and a start is refused -- here the occupant's fan-off hold -- and its paused-branch
+    reactivation must still start the blower once the hold ends."""
+
+    def test_window_over_an_armed_thermostat_with_the_fan_off_hold_is_an_active_pause_then_reactivates(self):
+        engine = _blower_engine(mode="cool")
+        engine._fan_off_hold_until = _DAY + timedelta(minutes=30)
+        _notes(engine)
+        _open(engine)
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is False, "active pause: HVAC was running"
+        assert engine._pre_pause_mode == "cool"
+        assert engine._test_state.state == "off"
+
+        engine._fan_off_hold_until = None  # the hold ends with the window still open
+        _tick(engine, 1900)
+        assert engine._natural_vent_active is True, "the paused-branch reactivation starts the blower"
+        assert engine._paused_by_door is False
+        assert engine._test_state.state == "off", "and holds the thermostat Off"

@@ -3394,8 +3394,10 @@ def _render_timeline_events(
         # Update fan ownership state before rendering
         if event_type in ("nat_vent_fan_on", "fan_activated"):
             _fan_user_owns = False
-        elif event_type == "fan_manual_override" and str(payload.get("fan_after", "")).strip() == "on":
-            _fan_user_owns = True
+        elif event_type == "fan_manual_override":
+            # The occupant's own fan-off ends their ownership too; otherwise a later CA fan-off would be
+            # annotated "fan may still be running -- user-controlled" for a fan the occupant already stopped.
+            _fan_user_owns = str(payload.get("fan_after", "")).strip() == "on"
         elif event_type == "fan_cancel":
             _fan_user_owns = False
 

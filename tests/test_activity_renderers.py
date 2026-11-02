@@ -2630,3 +2630,33 @@ class TestFanBlindRenderers:
     def test_all_three_not_deduplicated(self):
         for name in ("fan_blind_started", "fan_blind_stopped", "fan_blind_recovered"):
             assert name in _act_mod._NO_DEDUP
+
+
+# ---------------------------------------------------------------------------
+# Fan ownership annotation (Issue #957 tracker; occupant fan-off clears it)
+# ---------------------------------------------------------------------------
+
+
+class TestFanOwnershipAnnotation:
+    """A CA fan-off is annotated "user-controlled" only while the occupant still owns the fan."""
+
+    _NOTE = "fan may still be running -- user-controlled"
+
+    def test_annotated_while_the_occupant_runs_the_fan(self):
+        table = _build_table(
+            [
+                _make_event("fan_manual_override", hours_ago=2.0, fan_after="on"),
+                _make_event("nat_vent_fan_off", hours_ago=1.0),
+            ]
+        )
+        assert self._NOTE in table
+
+    def test_not_annotated_after_the_occupant_turned_the_fan_off(self):
+        table = _build_table(
+            [
+                _make_event("fan_manual_override", hours_ago=3.0, fan_after="on"),
+                _make_event("fan_manual_override", hours_ago=2.0, fan_after="off"),
+                _make_event("nat_vent_fan_off", hours_ago=1.0),
+            ]
+        )
+        assert self._NOTE not in table

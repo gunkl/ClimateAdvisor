@@ -548,11 +548,10 @@ class TestReactivationFsmDispatch:
         assert engine._paused_entity is None
 
     def test_soft_start_reactivation_routes_through_dispatcher(self):
-        """Same dispatcher, reached via the soft-start branch instead of the full
-        gate — isolated by forcing the full gate to decline and the soft-start gate
-        to accept, rather than reconstructing the exact peak/decline outdoor history
-        _nat_vent_may_soft_start() itself requires (that logic has its own dedicated
-        coverage elsewhere)."""
+        """Same dispatcher, reached through the real nat-vent FSM (Issue #1142: soft start is
+        an FSM input, so the old method mocks that forced the soft-start branch no longer
+        exist). This pins the PAUSED_NAT_VENT_REACTIVATED dispatch, not which gate branch
+        admitted the start; soft-start admission has its own coverage in the FSM tests."""
         from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
 
         engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)

@@ -147,25 +147,20 @@ def _make_dt(hour: int, minute: int = 0) -> datetime:
 
 
 class TestWindowsRecommendedPauseSuppression:
-    """Issue #1211 (A3, owner decision O8b): the planned window period is no longer an exemption in the
-    door/window EVENT handlers. A window opened (past the debounce) inside the period gets the same decision as
-    any other: the nat-vent entry gate starts nat-vent when it passes, and the HVAC pauses right there when it
-    refuses. (These engines have no fan, so the gate refuses.) The planned window only exempts the lazy
-    ``_sync_paused_by_door_with_live_sensors()`` reconcile. The history below describes the pre-#1211 design.
+    """Door/window events inside the planned window period (Issue #1211, A3, owner decision O8b).
 
-    Original design note: validate that door/window open events do NOT pause HVAC when the
-    classifier has recommended windows and the current time falls within
-    the planned window period.
+    The planned window period is no longer an exemption in the door/window EVENT handlers: a window opened (past
+    the debounce) inside the period gets the same decision as any other -- the nat-vent entry gate starts
+    nat-vent when it passes, and the HVAC pauses right there when it refuses (these engines have no fan, so it
+    refuses). Only the lazy ``_sync_paused_by_door_with_live_sensors()`` reconcile, which has no event and no
+    occupant action, is still exempt inside the period; when the period ends,
+    ``async_sync_after_planned_window_exit()`` runs it once.
 
-    The gap being tested: if the user manually put HVAC into "cool" mode on a
-    warm morning (before the classifier ran, or via an override), the thermostat
-    state is "cool" while windows_recommended=True and the time is inside the
-    window period.  Without the new suppression method, `handle_door_window_open`
-    would incorrectly turn HVAC off and send a notification.
-
-    Tests 1, 2, 4, 7, and the first part of 6 are expected to FAIL until
-    `_is_within_planned_window_period()` is implemented and wired into
-    `handle_door_window_open`.
+    The tests in this class were written for the pre-#1211 design (the handler returned silently inside the
+    period) and now pin the post-#1211 outcomes; the class name is kept so history and references still
+    resolve. Original scenario for context: the occupant put HVAC in "cool" on a warm morning with
+    windows_recommended=True inside the window period; the open window must be dealt with in the handler, not
+    left to the next coordinator refresh.
     """
 
     # ------------------------------------------------------------------

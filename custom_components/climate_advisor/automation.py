@@ -5922,13 +5922,19 @@ class AutomationEngine:
         pre-conditioning paths ran this re-check ahead of their own ``DEFER_OVERRIDE`` gate and
         switched the occupant's heat/cool off inside a grace CA had just announced. A grace with
         no manual override (fan-off / automation grace) does NOT block the re-check (D16).
+
+        Issue #1211: the planned window period is the one exemption left here -- this lazy reconcile (no event,
+        no occupant action) does not pause for an open sensor inside the period. The EVENT handlers no longer
+        honor that exemption (``handle_door_window_open()`` runs the nat-vent gate and pauses when it refuses),
+        so it is NOT "the same exception" they make; when the period ends,
+        ``async_sync_after_planned_window_exit()`` runs this reconcile once so a window left open is paused.
         """
         if self._manual_change_protected():
             return  # the occupant owns the thermostat; grace expiry / the gate decide, not this
         if self._paused_by_door:
             return  # already paused
         if self._is_within_planned_window_period():
-            return  # windows intentionally open — same exception handle_door_window_open() honors
+            return  # this lazy reconcile only: the event handlers decide (gate / pause) inside the period
         if not decide_open_sensor_hold(
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),

@@ -11,8 +11,6 @@ on:
 jobs:
   validate-and-test:
     runs-on: ubuntu-latest
-    env:
-      CA_UNIT_WORKERS: "4"
     permissions:
       contents: read
 
@@ -37,8 +35,12 @@ jobs:
       - name: Check formatting (ruff)
         run: uv run --locked --only-group test ruff format --check .
 
+      # CA_UNIT_WORKERS is scoped to this step only: scripts/test_changed_isolated.py below runs each file
+      # alone (an order-dependence guard) and must not pick up -n 4 from a job-wide environment.
       - name: Run unit tests
         run: python3 scripts/test.py unit
+        env:
+          CA_UNIT_WORKERS: "4"
 
       # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
       # No-op when no tests/test_*.py changed (e.g. a push to main).

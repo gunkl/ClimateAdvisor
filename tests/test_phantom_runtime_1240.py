@@ -30,7 +30,6 @@ from tests.test_hvac_session_detection import (
 )
 
 _DT = "custom_components.climate_advisor.coordinator.dt_util"
-_XFAIL_1240 = pytest.mark.xfail(strict=True, reason="Issue #1240: idle mode change counted as runtime")
 
 
 def _fire(coord, when: datetime, old: tuple[str, str], new: tuple[str, str]) -> None:
@@ -48,7 +47,6 @@ def _t(hour: int, minute: int = 0) -> datetime:
 class TestIdleModeChangeIsNotRuntime:
     """A mode selection the thermostat reports as idle/off must never accrue runtime."""
 
-    @_XFAIL_1240
     @pytest.mark.parametrize("mode", ["heat", "cool"])
     @pytest.mark.parametrize("idle_action", ["idle", "off"])
     def test_idle_mode_window_then_off_gives_zero_runtime(self, mode, idle_action):
@@ -61,7 +59,6 @@ class TestIdleModeChangeIsNotRuntime:
         assert coord._hvac_session_mode is None
         coord._start_hvac_observation.assert_not_called()
 
-    @_XFAIL_1240
     def test_idle_heat_window_contributes_nothing_to_live_or_rollover_total(self):
         """The day-rollover flush and the live getter both read the timer: nothing may be armed."""
         coord = _make_thermostat_coord()
@@ -72,7 +69,6 @@ class TestIdleModeChangeIsNotRuntime:
             assert coord._runtime_today_for_mode("heat") == 0.0
         assert coord._today_record.hvac_runtime_minutes == 0.0
 
-    @_XFAIL_1240
     def test_real_heating_after_idle_window_counts_only_the_heating(self):
         coord = _make_thermostat_coord()
         _fire(coord, _t(10), ("off", "idle"), ("heat", "idle"))
@@ -92,7 +88,6 @@ class TestIdleModeChangeIsNotRuntime:
 
         assert coord._today_record.hvac_runtime_minutes == pytest.approx(35.0)
 
-    @_XFAIL_1240
     def test_idle_heat_to_idle_cool_mode_switch_starts_nothing(self):
         coord = _make_thermostat_coord()
         _fire(coord, _t(10), ("off", "idle"), ("heat", "idle"))
@@ -106,7 +101,6 @@ class TestIdleModeChangeIsNotRuntime:
 class TestSymmetryFanOnlyAndGlide:
     """The same rule on the fan_only counter and on the glide/stop paths."""
 
-    @_XFAIL_1240
     def test_idle_fan_only_window_gives_zero_fan_only_runtime(self):
         coord = _make_thermostat_coord()
         _fire(coord, _t(10), ("off", "idle"), ("fan_only", "idle"))
@@ -115,7 +109,6 @@ class TestSymmetryFanOnlyAndGlide:
         assert coord._today_record.thermostat_fan_only_runtime_minutes == 0.0
         assert coord._thermostat_fan_only_on_since is None
 
-    @_XFAIL_1240
     def test_glide_from_running_fan_only_into_idle_heat_ends_the_session(self):
         """fan_only (blower running) -> heat while idle: the fan run ends, no heat timer starts."""
         coord = _make_thermostat_coord()
@@ -128,7 +121,6 @@ class TestSymmetryFanOnlyAndGlide:
         assert coord._hvac_on_since is None
         coord._start_hvac_observation.assert_not_called()
 
-    @_XFAIL_1240
     def test_idle_heat_then_running_fan_only_tracks_only_the_fan(self):
         coord = _make_thermostat_coord()
         _fire(coord, _t(10), ("off", "idle"), ("heat", "idle"))
@@ -138,7 +130,6 @@ class TestSymmetryFanOnlyAndGlide:
         assert coord._today_record.hvac_runtime_minutes == 0.0
         assert coord._today_record.thermostat_fan_only_runtime_minutes == pytest.approx(45.0)
 
-    @_XFAIL_1240
     def test_session_ends_when_thermostat_turns_idle_without_a_mode_change(self):
         """Stop-side mirror: a no-signal ("fan") heat session must end when the thermostat
         reports idle, not keep counting until the mode is switched off."""

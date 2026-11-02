@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.34] — 2026-11-02
+
+- Fix #1240: switching the thermostat to heat or cool no longer counts as heating or cooling time when the thermostat itself says it is idle. Before, a day where the thermostat sat in heat mode without heating and was then switched off showed hours of "HVAC Runtime" that never happened (one zone showed 361 minutes on a day with no heating at all). Those minutes also went into the average on the compliance card, the "high runtime on mild days" suggestion, the AI reports, the time-of-use summary and the thermal-learning warning. Real heating and cooling are counted exactly as before, including on thermostats that do not report whether they are running. A heating or cooling run on a thermostat that reports only its fan now also stops counting when the thermostat goes idle, instead of counting until you switch it off. The same applies to fan-only mode.
+
 ## [0.8.33] — 2026-11-02
 
 - Fix #1204: in a whole-house-fan home, when you turn the fan on and then set the heat or AC, Climate Advisor stops the fan for your newer change (as before) and now also ends your fan override at that moment, so the fan card no longer says "off (manual override)" for a fan that is off. Before, it kept saying so for 3 hours or more with Manual Change Pause set to 0, and about 25 minutes past the fan run's own end with a pause. If your heat or AC change turns out to be the same as Climate Advisor's own plan and is not kept as an override, the leftover pause now ends quietly instead of being logged as an error. The same now holds when Climate Advisor's whole-house-fan safety check is what stops the fan for your heat or AC, for example a change made while Climate Advisor is still starting up and has not yet registered it, where the fan card used to keep saying "off (manual override)" until the fan's own pause ended (hours with a remote timer).

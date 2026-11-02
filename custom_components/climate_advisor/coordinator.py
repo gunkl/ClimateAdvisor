@@ -283,7 +283,7 @@ from .fan_status import (
     remote_event_is_echo_of,
     resolve_untracked_fan_status,
 )
-from .hvac_action import is_hvac_action_active, is_hvac_compressor_active
+from .hvac_action import is_hvac_action_active, is_hvac_action_reported_idle, is_hvac_compressor_active
 from .incident_payload import build_incident_payload
 from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import (
@@ -6678,8 +6678,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # which would trap this branch indefinitely if we used the old `new_action and
             # old_action` guard.  Fall back to hvac_mode state for reliable edge detection.
             idle_modes = {"off", "unavailable", "unknown", ""}
-            was_running = old_state.state not in idle_modes
-            is_running = new_state.state not in idle_modes
+            # Issue #1240: the fallback is for thermostats whose hvac_action carries no signal
+            # (missing, or "fan" persistently — #93). A side that positively reports "idle"/"off"
+            # IS a signal: the equipment is not running, whatever hvac_mode is selected. Before,
+            # off->heat while idle armed the runtime timer and heat->off (or the day rollover)
+            # credited the whole idle window as runtime; and a "fan" heat session kept counting
+            # after the thermostat turned idle until the mode was switched off. Applied to both
+            # sides so the start, stop and glide edges agree.
+            was_running = old_state.state not in idle_modes and not is_hvac_action_reported_idle(old_action)
+            is_running = new_state.state not in idle_modes and not is_hvac_action_reported_idle(new_action)
             # Issue #986: this state-based fallback can't tell "hvac_mode is cool/heat and
             # the compressor just hasn't confirmed yet" apart from "CA's own fan-only
             # ventilation is running while hvac_mode happens to read cool/heat" — the
@@ -6709,8 +6716,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif action == "cooling":
                 session_mode = "cool"
             elif new_state.state == "heat":
-                # Fallback: some thermostats report hvac_action="fan" or "idle" briefly
-                # at compressor startup before transitioning to "heating".
+                # Fallback: some thermostats report hvac_action="fan" (or nothing) at
+                # compressor startup before transitioning to "heating". An "idle" startup no
+                # longer reaches here (Issue #1240): it starts at the real "heating" edge.
                 session_mode = "heat"
             elif new_state.state == "cool":
                 session_mode = "cool"

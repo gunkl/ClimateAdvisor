@@ -39,6 +39,12 @@ HVAC_ACTION_COMPRESSOR_ACTIVE: frozenset[str] = frozenset({"heating", "cooling"}
 
 HVAC_ACTION_ANY_ACTIVE: frozenset[str] = HVAC_ACTION_COMPRESSOR_ACTIVE | frozenset({"fan"})
 
+# Issue #1234: values by which a thermostat POSITIVELY reports that its equipment is not running.
+# A hvac_mode change that arrives while hvac_action reads one of these is a mode selection, not a
+# heat/cool session (the "phantom" session the state-based fallback used to open). Deliberately
+# excludes "fan" and the missing/empty value: those carry no heating/cooling signal at all.
+HVAC_ACTION_REPORTS_NOT_RUNNING: frozenset[str] = frozenset({"idle", "off"})
+
 
 def is_hvac_compressor_active(hvac_action: str | None) -> bool:
     """True if `hvac_action` indicates the compressor itself is actively driving.
@@ -59,3 +65,8 @@ def is_hvac_action_active(hvac_action: str | None) -> bool:
     contradiction warning).
     """
     return str(hvac_action).lower() in HVAC_ACTION_ANY_ACTIVE
+
+
+def is_hvac_action_reported_idle(hvac_action: str | None) -> bool:
+    """True if `hvac_action` positively reports the equipment is not running (``idle``/``off``)."""
+    return str(hvac_action).lower() in HVAC_ACTION_REPORTS_NOT_RUNNING

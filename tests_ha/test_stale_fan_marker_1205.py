@@ -694,3 +694,48 @@ async def test_hvac_fan_run_survives_thermostat_off_then_heat(make_house, caplog
     )
     assert engine._fan_override_active, "the replaced thermostat override must not end the occupant's blower run"
     assert engine._fan_override_until == run_end
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6b (A3, ACTIVE pause): the hold refuses the start over an ARMED thermostat; the restart comes after the hold
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fan", _FANS)
+async def test_a3_active_pause_hold_refuses_the_start_then_the_deferred_restart_applies(
+    make_house, fan, caplog
+) -> None:
+    """Issue #1225 item 4. The scenario-6 precondition changed in #1142 (after a session the thermostat is Off, so that
+    pause is the idle shape); this variant enters the ACTIVE pause: the occupant switches a fan on and off while the
+    house is still cooling and every window is shut, then a window opens inside the fan-off hold. The hold refuses the
+    start, so the open window pauses the armed thermostat (restore target recorded). When the hold ends with the window
+    still open the paused-branch reactivation starts the fan, rate-limited by the toggle floor if it must be, and
+    leaves the thermostat Off."""
+    fan = "hvac_fan"  # a whole-house fan session always leaves the thermostat Off (and a sealed house stops the fan)
+    house = await _house(make_house, fan, caplog)
+    engine = house.coordinator.automation_engine
+    assert house.thermostat.mode == "cool", "precondition: the thermostat is armed"
+    await house.occupant_sets_fan_mode("on")
+    await _steps(house, 20)
+    await _occupant_off(house, fan)
+    await _steps(house, 10)
+    assert engine._grace_is_fan_off_grace(), "precondition: the occupant's off started the fan-off hold"
+    assert not _fan_on(house, fan) and not _ca_starts(house, fan)
+
+    await house.open("window")
+    await _steps(house, 50)  # past the 30 s debounce, inside the 120 s hold
+    assert engine._grace_is_fan_off_grace(), "precondition: still inside the hold"
+    assert engine._paused_by_door is True and not _ca_starts(house, fan), "the hold refused the start"
+    assert engine._paused_with_hvac_already_off is False, "ACTIVE pause: the armed thermostat was interrupted"
+    assert engine._pre_pause_mode == "cool"
+    assert house.thermostat.mode == "off"
+
+    # the hold ends with the window still open: the deferred restart applies (within the toggle floor + a cycle)
+    for _ in range(80):
+        if _ca_starts(house, fan):
+            break
+        await house.advance(seconds=10)
+    assert len(_ca_starts(house, fan)) == 1, "the paused-branch reactivation started the fan after the hold"
+    assert _fan_on(house, fan) and engine._fan_active and engine._natural_vent_active
+    assert engine._paused_by_door is False, "the pause cleared when the session took over"
+    assert house.thermostat.mode == "off", "and the thermostat stays Off while it ventilates"

@@ -1,6 +1,6 @@
 {
   "name": "grace_prevents_sensor_repause",
-  "description": "After user resumes from door/window pause, 90-min grace blocks immediate re-pause when same sensor opens again",
+  "description": "After the door/window pause ends, the same sensor opens again inside Climate Advisor's own 90-min automation grace: since Issue #1142 the grace does NOT hold off the pause (rule 3), the reopen is paused at once",
   "source": "synthetic",
   "issue": 227,
   "config": {
@@ -73,31 +73,32 @@
     },
     {
       "at": "2026-06-10T14:46:00",
-      "expect": "resumed",
+      "expect": "paused",
       "track": "integration",
-      "reason": "If door opens again within the 90-min grace window, automation should NOT re-pause — outcome stays the carried-forward 'resumed' from 14:45 (no new pause decision). Corrected from legacy 'no_action'."
+      "reason": "Issue #1142 (rule 3): the door opens again within Climate Advisor's own 90-min automation grace; that grace is not a manual override, so the open door is paused at once (outdoor 85F, nat-vent not viable). Previously 'resumed' (the grace held the pause)."
     },
     {
       "at": "2026-06-10T14:47:00",
-      "expect": "resumed",
+      "expect": "paused",
       "track": "integration",
-      "reason": "Reopen inside the 90-min grace is held off: the AC keeps running."
+      "reason": "Reopen inside the automation grace is paused: the AC is switched off for the open door (rule 3)."
     },
     {
       "at": "2026-06-10T14:47:00",
       "expect": "field_equals",
       "field": "engine_state._paused_by_door",
-      "value": false,
-      "reason": "No pause was recorded for the reopen."
+      "value": true,
+      "reason": "The pause for the reopen is recorded."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Grace period prevents immediate re-pause after user resumes from door/window pause",
-    "observed_behavior": "Door opens within grace → automation ignores sensor for grace duration",
-    "expected_behavior": "90-min grace prevents sensor chatter from causing repeated pause/resume cycles after user intervenes"
+    "summary": "An automation grace does not hold off the pause (rule 3): the reopened door is paused at once",
+    "observed_behavior": "Door opens within the automation grace → paused at once",
+    "expected_behavior": "Only an occupant's manual override may keep heat/cool running with a window open (rule 3); Climate Advisor's own grace does not"
   },
   "notes": [
+    "Issue #1142 (owner-approved golden change): rule 3 -- the only exception to 'no heat/cool with a window open after the debounce' is the occupant's manual override. Climate Advisor's own automation grace is not one, so it no longer holds off the pause: a window open past the debounce inside it gets the same answer as outside a grace (start nat-vent if the nat-vent FSM allows it, otherwise pause). Superseded by this note: the 14:46/14:47 assertions below are now 'paused' with _paused_by_door true; the older notes describing the grace guard are historical.",
     "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true, evaluated for real. The scenario was missing the actual sensor re-open event the 14:46 assertion refers to — added it. automation_grace_seconds set explicitly to 5400 (90 min) to match the scenario's own stated intent ('90-min grace' in the description) — the harness default (automation_grace_seconds=300/5min, which is what the sensor-closed-resume path actually reads, not manual_grace_seconds) would have made the '90-min' claim inaccurate, though the specific 14:45->14:46 (1 min) assertion timing would have passed with either duration.",
     "The 14:46 assertion was 'no_action' in the legacy-simulator version. outcomes.py's production_outcome_at() has no 'no_action' sentinel — corrected to 'resumed' (carried forward from 14:45), the correct way to assert 'no NEW decision fired' — same pattern as grace_full_lifecycle_sensor_still_open.json's 13:12 assertion.",
     "This scenario exercises the same grace-blocks-reopen guard (automation.py:2137-2150) also covered by grace_full_lifecycle_sensor_still_open.json. The 14:47 no-op temp_update advances the scheduler past the 14:46 reopen so a (mis)pause would actually land, and the 14:47 assertions (resumed + _paused_by_door false) fail if the grace guard is removed."

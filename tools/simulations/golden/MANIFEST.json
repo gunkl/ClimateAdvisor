@@ -184,7 +184,7 @@
     "issue": 229
   },
   "grace_prevents_sensor_repause": {
-    "sha256": "8f247aaaed76ca202141a64f0574bc2f62217c878f5d62f68bca9e466a8da27e",
+    "sha256": "81c0a741411b37c247bce46ac743fa823b986a09f32e7dc180dbd41495bdbbb3",
     "signed": "2026-11-01",
     "issue": 227
   },
@@ -294,7 +294,7 @@
     "issue": 229
   },
   "grace_full_lifecycle_sensor_still_open": {
-    "sha256": "ea90e2fdd0c21780e13b0da4deee07e5739015fb5e8d7234be033ef96d02afdf",
+    "sha256": "1efd8f5a34a8a007cb50a247fb3527881074be8c59f56e2569de8bc4d97b24c3",
     "signed": "2026-11-01",
     "issue": 229
   },
@@ -374,7 +374,7 @@
     "issue": 629
   },
   "issue_637_paused_during_grace_open_fallthrough": {
-    "sha256": "157081d2e3ab3de723a378527ad3cea010f95b7c80713c1848866ab26b98b247",
+    "sha256": "010412a0eaca70348a6f5ca35edf3b764ee43844dfba4d4f1667374c81183e68",
     "signed": "2026-11-01",
     "issue": 637
   },

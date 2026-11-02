@@ -1,9 +1,10 @@
 {
   "name": "grace_full_lifecycle_sensor_still_open",
-  "description": "Hot day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). At 13:12 sensor opens again while grace is active — grace blocks re-pause. Grace expires at 13:15 with sensor still open → re-pause fires.",
+  "description": "Hot day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). At 13:12 sensor opens again while Climate Advisor's own automation grace is active — since Issue #1142 the grace does NOT block the pause (rule 3): the door open past the debounce is paused immediately. Grace expires at 13:15 with the sensor still open → the grace-expiry re-check agrees (still paused).",
   "source": "synthetic",
   "issue": 229,
   "notes": [
+    "Issue #1142 (owner-approved golden change): rule 3 -- the only exception to 'no heat/cool with a window open after the debounce' is the occupant's manual override. Climate Advisor's own automation grace is not one, so it no longer holds off the pause: a window open past the debounce inside it gets the same answer as outside a grace (start nat-vent if the nat-vent FSM allows it, otherwise pause). Superseded by this note: the 13:12 assertion below is now 'paused'; the older notes describing 'grace blocks the reopen' and its revert test are historical.",
     "Tests the grace period full lifecycle: pause → grace → sensor opens during grace (blocked) → re-pause on grace expiry.",
     "Issue #476: migrated to use_coordinator=true, same pattern as grace_full_lifecycle_clean_expiry.json.",
     "sensor_open/sensor_close dispatch via fake_hass.states.async_set() through the real",
@@ -98,8 +99,8 @@
     },
     {
       "at": "2026-07-15T13:12:00",
-      "expect": "resumed",
-      "reason": "Sensor opens during active grace period — grace blocks re-pause, so the outcome at 13:12 is still the carried-forward 'resumed' from 13:10 (no new decision fired). Corrected from legacy 'no_action' — see notes.",
+      "expect": "paused",
+      "reason": "Issue #1142 (rule 3): the sensor opens during Climate Advisor's own automation grace, which is not a manual override, so it does not hold off the pause. Outdoor (88F) is above indoor (76F), nat-vent is not viable, so HVAC is paused at once (previously 'resumed': the AC kept running into the open door until the grace expired at 13:15).",
       "track": "integration"
     },
     {
@@ -119,9 +120,9 @@
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Grace period blocks re-pause during active window; grace expiry with open sensor triggers re-pause",
-    "observed_behavior": "paused (13:00) → resumed (13:10) → grace blocks re-pause (13:12) → re-paused on grace expiry (13:15)",
-    "expected_behavior": "Grace period prevents rapid pause/resume oscillation; re-pause fires if sensor is still open when grace expires"
+    "summary": "An automation grace does not hold off the pause (rule 3): a door reopened inside it is paused at once; grace expiry with the sensor still open agrees",
+    "observed_behavior": "paused (13:00) → resumed (13:10) → paused again at the reopen (13:12) → grace expiry re-check agrees (13:15)",
+    "expected_behavior": "Climate Advisor's own grace never lets the AC/heat run into an open door past the debounce; only an occupant's manual override does (rule 3)"
   },
   "pending_issue": 245
 }

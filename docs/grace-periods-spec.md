@@ -735,7 +735,11 @@ re-evaluation in `check_natural_vent_conditions()` for PAUSED_IDLE). Any other s
 fan action, or the door/window pause genuinely ending discards it. The pause ending is caught at one choke point,
 the `_paused_by_door` property setter; a same-handler save-and-restore of the flag is not an end
 (`_holding_door_pause()` wraps it at the two idle-open sites). Discarding also drops the abandoned
-`_fan_rate_limited_*` activate record. Pending fact, marker, run, kind and start time are not persisted.
+`_fan_rate_limited_*` activate record, and since #1212 that record is cleared whether or not a pending fact exists:
+`_clear_fan_deferral_record()` is the one choke point (called by the pause-end setter, `handle_all_doors_windows_closed()`,
+the occupant's fan on/off, and by `_activate_fan()`/`_deactivate_fan()` for the opposite direction, except the reconcile "no-fan" bookkeeping call, which
+passes `abandons_deferral=False` because the paused-reactivation retry still applies that start); when it clears an
+"activate" record a pending fact bound to it is dropped in the same step, so the two never disagree. Pending fact, marker, run, kind and start time are not persisted.
 
 Logging (INFO, outcome first): `marker armed (label only)`, `marker not armed, no live run to bind it to`,
 `pending raised`, `pending promoted`, `pending discarded: reason=...`, `marker consumed, run matched (label

@@ -20,7 +20,7 @@
 
 ## Scope
 
-- **Files:** `custom_components/climate_advisor/fan_lifecycle.py` (Phase 1, pure composed-state derivation), `custom_components/climate_advisor/fan_toggle_rate_limit.py` (Phase 2, rapid-cycling backstop, delegated to from `automation.py`'s `_fan_toggle_rate_limited()`), `custom_components/climate_advisor/fan_fsm.py` (Phase 3, the unified `(state, event) -> Transition` table), `custom_components/climate_advisor/automation.py` (Phase 4/5 — `_build_fan_fsm_inputs()`, `fan_lifecycle_state` property, `_apply_fan_fsm_state()`, `_resolve_fan_fsm_state()`, and the 16 real entry points' dispatch wiring, now the sole path as of Phase 6). `coordinator.py` no longer carries any fan/WHF-specific axis — the per-engine cutover flag and the `fan_mirror` shadow-diagnostic axis were both deleted along with the dual-engine shell in Phase 6 (Issues #757–#770); only historical comments referencing them remain.
+- **Files:** `custom_components/climate_advisor/fan_lifecycle.py` (Phase 1, pure composed-state derivation), `custom_components/climate_advisor/fan_toggle_rate_limit.py` (Phase 2, rapid-cycling backstop, reached from `automation.py` through `_resolve_fan_fsm_state()`; the old `_fan_toggle_rate_limited()` method was deleted in #1212), `custom_components/climate_advisor/fan_fsm.py` (Phase 3, the unified `(state, event) -> Transition` table), `custom_components/climate_advisor/automation.py` (Phase 4/5 — `_build_fan_fsm_inputs()`, `fan_lifecycle_state` property, `_apply_fan_fsm_state()`, `_resolve_fan_fsm_state()`, and the 16 real entry points' dispatch wiring, now the sole path as of Phase 6). `coordinator.py` no longer carries any fan/WHF-specific axis — the per-engine cutover flag and the `fan_mirror` shadow-diagnostic axis were both deleted along with the dual-engine shell in Phase 6 (Issues #757–#770); only historical comments referencing them remain.
 - **Entry point:** `AutomationEngine.fan_lifecycle_state` (property) / `fan_lifecycle.derive_fan_lifecycle_state()` (pure function) / `fan_fsm.transition()` (the unified transition table) / `AutomationEngine._resolve_fan_fsm_state()` (the single dispatch chokepoint every real entry point calls through).
 
 **Does NOT cover:**
@@ -51,7 +51,7 @@
 | `override` | `FanOverrideState` | `NONE`, `ACTIVE`, `ACTIVE_REMOTE_TIMER` | `_fan_override_active`, `_fan_remote_timer_hours` |
 | `cycling` | `FanCyclingState` | `IDLE`, `ACTIVE`, `SUSPENDED` | `_fan_min_runtime_active`, `_fan_override_active` (an active override suspends cycling) |
 | `hvac_ownership` | `WhfHvacOwnership` | `NONE`, `SUPPRESSING` | `fan_mode` (WHOLE_HOUSE/BOTH only) AND `_pre_fan_hvac_mode is not None` |
-| `rate_limit` | `FanRateLimitState` | `NOT_DEFERRED`, `DEFERRED_ACTIVATE`, `DEFERRED_DEACTIVATE` | `_fan_rate_limited_until`, `_fan_rate_limited_direction` |
+| `rate_limit` | `FanRateLimitState` | `NOT_DEFERRED`, `DEFERRED_ACTIVATE`, `DEFERRED_DEACTIVATE` | `_fan_rate_limited_until`, `_fan_rate_limited_direction` (written on DEFER_NEW in `_activate_fan()`/`_deactivate_fan()`; cleared by a same-direction retry that lands, or when abandoned via `_clear_fan_deferral_record()`: pause end, all sensors closed, occupant fan on/off, an opposite-direction CA request (not the reconcile "no-fan" bookkeeping call), hvac_fan restriction refusal — Issue #1212) |
 
 The all-idle `FanLifecycleState.initial()` — `OFF`/`NONE`/`IDLE`/`NONE`/`NOT_DEFERRED` — matches every axis's default field value in a freshly-constructed `AutomationEngine`.
 
@@ -154,7 +154,7 @@ Per this project's Accuracy Verification convention: `fan_fsm.py`'s own module d
 
 **Wiring-correctness tests** (not decision-logic re-proofs — each of the 6 imported pure functions already has its own exhaustive unit coverage, out of scope here per `fan_fsm.py`'s own docstring):
 - `tests/test_fan_lifecycle.py` — `derive_fan_lifecycle_state()`'s per-axis derivation rules, including the drift-tick-count-nonzero-implies-ON safety invariant.
-- `tests/test_fan_toggle_rate_limit.py` — the Phase 2 rate-limit backstop `automation.py`'s `_fan_toggle_rate_limited()` delegates to.
+- `tests/test_fan_toggle_rate_limit.py` — the Phase 2 rate-limit backstop `automation.py` reaches through `_resolve_fan_fsm_state()`.
 - `tests/test_fan_fsm.py` — `fan_fsm.transition()`'s own dispatch-on-event-kind wiring for all 16 kinds, both groups' effective-inputs substitution rules, and the 2 deliberately-unreachable kinds' `to_state == from_state` invariant.
 - `tests/test_fan_fsm_single_caller.py` — AST-scan enforcement that each of the 6 pure decision functions is called from at most 2 places in the whole integration (`fan_fsm.py`'s own dispatch, once each, plus at most one named legacy closure in `automation.py`) — the same "sibling threshold drift" guard `test_nat_vent_exit_lockout_coverage.py` provides for nat-vent's exit chain.
 

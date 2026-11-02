@@ -258,7 +258,7 @@ class TestFanToggleRateLimitNeverBlocksManualOverride:
         t1 = t0 + timedelta(seconds=1)  # well within the cooldown window
         with (
             patch(_DT_NOW_PATH, return_value=t1),
-            patch.object(engine, "_fan_toggle_rate_limited") as rate_limit_spy,
+            patch.object(engine, "_resolve_fan_fsm_state") as rate_limit_spy,
         ):
             asyncio.run(engine._deactivate_fan(reason="manual override active"))
 

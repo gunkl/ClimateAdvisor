@@ -210,9 +210,7 @@ from .fan_thermostat_decision import (
     resolve_hard_exit_floor,
 )
 from .fan_toggle_rate_limit import (
-    FanToggleRateLimitInputs,
     FanToggleRateLimitOutcome,
-    decide_fan_toggle_rate_limit,
 )
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
@@ -1589,8 +1587,9 @@ class AutomationEngine:
         # own command sites touch this field.
         self._fan_toggle_command_time: datetime | None = None
         # Issue #641: set whenever a fan toggle is suppressed by the rate-limit backstop
-        # (_fan_toggle_rate_limited) — the timestamp the suppression will lift. None when
-        # no toggle is currently suppressed. Status-tab surfacing only, not read by any
+        # (the FSM path: _resolve_fan_fsm_state + the DEFER_NEW write in _activate_fan/_deactivate_fan) — the
+        # timestamp the suppression will lift. None when no toggle is currently suppressed. Cleared when the deferral
+        # is abandoned (_clear_fan_deferral_record, Issue #1212). Status-tab surfacing only, not read by any
         # decision path — mirrors the pattern of other diagnostic-only fields.
         self._fan_rate_limited_until: datetime | None = None
         # Issue #649: the direction ("activate"/"deactivate") the pending deferral above
@@ -2099,13 +2098,11 @@ class AutomationEngine:
     def _paused_by_door(self, value: bool) -> None:
         _was_paused = getattr(self, "_paused_by_door_flag", False)
         self._paused_by_door_flag = value
-        if (
-            _was_paused
-            and not value
-            and getattr(self, "_door_pause_hold", 0) == 0
-            and getattr(self, "_fan_manual_origin_pending", None) is not None
-        ):
-            self._discard_fan_manual_origin_pending("door_pause_ended")
+        if _was_paused and not value and getattr(self, "_door_pause_hold", 0) == 0:
+            if getattr(self, "_fan_manual_origin_pending", None) is not None:
+                self._discard_fan_manual_origin_pending("door_pause_ended")
+            # Issue #1212: the pause is over, so a start deferred for it (no pending fact needed) is abandoned too.
+            self._clear_fan_deferral_record("activate", "door_pause_ended")
 
     @contextlib.contextmanager
     def _holding_door_pause(self) -> Iterator[None]:
@@ -2810,6 +2807,9 @@ class AutomationEngine:
         self._end_fan_off_hold("occupant_fan_on")
         # Issue #1205: the occupant's newest action owns the fan; a deferred CA start no longer carries provenance.
         self._discard_fan_manual_origin_pending("occupant_fan_override")
+        # Issue #1212: the occupant owns the fan now, so any CA start OR stop deferred for the toggle floor is
+        # abandoned, with or without a pending fact.
+        self._clear_fan_deferral_record(None, "occupant_fan_override")
         self._clear_fan_manual_origin("occupant_fan_override")
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
@@ -2984,6 +2984,9 @@ class AutomationEngine:
         _settle_active = _settle_until is not None and dt_util.now() <= _settle_until
         # Issue #1205: the occupant is acting on the fan, so a deferred-start fact is moot either way.
         self._discard_fan_manual_origin_pending("occupant_fan_off")
+        # Issue #1212: the occupant owns the fan now, so any CA start OR stop deferred for the toggle floor is
+        # abandoned, with or without a pending fact.
+        self._clear_fan_deferral_record(None, "occupant_fan_off")
         # Issue #1205: label provenance only. The marker counts for the run it was armed for; a stale or unmatched
         # one is dropped and the plain fan-off wording is used. It NEVER suppresses or shortens the grace.
         _manual_origin = self._consume_fan_manual_origin()
@@ -3344,6 +3347,60 @@ class AutomationEngine:
             self._fan_start_seq,
         )
 
+    def _clear_fan_deferral_record(
+        self, direction: str | None, reason: str, *, applies_at: datetime | None = None
+    ) -> bool:
+        """Drop the toggle-floor deferral record when it is abandoned; the ONE choke point (Issue #1212).
+
+        Occupant view: CA deferred a fan start/stop for the 5-minute toggle floor and then abandoned it (the window
+        closed, the occupant used the fan, CA's own next request went the other way). Left behind, the whole-house-fan
+        card kept "(on/off pending ...)" and a later unrelated start/stop logged "applying deferred ..." hours later.
+
+        ``direction`` is "activate", "deactivate" or None (either). The record is cleared only when it matches; the
+        optional ``applies_at`` additionally requires the recorded moment to be that one. Returns whether it cleared;
+        a no-op (nothing recorded, other direction) is silent.
+
+        Coupling: the #1205 pending manual-origin fact is bound to the "activate" record's ``applies_at``. Clearing
+        that record drops the pending fact in the same step, so the two can never disagree (an orphaned pending could
+        never be matched by a later start and would mislabel the occupant's fan-off).
+        """
+        recorded_dir = self._fan_rate_limited_direction
+        recorded_at = self._fan_rate_limited_until
+        if recorded_dir is None and recorded_at is None:
+            return False
+        if direction is not None and recorded_dir != direction:
+            return False
+        if applies_at is not None and recorded_at != applies_at:
+            return False
+        self._fan_rate_limited_until = None
+        self._fan_rate_limited_direction = None
+        _pending = self._fan_manual_origin_pending
+        _pending_dropped = False
+        if _pending is not None and recorded_dir == "activate" and _pending[0] == recorded_at:
+            self._fan_manual_origin_pending = None
+            _pending_dropped = True
+        _LOGGER.info(
+            "Fan toggle deferral record cleared: reason=%s direction=%s applies_at=%s pending_fact_dropped=%s"
+            " (Issue #1212)",
+            reason,
+            recorded_dir,
+            recorded_at.strftime("%H:%M:%S") if isinstance(recorded_at, datetime) else recorded_at,
+            _pending_dropped,
+        )
+        if _pending_dropped:
+            self._log_fan_manual_origin_pending_discarded(reason, _pending[0], True)
+        return True
+
+    @staticmethod
+    def _log_fan_manual_origin_pending_discarded(reason: str, applies_at: datetime, record_cleared: bool) -> None:
+        """The single wording of the #1205 pending-discard line (tests and the debugging guide key on it)."""
+        _LOGGER.info(
+            "Fan manual-origin pending discarded: reason=%s applies_at=%s deferral_record_cleared=%s (Issue #1205)",
+            reason,
+            applies_at.strftime("%H:%M:%S"),
+            record_cleared,
+        )
+
     def _discard_fan_manual_origin_pending(self, reason: str) -> None:
         """Drop the pending fact and the abandoned deferral record it was raised for (Issue #1205)."""
         pending = self._fan_manual_origin_pending
@@ -3352,16 +3409,9 @@ class AutomationEngine:
         self._fan_manual_origin_pending = None
         # The deferral record this pending was raised for is abandoned with it: left behind, a later unrelated
         # start would log "applying deferred activation" and the status card could show an activation pending.
-        _record_cleared = self._fan_rate_limited_direction == "activate" and self._fan_rate_limited_until == pending[0]
-        if _record_cleared:
-            self._fan_rate_limited_until = None
-            self._fan_rate_limited_direction = None
-        _LOGGER.info(
-            "Fan manual-origin pending discarded: reason=%s applies_at=%s deferral_record_cleared=%s (Issue #1205)",
-            reason,
-            pending[0].strftime("%H:%M:%S"),
-            _record_cleared,
-        )
+        # Issue #1212: the record clear is the shared helper's (pending is already None here, so no recursion).
+        _record_cleared = self._clear_fan_deferral_record("activate", reason, applies_at=pending[0])
+        self._log_fan_manual_origin_pending_discarded(reason, pending[0], _record_cleared)
 
     def _resolve_fan_manual_origin_pending_on_start(
         self, *, deferral_applied_at: datetime | None, seq_before: int
@@ -6957,6 +7007,13 @@ class AutomationEngine:
         async with self._decision_pass("handle_all_doors_windows_closed"):
             was_nat_vent = self._natural_vent_active
             was_paused = self._paused_by_door
+            # Issue #1212 (F3): a start deferred for the toggle floor because a window opened is abandoned now that
+            # every sensor is closed (no pause ever recorded, so the pause-end clear never fires). Cleared first, so a
+            # stop this pass defers for the exit below is not mistaken for it (activate only).
+            # Reason label: with a pause recorded this close IS the pause ending (the #1205 log line keys on it).
+            self._clear_fan_deferral_record(
+                "activate", "door_pause_ended" if was_paused else "all_doors_windows_closed"
+            )
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "sensor_all_closed",
@@ -9180,6 +9237,10 @@ class AutomationEngine:
                     and not self._any_monitored_sensor_settled_open()
                 ),
                 release_suppression=True,
+                # Issue #1212: bookkeeping, not a stop decision -- a start deferred by the toggle floor (e.g. a
+                # grace-expiry reactivation while paused) is still retried by check_natural_vent_conditions(), so
+                # its record and #1205 pending fact must survive this call.
+                abandons_deferral=False,
             )
             return
 
@@ -11940,7 +12001,7 @@ class AutomationEngine:
             # recurrence of the exact incident this fixes — must not be filtered out of
             # production logs at the default level. INFO for a fresh deferral (worth a
             # human noticing), DEBUG for a repeat of an already-reported deferral within
-            # the same window — same split already used by _fan_toggle_rate_limited()'s
+            # the same window — same split already used by the fan FSM's rate-limit decision's
             # own DEFER_NEW/DEFER_DUPLICATE logging for the identical reason (Issue #649).
             _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
             _log(
@@ -15998,83 +16059,6 @@ class AutomationEngine:
         """
         return self.command_context_matches("fan", event_context_id, event_context_parent_id)
 
-    def _fan_toggle_rate_limited(self, *, action: str, reason: str) -> FanCommandResult | None:
-        """Hard safety backstop against rapid fan on/off/on cycling (Issue #641).
-
-        Returns ``None`` if this toggle is NOT rate-limited (caller should proceed).
-        Otherwise returns ``FanCommandResult.RATE_LIMITED_NEW`` the first time a given
-        deferral window is reported, or ``RATE_LIMITED_DUP`` for every later call that
-        lands in the *same* window (Issue #649) — e.g. two independent decision paths
-        noticing the same condition in one tick, or `fan_thermostat_check()` re-running
-        on every subsequent temperature-change tick while still blocked. Before #649
-        every such call logged its own WARNING and fired its own
-        ``incident_detected``/``fan_rapid_cycling`` event, producing an unbounded string
-        of duplicate, misleadingly-framed Activity Report rows for what is physically
-        one ongoing blocked state — the floor doing its job, not an anomaly, so it is no
-        longer reported as an incident at all.
-
-        Defense-in-depth: independent of any specific root cause, protects the physical
-        WHF/HVAC-fan relay from rapid cycling regardless of which upstream decision logic
-        produced the reversal (the WHF fast-cycling incident that motivated this — a
-        proactive-floor exit immediately followed by reactivation — no longer occurs,
-        since the predictive exit itself was removed in Issue #959, but this backstop
-        holds even if a different, future gap produces the same physical symptom).
-
-        Only ever compares against ``self._fan_toggle_command_time`` — stamped
-        exclusively by ``_activate_fan``/``_deactivate_fan``'s own command sites, not
-        the broader ``_fan_command_time`` echo-tracking field (see that attribute's
-        declaration for why the two must stay separate: an internal bookkeeping-only
-        stamp with no real physical toggle must not poison this guard). A genuine
-        user/RF-remote fan action never reaches this check either way, since both
-        callers already return early when ``self._fan_override_active`` is set.
-
-        isinstance guard: several call sites across the codebase (e.g. the fan-mode
-        assertion inside ``_set_hvac_mode``) stamp fan-related timestamps from
-        ``dt_util.now()`` without the caller having patched a real clock in tests,
-        leaving a ``MagicMock`` rather than a ``datetime`` — matching the defensive
-        pattern this codebase already uses elsewhere for mocked-engine timestamp reads
-        (see ``_format_grace_remaining()``). Treat anything that isn't a real timestamp
-        as "no prior command", never raise.
-        """
-        outcome, applies_at = decide_fan_toggle_rate_limit(
-            FanToggleRateLimitInputs(
-                last_toggle_command_time=self._fan_toggle_command_time,
-                action=action,
-                rate_limited_until=self._fan_rate_limited_until,
-                rate_limited_direction=self._fan_rate_limited_direction,
-                min_interval_s=FAN_MIN_TOGGLE_INTERVAL_S,
-                now=dt_util.now(),
-            )
-        )
-
-        if outcome is FanToggleRateLimitOutcome.ALLOW:
-            return None
-
-        if outcome is FanToggleRateLimitOutcome.DEFER_DUPLICATE:
-            # Issue #649: a deferral window already has a WARNING/report on record if
-            # _fan_rate_limited_until already points at this exact applies_at moment for
-            # the same direction — every later call in that same window is a silent
-            # duplicate of already-known information.
-            _LOGGER.debug(
-                "Fan toggle already deferred until %s — skipping duplicate report (%s)",
-                applies_at.strftime("%H:%M:%S"),
-                reason,
-            )
-            return FanCommandResult.RATE_LIMITED_DUP
-
-        elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
-        _LOGGER.info(
-            "Fan toggle deferred: rate limit (%.0fs since last change, min %ds) — %s (%s) — applies at %s",
-            elapsed,
-            FAN_MIN_TOGGLE_INTERVAL_S,
-            action,
-            reason,
-            applies_at.strftime("%H:%M:%S"),
-        )
-        self._fan_rate_limited_until = applies_at
-        self._fan_rate_limited_direction = action
-        return FanCommandResult.RATE_LIMITED_NEW
-
     def _hvac_fan_restriction_block_reason(self) -> str | None:
         """Return a short reason if hvac_fan_restrict_mode blocks HVAC-fan activation now.
 
@@ -16140,6 +16124,11 @@ class AutomationEngine:
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
             return FanCommandResult.DISABLED
+
+        # Issue #1212: CA now wants the fan ON, so a stop it deferred for the toggle floor is abandoned. Runs before
+        # every other early return (override, hold, occupant-press guard, ALREADY_IN_STATE): the intent changed
+        # whether or not this start goes out. After DISABLED only: with no fan configured no record can exist.
+        self._clear_fan_deferral_record("deactivate", "activation_requested")
 
         if self._fan_override_active:
             _LOGGER.info("Fan override active — skipping fan activation")
@@ -16245,9 +16234,7 @@ class AutomationEngine:
                 _LOGGER.info("Feature suppressed: HVAC fan not activated — %s (%s)", _early_restrict_reason, reason)
                 # A deferral recorded by an earlier attempt is moot (the start is refused, nothing is pending);
                 # clear it as the normal path does so the FSM stops reporting DEFERRED_ACTIVATE.
-                if self._fan_rate_limited_direction == "activate":
-                    self._fan_rate_limited_until = None
-                    self._fan_rate_limited_direction = None
+                self._clear_fan_deferral_record("activate", "hvac_fan_restriction")
                 return FanCommandResult.SUPPRESSED
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
@@ -16261,13 +16248,13 @@ class AutomationEngine:
         )
         # Issue #731 Phase 7 fix: the FSM's own computed rate_limit_applies_at
         # (fan_fsm.py's _transition_on_activate_requested() derives it) must be
-        # written back here — mirrors the legacy _fan_toggle_rate_limited()'s own
-        # DEFER_NEW-only write (ALLOW/DEFER_DUPLICATE leave these fields untouched).
+        # written back here — a DEFER_NEW-only write (ALLOW/DEFER_DUPLICATE leave these fields untouched; the
+        # deleted legacy _fan_toggle_rate_limited() did the same).
         if _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
             self._fan_rate_limited_until = _rl_transition.rate_limit_applies_at
             self._fan_rate_limited_direction = "activate"
-        # Issue #757 Step 2 correction: the deleted legacy closure's own
-        # _fan_toggle_rate_limited() carried the ONLY logging for this guard — the
+        # Issue #757 Step 2 correction: the (since deleted, #1212) legacy _fan_toggle_rate_limited()
+        # carried the ONLY logging for this guard — the
         # FSM-authoritative branch never had its own, so this INFO/DEBUG pair (an
         # Observability Requirements-mandated decision-outcome log, per CLAUDE.md)
         # had been silently missing from real production since Phase Fan/WHF (#731)
@@ -17234,6 +17221,7 @@ class AutomationEngine:
         release_suppression: bool | None = None,
         emit_event: bool = True,
         safety: bool = False,
+        abandons_deferral: bool = True,
     ) -> FanCommandResult:
         """Deactivate fan based on configured fan_mode.
 
@@ -17267,6 +17255,11 @@ class AutomationEngine:
                 via the fan FSM's ``rate_limit_bypass`` input, and (d) never touches the HVAC
                 blower in ``FAN_MODE_BOTH`` (rule 1 covers the whole-house fan only). Every other
                 caller must leave this False.
+            abandons_deferral: Issue #1212 — True (default) when this call is CA deciding the fan should be
+                OFF, which abandons a start deferred by the toggle floor (and a #1205 pending fact bound to it).
+                Only the reconcile "no-fan" branch passes False: it is bookkeeping ("fan confirmed off, release
+                any stranded suppression"), not a stop decision, and the deferred start it would otherwise drop
+                is still retried by the paused-reactivation / nat-vent paths, which never read the record.
 
         Returns:
             A ``FanCommandResult`` describing what actually happened (Issue #649) — see
@@ -17306,6 +17299,13 @@ class AutomationEngine:
                 self._fan_active = False
                 self._fan_on_since = None
             return FanCommandResult.DISABLED
+
+        # Issue #1212 (mirror of the _activate_fan() clear): CA now wants the fan OFF, so a start it deferred for the
+        # toggle floor is abandoned. Before every other early return (override, ALREADY_IN_STATE, ...), after
+        # DISABLED only (no fan configured -> no record can exist). Also drops a pending #1205 fact bound to it.
+        # Not for the reconcile "no-fan" bookkeeping call (abandons_deferral=False): no stop was decided there.
+        if abandons_deferral:
+            self._clear_fan_deferral_record("activate", "deactivation_requested")
 
         if self._fan_override_active and not safety:
             if self._fan_remote_timer_hours is not None:
@@ -17452,8 +17452,7 @@ class AutomationEngine:
         )
         # Issue #731 Phase 7 fix: see _activate_fan()'s matching comment — the FSM's
         # own computed rate_limit_applies_at must be written back here, mirroring the
-        # legacy _fan_toggle_rate_limited()'s own DEFER_NEW-only side effect on
-        # _fan_rate_limited_until/_direction.
+        # DEFER_NEW-only write to _fan_rate_limited_until/_direction (the deleted legacy method's side effect).
         if _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
             self._fan_rate_limited_until = _rl_transition.rate_limit_applies_at
             self._fan_rate_limited_direction = "deactivate"

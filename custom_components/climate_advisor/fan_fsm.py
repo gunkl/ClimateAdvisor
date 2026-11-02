@@ -2,7 +2,7 @@
 
 Assembles the pieces Phase 1 (``fan_lifecycle.py``, the composed 5-axis
 ``FanLifecycleState``) and Phase 2 (``fan_toggle_rate_limit.py``, now delegated
-to from ``automation.py``'s ``_fan_toggle_rate_limited()``) built, plus 4 other
+to from the ``_resolve_fan_fsm_state`` path in ``automation.py``) built, plus 4 other
 pre-existing pure decision modules, into one explicit ``(state, event) ->
 Transition`` function, mirroring ``nat_vent_fsm.py``/``override_grace_fsm.py``'s
 shape:

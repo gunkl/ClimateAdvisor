@@ -13,7 +13,7 @@
 | What happens when nat-vent exits and the sensor is still open — pause or grace? | `_exit_nat_vent()` forks: sensor still open → hands off into the pause lifecycle; sensors closed → hands off into the grace lifecycle. See `grace-periods-spec.md` for what happens next in either lifecycle. | [Handoff to Pause/Grace](#handoff-to-pausegrace) |
 | How was this spec's accuracy verified? | Differential replay: `derive_nat_vent_lifecycle_state()` run against the real final engine flags from all 74 golden + 4 pending scenarios (Issue #606), plus 3 hand-reasoned ground-truth scenarios. | [Verification](#verification) |
 | Is every `_exit_nat_vent()` call site's lockout-arming decision enforced, not just documented? | Yes — `tests/test_nat_vent_exit_lockout_coverage.py` AST-scans every call site and requires each to be explicitly classified `"arms lockout"` / `"exempted: <reason>"`, with a positive control that checks the claim against the actual `set_outdoor_exit_time=True` argument (Issue #641). | [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) |
-| Is there a hard floor on how fast CA can physically toggle the fan, independent of any exit/reactivation logic? | Yes — `AutomationEngine._fan_toggle_rate_limited()` enforces `FAN_MIN_TOGGLE_INTERVAL_S` (300s) as a defense-in-depth backstop. (See [Follow-up: rate-limit reporting](#follow-up-rate-limit-reporting-was-misleading-and-mis-framed-as-an-incident-issue-649) for details). | [Follow-up: rate-limit reporting](#follow-up-rate-limit-reporting-was-misleading-and-mis-framed-as-an-incident-issue-649) |
+| Is there a hard floor on how fast CA can physically toggle the fan, independent of any exit/reactivation logic? | Yes — the fan FSM path (`_resolve_fan_fsm_state()` in `_activate_fan()`/`_deactivate_fan()`) enforces `FAN_MIN_TOGGLE_INTERVAL_S` (300s) as a defense-in-depth backstop. (See [Follow-up: rate-limit reporting](#follow-up-rate-limit-reporting-was-misleading-and-mis-framed-as-an-incident-issue-649) for details). | [Follow-up: rate-limit reporting](#follow-up-rate-limit-reporting-was-misleading-and-mis-framed-as-an-incident-issue-649) |
 | Does `check_natural_vent_conditions()`'s exit chain always decide WHY a session ends? | No — confirmed by direct experiment (Issue #608): `nat_vent_temperature_check()` and `fan_thermostat_check()` (both dispatched from the same `temp_update`/thermostat-attribute-change trigger, both already pure-extracted by Issue #441) run FIRST and independently implement equivalent comfort-floor and outdoor-rise-style stops — they win the race and exit the session before `check_natural_vent_conditions()`'s chain ever evaluates, for every golden scenario tested. **Update (Issue #737):** `fan_thermostat_check()`'s stop is no longer a hand-duplicated inline check (Issue #435 unified it via `decide_fan_thermostat_check()`). `nat_vent_temperature_check()`'s legacy branch was the last genuine hand-rolled duplicate — it was deleted in Phase 6 (Issues #757–#770); the FSM path it duplicated is now the sole branch and the one every real install runs today. See the Known Duplicate-Logic Race section's update note. | [Known Duplicate-Logic Race](#known-duplicate-logic-race-issue-608-finding) |
 | Did an offline shadow engine prove the nat-vent FSM safe to construct? | Yes — `tools/sim_harness/shadow_engine_pair.py` (Issue #611) proved that an offline `dry_run=True` instance never contaminated production across 60 scenarios. This validation informed the Phase 6 decision to make the FSM permanent authority. | [Offline Whole-Engine Shadow-Pair Validation — Historical Context](#offline-whole-engine-shadow-pair-validation-issue-611-subtask-o) |
 | What happened to the live shadow engine and diagnostic sensor? | Both retired in Phase 6 (Issues #757–#770) once the nat-vent FSM, along with all other FSM subsystems, proved reliable through weeks of production use. The shadow-engine infrastructure (`coordinator.shadow_automation_engine`, `switch.climate_advisor_shadow_engine_primary`, diagnostic comparisons) was fully deleted; `lifecycle_dispatcher.py` provides the audit trail instead. | [Offline Whole-Engine Shadow-Pair Validation — Historical Context](#offline-whole-engine-shadow-pair-validation-issue-611-subtask-o) |
@@ -167,8 +167,9 @@ was closed. This section is retained as historical incident record only.
 **Root-cause fix alone was judged insufficient** — the occupant impact (rapid relay
 cycling, forced to disable automation) demanded a backstop that holds even if a
 *different*, future gap in this exit/entry logic reproduces the same physical
-symptom. `AutomationEngine._fan_toggle_rate_limited()` is a hard floor inside
-`_activate_fan()`/`_deactivate_fan()`: any reversal within `FAN_MIN_TOGGLE_INTERVAL_S`
+symptom. The fan FSM's rate-limit decision (`decide_fan_toggle_rate_limit()`, reached through
+`_resolve_fan_fsm_state()`; the original `_fan_toggle_rate_limited()` method was dead code and was deleted in #1212)
+is a hard floor inside `_activate_fan()`/`_deactivate_fan()`: any reversal within `FAN_MIN_TOGGLE_INTERVAL_S`
 (300s, `const.py`) of CA's own last real toggle command is suppressed, logged at
 WARNING, and raised as a proactive `fan_rapid_cycling` incident
 (`docs/incident-classes.md`) — visible through the existing incident pipeline with no
@@ -255,7 +256,7 @@ architecture exposed (not caused) by #641's rate limiter:
    `fan_deactivated`, etc.) built its Activity Report event **before** calling
    `_exit_nat_vent()` → `_deactivate_fan()`/`_activate_fan()`, with no way to know
    whether the toggle actually executed or was silently swallowed by
-   `_fan_toggle_rate_limited()`. This pattern predates #641 — before the rate limiter
+   the rate limiter (the FSM's DEFER_NEW outcome). This pattern predates #641 — before the rate limiter
    existed, "decided" and "physically executed" were always the same instant, so no
    caller needed to distinguish them.
 2. **The same blocked moment produced multiple rows.** Two independent mechanisms: (a)
@@ -273,10 +274,21 @@ caller's event itself with `fan_mode_change` reflecting the real
 `FanCommandResult` — unchanged when executed, a `"deferred (5-min floor, applies
 HH:MM:SS)"` description when newly rate-limited, and not emitted at all for a
 duplicate block within an already-reported deferral window.
-`_fan_toggle_rate_limited()` now tracks `_fan_rate_limited_direction` alongside
-`_fan_rate_limited_until` so it can recognize "this is the same pending window as
+The FSM path now tracks `_fan_rate_limited_direction` alongside
+`_fan_rate_limited_until` (written on DEFER_NEW in `_activate_fan()`/`_deactivate_fan()`) so it can recognize "this is the same pending window as
 last time" — the single change that fixes both duplicate-report mechanisms above,
-since both funnel through this one function. `_activate_fan()`/`_deactivate_fan()`
+since both funnel through this one decision.
+
+**Who clears the record (Issue #1212).** A deferral that is abandoned must not linger: the card kept
+"(on/off pending ...)" and a later unrelated start/stop logged "applying deferred ..." hours later. One helper,
+`_clear_fan_deferral_record(direction | None, reason)`, clears it (INFO `Fan toggle deferral record cleared`),
+and it is called by: the door/window pause ending (`_paused_by_door` setter, "activate"); `handle_all_doors_windows_closed()`
+("activate"; covers a start deferred for a window that closes with no pause); the occupant turning the fan on
+(`handle_fan_manual_override()`) or off (`on_fan_turned_off()`), both directions; `_activate_fan()` (clears
+"deactivate": CA now wants the fan on) and `_deactivate_fan()` (clears "activate"), before any early return
+including ALREADY_IN_STATE (except the reconcile "no-fan" branch, `abandons_deferral=False`: bookkeeping, not a stop
+decision, and the deferred reactivation is still retried while paused); and the hvac_fan restriction refusal ("activate"). A same-direction retry that lands
+clears it inline ("applying deferred ..."). `_activate_fan()`/`_deactivate_fan()`
 log an INFO "5-minute floor expired — applying deferred exit/activation" line when a
 previously-blocked command finally lands, ahead of the pre-existing (unchanged,
 WARNING) "Activated/Deactivated fan" line — deferred completion is normal operation,
@@ -327,7 +339,7 @@ addressed a separate, unrelated root cause — see `docs/grace-periods-spec.md`'
 - [`_exit_nat_vent`](../custom_components/climate_advisor/automation.py#L5098) — the primary (not sole) exit choke point
 - [`decide_nat_vent_gate`, `decide_nat_vent_soft_start_gate`](../custom_components/climate_advisor/nat_vent_gate.py) — entry gates
 - [`is_reactivation_locked_out`](../custom_components/climate_advisor/nat_vent_reactivation_lockout.py) — lockout predicate
-- [`AutomationEngine._fan_toggle_rate_limited`](../custom_components/climate_advisor/automation.py) — hard fan-toggle rate-limit backstop, independent of exit/reactivation logic (Issue #641)
+- [`decide_fan_toggle_rate_limit`](../custom_components/climate_advisor/fan_toggle_rate_limit.py) via `AutomationEngine._resolve_fan_fsm_state` — hard fan-toggle rate-limit backstop, independent of exit/reactivation logic (Issue #641); record cleared by `AutomationEngine._clear_fan_deferral_record` (Issue #1212)
 - [`tests/test_nat_vent_exit_lockout_coverage.py`](../tests/test_nat_vent_exit_lockout_coverage.py) — AST-based coverage registry for every `_exit_nat_vent()` call site's lockout-arming decision (Issue #641)
 - [`tests/test_duplicate_gate_detection.py`](../tests/test_duplicate_gate_detection.py) — AST-based structural-duplication ("DRY") checker: flags 2+ functions independently reimplementing the same gate/threshold condition (alpha-renamed operand matching, not textual diff), across `AutomationEngine` and the pure decision-leaf modules. Registry-enforced (Issue #737). Its former primary tracked instance — `nat_vent_temperature_check()`'s legacy branch vs `decide_nat_vent_exit()` — was resolved when Phase 6 (Issues #757–#770) deleted the legacy branch; the file's own `_ACKNOWLEDGED_DUPLICATE_GATES` registry has the current, live list.
 - [`nat_vent_fsm.transition`](../custom_components/climate_advisor/nat_vent_fsm.py) — the unified `(state, event) -> Transition` table assembling gate/exit/soft-start decisions into one function (Issue #633, Block 5 Phase P completion; soft-start→full-gate escalation modeling added in Phase R prep). Since Phase 6 (Issues #757–#770), this is the sole, permanent decision path for nat-vent — there is no remaining legacy branch or authoritative-flag toggle to model around.

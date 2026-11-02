@@ -135,6 +135,7 @@ class TestDecideComfortStall:
             "sensor_open": {"sensor_open": True},
             "startup_coalescing": {"startup_coalescing": True},
             "nat_vent_tolerated": {"nat_vent_tolerated": True},
+            "thermostat_swing": {"thermostat_swing_tolerated": True},
             "indoor_unavailable": {"indoor": None},
             "mode_unsupported": {"hvac_modes": ["off", "cool"]},
         }
@@ -206,6 +207,10 @@ class _Rig:
             "_note_equipment_activity",
             "_compute_hvac_control_issues",
             "_is_nat_vent_tolerated_deviation",
+            "_learned_swings",
+            "_thermostat_hvac_mode",
+            "_is_within_thermostat_hysteresis",
+            "_is_tolerated_comfort_deviation",
         ):
             setattr(coord, name, types.MethodType(getattr(cls, name), coord))
         self._patch = patch("custom_components.climate_advisor.coordinator.dt_util")
@@ -631,3 +636,63 @@ class TestAgainstTheGrainDeadband:
         assert stall_margins("heating", 5.0, 1.0) == (1.0, 6.0)
         assert stall_margins("cooling", 5.0, 1.0) == (6.0, 1.0)
         assert stall_margins(None, 2.0, 1.0) == (3.0, 3.0)
+
+
+class TestStallHonoursTheThermostatSwing:
+    """Issue #1258 mirror: a room held 1.2 F under the floor by a thermostat in heat (default 1.5 F swing) is the
+    thermostat's own hysteresis -- the stall alert must not announce "no heating running"; Off keeps the alert."""
+
+    def test_room_inside_the_swing_with_heat_mode_does_not_stall(self):
+        r = _rig(day_type="cold", mode="heat")
+        try:
+            _run_half_hours(r, 6, 66.8)  # 1.2 F under 68: past the 1.0 F margin, inside the 1.5 F swing
+            assert r.events == []
+        finally:
+            r.close()
+
+    def test_room_beyond_the_swing_with_heat_mode_still_stalls(self):
+        r = _rig(day_type="cold", mode="heat")
+        try:
+            _run_half_hours(r, 3, 66.4)  # 1.6 F under: the thermostat would have started heat
+            assert r.names() == ["hvac_output_stall"]
+        finally:
+            r.close()
+
+    def test_swing_exclusion_is_logged_as_thermostat_swing_not_nat_vent(self, caplog):
+        r = _rig(day_type="cold", mode="heat")
+        try:
+            with caplog.at_level("DEBUG", logger="custom_components.climate_advisor.coordinator"):
+                r.tick(0, 66.8)  # 1.2 F under 68, inside the default 1.5 F swing, thermostat in heat
+            msgs = [m for m in caplog.messages if "Comfort stall check skipped" in m]
+            assert msgs == ["Comfort stall check skipped: excluded_by=thermostat_swing"]
+        finally:
+            r.close()
+
+    def test_nat_vent_exclusion_keeps_its_own_name(self, caplog):
+        r = _rig(hysteresis=3.0, mode="heat")
+        try:
+            r.ae._natural_vent_active = True
+            with caplog.at_level("DEBUG", logger="custom_components.climate_advisor.coordinator"):
+                r.tick(0, 66.8)  # inside both tolerances: nat-vent is the reported reason
+            msgs = [m for m in caplog.messages if "Comfort stall check skipped" in m]
+            assert msgs == ["Comfort stall check skipped: excluded_by=nat_vent_tolerated"]
+        finally:
+            r.close()
+
+    def test_a_mislearned_four_degree_swing_is_capped_so_the_stall_still_fires(self):
+        """Owner cap (2.5 F): 3.5 F under the floor with heat idle for 3 h alerts even with a learned 4.0 F swing."""
+        r = _rig(day_type="cold", mode="heat")
+        r.coord.learning = SimpleNamespace(get_thermal_model=lambda: {"swing_heat_f": 4.0, "swing_cool_f": 4.0})
+        try:
+            _run_half_hours(r, 3, 64.5)
+            assert r.names() == ["hvac_output_stall"]
+        finally:
+            r.close()
+
+    def test_same_room_with_the_thermostat_off_still_stalls(self):
+        r = _rig(day_type="cold", mode="off")
+        try:
+            _run_half_hours(r, 3, 66.8)
+            assert r.names() == ["hvac_output_stall"]
+        finally:
+            r.close()

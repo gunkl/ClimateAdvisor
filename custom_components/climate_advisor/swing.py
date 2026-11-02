@@ -26,10 +26,13 @@ from typing import Any
 
 try:
     from .const import (
+        COMFORT_DEVIATION_FLOOR_F,
+        COMFORT_SWING_TOLERANCE_MAX_F,
         THERMAL_COAST_ESTIMATOR_WINDOW,
         THERMAL_COAST_MAX_F,
         THERMAL_COAST_MAX_S,
         THERMAL_SWING_AUDIT_CAP,
+        THERMAL_SWING_DEFAULT_F,
         THERMAL_SWING_DEFINITION_VERSION,
         THERMAL_SWING_ESTIMATOR_WINDOW,
         THERMAL_SWING_MAX_F,
@@ -45,10 +48,13 @@ except ImportError:  # loaded as a standalone file by tools/ (the package __init
     _spec = _ilu.spec_from_file_location("_ca_const_standalone", _Path(__file__).with_name("const.py"))
     _const = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
     _spec.loader.exec_module(_const)  # type: ignore[union-attr]
+    COMFORT_DEVIATION_FLOOR_F = _const.COMFORT_DEVIATION_FLOOR_F
+    COMFORT_SWING_TOLERANCE_MAX_F = _const.COMFORT_SWING_TOLERANCE_MAX_F
     THERMAL_COAST_ESTIMATOR_WINDOW = _const.THERMAL_COAST_ESTIMATOR_WINDOW
     THERMAL_COAST_MAX_F = _const.THERMAL_COAST_MAX_F
     THERMAL_COAST_MAX_S = _const.THERMAL_COAST_MAX_S
     THERMAL_SWING_AUDIT_CAP = _const.THERMAL_SWING_AUDIT_CAP
+    THERMAL_SWING_DEFAULT_F = _const.THERMAL_SWING_DEFAULT_F
     THERMAL_SWING_DEFINITION_VERSION = _const.THERMAL_SWING_DEFINITION_VERSION
     THERMAL_SWING_ESTIMATOR_WINDOW = _const.THERMAL_SWING_ESTIMATOR_WINDOW
     THERMAL_SWING_MAX_F = _const.THERMAL_SWING_MAX_F
@@ -611,3 +617,68 @@ def apply_coast_samples(cache: dict[str, Any], mode: str, new_samples: list[dict
     cache[f"coast_{mode}_past_setpoint_f"] = summary["past_setpoint_f"]
     cache[f"observation_count_coast_{mode}"] = int(cache.get(f"observation_count_coast_{mode}", 0) or 0) + added
     return added
+
+
+# ---------------------------------------------------------------------------
+# Comfort-deviation tolerance (Issue #1258)
+# ---------------------------------------------------------------------------
+# The room is allowed to sit up to the thermostat's own swing past the band edge while the thermostat is
+# running in the matching direction: that is the configured hysteresis, not a failure to hold the band.
+
+SWING_SOURCE_LEARNED = "learned"
+SWING_SOURCE_DEFAULT = "default"
+SWING_SOURCE_CAPPED_SUFFIX = " (capped)"
+
+# hvac modes in which the thermostat holds each direction (owner rule, 2026-11-02): Off, the opposite mode
+# or an unknown mode do NOT hold the room by hysteresis, so only the fixed floor applies there.
+_HOLDING_MODES: dict[str, frozenset[str]] = {
+    "heat": frozenset({"heat", "heat_cool", "auto"}),
+    "cool": frozenset({"cool", "heat_cool", "auto"}),
+}
+
+
+def swing_tolerance(swing_f: Any) -> tuple[float, str]:
+    """``(tolerance_f, source)`` for one direction.
+
+    ``min(max(swing or 1.5 F default, 0.5 F floor), 2.5 F cap)``. ``source`` is ``"learned"`` / ``"default"``,
+    with ``" (capped)"`` appended when the cap bit (owner decision 2026-11-02: a mis-learned large swing must not
+    silence the comfort alarms). Only the comfort tolerance is capped, never the learned swing itself.
+    """
+    if isinstance(swing_f, (int, float)) and not isinstance(swing_f, bool) and swing_f > 0:
+        raw, source = max(COMFORT_DEVIATION_FLOOR_F, float(swing_f)), SWING_SOURCE_LEARNED
+    else:
+        raw, source = max(COMFORT_DEVIATION_FLOOR_F, THERMAL_SWING_DEFAULT_F), SWING_SOURCE_DEFAULT
+    if raw > COMFORT_SWING_TOLERANCE_MAX_F:
+        return COMFORT_SWING_TOLERANCE_MAX_F, source + SWING_SOURCE_CAPPED_SUFFIX
+    return raw, source
+
+
+def thermostat_holds_direction(direction: str, thermostat_mode: Any) -> bool:
+    """True when the thermostat's own mode holds the room in ``direction`` ("heat" or "cool")."""
+    return isinstance(thermostat_mode, str) and thermostat_mode.lower() in _HOLDING_MODES.get(direction, frozenset())
+
+
+def within_thermostat_hysteresis(
+    indoor_f: float,
+    floor_f: float | None,
+    ceiling_f: float | None,
+    swing_heat_f: Any,
+    swing_cool_f: Any,
+    thermostat_mode: Any,
+) -> bool:
+    """True when ``indoor_f`` is out of band only by the thermostat's own learned swing (Issue #1258).
+
+    Under the floor by no more than the heat tolerance while the thermostat is in heat/heat_cool/auto, or over
+    the ceiling by no more than the cool tolerance while it is in cool/heat_cool/auto. In band, beyond the
+    swing, or with the thermostat Off / in the opposite mode / unknown: False (the caller's fixed 0.5 F rule
+    stays). All values are internal degrees F; the swing is a delta. The boundary is inclusive (a room exactly
+    one swing out is still the thermostat's own hysteresis).
+    """
+    eps = 1e-9
+    if floor_f is not None and indoor_f < floor_f:
+        tol, _ = swing_tolerance(swing_heat_f)
+        return thermostat_holds_direction("heat", thermostat_mode) and (floor_f - indoor_f) <= tol + eps
+    if ceiling_f is not None and indoor_f > ceiling_f:
+        tol, _ = swing_tolerance(swing_cool_f)
+        return thermostat_holds_direction("cool", thermostat_mode) and (indoor_f - ceiling_f) <= tol + eps
+    return False

@@ -645,6 +645,8 @@ This is a real, intentional behavior change: houses that previously got confiden
 
 **Storage (`thermal_model_cache`):** `swing_heat_f`/`swing_cool_f`, `swing_*_samples`, `swing_*_resolution_f`, `swing_*_off_point_f` (stop point, kept separate), `observation_count_swing_*`, `swing_definition_version` (migration marker: caches without the current value are nulled on load). Issue #1233 adds, all additive and downgrade-safe: `swing_*_audit` (the newest 50 judged cycles per mode with their inputs and reject reason), `swing_*_reject_counts` (cumulative per reason), and the separate coast fields `coast_*_samples`, `coast_*_f`, `coast_*_past_setpoint_f`, `observation_count_coast_*` (peak after heat-off / trough after cool-off; never part of the swing - see [05](05-LEARNING-ENGINE-DESIGN.md) "Coast overshoot"). `get_thermal_model()` adds `swing_definition`, `swing_debug` and the `coast_*` values.
 
+**Comfort tolerance (Issue #1258):** the learned swing (default 1.5 F, floor 0.5 F, capped at 2.5 F for this purpose only) is the tolerance below the floor / above the ceiling inside which no comfort incident, violation minute or stall alert is raised, while the thermostat mode matches the direction; see [08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md) 5e-vii.
+
 **Default for display:** `THERMAL_SWING_DEFAULT_F = 1.5 F` - used when the observed value is None (`swing_heat_f_display` / `swing_cool_f_display` in `get_thermal_model()` output).
 
 **Confidence tiers:**

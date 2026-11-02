@@ -760,6 +760,7 @@ range in effect at that moment** — the same time-varying target band the chart
 (awake: `comfort_heat`–`comfort_cool`, widened by aggressive savings when on; sleep: `sleep_heat`–`sleep_cool`
 with the wake/sleep ramps; away/vacation: the setback range). Issue #1107: before 0.8.1 it was always
 the static `comfort_heat`–`comfort_cool` range, so CA's own planned setbacks counted as discomfort.
+Issue #1258: a minute is also not counted while indoor is no more than the thermostat's own learned swing past the band edge and the thermostat is in the matching mode (`coordinator._is_tolerated_comfort_deviation()`; 1.5 °F default, 0.5 °F floor, 2.5 °F cap; Off or the opposite mode count as before).
 The band is read via `coordinator._comfort_score_band_now()` → `_target_band_lower_upper_now()`
 (the per-cycle cached band, Issue #514); while no band has been resolved yet (`(None, None)`: before
 the first cycle's band, or a weather source with no hourly forecast) it falls back to the static

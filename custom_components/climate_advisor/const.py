@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.42"
+VERSION = "0.8.43"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1468,6 +1468,13 @@ THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
 # transition; cool: indoor - setpoint at the cool-on transition). One-sided, so heat and cool are
 # independent and NOT symmetric around the setpoint. See swing.py for the pure rules.
 THERMAL_SWING_DEFAULT_F: float = 1.5
+# Issue #1258: a comfort deviation (incident / violation minute) is never tolerated below this many degF past the
+# band edge - the historical fixed incident threshold, now the FLOOR of the swing-aware tolerance in swing.py.
+COMFORT_DEVIATION_FLOOR_F: float = 0.5
+# Issue #1258 (owner decision 2026-11-02): the swing-aware comfort tolerance never exceeds this many degF, so a
+# mis-learned large swing cannot silence the incident, the violation minutes and the stall alert. Caps ONLY the
+# comfort tolerance; the learned swing itself (swing_heat_f / swing_cool_f) is unchanged.
+COMFORT_SWING_TOLERANCE_MAX_F: float = 2.5
 THERMAL_SWING_MIN_F: float = 0.1
 THERMAL_SWING_MAX_F: float = 5.0
 # An on-transition within this many seconds after a setpoint (or HVAC mode) change is a jump

@@ -42,6 +42,7 @@ from .const import (
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
     ATTR_TREND,
+    COMFORT_DEVIATION_FLOOR_F,
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
     MAX_WEATHER_BIAS_APPLY_F,
@@ -52,11 +53,11 @@ from .const import (
     OBS_TYPE_VENT_FAN_DECAY,
     OBS_TYPE_VENT_WINDOW_DECAY,
     THERMAL_OBS_CAP,
-    THERMAL_SWING_DEFAULT_F,
 )
 from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
 from .hvac_action import is_hvac_action_active
+from .swing import swing_tolerance, thermostat_holds_direction, within_thermostat_hysteresis
 from .temperature import UNIT_SYMBOL, display_temp, format_temp, format_temp_delta, read_attribute_temp_f
 
 _LOGGER = logging.getLogger(__name__)
@@ -3838,11 +3839,13 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
     Two deterministic checks, pre-computed so the model cites them rather than
     re-deriving: (1) hvac_mode=off but hvac_action reports active — flagged unless
     it's the expected CA-fan-only-mode case (is_ca_fan_running() is the single
-    source of truth here, Issue #458); (2) indoor temp vs. comfort band, using the
-    thermostat's own swing so a within-hysteresis shortfall isn't flagged. Since Issue #1234 the
-    swing is how far BELOW the setpoint the thermostat lets the room fall before heating (how far
-    ABOVE before cooling), so ``comfort_heat - indoor > swing_heat`` is exactly "the room has
-    drifted past the point where the thermostat itself would have started heating".
+    source of truth here, Issue #458); (2) indoor temp vs. comfort band, judged by the SAME rule as
+    the comfort incident scan (Issue #1258): the room may sit up to the thermostat's own learned
+    swing past the band edge (``swing.within_thermostat_hysteresis``; since Issue #1234 the swing is
+    how far BELOW the setpoint the thermostat lets the room fall before heating, how far ABOVE before
+    cooling) only while the thermostat mode holds that direction (heat/heat_cool/auto below,
+    cool/heat_cool/auto above). Off, the opposite mode or an unknown mode keep only the
+    ``COMFORT_DEVIATION_FLOOR_F`` (0.5 F) tolerance, so a cold room with the thermostat Off is flagged.
     """
     data: dict[str, Any] = coordinator.data or {}
     options: dict[str, Any] = coordinator.config or {}
@@ -3871,17 +3874,18 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
             )
 
     # One-sided thermostat hysteresis (swing_heat_f below / swing_cool_f above the setpoint), learned
-    # from real on-transitions (Issue #1234); THERMAL_SWING_DEFAULT_F until a sample exists.
-    _swing_heat_f = THERMAL_SWING_DEFAULT_F
-    _swing_cool_f = THERMAL_SWING_DEFAULT_F
+    # from real on-transitions (Issue #1234); swing.swing_tolerance() applies THERMAL_SWING_DEFAULT_F
+    # until a sample exists and never goes below COMFORT_DEVIATION_FLOOR_F.
+    _swing_heat_f: Any = None
+    _swing_cool_f: Any = None
     learning = getattr(coordinator, "learning", None)
     if learning is not None and callable(getattr(learning, "get_thermal_model", None)):
         try:
             _build_health = getattr(coordinator, "_build_learning_health", None)
             _health = _build_health() if callable(_build_health) else {}
             _thermal = learning.get_thermal_model(learning_health=_health)
-            _swing_heat_f = _thermal.get("swing_heat_f_display", THERMAL_SWING_DEFAULT_F)
-            _swing_cool_f = _thermal.get("swing_cool_f_display", THERMAL_SWING_DEFAULT_F)
+            _swing_heat_f = _thermal.get("swing_heat_f", _thermal.get("swing_heat_f_display"))
+            _swing_cool_f = _thermal.get("swing_cool_f", _thermal.get("swing_cool_f_display"))
         except Exception:
             pass
 
@@ -3891,19 +3895,33 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
         if current_temp_f is None:
             raise ValueError("no indoor reading")
         ct = current_temp_f
-        # All comparisons are in internal degF; only the rendered text is in the user's unit.
+        # All comparisons are in internal degF (the swing is a degF delta); only the rendered text is
+        # in the user's unit.
         _ct_s = format_temp(ct, _temp_unit, 1)
-        if (ch - ct) > _swing_heat_f:
-            state_flags.append(
-                f"[FLAG] Indoor {_ct_s} < comfort_heat {format_temp(ch, _temp_unit, 1)} -- "
-                f"below by {format_temp_delta(ch - ct, _temp_unit, 1)} "
-                f"(deadband: {format_temp_delta(_swing_heat_f, _temp_unit, 1)})"
+        if ct < ch or ct > cc:
+            _below = ct < ch
+            _direction = "heat" if _below else "cool"
+            _edge = ch if _below else cc
+            _gap = (ch - ct) if _below else (ct - cc)
+            _held = thermostat_holds_direction(_direction, hvac_mode)
+            _swing_tol, _swing_src = swing_tolerance(_swing_heat_f if _below else _swing_cool_f)
+            _tol = _swing_tol if _held else COMFORT_DEVIATION_FLOOR_F
+            _tol_s = (
+                f"thermostat {_direction} swing {format_temp_delta(_swing_tol, _temp_unit, 1)}, {_swing_src}; "
+                f"hvac_mode={hvac_mode}"
+                if _held
+                else f"{format_temp_delta(_tol, _temp_unit, 1)}; hvac_mode={hvac_mode} does not hold {_direction}, "
+                "so the swing does not apply"
             )
-        elif (ct - cc) > _swing_cool_f:
+            _cmp, _side, _edge_name = ("<", "below", "comfort_heat") if _below else (">", "above", "comfort_cool")
+            # Same composition as the incident scan: beyond the 0.5 F floor AND not inside the swing.
+            _flag = _gap > COMFORT_DEVIATION_FLOOR_F and not within_thermostat_hysteresis(
+                ct, ch, cc, _swing_heat_f, _swing_cool_f, hvac_mode
+            )
             state_flags.append(
-                f"[FLAG] Indoor {_ct_s} > comfort_cool {format_temp(cc, _temp_unit, 1)} -- "
-                f"above by {format_temp_delta(ct - cc, _temp_unit, 1)} "
-                f"(deadband: {format_temp_delta(_swing_cool_f, _temp_unit, 1)})"
+                f"{'[FLAG]' if _flag else '[OK]'} Indoor {_ct_s} {_cmp} {_edge_name} "
+                f"{format_temp(_edge, _temp_unit, 1)} -- {_side} by {format_temp_delta(_gap, _temp_unit, 1)} "
+                f"({'beyond' if _flag else 'within'} tolerance: {_tol_s})"
             )
         else:
             state_flags.append(

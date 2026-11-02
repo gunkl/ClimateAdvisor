@@ -11,6 +11,7 @@
 | What units do payload temperatures use? | Internal °F always, regardless of the display unit (`setpoint_f`, `indoor_f`, `last_commanded_setpoint_f`, `comfort_*`); renderers convert for display. | [Invariants](#invariants) |
 | What counts as a "validation error" rather than a device failure? | An exception whose MRO contains `ServiceValidationError`, `Invalid`, `MultipleInvalid` or `ServiceNotSupported` (matched by class name so it works with test stubs). Those are logged and skipped, never an `hvac_command_failed` episode. | [Interfaces](#interfaces) |
 | Which classes carry the thermostat context fields? | `comfort_violation` / `comfort_undertemp` add `thermostat_mode`, `thermostat_action`, `last_commanded_mode`, `last_commanded_setpoint_f`, `last_command_result` via `coordinator._thermostat_incident_context()`. | [Interfaces](#interfaces) |
+| What tolerance did a comfort incident use? | `comfort_violation` / `comfort_undertemp` add `swing_tolerance_f` (internal degF delta, floor 0.5, cap 2.5 = `COMFORT_SWING_TOLERANCE_MAX_F`), `swing_tolerance_source` (`learned` / `default`, with ` (capped)` appended when the cap bit, e.g. `learned (capped)`) and `swing_tolerance_applied` (thermostat mode matched the direction) via `coordinator._hysteresis_incident_context()` (Issue #1258). | [incident-classes.md](incident-classes.md) |
 
 ## Scope
 

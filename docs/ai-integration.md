@@ -237,7 +237,7 @@ and assembly continues.
 |---|---|
 | `current_state` | `coordinator.data` + fresh HVAC runtime |
 | `hvac_entity` | `hass.states.get(climate_entity_id)` |
-| `state_cross_validation` | HVAC mode/action contradiction check + comfort-band deadband/swing check (ported from the retired activity context, Issue #563); the swing is the thermostat's learned one-sided hysteresis (Issue #1234); the LEARNING - THERMAL MODEL section also states what the swing means, the accepted-cycle count, per-reason reject counts and the coast (Issue #1233) |
+| `state_cross_validation` | HVAC mode/action contradiction check + comfort-band deadband/swing check (ported from the retired activity context, Issue #563); the swing is the thermostat's learned one-sided hysteresis (Issue #1234), applied by the comfort incident's own rule (mode gate + 0.5 F floor + 2.5 F cap, Issue #1258); the LEARNING - THERMAL MODEL section also states what the swing means, the accepted-cycle count, per-reason reject counts and the coast (Issue #1233) |
 | `last_briefing` | Most recent daily briefing text |
 | `learning` | Compliance summary, thermal model, weather bias, suggestions, recent daily records |
 | `thermal_pipeline` | Per-obs-type rejection/commit counts, `NEVER LEARNED`/`***PIPELINE FAILURE***` markers, engine status |

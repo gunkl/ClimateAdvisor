@@ -162,7 +162,8 @@ def cli_generate(
         s = res.to_summary()
         print(
             f"master_seed={ms}: {res.days} days in {res.seconds:.1f}s ({s['mean_seconds_per_day']}s/day), "
-            f"hard={s['hits_by_promise'] or 'none'}, warnings={s['warnings_by_promise'] or 'none'}"
+            f"hard={s['hits_by_promise'] or 'none'}, warnings={s['warnings_by_promise'] or 'none'}, "
+            f"excused={s['excused_by_promise'] or 'none'}"
         )
         for promise, rows in res.hits.items():
             for ds, h in rows[:3]:

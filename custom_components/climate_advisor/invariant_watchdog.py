@@ -29,6 +29,12 @@ Promise 9 (``whf_sealed``, Issue #1144) was added with the owner's sign-off: rul
 whole-house fan never runs on a sealed house, off within 30 s even under a manual or RF override")
 was declared authoritative on 2026-10-31.
 
+Promise 7 (``comfort_kept``) has ONE named exception, the thermostat's own deadband, signed off by the owner in
+Issue #1260 on 2026-11-02 (``_p7_thermostat_deadband``): "...except while the thermostat itself is in the matching
+mode, idle, set at or inside the band edge, and the room is within 2.5°F of both that edge and the thermostat's own
+setpoint (the thermostat's own deadband)." It reads ground-truth ``Reading`` fields only, so it is
+not an amendment to the rule above; ``P7_SLACK_F`` and every other promise are unchanged by it.
+
 Changing the invariant set (adding, removing, or loosening a check) is treated the same as
 this project's LOCKED golden-scenario policy (see CLAUDE.md's "Golden Simulation Test
 Policy"): it requires explicit human review — show the proposed invariant in human-readable
@@ -199,7 +205,13 @@ class PromiseNumbers:
     P6_WINDOW_MIN: float = 60.0
     P6_OCCUPANT_EXCUSE_MIN: float = 5.0
     P7_MAX_MIN: float = 45.0
-    P7_SLACK_F: float = 1.0
+    P7_SLACK_F: float = 1.0  # applies to every state OUTSIDE the thermostat-deadband exception below
+    # Issue #1260 (owner-approved 2026-11-02): while the thermostat is in the matching mode, idle, set at or inside
+    # the band edge, the room may sit this far past the edge, and no further than this from that setpoint, without it
+    # counting (the thermostat's own deadband).
+    # A fixed constant, not the learned swing. tests/test_promise_numbers.py holds it >= production's
+    # COMFORT_SWING_TOLERANCE_MAX_F and proves the exception never looser than that cap.
+    P7_THERMOSTAT_DEADBAND_F: float = 2.5
     P7_MAX_GAP_MIN: float = 35.0
     P7_AGGRESSIVE_WIDEN_F: float = 2.0
     P7_OVERSHOOT_EXPLAINED_F: float = 5.0
@@ -362,6 +374,25 @@ class Hit:
     detail: str
     evidence: Evidence = ()
     kind: str = KIND_EVENT
+
+
+EXCUSED_BY_THERMOSTAT_DEADBAND = "thermostat_deadband"
+
+
+@dataclass(frozen=True, slots=True)
+class Excused:
+    """Time a promise did NOT count because a named, owner-approved exception applied (Issue #1260).
+
+    Never a hit: it is recorded beside hits (journal stats, probe report, nightly summary) so a rise in excused
+    time is visible instead of disappearing.
+    """
+
+    promise: str
+    ts: datetime
+    key: RunKey
+    excused_by: str
+    minutes: float
+    evidence: Evidence = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1020,9 +1051,58 @@ def _state_at(timeline: tuple[list[datetime], list[bool]], ts: datetime) -> bool
     return states[i - 1] if i else False
 
 
-def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
-    """While Climate Advisor is in control, the house is not outside the range for > 45 min."""
-    hits: list[Hit] = []
+# Issue #1260: the thermostat modes that hold the room on each side (heat below the floor, cool above the ceiling).
+# P7's own short rule: deliberately NOT production's swing helper, so a bug there cannot also blind this check.
+_P7_DEADBAND_MODES: dict[str, frozenset[str]] = {
+    "below": frozenset({"heat", "heat_cool", "auto"}),
+    "above": frozenset({"cool", "heat_cool", "auto"}),
+}
+_P7_EDGE_EPS_F = 0.01  # a setpoint converted from Celsius must not miss "at the edge" by float noise
+
+
+def _p7_thermostat_deadband(r: Reading, side: str, edge: float) -> bool:
+    """True when ``r`` is the thermostat's own deadband (Issue #1260, owner-approved wording).
+
+    ALL of: (1) the live mode matches the side; (2) ``hvac_action`` is idle; (3) the thermostat's setpoint for that
+    side is known and at or inside the band edge (heat/cool: ``setpoint_f``; heat_cool/auto: the matching low/high
+    setpoint, unknown = not excused); (4) the room is no more than ``P7_THERMOSTAT_DEADBAND_F`` past the edge;
+    (5) the room is ALSO no more than ``P7_THERMOSTAT_DEADBAND_F`` from that same setpoint on the side it is
+    correcting (heat: setpoint - indoor; cool: indoor - setpoint), so a thermostat idle far below its own setpoint is
+    not its deadband (owner-approved tightening, 2026-11-02).
+    ``edge`` is the un-slackened, un-widened band edge, so aggressive savings never widens this.
+    """
+    if r.indoor_f is None:
+        return False
+    mode = (r.hvac_mode or "").lower()
+    if mode not in _P7_DEADBAND_MODES[side]:
+        return False
+    if (r.hvac_action or "").lower() != "idle":
+        return False
+    dual = mode in ("heat_cool", "auto")
+    if side == "below":
+        sp = r.setpoint_low_f if dual else r.setpoint_f
+        if sp is None or sp < edge - _P7_EDGE_EPS_F:
+            return False
+        past = edge - r.indoor_f
+        past_sp = sp - r.indoor_f
+    else:
+        sp = r.setpoint_high_f if dual else r.setpoint_f
+        if sp is None or sp > edge + _P7_EDGE_EPS_F:
+            return False
+        past = r.indoor_f - edge
+        past_sp = r.indoor_f - sp
+    limit = NUMBERS.P7_THERMOSTAT_DEADBAND_F + 1e-9
+    return past <= limit and past_sp <= limit
+
+
+def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
+    """Every open P7 run: ``start``/``last``/``side``/``worst``, ``cross`` (set only by a NON-excused reading past
+    the allowance) and ``excused_min`` (time spent in the thermostat's deadband, Issue #1260).
+
+    No clock reset (Issue #1260): an excused reading continues the run exactly like any other out-of-range
+    reading, so the run is timed from when the room FIRST left the range. It just can never be the reading that
+    crosses the allowance; a run that leaves the exception later crosses at once if it is already past 45 min.
+    """
     rs = inp.readings
     marks = tuple(sorted(inp.marks, key=lambda m: m.ts))
     occ_ts = sorted(o.ts for o in occupant_actions(inp))
@@ -1076,25 +1156,45 @@ def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
             dist <= NUMBERS.P7_OVERSHOOT_EXPLAINED_F and recent is not None and timedelta(0) <= r.ts - recent <= window
         )
 
-    # Collect each open run, then emit one hit per run that outlasted the allowance.
     runs: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
     gap = timedelta(minutes=NUMBERS.P7_MAX_GAP_MIN)
+    # (run, ts) of the previous reading when it was excused: its state holds until the next reading arrives.
+    pending: tuple[dict[str, Any], datetime] | None = None
     for idx, r in enumerate(rs):
+        if pending is not None:
+            run_p, ts_p = pending
+            run_p["excused_min"] += min(_mins(ts_p, r.ts), NUMBERS.P7_MAX_GAP_MIN)
+            pending = None
         o = outside(r)
         if o is None or not in_control(idx, r, o[0], o[1]):
             cur = None
             continue
         side, dist = o
         if cur is None or side != cur["side"] or r.ts - cur["last"] > gap:
-            cur = {"start": r.ts, "side": side, "worst": 0.0, "cross": None, "last": r.ts}
+            cur = {"start": r.ts, "side": side, "worst": 0.0, "cross": None, "last": r.ts, "excused_min": 0.0}
             runs.append(cur)
         cur["last"] = r.ts
         cur["worst"] = max(cur["worst"], dist)
+        edge = cfg.floor_lo(r.ts) if side == "below" else cfg.ceiling_hi(r.ts)
+        if _p7_thermostat_deadband(r, side, edge):
+            pending = (cur, r.ts)
+            continue
         if cur["cross"] is None and _mins(cur["start"], r.ts) > NUMBERS.P7_MAX_MIN:
             cur["cross"] = r.ts
             cur["worst_at_cross"] = cur["worst"]
-    for run in runs:
+    return runs
+
+
+def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
+    """While Climate Advisor is in control, the house is not outside the range for > 45 min.
+
+    Issue #1260 (owner-approved): except while the thermostat itself is in the matching mode, idle, set at or inside
+    the band edge, and the room is within 2.5 F of both that edge and the thermostat's own setpoint (the thermostat's
+    own deadband).
+    """
+    hits: list[Hit] = []
+    for run in _p7_runs(inp, cfg):
         if run["cross"] is None:
             continue
         minutes = _mins(run["start"], run["cross"])
@@ -1115,6 +1215,25 @@ def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
     return hits
 
 
+def excused_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Excused]:
+    """The time P7 did not count because of the thermostat's deadband, one record per open run (Issue #1260)."""
+    out: list[Excused] = []
+    for run in _p7_runs(inp, cfg):
+        if run["excused_min"] <= 0:
+            continue
+        out.append(
+            Excused(
+                promise="comfort_kept",
+                ts=run["last"],
+                key=RunKey(f"comfort_kept:{run['side']}:{EXCUSED_BY_THERMOSTAT_DEADBAND}", run["start"], run["last"]),
+                excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND,
+                minutes=run["excused_min"],
+                evidence=_ev(minutes=run["excused_min"], side=run["side"], excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND),
+            )
+        )
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class PromiseSpec:
     number: int
@@ -1123,6 +1242,8 @@ class PromiseSpec:
     check: Callable[[PromiseInput, PromiseConfig], list[Hit]]
     test_severity: str
     home_level: str | None  # LEVEL_LOG | LEVEL_ALERT | None (not checked at home)
+    # Issue #1260: optional record of time the check did not count under a named exception (never a hit).
+    excused: Callable[[PromiseInput, PromiseConfig], list[Excused]] | None = None
 
 
 # Flat tuple, not a plugin registry. Promise 8 (surfaces_agree) is test-only and lives with the
@@ -1135,7 +1256,7 @@ PROMISES: tuple[PromiseSpec, ...] = (
     PromiseSpec(5, "no_blind_fan_start", "5", check_p5_no_blind_fan_start, SEVERITY_HARD, LEVEL_LOG),
     PromiseSpec(5, "blind_fan_continue", "5b", check_p5b_blind_fan_continue, SEVERITY_WARNING, LEVEL_LOG),
     PromiseSpec(6, "mode_flip_rate", "6", check_p6_mode_flip_rate, SEVERITY_WARNING, LEVEL_LOG),
-    PromiseSpec(7, "comfort_kept", "7", check_p7_comfort_kept, SEVERITY_WARNING, LEVEL_LOG),
+    PromiseSpec(7, "comfort_kept", "7", check_p7_comfort_kept, SEVERITY_WARNING, LEVEL_LOG, excused_p7_comfort_kept),
     # Issue #1144: owner rule 1. 8 is surfaces_agree (test-only, not in this registry).
     PromiseSpec(9, "whf_sealed", "9", check_p9_whf_sealed, SEVERITY_HARD, LEVEL_ALERT),
 )
@@ -1162,3 +1283,24 @@ def run_promise_checks(inp: PromiseInput, cfg: PromiseConfig, *, scope: str) -> 
             _LOGGER.warning("Household promise check failed: promise=%s", spec.key, exc_info=True)
     hits.sort(key=lambda h: h.ts)
     return hits
+
+
+def run_promise_excused(inp: PromiseInput, cfg: PromiseConfig, *, scope: str) -> list[Excused]:
+    """Time the promises did not count under a named exception (Issue #1260), time-ordered.
+
+    Same scoping and error policy as ``run_promise_checks``; kept apart so no consumer can mistake it for a hit.
+    """
+    if scope not in (SCOPE_HOME, SCOPE_TEST):
+        raise ValueError(f"unknown scope: {scope!r}")
+    out: list[Excused] = []
+    for spec in PROMISES:
+        if spec.excused is None or (scope == SCOPE_HOME and spec.home_level is None):
+            continue
+        try:
+            out.extend(spec.excused(inp, cfg))
+        except Exception:
+            if scope == SCOPE_TEST:
+                raise
+            _LOGGER.warning("Household promise excused-time check failed: promise=%s", spec.key, exc_info=True)
+    out.sort(key=lambda x: x.ts)
+    return out

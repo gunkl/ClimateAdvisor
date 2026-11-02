@@ -772,6 +772,8 @@ class BatchResult:
     # promise key -> list of (day_seed, hit)
     hits: dict[str, list[tuple[int, Any]]] = field(default_factory=dict)
     warnings: dict[str, int] = field(default_factory=dict)
+    # Issue #1260: promise -> excused_by -> {"runs", "minutes"} summed over the batch (never a hit).
+    excused: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
     callback_error_days: list[int] = field(default_factory=list)
     errors: list[tuple[int, str]] = field(default_factory=list)
     coordinator_days: int = 0
@@ -792,6 +794,7 @@ class BatchResult:
             "days_with_hit": {k: len({d for d, _ in v}) for k, v in sorted(self.hits.items())},
             "first_hit_day": {k: v[0][0] for k, v in sorted(self.hits.items())},
             "warnings_by_promise": dict(sorted(self.warnings.items())),
+            "excused_by_promise": {k: v for k, v in sorted(self.excused.items())},
             "callback_error_days": self.callback_error_days,
             "run_errors": self.errors[:5],
             "coordinator_days": self.coordinator_days,
@@ -850,6 +853,11 @@ def run_batch(
             out.hits.setdefault(h.promise, []).append((ds, h))
         for h in rec.report.warnings:
             out.warnings[h.promise] = out.warnings.get(h.promise, 0) + 1
+        for promise, by in rec.report.excused.items():
+            for reason, row in by.items():
+                acc = out.excused.setdefault(promise, {}).setdefault(reason, {"runs": 0, "minutes": 0.0})
+                acc["runs"] += row["runs"]
+                acc["minutes"] = round(acc["minutes"] + row["minutes"], 1)
         if on_record is not None:
             on_record(rec)
         if rec.report.hard and save_dir is not None:

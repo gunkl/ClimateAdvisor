@@ -184,3 +184,19 @@ class TestRedactionInsideBuilder:
         events = recent_hvac_events(coord)
         assert [e["type"] for e in events] == ["hvac_command_failed", "setpoint_rejected"]
         assert "X1" not in repr(events) and "10.1.1.1" not in repr(events)
+
+
+class TestPromiseStatsExcusedTime:
+    """Issue #1260: time the thermostat's deadband excused is in the snapshot, beside (never inside) the hits."""
+
+    def test_excused_time_is_carried_apart_from_hits(self):
+        coord = _coordinator(_engine())
+        excused = {"thermostat_deadband": {"runs": 2, "minutes": 75.0, "last_ts": "2026-11-02T10:00:00"}}
+        coord._promise_stats = {
+            "comfort_kept": {"hits": 0, "first_ts": None, "last_ts": None, "excused": excused},
+            "settling_flip": {"hits": 3, "first_ts": "a", "last_ts": "b"},
+        }
+        snap = build_diagnostic_snapshot(_hass_with(_SENSI_ATTRS), coord, include_control_quality=False)
+        ps = snap["promise_stats"]
+        assert ps["comfort_kept"] == {"hits": 0, "first_ts": None, "last_ts": None, "excused": excused}
+        assert ps["settling_flip"] == {"hits": 3, "first_ts": "a", "last_ts": "b"}  # no empty excused key

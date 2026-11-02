@@ -87,6 +87,8 @@ A plan drawn from `random.Random(day_seed)` (config, weather, occupancy, doors, 
 
 Goldens are LOCKED; a divergence is recorded in a ledger, never by editing a scenario.
 
+**Excused time (Issue #1260).** Time a promise did not count under a named exception (today only P7's thermostat deadband, `excused_by=thermostat_deadband`) is not a hit and is in none of the ledgers above. It is reported beside hits: `PromiseReport.excused` per run and `excused_by_promise` (runs and minutes) in the nightly batch summary and the `replay` line, so a rise is visible.
+
 **Code reference:** `tools/sim_harness/session.py`, `tools/sim_harness/generator.py` (`run_batch`, `run_day`, `replay_scenario`), `tools/sim_harness/surfaces.py` (`cli_surfaces`).
 
 ---

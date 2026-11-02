@@ -508,6 +508,12 @@ NAT_VENT_START_IDLE_OPEN = NatVentStartProfile("idle_open", apply_reactivation_f
 NAT_VENT_START_PAUSED_REACTIVATION = NatVentStartProfile(
     "paused_reactivation", apply_reactivation_floor=True, live_lifecycle_state=True
 )
+# The routine re-check and the comfort-band guard: "if I pause now, will the paused-by-door reactivation start a fan
+# session on the next check?" -- the same question as the reactivation site, asked as if the pause were already
+# recorded (``paused_by_door=True`` applies the lockout), from the pure entry state.
+NAT_VENT_START_ROUTINE_RECHECK = NatVentStartProfile(
+    "routine_recheck", paused_by_door=True, apply_reactivation_floor=True
+)
 
 
 class HvacCommandResult(Enum):
@@ -4686,6 +4692,7 @@ class AutomationEngine:
                     "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
                 ),
                 notify_type="door_window_pause",
+                quiet=self._fan_session_about_to_take_over(caller="_apply_comfort_band"),
             )
             return None  # paused instead of armed: no write attempted
 
@@ -6464,6 +6471,7 @@ class AutomationEngine:
                 "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
             ),
             notify_type="door_window_pause",
+            quiet=self._fan_session_about_to_take_over(caller="_sync_paused_by_door_with_live_sensors"),
         )
 
     def _set_door_window_pause_fields(self, *, entity_label: str, hvac_already_off: bool) -> None:
@@ -6489,7 +6497,7 @@ class AutomationEngine:
         self._paused_since = dt_util.now()
 
     async def _pause_for_door_window_action(
-        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str
+        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str, quiet: bool = False
     ) -> bool | None:
         """The HVAC-affecting half of a door/window pause (Issue #660 Step 6):
         thermostat mode capture, turning HVAC off (or noting it's already off),
@@ -6512,7 +6520,8 @@ class AutomationEngine:
             self._pre_pause_mode = mode
             with self._mode_change_context("pause"):
                 await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
-            await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
+            if not quiet:
+                await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "sensor_opened",
@@ -6541,7 +6550,7 @@ class AutomationEngine:
         return None
 
     async def _pause_for_door_window(
-        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str
+        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str, quiet: bool = False
     ) -> bool:
         """Pause HVAC for an open door/window, or mark paused if HVAC was already off.
 
@@ -6570,7 +6579,11 @@ class AutomationEngine:
         thermostat state was unavailable/unknown and no pause happened at all).
         """
         hvac_already_off = await self._pause_for_door_window_action(
-            entity_label=entity_label, reason=reason, notify_message=notify_message, notify_type=notify_type
+            entity_label=entity_label,
+            reason=reason,
+            notify_message=notify_message,
+            notify_type=notify_type,
+            quiet=quiet,
         )
         if hvac_already_off is None:
             return False
@@ -12280,6 +12293,29 @@ class AutomationEngine:
             else None,
             soft_start_enabled=soft_start_enabled,
         )
+
+    def _fan_session_about_to_take_over(self, *, caller: str) -> bool:
+        """Whether the paused-by-door reactivation will start a fan session on its next check (Issue #1142).
+
+        Asked by the two safety nets that pause an open window outside the window-open handler (the scheduled
+        routines' re-check and the comfort-band guard) so they pause QUIETLY: rule 3 still holds, but "HVAC paused"
+        is not announced when the fan starts and clears it seconds later. The answer is the nat-vent FSM's, not a
+        copy: the routine-recheck profile asks it as if the pause were already recorded.
+        """
+        transition = self._nat_vent_start_decision(
+            NAT_VENT_START_ROUTINE_RECHECK, indoor=self._get_indoor_temp_f(), outdoor=self._last_outdoor_temp
+        )
+        take_over = transition.to_state in (
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+        )
+        if take_over:
+            _LOGGER.info(
+                "%s: door/window pause will be quiet -- a fan session is about to take over (to_state=%s)",
+                caller,
+                transition.to_state.value,
+            )
+        return take_over
 
     def _nat_vent_start_decision(
         self,

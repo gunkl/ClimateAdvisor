@@ -43,7 +43,6 @@ from tests.test_restore_resolved_band import _classification, _make_engine
 
 _AWAY_SETBACK_COOL = 80.0
 
-_XF_D2 = pytest.mark.xfail(strict=True, reason="#1142 D2: routine pause notifies although a start is due")
 _XF_D3 = pytest.mark.xfail(strict=True, reason="#1142 D3: grace pre-check and nat-vent FSM disagree")
 _XF_D4 = pytest.mark.xfail(strict=True, reason="#1142 D4: blower exit with a window open leaves the thermostat armed")
 _XF_D7 = pytest.mark.xfail(strict=True, reason="#1142 D7: blower ventilation arms the occupied band")
@@ -173,7 +172,6 @@ class TestD1SoftStartAtHandler:
 
 
 class TestD2QuietPause:
-    @_XF_D2
     def test_sync_recheck_pauses_without_notifying_when_a_start_is_due(self):
         engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
         notify = _notes(engine)
@@ -192,7 +190,6 @@ class TestD2QuietPause:
         assert engine._paused_by_door is True
         assert notify.called, "a pause that stays is announced"
 
-    @_XF_D2
     def test_comfort_band_guard_pauses_without_notifying_when_a_start_is_due(self):
         from custom_components.climate_advisor.automation import ComfortBand  # noqa: PLC0415
 
@@ -477,3 +474,44 @@ class TestGraceExpiryPredictionIsTheFsmsAnswer:
         engine._manual_override_mode = "cool"
         _expire_grace(engine)
         assert engine._paused_by_door is False, "the re-check runs after the override is cleared"
+
+
+# ---------------------------------------------------------------------------
+# Step 4 -- the quiet pause: symmetry (close restores) and the cases that must stay loud
+# ---------------------------------------------------------------------------
+
+
+class TestQuietPauseEdges:
+    def test_closing_the_window_after_a_quiet_pause_restores_the_mode(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        _notes(engine)
+        _at(lambda: engine._sync_paused_by_door_with_live_sensors())
+        assert engine._paused_by_door is True and engine._test_state.state == "off", "precondition"
+        _close(engine)
+        assert engine._paused_by_door is False
+        assert engine._test_state.state == "cool", "the quiet pause restores exactly like a loud one"
+
+    def test_a_locked_out_start_is_not_quiet(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        engine._nat_vent_outdoor_exit_time = _DAY  # an exit just now: the reactivation lockout holds
+        notify = _notes(engine)
+        _at(lambda: engine._sync_paused_by_door_with_live_sensors())
+        assert engine._paused_by_door is True
+        assert notify.called, "no fan session will take over inside the lockout, so the pause is announced"
+
+    def test_no_fan_install_pause_is_announced(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        engine.config.pop(CONF_FAN_MODE)
+        notify = _notes(engine)
+        _at(lambda: engine._sync_paused_by_door_with_live_sensors())
+        assert notify.called
+
+    def test_the_quiet_pause_still_reports_the_window_event(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        events = _record(engine)
+        _notes(engine)
+        _at(lambda: engine._sync_paused_by_door_with_live_sensors())
+        assert (
+            "sensor_opened",
+            {"entity": "monitored door/window", "result": "paused", "hvac_mode_change": "cool→off"},
+        ) in events

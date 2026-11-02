@@ -102,6 +102,15 @@ def _make_coordinator_stub(config: dict | None = None):
     coord._is_nat_vent_tolerated_deviation = types.MethodType(
         ClimateAdvisorCoordinator._is_nat_vent_tolerated_deviation, coord
     )
+    # Issue #1258: the swing tolerance joins the nat-vent one in the shared gate; bind its real methods.
+    for _name in (
+        "_learned_swings",
+        "_thermostat_hvac_mode",
+        "_is_within_thermostat_hysteresis",
+        "_is_tolerated_comfort_deviation",
+        "_hysteresis_incident_context",
+    ):
+        setattr(coord, _name, types.MethodType(getattr(ClimateAdvisorCoordinator, _name), coord))
     return coord
 
 
@@ -305,6 +314,15 @@ def _make_boundary_coordinator_stub(config: dict | None = None):
     coord._is_nat_vent_tolerated_deviation = types.MethodType(
         ClimateAdvisorCoordinator._is_nat_vent_tolerated_deviation, coord
     )
+    # Issue #1258: the swing tolerance joins the nat-vent one in the shared gate; bind its real methods.
+    for _name in (
+        "_learned_swings",
+        "_thermostat_hvac_mode",
+        "_is_within_thermostat_hysteresis",
+        "_is_tolerated_comfort_deviation",
+        "_hysteresis_incident_context",
+    ):
+        setattr(coord, _name, types.MethodType(getattr(ClimateAdvisorCoordinator, _name), coord))
     # Real methods under test for this class — the whole point is to exercise the
     # sleep-window-aware resolution, not stub around it.
     coord._get_indoor_temp_with_provenance = types.MethodType(

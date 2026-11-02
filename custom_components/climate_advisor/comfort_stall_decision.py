@@ -104,6 +104,7 @@ def decide_comfort_stall(
     sensor_open: bool,
     startup_coalescing: bool,
     nat_vent_tolerated: bool,
+    thermostat_swing_tolerated: bool = False,
 ) -> StallDecision:
     """Decide whether the house is stalled outside the active comfort band.
 
@@ -112,7 +113,9 @@ def decide_comfort_stall(
     cooling) was seen in that direction.  Exclusions (all reset the clock):
     thermostat or indoor unavailable, thermostat without ``hvac_action`` (can't prove
     equipment is idle), manual control, an open door/window, startup coalescing, the
-    needed mode not offered by the thermostat, and an in-tolerance nat-vent deviation.
+    needed mode not offered by the thermostat, an in-tolerance nat-vent deviation, and a deviation
+    only inside the thermostat's own learned swing in the matching mode (Issue #1258,
+    ``excluded_by="thermostat_swing"``; nat-vent is reported first when both hold).
     """
     excluded_by: str | None = None
     if indoor is None or comfort_heat is None or comfort_cool is None:
@@ -129,6 +132,8 @@ def decide_comfort_stall(
         excluded_by = "sensor_open"
     elif nat_vent_tolerated:
         excluded_by = "nat_vent_tolerated"
+    elif thermostat_swing_tolerated:
+        excluded_by = "thermostat_swing"
 
     direction: str | None = None
     if excluded_by is None:

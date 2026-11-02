@@ -103,6 +103,7 @@ from .const import (
     BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES,
     BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F,
     CHART_LOG_MAX_DAYS,
+    COMFORT_DEVIATION_FLOOR_F,
     COMFORT_STALL_MARGIN_F,
     COMFORT_STALL_REMINDER_SECONDS,
     COMFORT_STALL_SUSTAIN_SECONDS,
@@ -343,7 +344,10 @@ from .swing import (
     evaluate_swing_cycle,
     pick_setpoint,
     setpoint_or_mode_changed,
+    swing_tolerance,
+    thermostat_holds_direction,
     whole_degree_resolution_f,
+    within_thermostat_hysteresis,
 )
 from .temperature import (
     convert_delta,
@@ -3794,7 +3798,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._last_violation_check = now
                     if (
                         forecast.current_indoor_temp < comfort_low or forecast.current_indoor_temp > comfort_high
-                    ) and not self._is_nat_vent_tolerated_deviation(
+                    ) and not self._is_tolerated_comfort_deviation(
                         forecast.current_indoor_temp, comfort_low, comfort_high
                     ):
                         self._today_record.comfort_violations_minutes += elapsed_minutes
@@ -11513,11 +11517,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         modes = attrs.get("hvac_modes")
         self._note_equipment_activity(action, now=now)
 
-        in_tolerance = (
-            indoor is not None
-            and comfort_heat is not None
-            and comfort_cool is not None
-            and self._is_nat_vent_tolerated_deviation(indoor, comfort_heat, comfort_cool)
+        # The same two tolerances as _is_tolerated_comfort_deviation (nat-vent OR swing), kept apart only so the
+        # exclusion names the right reason in the log (Issue #1258).
+        _band_known = indoor is not None and comfort_heat is not None and comfort_cool is not None
+        nat_vent_tolerated = _band_known and self._is_nat_vent_tolerated_deviation(indoor, comfort_heat, comfort_cool)
+        swing_tolerated = (
+            _band_known
+            and not nat_vent_tolerated
+            and self._is_within_thermostat_hysteresis(indoor, comfort_heat, comfort_cool)
         )
         # Only a direction CA itself would act on counts: against the day's grain the margin
         # includes the day-type comfort-family deadband (see stall_margins).
@@ -11544,7 +11551,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             manual_control=bool(ae._manual_change_protected()),
             sensor_open=self._any_sensor_open() or bool(getattr(ae, "_paused_by_door", False)),
             startup_coalescing=bool(self._startup_coalesce_active),
-            nat_vent_tolerated=in_tolerance,
+            nat_vent_tolerated=nat_vent_tolerated,
+            thermostat_swing_tolerated=swing_tolerated,
         )
         self._stall_direction = decision.direction
         self._stall_since = decision.since
@@ -11693,6 +11701,69 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         return (comfort_heat - hysteresis) <= indoor <= (comfort_cool + hysteresis)
 
+    def _learned_swings(self) -> tuple[float | None, float | None]:
+        """The learned ``(swing_heat_f, swing_cool_f)`` in degF; ``None`` for a direction not learned yet (#1258)."""
+        learning = getattr(self, "learning", None)
+        if learning is None:
+            return None, None
+        try:
+            model = learning.get_thermal_model() or {}
+        except Exception:
+            return None, None
+
+        def _num(value: Any) -> float | None:
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+        return _num(model.get("swing_heat_f")), _num(model.get("swing_cool_f"))
+
+    def _thermostat_hvac_mode(self) -> str | None:
+        """The climate entity's current hvac mode (its state string), or None when unknown."""
+        ae = self.automation_engine
+        if ae is None:
+            return None
+        state = self.hass.states.get(ae.climate_entity)
+        mode = getattr(state, "state", None)
+        return mode if isinstance(mode, str) else None
+
+    def _is_within_thermostat_hysteresis(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
+        """True if indoor is out of band only by the thermostat's own learned swing (Issue #1258).
+
+        Occupant outcome: the thermostat is deliberately letting the room drift about its swing past the setpoint
+        before it starts the equipment - a configured state, not a comfort failure - so it must not raise an
+        incident or count violation minutes. Only while the thermostat mode matches the direction (owner rule).
+        The rule itself lives in ``swing.within_thermostat_hysteresis``.
+        """
+        swing_heat, swing_cool = self._learned_swings()
+        return within_thermostat_hysteresis(
+            indoor, comfort_heat, comfort_cool, swing_heat, swing_cool, self._thermostat_hvac_mode()
+        )
+
+    def _is_tolerated_comfort_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
+        """True if this out-of-band reading is expected behaviour, not a comfort failure.
+
+        THE one gate for the incident scan, the ``comfort_violations_minutes`` accumulation and the stall alert:
+        nat-vent cycling tolerance (Issue #411) OR the thermostat's own swing (Issue #1258).
+        """
+        return self._is_nat_vent_tolerated_deviation(
+            indoor, comfort_heat, comfort_cool
+        ) or self._is_within_thermostat_hysteresis(indoor, comfort_heat, comfort_cool)
+
+    def _hysteresis_incident_context(self, direction: str) -> dict[str, Any]:
+        """Why a comfort incident fired despite the swing tolerance: the tolerance used for ``direction``.
+
+        ``direction`` is ``"heat"`` (under-temperature) or ``"cool"`` (over-temperature). Recorded in the
+        incident payload (Issue #1258): ``swing_tolerance_f`` (degF delta, floored at 0.5, capped at 2.5), its source
+        (``learned`` / ``default``, with `` (capped)`` when the cap bit) and whether the thermostat mode let it
+        apply at all.
+        """
+        swing_heat, swing_cool = self._learned_swings()
+        tol, source = swing_tolerance(swing_heat if direction == "heat" else swing_cool)
+        return {
+            "swing_tolerance_f": round(tol, 3),
+            "swing_tolerance_source": source,
+            "swing_tolerance_applied": thermostat_holds_direction(direction, self._thermostat_hvac_mode()),
+        }
+
     def _detect_and_emit_incidents(self) -> None:
         """Scan recent event_log and state for noteworthy production incidents.
 
@@ -11792,8 +11863,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if (
             indoor
             and comfort_cool
-            and indoor > comfort_cool + 0.5
-            and not self._is_nat_vent_tolerated_deviation(indoor, comfort_heat or 0.0, comfort_cool)
+            and indoor > comfort_cool + COMFORT_DEVIATION_FLOOR_F
+            and not self._is_tolerated_comfort_deviation(indoor, comfort_heat or 0.0, comfort_cool)
         ):
             recent_violations = [
                 e
@@ -11814,6 +11885,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             self.automation_engine._natural_vent_active if self.automation_engine else None
                         ),
                         **self._thermostat_incident_context(),
+                        **self._hysteresis_incident_context("cool"),
                     },
                     comfort_heat=comfort_heat,
                     comfort_cool=comfort_cool,
@@ -11821,8 +11893,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         elif (
             indoor
             and comfort_heat
-            and indoor < comfort_heat - 0.5
-            and not self._is_nat_vent_tolerated_deviation(indoor, comfort_heat, comfort_cool or 999.0)
+            and indoor < comfort_heat - COMFORT_DEVIATION_FLOOR_F
+            and not self._is_tolerated_comfort_deviation(indoor, comfort_heat, comfort_cool or 999.0)
         ):
             recent_violations = [
                 e
@@ -11843,6 +11915,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             self.automation_engine._natural_vent_active if self.automation_engine else None
                         ),
                         **self._thermostat_incident_context(),
+                        **self._hysteresis_incident_context("heat"),
                     },
                     comfort_heat=comfort_heat,
                     comfort_cool=comfort_cool,

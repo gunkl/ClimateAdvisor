@@ -74,8 +74,8 @@ def test_planned_sleep_setback_is_not_a_violation():
 
 
 def test_below_the_sleep_floor_still_counts():
-    """63 °F is colder than even the planned sleep floor → a real violation."""
-    added, _ = _refresh_minutes(_NIGHT, 63.0)
+    """62 °F is colder than even the planned sleep floor, and beyond the default 1.5 °F swing (#1258) → a violation."""
+    added, _ = _refresh_minutes(_NIGHT, 62.0)
     assert added == 30.0
 
 
@@ -86,7 +86,7 @@ def test_awake_band_behaviour_unchanged():
     assert below == 30.0
     inside, _ = _refresh_minutes(_DAY, 70.0)
     assert inside == 0.0
-    above, _ = _refresh_minutes(_DAY, 75.0)
+    above, _ = _refresh_minutes(_DAY, 76.0)  # 2 °F over: beyond the default 1.5 °F swing (#1258)
     assert above == 30.0
 
 
@@ -104,7 +104,7 @@ def test_planned_cool_side_setback_is_not_a_violation():
     added, band = _refresh_minutes(_NIGHT, 77.0, sleep_cool=79.0)
     assert band == (64.0, 79.0)
     assert added == 0.0
-    above, _ = _refresh_minutes(_NIGHT, 80.0, sleep_cool=79.0)
+    above, _ = _refresh_minutes(_NIGHT, 81.0, sleep_cool=79.0)
     assert above == 30.0
 
 

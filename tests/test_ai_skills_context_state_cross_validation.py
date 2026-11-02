@@ -93,6 +93,57 @@ class TestBuildStateCrossValidationContext:
         assert "[FLAG]" in ctx
         assert "below" in ctx
 
+    # ---- Issue #1258: the SAME swing rule as the comfort incident scan (mode gate + 0.5 F floor) ----------------
+    @staticmethod
+    def _ctx_1258(mode: str, indoor: float, swing_heat=1.4, swing_cool=1.4) -> str:
+        learning = MagicMock()
+        learning.get_thermal_model.return_value = {"swing_heat_f": swing_heat, "swing_cool_f": swing_cool}
+        coord = _make_coordinator(data={"hvac_mode": mode, "hvac_action": "idle"}, learning=learning)
+        return asyncio.run(build_state_cross_validation_context(_make_hass(current_temperature=indoor), coord))
+
+    def test_1258_cold_room_with_thermostat_off_is_flagged_not_ok(self):
+        """Owner rule (b): with the thermostat Off nothing holds the room by hysteresis -- 67 vs 68 is a shortfall.
+        Before the fix this said "[OK] ... within comfort band" because the swing had no mode gate."""
+        ctx = self._ctx_1258("off", 67.0)
+        assert "[FLAG]" in ctx
+        assert "[OK]" not in ctx
+        assert "below by 1.0" in ctx
+
+    def test_1258_hot_room_with_thermostat_in_heat_is_flagged(self):
+        ctx = self._ctx_1258("heat", 75.0)
+        assert "[FLAG]" in ctx and "above by 1.0" in ctx
+
+    def test_1258_heat_mode_inside_the_swing_is_ok_not_flagged(self):
+        ctx = self._ctx_1258("heat", 67.0)  # 1.0 under, learned heat swing 1.4, thermostat in heat
+        assert "[FLAG]" not in ctx
+        assert "[OK]" in ctx and "within tolerance" in ctx
+
+    def test_1258_heat_mode_beyond_the_swing_is_a_shortfall(self):
+        ctx = self._ctx_1258("heat", 66.3)  # 1.7 under > 1.4 swing
+        assert "[FLAG]" in ctx and "below by 1.7" in ctx and "beyond tolerance" in ctx
+
+    def test_1258_cool_side_mirror(self):
+        assert "[FLAG]" not in self._ctx_1258("cool", 75.0)
+        assert "[FLAG]" in self._ctx_1258("cool", 75.6)
+        assert "[FLAG]" not in self._ctx_1258("heat_cool", 75.0)
+
+    def test_1258_tiny_swing_is_floored_and_off_keeps_the_half_degree_floor(self):
+        # Learned swing 0.2 -> tolerance 0.5 (as for the incident); with Off a 0.4 shortfall is also not flagged
+        # (the incident scan's fixed 0.5 F rule), but 0.6 is.
+        assert "[FLAG]" not in self._ctx_1258("heat", 67.6, swing_heat=0.2)
+        assert "[FLAG]" not in self._ctx_1258("off", 67.6)
+        assert "[FLAG]" in self._ctx_1258("off", 67.4)
+
+    def test_1258_ai_line_shows_the_capped_tolerance(self):
+        ctx = self._ctx_1258("heat", 64.5, swing_heat=4.0)  # 3.5 under; tolerance capped at 2.5
+        assert "[FLAG]" in ctx and "beyond tolerance" in ctx
+        assert "2.5" in ctx and "learned (capped)" in ctx
+        ok = self._ctx_1258("heat", 66.0, swing_heat=4.0)  # 2.0 under, inside the capped 2.5
+        assert "[FLAG]" not in ok and "learned (capped)" in ok
+
+    def test_1258_unknown_mode_keeps_the_strict_rule(self):
+        assert "[FLAG]" in self._ctx_1258("unavailable", 67.0)
+
     def test_hvac_off_but_action_heating_flags_warning(self):
         coord = _make_coordinator(data={"hvac_mode": "off", "hvac_action": "heating", "fan_status": "inactive"})
         hass = _make_hass(current_temperature=71.0)

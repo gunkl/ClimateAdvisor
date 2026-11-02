@@ -257,16 +257,19 @@ class TestStaleMarkerNeverArmedForARefusedStart:
         assert engine._fan_manual_origin_unclosed is False, "no CA blower run is pending: nothing to mark"
         assert engine._natural_vent_active is False
 
-    def test_a_really_deferred_start_still_arms_the_marker(self):
+    def test_a_really_deferred_start_still_records_the_pending_fact(self):
         """Positive control (#829 stays intact): an unrestricted blower start deferred by a real floor IS
-        CA's own pending run, so its eventual off must not look like a fresh manual override."""
+        CA's own pending run, so its eventual off must not look like a fresh manual override. Issue #1205: the
+        deferral records a pending fact (promoted to the run-bound marker when the start applies, see
+        tests/test_stale_fan_marker_1205.py); no marker is armed for a run that does not exist yet."""
         engine = _paused_restricted_engine()
         engine.config[CONF_HVAC_FAN_RESTRICT_MODE] = "both"
         engine._fan_toggle_command_time = _DAY - timedelta(seconds=10)
         with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
             _run(engine._re_pause_for_open_sensor())
         assert engine._fan_rate_limited_until is not None, "precondition: the start is genuinely deferred"
-        assert engine._fan_manual_origin_unclosed is True
+        assert engine._fan_manual_origin_pending is not None
+        assert engine._fan_manual_origin_unclosed is False
 
     def test_marker_is_not_armed_when_nothing_is_pending(self):
         """Direct guard: even if the activation reports RATE_LIMITED, no marker without a pending start."""
@@ -282,6 +285,7 @@ class TestStaleMarkerNeverArmedForARefusedStart:
         with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
             _run(engine._re_pause_for_open_sensor())
         assert engine._fan_manual_origin_unclosed is False
+        assert engine._fan_manual_origin_pending is None
 
 
 # ---------------------------------------------------------------------------

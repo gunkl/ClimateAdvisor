@@ -230,6 +230,39 @@ class TestActivateFan:
         calls = _get_service_calls(engine, "climate", "set_fan_mode")
         assert len(calls) == 0
 
+    def test_no_on_fan_mode_logs_error_once_per_cause_then_debug_and_rearms(self, caplog):
+        """Issue #1205 (C-a): the economizer retries about twice an hour, so an unchanged "no 'on' fan_mode" cause is
+        an ERROR once and DEBUG after that. A different cause (other fan_modes) logs ERROR again, and so does the same
+        cause after a successful command re-armed it."""
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="custom_components.climate_advisor.automation")
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        state = MagicMock()
+        state.attributes = {"fan_modes": ["auto"]}
+        engine.hass.states.get = MagicMock(return_value=state)
+
+        def refusals() -> list[str]:
+            return [r.levelname for r in caplog.records if "Cannot activate HVAC fan" in r.getMessage()]
+
+        for _ in range(4):
+            asyncio.run(engine._activate_fan(reason="economizer maintain"))
+        assert refusals() == ["ERROR", "DEBUG", "DEBUG", "DEBUG"]
+
+        state.attributes = {"fan_modes": ["auto", "diffuse"]}  # a different cause
+        asyncio.run(engine._activate_fan(reason="economizer maintain"))
+        assert refusals()[-1] == "ERROR"
+
+        state.attributes = {"fan_modes": ["auto", "on"]}  # the thermostat now works: success re-arms the ERROR
+        engine._fan_command_time = None
+        engine._fan_toggle_command_time = None
+        asyncio.run(engine._activate_fan(reason="economizer maintain"))
+        assert len(_get_service_calls(engine, "climate", "set_fan_mode")) == 1
+        asyncio.run(engine._deactivate_fan(reason="test"))
+        state.attributes = {"fan_modes": ["auto", "diffuse"]}
+        asyncio.run(engine._activate_fan(reason="economizer maintain"))
+        assert refusals()[-1] == "ERROR"
+
     def test_activate_both_fans(self):
         """fan_mode=both → calls fan.turn_on, suppresses HVAC, then sets fan_mode 'on'.
 

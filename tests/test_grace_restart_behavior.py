@@ -396,7 +396,8 @@ class TestNewOverrideDuringGrace:
         replace = coord.automation_engine._replace_thermostat_override
         replace.assert_called_once()
         assert replace.call_args.kwargs["reason"] == "new_override_during_grace"
-        assert replace.call_args.kwargs["clear_fan"] is True
+        # Issue #1205: the occupant's fan run is a separate request -- a thermostat mode change never clears it.
+        assert replace.call_args.kwargs["clear_fan"] is False
         coord.automation_engine.handle_manual_override.assert_called_once()
 
     def test_same_mode_during_grace_not_refired(self):

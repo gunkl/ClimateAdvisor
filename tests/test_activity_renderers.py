@@ -1175,6 +1175,36 @@ class TestFanOwnershipAnnotations:
         )
         assert "user turned off" not in ev.lower()
 
+    def test_fan_cancel_renderer_manual_origin_carryforward_wording_1205(self):
+        """Issue #1205: the label says a person turned the fan off AND that it is now held off, per origin kind."""
+        render = _act_mod.EVENT_RENDERERS["fan_cancel"]
+        takeover, _ = render(
+            {
+                "trigger": "manual_origin_carryforward",
+                "manual_origin_kind": "takeover",
+                "manual_origin_started": "2026-11-01T14:05:00-06:00",
+            },
+            "fahrenheit",
+        )
+        assert takeover == (
+            "Fan off -- you turned off the fan Climate Advisor took over from your earlier manual fan-on"
+            " (started 14:05); holding the fan off"
+        )
+        restart, _ = render(
+            {
+                "trigger": "manual_origin_carryforward",
+                "manual_origin_kind": "restart",
+                "manual_origin_started": "2026-11-01T14:05:00-06:00",
+            },
+            "fahrenheit",
+        )
+        assert restart == (
+            "Fan off -- you turned off the fan Climate Advisor restarted after your grace ended (started 14:05);"
+            " holding the fan off"
+        )
+        bare, _ = render({"trigger": "manual_origin_carryforward"}, "fahrenheit")
+        assert bare == "Fan off -- closing the session from your earlier manual fan-on; holding the fan off"
+
     def test_fan_cancel_renderer_genuine_fan_off_still_says_user_turned_off(self):
         """trigger=fan_off is a genuine externally-detected physical fan-off — the one case
         that IS a real user action. Must render unchanged from before this fix."""

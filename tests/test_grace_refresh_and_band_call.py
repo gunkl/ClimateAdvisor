@@ -60,7 +60,7 @@ def _minimal_engine() -> AutomationEngine:
             "dry_run": False,
             "_active_listeners": [],
             "_current_classification": None,
-            "_paused_by_door": False,
+            "_paused_by_door_flag": False,  # Issue #1205: _paused_by_door is a property; the backing flag is the key
             "_paused_with_hvac_already_off": False,
             "_pre_pause_mode": None,
             "_doorwindow_fsm_authoritative": False,

@@ -18,13 +18,13 @@
 | What happens if grace is left active with no override behind it (e.g. a future callsite bypasses `cancel_override()`)? | `coordinator._check_orphaned_grace()` (Issue #508), run every regular update cycle (~30s), self-heals: if `_grace_active=True`, `_grace_protects_override=True` (Issue #530 — see next row), and neither `_manual_override_active` nor `_fan_override_active` is set, it force-cancels grace and emits `stuck_grace_recovered` with `reason="grace_without_override"`. This is the mirror of the pre-existing Issue #321 stuck-grace check (which catches the opposite shape — an override stuck active past its own due grace-end-time); the two checks are independent and cannot both fire on the same state. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
 | Can every grace type be "orphaned" in the Issue #508 sense — does the watchdog apply to fan-off/window-close/resume grace too? | No (Issue #530 fix). `_start_grace_period(trigger=...)` sets `_grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE` (only `"fan_manual_override"` and `"override_confirmed"`) — the watchdog now only fires for grace that was genuinely started to protect a real override. Before this fix, the watchdog inferred "orphaned" purely from absent override flags, which is also the NORMAL, by-design shape of fan-off/drift-correction/window-close/dashboard-resume grace — every one of those was being killed within about one event-loop tick of starting. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
 | A fan-off arrives seconds after an RF-remote-timer grace expires — is that a fresh event? | No (Issue #530). `_on_grace_expired()` arms `_timer_boundary_settle_until` (2 min) whenever the expiring grace's `_fan_remote_timer_hours` was set. A fan-off inside that window is treated as the tail of the SAME timer boundary — routed straight through `_exit_nat_vent()` instead of starting an independent new grace. | [§ RF-Timer Boundary Settle Window (Issue #530)](#rf-timer-boundary-settle-window-issue-530) |
-| A default-duration manual fan-on's grace expires while the fan is still running (or CA reactivates it after a grace expiry) — is the fan's eventual real off treated as fresh, hours later? | No, as of Issue #829. `_fan_manual_origin_unclosed` is a state-based (not time-boxed) sibling of the RF-timer settle window, armed in `clear_fan_override()`/`_re_pause_for_open_sensor()`/`_reconcile_fan_on_startup_locked()` whenever CA hands a still-running fan's ownership to itself with no real timer to anchor the settle window to. `on_fan_turned_off()` checks it alongside the settle window. | [§ Manual-Origin Unclosed Marker (Issue #829)](#manual-origin-unclosed-marker-issue-829) |
+| A default-duration manual fan-on's grace expires while the fan is still running (or CA reactivates it after a grace expiry) — when the occupant later switches that fan off, does a fan-off grace (hold) start? | Yes, always (Issue #1205, owner decision 2026-11-01). CA always knows how a run should end (an RF timer by time, a no-timer run by its default timer, then CA's own turn-off or adopt), so any fan-off CA did not command outside the RF-timer settle window is a person and starts the normal fan-off grace, in both supported fan modes. The Issue #829 marker `_fan_manual_origin_unclosed` is label-only: it selects the Activity Record wording (`trigger=manual_origin_carryforward`) and never decides or shortens the hold. | [§ Manual-Origin Unclosed Marker (Issue #829, Issue #1205)](#manual-origin-unclosed-marker-issue-829-issue-1205) |
 | Is an occupant's Off on a mild day (classification `off`) kept? | Yes (Issue #1159). An occupant Off is always a manual change: confirmed (PATH A) and kept for the manual grace exactly as on hot/cold days, and never adopted as matching. This holds even if CA's own door/window pause (`_paused_by_door`) engages before the confirm or during the grace; nothing is written until the grace ends. | [§ State Machine](#state-machine) |
 | Does PATH B (self-resolved transient) send a notification? | Yes (Issue #200). When the thermostat reverts to the expected mode within the confirmation window, a push notification is sent: "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." | [§ State Machine — PATH B](#state-machine) |
 | What happens if the user changes to a different mode while a grace period is already active? | The current override and grace timer are cleared, and a fresh 10-minute confirmation window starts for the new mode (Issue #201). The latest user action always wins. | [§ Second Override During Active Grace](#second-override-during-active-grace-issue-201) |
 | Where can the user see how much longer an active grace period will run, and what caused it? | Debug tab shows full `grace_end_time` and `last_action_reason`. Status tab shows `_format_grace_remaining()` with a cause label from `_GRACE_TRIGGER_LABELS`, e.g. "grace period (manual) — thermostat override — 30 min (ends 7:14 AM)" — this display moved onto the Status card and reached its current duration+cause-label shape across issues #620→#498→#527→#625 (full history in git blame; current shape is what's shown here). | [§ Debounce and Grace Period System](02-ARCHITECTURE-REFERENCE.md#debounce-and-grace-period-system) |
 | Do bedtime/wakeup/pre-cool implement their own copies of the occupancy/override/paused/nat-vent gate checks? | No (Issue #498). All four scheduled/cyclical call sites — `apply_classification()`, `handle_bedtime()`, `handle_morning_wakeup()`, `handle_pre_cool()` — call one shared pure function, `desired_state.decide_scheduled_band_gate()`, instead of hand-copying the checks. This fixed a real bug: `handle_morning_wakeup()`'s copy was missing the fan-override guard entirely, and none of the three scheduled handlers checked paused-by-door at all. | [§ Shared Scheduled-Band Gate (Issue #498)](#shared-scheduled-band-gate-issue-498) |
-| Does a fan-off grace actually stop nat-vent from immediately re-engaging, in every code path? | As of Issue #620, yes. `check_natural_vent_conditions()`'s `_idle_open` widening (Issue #244/#402/#504) never checked `_grace_active` — a user turning the WHF off could see it reactivated within seconds if outdoor stayed favorable. Fixed by adding `and not self._grace_active` to `_idle_open`; the Issue #134 comfort-ceiling exception beside it is untouched. | [§ Fan-Off Grace](#fan-off-grace-issue-359) |
+| Does a fan-off grace actually stop nat-vent from immediately re-engaging, in every code path? | As of Issue #620, yes. `check_natural_vent_conditions()`'s `_idle_open` widening (Issue #244/#402/#504) never checked `_grace_active` — a user turning the WHF off could see it reactivated within seconds if outdoor stayed favorable. Fixed by adding `and not self._grace_active` to `_idle_open`; the Issue #134 comfort-ceiling exception beside it stays for CA's own graces but, since Issue #1205, never overrides the occupant's fan-off hold (a hot house does not bring the fan back inside the hold). | [§ Fan-Off Grace](#fan-off-grace-issue-359) |
 | Can a scheduled routine (wake-up, bedtime, pre-cool, TOU pre-conditioning) or the 5-minute revisit switch off a manual heat/cool override because a door/window is open? | No (Issue #1119). `_sync_paused_by_door_with_live_sensors()` returns early while `_manual_override_active` or `_override_confirm_pending` is set, and override adoption never "agrees" while the open-window hold is live (`_override_decision_mode_and_target()` returns `(None, None)`). The occupant's mode holds until grace expiry, which re-pauses if a sensor is still open. A grace with no override (fan-off/automation grace) does not block the re-check. | [§ Manual Grace](#manual-grace) · [§ Shared Scheduled-Band Gate (Issue #498)](#shared-scheduled-band-gate-issue-498) |
 | The occupant presses heat/cool on a door/window-paused thermostat while a grace is running (e.g. a whole-house-fan override grace) -- is that a pending change? | Yes (Issue #1158). `override_grace_fsm.transition()` treats `MANUAL_OVERRIDE_DURING_PAUSE` like `OVERRIDE_DETECTED` from a protecting or unprotected grace (a pause and a protecting grace DO coexist: a fan-override grace protects with no thermostat change behind it), landing `_override_confirm_pending=True` so `_manual_change_protected()` shields the press from `apply_classification()` and the open-window guard in `_apply_comfort_band()`. A press made during the pause (origin `"pause"`) is always CONFIRMED at the end of the confirmation window, even when it equals the day's classification label (heat on a cold day, cool on a hot day): during a pause CA's plan is "paused", so the label is not a plan the press could be "self-resolving" to (`override_confirm_split.is_always_confirm_origin()`, sibling of the #1159 Off rule). A pending change that self-resolves under a protecting grace ends without touching that grace (`OVERRIDE_CONFIRM_EXPIRED`). Rule 2 still holds: the press stands a running whole-house fan down. | [§ Manual Grace](#manual-grace) |
 | Can a monitored sensor block a routine comfort-restore write even if it was never freshly detected as opening? | As of Issue #620, yes. `decide_scheduled_band_gate()`'s `paused_by_door` input previously reflected only event history (`_paused_by_door`, set by `handle_door_window_open()`/`_exit_nat_vent()`). A sensor open since before either ever ran left it `False` forever. `_sync_paused_by_door_with_live_sensors()` — called at the top of all four `decide_scheduled_band_gate()` callers — now reconciles the flag against live, debounce-settled sensor state first. | [§ Shared Scheduled-Band Gate (Issue #498)](#shared-scheduled-band-gate-issue-498) |
@@ -102,6 +102,112 @@ reactivated within seconds — confirmed live, 2026-08-11. Fixed by adding
 unaffected. See `issue_620_fan_off_grace_blocks_idle_reactivation` pending scenario for the
 reproduction and revert-tested fix confirmation.
 
+**Issue #134 comfort-ceiling bypass: CA's own graces only (Issue #1205, owner decision 2026-11-01).** Issue #134
+("grace blindspot during comfort breach") lets nat-vent re-enter during a grace when indoor is ABOVE `comfort_cool`
+(strict). It was written for Climate Advisor's own graces: after CA stopped the fan at the comfort floor, a
+90-minute automation grace left the house drifting up to 75 F with nothing running. The check tested "any grace", so
+it also overrode the PERSON's fan-off hold: with the house above `comfort_cool`, a window open and cooler air outside,
+the fan came back on at the next check (about 240 s after the person switched it off). The bypass now applies only
+while the running grace is NOT the fan-off grace. One predicate serves every site:
+`nat_vent_fsm.overheat_bypasses_grace()` (`grace_active AND NOT fan_off_hold_active AND indoor > comfort_cool`),
+used by `_grace_blocks_natvent()` (the FSM's grace short-circuit; `NatVentFsmInputs.fan_off_hold_active` is filled
+from `_fan_off_hold_active()` by `_build_nat_vent_fsm_inputs()`), by `check_natural_vent_conditions()`'s entry
+precondition, and by the Issue #1095 blocker log (`grace_active` is listed as the blocker for a hot house during a
+fan-off hold). Unchanged for CA's own graces (automation / comfort-floor, nat-vent-exit resume, door/window
+recommendation grace): a house above `comfort_cool` still re-enters nat-vent during them. In `hvac_fan` mode the
+reactivation gate itself refuses above the ceiling (`comfort_cool`, or `comfort_cool + 2 F` with
+`aggressive_savings`, Issue #392), so the blower only came back in the `aggressive_savings` band; `whole_house_fan`
+has no ceiling and came back at any temperature above `comfort_cool`.
+
+**The hold has its own deadline and survives a thermostat change (Issue #1205, owner decision 2026-11-01).** "Fan
+off" and "thermostat X" are two separate requests from the occupant, so a later thermostat change must not cancel the
+fan-off hold. Occupant view: the person switches the fan off, then sets the thermostat to Off. About ten minutes later the
+Off is confirmed as an override and `_start_grace_period_action()` replaces the fan-off grace with the override's grace
+(`override_confirmed`). Before this decision every hold check keyed on "the running grace is `fan_off`", so replacing
+the grace lifted all of them: `_protected_active_mode()` exempts Off and the economizer has no override check of its own,
+so about two minutes after the Off was confirmed (+13 min) CA started the fan again, long before the pause the person
+asked for had ended (both fan modes).
+
+- **One source of truth:** `AutomationEngine._fan_off_hold_until` (a `datetime`) and the predicate
+  `_fan_off_hold_active()` (`now < _fan_off_hold_until`; a lapsed deadline is cleared and logged by whichever check first
+  sees it). The deadline is the fan-off grace's end time at the moment it started (`_start_grace_period_action()` sets it
+  when `trigger == "fan_off"`; the Issue #1006 restart re-arm comes through the same call; a newer fan-off restarts it
+  with a new deadline). With the grace disabled (0 s) no grace starts and so no hold.
+- **`_grace_is_fan_off_grace()` is kept, but only for "which grace timer is running"** (the grace-protection
+  predicate `_grace_protects_no_hvac_on_change()` and the door/window log label). Every question of the form "is the
+  occupant's off still in force?" reads `_fan_off_hold_active()`: the `_activate_fan()` backstop, the FSM input
+  `fan_off_hold_active` (so the #134 bypass never applies to the hold), the Issue #134 precondition and blocker log in
+  `check_natural_vent_conditions()`, the nat-vent start refusal in `handle_door_window_open()`, the min-runtime cycle
+  deferral (retry at the hold's own deadline + 5 s) and the once-per-hold keys of the refusal log and the
+  hold-beats-ceiling log (keyed on the deadline).
+- **A thermostat change after the off does not end the hold.** When a thermostat override's grace (or any other grace)
+  replaces the fan-off grace the engine logs INFO `Fan-off hold continues past <trigger> grace: hold_until=... override_mode=...
+  override_active=...`. The hold runs to its original deadline; the fan stays off for all of it in both fan modes, with a
+  hot or a mild day and a thermostat set to Off, cool or heat (a confirmed heat/cool override additionally keeps CA from
+  starting the fan under the Issue #714 rule, which is separate from the hold).
+- **How the hold ends (INFO `Fan-off hold ended: reason=... hold_until=...`).** David's rule: "fan off" and "thermostat X"
+  are separate requests, so the hold ends early ONLY on (1) the occupant turning a fan on (`occupant_fan_on`,
+  `handle_fan_manual_override()`: the newest fan action wins, whole-house fan and blower alike), (2) a dashboard cancel
+  that targets the FAN-OFF pause (`grace_cancelled:<reason>`) and (3) a WHF safety stop that cancels a fan-owned grace
+  (`_end_fan_override_and_grace()`); otherwise at its own deadline (`expired`, also the fan-off grace expiring).
+  Ending a THERMOSTAT override never ends it: not the automatic adoption of a matching override
+  (`cancel_override("adopted_matching_decision")`), not a dashboard cancel of the thermostat change, not a superseding
+  grace. The two dashboard cancel endpoints (`api.py`) both call `AutomationEngine.cancel_override()`:
+  `POST cancel_override` (reason `user_cancel_override`) and `POST cancel_fan_override` (reason
+  `user_cancel_fan_override`). `cancel_override()` decides which request the cancel targets: a thermostat change
+  (`_manual_change_protected()`: an active override or a pending confirmation) is the target unless the cancel comes
+  from the fan card (`user_cancel_fan_override`); with no thermostat change behind it the cancel targets the fan side.
+  So override-confirmed then fan-off then "Cancel override" keeps the hold, as does fan-off then a thermostat change
+  then "Cancel override", while "Cancel" on a lone fan-off pause ends it. The fan card's cancel is a fan-side cancel
+  whatever grace is running: it ends the hold and the fan run and the fan-owned grace (`_cancel_fan_side_only()`)
+  and leaves a pending or confirmed THERMOSTAT change and its grace alone (it used to clear them too); the thermostat
+  cancel mirrors it and leaves the fan run and the hold alone. A hold with NO grace running (the thermostat override's
+  grace came and went) is still cancellable: `cancel_override()` includes `_fan_off_hold_active()` in its precondition and
+  the endpoint answers "Fan-off pause ended". Dashboard (`frontend/index.html`): the status payload carries
+  `fan_off_hold_active`, and the fan card's button is enabled by `fan_override_active || fan_off_hold_active`. With ONLY a
+  hold running it reads "End Fan-Off Pause" and calls `cancel_fan_override`, which ends the hold and answers "Fan-off pause
+  ended." (pinned by `tests/test_api.py::...test_cancel_fan_override_view_ends_a_fan_off_pause_with_no_grace_behind_it`).
+  "Cancel Override" (thermostat side) is unchanged. Away/vacation handling and the bedtime/wake-up cancels
+  only touch override-protecting graces, so they never ended a fan-off grace and do not end the hold either.
+- **The occupant's fan run keeps its own deadline too (Issue #1205 F3, mirror on the fan-ON side).**
+  `_fan_override_until` is the `fan_manual_override` grace's end at the moment the run started (an RF timer's duration
+  included). A thermostat override's grace replacing that grace, and that grace's expiry, adoption or cancel, no longer
+  clear `_fan_override_active` (before, a 4 h remote-timer run was cut off about 3.5 h early and in `hvac_fan` mode CA
+  then sent `set_fan_mode auto`, stopping the occupant's blower): `_clear_manual_override_active(keep_fan_override=True)`
+  restarts the `fan_manual_override` grace for the remaining time (INFO `Fan override continues past thermostat override
+  grace: until=...`), so the run ends through the ordinary machinery at its own deadline, with the #530 settle window
+  armed only when that fan grace expires. It still ends on its deadline, the occupant's fan-off, the fan card's cancel
+  (`user_cancel_fan_override`), a WHF safety stop, bedtime/wake-up, away and every other path that ended it before;
+  only "a thermostat override's grace ended" no longer does. The status card also names a hold or fan run when NO grace runs (`_compute_automation_status()` appends the same " — fan held off until H:MM" / " — your fan run continues until H:MM"). Persisted as `fan_override_until`; on restart it feeds the
+  Issue #1045 stash when a thermostat grace was the persisted one.
+- **Restart:** the deadline is persisted as `fan_off_hold_until` in the serialized engine state and restored by
+  `_maybe_restore_fan_off_grace()`. When the fan-off grace itself was the persisted grace it is re-armed as in Issue #1006 and the
+  hold with it; when a thermostat override's grace (not restored, Issue #1046) was the persisted one, the hold is
+  restored on its own (INFO `Fan-off hold restored across restart`) while its deadline is still in the future. A lapsed
+  persisted hold is not restored.
+- **Status surfaces:** while the fan-off grace runs the Status card shows it (trigger label "WHF turned off"). Once a
+  thermostat override replaces the grace, `_grace_status_detail()` appends " — fan held off until H:MM" (hold in the
+  future, running trigger not `fan_off`) and, for the occupant's fan run, " — your fan run continues until H:MM"
+  (`_separate_fan_request_detail()`). The Next Automation nat-vent candidate scans from no earlier than
+  `ae._fan_off_hold_until`, so it never names a start inside the hold. The household-promise journal keeps the
+  fan-off / fan-run episode open to its own deadline (`grace_cancelled` payload `continues`, a thermostat grace's
+  `grace_expired` does not close a fan episode inside its deadline), so P4 keeps watching. Over the real event stream: `grace_cancelled` and `override_cleared` carry `continues` when the engine keeps the occupant's fan run (or the hold) past a thermostat override's end, and the journal then skips closing the fan episodes; a fan-side cancel or the run's own `fan_override_cleared` closes them.
+
+**Backstop in `_activate_fan()` (Issue #1205).** Every CA-initiated fan START (nat-vent entry or cycling-on, the
+min-runtime cycle, the economizer's window-cooling start, a reactivation) is refused with
+`FanCommandResult.SUPPRESSED` ("no working fan": no session is recorded, by nat-vent or by the economizer) while the fan-off hold runs (`_fan_off_hold_active()`, which outlives the fan-off grace when a thermostat override replaces it). The
+path-level guards decide first and say why; this catches a path with none (the economizer start had no grace check).
+A stop is never refused here, and the occupant's own fan-on never comes through `_activate_fan()`
+(`handle_fan_manual_override()`). INFO `Fan activation refused: occupant's fan-off hold active reason=... hold_until=...`
+(INFO once per caller per hold, keyed on the caller prefix of the reason and the hold deadline because the reason embeds live temperatures; DEBUG on repeats).
+
+**Economizer during the hold (Issue #1205 S1).** The economizer still decides MAINTAIN or COOL_DOWN on a hot day with a window open, but the backstop refuses the start, so `_apply_economizer_fsm_state_after_activation()` applies INACTIVE: no `_economizer_active`, no "ventilation holding" status or log, and no session. It is re-evaluated on its own next tick (the FSM still sees a change from INACTIVE), so once the hold ends and the conditions still hold, the economizer starts the fan. Before the fix it recorded itself active with the fan off, saw no change on later ticks and never retried.
+
+The min-runtime cycle (`_fan_cycle_on()`; restarted by the occupant's own off) defers instead of being refused: while
+the hold runs (also after a thermostat override replaced the grace) it starts nothing, sets no "cycle running" flag and retries at the hold's own deadline + 5 s (INFO
+`Min-runtime cycle deferred: occupant's fan-off hold active (retry in Ns)`), so the hour's minimum runtime is delayed,
+not lost.
+
 **Semantics are INVERTED vs `fan_manual_override` grace:** `fan_manual_override` grace gates CA from **stopping** a fan the user is running. `fan_off` grace gates CA from **starting** a fan the user just stopped. Both protect the user's deliberate action from being immediately undone by automation, in opposite physical directions.
 
 **Fan-off grace and the door/window pause (Issue #1201):** the grace guards the FAN, not the heating/cooling. Stopping a fan turns no HVAC on, so a window that stays open past the sensor debounce pauses HVAC as usual (owner rule 3) in both supported fan modes (`hvac_fan`, `whole_house_fan`): HVAC off, `_paused_by_door` recorded, `_pre_pause_mode` captured, normal notification; HVAC restores on close. `handle_door_window_open()` still refuses to start nat-vent while the grace runs (Issue #1006 contract: the fan the occupant stopped stays off). An occupant's protected thermostat change still wins over the window (no pause). Predicate: `AutomationEngine._grace_protects_no_hvac_on_change()`.
@@ -112,7 +218,7 @@ reproduction and revert-tested fix confirmation.
 
 **Never orphaned-grace-eligible (Issue #530):** because this grace type never sets an override flag by design, `_start_grace_period(trigger="fan_off")` (the default `trigger_label` in `_clear_fan_flags_and_start_grace()`) is NOT a member of `_GRACE_TRIGGERS_PROTECTING_OVERRIDE` — `_grace_protects_override` is `False`, so `coordinator._check_orphaned_grace()` never touches it. Before this fix, the watchdog could not distinguish "no override flag because nothing needs protecting" from "no override flag because something is broken," and killed essentially every fan-off grace within about one event-loop tick of starting (see [§ Orphaned Grace Self-Heal](#orphaned-grace-self-heal-issue-508)).
 
-**End condition:** Grace timer fires → `reconcile_fan_on_startup()` is called to re-evaluate the physical fan state. If the fan is still running (edge case), the reconcile step either adopts it as nat-vent or turns it off. If the fan is off (normal case), no action is taken. **Exception (Issue #530):** if the fan-off arrives inside the RF-timer boundary settle window, no fan-off grace is started at all — see [§ RF-Timer Boundary Settle Window](#rf-timer-boundary-settle-window-issue-530).
+**End condition:** Grace timer fires → `reconcile_fan_on_startup()` is called to re-evaluate the physical fan state. If the fan is still running (edge case), the reconcile step either adopts it as nat-vent or turns it off. If the fan is off (normal case), no action is taken. **Exception (Issue #530):** if the fan-off arrives inside the RF-timer boundary settle window, no fan-off grace is started at all — see [§ RF-Timer Boundary Settle Window](#rf-timer-boundary-settle-window-issue-530). **No other exception (Issue #1205):** a fan-off CA did not command that falls outside that window always starts this grace, including the off of a fan CA took over or restarted after an earlier manual fan-on (the Issue #829 marker only changes the wording) — see [§ Manual-Origin Unclosed Marker](#manual-origin-unclosed-marker-issue-829-issue-1205).
 
 #### Fan-Off Grace and Command-Only Mode (Issue #361)
 
@@ -151,7 +257,7 @@ the fan's current state (command tracking vs. physical state read).
 
 **The occupant's own Off, and a setpoint change after a nat-vent exit, at the door-close restore (Issues #1165, #1157).** Both live in the protected branch of `_restore_comfort_after_door_window_close()` and share one rule: the occupant's newest action wins. (a) #1165: a MODE change to Off during a pause (e.g. the nat-vent-exit pause that leaves the thermostat in cool/heat) is recorded as `off` and kept -- `_protected_change_is_occupant_off()` (mode `off` and source not `setpoint`) makes the close write nothing. Before, the confirm-time call to `_occupant_mode_when_ca_holds_off()` was not gated on the change's source, so the live Off read as CA's own pause Off and the override was recorded as the pre-pause mode, which the close then restored over the Off (seed 1149005000058). The substitution now applies to setpoint-only changes at both detection and confirm. (b) #1157: a nat-vent exit with the window still open records no `_pre_pause_mode` (thermostat Off). A setpoint-only change on it is judged against the comfort family the selector would arm now (`_preview_comfort_family()`, the same side-effect-free preview override adoption uses: it reads `_comfort_family_would_switch()`, never the committing `_resolve_comfort_family_via_fsm()`, so the occupant's change emits no `comfort_family_switch`, commits no dwell/arming state and rate-limits nothing); the day's default family comes from the armed band's active edge, so a mild day (classification `off`) resolves too. That mode is the recorded override mode (so the `override_respected` promise sees the resume as the occupant's own mode) and the close resumes it at the occupant's setpoint. Consequence to know: `_protected_active_mode()` is then non-None while the window is still open, so Climate Advisor's own whole-house-fan / nat-vent start is refused over it (F-D) for the life of the override, where a recorded `off` would have allowed it. Away/vacation is deliberately not given a family: the live Off stays recorded as `off` and the protected close writes nothing, whereas an unprotected close redirects to the setback -- a known asymmetry, not changed here. An ordinary pause over an already-Off thermostat is untouched (the #1068 gate: `_paused_entity == "nat-vent-exit"`). The family is fixed when the occupant speaks, not re-resolved at the close (same as the pre-pause mode in #1131).
 
-**Owner principle (2026-10-31): the latest manual change creates the latest override and replaces the old one; there is no returning to an earlier override.** (1) A press of the WHOLE-HOUSE fan (`handle_fan_manual_override()` with `hvac_fan=False` under `fan_mode` `whole_house_fan` or `both`) REPLACES any thermostat change, pending or confirmed, at ANY grace setting including 0: a pending confirmation is cancelled (timer, bookkeeping and, through the FSM, the confirm flag -- `FAN_OVERRIDE_DETECTED` when a grace starts, `OVERRIDE_CANCELLED` when it does not) so it can never confirm later, and a confirmed override is cleared (`override_cleared`, reason `new_override_during_grace`, via `_clear_thermostat_override_flags()`, which never touches fan state). That removes the old failure where a change made just before the fan was confirmed against the fan's Off -- recorded as `off` on a hot day (blocking every reclassify indefinitely) or discarded as a transient on a mild day. (2) When the fan session ends nothing earlier comes back as an override. The two end paths differ: when the OCCUPANT turns the fan off (`on_fan_turned_off()` -> `_release_whf_and_reclassify()`) the hold is released and Climate Advisor resumes its own plan through a reclassify -- nothing is restored; when CLIMATE ADVISOR stops the fan (`_deactivate_fan()`: sealed-house guard, nat-vent exits, reconcile) that call alone writes the pre-fan mode back, then the plan resumes (with the window shut; with it open, rule 3 keeps HVAC off once the sensor debounce has expired). There is no hand-back helper: the earlier `_occupant_mode_to_restore_after_whf()` / `_restore_occupant_mode_after_whf()` / `_whf_release_restore_mode` machinery was removed as dead under this principle -- the replacement for a safety stop (#1144's `_after_whf_safety_stop`) is the ordinary `_deactivate_fan()` restore path. The replacement is for the whole-house fan ONLY (WHF and HVAC fan are different physics): a press of the thermostat's own fan (`fan_mode` `hvac_fan`, or the thermostat leg of `both`; the coordinator's thermostat `fan_mode` listener passes `hvac_fan=True`) leaves a heat/cool change alone, and a thermostat event carrying a mode change AND a `fan_mode` change registers the mode change only (one event, one root cause). **Fan identity (Issues #1163/#1164).** `AutomationEngine._is_whf_press(hvac_fan)` is the ONE predicate for "a press of the whole-house fan" (`fan_mode` `whole_house_fan`/`both` and not the thermostat blower); it gates BOTH consequences -- replacing the occupant's thermostat change and the HVAC suppression (so the thermostat blower, which coexists with the compressor, never turns HVAC off, under any configuration). A thermostat-fan press dispatches `HVAC_FAN_OVERRIDE_DETECTED` (same grace landing as `FAN_OVERRIDE_DETECTED`, but the confirm axis is preserved), so a pending thermostat change stays pending with its timer intact at any grace; `FAN_OVERRIDE_DETECTED` is kept for the WHF press, which cancels it. The engine records which fan an override belongs to (`_fan_override_is_hvac_fan`) and `on_fan_turned_off(hvac_fan=)` ignores an off report from the OTHER fan: a blower On->Auto no longer ends a WHF RF-timer override (and a WHF-entity off no longer ends a blower override); the coordinator's thermostat `fan_mode` listener passes `hvac_fan=True` in both directions. **Scope (Issue #1197, owner decisions 2026-11-01):** the thermostat blower is Climate Advisor's fan only under `hvac_fan` (and the unsupported `both`) -- `fan_mode_resolver.thermostat_blower_is_ca_fan()`; under `whole_house_fan` a blower change is ignored (INFO log, no override, no grace, no `on_fan_turned_off()`), so a blower override can only exist where there is no whole-house fan entity. **A blower-override or fan-off grace never holds off the door/window pause (Issues #1172, #1201):** `handle_door_window_open()` skips its grace branch when `_grace_protects_no_hvac_on_change()` (trigger `fan_manual_override` + `_fan_override_is_hvac_fan`, or trigger `fan_off`; no protected thermostat change); the pause happens after the sensor debounce and the occupant's blower keeps running (#1180). **Restart (Issue #1170):** `_fan_override_is_hvac_fan` is not persisted; the startup re-arm derives it from config (`hvac_fan=True` under `hvac_fan`, WHF otherwise), so the occupant turning the blower off after a restart ends the override. A mode-change override in the same thermostat event gates only the fan-ON press, never the fan-off direction. A shared helper, `AutomationEngine._replace_thermostat_override()`, is the one "a new override replaces the old one" implementation, used by the coordinator's mode-to-mode supersession and by the WHF press. (3) Consistent with it and unchanged: a thermostat MODE change while the fan runs replaces the fan override (#714/#748 stand-down keeps the occupant's mode); a temperature-only change while the WHF owns HVAC is ignored (never an override, not counted); CA's own fan start refuses over a protected active mode, pending included (F-D). `_occupant_mode_when_ca_holds_off()` remains only for CA's own door/window pause (#1131): the pause's Off is never mistaken for the occupant's mode. `_notify()` never raises (M3); a late echo of CA's own command with a missing prior setpoint is not an override (L6).
+**Owner principle (2026-10-31): the latest manual change creates the latest override and replaces the old one; there is no returning to an earlier override.** (1) A press of the WHOLE-HOUSE fan (`handle_fan_manual_override()` with `hvac_fan=False` under `fan_mode` `whole_house_fan` or `both`) REPLACES any thermostat change, pending or confirmed, at ANY grace setting including 0: a pending confirmation is cancelled (timer, bookkeeping and, through the FSM, the confirm flag -- `FAN_OVERRIDE_DETECTED` when a grace starts, `OVERRIDE_CANCELLED` when it does not) so it can never confirm later, and a confirmed override is cleared (`override_cleared`, reason `new_override_during_grace`, via `_clear_thermostat_override_flags()`, which never touches fan state). That removes the old failure where a change made just before the fan was confirmed against the fan's Off -- recorded as `off` on a hot day (blocking every reclassify indefinitely) or discarded as a transient on a mild day. (2) When the fan session ends nothing earlier comes back as an override. The two end paths differ: when the OCCUPANT turns the fan off (`on_fan_turned_off()` -> `_release_whf_and_reclassify()`) the hold is released and Climate Advisor resumes its own plan through a reclassify -- nothing is restored; when CLIMATE ADVISOR stops the fan (`_deactivate_fan()`: sealed-house guard, nat-vent exits, reconcile) that call alone writes the pre-fan mode back, then the plan resumes (with the window shut; with it open, rule 3 keeps HVAC off once the sensor debounce has expired). There is no hand-back helper: the earlier `_occupant_mode_to_restore_after_whf()` / `_restore_occupant_mode_after_whf()` / `_whf_release_restore_mode` machinery was removed as dead under this principle -- the replacement for a safety stop (#1144's `_after_whf_safety_stop`) is the ordinary `_deactivate_fan()` restore path. The replacement is for the whole-house fan ONLY (WHF and HVAC fan are different physics): a press of the thermostat's own fan (`fan_mode` `hvac_fan`, or the thermostat leg of `both`; the coordinator's thermostat `fan_mode` listener passes `hvac_fan=True`) leaves a heat/cool change alone, and a thermostat event carrying a mode change AND a `fan_mode` change registers the mode change only (one event, one root cause). **Fan identity (Issues #1163/#1164).** `AutomationEngine._is_whf_press(hvac_fan)` is the ONE predicate for "a press of the whole-house fan" (`fan_mode` `whole_house_fan`/`both` and not the thermostat blower); it gates BOTH consequences -- replacing the occupant's thermostat change and the HVAC suppression (so the thermostat blower, which coexists with the compressor, never turns HVAC off, under any configuration). A thermostat-fan press dispatches `HVAC_FAN_OVERRIDE_DETECTED` (same grace landing as `FAN_OVERRIDE_DETECTED`, but the confirm axis is preserved), so a pending thermostat change stays pending with its timer intact at any grace; `FAN_OVERRIDE_DETECTED` is kept for the WHF press, which cancels it. The engine records which fan an override belongs to (`_fan_override_is_hvac_fan`) and `on_fan_turned_off(hvac_fan=)` ignores an off report from the OTHER fan: a blower On->Auto no longer ends a WHF RF-timer override (and a WHF-entity off no longer ends a blower override); the coordinator's thermostat `fan_mode` listener passes `hvac_fan=True` in both directions. **Scope (Issue #1197, owner decisions 2026-11-01):** the thermostat blower is Climate Advisor's fan only under `hvac_fan` (and the unsupported `both`) -- `fan_mode_resolver.thermostat_blower_is_ca_fan()`; under `whole_house_fan` a blower change is ignored (INFO log, no override, no grace, no `on_fan_turned_off()`), so a blower override can only exist where there is no whole-house fan entity. **A blower-override or fan-off grace never holds off the door/window pause (Issues #1172, #1201):** `handle_door_window_open()` skips its grace branch when `_grace_protects_no_hvac_on_change()` (trigger `fan_manual_override` + `_fan_override_is_hvac_fan`, or trigger `fan_off`; no protected thermostat change); the pause happens after the sensor debounce and the occupant's blower keeps running (#1180). **Restart (Issue #1170):** `_fan_override_is_hvac_fan` is not persisted; the startup re-arm derives it from config (`hvac_fan=True` under `hvac_fan`, WHF otherwise), so the occupant turning the blower off after a restart ends the override. A mode-change override in the same thermostat event gates only the fan-ON press, never the fan-off direction. A shared helper, `AutomationEngine._replace_thermostat_override()`, is the one "a new override replaces the old one" implementation, used by the coordinator's mode-to-mode supersession and by the WHF press. (3) Issue #1205 (owner decision, final review): a thermostat MODE change while the fan runs does NOT replace the occupant's fan run -- "fan" and "thermostat" are separate requests and neither cancels the other unless they conflict. The coordinator's mode-to-mode path (`_replace_thermostat_override(clear_fan=False)`, the only production caller) replaces the old thermostat override only; the fan run keeps its own deadline (`_fan_override_until`). Rule 2 (WHF and HVAC never together) is enforced by the WHF safety check (`whf_safety_decision` `STOP_MUTEX_FAN` -> `_end_fan_override_and_grace`) when the newer mode is heat/cool; in `hvac_fan` mode nothing conflicts and the blower run continues (a silent clear is worse: on command-only installs `fan_believed_on` reads `_fan_override_active`, so after a clear the mutex could no longer stop a still-running WHF). The #714/#748 stand-down still keeps the occupant's mode; a temperature-only change while the WHF owns HVAC is ignored (never an override, not counted); CA's own fan start refuses over a protected active mode, pending included (F-D). `_occupant_mode_when_ca_holds_off()` remains only for CA's own door/window pause (#1131): the pause's Off is never mistaken for the occupant's mode. `_notify()` never raises (M3); a late echo of CA's own command with a missing prior setpoint is not an override (L6).
 
 **Confirmation source reaches the FSM (Issue #1146).** `_confirm_override_expired()` must clear the confirm bookkeeping (`_clear_override_confirm_action()`, which sets `_override_confirm_source` to None) before it writes the grace flags, so the FSM input builder used to read `setpoint_override=False`, take PATH B and land on (IDLE, NONE) while the real manual timer was armed -- a setpoint-only change whose mode already matched the day's classification (typical on heat/cool days) was never protected and the status card showed no grace. `_resolve_override_grace_fsm_state(..., confirm_source=source)` now hands the source to `_build_override_grace_fsm_inputs(confirm_source=...)` explicitly; `_override_confirm_source` still ends as None. The coordinator's duplicate override/grace tracker (`_evaluate_override_grace_fsm`, its builder copy and ~15 feed call sites, `_override_grace_fsm_state`) was dead diagnostics that carried the same defect and was deleted (Issue #1152); `AutomationEngine._resolve_override_grace_fsm_state()` is the only override/grace FSM dispatch.
 
@@ -357,7 +463,7 @@ cancellation plus reconciliation, only for callers that mean deliberate, immedia
 
 **Log lines** (all in `automation.py`):
 - `Started <source> grace period (N seconds) — trigger=… source=… ends=HH:MM` (`_start_grace_period_action()`), the mirror of `Grace cancelled — reason= trigger= source= remaining_min=` (`_cancel_grace_intentionally()`). Both fragments come from `_grace_log_fields()` / the same field names.
-- `Nat-vent evaluation skipped: reason=… ` / `Nat-vent evaluation not engaged: reason=…` (`_log_nat_vent_eval()`), emitted from every entry-evaluation exit of `check_natural_vent_conditions()`. Skip reasons: `no_sensor_open`, `hvac_calling`, `sensor_debounce_pending`, `grace_active`, `reactivation_lockout`, `temperature_unavailable`. `not engaged` reasons are listed in the order the nat-vent FSM decides (`override_active`, `grace_active` — which, like the FSM, does not apply when indoor exceeds `comfort_cool` (Issue #134) — `reactivation_lockout`, then gate rejections from `nat_vent_gate.explain_nat_vent_gate()`); `fsm_declined` means no listed cause applied. Only the full gate is itemised, not the soft-start sub-gate. The previous-outcome memory resets when a nat-vent session starts/ends or a new grace starts, so a new blocker always logs at INFO (see `08-COMPUTATION-REFERENCE.md` §nat-vent gate). INFO when the (outcome, reasons) pair changes, DEBUG when it repeats.
+- `Nat-vent evaluation skipped: reason=… ` / `Nat-vent evaluation not engaged: reason=…` (`_log_nat_vent_eval()`), emitted from every entry-evaluation exit of `check_natural_vent_conditions()`. Skip reasons: `no_sensor_open`, `hvac_calling`, `sensor_debounce_pending`, `grace_active`, `reactivation_lockout`, `temperature_unavailable`. `not engaged` reasons are listed in the order the nat-vent FSM decides (`override_active`, `grace_active` — which, like the FSM, does not apply when indoor exceeds `comfort_cool` (Issue #134), except during the occupant's fan-off hold (Issue #1205) — `reactivation_lockout`, then gate rejections from `nat_vent_gate.explain_nat_vent_gate()`); `fsm_declined` means no listed cause applied. Only the full gate is itemised, not the soft-start sub-gate. The previous-outcome memory resets when a nat-vent session starts/ends or a new grace starts, so a new blocker always logs at INFO (see `08-COMPUTATION-REFERENCE.md` §nat-vent gate). INFO when the (outcome, reasons) pair changes, DEBUG when it repeats. Also `Nat-vent not re-entered: occupant's fan-off hold wins over comfort-ceiling bypass indoor=… comfort_cool=… grace_remaining_min=…` (Issue #1205), INFO once per fan-off hold, only when the house is above `comfort_cool` (the case the #134 bypass would have let through).
 
 **Status card:** every Status string that mentions a grace carries the cause and `— <duration> (ends HH:MM)` via `ClimateAdvisorCoordinator._grace_status_detail()` — including the door/window-paused string (`paused — door/window open · grace (manual) — WHF turned off — 3h (ends 9:45 PM)`) and `resumed — door/window override — 3h (ends …)`. The Issue #860 rule still applies: when `_fan_remote_timer_hours` is set the duration is omitted and the Fan card owns it. `dashboard_resume` is a `_GRACE_TRIGGER_LABELS` entry.
 
@@ -482,70 +588,156 @@ reset alongside grace's other one-shot state). `const.py` — `TIMER_BOUNDARY_SE
 
 ---
 
-## Manual-Origin Unclosed Marker (Issue #829)
+## Manual-Origin Unclosed Marker (Issue #829, Issue #1205)
 
-**Problem:** the settle window above only ever arms when the expiring grace's
-`_fan_remote_timer_hours` was set — i.e. only for an override tied to a real RF-remote
-timer selection. A **default-duration** manual fan-on (no timer selected on the
-remote/device — falls back to the configured `manual_grace_seconds`) has no numeric
-timer value to anchor that window to, so this class of grace had no equivalent
-protection. Confirmed live (2026-09-02/03): a WHF-on with no timer at 17:37 armed a
-180-minute default override grace. That grace expired in software at 20:37 while the fan
-was still physically running and nat-vent conditions favored keeping it on —
-`clear_fan_override()` unconditionally discarded `_fan_override_active`,
-`_fan_override_time`, `_fan_remote_timer_hours`, and `_fan_remote_speed`, silently
-handing ownership to nat-vent with **no** record the run had ever been user-initiated.
-The fan's real off, ~5 hours later, was read by `on_fan_turned_off()` as a brand-new
-unexplained override and started a fresh 180-minute grace. The same shape then repeated
-one level down: that second grace expired with the monitored sensor still open,
-`_re_pause_for_open_sensor()` reactivated nat-vent on its own initiative ("adopting as
-CA-owned"), and ~93 minutes later the fan's real off was again read as fresh, restarting
-a third grace — the loop this issue reported.
+### The rule (Issue #1205, owner decision 2026-11-01)
 
-**Why a 120-second settle window can't fix this:** the RF-timer window works because a
-real hardware timer's own clock and CA's software clock are expected to agree to within
-seconds. Here there is no hardware timer at all — the gap between CA silently taking
-over an already-running fan and that fan's eventual real off was observed to be **minutes
-to hours**, not seconds. Widening `TIMER_BOUNDARY_SETTLE_SECONDS` or dropping the
-`_fan_remote_timer_hours is not None` condition would either still fail to cover the
-observed gaps, or risk suppressing a genuinely fresh override that happens to follow
-closely after an unrelated grace expiry.
+**What the occupant experiences:** when someone in the home switches off a fan (the whole-house fan in
+`whole_house_fan` mode, the thermostat blower in `hvac_fan` mode), the fan stays off for the fan-off pause (the
+fan-off grace, "hold"). That includes a fan Climate Advisor took over or restarted after an earlier manual fan-on.
+Before #1205 an off of that kind started no hold, and with a window open and cool air outside CA switched the
+fan back on within about 6-13 minutes.
 
-**Fix — a state-based (not time-boxed) sibling of the settle window:**
-`self._fan_manual_origin_unclosed: bool` is set (not by elapsed time, but by the handoff
-event itself) at the three points where CA hands ownership of a still-running or
-freshly-reactivated fan to itself without having seen the physical end of a manual
-session:
-- `clear_fan_override()` — when the fan is still `_fan_active` and
-  `_fan_remote_timer_hours is None` (the default-duration case the settle window
-  doesn't cover) at the moment override flags are cleared.
-- `_re_pause_for_open_sensor()` — when it reactivates nat-vent on CA's own initiative
-  after a grace expires with the sensor still open.
-- `_reconcile_fan_on_startup_locked()`'s "adopting as CA-owned" branch, scoped to
-  `trigger == "post_grace_expiry"` only (the live restart-analog of the previous case;
-  `ha_restart` already has its own narrower RF-timer-provenance handling per Issue #677,
-  and `backstop_30min`/`thermostat_state_change` adopting an already-running fan is
-  routine reconciliation, not a grace-expiry handoff).
+**Every fan-off that Climate Advisor did not command and that falls outside the selected-timer settle window
+starts the normal fan-off grace (hold), in both supported fan modes.** CA must not restart the fan during it: no nat-vent path, no economizer start, and not the Issue #134 comfort-ceiling bypass (a house above `comfort_cool` does not end the hold; that bypass is for CA's own graces only, see [§ Fan-Off Grace](#fan-off-grace-issue-359)). `_activate_fan()` refuses any CA start during the hold as the backstop. The hold runs to its OWN deadline: a thermostat override replacing the grace does not end it (see [§ Fan-Off Grace](#fan-off-grace-issue-359)).
+`FAN_MODE_BOTH` is unsupported (#1175).
 
-`on_fan_turned_off()` checks this flag alongside the RF-timer settle window, before
-falling through to the generic fresh-event path — if either is set, the fan-off is
-treated as closing an existing session (routed through `_exit_nat_vent()` if
-`_natural_vent_active`, otherwise flags are simply reconciled) instead of starting a
-new "unprotected" grace, and the flag is consumed (one-shot). The Activity Report's
-`fan_cancel` renderer (`ai_skills_context.py::_render_fan_cancel()`) shows a distinct
-`trigger=manual_origin_carryforward` label ("Fan cancel -- closing session from earlier
-manual fan-on") so this closure reads as legible, not as an unexplained repeat.
+**Why: CA always knows how a run should end.**
+- A remote-selected timer (1/2/4/8/12 h) is tracked by time. When its grace expires, the 120 s settle window
+  (see [§ RF-Timer Boundary Settle Window](#rf-timer-boundary-settle-window-issue-530)) recognizes the hardware
+  timer's own off. That is the only fan-off that starts no hold.
+- With no timer selected the QuietCool would run indefinitely, so CA applies a default timer
+  (`manual_grace_seconds`; the remote's `timer_none` token uses the same default, see `fan-remote-spec.md`). At its
+  expiry the post-grace reconcile either turns the fan off itself (`decision="turn-off"`: CA's own command, which
+  never reaches `on_fan_turned_off()`) or keeps it running as CA's own nat-vent run (`decision="adopt-on"`).
+- All other CA-initiated stops (nat-vent exit, safety/mutex stop, cycling off, reconcile turn-off) are CA's own
+  commands and start no hold either.
 
-**Relationship to the RF-Timer Boundary Settle Window above:** shares the same consuming
-choke point in `on_fan_turned_off()` and the same resulting FSM transition
-(`FanFsmEventKind.TIMER_BOUNDARY_SETTLE`) — the two differ only in what arms them (a
-short time window vs. a state-based marker) and in scope (RF-timer-linked grace only vs.
-every other CA-initiated ownership handoff of a still-running fan).
+Therefore a fan-off CA did not command, outside the settle window, came from a PERSON. The premise of the
+original #829 fix, that such an off is "the expected end" of the manual session, was wrong.
 
-**Location:** `automation.py` — `_fan_manual_origin_unclosed` (instance attribute),
-`clear_fan_override()` / `_re_pause_for_open_sensor()` / `_reconcile_fan_on_startup_locked()`
-(arm it), `on_fan_turned_off()` (consumes it). `ai_skills_context.py` —
-`_render_fan_cancel()` (renders the `manual_origin_carryforward` trigger).
+**The marker is label-only.** `_fan_manual_origin_unclosed` (with its run binding and pending fact, below) no
+longer controls any behavior. It ONLY selects the Activity Record / `fan_cancel` / log wording of the occupant's
+off:
+- matched marker, `fan_cancel` trigger `manual_origin_carryforward`, rendered by
+  `ai_skills_context.py::_render_fan_cancel()` from the payload's `manual_origin_kind` and
+  `manual_origin_started`:
+  - kind `takeover` (armed by `clear_fan_override()` or the reconcile `adopt-on`): "Fan off -- you turned off the
+    fan Climate Advisor took over from your earlier manual fan-on (started HH:MM); holding the fan off"
+  - kind `restart` (armed by the grace-expiry reactivation, applied or deferred-then-applied): "Fan off -- you
+    turned off the fan Climate Advisor restarted after your grace ended (started HH:MM); holding the fan off"
+  - no kind in the payload: "Fan off -- closing the session from your earlier manual fan-on; holding the fan off"
+- stale or unmatched marker (or none), trigger `fan_off`: the plain "Fan cancel (user turned off)" wording.
+
+`on_fan_turned_off()` runs the SAME path for both: `fan_cancel`, then `_clear_fan_flags_and_start_grace()` (flags
+cleared, nat-vent session ended, the fan-off grace started, FSM kind `FLAGS_CLEARED_FOR_GRACE`), then
+`_release_whf_and_reclassify()`. Only the settle-window branch returns early. A matched off never routes through
+`_exit_nat_vent()` without a grace.
+
+**Grace expiry with a window still open** is unchanged: when the hold ends and the window is still open, CA
+restarts the fan (normal behavior). It is visible in the Activity Record as `nat_vent_reactivated_while_paused`
+(and `fan_activated`). A person's off of that restarted run is again held, and labelled "restarted after your
+grace ended".
+
+### Incident narrative (Issue #829) and its correct reading
+
+Confirmed live (2026-09-02/03): a WHF-on with no timer at 17:37 armed a 180-minute default override grace. That
+grace expired in software at 20:37 while the fan was still physically running and nat-vent conditions favored
+keeping it on, and `clear_fan_override()` discarded `_fan_override_active`, `_fan_override_time`,
+`_fan_remote_timer_hours` and `_fan_remote_speed`, silently handing ownership to nat-vent with no record the run
+had ever been user-initiated. The fan's real off, ~5 hours later (the 01:37 off), was read by
+`on_fan_turned_off()` as a brand-new unexplained override ("another manual override") and started a fresh
+180-minute grace. The same shape repeated one level down: that grace expired with the sensor still open,
+`_re_pause_for_open_sensor()` reactivated nat-vent on CA's own initiative, and ~93 minutes later the fan's real off
+was again read as fresh.
+
+**Correct interpretation (Issue #1205):** the 01:37 off was a person, and a fan-off grace after it was the right
+outcome. The real #829 complaint was the misleading LABEL ("another manual override"), not the grace. The #829 fix
+removed the grace (it treated the off as the expected end of the manual session and skipped the hold) to fix a
+label, which is what let CA switch the fan back on. #1205 restores the hold and keeps only the label fix.
+
+The RF-timer settle window cannot cover the no-timer case: it works because a hardware timer's clock and CA's
+software clock agree to within seconds, whereas a person's off of a run CA took over comes minutes to hours later.
+That is not a reason to skip the hold; it is the reason the off needs the normal hold and its own wording.
+
+### What arms the marker, and run binding
+
+`self._fan_manual_origin_unclosed: bool` is set (not by elapsed time, but by the handoff event itself) where CA
+hands a still-running or freshly-reactivated fan to itself without having seen the end of a manual session:
+- `clear_fan_override()` (A1): the fan is still `_fan_active` and `_fan_remote_timer_hours is None` when the
+  override flags are cleared. `_fan_active` implies a stamped CA-owned run; an occupant-started fan never sets
+  `_fan_active` and never reaches this arm. Kind `takeover`.
+- the reconcile adopt on `trigger == "post_grace_expiry"` (A2; `ha_restart` has its own RF-timer provenance
+  handling per Issue #677, and `backstop_30min` / `thermostat_state_change` adopting a running fan is routine
+  reconciliation). Kind `takeover`.
+- `_re_pause_for_open_sensor()` when the grace-expiry reactivation is applied (A4), and the deferred-then-applied
+  case (A3, below). Kind `restart`.
+
+**Re-arm and clear (Issue #1205, label only).** A re-arm for the SAME run overwrites the kind and site (the newest
+arm owns the wording; the same kind and site again is a no-op). The one exception is deliberate: the grace-expiry
+reactivation site (A4) does not relabel a run that was already running and already marked (`ALREADY_IN_STATE`, for
+example the post-grace reconcile adopted the person's run a moment earlier, kind `takeover`), because CA restarted
+nothing. When the person turns the fan on again or selects a remote timer (`handle_fan_manual_override()`), an armed
+marker is cleared (`_clear_fan_manual_origin()`, INFO `Fan manual-origin marker cleared: reason=occupant_fan_override
+...`): the run is theirs now, and their later off carries the plain wording, not "restarted after your grace ended".
+Either way the off starts the hold.
+
+All arms go through ONE helper, `_arm_fan_manual_origin(site, reason, kind=..., started=...)`, which sets the bool,
+`_fan_manual_origin_run` (the `_fan_on_since` of the run being handed to CA, stamped fresh on every successful
+start), the kind and the start time together, and arms nothing when there is no live run to bind to. The consume,
+`_consume_fan_manual_origin()`, returns the label provenance only when the marker's run equals the current
+`_fan_on_since` (the run turning off now); a marker armed for another run, or without a run identity, is
+discarded as stale (INFO with `armed_run` and `current_run`) and the plain wording is used. Either way the hold
+starts. Binding keeps the label honest: CA stopping the marked run itself (its off never reaches
+`on_fan_turned_off()`) cannot leave a marker that mislabels a later, unrelated run (R1/R2 below).
+
+**A3 (rate-limited reactivation):** `_re_pause_for_open_sensor()` records a *pending* fact
+`_fan_manual_origin_pending = (deferral applies_at, _fan_start_seq)` when a deferred "activate" is really recorded
+(#1196 gate); no marker is armed, because no run exists yet and none is guaranteed. It is resolved in
+`_activate_fan()` itself, on a successful start, right after the run is stamped: promoted to the run-bound marker
+only when that start applied the recorded deferral (same `applies_at`, no other start counted since in
+`_fan_start_seq`). Promotion is caller-independent (the paused-reactivation helper for PAUSED, the idle-open
+re-evaluation in `check_natural_vent_conditions()` for PAUSED_IDLE). Any other successful start, the occupant's
+fan action, or the door/window pause genuinely ending discards it. The pause ending is caught at one choke point,
+the `_paused_by_door` property setter; a same-handler save-and-restore of the flag is not an end
+(`_holding_door_pause()` wraps it at the two idle-open sites). Discarding also drops the abandoned
+`_fan_rate_limited_*` activate record. Pending fact, marker, run, kind and start time are not persisted.
+
+Logging (INFO, outcome first): `marker armed (label only)`, `marker not armed, no live run to bind it to`,
+`pending raised`, `pending promoted`, `pending discarded: reason=...`, `marker consumed, run matched (label
+only)`, `marker discarded as stale (plain label): reason=... armed_run=... current_run=...`, and the off itself:
+`Fan turned off by occupant — holding fan off (fan_off grace); closes session from earlier manual fan-on:
+fan=... kind=... run=... started=... armed_site=...` (matched) or `Fan turned off by occupant — holding fan off
+(fan_off grace): fan=...` (plain).
+
+### Where the #1205 bug came from
+
+Two routes left the marker set after the run it described was gone, so the NEXT, unrelated run's off was also
+misread as "closing an earlier manual session" (no hold):
+- **R1 (abandoned deferral):** the toggle-floor-deferred reactivation armed the marker, but nothing retries it
+  except a later `check_natural_vent_conditions()` cycle while the pause lasts; if the window closed first the fan
+  never ran and the marker outlived it.
+- **R2 (CA stops the run itself):** the marker was armed for a running fan, then CA stopped that fan (nat-vent exit
+  on window close, safety/mutex stop, cycling off); CA's own off never reaches `on_fan_turned_off()`.
+
+Run binding and the pending fact fixed the marker's lifetime; the owner decision then made the hold independent of
+the marker altogether (the matched case had the same symptom: a person's off of the marked run itself was ignored).
+
+**Cycle-off/on inside a marked run:** CA stops the marked run and starts another (a nat-vent cycle). The new run
+has a new `_fan_on_since`, so the person's off of it uses the plain wording (it is a nat-vent run CA started, not
+the one it took over or restarted). The hold starts either way.
+
+**Relationship to the RF-Timer Boundary Settle Window:** both are consumed at the top of `on_fan_turned_off()`.
+They differ in effect: the settle window (a selected timer ending on schedule) returns early with no hold, trigger
+`timer_boundary_settle`, FSM kind `TIMER_BOUNDARY_SETTLE` (unchanged by #1205); the marker never returns early.
+
+**Location:** `automation.py` — `_fan_manual_origin_unclosed` / `_fan_manual_origin_run` / `_fan_manual_origin_kind` /
+`_fan_manual_origin_started` / `_fan_manual_origin_site` / `_fan_manual_origin_pending` (instance attributes),
+`_arm_fan_manual_origin()` (sole arm writer, called from `clear_fan_override()` / `_re_pause_for_open_sensor()` /
+`_reconcile_fan_on_startup_locked()` and, on promotion, `_resolve_fan_manual_origin_pending_on_start()` called from
+`_activate_fan()`), `_raise_fan_manual_origin_pending()` / `_discard_fan_manual_origin_pending()`, the
+`_paused_by_door` setter and `_holding_door_pause()`, and `on_fan_turned_off()` → `_consume_fan_manual_origin()`
+(label only). `ai_skills_context.py` — `_render_fan_cancel()` (renders `manual_origin_carryforward`).
 
 ---
 
@@ -694,6 +886,8 @@ it computes the *remaining* duration and calls `_start_grace_period("manual", tr
 duration_override=remaining_seconds)` — the same `duration_override` mechanism Issue #677 built
 for the RF-remote-timer restart re-arm, sourced from persisted JSON instead of a live RF-remote
 re-announcement.
+
+**Issue #1205:** the hold's own deadline is persisted too (`fan_off_hold_until`) and restored even when a thermostat override's grace was the persisted one -- see the hold paragraph in [§ Fan-Off Grace (Issue #359)](#fan-off-grace-issue-359).
 
 **Why `fan_off` only:** it is the one grace trigger confirmed to never set
 `_manual_override_active`/`_fan_override_active` (`on_fan_turned_off()` →

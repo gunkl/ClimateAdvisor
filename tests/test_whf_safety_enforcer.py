@@ -294,6 +294,27 @@ class TestRule2Mutex:
             "the HVAC change has its own grace; the fan override expires with it"
         )
 
+    def test_1205_mode_to_mode_override_keeps_the_fan_run_and_the_mutex_still_stops_the_whf(self, clock):
+        """Coordinator Fix D (a different thermostat mode replaces a confirmed override) no longer clears the
+        occupant's fan run (Issue #1205): the WHF/HVAC mutex, not a silent clear, stops a whole-house fan that fights
+        the newer heat/cool -- and it still can, because the fan run is still known."""
+        engine, world = _engine(thermostat_mode="heat")
+        world["sensors"] = (OPEN,)
+        engine._fan_override_active = True
+        engine._fan_override_time = engine._whf_press_time = clock.now().isoformat()
+        engine._manual_override_active = True
+        engine._manual_override_mode = "off"
+        clock.advance(60)
+
+        engine._replace_thermostat_override(reason="new_override_during_grace", clear_fan=False)  # Fix D
+        engine._occupant_hvac_on_at = clock.now()  # the new mode is heat, set after the fan press
+        assert engine._fan_override_active is True
+        with patch.object(AutomationEngine, "_occupant_fan_on_at", return_value=T0):
+            result = _run(engine, "thermostat_mode")
+
+        assert result is FanCommandResult.EXECUTED
+        assert len(_fan_off(engine)) == 1
+
     def test_occupant_fan_after_armed_heat_suppresses_hvac(self, clock):
         engine, world = _engine(thermostat_mode="heat")
         world["sensors"] = (OPEN,)

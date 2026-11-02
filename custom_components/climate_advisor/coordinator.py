@@ -6531,7 +6531,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
             ae._replace_thermostat_override(
-                reason="new_override_during_grace", fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED, clear_fan=True
+                reason="new_override_during_grace", fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED, clear_fan=False
             )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -11337,7 +11337,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
 
     def _compute_automation_status(self) -> str:
-        """Compute the current automation status string."""
+        """Compute the current automation status string.
+
+        Issue #1205: the occupant's fan requests that outlive the running grace (the fan-off hold, a fan run) are
+        named on the card even when no grace runs at all (the grace branch already adds them via
+        ``_grace_status_detail()``).
+        """
+        status = self._compute_automation_status_core()
+        if status == "disabled" or status.startswith("starting"):
+            return status
+        ae = self.automation_engine
+        trigger = getattr(ae, "_last_grace_trigger", None) if getattr(ae, "_grace_active", False) is True else ""
+        extra = self._separate_fan_request_detail(ae, trigger if isinstance(trigger, str) else "")
+        return status if not extra or extra in status else f"{status}{extra}"
+
+    def _compute_automation_status_core(self) -> str:
+        """The status string before the separate-fan-request detail is added."""
         if not self._automation_enabled:
             return "disabled"
         # Bug 1 (Issue #321): Surface startup coalescing window in status
@@ -11954,11 +11969,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Issue #860: when a Fan remote timer is active (`_fan_remote_timer_hours` set) the
         Fan card owns the duration/expiry, so only the cause label is returned here.
         """
-        _label = _GRACE_TRIGGER_LABELS.get(getattr(ae, "_last_grace_trigger", None) or "", "")
+        _trigger = getattr(ae, "_last_grace_trigger", None) or ""
+        _label = _GRACE_TRIGGER_LABELS.get(_trigger, "")
         _cause = f" — {_label}" if _label else ""
+        _cause += self._separate_fan_request_detail(ae, _trigger)
         if ae._fan_remote_timer_hours is not None:
             return _cause
         return f"{_cause}{self._format_grace_remaining(ae)}"
+
+    def _separate_fan_request_detail(self, ae: AutomationEngine, trigger: str) -> str:
+        """Issue #1205: name the occupant's fan request that outlives the running grace (owner decision 2026-11-01).
+
+        "Fan off" and "fan on" are separate requests from a thermostat change; once the thermostat override's grace
+        replaces the grace that carried them, the card would otherwise show only the override while CA still keeps
+        the fan off (or leaves the occupant's fan running) until the request's own deadline. isinstance guards: tests
+        stub the engine as a bare MagicMock.
+        """
+        now = dt_util.now()
+        if not isinstance(now, datetime):
+            return ""
+
+        def _at(value: Any) -> str | None:
+            if not isinstance(value, datetime):
+                return None
+            try:
+                if value <= now:
+                    return None
+            except TypeError:
+                return None
+            return dt_util.as_local(value).strftime("%I:%M %p").lstrip("0")
+
+        out = ""
+        hold_at = _at(getattr(ae, "_fan_off_hold_until", None))
+        if hold_at and trigger != "fan_off":
+            out += f" — fan held off until {hold_at}"
+        run_at = _at(getattr(ae, "_fan_override_until", None))
+        if run_at and trigger != "fan_manual_override" and getattr(ae, "_fan_override_active", False) is True:
+            out += f" — your fan run continues until {run_at}"
+        return out
 
     def _format_grace_remaining(self, ae: AutomationEngine) -> str:
         """Format grace duration + end time as ' — 30 min (ends H:MM AM)', matching the
@@ -12165,6 +12213,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 except TypeError:  # naive vs aware mismatch: cannot order them, so do not guess
                     _nv_grace_known = False
             else:
+                _nv_grace_known = False
+        # Issue #1205: the occupant's fan-off hold keeps its own deadline and outlives the grace that
+        # carried it (a thermostat override can replace that grace), and _activate_fan() refuses every
+        # CA start until then, so the scan cannot start before the hold ends either.
+        _nv_hold_until = getattr(ae, "_fan_off_hold_until", None)
+        if isinstance(_nv_hold_until, datetime):
+            try:
+                _nv_after = max(_nv_after, _nv_hold_until)
+            except TypeError:  # naive vs aware mismatch: cannot order them, so do not guess
                 _nv_grace_known = False
         if (
             self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED

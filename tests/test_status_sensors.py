@@ -1328,6 +1328,36 @@ class TestNatVentStartCandidate:
         action, _t = self._grace_candidate(None)
         assert action != "Natural ventilation"
 
+    def _hold_candidate(self, hold_until):
+        """A thermostat override's grace (ending 2:00 PM) has replaced the occupant's fan-off grace,
+        but the fan-off hold keeps its own deadline ``hold_until`` (Issue #1205)."""
+        from custom_components.climate_advisor import coordinator as _coord_mod
+
+        ae = _make_automation_engine(
+            is_paused_by_door=True, grace_active=True, grace_end_time="2026-07-10T14:00:00", grace_duration_seconds=1800
+        )
+        ae._natural_vent_active = False
+        ae._fan_off_hold_until = hold_until
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        config = {"fan_mode": "whole_house_fan"}
+        indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
+        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        with patch.object(_coord_mod.dt_util, "parse_datetime", side_effect=lambda s: datetime.fromisoformat(s)):
+            return _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+
+    def test_fan_off_hold_outliving_the_grace_defers_the_prediction(self):
+        """Issue #1205: the hold runs to 3:30 PM even though the override's grace ends at 2:00 PM, and
+        CA refuses every fan start until then -> the card must not promise 3:00 PM."""
+        action, t = self._hold_candidate(datetime(2026, 7, 10, 15, 30))
+        assert action == "Natural ventilation"
+        assert t == "4:00 PM"
+
+    def test_fan_off_hold_ending_before_the_crossing_does_not_move_it(self):
+        """Issue #1205: a hold that is over by 2:30 PM leaves the 3:00 PM crossing alone."""
+        action, t = self._hold_candidate(datetime(2026, 7, 10, 14, 30))
+        assert action == "Natural ventilation"
+        assert t == "3:00 PM"
+
 
 class TestGraceTimingOnStatus:
     """Issue #1095: every Status string that mentions a grace carries its cause and end time,

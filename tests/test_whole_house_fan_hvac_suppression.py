@@ -1178,6 +1178,9 @@ class TestFanManualOriginUnclosed:
     shape then repeated via a grace-expiry reactivation (_re_pause_for_open_sensor()) ~93
     minutes later. _fan_manual_origin_unclosed is the state-based (not time-boxed) marker
     that closes this gap.
+
+    Issue #1205 (owner decision 2026-11-01): the marker is LABEL-ONLY. The 01:37 off in that incident was a person;
+    the real #829 complaint was the label "another manual override". The off always starts the fan-off grace.
     """
 
     _FIXED_NOW = datetime(2026, 9, 3, 1, 37, 28)
@@ -1195,11 +1198,13 @@ class TestFanManualOriginUnclosed:
         engine._fan_override_time = "2026-09-02T17:37:24"
         engine._fan_remote_timer_hours = None  # no timer selected — the #829 case
         engine._fan_active = True  # still physically running when grace expired
+        engine._fan_on_since = "2026-09-02T17:37:30"  # Issue #1205: the run the marker is bound to
         engine._natural_vent_active = True
 
         engine.clear_fan_override()
 
         assert engine._fan_manual_origin_unclosed is True
+        assert engine._fan_manual_origin_run == "2026-09-02T17:37:30"
         assert engine._fan_override_active is False
         assert engine._fan_remote_timer_hours is None
 
@@ -1231,75 +1236,70 @@ class TestFanManualOriginUnclosed:
 
         assert engine._fan_manual_origin_unclosed is False
 
-    def test_fan_off_with_manual_origin_unclosed_does_not_start_fresh_grace(self):
-        """The real reported failure: a fan-off arriving long after the marker was set
-        (hours later — unlike the settle window, this marker is not time-boxed) must close
-        the existing session via _exit_nat_vent(), not start a brand-new unprotected
-        manual grace."""
+    def test_fan_off_with_manual_origin_unclosed_starts_the_fan_off_grace(self):
+        """Issue #1205 (owner decision 2026-11-01), FLIPPED from "does not start a fresh grace".
+
+        The occupant's experience: a person switched off a fan CA had taken over after an earlier manual fan-on.
+        Before, CA treated the off as "closing the earlier session" and held nothing, so it could switch the fan
+        back on minutes later. CA always knows how a run should end (an RF timer by time, a no-timer run by its
+        default timer, then CA's own turn-off or adopt), so an off CA did not command is a PERSON and starts the
+        normal fan-off grace. The marker only selects the label (fan_cancel trigger manual_origin_carryforward).
+        """
         engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
-        engine._fan_manual_origin_unclosed = True
+        engine._fan_on_since = "2026-09-02T17:37:30"  # Issue #1205: the marker is bound to this run
+        engine._arm_fan_manual_origin("test", "precondition")
         engine._natural_vent_active = True
         engine._fan_active = True
         engine._pre_fan_hvac_mode = "cool"
         engine._sensor_check_callback = MagicMock(return_value=False)  # sensors closed
-
-        captured: list = []
-        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured.append(c))
+        events: list = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
 
         engine.on_fan_turned_off(fan_before="on", fan_after="off")
 
         assert engine._fan_manual_origin_unclosed is False, "Marker must be consumed (one-shot)"
-        assert len(captured) == 1, "_exit_nat_vent() must be scheduled, not run inline"
-        asyncio.run(captured[0])
+        assert engine._natural_vent_active is False, "the ordinary path ends the nat-vent session"
+        assert engine._fan_active is False
+        assert engine._grace_is_fan_off_grace(), "the occupant's off ALWAYS starts the fan-off grace"
+        assert engine._last_resume_source == "manual"
+        assert [d["trigger"] for n, d in events if n == "fan_cancel"] == ["manual_origin_carryforward"]
 
-        assert engine._natural_vent_active is False
-        assert engine._grace_active is True
-        assert engine._last_resume_source == "automation", (
-            "Must close via _exit_nat_vent()'s AUTOMATION grace, never a fresh MANUAL fan-off grace"
-        )
-
-    def test_fan_off_with_manual_origin_unclosed_and_sensor_open_pauses_not_grace(self):
-        """Same marker, but the monitored sensor is still open: must pause, and must NOT
-        start any fresh grace — this is the exact 04:37->06:10 leg of the reported
-        incident (grace-expiry reactivation, then a later real off while still paused)."""
+    def test_fan_off_with_manual_origin_unclosed_and_sensor_open_starts_the_fan_off_grace(self):
+        """Issue #1205, FLIPPED from "must pause, and must NOT start any fresh grace" (the 04:37->06:10 leg of the
+        #829 incident: grace-expiry reactivation, then a later real off while the window is still open). That off
+        was a person: the fan stays off for the fan-off grace, which does not block the door/window pause (#1201)."""
         engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
-        engine._fan_manual_origin_unclosed = True
+        engine._fan_on_since = "2026-09-02T17:37:30"  # Issue #1205: the marker is bound to this run
+        engine._arm_fan_manual_origin("test", "precondition")
         engine._natural_vent_active = True
         engine._fan_active = True
         engine._pre_fan_hvac_mode = "cool"
         engine._sensor_check_callback = MagicMock(return_value=True)  # sensor still open
-        engine._paused_by_door = False
-
-        captured: list = []
-        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured.append(c))
 
         engine.on_fan_turned_off(fan_before="on", fan_after="off")
-        asyncio.run(captured[0])
 
         assert engine._natural_vent_active is False
-        assert engine._paused_by_door is True
-        assert engine._grace_active is False, "No fresh grace — this is the loop Issue #829 reported"
+        assert engine._grace_is_fan_off_grace(), "the hold starts even with the window open"
 
-    def test_fan_off_with_manual_origin_unclosed_and_fan_not_active_just_clears(self):
-        """If nothing adopted the fan as nat-vent by the time it turns off, the marker
-        still prevents a fresh grace — flags are simply cleared."""
+    def test_fan_off_with_manual_origin_unclosed_and_fan_not_active_starts_the_fan_off_grace(self):
+        """Issue #1205, FLIPPED from "still prevents a fresh grace -- flags are simply cleared": a person's off with
+        a matched marker starts the fan-off grace whether or not CA had adopted the fan as nat-vent."""
         engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
-        engine._fan_manual_origin_unclosed = True
+        engine._fan_on_since = "2026-09-02T17:37:30"  # Issue #1205: the marker is bound to this run
+        engine._arm_fan_manual_origin("test", "precondition")
         engine._natural_vent_active = False
         engine._fan_active = False
-
-        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
 
         engine.on_fan_turned_off(fan_before="on", fan_after="off")
 
         assert engine._fan_manual_origin_unclosed is False
         assert engine._fan_active is False
-        assert engine._grace_active is False
-        engine.hass.async_create_task.assert_not_called()
+        assert engine._grace_is_fan_off_grace()
 
     def test_settle_window_takes_priority_over_manual_origin_marker(self):
         """When both are set, the branch must still fire exactly once (not double-handle)
-        and consume both markers — regression guard against the two checks interfering."""
+        and consume both markers — regression guard against the two checks interfering.
+        Issue #1205: the settle-window branch (a selected timer ending on schedule: NO hold) is unchanged."""
         engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
         engine._timer_boundary_settle_until = self._FIXED_NOW + timedelta(seconds=60)
         engine._fan_manual_origin_unclosed = True

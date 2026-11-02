@@ -527,6 +527,16 @@ via the same two paths as any other manual fan override:
    the override through the existing three-branch expiry logic (see
    [grace-periods-spec.md § Timer Lifecycle](grace-periods-spec.md#timer-lifecycle)).
 
+**What a fan-off starts (Issue #1205).** CA always knows how a run should end, so the fan-off is classified by
+who ended it. A selected timer (`timer_1h` ... `timer_12h`) is tracked by time: the hardware timer's own off
+that lands inside the 120 s settle window after its grace expires is the run ending on schedule and starts **no**
+hold. With no timer (`timer_none`, or a plain physical fan-on) CA applies the default timer
+(`manual_grace_seconds`); at its expiry CA's reconcile either turns the fan off itself or keeps it as its own run.
+Every other fan-off CA did not command, including a person switching off a fan CA took over or restarted after an
+earlier manual fan-on, starts the normal fan-off grace (hold). The Issue #829 manual-origin marker only changes the
+Activity Record wording of that off. See
+[grace-periods-spec.md § Manual-Origin Unclosed Marker](grace-periods-spec.md#manual-origin-unclosed-marker-issue-829-issue-1205).
+
 ---
 
 ## Config

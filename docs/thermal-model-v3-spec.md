@@ -166,6 +166,13 @@ Known consequences (accepted, not defects):
 
 ---
 
+**Setpoint offset (Issue #1194 a) never feeds thermal learning.** The remote-sensor outer loop raises the thermostat's
+setpoint above the comfort target while the bedroom is cold. Learning keeps reading `primary_value` only, and the
+swing (`swing_heat_f` / `swing_cool_f`) is used by the loop READ-ONLY as its hysteresis at the remote sensor
+(`AutomationEngine._remote_swing_f()`, default `THERMAL_SWING_DEFAULT_F`). How the swing is learned is unchanged by
+#1194 (it is #1234's subject); a swing that mis-measures the thermostat's real hysteresis therefore mis-sizes the loop's
+dead-band, which is why #1234 lands first.
+
 ## Observation Types
 
 All six types run concurrently in `_pending_observations: dict[str, PendingObservation]`. The dict is keyed by the `OBS_TYPE_*` string constant.

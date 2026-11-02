@@ -199,6 +199,7 @@ from .const import (
     REMOTE_BURST_WINDOW_SECONDS,
     REMOTE_CONFIRM_SECONDS,
     REMOTE_EVENT_MAX_AGE_SECONDS,
+    REMOTE_OFFSET_CHECK_INTERVAL_S,
     REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -1290,6 +1291,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.hass,
                     _sleep_indoor_entity,
                     self._zone_scoped(self._on_sleep_indoor_temp_changed),
+                )
+            )
+            # Issue #1194 (a): the remote-sensor outer loop's 1-minute floor. The listener above fires only when the
+            # bedroom sensor reports, which can be 100+ minutes apart; the startup wait, step-down and the
+            # stale-reading fallback must not wait for the next report. The loop itself is a cheap no-op whenever
+            # the remote sensor is not the indoor source or nothing would change.
+            self._unsub_listeners.append(
+                async_track_time_interval(
+                    self.hass,
+                    self._zone_scoped(self._async_remote_offset_tick),
+                    timedelta(seconds=REMOTE_OFFSET_CHECK_INTERVAL_S),
                 )
             )
 
@@ -6417,6 +6429,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not _in_sleep_window(dt_util.now(), self.config):
             return
         await self._async_run_temp_reactive_checks()
+        # Issue #1194 (a): every remote-sensor update is also a check of the outer loop's offset.
+        await self.automation_engine.remote_offset_check()
+
+    async def _async_remote_offset_tick(self, _now: Any) -> None:
+        """1-minute floor under the remote-sensor listener (Issue #1194 a)."""
+        await self.automation_engine.remote_offset_check()
 
     @_whf_safety_after_event(_whf_after_thermostat_event)
     async def _async_thermostat_changed(self, event: Event) -> None:
@@ -11266,6 +11284,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     ae._last_hvac_heating_active = iso
                 else:
                     ae._last_hvac_cooling_active = iso
+                # Issue #1194 (a): the thermostat starting after an offset raise is the loop's actuation feedback.
+                ae.note_remote_offset_actuation(direction, stamp)
 
     def _update_comfort_stall(
         self, indoor: float | None, comfort_heat: float | None, comfort_cool: float | None, now: datetime

@@ -52,12 +52,14 @@ def _spy_inputs(engine):
 
 def test_profile_table_is_the_documented_knob_set():
     assert (NAT_VENT_START_WINDOW_OPEN.hysteresis, NAT_VENT_START_WINDOW_OPEN.grace_active) == (0.0, False)
+    assert NAT_VENT_START_WINDOW_OPEN.soft_start is True  # Issue #1142 D1
     assert NAT_VENT_START_WINDOW_OPEN.paused_by_door is None
     assert NAT_VENT_START_WINDOW_OPEN.apply_reactivation_floor is False
     assert NAT_VENT_START_WINDOW_OPEN.live_lifecycle_state is False
 
     assert (NAT_VENT_START_GRACE_RECHECK.hysteresis, NAT_VENT_START_GRACE_RECHECK.paused_by_door) == (0.0, False)
     assert NAT_VENT_START_GRACE_RECHECK.apply_reactivation_floor is True
+    assert NAT_VENT_START_GRACE_RECHECK.soft_start is True  # Issue #1142 D1
     assert NAT_VENT_START_GRACE_RECHECK.live_lifecycle_state is False
 
     for profile in (NAT_VENT_START_IDLE_OPEN, NAT_VENT_START_PAUSED_REACTIVATION):

@@ -43,7 +43,6 @@ from tests.test_restore_resolved_band import _classification, _make_engine
 
 _AWAY_SETBACK_COOL = 80.0
 
-_XF_D1 = pytest.mark.xfail(strict=True, reason="#1142 D1: handler pauses before a soft start")
 _XF_D2 = pytest.mark.xfail(strict=True, reason="#1142 D2: routine pause notifies although a start is due")
 _XF_D3 = pytest.mark.xfail(strict=True, reason="#1142 D3: grace pre-check and nat-vent FSM disagree")
 _XF_D4 = pytest.mark.xfail(strict=True, reason="#1142 D4: blower exit with a window open leaves the thermostat armed")
@@ -149,7 +148,6 @@ def _paused_blower_engine(*, away: bool) -> AutomationEngine:
 
 
 class TestD1SoftStartAtHandler:
-    @_XF_D1
     def test_soft_start_is_started_not_paused_first(self):
         engine = _whf_soft_start_engine()
         notify = _notes(engine)
@@ -372,3 +370,62 @@ class TestD8AwayCeilingExitWithWindowOpen:
         calls = _climate_calls(engine, before)
         assert _below_away_setback(calls) == []
         assert any(s == "set_temperature" and d.get("temperature", 0) >= _AWAY_SETBACK_COOL for s, d in calls), calls
+
+
+# ---------------------------------------------------------------------------
+# Step 2 -- soft start at the handler and the grace-expiry re-check: edges around D1
+# ---------------------------------------------------------------------------
+
+
+def _record(engine) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    engine._emit_event_callback = lambda name, data: events.append((name, data))
+    return events
+
+
+class TestSoftStartEdges:
+    def test_grace_expiry_recheck_starts_a_soft_start_session(self):
+        engine = _whf_soft_start_engine()
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False
+        engine._pre_pause_mode = "cool"
+        events = _record(engine)
+        _at(lambda: engine._re_pause_for_open_sensor())
+        assert engine._natural_vent_active is True and engine._nat_vent_soft_start is True
+        assert engine._paused_by_door is False
+        assert "nat_vent_soft_start_entered" in [name for name, _ in events]
+
+    def test_handler_reports_the_soft_start_before_the_window_event(self):
+        engine = _whf_soft_start_engine()
+        events = _record(engine)
+        _open(engine)
+        names = [name for name, _ in events]
+        assert names.index("nat_vent_soft_start_entered") < names.index("sensor_opened")
+        assert events[-1][0] == "sensor_opened"
+
+    def test_second_window_does_not_demote_a_live_soft_session(self):
+        engine = _whf_soft_start_engine()
+        _open(engine)
+        assert engine._nat_vent_soft_start is True, "precondition"
+        engine._last_outdoor_temp = 70.0  # the full gate would now qualify too
+        engine._test_state.attributes["current_temperature"] = 80.0
+        _open(engine)
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is True, "a second window is not a start decision"
+
+    def test_control_blower_install_has_no_soft_start(self):
+        engine = _blower_engine(indoor=80.0, outdoor=79.0)
+        engine._outdoor_temp_today_peak = 85.0
+        engine._outdoor_temp_today_sample_count = 20
+        _open(engine)
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+
+    def test_soft_start_is_still_vetoed_by_the_forecast_guard(self):
+        engine = _whf_soft_start_engine()
+        _forecast_peak_ahead(engine)
+        notify = _notes(engine)
+        _open(engine)
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+        assert notify.called, "a pause that stays is announced"

@@ -497,10 +497,10 @@ class NatVentStartProfile:
 
 
 # The window-open handler: a fresh open, hysteresis never applied, the grace question already answered above it.
-NAT_VENT_START_WINDOW_OPEN = NatVentStartProfile("window_open", hysteresis=0.0, grace_active=False, soft_start=False)
+NAT_VENT_START_WINDOW_OPEN = NatVentStartProfile("window_open", hysteresis=0.0, grace_active=False)
 # The grace-expiry re-check: hysteresis never applied, the lockout never consulted (grace just ended).
 NAT_VENT_START_GRACE_RECHECK = NatVentStartProfile(
-    "grace_recheck", hysteresis=0.0, paused_by_door=False, apply_reactivation_floor=True, soft_start=False
+    "grace_recheck", hysteresis=0.0, paused_by_door=False, apply_reactivation_floor=True
 )
 # The idle-open re-entry (a sensor open while HVAC idles) and the paused-by-door reactivation: re-arming a session
 # that already ran, so the sleep-aware floor and the configured hysteresis apply and the lockout is consulted.
@@ -6712,16 +6712,17 @@ class AutomationEngine:
             # Issue #1142: the ONE start question, asked of the nat-vent FSM with this site's profile
             # (``NAT_VENT_START_WINDOW_OPEN``): a fresh open, hysteresis never applied, grace forced off (the
             # pre-check above already answered it), asked from INACTIVE (a second window opening during a live
-            # session must not route through the exit chain), start guards on, soft start not yet accepted here.
+            # session must not route through the exit chain), start guards on, soft start accepted (owner decision
+            # 2026-11-01: after the debounce the handler may start a soft-start session directly instead of
+            # pausing first, Issue #1142 D1).
             _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_WINDOW_OPEN, indoor=indoor, outdoor=outdoor)
-            # Full-gate only, as before: a vetoed soft start is "not entered" for this site.
-            _start_veto = (
-                _fsm_result.veto if _fsm_result.vetoed_state == NatVentLifecycleState.ACTIVE_FULL_GATE else None
-            )
-            # "Entered" keeps its meaning (the temperature gate passed) so the lockout check below
+            _start_veto = _fsm_result.veto
+            # "Entered" = the temperature gate passed (full gate or soft start); the lockout check below
             # applies to a vetoed start exactly as it did to a guard-skipped one.
             _nat_vent_gate_entered = (
-                _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE or _start_veto is not None
+                _fsm_result.to_state
+                in (NatVentLifecycleState.ACTIVE_FULL_GATE, NatVentLifecycleState.ACTIVE_SOFT_START)
+                or _start_veto is not None
             )
             if _fan_off_hold and _nat_vent_gate_entered:
                 # Issue #1201 / #1006: the occupant just stopped the fan -- leave it stopped. The grace passes
@@ -6768,9 +6769,15 @@ class AutomationEngine:
                 _old_mode_nv = self.hass.states.get(self.climate_entity)
                 _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
 
+                _is_soft_start = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_SOFT_START
                 nat_vent_reason = (
-                    f"natural ventilation: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
-                    f" outdoor {self._t(outdoor)} <= {self._t(nat_vent_threshold)}"
+                    f"nat-vent soft-start: outdoor {self._t(outdoor)} at/below indoor {self._t(indoor)}"
+                    " parity, past today's peak and declining — purge/comfort air movement"
+                    if _is_soft_start
+                    else (
+                        f"natural ventilation: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
+                        f" outdoor {self._t(outdoor)} <= {self._t(nat_vent_threshold)}"
+                    )
                 )
                 # Issue #1140 follow-up: a window opening while a nat-vent session is ALREADY live is not a
                 # start decision. The session (and the WHF suppression that goes with it) stays until its own
@@ -6805,10 +6812,16 @@ class AutomationEngine:
                         _activation_result.name,
                     )
                 else:
+                    # A live session keeps its own kind (a second window must not demote a soft start); a fresh
+                    # start takes the FSM's answer (Issue #1142 D1: a soft start may start here).
                     self._apply_nat_vent_fsm_state_after_activation(
-                        NatVentLifecycleState.ACTIVE_SOFT_START
-                        if self._nat_vent_soft_start
-                        else NatVentLifecycleState.ACTIVE_FULL_GATE,
+                        (
+                            NatVentLifecycleState.ACTIVE_SOFT_START
+                            if self._nat_vent_soft_start
+                            else NatVentLifecycleState.ACTIVE_FULL_GATE
+                        )
+                        if _session_was_live
+                        else _fsm_result.to_state,
                         _activation_result,
                     )
                 if _activation_result in _NAT_VENT_NO_WORKING_FAN_RESULTS and not _keep_live_session:
@@ -6829,6 +6842,19 @@ class AutomationEngine:
                         nat_vent_threshold,
                     )
                     await self._apply_nat_vent_hvac_state()
+                    if _is_soft_start and not _session_was_live and self._emit_event_callback:
+                        # Same event the reactivation sites emit; BEFORE "sensor_opened" so that stays the last
+                        # event at this instant (the golden harness maps it to "natural_ventilation").
+                        self._emit_event_callback(
+                            "nat_vent_soft_start_entered",
+                            {
+                                "outdoor": outdoor,
+                                "indoor": indoor,
+                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "comfort_heat": comfort_heat,
+                                "decline_margin_f": PEAK_DECLINE_MARGIN_F,
+                            },
+                        )
                     _sensor_opened_payload = {
                         "entity": entity_id,
                         "result": "natural_ventilation",
@@ -10030,9 +10056,13 @@ class AutomationEngine:
             # own FSM governs its own reactivation question.
             # Issue #1142: the ONE start question, asked with this site's profile
             # (``NAT_VENT_START_GRACE_RECHECK``): asked from INACTIVE, hysteresis 0, the lockout never consulted
-            # (``paused_by_door=False``), the sleep-aware floor, start guards on, soft start not yet accepted.
+            # (``paused_by_door=False``), the sleep-aware floor, start guards on, soft start accepted (Issue #1142 D1).
             _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_GRACE_RECHECK, indoor=indoor, outdoor=outdoor)
-            _reactivates = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+            _reactivates = _fsm_result.to_state in (
+                NatVentLifecycleState.ACTIVE_FULL_GATE,
+                NatVentLifecycleState.ACTIVE_SOFT_START,
+            )
+            _reactivation_state = _fsm_result.to_state
             if not _reactivates and _fsm_result.veto is not None:
                 # Issue #1138/#1140: the temperature gate passed but a start rule refused it (no working
                 # fan, forecast peak, imminent floor) -- log it like every other start site instead of
@@ -10050,21 +10080,26 @@ class AutomationEngine:
                 )
 
             if _reactivates:
+                _soft = _reactivation_state == NatVentLifecycleState.ACTIVE_SOFT_START
                 nat_vent_reason = (
-                    f"grace expired — nat-vent: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
-                    f" outdoor {self._t(outdoor)} ≤ {self._t(nat_vent_threshold)}"
+                    f"grace expired — nat-vent soft-start: outdoor {self._t(outdoor)} at/below indoor"
+                    f" {self._t(indoor)} parity, past today's peak and declining"
+                    if _soft
+                    else (
+                        f"grace expired — nat-vent: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
+                        f" outdoor {self._t(outdoor)} ≤ {self._t(nat_vent_threshold)}"
+                    )
                 )
                 # Issue #935: routed through _apply_nat_vent_fsm_state_after_activation()
                 # rather than hand-setting _natural_vent_active directly — a rate-limited
                 # or overridden command must not be reported as an active session. This
-                # site's own _fsm_result.to_state == ACTIVE_FULL_GATE is exactly what
-                # _reactivates was computed from above, so ACTIVE_FULL_GATE is the
-                # correct to_state to pass here.
+                # site's own _fsm_result.to_state (full gate or, Issue #1142, soft start) is exactly
+                # what _reactivates was computed from above, so it is the correct to_state to pass here.
                 # Issue #1132 (mirror of #931): only clear the pause / report a nat-vent
                 # session when the activation was applied. Otherwise fall through to the
                 # re-pause below, which re-records the pause (idempotent when already paused).
                 _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
-                    NatVentLifecycleState.ACTIVE_FULL_GATE,
+                    _reactivation_state,
                     reason=nat_vent_reason,
                     outdoor=outdoor,
                     indoor=indoor,
@@ -10169,6 +10204,17 @@ class AutomationEngine:
                     # this instant, unchanged from pre-fix behavior. Since Issue #1132 this
                     # event also maps to "natural_ventilation" (outcomes.py), so the order
                     # no longer changes the outcome; it is kept for readability.
+                    if _soft:
+                        self._emit_event_callback(
+                            "nat_vent_soft_start_entered",
+                            {
+                                "outdoor": outdoor,
+                                "indoor": indoor,
+                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "comfort_heat": self._nat_vent_reactivation_floor(),
+                                "decline_margin_f": PEAK_DECLINE_MARGIN_F,
+                            },
+                        )
                     self._emit_event_callback(
                         "nat_vent_reactivated_while_paused",
                         {"outdoor": outdoor, "indoor": indoor, "threshold": nat_vent_threshold},

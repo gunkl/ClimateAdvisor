@@ -106,8 +106,6 @@ async def test_outdoor_rise_exit_with_window_open_leaves_thermostat_off_and_clos
     assert len(set(modes)) <= 1, f"modes flapped after the window closed: {modes}"
 
 
-_XF_D1 = pytest.mark.xfail(strict=True, reason="#1142 D1: handler pauses before a soft start")
-
 _HOT_EVENING_WHF = {
     "fan": "whf",
     "profile": "scripted",
@@ -123,8 +121,6 @@ _HOT_EVENING_WHF = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason="#1142 D1: handler pauses before a soft start")
-@_XF_D1
 async def test_soft_start_evening_gets_no_hvac_paused_message(make_house) -> None:
     house = await make_house(**_HOT_EVENING_WHF)
     await house.advance(minutes=6)

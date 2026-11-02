@@ -188,9 +188,9 @@ Day Type: Cold | Trend: Significant cold front coming (-10°F)
 
 It's going to be cold out there. The heater runs all day at 70°F, and you can help it out — keep doors and windows closed, minimize how long you hold exterior doors open, and close curtains on the north side. If you have south-facing windows, open those curtains to grab some free solar heat.
 
-Tomorrow's even colder, so I'm going to bank some extra heat this evening. Starting around 7pm, I'll bump the setpoint up to 73°F for a couple hours, then coast into the night. The house will feel extra warm before bed — that's on purpose.
+Tomorrow's even colder, so expect the heater to work harder in the morning.
 
-Tonight I'm using a conservative setback — 67°F instead of the usual 60°F. When it's this cold, a deeper setback takes too long to recover from in the morning.
+At bedtime I'll set back to 66°F.
 
 If you head out, I'll drop to 60°F after about 15 minutes. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.
 

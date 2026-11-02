@@ -164,7 +164,7 @@ Default values used in examples (from `const.py`: `DEFAULT_COMFORT_HEAT = 68`, `
 - Guest mode calls `handle_occupancy_home()` directly — no separate handler.
 - Morning wakeup is skipped when occupancy is `away` or `vacation` (Issue #85).
 - Bedtime setback is skipped when occupancy is `away` or `vacation` (the setback band is kept by the 30-minute `apply_classification()` cycle; see §6a).
-- The daily briefing TLDR table shows setback temps and an occupancy status row when not home. The HVAC Mode row's setback temp no longer repeats "(setback — away/vacation)" — the Occupancy row directly below it already states that fact (Issue #555 dedup, needed to fit HA's 255-char sensor state limit).
+- The daily briefing TLDR table shows setback temps and an occupancy status row when not home. The HVAC Mode row's setback temp no longer repeats "(setback — away/vacation)" — the Occupancy row directly below it already states that fact (Issue #555 dedup, needed to fit HA's 255-char sensor state limit). Since Issue #1231, on every day type the briefing promises no at-home hold, bedtime setback, pre-cool or window advice while away/vacation (Windows row `Closed all day`, Bedtime row `away setback held`) — the engine holds the away setback all day and night. The briefing's at-home bedtime number is the engine's sleep-band edge (`select_comfort_band(..., in_sleep_window=True)`) unless an adaptive value is passed; it no longer uses the `DEFAULT_SETBACK_DEPTH_F` fallback below (that fallback now belongs to `compute_bedtime_setback()` only). See `docs/briefing-spec.md`.
 
 ### 5a. Adaptive Bedtime Setback (`compute_bedtime_setback()`)
 
@@ -1260,13 +1260,15 @@ computation — freezing the whole cached dict while a reason flip settles would
 that input. Only the display-facing (and, see below, control-boundary) cutoff/
 reason pair is protected.
 
-**Blast radius beyond display text:** `automation.py` (~lines 1303–1316,
-`_is_within_planned_window_period()`, see §16) reads `self._nat_vent_cutoff` — propagated from
-`self._nat_vent_plan["nat_vent_cutoff"]` via `apply_classification()` (Issue #817) — as a real
-control boundary: the door/window pause-exemption window's end time, not just briefing text. The
-pre-fix flapping therefore also caused an unnoticed automation-boundary flicker on knife-edge
-mornings. Because both the display value and the control-boundary value flow through the same
-cached `self._nat_vent_plan` dict, stabilizing it here fixes both without a second change.
+**Blast radius beyond display text:** `automation.py`'s `_is_within_planned_window_period()` (see §16) reads
+`self._nat_vent_cutoff` and `self._nat_vent_cutoff_already_reached` — propagated from
+`self._nat_vent_plan["nat_vent_cutoff"]` / `["nat_vent_cutoff_already_reached"]` via
+`apply_classification()` (Issues #817, #1231) — as a real control boundary: the end of the planned window
+period, not just briefing text. A cutoff-*reason* flip therefore moved that boundary on knife-edge mornings;
+the sustain-confirm above holds the cutoff/reason/evening-open trio during a pending flip, so both the display
+value and the boundary share the fix. It does **not** freeze the cutoff time against ordinary recomputes, and
+`nat_vent_cutoff_already_reached` is held with them (Issue #1231): it describes the held cutoff, and the engine
+ends the period on it.
 
 **Wording (separate from the stabilization fix, same issue):**
 `describe_nat_vent_cutoff_reason()`'s `comfort_floor` phrase was reworded away from
@@ -1636,7 +1638,7 @@ when ODE forecast curves aren't calibrated yet.
 - **Stage B, direction (live gate and Next User Action card):** with an indoor reading, indoor above the ceiling needs outdoor cooler, indoor below the floor needs outdoor warmer, indoor in the band does not veto. `_apply_outdoor_windows_gate()` clears `windows_recommended` when outdoor > `comfort_cool` or stage B fails (no indoor reading: the old floor−15°F extreme-cold cutoff). Stage A is never applied to a live reading (outdoor only reaches the floor around midday).
 - `DayClassification.forecast_windows_recommended` keeps the classifier's own answer (hysteresis seed, briefing drift trigger #4); `windows_recommended` is what the live gate may clear. The restore path puts the persisted values back (`__post_init__` would recompute and resurrect a gate-cleared flag).
 - The record flag (`DailyRecord.windows_recommended`) means "recommended at any point today" (credit and denominator agree: both use the live-gated flag, so the record is created/upgraded after the outdoor update that runs the gate).
-- Briefing: header `Comfort band 68–74°F` plus ` (windows day)` only when recommended and someone is home; no window tip, fan-ventilation sentence, "close up by" or "reopen" line otherwise, and none at all for away/vacation; a mild forecast high within `WINDOWS_NEAR_MISS_F` (5°F) below the floor says outside air may help later. Pinned by `tests/test_briefing_window_corpus_1211.py`.
+- Briefing: header `Comfort band 68–74°F` plus ` (windows day)` only when recommended and someone is home; no window tip, fan-ventilation sentence, "close up by" or "reopen" line otherwise, and none at all for away/vacation on **any** day type (hot, warm, mild, cool, cold — Issue #1231; #1211 had covered only warm/mild; the lead line is "A <day> day, and the house is empty, so the away settings below are what apply."); a mild forecast high within `WINDOWS_NEAR_MISS_F` (5°F) below the floor says outside air may help later. Pinned by `tests/test_briefing_window_corpus_1211.py`.
 
 Constants: `WARM_WINDOW_OPEN_HOUR = 6`, `WARM_WINDOW_CLOSE_HOUR = 10`. The static `WARM_WINDOW_CLOSE_HOUR` is only a fallback — `generate_briefing()`'s single per-day-type call into `nat_vent_plan.compute_nat_vent_plan()` overrides it with the ODE-derived `nat_vent_cutoff` whenever a forecast curve is available, the same cascade §6d documents for MILD days.
 
@@ -1723,9 +1725,10 @@ don't re-diagnose from zero):
 | #817 | Same close/cutoff computed three independent ways across three surfaces | No single source of truth for the computation |
 | #847 | Briefing and Next Automation card disagreed on close time and reason wording | Two independent phrasing branches for one shared value |
 | #849 | Next Automation card told the occupant to close/open windows — CA has no window actuator | Category error: an occupant instruction on the automation-action card, not a wording bug |
-| #869 | Briefing flip-flopped between contradictory guidance on noisy recomputes | No hysteresis on a value recomputed every cycle |
+| #869 | Briefing flip-flopped between contradictory guidance on noisy recomputes | No hysteresis on a value recomputed every cycle (fixed for the cutoff *reason* flip only — it does not freeze the cutoff time, see §16) |
 | #876 | Hot's close time was a hardcoded 9:00 AM, disconnected from the forecast | Hot never got the ODE-crossing treatment Warm/Mild had since #518 |
 | #878 | "Close by 6:00 PM / Open 5:00 PM+" — reopen time before close time; "this morning" applied to a 6:00 PM crossing | No primitive resolved a close/open pair *together* — each side resolved independently, so a late dynamic close could pair with an earlier static-fallback open with nothing checking the two against each other |
+| #1218 / #1231 | Status card said "windows open (as planned)" and the background open-window pause (600 s debounce) was skipped for hours after the briefed 17:00 close; production logged "Planned window period ended" at 20:02, ~3 h late. The briefing separately printed "Close by 11:00 AM" today for a cutoff dated tomorrow, and away/vacation briefings promised at-home behavior on hot/cool/cold days | `_is_within_planned_window_period()` compared `self._nat_vent_cutoff.time()` (a bare time of day) and ignored `nat_vent_cutoff_already_reached`: once the crossing was behind us the forward-only scan's cutoff is only "the next grid point after now", which kept sliding later and kept the period open; a cutoff dated tomorrow was read as today's clock time. Fixed by one dated helper, `nat_vent_plan.effective_window_close()`, shared by the engine and the briefing, plus `apply_classification(nat_vent_cutoff_already_reached=...)` at all 7 production call sites (see §16). Same single-facts change (`_BriefingFacts`) closed the away/vacation promises. No case was found where heat or cool ran into an open window. Out of scope: #1230 (per-day latch, drift-proof live recompute, regenerate-on-change) |
 | #878-followup (A) | A legitimate overnight reopen (close 7:00 PM today, reopen 2:00 AM the next morning) was silently dropped | `resolve_window_pair()`'s ordering check compared date-stripped `.time()` values (`time(2,0) <= time(19,0)` reads "before" on a bare clock face) instead of the real dated datetimes — and the very invariant matrix built to catch this bug held the date constant across every test case, hiding the exact defect |
 | #878-followup (B) | "Close by 7:00 PM" shown hours after outdoor had already risen past indoor that morning — a stale future claim | The ODE crossing scan is forward-only from "now"; when the close condition is already true at compute time, the scan can only return the nearest future grid point, and every consumer rendered that identically to a genuine future prediction |
 | #878-followup (D) | "Open 2:00 AM+" shown when outdoor had already dropped well below the comfort ceiling by ~9-11 PM — the app's own stated reopen condition was satisfied hours before it acted | `evening_open_time`'s reopen predicate compared outdoor against the live `predicted_indoor` curve, which an unrelated feature (pre-cool banking ahead of a hotter following day) can pull well below `comfort_cool` overnight — reactivation eligibility was accidentally answering "has outdoor caught up with tonight's banking depth" instead of "is it cool enough to skip the AC" |
@@ -1776,6 +1779,12 @@ fragment (mirrors `describe_nat_vent_cutoff_reason()`'s treatment of the *reason
 of the sentence) rather than always asserting the returned clock time as a scheduled
 future event. This only applies to the close/cutoff side — `evening_open_time` is
 scanned strictly `after` the cutoff, so it can never be "already true at curve start."
+
+**Dated close (Issue #1231, absorbs #1218):** the briefing's close time and the engine's planned window period
+both resolve the close through `nat_vent_plan.effective_window_close(cutoff, already_reached, static_close,
+now)` and compare dated datetimes, never `.time()` values: already reached -> `now`; a cutoff dated another
+day -> *today's* static close; otherwise the cutoff; no cutoff -> today's static close (None if there is
+none). The warm-day ceiling-breach sentence is dropped when the breach is dated another day.
 
 **Reactivation eligibility vs. exit eligibility must reference different "indoor"
 values (Issue #878-followup D/E) — a named, permanent hazard, not a one-off fix:**
@@ -3257,16 +3266,37 @@ All three must be true simultaneously for the check to return `True`:
 | 2 | Current local time is within the recommended open window | `warm`: 6:00 AM – 10:00 AM; `mild`: 10:00 AM – 5:00 PM (constants: `WARM_WINDOW_OPEN_HOUR`, `WARM_WINDOW_CLOSE_HOUR`, `MILD_WINDOW_OPEN_HOUR`, `MILD_WINDOW_CLOSE_HOUR`) — but see the ODE-cutoff override note below; these static hours are only the fallback bound |
 | 3 | HVAC mode is `off` | The classification itself set HVAC to `off` for warm/mild days — if HVAC is running (e.g. classification changed to cool/heat), normal pause rules apply |
 
-**Condition #2's real close bound (Issue #817, stabilized by #869):** the static
-`WARM_WINDOW_CLOSE_HOUR`/`MILD_WINDOW_CLOSE_HOUR` in the table above is a fallback only.
-`_is_within_planned_window_period()` (automation.py ~lines 1303–1316) prefers
-`self._nat_vent_cutoff` — propagated from the coordinator's cached `self._nat_vent_plan
-["nat_vent_cutoff"]` via `apply_classification()` — whenever it is set, so the pause-exemption
-window actually ends at the same ODE-derived moment the briefing/status cards show this cycle,
-same as §7's WARM/MILD close-time caveat. As of Issue #869, that cached value is sustain-confirmed
-before it changes (see §6d's Issue #869 update above), so this control boundary no longer flickers
-in step with the knife-edge `nat_vent_cutoff_reason` race that motivated that fix — a genuine
-change in the ODE curve still updates the boundary, just not a same-cycle sensor-noise flip.
+**Condition #2's real close bound (Issues #817, #1218/#1231):** the static
+`WARM_WINDOW_CLOSE_HOUR`/`MILD_WINDOW_CLOSE_HOUR` in the table above is a fallback only. The predicate compares
+**dated** datetimes (`open_dt <= now <= close_dt`, the upper bound inclusive), where `open_dt` is today at
+`window_open_time` and `close_dt` comes from `nat_vent_plan.effective_window_close()` — the same helper the
+briefing uses, so the period and the briefed close time cannot disagree:
+
+| State of `self._nat_vent_cutoff` (set by `apply_classification()` from `self._nat_vent_plan`) | Close used |
+|---|---|
+| `nat_vent_cutoff_already_reached` is True (the forward-only scan found the crossing already behind us; the cutoff is only the next grid point after "now") | The period has **ended** — the predicate returns False |
+| Dated another day than now (e.g. tomorrow 11:00 or 16:00) | Today's static close (`window_close_time`) |
+| Dated today | The cutoff |
+| None | Today's static close; False when there is none |
+
+Before #1231 the predicate used `cutoff.time()` and ignored the already-reached flag, so a cutoff that kept
+sliding to the next grid point held the period open for hours past the briefed close (production logged
+"Planned window period ended" at 20:02 for a 17:00 close), the Status card kept saying "windows open (as
+planned)", and the background open-window pause was skipped; a cutoff dated tomorrow also ended today's period
+early or kept it open. `apply_classification()` now takes `nat_vent_cutoff_already_reached` (stored as
+`self._nat_vent_cutoff_already_reached`) and all 7 production call sites pass both the cutoff and the flag: 4 in
+`coordinator.py`, the engine's own re-assert, the grace-expiry re-apply (`_apply_current_scheduled_state()`) and the
+cancel-override follow-up in `api.py`. The last two used to pass neither, which reset the engine to the static
+close and re-opened a period the plan had already ended, for up to one 30-minute cycle; an AST test now requires
+every production call to carry both. The held plan (`_stabilize_nat_vent_cutoff_reason()`, §6d) holds the flag
+together with the cutoff it describes.
+
+**What #869 does and does not stabilize:** the sustain-confirm (`_stabilize_nat_vent_cutoff_reason()`, §6d)
+only holds the cutoff/reason/evening-open trio while a cutoff-*reason* flip is pending (90 s). It does not
+freeze the cutoff time against ordinary recomputes, and the already-reached flag is not held. The earlier claim
+here that the control boundary "no longer flickers" was therefore too strong: the boundary still follows the
+latest accepted plan (a genuine ODE change moves it). Latching a per-day close, a drift-proof live recompute and
+regenerate-on-change are Issue #1230.
 
 ### What It Suppresses
 
@@ -3282,11 +3312,14 @@ Natural ventilation is never suppressed by the planned window (matrix rows C2/C5
 
 | Call site | Purpose |
 |---|---|
-| `handle_door_window_open()` | Blocks initial pause when sensor opens |
-| `_grace_expired()` | Blocks re-pause when grace timer fires with sensor still open |
-| `_re_pause_for_open_sensor()` | Blocks re-pause called from the grace expiry path |
-| `_compute_automation_status()` | Returns `"windows open (as planned)"` instead of a pause/warning status |
-| `_compute_next_automation_action()` | Returns `"Windows open as recommended"` in the next-action field |
+| `_sync_paused_by_door_with_live_sensors()` (automation.py) | The one remaining exemption: the lazy reconcile does not pause for an open sensor inside the period (the 600 s open-window pause) |
+| `handle_door_window_open()` (automation.py) | Log line only ("Door/window open ... during planned window period — running the nat-vent gate"); since #1211 it does not exempt — the nat-vent gate decides, pausing when it refuses |
+| Door/window FSM input (automation.py, `within_planned_window=`, consumed by `door_window_fsm.py`) | The FSM twin of the predicate, passed on each decision |
+| `consume_planned_window_exit_edge()` / `async_sync_after_planned_window_exit()` (automation.py; driven by the coordinator's 5-minute tick and the outdoor-temp path) | Reports the active -> inactive edge once and runs the pause-only reconcile so a window left open past the close is paused immediately |
+| `_compute_automation_status()` (coordinator.py) | Returns `"windows open (as planned)"` when inside the period and a sensor is open |
+
+`_grace_expired()`, `_re_pause_for_open_sensor()` and `_compute_next_automation_action()` no longer read the
+predicate (the first two lost their planned-window branch in #1211; the next-action card has its own gate).
 
 ---
 

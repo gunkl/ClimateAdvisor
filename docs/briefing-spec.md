@@ -69,6 +69,7 @@ directly. Key inputs, all read from `coordinator.config` / `coordinator.data` at
 | `adaptive_thermal_active` | `thermal_model.get("confidence", "none") != "none"` from `self.learning.get_thermal_model()` |
 | `predicted_indoor_future`/`predicted_outdoor_future` | `self._last_predicted_indoor` / `_build_future_forecast_outdoor()` |
 | `occupancy_mode` | `self._occupancy_mode` |
+| `now` (optional) | defaults to `dt_util.now()`; dates the close/breach facts (Issue #1231) |
 
 `generate_briefing()` is pure logic with no I/O — it never re-derives anything from `hass`,
 so any staleness in the values above (e.g. a classification computed hours ago) is a
@@ -83,9 +84,10 @@ the live ODE-predicted indoor/outdoor curves (`nat_vent_cutoff`) — the two cou
 the body's separate AC-start sentence could also contradict the header's `HVAC Mode: Off` by
 promising a fixed AC clock-time with no awareness of window state. Fixed by computing
 `_derive_warm_day_events()` **once** in `generate_briefing()` and passing the same `warm_events`
-dict into both `_generate_tldr_table()` and `_warm_day_plan()` — the header now prefers
-`warm_events["nat_vent_cutoff"]` when available, falling back to the classifier constant only
-when no forecast curve exists. The AC-safety-net fact is now stated exactly once (in the
+dict into both `_generate_tldr_table()` and `_warm_day_plan()` — the header prefers
+`warm_events["nat_vent_cutoff"]` when available, falling back to the classifier's static close hour
+only when no forecast curve exists or the cutoff is dated another day (since Issue #1231 the close is
+resolved by `nat_vent_plan.effective_window_close()` — see "Briefing Facts" below). The AC-safety-net fact is now stated exactly once (in the
 forecast-peak sentence, conditioned on windows being closed) rather than duplicated by a second,
 window-unaware sentence — see [§6e in 08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md)
 for the real automation-layer guard (`apply_classification()`'s `DEFER_PAUSED` branch) this
@@ -134,6 +136,51 @@ kwarg — such a caller would silently get `_mild_day_plan()`'s old unverified-c
 wording while `_warm_day_plan()`'s equivalent caller would silently get the new
 gated wording. Flagged here so a future change to either default is a deliberate
 choice, not an accidental rediscovery of this asymmetry.
+
+## Briefing Facts, Occupancy and Dated Close Times (Issue #1231, absorbs #1218/#1219)
+
+**Occupant outcome:** with nobody home, the briefing used to promise at-home holds, a bedtime setback,
+overnight pre-cooling and window advice the engine never performs; on a cold day at home it compared the
+bedtime number against the *away* setback, quoting a "usual" temperature the house is never at; and it could
+print "Close by 11:00 AM" today for a cutoff dated tomorrow.
+
+**One set of facts.** `generate_briefing()` calls `_gather_briefing_facts()` **once** at write time and builds
+a frozen `_BriefingFacts` (occupancy mode and `unoccupied`, the armed awake band and edges, `normal_bedtime`,
+`bedtime_target`, `windows_advice`, `near_miss`, the dated `close` fact, `evening_open`, `ceiling_breach`, the
+hot-day morning/evening flags and open time, the pre-cool targets, the economizer threshold). Every day-plan
+function, `_fresh_air_section()`, `_tonight_preview()` and `_generate_tldr_table()` reads from it (the TLDR
+gathers it through the same function when called directly without `facts=`). A value that is unknown or not
+applied is `None` and its sentence is simply absent. This replaced five inline `occupancy_mode in ("away",
+"vacation")` checks.
+
+**Away / vacation, every day type (hot, warm, mild, cool, cold).** `unoccupied` means the engine holds the
+away/vacation setback all day and night (`handle_bedtime` defers to it), so the briefing promises nothing
+at-home (#1211 had fixed only warm/mild):
+
+| Surface | Away/vacation text |
+|---|---|
+| Day-plan lead | `"A <day> day, and the house is empty, so the away settings below are what apply."` (hot/cool/cold: that line only) |
+| TLDR Windows row | `Closed all day` |
+| TLDR Bedtime row | `away setback held` |
+| Pre-cool, bedtime-tuning, "set back more aggressively tonight", awake-target quotes | omitted |
+
+**At home — one bedtime number.** `bedtime_target` is the adaptive value when the coordinator passes one
+(`bedtime_setback_heat`/`_cool`), else the engine's sleep-band edge: `select_comfort_band(...,
+in_sleep_window=True)` floor (heat) or ceiling (cool), the edge `handle_bedtime()` arms. Body and TLDR quote
+that one number. The cold-day sentence compares it against `normal_bedtime` (that same edge), **never**
+against `setback_heat` (the away setpoint). The engine arms that same edge every heating night, so when the two
+are equal there is no cold-day adjustment to describe and the body says plainly "At bedtime I'll set back to
+X." (owner decision, option A). Only a learned value that differs reads "Tonight I'm using a conservative
+setback — X instead of the usual Y". The old `comfort - DEFAULT_SETBACK_DEPTH_F` / `COLD_DAY_SETBACK_DEPTH_F` fallbacks are gone from the
+briefing.
+
+**Dated close times.** The close the briefing prints and the close the engine's window period uses come from
+one helper, `nat_vent_plan.effective_window_close(cutoff, already_reached, static_close, now)`: already
+reached -> `now`; a cutoff dated another day -> *today's* static close; otherwise the cutoff; no cutoff ->
+today's static close (None when there is none). `_CloseFact.dynamic` is True only when the forecast cutoff is
+in play, so a cutoff reason is stated only then. The warm-day ceiling-breach sentence is likewise dropped when
+the breach is dated another day. Out of scope (Issue #1230): the per-day latch, drift-proof live recompute and
+regenerate-on-change.
 
 ## Coherence Validation (Issue #518)
 
@@ -205,8 +252,8 @@ Two changes keep this from recurring:
    read the same `awake_comfort_edges()` ceiling, because the ODE ceiling guard now defends that
    ceiling (breach scan, lead time and cool setpoint), and `compute_nat_vent_plan(ceiling=...)`
    times the breach against it. These deliberately stay raw: the economizer/window
-   thresholds (`comfort_cool` + delta; that gate does not widen), the bedtime/setback fallbacks,
-   and the away/vacation rows.
+   thresholds (`comfort_cool` + delta; that gate does not widen) and the away/vacation rows. (The
+   bedtime number is the engine's sleep-band edge since Issue #1231.)
 2. **Truncation remains a safety net**, not the primary fix: `ClimateAdvisorBaseSensor._capped_state()`
    (`sensor.py`) caps any sensor state at 250 chars (`text[:247] + "..."`), logging a
    one-time `WARNING` if it ever actually fires, so a future regression degrades to a
@@ -225,7 +272,8 @@ the sensor-level cap should rarely/never actually trigger in practice.
 day's forecast is unavailable. Within `generate_briefing()` itself, every optional input
 degrades gracefully rather than raising: missing `predicted_indoor_future`/`predicted_outdoor_future`
 falls back to the classifier's static window/close-time constants (see § Single Source of Truth
-above); `bedtime_setback_heat`/`bedtime_setback_cool` of `None` falls back to
-`comfort_{heat,cool} ± DEFAULT_SETBACK_DEPTH_F`; `learning_suggestions=None` simply omits that
+above); `bedtime_setback_heat`/`bedtime_setback_cool` of `None` falls back to the engine's own
+sleep-band edge (`select_comfort_band(..., in_sleep_window=True)`, Issue #1231 — no
+`DEFAULT_SETBACK_DEPTH_F` arithmetic in the briefing); `learning_suggestions=None` simply omits that
 section. There is no explicit "data is stale" messaging in the briefing itself — staleness is
 prevented upstream by the coordinator's early-return, not communicated to the user.

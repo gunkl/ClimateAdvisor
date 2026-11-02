@@ -835,7 +835,14 @@ def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae:
         # logging from apply_classification() attributes to the right zone.
         with log_capture.zone_scope(coordinator.zone_label):
             if coordinator._current_classification:
-                hass.async_create_task(ae.apply_classification(coordinator._current_classification))
+                # Issue #1231: carry the plan's close through, or the reset reopens the planned window period.
+                hass.async_create_task(
+                    ae.apply_classification(
+                        coordinator._current_classification,
+                        nat_vent_cutoff=ae._nat_vent_cutoff,
+                        nat_vent_cutoff_already_reached=ae._nat_vent_cutoff_already_reached,
+                    )
+                )
 
     # Issue #1102 (F8): keep the handle on the coordinator so unloading it cancels this
     # follow-up. Exception to the release rule: one entry per cancel-override click,

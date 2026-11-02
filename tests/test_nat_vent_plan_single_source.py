@@ -56,7 +56,7 @@ Keying scheme history (Issue #843/#847 follow-up):
 from __future__ import annotations
 
 import ast
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -309,3 +309,54 @@ class TestEveningOpenTimeRequiresGenuinePeakBreach:
             f" the genuine ceiling breach at {breach_hour5}."
         )
         assert result["evening_open_time"] == expected_hour7
+
+
+# ---------------------------------------------------------------------------
+# Issue #1231 (absorbs #1218): effective_window_close() -- the dated close the engine and briefing share
+# ---------------------------------------------------------------------------
+
+
+class TestEffectiveWindowClose_1231:
+    """Pure helper: already reached -> period over now; dated compare; tomorrow cutoff -> today's static close."""
+
+    NOW = datetime(2026, 7, 10, 18, 0, 0)
+
+    def _fn(self):
+        from custom_components.climate_advisor.nat_vent_plan import effective_window_close
+
+        return effective_window_close
+
+    def test_already_reached_returns_now(self):
+        f = self._fn()
+        assert f(self.NOW + timedelta(hours=1), True, time(17, 0), self.NOW) == self.NOW
+
+    def test_cutoff_today_wins_over_static(self):
+        f = self._fn()
+        cutoff = datetime(2026, 7, 10, 15, 30)
+        assert f(cutoff, False, time(17, 0), self.NOW) == cutoff
+
+    def test_cutoff_tomorrow_falls_back_to_todays_dated_static_close(self):
+        f = self._fn()
+        assert f(datetime(2026, 7, 11, 11, 0), False, time(17, 0), self.NOW) == datetime(2026, 7, 10, 17, 0)
+
+    def test_cutoff_yesterday_falls_back_to_todays_dated_static_close(self):
+        f = self._fn()
+        assert f(datetime(2026, 7, 9, 11, 0), False, time(17, 0), self.NOW) == datetime(2026, 7, 10, 17, 0)
+
+    def test_no_cutoff_uses_static_close_or_none(self):
+        f = self._fn()
+        assert f(None, False, time(17, 0), self.NOW) == datetime(2026, 7, 10, 17, 0)
+        assert f(None, False, None, self.NOW) is None
+
+    def test_cutoff_tomorrow_and_no_static_close_is_none(self):
+        f = self._fn()
+        assert f(datetime(2026, 7, 11, 11, 0), False, None, self.NOW) is None
+
+    def test_aware_cutoff_is_compared_in_the_local_zone(self):
+        """23:30 UTC on the 9th is 18:30 local (UTC-5) on the 9th... but 03:00 UTC on the 11th is 22:00 local on the
+        10th -> today."""
+        f = self._fn()
+        tz = timezone(timedelta(hours=-5))
+        now = datetime(2026, 7, 10, 18, 0, tzinfo=tz)
+        cutoff = datetime(2026, 7, 11, 3, 0, tzinfo=UTC)
+        assert f(cutoff, False, time(17, 0), now) == cutoff.astimezone(tz)

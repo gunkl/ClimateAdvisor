@@ -365,3 +365,18 @@ class TestGenuineSustainedChangeAccepted:
         # Candidate state cleared once confirmed.
         assert coord._nat_vent_cutoff_reason_candidate is None
         assert coord._nat_vent_cutoff_reason_candidate_since is None
+
+
+class TestHeldPlanHoldsAlreadyReached_1231:
+    """Issue #1231: the engine ends the planned window period on ``nat_vent_cutoff_already_reached``, so the flag
+    describes the cutoff it travels with. While a reason flip is pending the held plan keeps the OLD cutoff, so it
+    must keep the OLD flag too -- a fresh flag paired with a held cutoff is a pair no scan ever produced."""
+
+    def test_flag_is_held_with_the_cutoff(self):
+        previous = {**_plan("comfort_floor", _T0 + timedelta(hours=3)), "nat_vent_cutoff_already_reached": False}
+        coord = _make_coord(nat_vent_plan=previous)
+        raw = {**_plan("outdoor_rise", _T0 + timedelta(hours=1)), "nat_vent_cutoff_already_reached": True}
+        with patch(_DT_PATCH_TARGET, return_value=_T0 + timedelta(seconds=5)):
+            result = coord._stabilize_nat_vent_cutoff_reason(raw)
+        assert result["nat_vent_cutoff"] == _T0 + timedelta(hours=3)  # held
+        assert result["nat_vent_cutoff_already_reached"] is False  # held with it

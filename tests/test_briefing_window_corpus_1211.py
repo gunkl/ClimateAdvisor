@@ -65,6 +65,8 @@ _WINDOW_PHRASES = (
 _NO_ENERGY_PHRASES = ("no energy impact", "the hvac is off today", "hvac is off this morning")
 _PROMISE_PHRASES = ("around 7pm", "bank some extra warmth", "ease back a couple degrees midday")
 _NEAR_MISS_PHRASE = "may help later"
+# Sentences that SAY something about whether outside air helps the house today.
+_AIR_CLAIM_PHRASES = ("outside air won't do much", "outside air isn't going to warm", "outside air may help")
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,20 @@ def _violations(case: Case) -> list[str]:
         wants_near_miss = case.near_miss and not away and not case.low_estimated
         if (_NEAR_MISS_PHRASE in low) != wants_near_miss:
             problems.append(f"near-miss wording mismatch (expected {wants_near_miss})")
+        # Away/vacation: the lead line says nothing about the air and quotes no awake band (the away section
+        # quotes the setbacks); an estimated low: neither "helps" nor "won't help" is known, so neither is said.
+        if away or case.low_estimated:
+            for phrase in _AIR_CLAIM_PHRASES:
+                if phrase in low and not (phrase == "outside air may help" and not away and wants_near_miss):
+                    problems.append(f"claim about outside air {phrase!r} while away or on an estimated low")
+        if away:
+            awake_band = f"{heat:.0f}\u2013{cool:.0f}\u00b0f"
+            if awake_band in low:
+                problems.append("awake comfort band quoted while away or on vacation")
+        # A real forecast low and no windows day at home: the briefing says air will not help (not silence).
+        says_wont_help = "won't do much" in low or "isn't going to warm" in low
+        if not away and not case.low_estimated and not expect_windows and not wants_near_miss and not says_wont_help:
+            problems.append("a home non-windows day on a real low should say outside air won't help")
         allowed = {
             round(v)
             for v in (

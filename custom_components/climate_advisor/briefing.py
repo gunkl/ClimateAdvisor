@@ -135,9 +135,11 @@ def generate_briefing(
             ``_warm_day_plan()``. Default False (assume no evidence of overnight
             heat — the "don't assert what you can't verify" thesis this whole fix
             is built on) for callers that don't pass it; at this default,
-            ``_mild_day_plan()`` renders the neutral wording (not "I warmed to X"),
-            and ``_warm_day_plan()`` keeps its unchanged "HVAC is off this
-            morning." wording.
+            ``_mild_day_plan()`` renders the neutral wording (not "I warmed to X").
+            Issue #1211: the WARM-day "HVAC is off this morning." sentence no longer
+            exists (a comfort band is armed on a warm day); with this flag False and no
+            window advice, ``_warm_day_plan()`` says the thermostat holds the band (and,
+            only on a real forecast low, that outside air won't do much).
         automation_overridden: Issue #948 (Root Cause 1, third site) — whether
             automation is disabled, manually overridden, or paused (the same
             signal ``_compute_automation_status()`` reads). Gates
@@ -320,6 +322,7 @@ def generate_briefing(
                 armed_cool=awake_cool,
                 armed_heat=awake_heat,
                 windows_advice=_gives_window_advice(c, occupancy_mode),
+                away=occupancy_mode in ("away", "vacation"),
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
@@ -337,6 +340,7 @@ def generate_briefing(
                 armed_heat=awake_heat,
                 armed_cool=awake_cool,
                 windows_advice=_gives_window_advice(c, occupancy_mode),
+                away=occupancy_mode in ("away", "vacation"),
                 near_miss=_is_mild_near_miss(
                     c, comfort_heat, occupancy_mode, advice=_gives_window_advice(c, occupancy_mode)
                 ),
@@ -382,7 +386,16 @@ def generate_briefing(
         )
     )
     lines.append("")
-    lines.extend(_fresh_air_section(c, awake_heat, awake_cool, debounce_seconds, temp_unit=temp_unit))
+    lines.extend(
+        _fresh_air_section(
+            c,
+            awake_heat,
+            awake_cool,
+            debounce_seconds,
+            temp_unit=temp_unit,
+            away=occupancy_mode in ("away", "vacation"),
+        )
+    )
 
     # Grace period status — only shown when a grace period is currently active,
     # or when grace periods are configured to a non-default value worth explaining
@@ -459,6 +472,17 @@ def _gives_window_advice(c: DayClassification, occupancy_mode: str) -> bool:
     # classification by hand.
     recommended = bool(c.forecast_windows_recommended or c.windows_recommended)
     return recommended and occupancy_mode not in ("away", "vacation")
+
+
+def _says_air_wont_help(c: DayClassification) -> bool:
+    """Whether the briefing may SAY outside air will not help today (Issue #1211).
+
+    Only when the classifier decided so on a real forecast low: not recommended by the forecast answer nor the
+    live flag, and the low is not a stand-in. When the low is estimated the answer is unknown, so the text
+    asserts neither that air helps nor that it does not. Away/vacation never reaches this (no window advice there
+    says nothing about the air at all).
+    """
+    return not c.forecast_windows_recommended and not c.windows_recommended and not c.low_is_estimated
 
 
 def _band_text(floor: float, ceiling: float, temp_unit: str) -> str:
@@ -819,6 +843,7 @@ def _warm_day_plan(
     armed_cool: float | None = None,
     armed_heat: float | None = None,
     windows_advice: bool | None = None,
+    away: bool = False,
 ) -> list[str]:
     """Conversational plan for warm days (75-85\u00b0F).
 
@@ -838,7 +863,8 @@ def _warm_day_plan(
     holds \u2014 if outdoor has already risen above indoor by render time, the sentence
     falls back to ``outdoor_rise`` phrasing instead of asserting a stale claim.
 
-    Issue #948 (Root Cause 1): the "HVAC is off this morning." sentence used to
+    Issue #948 (Root Cause 1; the sentence itself was removed by Issue #1211, which keeps this gate on the
+    "heater ran overnight" alternative): the "HVAC is off this morning." sentence used to
     be asserted purely from classifier/window state (windows_recommended
     False), with no check on whether HVAC actually ran overnight — the same
     false present-tense claim shape as ``_mild_day_plan()``'s "I warmed"
@@ -849,7 +875,10 @@ def _warm_day_plan(
 
     Issue #1211: every window sentence (the tip, the fan-ventilation line, "close up by", "reopen") is gated
     on ``windows_advice`` -- windows recommended today AND someone home (default: ``c.windows_recommended``).
-    Otherwise the plan says what is true: the thermostat holds the comfort band.
+    Otherwise the plan says what is true: the thermostat holds the comfort band. ``away`` (away/vacation) gets a
+    neutral line with no claim about the air and no awake band; "outside air won't do much" is said only when
+    the classifier decided so on a real forecast low (``_says_air_wont_help()``), and an estimated low asserts
+    neither way.
     """
     lines = []
     if windows_advice is None:
@@ -925,6 +954,9 @@ def _warm_day_plan(
                 "Windows are open to catch the cool morning air \u2014"
                 " cross-ventilation keeps things comfortable without the AC."
             )
+    elif away:
+        # Nobody is home: no claim about the air, and no awake band (the away section quotes the setbacks).
+        lines.append("A warm day, and the house is empty, so the away settings below are what apply.")
     elif overnight_heat_engaged:
         lines.append(
             "The heater ran a bit overnight before settling"
@@ -934,12 +966,15 @@ def _warm_day_plan(
                 else " — the thermostat has it from here."
             )
         )
-    else:
+    elif _says_air_wont_help(c):
         lines.append(
             f"Outside air won't do much for the house today, so the thermostat holds {_band_desc}."
             if _band_desc
             else "Outside air won't do much for the house today, so the thermostat has it."
         )
+    else:
+        # Low is estimated: say neither that windows help nor that they don't.
+        lines.append(f"The thermostat holds {_band_desc} today." if _band_desc else "The thermostat has it today.")
 
     if windows_advice and fan_mode != FAN_MODE_DISABLED:
         lines.append("I'll use the fan to boost cross-ventilation when windows are open.")
@@ -953,7 +988,11 @@ def _warm_day_plan(
     # _fresh_air_section()'s already-correct, debounce-aware version of this same fact.
     # This section now only states the forecast and ties the AC to windows being
     # closed; _fresh_air_section owns the debounce/pause mechanics, so it's said once.
-    if _ceiling_breach is not None:
+    if away:
+        # Nobody is home: the AC-handoff sentences quote the awake ceiling, which is not what the thermostat holds
+        # while away (the away section states the setback band).
+        lines.pop()  # drop the spacer so the away line is not followed by a double blank
+    elif _ceiling_breach is not None:
         breach_t = _ceiling_breach.strftime(_FMT_HOUR)
         _tail = (
             " Once windows are closed, the AC will step in automatically if it's needed to hold that ceiling."
@@ -1020,6 +1059,7 @@ def _mild_day_plan(
     armed_cool: float | None = None,
     windows_advice: bool | None = None,
     near_miss: bool = False,
+    away: bool = False,
 ) -> list[str]:
     """Conversational plan for mild days (60-74\u00b0F).
 
@@ -1042,7 +1082,10 @@ def _mild_day_plan(
     Issue #1211: the window tip, the "close up by" line and the evening reopen line are gated on
     ``windows_advice`` (windows recommended today AND someone home; default ``c.windows_recommended``), and the
     plan never claims "HVAC is off" -- the comfort band is armed. ``near_miss`` (forecast high just under the
-    floor) says outside air may help later instead of going silent (owner decision O7).
+    floor) says outside air may help later instead of going silent (owner decision O7). ``away`` gets a neutral
+    line with no claim about the air and no awake band; "isn't going to warm the house" is said only when the
+    classifier decided so on a real forecast low (``_says_air_wont_help()``), and an estimated low asserts
+    neither way.
     """
     if windows_advice is None:
         windows_advice = bool(c.windows_recommended)
@@ -1051,7 +1094,14 @@ def _mild_day_plan(
     _band_desc = _band_text(_shown_heat, armed_cool, temp_unit) if armed_cool is not None else None
     _holding = f"the thermostat holds {_band_desc}" if _band_desc else "the thermostat holds your comfort band"
     if not windows_advice:
-        lines = [f"A mild day. Outside air isn't going to warm the house, so {_holding} and steps in if it drifts."]
+        if away:
+            # Nobody is home: no claim about the air, and no awake band (the away section quotes the setbacks).
+            lines = ["A mild day, and the house is empty, so the away settings below are what apply."]
+        elif _says_air_wont_help(c):
+            lines = [f"A mild day. Outside air isn't going to warm the house, so {_holding} and steps in if it drifts."]
+        else:
+            # Low is estimated: the answer is unknown, so say neither that windows help nor that they don't.
+            lines = [f"A mild day, so {_holding} and steps in if it drifts."]
         if near_miss:
             lines.append("")
             lines.append(
@@ -1313,8 +1363,12 @@ def _fresh_air_section(
     temp_unit: str = FAHRENHEIT,
     natural_vent_active: bool = False,
     current_outdoor_temp: float | None = None,
+    away: bool = False,
 ) -> list[str]:
     """User-centric section about opening windows/doors for fresh air.
+
+    ``away`` (away/vacation): the thermostat is holding the setback band, not the awake band, so the
+    "holding X-Y today" clause is left out rather than quoting the wrong band (Issue #1211).
 
     Affirms the user's choice first, then explains impact and recovery.
     Varies by HVAC mode since the impact differs significantly.
@@ -1355,9 +1409,13 @@ def _fresh_air_section(
             f" comfortable while you do it.",
         ]
     else:
+        _holding_clause = (
+            ""
+            if away
+            else f" \u2014 the thermostat is holding {_band_text(comfort_heat, comfort_cool, temp_unit)} today"
+        )
         return [
-            f"If you want to open a window for some fresh air, go for it \u2014"
-            f" the thermostat is holding {_band_text(comfort_heat, comfort_cool, temp_unit)} today."
+            f"If you want to open a window for some fresh air, go for it{_holding_clause}."
             f" Enjoy the breeze. If the heat or AC does need to run while a window is"
             f" still open, I'll give it {debounce_desc} and then pause until you close up.",
         ]

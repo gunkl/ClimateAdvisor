@@ -70,3 +70,77 @@ def test_window_left_open_past_the_end_of_the_period_is_paused_without_waiting_f
         assert engine.consume_planned_window_exit_edge() is True
         asyncio.run(engine.async_sync_after_planned_window_exit())
     assert engine._paused_by_door is True, "the open window must be paused as soon as the period ends"
+
+
+# ---------------------------------------------------------------------------
+# The coordinator's real 5-minute tick drives the exit reconcile (the trigger, not just the engine half)
+# ---------------------------------------------------------------------------
+
+
+def _tick_coordinator(engine):
+    """A bare coordinator whose REAL ``_async_thermal_sample_tick`` / exit-check methods run against ``engine``.
+
+    ``@callback`` is the identity in a private copy of the class (the lightweight HA stub swallows it, which
+    would make the tick unreachable); everything the tick calls besides the exit check is stubbed.
+    """
+    import types
+    from unittest.mock import MagicMock
+
+    from tests.test_promise_wiring import TestRealEntryPointsFeedThePromises
+
+    cls = TestRealEntryPointsFeedThePromises._callback_transparent_class()
+    coord = object.__new__(cls)
+    coord.automation_engine = engine
+    coord._refresh_outdoor_temp = MagicMock()
+    coord._tick_household_promises = MagicMock()
+    coord._refresh_indoor_sensor_health = MagicMock()
+    coord._get_indoor_temp = MagicMock(return_value=None)
+    coord._sample_all_observations = MagicMock()
+    created: list = []
+
+    def _spawn(coro, **_kw):
+        task = asyncio.ensure_future(coro)
+        created.append(task)
+        return task
+
+    coord._spawn = _spawn
+    for name in (
+        "_async_thermal_sample_tick",
+        "_schedule_planned_window_exit_check",
+        "_async_planned_window_exit_sync",
+    ):
+        setattr(coord, name, types.MethodType(getattr(cls, name), coord))
+    return coord, created
+
+
+def test_the_real_tick_pauses_a_window_left_open_when_the_period_ends_and_notifies_once():
+    """Occupant: a window is open (past the debounce) when the 10:00 close time passes, with the AC armed.
+    The house must be paused by the 5-minute tick that crosses the close time, not by the next 30-minute cycle,
+    and the occupant is told once, however many ticks follow."""
+    engine = _engine_in_period()
+    engine.hass.states.get.return_value = _make_state("cool")
+    engine._sensor_check_callback = lambda: True
+
+    async def _run():
+        coord, created = _tick_coordinator(engine)
+        with patch("custom_components.climate_advisor.automation.dt_util") as dt:
+            dt.now.return_value = _make_dt(9, 55)
+            coord._async_thermal_sample_tick(dt.now.return_value)  # in period: remembers it was active
+            await asyncio.gather(*created)
+            assert engine._paused_by_door is False, "inside the period the open window is expected"
+
+            dt.now.return_value = _make_dt(10, 5)
+            coord._async_thermal_sample_tick(dt.now.return_value)  # crosses the close time
+            await asyncio.gather(*created)
+            assert engine._paused_by_door is True, "the tick crossing the close time must pause the open window"
+            assert len(created) == 1, "exactly one reconcile for the one edge"
+            calls_after_first = engine.hass.services.async_call.await_count
+
+            for minute in (10, 15, 20):  # later ticks: no edge, nothing repeats
+                dt.now.return_value = _make_dt(10, minute)
+                coord._async_thermal_sample_tick(dt.now.return_value)
+            await asyncio.gather(*created)
+            assert len(created) == 1
+            assert engine.hass.services.async_call.await_count == calls_after_first, "no duplicate action/notification"
+
+    asyncio.run(_run())

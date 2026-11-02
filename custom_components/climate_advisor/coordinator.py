@@ -1856,9 +1856,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _fetched_raw = state.get("classification_fetched_at")
                 if isinstance(_fetched_raw, str):
                     _fetched = datetime.fromisoformat(_fetched_raw)
-                    # Saved stamps always carry a timezone; a naive one (hand-edited state) would make the
-                    # briefing's ``dt_util.now() - _fetched_at`` raise, so it is dropped like a stale stamp.
-                    if _fetched.tzinfo is not None and _fetched.date() == dt_util.now().date():
+                    # A stamp whose timezone-awareness differs from ``dt_util.now()`` (hand-edited state) would
+                    # make the briefing's ``dt_util.now() - _fetched_at`` raise, so it is dropped like a stale one.
+                    _now = dt_util.now()
+                    if (_fetched.tzinfo is None) == (_now.tzinfo is None) and _fetched.date() == _now.date():
                         self._classification_fetched_at = _fetched
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.warning("Failed to restore classification: %s", err)

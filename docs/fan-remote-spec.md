@@ -483,7 +483,9 @@ regression. Three independent layers now cover it:
    behaviour. The comfort-only speed path needs no gate (the fan was already running).
 
 **Symmetry:** a real press during startup coalescing is still dropped (unchanged — the fan entity
-listener covers physical on/off) but its timestamp is now recorded; a stale-restored `off` can no
+listener is suppressed during the window too; changes made during coalescing are not supported, owner
+decision Issue #1235, and `reconcile_fan_on_startup()` decides from the live fan state at coalesce end)
+but its timestamp is now recorded; a stale-restored `off` can no
 longer cancel a genuine pending press (it is rejected before the `off` branch); a stale event can no
 longer re-stamp or extend a real active override (it never reaches the burst). Tests:
 `tests/test_fan_remote.py::TestRemoteReannounceAfterReconnect1198`,

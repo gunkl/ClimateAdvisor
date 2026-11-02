@@ -1,7 +1,7 @@
 """Real-HA test for Issue #1211 (O5): the daily record's "windows were recommended today" flag.
 
-Occupant story: the forecast says a warm day with a cool morning (windows day), but the house starts cold with colder air
-outside, so the live gate vetoes the recommendation (opening windows would chill the house further). The
+Occupant story: the forecast says a warm day with a cool morning (windows day), but the house starts cold with
+colder air outside, so the live gate vetoes the recommendation (opening windows would chill the house further). The
 window-compliance statistics must not count that day as a day the occupant was asked to open windows: the
 record's flag (the denominator) has to read the same gated flag the credit uses, not the raw forecast answer.
 """

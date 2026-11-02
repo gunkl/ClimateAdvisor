@@ -10678,6 +10678,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _armed_heat, _armed_cool = _armed.floor, _armed.ceiling
         cooling_needed = indoor_temp is not None and indoor_temp > _armed_cool
         heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
+        # Issue #1211: ONE direction rule for both directions (stage B of the shared outside-air rule): above the
+        # armed ceiling outdoor must be cooler, below the armed floor warmer. The same function the live
+        # windows gate uses, so the card and the gate cannot disagree.
+        direction_ok = outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool)
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
@@ -10715,7 +10719,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if heating_needed:
             if windows_physically_open:
                 return _decide("Close windows to enable the heater.")
-            if outdoor_temp is not None and outdoor_temp > indoor_temp:
+            if outdoor_temp is not None and direction_ok:
                 return _decide(
                     f"Open windows briefly — outdoor's warmer ({format_temp(outdoor_temp, unit)} vs"
                     f" {format_temp(indoor_temp, unit)}).",

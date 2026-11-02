@@ -7,7 +7,10 @@
     "Regression scenario for Issue #1209 (fixed): passes with the commanded-mode rule in override_confirm_split.decide_override_confirm_path; with the rule removed the 10:10 assertion fails (override_confirmed instead of override_self_resolved). The old 10:30 classification_applied check was dropped: it, and engine_state flag checks at 10:30, also pass when the override was confirmed (verified), so only the 10:10 outcome discriminates.",
     "Occupant outcome: a momentary thermostat glitch is not mistaken for the occupant's own change; CA keeps managing comfort and no 1 h manual grace starts.",
     "Derived from override_self_resolve_transient (golden), which covers the same blip on a HOT day (label cool); here the label is off, so only the commanded mode (cool) identifies the return as CA's own.",
-    "Proposal only: promotion to golden/ needs owner approval and --sign."
+    "Owner-approved for golden 2026-11-02.",
+    "(a) Scenario effectiveness: with the commanded-mode rule removed from decide_override_confirm_path, the 10:10 assertion fails (override_confirmed instead of override_self_resolved).",
+    "(b) Docs <-> production: docs/grace-periods-spec.md (PATH A/B tree, Issue #1209 section) and docs/08 describe the live commanded-mode match (never for Off, #1159) implemented in override_confirm_split.py.",
+    "(c) User outcome if this regresses: a momentary thermostat glitch on a warm or mild day silently stops comfort management for the 1 h manual grace."
   ],
   "config": {
     "comfort_heat": 70,

@@ -4,6 +4,7 @@
   "source": "live",
   "issue": 1222,
   "notes": [
+    "Owner-approved for golden 2026-11-02.",
     "Live example: 2026-11-01 13:07:41 to 13:12:41, ERROR 'Stuck grace detected' after leaving home with an override.",
     "Occupant outcome: the dashboard and the next-action text kept saying 'Grace period active' in an empty house already in setback, and the grace's end-time bookkeeping stayed armed until the watchdog fired.",
     "manual_grace_seconds is 6000 so the grace cannot have run out by itself at the end of the scenario: _grace_active False at 21:15 is caused by the away transition ending it.",
@@ -86,7 +87,10 @@
       "at": "2026-06-10T21:15:00",
       "expect": "event_emitted",
       "event": "grace_cancelled",
-      "payload_subset": {"reason": "occupancy_away", "protects_override": true},
+      "payload_subset": {
+        "reason": "occupancy_away",
+        "protects_override": true
+      },
       "track": "logic",
       "reason": "The ending is announced as an intentional away-transition cancel, not left for the watchdog."
     }
@@ -94,7 +98,7 @@
   "verdict": {
     "type": "positive",
     "summary": "Leaving home ends the cleared override's grace at once",
-    "observed_behavior": "FAILS before the fix: _grace_active stays True and no grace_cancelled row is emitted; the stuck-grace watchdog reaps the grace later",
+    "observed_behavior": "_grace_active False right after the away transition; grace_cancelled (reason occupancy_away, protects_override true) emitted; before the fix the grace stayed active until the stuck-grace watchdog reaped it",
     "expected_behavior": "_grace_active is False right after the away transition and grace_cancelled (reason occupancy_away) is emitted"
   }
 }

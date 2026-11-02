@@ -467,5 +467,25 @@
     "sha256": "1b64dbd0d2c2ce4ed1839b1268f5709506ced2e59bd4657342acb2aee7ca3bc5",
     "signed": "2026-11-01",
     "issue": 229
+  },
+  "issue_1208_return_home_warm_day_restores_comfort": {
+    "sha256": "f0e95502fb62e7907c37dde801552ec6f0bf960af98a4e1796dd1bc012c1fa64",
+    "signed": "2026-11-02",
+    "issue": 1208
+  },
+  "issue_1208_return_home_mild_day_restores_comfort": {
+    "sha256": "2e2dcc23830f33285c48f40283cc551c74d0671a744d9922b8f9ed7f79a1f63c",
+    "signed": "2026-11-02",
+    "issue": 1208
+  },
+  "issue_1209_transient_blip_warm_day_self_resolves": {
+    "sha256": "926854b3e40c0195e48c1fc638193297ecdef635c268bbe7855fb714777c85f6",
+    "signed": "2026-11-02",
+    "issue": 1209
+  },
+  "issue_1222_leaving_home_ends_override_grace": {
+    "sha256": "47bf6eea0b11e953ebad33ae8c8135a747cffd727d349fadc8037c2604c403c1",
+    "signed": "2026-11-02",
+    "issue": 1222
   }
 }

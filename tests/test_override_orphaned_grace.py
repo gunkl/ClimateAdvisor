@@ -26,12 +26,26 @@ _FUTURE = _NOW + timedelta(minutes=10)
 
 
 class TestDecideOrphanedGrace:
+    def test_a_change_awaiting_confirmation_keeps_its_grace(self):
+        """Issue #1216: Fix D's kept grace protects the occupant's second, still-pending change."""
+        assert (
+            decide_orphaned_grace(
+                grace_active=True,
+                grace_protects_override=True,
+                manual_override_active=False,
+                fan_override_active=False,
+                override_confirm_pending=True,
+            )
+            is False
+        )
+
     def test_grace_protecting_with_no_override_left_is_orphaned(self):
         result = decide_orphaned_grace(
             grace_active=True,
             grace_protects_override=True,
             manual_override_active=False,
             fan_override_active=False,
+            override_confirm_pending=False,
         )
         assert result is True
 
@@ -41,6 +55,7 @@ class TestDecideOrphanedGrace:
             grace_protects_override=True,
             manual_override_active=False,
             fan_override_active=False,
+            override_confirm_pending=False,
         )
         assert result is False
 
@@ -52,6 +67,7 @@ class TestDecideOrphanedGrace:
             grace_protects_override=False,
             manual_override_active=False,
             fan_override_active=False,
+            override_confirm_pending=False,
         )
         assert result is False
 
@@ -61,6 +77,7 @@ class TestDecideOrphanedGrace:
             grace_protects_override=True,
             manual_override_active=True,
             fan_override_active=False,
+            override_confirm_pending=False,
         )
         assert result is False
 
@@ -70,6 +87,7 @@ class TestDecideOrphanedGrace:
             grace_protects_override=True,
             manual_override_active=False,
             fan_override_active=True,
+            override_confirm_pending=False,
         )
         assert result is False
 
@@ -120,6 +138,7 @@ class TestMutualExclusion:
                     grace_protects_override=grace_protects_override,
                     manual_override_active=manual_override_active,
                     fan_override_active=fan_override_active,
+                    override_confirm_pending=False,
                 )
                 stuck = decide_stuck_override(
                     manual_override_active=manual_override_active,
@@ -149,6 +168,7 @@ class TestMutualExclusion:
             grace_protects_override=True,
             manual_override_active=False,
             fan_override_active=False,
+            override_confirm_pending=False,
         )
         stuck = decide_stuck_override(manual_override_active=True, grace_active=True, grace_end_time=_PAST, now=_NOW)
         assert orphaned is True

@@ -40,24 +40,17 @@ with door/window's own FSM (same event, same underlying method, two
 lifecycles reading two different consequences of it) — not because it
 branches this module's next-state.
 
-**Supersession's transient state — investigated during implementation, confirmed
-NOT a live race.** Issue #282's "Fix D" branch (``coordinator._async_thermostat_changed()``,
-~4037-4058) calls ``clear_manual_override(reason="new_override_during_grace")`` — which
-clears override flags but does NOT call ``_cancel_grace_timers()`` — immediately followed
-by ``handle_manual_override()`` re-detecting the new override. An earlier draft of this
-docstring hypothesized this window as exploitable by ``_check_orphaned_grace()``'s ~30s
-update-cycle check (Issue #508) if it happened to run in between. Verified against the
-actual call chain and found FALSE: both ``clear_manual_override()`` and
-``handle_manual_override()`` are plain synchronous ``def`` methods (not ``async def``),
-called back-to-back with no ``await`` between them inside ``_async_thermostat_changed()``.
-Python's single-threaded, cooperative event loop cannot interleave another coroutine
-(including ``_check_orphaned_grace()``, itself only ever invoked from inside
-``_async_update_data()``'s own tick) into a synchronous call sequence with no yield point —
-so this transient flag combination, while real at the attribute level for the duration of
-one Python call stack, is never externally observable and never a genuine race. Modeled
-here as a same-tick transient (PENDING-or-IDLE, ACTIVE_PROTECTING_OVERRIDE) landing state
-purely for completeness of the transition record — not because any caller-side watchdog
-could actually intervene on it.
+**Supersession's pending state — a live race until Issue #1216, not the
+same-tick transient first described.** Issue #282's "Fix D" branch (``coordinator._async_thermostat_changed()``,
+log "New mode change during active override grace") calls
+``clear_manual_override(reason="new_override_during_grace")`` — which clears override flags but does NOT call
+``_cancel_grace_timers()`` — immediately followed
+by ``handle_manual_override()`` re-detecting the new override. Issue #1216 corrected an earlier note here that
+called the resulting state a same-tick transient no watchdog could observe. ``handle_manual_override()``
+starts a confirmation WINDOW: the new change stays PENDING for the whole confirm period with the replaced
+override's grace still running and no override active, so ``coordinator._check_orphaned_grace()`` (Issue #508)
+did see it on its next cycle and reaped the grace, dropping the change. The watchdog now skips while a change
+is pending, and that grace expiring keeps the pending change (``unprotected_grace_expiry_keeps_pending``).
 
 **Cross-lifecycle inputs.** ``paused_by_door`` gates whether
 ``MANUAL_OVERRIDE_DURING_PAUSE``/``DASHBOARD_RESUME`` are even reachable in
@@ -160,7 +153,6 @@ class OverrideGraceFsmInputs:
                                     GraceState.NONE in that case instead of unconditionally
                                     assuming grace starts, matching what
                                     ``_start_grace_period_action()`` actually does)
-      grace_is_occupants_own      -> AutomationEngine._grace_is_occupants_thermostat_grace()
       now                        -> caller-resolved wall-clock time
     """
 
@@ -179,10 +171,6 @@ class OverrideGraceFsmInputs:
     grace_source: str
     now: datetime
     grace_would_start: bool = True
-    # Issue #1158 (M1): False while the running protecting grace is a whole-house-fan override grace (it protects
-    # the FAN session, not a thermostat change). From ``AutomationEngine._grace_is_occupants_thermostat_grace()``,
-    # the same fact the engine's ``_on_grace_expired()`` feeds ``unprotected_grace_expiry_keeps_pending``.
-    grace_is_occupants_own: bool = True
     # Issue #1073 (S6): what production's ``_override_matches_current_decision()`` actually compares
     # against -- the comfort-edge selector's family and the resolved band edge, NOT
     # ``classification_mode`` (which is "off" on warm/mild days). Resolved by the caller via
@@ -257,24 +245,19 @@ def _grace_expiry_outcome_str(inputs: OverrideGraceFsmInputs) -> str:
     return outcome.value
 
 
-def unprotected_grace_expiry_keeps_pending(
-    *, confirm_pending: bool, manual_override_active: bool, grace_protects_override: bool
-) -> bool:
-    """Whether a grace expiring leaves a pending confirmation (and its timer) alone (Issue #1156).
+def unprotected_grace_expiry_keeps_pending(*, confirm_pending: bool, manual_override_active: bool) -> bool:
+    """Whether a grace expiring leaves a pending confirmation (and its timer) alone (Issues #1156, #1216).
 
-    Only for a change that is the ONLY thing the occupant has done: no confirmed override
-    (``manual_override_active``) and a grace that is not the occupant's own. With a confirmed override
-    behind it, that grace expiring ends the override, so a second pending change is cleared with it
+    For a change with no confirmed override behind it (``manual_override_active`` False): it is the newest thing
+    the occupant has done, so the grace just ends and the change keeps waiting for its confirmation (Rule 2).
+    That holds whoever's grace it is -- a window-close resume or fan-off cooldown (#1156), a whole-house-fan
+    override grace (#1158 M1), and the occupant's own earlier thermostat grace that coordinator Fix D kept running
+    after a second change replaced its override (#1216: Cool confirmed, then Off inside Cool's grace). With a
+    confirmed override behind it, that grace expiring ends the override, so a pending change is cleared with it
     (timer included); keeping it would leave a pending change with no confirmation timer.
     The engine's expiry branch and both FSM expiry branches call this, so they cannot disagree.
-
-    ``grace_protects_override`` stands for "this grace is the occupant's own thermostat grace". A
-    whole-house-fan override grace also sets ``_grace_protects_override`` without being the occupant's
-    thermostat change; a caller that can tell them apart (e.g. by ``_last_grace_trigger``) passes the
-    narrower fact here -- engine call site (``_on_grace_expired``) and the FSM input builder are the only
-    two places to feed it -- and a pending change then survives a fan grace expiring.
     """
-    return confirm_pending and not manual_override_active and not grace_protects_override
+    return confirm_pending and not manual_override_active
 
 
 def _transition_from_no_grace(
@@ -341,13 +324,12 @@ def _transition_from_grace_protecting(
 
     if kind == OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED:
         outcome_str = _grace_expiry_outcome_str(inputs)
-        # Same shared rule as the unprotected branch (and the engine's ``_on_grace_expired()``). A
-        # whole-house-fan override grace protects too but is not the occupant's thermostat grace (Issue
-        # #1158 M1), so a press still awaiting confirmation survives it expiring.
+        # Same shared rule as the unprotected branch (and the engine's ``_on_grace_expired()``): a press still
+        # awaiting confirmation with no confirmed override behind it survives a protecting grace expiring, be it a
+        # whole-house-fan override grace (Issue #1158 M1) or a superseded thermostat grace (Issue #1216).
         keep = unprotected_grace_expiry_keeps_pending(
             confirm_pending=current_state[0] == OverrideConfirmState.PENDING,
             manual_override_active=inputs.manual_override_active,
-            grace_protects_override=inputs.grace_is_occupants_own,
         )
         next_state = (current_state[0] if keep else OverrideConfirmState.IDLE, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome_str, inputs.now)
@@ -415,7 +397,6 @@ def _transition_from_grace_unprotected(
         keep = unprotected_grace_expiry_keeps_pending(
             confirm_pending=confirm == OverrideConfirmState.PENDING,
             manual_override_active=inputs.manual_override_active,
-            grace_protects_override=False,
         )
         next_state = (confirm if keep else OverrideConfirmState.IDLE, GraceState.NONE)
         return OverrideGraceTransition(current_state, next_state, kind, outcome_str, inputs.now)

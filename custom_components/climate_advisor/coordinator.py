@@ -3180,9 +3180,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         the future — the timer would fire correctly on its own — but no override (thermostat or
         fan) is currently active to justify keeping it. Defense-in-depth for anything that clears
         an override without going through AutomationEngine.cancel_override() (e.g. an exception
-        mid-cancel, or a future third endpoint that bypasses it). Runs every regular update cycle
-        (~30s), so any residual inconsistency self-heals within one cycle instead of persisting
-        for hours.
+        mid-cancel, or a future third endpoint that bypasses it). Runs once per coordinator update
+        (the 30-min interval plus on-demand refreshes: the 5-min revisit, sensor and fan events), so a
+        residual inconsistency self-heals at the next update instead of persisting for hours.
 
         Scoped via ``ae._grace_protects_override`` (Issue #530): only grace periods started for
         a real override (``_start_grace_period(trigger=...)`` with a trigger in
@@ -3194,12 +3194,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         universally. This does not weaken the original Issue #508 protection: every trigger that
         genuinely represents an override-confirmation grace is still covered.
         """
+        from .override_orphaned_grace import decide_orphaned_grace
+
         ae = self.automation_engine
-        if not (
-            ae._grace_active
-            and getattr(ae, "_grace_protects_override", False)
-            and not ae._manual_override_active
-            and not ae._fan_override_active
+        # Issue #1216: the one predicate (it also exempts a change still awaiting confirmation -- see its docstring).
+        if not decide_orphaned_grace(
+            grace_active=bool(ae._grace_active),
+            grace_protects_override=bool(getattr(ae, "_grace_protects_override", False)),
+            manual_override_active=bool(ae._manual_override_active),
+            fan_override_active=bool(ae._fan_override_active),
+            override_confirm_pending=bool(ae._override_confirm_pending),
         ):
             return
         _LOGGER.error(
@@ -3212,10 +3216,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # `_on_grace_expired()` — confirm was never involved here (Issue #647's own comment:
         # "not via clear_manual_override()"), so only the grace half is dispatched. Closest
         # semantic match is GRACE_TIMER_EXPIRED (grace ending with nothing left to protect).
-        # Issue #1158 (M1, second caller): resolve BEFORE the cancel. The cancel clears
-        # `_last_grace_trigger`, so resolving afterwards made a WHF fan-override grace read as the
-        # occupant's own thermostat grace and dropped a pending press made during a window pause
-        # (same ordering trap as AutomationEngine._on_grace_expired()'s keep branch).
+        # Resolve BEFORE the cancel, so the FSM sees the grace being ended (same order as
+        # AutomationEngine._on_grace_expired()'s keep branch).
         ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
         ae._cancel_grace_timers_action()
         # Issue #679: derive_door_window_lifecycle_state() also takes grace_active as an

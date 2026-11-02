@@ -237,7 +237,7 @@ A sample is appended only when `elapsed_since_last_sample >= interval_s`. Each s
 
 ### HVAC Types (hvac_heat, hvac_cool)
 
-**Start:** `_start_hvac_observation(session_mode)` fires when `hvac_action` changes to `"heating"` or `"cooling"`. Creates the observation with `_phase="active"`, `active_samples=[]`, `pre_heat_samples` from the `_pre_heat_sample_buffer`, and `status="monitoring"`.
+**Start:** `_start_hvac_observation(session_mode)` fires when `hvac_action` changes to `"heating"` or `"cooling"`. Creates the observation with `_phase="active"`, `active_samples=[]`, `pre_heat_samples` from the `_pre_heat_sample_buffer`, and `status="monitoring"`. The edge comes from the session detector in `_async_thermostat_changed`: `hvac_action` when either side is heating/cooling, else an `hvac_mode` fallback that treats a positively reported `idle`/`off` `hvac_action` as not running (Issue #1240), so switching the mode while the thermostat stays idle opens no phantom observation. See [08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md) § HVAC session / runtime edge detection.
 
 **Sample accumulation:** Active phase samples every coordinator poll (no decimation gate). Post-heat phase uses `THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S` (5 min). Post-heat samples go into `post_heat_samples`.
 

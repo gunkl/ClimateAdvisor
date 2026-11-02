@@ -834,6 +834,33 @@ All five fields default to `None` at record creation. On a fire night, `setback_
 > **Test coverage:** `tests/test_daily_record_accuracy.py` —
 > `test_daily_record_survives_briefing_after_restart`
 
+### HVAC session / runtime edge detection (Issue #1240)
+
+**What the occupant experiences:** switching the thermostat to heat/cool (or fan_only) while it stays idle must not be logged as hours of heating or cooling. Before the fix, `hvac_runtime_minutes` (and `thermostat_fan_only_runtime_minutes`) were credited for the whole idle window and a phantom heat/cool thermal observation was opened, skewing the briefing, the high-runtime learning pattern and `k_active`.
+
+`coordinator._async_thermostat_changed` derives `was_running` / `is_running` from the old and new thermostat state:
+
+1. If either side's `hvac_action` is `heating`/`cooling` (`is_hvac_compressor_active`), `hvac_action` alone decides each side.
+2. Otherwise fall back to `hvac_mode`: a side is running when its mode is not `off`/`unavailable`/`unknown`/empty **and** its `hvac_action` does not positively report idle (`hvac_action.is_hvac_action_reported_idle`, values in `HVAC_ACTION_REPORTS_NOT_RUNNING` = `idle`/`off`). Applied to both sides so start, stop and glide edges agree.
+3. In the fallback, `is_running` is forced false while CA's own fan or nat-vent is active (`_fan_active` / `_natural_vent_active`, Issue #986).
+
+| hvac_mode (old -> new) | hvac_action (old -> new) | Result | Why |
+|---|---|---|---|
+| off -> heat/cool/fan_only | idle -> idle | no session, no runtime | #1240: idle is a positive "not running" signal |
+| off -> heat | idle -> heating | session starts at the `heating` edge | rule 1 |
+| heat | heating -> idle | session ends, runtime flushed | rule 1 |
+| off -> heat | missing/empty -> missing/empty | session starts on the mode change | no signal, fallback applies (#93) |
+| heat | fan -> fan | session counts until idle or mode off | `fan` is no signal (#93/#986) |
+| heat | fan -> idle | session ends, runtime flushed | #1240 stop-side mirror: previously counted until mode off |
+| fan_only -> heat | fan -> idle | fan session ends, no heat timer started | #1240 glide case |
+| heat -> off | idle/missing/fan -> idle/missing/fan | session ends | in the fallback, mode off is never running |
+
+Regression origin: ebbf5ab (Fix #93, 2026-04-08) widened the fallback guard from `if new_action and old_action` to "neither side heating/cooling", which swept in idle/off. The resolved session mode (`heat`/`cool`/`fan_only`, Issue #912) selects which counter the timer feeds; only `heat`/`cool` open a thermal observation.
+
+**Known open issue (#1241):** a run that crosses the 23:59 rollover flush loses its post-rollover runtime.
+
+> **Test coverage:** `tests/test_phantom_runtime_1240.py` (idle windows, real edge after idle, cool mirror, fan_only and glide symmetry, stop-side mirror, #93/#986 fallback guards); `tests/test_hvac_session_detection.py`; real HA: `tests_ha/test_phantom_runtime_1240.py`.
+
 ---
 
 ### 6b. Warm-Day Comfort-Floor Guard _(passive safety backstop — Issue #249)_

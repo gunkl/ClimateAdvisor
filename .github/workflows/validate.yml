@@ -35,8 +35,6 @@ jobs:
       - name: Check formatting (ruff)
         run: uv run --locked --only-group test ruff format --check .
 
-      # CA_UNIT_WORKERS is scoped to this step only: scripts/test_changed_isolated.py below runs each file
-      # alone (an order-dependence guard) and must not pick up -n 4 from a job-wide environment.
       - name: Run unit tests
         run: python3 scripts/test.py unit
         env:
@@ -44,8 +42,13 @@ jobs:
 
       # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
       # No-op when no tests/test_*.py changed (e.g. a push to main).
+      # Workers split one file's tests, never mix in another file: every xdist worker collects only that
+      # file, so a file that passes only because another file ran first still fails here. Serial, a PR
+      # touching tests/test_sim_generator.py paid ~6 min for that one file.
       - name: Run changed unit test files in isolation
         run: python3 scripts/test_changed_isolated.py --base origin/main --strict
+        env:
+          CA_UNIT_WORKERS: "4"
 
   # Real Home Assistant tier (Issue #1102 follow-up S1). Its own job and its own
   # environment: tests/ stubs homeassistant for the whole process, and this plugin

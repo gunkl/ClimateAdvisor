@@ -9,6 +9,8 @@ changed file alone, exactly as ``python scripts/test.py unit <file>``, catches t
 order dependence on the PR that introduces it. With no changed test files (or when the base
 ref is unavailable) this is a successful no-op. ``--all`` sweeps every ``tests/test_*.py``.
 ``--strict`` (CI) turns a git failure into a non-zero exit instead of a silent no-op.
+``CA_UNIT_WORKERS`` applies to each file's run (via ``scripts/test.py``): the workers share that one
+file only, so the guard holds; CI sets 4.
 
 Standard library only.
 """

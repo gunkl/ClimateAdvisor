@@ -57,6 +57,7 @@ def _make_coord(*, sleep_time: str = "22:30", wake_time: str = "06:30") -> Magic
     coord._refresh_indoor_sensor_health = MagicMock()  # Issue #1033 funnel, covered in test_indoor_sensor_fallback.py
     coord._last_outdoor_temp = 65.0
     coord._last_predicted_indoor = None
+    coord._startup_coalesce_active = False  # steady state (#1194 b: the loop is silent while coalescing)
 
     coord._async_run_temp_reactive_checks = types.MethodType(
         ClimateAdvisorCoordinator._async_run_temp_reactive_checks, coord

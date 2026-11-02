@@ -960,6 +960,7 @@ class TestCoordinatorWiring:
         coord.automation_engine = ae
         coord._get_indoor_temp = MagicMock(return_value=64.0)
         coord._refresh_indoor_sensor_health = MagicMock()
+        coord._startup_coalesce_active = False  # steady state (#1194 b: the loop is silent while coalescing)
         coord._last_outdoor_temp = 50.0
         coord._last_predicted_indoor = None
         coord._async_run_temp_reactive_checks = types.MethodType(cls._async_run_temp_reactive_checks, coord)

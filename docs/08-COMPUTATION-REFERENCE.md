@@ -4117,13 +4117,70 @@ The measured sensor reports on change in ~0.18 F steps and idled up to 105 min, 
 guarded; a no-op in dry-run, after shutdown, with no setpoint written yet, or when the thermostat is not in the
 target's mode (the loop never changes the mode).
 
-**Gates in this increment (safe default).** No offset is applied or written while the shared scheduled-band gate says
-defer (`desired_state.decide_scheduled_band_gate`: away/vacation, manual override, door/window pause, nat-vent or WHF
-ownership) or an override confirmation is pending. A closed gate resets the offset to 0 and marks the thermostat's
-held value unknown. While it is unknown, the first check after the gate reopens compares the thermostat's LIVE setpoint
-with what CA would command now and re-writes it once unless it already matches within half a step, so an offset can
-never stay on the thermostat after the episode that closed the gate (a stranded +4 F) waiting for some unrelated
-writer.
+**Gates (Issue #1194 b; both fan modes).** ONE predicate, `AutomationEngine._remote_offset_gate()`, asked by the write
+path (`_remote_offset_for_write`) and by the check (`_remote_offset_check_locked`); neither carries a gate of its own.
+It returns `PROCEED`, `FREEZE` or `CLOSED` from the pure rule `remote_offset.decide_remote_offset_gate` over existing
+predicates: an owner -- `_manual_change_protected()` (confirmed override or a change still inside its confirmation window)
+or the shared `desired_state.decide_scheduled_band_gate` (away/vacation, override, door/window pause, nat-vent or WHF
+ownership) -- is `CLOSED`; otherwise `_any_monitored_sensor_holding_open()` is `FREEZE` while `_sensor_debounce_pending`
+and `CLOSED` once the debounce is over (see the debounce rows).
+
+* `CLOSED`: the loop adds no offset and writes nothing, and the next check or CA write forgets the offset (the
+  thermostat's held value becomes "unknown"); the gate's owner commands the thermostat (Off, the setback, the occupant's
+  value) and the loop never overwrites it. On the first check after it reopens, the LIVE setpoint is compared with what CA
+  would command now and re-written once unless it already matches (within half a step), so no offset outlives the episode
+  that closed the gate (a stranded +4 F) and none is applied twice. A gate that opens and closes again with no check and no
+  CA write in between (shorter than the 1-minute floor, e.g. a phantom whole-house-fan press that the sealed-house safety
+  stands down within seconds) leaves the loop's state untouched: the restore writes back the setpoint the thermostat held
+  before (up to the cap, never above it), and the loop continues from there.
+* `FREEZE` (owner decision D1): the offset is HELD exactly as it is -- the check neither raises nor steps down nor resets
+  (the startup-wait clock included) and writes nothing; any other writer (the #489 refresh -> `apply_classification` ->
+  band apply, TOU, ...) re-applies the held offset through the single path.
+
+| Gate | Who owns the thermostat | Predicate it closes on | `whole_house_fan` | `hvac_fan` | Exit |
+|---|---|---|---|---|---|
+| Occupant changed the setpoint (pending) | the person | `_override_confirm_pending` via `_manual_change_protected()` | same | same | confirmed -> next row; self-resolved or cancelled -> plain target / one fresh step |
+| Occupant override (confirmed) | the person | `_manual_override_active` (`decide_scheduled_band_gate` and `_manual_change_protected()`) | same | same | grace expiry or Cancel Override -> plain target / one fresh step |
+| Door/window open, inside the debounce (`FREEZE`) | nobody yet: the offset is held as is | `_any_monitored_sensor_holding_open()` and `_sensor_debounce_pending` | same | same | closes inside the debounce -> nothing happened, the offset continues; outlasts it -> the pause (next row) |
+| Door/window open past the debounce with no pause (e.g. a dashboard resume into an open window) | CA, but no extra degrees into a settled-open window | `_any_monitored_sensor_holding_open()`, debounce over | same | same | close -> plain target / one fresh step |
+| Door/window pause | CA's pause (HVAC Off) | `_paused_by_door` | same | same | close -> comfort restore writes the plain target, then a fresh step |
+| Natural ventilation | the fan session | `_natural_vent_active` | the WHF runs and owns the HVAC | the thermostat blower ventilates, the thermostat is held Off (#1142 D7) | window closes -> restore writes the plain target, then a fresh step |
+| Whole-house-fan ownership (occupant press, phantom RF press) | the fan | `_whf_owns_hvac()` | HVAC suppressed for the fan | not applicable: the thermostat blower is not a whole-house fan (`_is_whf_press`) | fan off -> restore writes the plain target, then a fresh step; a gate shorter than one check (a phantom press stood down within seconds) -> the restore writes back the setpoint held before, up to the cap |
+| Away / vacation | the setback | `_occupancy_mode` away/vacation | same | same | home -> comfort restore writes the plain target, then a fresh step |
+| Startup coalescing (300 s) | nobody; occupant changes are unsupported there (#1235) | `_startup_coalesce_active`, checked at the coordinator entry (`_async_remote_offset_tick`), not in the engine | same | same | the window ends -> the loop resumes |
+
+"Plain target / one fresh step" = the thermostat holds the comfort target when the remote sensor is inside the band, or the
+target plus ONE step when it is still off target, never the old cap and never target + 2 x offset. Heat and cool are
+mirror images (the offset lowers the cool setpoint); every row holds for both.
+
+*Choices made in (b), with the reasoning.*
+
+* **Debounce: FREEZE (owner decision D1, 2026-11-02).** A monitored door/window that is open but inside its debounce
+  freezes the loop: no raise, no step down, no reset, no loop write, and every other writer re-applies the held offset.
+  Owner rule 3 is about heat or cool into a window PAST its debounce, which the door/window pause (HVAC Off, `CLOSED`)
+  already guarantees. An earlier build closed the gate on the raw open instead; on a busy door (open 20 s every 3 min)
+  that flapped the setpoint 66 <-> 68 F about 40 times an hour (60 at 10 s every 2 min) and re-raised at once after every
+  close; with the freeze it is 0. The sensor read is `_any_monitored_sensor_holding_open()` (it also counts a sensor that
+  went dark after reading open, #1181, the same read that keeps a pause alive). One limit, accepted: with two sensors, one
+  settled open without a pause and another inside its debounce, the result is `FREEZE`; the held offset is then the one the
+  settled-open sensor already forced to 0 at the first check after it settled.
+* **Grace only is NOT a gate.** A grace (CA's own 5-minute resume grace, a fan-off hold, a blower-press grace, the manual
+  grace of a dashboard resume, or an override-protecting grace whose override already cleared) is a timer for an owner, not
+  an owner. `_manual_change_protected()` is the one "the occupant's change is protected" predicate and is already in the
+  gate; no band writer defers on a bare grace; bedtime / wake-up / occupancy clear the override and leave the grace running
+  by design and then write their band through the same path; and a protecting grace with nothing behind it is the orphan
+  the watchdog heals (#508). Gating on it would leave the bedroom cold after every window close.
+* **Blower sessions on an `hvac_fan` home.** Natural ventilation holds the gate through `_natural_vent_active` (the thermostat
+  is Off, the window open). CA's own circulation / minimum-runtime blower session and the occupant's blower press run WITH
+  heat (the blower does not fight the compressor, `_is_whf_press`), so they do not gate; the loop keeps stepping and never
+  doubles the offset.
+* **Startup coalescing.** The loop has no target after a restart (the target is learned from CA's first setpoint write) and
+  CA writes nothing in the window, so it is inert there by construction; the coordinator entry additionally skips the check
+  while `_startup_coalesce_active` so another writer's write inside the window can never be followed by loop steps.
+  Occupant changes in the window stay unsupported (#1235).
+* **Occupant change with an offset applied.** The occupant's value wins and CA does not step it: the change is judged by the
+  ordinary guards (a value CA did not write, or the same value after 180 s, is the occupant; CA's own write echoing back is
+  not, #1232), confirmed after the confirmation window, and the loop stays silent through the pending and confirmed phases.
 
 **Failed loop write: roll back and back off.** When the loop's own write is not `EXECUTED` (failed, rejected,
 blocked, superseded, unconfirmed) the offset goes back to the value the thermostat holds (no silent climb to the cap)
@@ -4132,9 +4189,8 @@ the same interval as the read-back verify's setpoint retry) and the next remote-
 the interval when the remote sensor is no longer in use), so a refusing thermostat sees about 4 attempts an hour instead
 of 60, and the first write after recovery is one step. Any executed setpoint write, from any writer, ends the back-off.
 
-Full gate coverage in both fan modes, context
-entry/exit transitions, the Status "clamped" display and the chart target/commanded split are the later increments
-(#1194 b, c, d); the simulation bedroom node and Tier A/B scenarios are (e). Cool mode is simulation-tested only.
+Context entry/exit transitions, the Status "clamped" display and the chart target/commanded split are the later
+increments (#1194 c, d); the simulation bedroom node and Tier A/B scenarios are (e). Cool mode is simulation-tested only.
 
 **Before / after (heat, sleep window, bedroom 64.0 F, target 66 F, hallway at setpoint).**
 
@@ -4167,6 +4223,7 @@ entry/exit transitions, the Status "clamped" display and the chart target/comman
 | Indoor sensor failure: resolver reasons, `next_fallback_episode`, funnel announcements, Settings suffix (Issue #1033) | `tests/test_indoor_temp_helper.py`, `tests/test_indoor_sensor_fallback.py`, `tests/test_fallback_episode.py`, `tests/test_api.py`, `tests/test_activity_renderers.py` (written by the implementing agents; names not verified at doc time) |
 | `issue_895_sleep_indoor_sensor_swap` (pending scenario) | `tools/simulations/pending/` |
 | Remote-sensor outer loop offset core (Issue #1194 a): pure decision, units, provenance, heat/cool, caps, swing source, freshness, startup wait, single-path callers, gates, coordinator wiring | `tests/test_remote_offset_1194a.py` |
+| Remote-sensor outer loop gates (Issue #1194 b): every gate through the real coordinator and engine in both fan modes, heat and cool, enter / during / exit, the composed predicate's truth table, the startup-coalescing window | `tests/test_remote_offset_gates_1194b.py`, `tests_ha/test_remote_offset_gates_1194b.py` (real HA: door/window and manual override, both fan modes) |
 
 ---
 

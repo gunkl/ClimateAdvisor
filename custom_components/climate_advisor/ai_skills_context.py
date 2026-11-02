@@ -3379,7 +3379,6 @@ def _render_timeline_events(
 
     # Fan ownership tracker: updated per-event to detect when nat_vent_fan_off fires
     # while the user is still running the fan manually (misleading if shown as CA fan-off).
-    _fan_ca_owns = False
     _fan_user_owns = False
 
     for entry in filtered:
@@ -3394,29 +3393,11 @@ def _render_timeline_events(
 
         # Update fan ownership state before rendering
         if event_type in ("nat_vent_fan_on", "fan_activated"):
-            _fan_ca_owns = True
             _fan_user_owns = False
         elif event_type == "fan_manual_override" and str(payload.get("fan_after", "")).strip() == "on":
             _fan_user_owns = True
-            _fan_ca_owns = False
         elif event_type == "fan_cancel":
             _fan_user_owns = False
-        elif event_type in (
-            "nat_vent_fan_off",
-            "fan_deactivated",
-            # Issue #957 mirror-check: these four are also confirmed real fan-off exits
-            # (routed through _exit_nat_vent() -> _deactivate_fan()) — the tracker
-            # previously only cleared on the two types above, leaving it stale (still
-            # True) after any of these fired.
-            "nat_vent_comfort_floor_exit",
-            "nat_vent_outdoor_rise_exit",
-            "nat_vent_away_ceiling_exit",
-            "nat_vent_manual_override_exit",
-            # Issue #1037: the blind-fan timeout ends a CA-owned nat-vent session the
-            # same way (routed through _exit_nat_vent() -> _deactivate_fan()).
-            "fan_blind_stopped",
-        ):
-            _fan_ca_owns = False
 
         renderer = EVENT_RENDERERS.get(event_type)
         try:

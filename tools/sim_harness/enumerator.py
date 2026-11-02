@@ -91,7 +91,7 @@ DIMENSIONS: tuple[Dimension, ...] = (
     # Physical prerequisite for nat-vent reactivation (automation.py:2225-2226's
     # `_idle_open` requires a monitored sensor open). Added after Step 2 found this
     # dimension missing meant zero of the original 4735 t=3 scenarios ever reached
-    # `_nat_vent_may_reactivate()`'s check_natural_vent_conditions() call site — a
+    # the (since-deleted) `_nat_vent_may_reactivate()`'s check_natural_vent_conditions() call site — a
     # real coverage gap in the original 9-dimension set, not a workaround.
     Dimension("sensor_open", (True, False), baseline=False),
 )

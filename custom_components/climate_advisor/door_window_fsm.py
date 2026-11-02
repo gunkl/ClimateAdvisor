@@ -76,7 +76,8 @@ scoping pass are now fixed in production (not just documented as blockers):
 
 - ``handle_door_window_open()``'s grace-fallthrough (**#655**) — the coarse
   outdoor-only proxy check has been removed; the grace-active branch now shares the
-  same real ``_nat_vent_may_reactivate()`` gate result used by the nat-vent-vs-pause
+  same real nat-vent start decision (``_nat_vent_start_decision()``, Issue #1142; formerly
+  ``_nat_vent_may_reactivate()``) used by the nat-vent-vs-pause
   decision further down the function. This module's ``decide_door_open_response()``
   already modeled the gate as a caller-resolved boolean input
   (``nat_vent_gate_entered``), so no change was needed here — production simply now

@@ -3088,7 +3088,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # that can set _paused_by_door — was never called at all, so an open window at
             # restart could silently fall through to apply_classification() unsuppressed.
             # Delegate unconditionally instead: handle_door_window_open() already runs the
-            # full _nat_vent_may_reactivate() gate (fan-mode archetype, aggressive_savings,
+            # nat-vent start decision (_nat_vent_start_decision(): fan-mode archetype, aggressive_savings,
             # forecast/floor guards, missing-temp safety) and falls through to the pause
             # branch itself when nat-vent isn't viable — single source of truth.
             first_sensor = open_sensors[0]
@@ -12245,17 +12245,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # moved the WARM/MILD-day events block off this and onto self._nat_vent_plan).
         _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
 
-        # Issue #535: shared comfort-floor inputs, hoisted above the nat-vent
-        # start-prediction block below so it doesn't independently re-read the same
-        # config keys. "sleep_heat" literal, not the CONF_SLEEP_HEAT constant: the
-        # bedtime block above does a local `from .const import ... CONF_SLEEP_HEAT`
-        # inside an `if c.hvac_mode in ("heat", "cool")` branch, which makes
-        # CONF_SLEEP_HEAT a local name for this ENTIRE function regardless of whether
-        # that branch actually runs — referencing the module-level import here raises
-        # UnboundLocalError whenever hvac_mode is "off"/"auto". Same value either way.
-        _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-        _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
-
         # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_plan
         # already computed for the briefing. Issue #817: this used to independently
         # re-derive its own copy via a second compute_nat_vent_plan() call with its own
@@ -12319,13 +12308,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and (ae.is_paused_by_door or self._any_sensor_open())
             and _predicted_indoor
         ):
-            # _comfort_heat_raw / _sleep_heat computed once above, shared with the
-            # WARM/MILD-day events block.
-            _comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-            _nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-            _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-            _fan_mode_val = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-            _aggressive_savings = bool(self.config.get("aggressive_savings", False))
 
             def _nat_vent_gate_comparator(ts: datetime, outdoor: float, indoor: float) -> bool:
                 # Issue #1142 (step 7): the engine's own "may a fan session start?" question, asked as of ``ts`` on
@@ -14983,8 +14965,8 @@ def _walk_forward_regime(
              pre-cool banking ahead of a hotter following day), and comparing
              REACTIVATION eligibility against that banked value let banking silently
              suppress a genuine nat-vent opportunity. The exit call is unaffected (still
-             reads the real predicted-indoor curve) — exit questions ("should an already-
-             running session stop") are correctly answered against real/predicted state;
+             reads the real predicted-indoor curve) — exit questions ("should an
+             already-running session stop") are correctly answered against real/predicted state;
              only entry/reactivation questions ("should we override the day's committed
              target") are answered against the stable target. ``off`` days have no such
              committed target, so their gate call is unchanged.

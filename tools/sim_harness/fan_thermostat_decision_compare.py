@@ -1,6 +1,6 @@
 """fan_thermostat_decision_compare — old-vs-new differential comparator (Step 2, slice 2).
 
-Unlike ``_nat_vent_may_reactivate()``, production's ``fan_thermostat_check()``
+Unlike the (since-deleted) ``_nat_vent_may_reactivate()``, production's ``fan_thermostat_check()``
 does not RETURN a value — its outcome is implicit in which downstream method
 gets called (``_exit_nat_vent()``, ``_deactivate_fan()``, or neither). This
 comparator observes those calls during one real invocation to infer the REAL
@@ -21,8 +21,8 @@ why): observes real side effects and compares against the new pure function's
 prediction; the wrapped method's real behavior is completely untouched.
 
 Does NOT use ``tools.sim_harness.decision_compare_base`` (Issue #454): that
-base covers comparators for production methods that RETURN a value (see
-``nat_vent_gate_compare.py``). This comparator's production method returns
+base covers comparators for production methods that RETURN a value (the deleted
+``nat_vent_gate_compare.py`` was the first such comparator). This comparator's production method returns
 nothing and requires capturing inputs BEFORE the call (production mutates
 state as part of the decision) plus side-effect observation to infer the
 outcome — a genuinely different instrumentation shape, not a variation the
@@ -234,7 +234,7 @@ def compare_scenario(scenario: dict, scenario_name: str, run: FanThermostatCompa
 # That's exactly the "workaround that defeats the purpose" to avoid.
 #
 # The reactivation gate supported clean substitution because it was ALREADY
-# extracted as a single callable returning a value (`_nat_vent_may_reactivate()`,
+# extracted as a single callable returning a value (the since-deleted `_nat_vent_may_reactivate()`,
 # itself a product of Issue #411's earlier refactor) — substitution there meant
 # swapping one return value for another, no side effects to reconstruct.
 # `fan_thermostat_check()` inlines its dispatch instead. The real prerequisite

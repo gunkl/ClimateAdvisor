@@ -689,15 +689,15 @@ class TestExitNatVentSensorStillOpenFsmAuthoritative:
 
     def test_active_pause_from_normal(self):
         """No prior pause -> NORMAL origin. NAT_VENT_EXITED_SENSOR_STILL_OPEN
-        unconditionally pauses; hvac_mode not off -> PAUSED_ACTIVE."""
+        unconditionally pauses. Issue #1225 item 5: the exit's Off-hold wrote Off, so no restore mode is recorded
+        (the mocked state still reads "cool"; a lagging real thermostat must not replay it on close)."""
         engine = self._make_engine_exiting_nat_vent(hvac_mode="cool")
 
         asyncio.run(engine._exit_nat_vent(reason="test exit"))
 
         assert engine._paused_by_door is True
-        assert engine._paused_with_hvac_already_off is False
         assert engine._paused_entity == "nat-vent-exit"
-        assert engine._pre_pause_mode == "cool"
+        assert engine._pre_pause_mode is None
 
     def test_idle_pause_when_hvac_off(self):
         engine = self._make_engine_exiting_nat_vent(hvac_mode="off")

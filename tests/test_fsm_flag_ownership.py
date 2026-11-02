@@ -78,6 +78,9 @@ _FLAG_OWNERS: dict[str, frozenset[str]] = {
     # Issue #411/#647: nat-vent's own lifecycle flags.
     "_natural_vent_active": frozenset({"_apply_nat_vent_fsm_state"}),
     "_nat_vent_soft_start": frozenset({"_apply_nat_vent_fsm_state"}),
+    # Issue #1225 item 3: the once-per-session close-windows notice is re-armed on the session-START edge, which only
+    # this method sees (it is the single writer of _natural_vent_active); it is a notice flag, not lifecycle state.
+    "_close_windows_advised": frozenset({"_apply_nat_vent_fsm_state"}),
     # Not currently written by any _apply_*_fsm_state() method — real writers are
     # handle_manual_override()/clear_manual_override()/_confirm_override(), none of
     # which are apply-method-shaped. Listed with an empty owner set so this test

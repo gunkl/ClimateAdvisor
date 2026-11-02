@@ -433,9 +433,9 @@ class TestNatVentOutdoorRiseExit:
         assert not (engine._natural_vent_active and engine._paused_by_door)
         assert engine._paused_by_door is True
         assert engine._natural_vent_active is False
-        # _pre_pause_mode reflects the climate entity's state at exit time (mocked "cool"
-        # in _make_engine), not None and not silently dropped by the handoff.
-        assert engine._pre_pause_mode == "cool"
+        # Issue #1225 item 5: the exit's Off-hold wrote Off, so no restore mode is recorded even though the
+        # mocked state (_make_engine) still reads "cool".
+        assert engine._pre_pause_mode is None
 
 
 # ---------------------------------------------------------------------------

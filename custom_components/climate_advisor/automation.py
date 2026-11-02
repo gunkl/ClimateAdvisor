@@ -7514,7 +7514,7 @@ class AutomationEngine:
 
                 if (
                     exit_decision.reason == NatVentExitReason.COMFORT_FLOOR
-                    and self._any_monitored_sensor_holding_open()
+                    and self._any_monitored_sensor_settled_open()
                 ):
                     # Issue #1142 D4 (mirror of the fast loop, which already routes this exit through
                     # _exit_nat_vent()): with a window still open the comfort restore below would write heat/cool
@@ -7643,7 +7643,7 @@ class AutomationEngine:
                         indoor,
                         comfort_cool,
                     )
-                    if self._any_monitored_sensor_holding_open():
+                    if self._any_monitored_sensor_settled_open():
                         # Issue #1142 D8: with a window still open this exit used to stop the fan and let the
                         # restore send `cool` at the comfort setpoint into it (never the away setback, no pause
                         # recorded). Same as the outdoor-rise exit: end the session, record the window pause, leave
@@ -8032,7 +8032,7 @@ class AutomationEngine:
                         current_temp,
                         comfort_cool,
                     )
-                    if self._any_monitored_sensor_holding_open():
+                    if self._any_monitored_sensor_settled_open():
                         # Issue #1142 D8: see check_natural_vent_conditions()'s matching AWAY_CEILING branch.
                         await self._exit_nat_vent(
                             reason="nat-vent ceiling exit (away mode) via temp_check, window still open",
@@ -9171,7 +9171,7 @@ class AutomationEngine:
                 restore_hvac=(
                     not self._paused_by_door
                     and not recent_hvac_session_ended
-                    and not self._any_monitored_sensor_holding_open()
+                    and not self._any_monitored_sensor_settled_open()
                 ),
                 release_suppression=True,
             )
@@ -9861,8 +9861,10 @@ class AutomationEngine:
         # Issue #1211 (A3): no planned-window branch here -- a sensor still open at grace expiry is
         # re-paused (or handed to nat-vent by the nested gate) inside the planned window period too.
 
-        # If any contact sensor is still open, re-pause instead of clearing
-        if self._any_monitored_sensor_holding_open():
+        # If any contact sensor is still open, re-pause instead of clearing.
+        # Issue #1227: a sensor still inside its open delay is not yet open (a brief open must never pause or
+        # start ventilation). The grace ends normally here and the post-delay handler decides when the delay ends.
+        if self._any_monitored_sensor_settled_open():
             _LOGGER.info(
                 "%s grace expired but sensor(s) still open — re-pausing HVAC",
                 source,
@@ -11046,6 +11048,16 @@ class AutomationEngine:
         """
         return bool(self._sensor_check_callback and self._sensor_check_callback())
 
+    def _any_monitored_sensor_settled_open(self) -> bool:
+        """A monitored sensor holds open AND no sensor is still inside its open/close delay (Issue #1227).
+
+        The debounce-safe form of ``_any_monitored_sensor_holding_open()``: a door/window opened for less than its
+        delay (600 s default) is not open yet, so no path that changes the HVAC or starts a fan may act on it. The
+        post-delay handler fires when the delay ends and decides then. Use this for every decision that writes
+        HVAC or starts/stops a fan; the raw form is for reads that only keep something as it is.
+        """
+        return self._any_monitored_sensor_holding_open() and not self._sensor_debounce_pending
+
     def _any_monitored_sensor_holding_open(self) -> bool:
         """Return True if any monitored sensor must keep a door/window pause alive (Issue #1181, owner decision D1).
 
@@ -12008,7 +12020,7 @@ class AutomationEngine:
         self._arm_comfort_family("cooling", dt_util.now())
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
-        sensor_open = self._any_monitored_sensor_holding_open()
+        sensor_open = self._any_monitored_sensor_settled_open()
         # emit_event=False on both branches: the caller's own specific exit event
         # (nat_vent_comfort_floor_exit, nat_vent_outdoor_rise_exit, etc.) is emitted
         # below, by this method, once the
@@ -12820,7 +12832,7 @@ class AutomationEngine:
             fan_mode=str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             within_planned_window=self._is_within_planned_window_period(),
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_open=self._any_monitored_sensor_settled_open(),
             sensor_debounce_pending=bool(self._sensor_debounce_pending),
             override_matches_current_decision=self._override_matches_current_decision(self._current_classification),
             grace_source=self._last_resume_source or "automation",
@@ -13142,7 +13154,7 @@ class AutomationEngine:
             current_setpoint_f=current_setpoint_f,
             target_setpoint_f=target_setpoint_f,
             tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_open=self._any_monitored_sensor_settled_open(),
             # Issue #757 Phase 6 Step 3 correction: for GRACE_TIMER_EXPIRED specifically,
             # _cancel_grace_timers_action() already set _last_resume_source=None before
             # this dispatch, so this read is always "automation" for that kind. Confirmed

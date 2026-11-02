@@ -124,7 +124,7 @@ as a real temperature) is gone. Every caller must skip, never append, on `None`:
 | Caller | Behaviour when the sample is `None` |
 |---|---|
 | `_update_pre_heat_buffer` (every tick) | Prunes entries older than `THERMAL_PRE_HEAT_BUFFER_MINUTES` first, then appends only a real sample; DEBUG `Pre-heat sample skipped: reason=indoor_unavailable`. The buffer is simply shorter. |
-| `_start_hvac_observation` | The observation is not created. INFO `Thermal HVAC observation not started [type=... reason=indoor_unavailable ...]` plus a structured `indoor_unavailable` rejection (see below). |
+| `_start_hvac_observation` | The observation is not created. INFO `Thermal HVAC observation not started [zone=... type=... reason=indoor_unavailable ...]` plus a structured `indoor_unavailable` rejection (see below). |
 | Event-driven HVAC sample in `_async_thermostat_changed` | Skipped; DEBUG `Event-driven HVAC sample skipped: type=... reason=indoor_unavailable`; `last_event_sample_time` is not advanced so the next thermostat event retries. |
 | `_sample_all_observations` (5-min tick, both sampling sites) | `continue` — the observation keeps its existing samples. |
 | `_end_hvac_active_phase` | The closing sample is not appended; the phase still ends. |
@@ -643,7 +643,7 @@ This is a real, intentional behavior change: houses that previously got confiden
 
 **Coast overshoot:** not collected yet (#1233).
 
-**Storage (`thermal_model_cache`):** `swing_heat_f`/`swing_cool_f`, `swing_*_samples`, `swing_*_resolution_f`, `swing_*_off_point_f` (stop point, kept separate), `observation_count_swing_*`, `swing_definition_version` (migration marker: caches without the current value are nulled on load).
+**Storage (`thermal_model_cache`):** `swing_heat_f`/`swing_cool_f`, `swing_*_samples`, `swing_*_resolution_f`, `swing_*_off_point_f` (stop point, kept separate), `observation_count_swing_*`, `swing_definition_version` (migration marker: caches without the current value are nulled on load). Issue #1233 adds, all additive and downgrade-safe: `swing_*_audit` (the newest 50 judged cycles per mode with their inputs and reject reason), `swing_*_reject_counts` (cumulative per reason), and the separate coast fields `coast_*_samples`, `coast_*_f`, `coast_*_past_setpoint_f`, `observation_count_coast_*` (peak after heat-off / trough after cool-off; never part of the swing - see [05](05-LEARNING-ENGINE-DESIGN.md) "Coast overshoot"). `get_thermal_model()` adds `swing_definition`, `swing_debug` and the `coast_*` values.
 
 **Default for display:** `THERMAL_SWING_DEFAULT_F = 1.5 F` - used when the observed value is None (`swing_heat_f_display` / `swing_cool_f_display` in `get_thermal_model()` output).
 

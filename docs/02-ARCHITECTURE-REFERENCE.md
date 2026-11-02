@@ -653,10 +653,13 @@ dismisses it from the queue.
 
 ### ai_skills_investigator.py — AI Investigator Skill
 
-Provides the Claude investigator with structured context about Climate Advisor's
-internal state: sensor values, HVAC session history, thermal model parameters,
-fan status, occupancy mode, and diagnostic guidance. This module knows the
-thermostat's deadband behavior (the learned one-sided swing: how far past the setpoint the
+The skill definition, system prompt and thin orchestrator. The structured context it hands the
+Claude investigator - sensor values, HVAC session history, thermal model parameters, fan status,
+occupancy mode, diagnostic guidance - is assembled by the context providers in
+`ai_skills_context.py` (that is where the deadband logic and the swing lines live, Issue #1233 doc
+fix). That context knows the thermostat's deadband behavior (the learned one-sided swing: how far past the setpoint the
 thermostat lets the room drift before starting the equipment, Issue #1234) and explains it to
-the AI so it does not misinterpret normal deadband oscillation as a CA fault. See
+the AI so it does not misinterpret normal deadband oscillation as a CA fault; `_swing_context_lines()` in
+`ai_skills_context.py` adds the one-line meaning of the swing, how many cycles were accepted, the per-reason
+reject counts and the coast (Issue #1233). See
 [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md) for swing detection details.

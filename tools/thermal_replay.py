@@ -471,6 +471,20 @@ _SWING_CACHE_KEYS = (
     "swing_heat_off_point_f",
     "swing_cool_off_point_f",
     "swing_definition_version",
+    # Issue #1233: the per-cycle audit trail and the coast overshoot are not rebuilt from observations
+    # either, so a rebuild must carry them over or --write would wipe them.
+    "swing_heat_audit",
+    "swing_cool_audit",
+    "swing_heat_reject_counts",
+    "swing_cool_reject_counts",
+    "coast_heat_samples",
+    "coast_cool_samples",
+    "coast_heat_f",
+    "coast_cool_f",
+    "coast_heat_past_setpoint_f",
+    "coast_cool_past_setpoint_f",
+    "observation_count_coast_heat",
+    "observation_count_coast_cool",
 )
 
 

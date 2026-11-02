@@ -113,3 +113,61 @@ class TestDefaultRawLinesConstant:
             _ha_logs.fetch_logs(_fake_config(), lines=500, component_filter="climate_advisor")
         remote_cmd = _captured_remote_cmd(mock_run)
         assert f"--lines {_ha_logs.DEFAULT_RAW_LINES}" in remote_cmd
+
+
+class TestHistoryWindowSendsAnEndTime:
+    """Issue #1233: HA's /api/history/period returns ONE DAY from the start time when no ``end_time`` is
+    sent, so ``--hours 72`` silently came back with the oldest 24 h (the owner's swing investigation read
+    the wrong three days). The window must always be closed explicitly."""
+
+    @staticmethod
+    def _urls(fn, *args, **kwargs):
+        seen: list[str] = []
+
+        def fake(url, token):
+            seen.append(url)
+            return []
+
+        with patch.object(_ha_logs, "_ha_api_request", side_effect=fake):
+            fn({**_fake_config(), "HA_API_TOKEN": "t"}, *args, **kwargs)
+        return seen
+
+    def test_hours_over_a_day_sends_end_time_for_sensor_history(self):
+        (url,) = self._urls(_ha_logs.fetch_sensor_history, "climate.x", hours_back=72)
+        assert "end_time=" in url
+
+    def test_hours_over_a_day_sends_end_time_for_the_logbook(self):
+        (url,) = self._urls(_ha_logs.fetch_history, "climate.x", hours_back=72)
+        assert "end_time=" in url
+
+    def test_the_window_spans_the_requested_hours(self):
+        from datetime import datetime, timedelta
+        from urllib.parse import unquote
+
+        (url,) = self._urls(_ha_logs.fetch_sensor_history, "climate.x", hours_back=72)
+        start = datetime.fromisoformat(unquote(url.split("/api/history/period/")[1].split("?")[0]))
+        end = datetime.fromisoformat(unquote(url.split("end_time=")[1]))
+        assert timedelta(hours=71, minutes=59) <= end - start <= timedelta(hours=72, minutes=1)
+
+    def test_start_without_end_runs_to_now_not_one_day(self):
+        from datetime import UTC, datetime, timedelta
+
+        start = datetime.now(UTC) - timedelta(days=5)
+        (url,) = self._urls(_ha_logs.fetch_sensor_history, "climate.x", start_dt=start)
+        assert "end_time=" in url
+
+
+class TestExplicitEndKept:
+    def test_an_explicit_end_is_kept(self):
+        from datetime import UTC, datetime
+
+        end = datetime(2026, 10, 25, 8, 0, tzinfo=UTC)
+        seen: list[str] = []
+        with patch.object(_ha_logs, "_ha_api_request", side_effect=lambda url, token: seen.append(url) or []):
+            _ha_logs.fetch_sensor_history(
+                {**_fake_config(), "HA_API_TOKEN": "t"},
+                "climate.x",
+                start_dt=datetime(2026, 10, 22, 8, 0, tzinfo=UTC),
+                end_dt=end,
+            )
+        assert "end_time=2026-10-25T08%3A00%3A00%2B00%3A00" in seen[0]

@@ -130,6 +130,21 @@ def _format_api_timestamp(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
+def _history_window(
+    hours_back: int, start_dt: datetime | None, end_dt: datetime | None, now: datetime | None = None
+) -> tuple[datetime, datetime]:
+    """The explicit ``[start, end]`` window of a history/logbook query (UTC).
+
+    Home Assistant's ``/api/history/period`` and ``/api/logbook`` return ONE DAY from the start time
+    when no ``end_time`` is sent, so ``--hours 72`` used to come back with the OLDEST 24 h and a
+    ``--start`` without ``--end`` with just the first day after it (Issue #1233). The window is
+    therefore always closed explicitly: ``end_dt`` if given, else now.
+    """
+    now = now or datetime.now(UTC)
+    start = start_dt if start_dt is not None else now - timedelta(hours=hours_back)
+    return start, end_dt if end_dt is not None else now
+
+
 def fetch_history(
     config: dict[str, str],
     entity_filter: str = "",
@@ -156,7 +171,8 @@ def fetch_history(
 
     base_url = _build_ha_base_url(config)
 
-    start_time = start_dt if start_dt is not None else datetime.now(UTC) - timedelta(hours=hours_back)
+    explicit_end = end_dt
+    start_time, end_dt = _history_window(hours_back, start_dt, end_dt)
 
     timestamp = _format_api_timestamp(start_time)
     url = f"{base_url}/api/logbook/{timestamp}"
@@ -164,10 +180,8 @@ def fetch_history(
     params = []
     if entity_filter:
         params.append(f"entity_id={urllib.request.quote(entity_filter)}")
-    if end_dt is not None:
-        params.append(f"end_time={urllib.request.quote(_format_api_timestamp(end_dt))}")
-    if params:
-        url += "?" + "&".join(params)
+    params.append(f"end_time={urllib.request.quote(_format_api_timestamp(end_dt))}")
+    url += "?" + "&".join(params)
 
     data = _ha_api_request(url, token)
 
@@ -198,7 +212,7 @@ def fetch_history(
     if not lines:
         window_desc = (
             f"{_format_api_timestamp(start_time)} to {_format_api_timestamp(end_dt)}"
-            if end_dt
+            if start_dt is not None or explicit_end is not None
             else f"the last {hours_back} hours"
         )
         return f"(no logbook entries found for {window_desc})"
@@ -230,26 +244,26 @@ def fetch_sensor_history(
 
     base_url = _build_ha_base_url(config)
 
-    start_time = start_dt if start_dt is not None else datetime.now(UTC) - timedelta(hours=hours_back)
+    explicit_end = end_dt
+    start_time, end_dt = _history_window(hours_back, start_dt, end_dt)
 
     timestamp = _format_api_timestamp(start_time)
     url = f"{base_url}/api/history/period/{timestamp}?filter_entity_id={urllib.request.quote(entity_id)}"
-    if end_dt is not None:
-        url += f"&end_time={urllib.request.quote(_format_api_timestamp(end_dt))}"
+    url += f"&end_time={urllib.request.quote(_format_api_timestamp(end_dt))}"
 
     data = _ha_api_request(url, token)
 
     if not isinstance(data, list) or not data:
         window_desc = (
             f"{_format_api_timestamp(start_time)} to {_format_api_timestamp(end_dt)}"
-            if end_dt
+            if start_dt is not None or explicit_end is not None
             else f"the last {hours_back} hours"
         )
         return f"(no history found for {entity_id} in {window_desc})"
 
     # The API returns a list of lists (one list per entity)
     if start_dt is not None:
-        end_label = _format_api_timestamp(end_dt) if end_dt else "now"
+        end_label = _format_api_timestamp(end_dt) if explicit_end else "now"
         window_label = f"{_format_api_timestamp(start_dt)} to {end_label}"
     else:
         window_label = f"last {hours_back}h"
@@ -285,7 +299,7 @@ def fetch_sensor_history(
     if len(lines) == 1:
         window_desc = (
             f"{_format_api_timestamp(start_time)} to {_format_api_timestamp(end_dt)}"
-            if end_dt
+            if start_dt is not None or explicit_end is not None
             else f"the last {hours_back} hours"
         )
         return f"(no state changes found for {entity_id} in {window_desc})"

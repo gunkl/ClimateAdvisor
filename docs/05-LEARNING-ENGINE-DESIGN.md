@@ -426,9 +426,12 @@ The 23 remaining rejections are data-quality limits of chart_log 1°F resolution
 - 5 data artifacts: sub-2-minute elapsed times from timestamp coincidences or thermostat glitches
 - 2 borderline: k_active estimates just above the 15.0 °F/hr sanity bound
 
-The live coordinator reads `sensor.santa_maria_hallway_current_temperature` at 0.18°F
-resolution and samples at the exact HVAC state-change moment — expected to substantially
-exceed the 51% chart_log acceptance rate.
+The live coordinator samples the configured primary indoor reading at the exact HVAC state-change
+moment. With a dedicated sensor that is its native resolution (the owner's 0.18°F
+`sensor.santa_maria_hallway_current_temperature` when configured); on the default `climate_fallback`
+source it is the thermostat's own `current_temperature`, whole-degree on many thermostats (Issue #1233
+doc fix: the owner's hallway runs on the whole-degree climate entity). The exact-moment sampling is the
+advantage over chart_log's 30-minute rows, not a finer sensor.
 
 ### Thermostat Swing Detection (Issue #102, redefined by Issue #1234)
 
@@ -486,12 +489,68 @@ the odd long-recovery outlier, no alpha to tune, follows a changed thermostat se
 
 **Kept separately (never mixed into the swing):** `swing_{heat,cool}_off_point_f` - the stop point
 (`setpoint - indoor` at heat-off, same sign convention; recorded only if the setpoint was unchanged
-during the run). Coast overshoot: not collected yet (#1233) - it needs post-off samples; the
-observation record keeps `setpoint_f` and `peak_indoor_f` for a later consumer such as #1194.
+during the run). Coast overshoot (Issue #1233) is collected separately - see "Coast overshoot" below;
+the observation record keeps `setpoint_f` and `peak_indoor_f` for a later consumer such as #1194.
 
 **Storage:** `thermal_model_cache` - `swing_heat_f`/`swing_cool_f` (median),
 `swing_*_samples` (the retained window), `swing_*_resolution_f`, `swing_*_off_point_f`,
-`observation_count_swing_*` (accepted samples ever), `swing_definition_version`.
+`observation_count_swing_*` (accepted samples ever), `swing_definition_version`, and (Issue #1233)
+`swing_*_audit`, `swing_*_reject_counts`, `coast_*_samples`, `coast_*_f`, `coast_*_past_setpoint_f`,
+`observation_count_coast_*` (all additive: older code ignores them, so the change is downgrade-safe).
+
+**Debugging a learned value (Issue #1233):** a homeowner can check the swing against their own
+thermostat. Every judged cycle - accepted or rejected - is kept with the inputs that decided it:
+
+- `thermal_model_cache.swing_{heat,cool}_audit` - the newest `THERMAL_SWING_AUDIT_CAP` (50) records per mode:
+  `ts` (start), `mode`, `accepted`, `reason` (`ok` or one reject code), `value_f` (accepted value, or the
+  would-be value of a rejected cycle when its inputs allow), `setpoint_f`, `setpoint_age_s` (seconds since the
+  last setpoint/mode change at the start; `None` = unknown), `on_indoor_f`, `off_indoor_f`, `indoor_entity`
+  (the primary sensor or the climate entity behind the reading), `resolution_f`, `reading_unit`, `trigger`
+  (`hvac_action`; the only trigger since #1234) and `since_prev_off_s`. Built by
+  `swing.build_swing_audit_record`, folded by `swing.record_swing_audit`.
+- `swing_{heat,cool}_reject_counts` - cumulative per-reason counters (not bounded by the audit window).
+- The reject codes are exactly what `swing.evaluate_swing_cycle` returns, in check order:
+  `missing_input`, `setpoint_change`, `short_restart`, `wrong_direction`, `non_positive`, `out_of_bounds`
+  (`swing.SWING_REJECT_REASONS`).
+- One log line per cycle, with the zone (`zone=<entry id>`, else the climate entity): INFO
+  `Swing sample accepted: zone=... mode=... value=... setpoint=... setpoint_age_s=... on=... off=... source=...
+  resolution=... off_point=... median <before>-><after> (n=<retained>)`; DEBUG `Swing sample rejected: zone=...
+  mode=... reason=... setpoint=... setpoint_age_s=... on=... off=... source=...`. The HVAC observation start
+  (`Thermal HVAC observation started`, `_start_hvac_observation:`, `... not started`) and commit
+  (`Thermal observation committed`, `Thermal obs 2-param PRIMARY commit`) lines carry `zone=` too.
+- `get_thermal_model()` returns `swing_definition` (one line: how far past the setpoint the thermostat lets the
+  room drift before starting the equipment) and `swing_debug` (`recent` records, `reject_counts`, window
+  counts per mode); the chart payload (`thermal_model.swing_debug`, display units) and the investigator's
+  LEARNING - THERMAL MODEL section carry the same.
+- `python tools/learning_db.py --swing [--last N] [--entry-id ID]` prints the per-cycle table, the reject
+  histogram, the median recomputed with `swing.summarize_swing_samples` (flagging a stored value that
+  disagrees) and the coast section. `python tools/swing_audit.py` measures the real firing offsets from
+  recorder history (`ha_logs.py --history`) or a saved chart_log, judging every cycle with the same
+  `swing.evaluate_swing_cycle`, and prints them next to the learned value. Its coast replays the same history
+  through the live coast driver (`swing.coast_thermostat_event` / `swing.coast_feed`), so it is the coast the
+  integration records, not an approximation; setpoint-change detection and the setpoint read are shared too
+  (`swing.setpoint_or_mode_changed`, `swing.pick_setpoint`, `SETPOINT_CHANGE_ATTRS`).
+
+**Coast overshoot (Issue #1233) - kept apart from the swing.** After a THERMOSTAT-CHOSEN stop (a real
+heating/cooling -> idle `hvac_action` edge with no setpoint/mode change in the same event, nor within
+`THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` (120 s) before it - many thermostats report the command and the stop in
+two state changes; `swing.coast_stop_was_commanded`, the mirror of the swing's on-edge rule) the coordinator
+opens a coast window with the off reading as baseline (`swing.coast_thermostat_event`, called by
+`_track_swing_edges`; the one driver the coordinator and `tools/swing_audit.py` share). Every later indoor update - a
+thermostat state change, or a tick of the dedicated indoor sensor - folds into it (`swing.coast_feed`; heat keeps
+the running peak, cool the running trough, `swing.coast_extreme`). The window ends at the first of: the
+equipment starting again (`next_on`), a setpoint or HVAC-mode change (`setpoint_change`), or
+`THERMAL_COAST_MAX_S` (1800 s, `timeout`). The reading that accompanies the ending event is not coast.
+`swing.build_coast_sample` judges it: no post-off reading -> no sample (`no_post_readings`); a fall-back
+after a heat stop is a coast of 0.0; more than `THERMAL_COAST_MAX_F` (5 F) is weather or another actor
+(`out_of_bounds`). Stored in `coast_{heat,cool}_samples` (newest `THERMAL_COAST_ESTIMATOR_WINDOW` = 15),
+`coast_{heat,cool}_f` (median `coast_f` = distance beyond the off reading),
+`coast_{heat,cool}_past_setpoint_f` and `observation_count_coast_{heat,cool}`. A window cut short by the next
+run or a setpoint change is a lower bound (each sample records `ended_by`). The swing and the off-point are
+never touched by it. Open windows are not persisted (a restart drops them). `tools/thermal_replay.py` does
+NOT backfill coast: chart_log keeps `indoor_primary` only on `hvac_action_change` rows, and the 30-minute
+poll rows between them carry no primary reading, so the peak after a stop cannot be reconstructed (it would
+learn a falsely small coast).
 
 **Migration:** the learning DB has no schema version; `swing_definition_version` in the cache is the
 marker. A cache without the current value (everything learned before v0.8.34) has its swing values,
@@ -520,7 +579,8 @@ setpoint is confirmed by every earlier row back to one at least `THERMAL_SWING_S
 (120 s) older - stricter than live, never looser (just the previous row is not enough: the 30-min
 poll row and the `override` row are written seconds after a change and already carry the new
 setpoint). `rebuild_model_cache()` never recomputes swing from observations (a legacy `swing_f` cannot
-re-poison it) and carries the existing swing fields over.
+re-poison it) and carries the existing swing fields over - including the Issue #1233 audit trail
+(`swing_*_audit`, `swing_*_reject_counts`) and the coast keys, which are not rebuilt from observations either.
 
 **Decisions:** D27 (setpoint-agnostic formula) and D28 (min(active_samples) cool trough) are
 superseded by Issue #1234; D29 (swing in `--hvac` mode) and D30 (rows hidden until first HVAC obs)

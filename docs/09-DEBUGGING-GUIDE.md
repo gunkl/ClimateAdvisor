@@ -44,7 +44,7 @@ Climate Advisor exposes several sensor entities in Home Assistant. These persist
 **How to access:**
 - HA UI: Developer Tools → States → filter "climate_advisor"
 - HA History: Click any entity → History tab (shows state changes over time)
-- CLI: `python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status --hours 24`
+- CLI: `python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status --hours 24` (`--hours` above 24 works since Issue #1233; before it, HA returned only the oldest 24 h because no `end_time` was sent)
 
 ### 2. Temperature Forecast Chart (Visual History)
 
@@ -387,6 +387,42 @@ Install a `fan_state_entity` sensor to enable override detection.
 
 ---
 
+## Debugging the Learned Swing (Issue #1233)
+
+**The question a homeowner asks:** the dashboard says "Heat swing 1.4 F below setpoint" - does that match my
+thermostat? (The swing is how far past the setpoint the thermostat lets the room drift before starting the
+equipment.)
+
+1. **What did Climate Advisor judge, and why?** `python3 tools/learning_db.py --swing [--last 30] [--entry-id ID]`
+   - one row per judged cycle (accepted or `rejected:<reason>`) with the setpoint, setpoint age, on/off readings,
+   source entity, resolution and trigger; the reject histogram; the median recomputed from the retained samples
+   (a `MISMATCH` flag means the stored value disagrees with them); and the coast section.
+2. **Is it true of my equipment?** Save a few days of recorder history and compare:
+   ```bash
+   python3 tools/ha_logs.py --history --entity climate.my_thermostat --hours 72 > climate.txt
+   python3 tools/ha_logs.py --history --entity sensor.my_fine_temperature --hours 72 > sensor.txt
+   python3 tools/swing_audit.py --climate-file climate.txt --sensor-file sensor.txt --from-db
+   ```
+   `swing_audit.py` judges each cycle with the same `swing.evaluate_swing_cycle` the integration uses and prints
+   `measured X F` next to `learned Y F` (`matches` / `DIFFERS`). Without a fine sensor it uses the thermostat's own
+   whole-degree `current_temperature` and says so. Its coast line replays the history through the integration's own
+   coast driver, so it shows what the integration records (a fine sensor's ticks count as its readings).
+3. **In the logs:** `python3 tools/ha_logs.py --lines 5000 --filter "Swing sample"` - INFO for accepted samples
+   (with `median before->after`), DEBUG for rejected ones (needs debug logging for `custom_components.climate_advisor`).
+   Every line carries `zone=<entry id>`; the HVAC observation start/commit lines do too.
+
+| Reject reason | Meaning for the occupant |
+|---|---|
+| `setpoint_change` | The equipment started within 120 s of a setpoint or mode change - CA's own or yours moved the target; not the thermostat's hysteresis |
+| `short_restart` | `heating -> idle -> heating` within 60 s - the thermostat flapped, not a new drift |
+| `wrong_direction` | A heat run whose temperature fell (or cool run that rose) - something else dominated |
+| `non_positive` | The equipment started at/inside the setpoint - not a hysteresis start |
+| `out_of_bounds` | Outside 0.1-5.0 F |
+| `missing_input` | No setpoint or no usable indoor reading at the start or stop |
+
+The history tool needs `--hours` above 24 to span several days; before Issue #1233 it silently returned only the
+oldest 24 h (no `end_time` was sent).
+
 ## Debugging Thermal Model Learning
 
 ### "Thermal model confidence is 'none' after weeks of use"
@@ -423,7 +459,7 @@ Look for:
 - `"keeping alive"` — multi-window accumulator running; observation extending past 30 min
 - `"Thermal event commit"` — successful commit with k_passive and R²
 - `"abandoned"` / `"max_window_exceeded"` — rejection with reason code
-- `"Thermal HVAC observation not started [type=... reason=indoor_unavailable ...]"` (INFO) — an HVAC session began while the indoor temperature sensor was unreadable, so that session was deliberately not learned (Issue #1035). It is also stored as a structured `indoor_unavailable` rejection: `python3 tools/learning_db.py --rejections --entry-id <id>`. Check the Activity Log for the `indoor_sensor_unavailable` / `indoor_sensor_recovered` rows (Issue #1033) to see how long the outage lasted. The next `"Thermal HVAC observation started"` line shows learning resumed.
+- `"Thermal HVAC observation not started [zone=... type=... reason=indoor_unavailable ...]"` (INFO) — an HVAC session began while the indoor temperature sensor was unreadable, so that session was deliberately not learned (Issue #1035). It is also stored as a structured `indoor_unavailable` rejection: `python3 tools/learning_db.py --rejections --entry-id <id>`. Check the Activity Log for the `indoor_sensor_unavailable` / `indoor_sensor_recovered` rows (Issue #1033) to see how long the outage lasted. The next `"Thermal HVAC observation started"` line shows learning resumed.
 - DEBUG only (enable debug logging): `"Pre-heat sample skipped: reason=indoor_unavailable"` (every tick) and `"Event-driven HVAC sample skipped: type=... reason=indoor_unavailable"` — samples dropped during an outage instead of being stored as fake `0.0°F` readings.
 
 **Step 4 — Common root causes:**

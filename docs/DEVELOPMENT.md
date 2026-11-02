@@ -77,6 +77,13 @@ await house.reload_zone(); await house.restart(down_for_seconds=0); await house.
 * Lifecycle contract: `close()` unloads Climate Advisor then the sim; HA's autouse `verify_cleanup` is the net.
   `restart()` is unload + set up on the same `hass` and config dir (persistence is exercised, HA boot ordering is
   not).
+* **30 s slices pitfall:** `advance()` fires timers only at slice ends. A timer due mid-slice (HA's refresh
+  debouncer, CA's own short timers) runs at the slice's END, the same virtual instant the next `occupant_*` call
+  happens. The occupant's change then lands inside CA's 3 s / 30 s recent-command echo guard and is not
+  detected, which is not what a real household sees. #1235 observation A looked like a 15–30 s blind spot after
+  coalesce end; with `tests_ha.house.builder.SIM_STEP` monkeypatched to 1 s it shrank to the real 3 s windows. To
+  test occupant timing near a CA write, patch `SIM_STEP` to 1 s, or place the change at least 3 s (mode) or 30 s
+  (setpoint) after the write.
 * Markers (`tests_ha/pytest.ini`, `--strict-markers`, `timeout = 60`): `house`, `goldens`, `snapshot`, `slow`.
 * `CA_HA_WORKERS=4 python scripts/test.py ha` runs the tier under xdist (`auto` in CI).
 

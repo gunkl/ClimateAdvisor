@@ -216,7 +216,8 @@ class DoorWindowFsmInputs:
       fan_mode                            -> config CONF_FAN_MODE
       aggressive_savings                  -> config aggressive_savings
       within_planned_window               -> self._is_within_planned_window_period()
-      any_sensor_open                     -> self._any_monitored_sensor_holding_open() (Issue #1181)
+      any_sensor_open                     -> self._any_monitored_sensor_settled_open() (Issue #1181;
+                                             Issue #1227: a sensor still inside its delay is not open)
       sensor_debounce_pending             -> self._sensor_debounce_pending
       override_matches_current_decision   -> self._override_matches_current_decision(
                                               self._current_classification)

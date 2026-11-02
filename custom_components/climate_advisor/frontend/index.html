@@ -2258,8 +2258,10 @@
     const swCool = (tm.swing_cool ?? 1.5).toFixed(1);
     const swHeatHint = tm.swing_heat_measured ? '' : ' <span class="tm-swing-hint">(estimated)</span>';
     const swCoolHint = tm.swing_cool_measured ? '' : ' <span class="tm-swing-hint">(estimated)</span>';
-    hvacParamRows.push({ label: 'Heat swing', value: `±${swHeat} ${unitLabel}${swHeatHint}` });
-    hvacParamRows.push({ label: 'Cool swing', value: `±${swCool} ${unitLabel}${swCoolHint}` });
+    // Issue #1234: the swing is one-sided - how far past the setpoint the thermostat lets the room
+    // drift before it starts the equipment - so it is not shown as a symmetric "±".
+    hvacParamRows.push({ label: 'Heat swing', value: `${swHeat} ${unitLabel} below setpoint${swHeatHint}` });
+    hvacParamRows.push({ label: 'Cool swing', value: `${swCool} ${unitLabel} above setpoint${swCoolHint}` });
   }
   const hvacHint = hvacConf === 'none'
     ? `<p class="tm-hint">Updates each time the system runs a heating or cooling cycle.</p>`

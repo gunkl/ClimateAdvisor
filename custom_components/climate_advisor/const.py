@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.35"
+VERSION = "0.8.36"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1423,10 +1423,34 @@ THERMAL_HVAC_MIN_DECAY_F = 0.3
 # Minimum ΔT for single-point k_active estimate (filters sensor noise / no-effect cycles)
 THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
 
-# Thermostat swing (deadband half-amplitude) detection constants
+# Thermostat swing = the thermostat's OWN hysteresis (Issue #1234): how far past the setpoint the
+# room is allowed to drift before the equipment starts (heat: setpoint - indoor at the heat-on
+# transition; cool: indoor - setpoint at the cool-on transition). One-sided, so heat and cool are
+# independent and NOT symmetric around the setpoint. See swing.py for the pure rules.
 THERMAL_SWING_DEFAULT_F: float = 1.5
 THERMAL_SWING_MIN_F: float = 0.1
 THERMAL_SWING_MAX_F: float = 5.0
+# An on-transition within this many seconds after a setpoint (or HVAC mode) change is a jump
+# commanded by CA or the occupant, not the room drifting to the thermostat's trigger point, so it
+# is not a hysteresis sample. Covers the measured 2-5 s thermostat start-up latency plus margin.
+THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S: float = 120.0
+# An on-transition within this many seconds after the previous off-transition in the same direction
+# is the thermostat's hvac_action flapping (heating -> idle -> heating), not the room drifting back to
+# the trigger point (a real thermostat's minimum off time is minutes), so it is not a sample.
+THERMAL_SWING_REARM_WINDOW_S: float = 60.0
+# Robust estimator: median of the last K accepted samples (also the retained-sample cap). A median
+# ignores the occasional long-recovery outlier without an alpha to tune, and follows a changed
+# thermostat setting within ~K/2 cycles (an EWMA at alpha 0.05 needs ~20+).
+THERMAL_SWING_ESTIMATOR_WINDOW: int = 15
+# Reading-granularity FALLBACK for the climate_fallback indoor source (the thermostat's own
+# current_temperature), used only until there are enough distinct readings to infer the real
+# granularity from the readings themselves (swing.infer_resolution_f: whole F -> 1.0, whole C ->
+# 1.8 F, half C -> 0.9 F, finer -> 0.0). One whole degree of the configured unit, in F (x1.8 for
+# Celsius). A quantised sample `setpoint - k` has its true value within +/- resolution/2.
+THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F: float = 1.0
+# Persisted-cache marker for the swing DEFINITION. Caches without it (or older) hold the retired
+# |T_off - T_on| / 2 values, which are nulled on load so they re-learn (Issue #1234).
+THERMAL_SWING_DEFINITION_VERSION: int = 2
 THERMAL_SWING_CONF_LOW: int = 1
 THERMAL_SWING_CONF_MEDIUM: int = 3
 THERMAL_SWING_CONF_HIGH: int = 10

@@ -653,6 +653,7 @@ dismisses it from the queue.
 Provides the Claude investigator with structured context about Climate Advisor's
 internal state: sensor values, HVAC session history, thermal model parameters,
 fan status, occupancy mode, and diagnostic guidance. This module knows the
-thermostat's deadband behavior (swing) and explains it to the AI so it does not
-misinterpret normal deadband oscillation as a CA fault. See
+thermostat's deadband behavior (the learned one-sided swing: how far past the setpoint the
+thermostat lets the room drift before starting the equipment, Issue #1234) and explains it to
+the AI so it does not misinterpret normal deadband oscillation as a CA fault. See
 [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md) for swing detection details.

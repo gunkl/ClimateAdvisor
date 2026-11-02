@@ -1,0 +1,315 @@
+{
+ "_comment": "31 real heat cycles, climate.santa_maria_hallway, 2026-10-24..2026-11-01 (Issue #1234 swing investigation, analysis_filtered.txt). thermostat_* = the climate entity's whole-degree current_temperature; fine_* = the 0.18F hallway sensor. setpoint_age_min = minutes since the setpoint last changed (rounded).",
+ "cycles": [
+  {
+   "on_utc": "2026-10-24T14:08:22",
+   "dur_min": 14.0,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 66.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 66.02,
+   "fine_off_f": 67.82
+  },
+  {
+   "on_utc": "2026-10-24T14:46:14",
+   "dur_min": 5.5,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 38.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 67.46
+  },
+  {
+   "on_utc": "2026-10-24T16:16:56",
+   "dur_min": 7.8,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 90.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.56,
+   "fine_off_f": 67.28
+  },
+  {
+   "on_utc": "2026-10-25T14:19:29",
+   "dur_min": 9.3,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 66.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.38,
+   "fine_off_f": 66.92
+  },
+  {
+   "on_utc": "2026-10-25T14:47:29",
+   "dur_min": 5.8,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.92,
+   "fine_off_f": 67.46
+  },
+  {
+   "on_utc": "2026-10-26T13:54:08",
+   "dur_min": 10.4,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 66.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.02,
+   "fine_off_f": 66.92
+  },
+  {
+   "on_utc": "2026-10-26T15:02:38",
+   "dur_min": 9.0,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.28,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-10-26T17:17:21",
+   "dur_min": 9.2,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 14.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 68.0
+  },
+  {
+   "on_utc": "2026-10-27T13:30:05",
+   "dur_min": 8.1,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.56,
+   "fine_off_f": 67.28
+  },
+  {
+   "on_utc": "2026-10-27T14:29:06",
+   "dur_min": 8.3,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 37.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-10-27T18:22:18",
+   "dur_min": 8.6,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.46,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-10-28T12:53:44",
+   "dur_min": 10.0,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 65.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 65.3,
+   "fine_off_f": 66.92
+  },
+  {
+   "on_utc": "2026-10-28T13:34:39",
+   "dur_min": 0.4,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 2.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.74,
+   "fine_off_f": 66.56
+  },
+  {
+   "on_utc": "2026-10-28T13:37:57",
+   "dur_min": 8.0,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.56,
+   "fine_off_f": 67.28
+  },
+  {
+   "on_utc": "2026-10-28T14:00:57",
+   "dur_min": 8.4,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 5.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 68.36
+  },
+  {
+   "on_utc": "2026-10-28T16:23:57",
+   "dur_min": 15.0,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 69.0,
+   "fine_on_f": 66.74,
+   "fine_off_f": 68.54
+  },
+  {
+   "on_utc": "2026-10-28T17:43:09",
+   "dur_min": 8.1,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 79.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-10-28T18:21:57",
+   "dur_min": 9.0,
+   "setpoint_f": 70.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 69.0,
+   "fine_on_f": 68.18,
+   "fine_off_f": 68.9
+  },
+  {
+   "on_utc": "2026-10-28T19:03:39",
+   "dur_min": 7.1,
+   "setpoint_f": 70.0,
+   "setpoint_age_min": 42.0,
+   "thermostat_on_f": 69.0,
+   "thermostat_off_f": 69.0,
+   "fine_on_f": 68.54,
+   "fine_off_f": 69.08
+  },
+  {
+   "on_utc": "2026-10-29T14:00:29",
+   "dur_min": 10.3,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 65.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 65.3,
+   "fine_off_f": 66.92
+  },
+  {
+   "on_utc": "2026-10-29T15:14:30",
+   "dur_min": 7.3,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 74.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.56,
+   "fine_off_f": 67.1
+  },
+  {
+   "on_utc": "2026-10-29T16:29:48",
+   "dur_min": 14.3,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 66.92,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-10-29T18:00:26",
+   "dur_min": 8.0,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 91.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-10-31T13:30:02",
+   "dur_min": 9.2,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 66.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.38,
+   "fine_off_f": 66.92
+  },
+  {
+   "on_utc": "2026-10-31T15:11:44",
+   "dur_min": 7.8,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 102.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.56,
+   "fine_off_f": 67.1
+  },
+  {
+   "on_utc": "2026-10-31T18:37:44",
+   "dur_min": 8.6,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 66.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 66.38,
+   "fine_off_f": 66.92
+  },
+  {
+   "on_utc": "2026-11-01T14:10:17",
+   "dur_min": 15.6,
+   "setpoint_f": 68.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 66.0,
+   "thermostat_off_f": 67.0,
+   "fine_on_f": 65.66,
+   "fine_off_f": 66.56
+  },
+  {
+   "on_utc": "2026-11-01T15:14:10",
+   "dur_min": 9.0,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 11.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-11-01T16:00:11",
+   "dur_min": 8.2,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 57.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-11-01T18:32:47",
+   "dur_min": 8.4,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 0.0,
+   "thermostat_on_f": 67.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.1,
+   "fine_off_f": 68.18
+  },
+  {
+   "on_utc": "2026-11-01T20:21:53",
+   "dur_min": 5.3,
+   "setpoint_f": 69.0,
+   "setpoint_age_min": 109.0,
+   "thermostat_on_f": 68.0,
+   "thermostat_off_f": 68.0,
+   "fine_on_f": 67.64,
+   "fine_off_f": 67.82
+  }
+ ]
+}

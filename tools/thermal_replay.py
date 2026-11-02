@@ -27,6 +27,7 @@ Entity hints (check HA → Developer Tools → States):
 """
 
 import argparse
+import importlib.util
 import json
 import math
 import subprocess
@@ -423,6 +424,30 @@ def run_ols_on_window(window: list[dict]) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Thermostat swing — the ONE implementation lives in the integration (Issue #1234)
+# ---------------------------------------------------------------------------
+
+
+def _load_swing_module():
+    """Load ``custom_components/climate_advisor/swing.py`` as a standalone file.
+
+    The package ``__init__`` imports Home Assistant, which this tool must not require, so the
+    pure swing rules are loaded by path (the same approach as tools/fix_search.py). Production
+    (``coordinator.py``) and this replay both judge cycles with ``swing.evaluate_swing_cycle`` and
+    fold samples with ``swing.apply_swing_samples`` - there is no second copy of the rules.
+    """
+    path = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "swing.py"
+    spec = importlib.util.spec_from_file_location("_ca_swing_standalone", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolves string annotations via sys.modules
+    spec.loader.exec_module(module)
+    return module
+
+
+_swing = _load_swing_module()
+
+
+# ---------------------------------------------------------------------------
 # EWMA model cache rebuild — mirrors learning.py _update_thermal_model_cache
 # ---------------------------------------------------------------------------
 
@@ -434,8 +459,28 @@ def _ewma(old: float | None, new: float, alpha: float) -> float:
     return new if old is None else (1.0 - alpha) * old + alpha * new
 
 
-def rebuild_model_cache(all_obs: list[dict]) -> dict:
+_SWING_CACHE_KEYS = (
+    "swing_heat_f",
+    "swing_cool_f",
+    "observation_count_swing_heat",
+    "observation_count_swing_cool",
+    "swing_heat_samples",
+    "swing_cool_samples",
+    "swing_heat_resolution_f",
+    "swing_cool_resolution_f",
+    "swing_heat_off_point_f",
+    "swing_cool_off_point_f",
+    "swing_definition_version",
+)
+
+
+def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None) -> dict:
     """Recompute thermal_model_cache EWMA from all obs in chronological order.
+
+    Swing is NOT rebuilt from observations (Issue #1234): it is the thermostat's own hysteresis,
+    sampled at real on-transitions, so it is carried over from ``existing_cache`` (reset first if
+    that cache still holds the retired definition) and extended by the caller with
+    ``swing.apply_swing_samples``. A rebuild can therefore never re-poison or wipe it.
 
     Mirrors _update_thermal_model_cache logic exactly:
     - passive/heat/cool modes update k_passive
@@ -461,6 +506,7 @@ def rebuild_model_cache(all_obs: list[dict]) -> dict:
         "swing_cool_f": None,
         "observation_count_swing_heat": 0,
         "observation_count_swing_cool": 0,
+        "swing_definition_version": _swing.THERMAL_SWING_DEFINITION_VERSION,
         "avg_r_squared_passive": None,
         "last_observation_date": None,
         "confidence_k_passive": "none",
@@ -506,17 +552,15 @@ def rebuild_model_cache(all_obs: list[dict]) -> dict:
                 cache["k_solar"] = _ewma(cache["k_solar"], k_sol, alpha)
             cache["observation_count_solar"] += 1
 
-        # Swing EWMA — update alongside the k_active EWMA for heat/cool obs
-        swing_val = obs.get("swing_f")
-        if swing_val is not None:
-            if mode == "heat":
-                cache["swing_heat_f"] = _ewma(cache["swing_heat_f"], swing_val, alpha)
-                cache["observation_count_swing_heat"] += 1
-            elif mode == "cool":
-                cache["swing_cool_f"] = _ewma(cache["swing_cool_f"], swing_val, alpha)
-                cache["observation_count_swing_cool"] += 1
-
         cache["last_observation_date"] = obs.get("date")
+
+    # Swing: carry the existing (current-definition) values over untouched.
+    if existing_cache:
+        carried = {k: v for k, v in existing_cache.items() if k in _SWING_CACHE_KEYS}
+        if carried:
+            _swing.reset_swing_cache(carried)  # drops values learned under the retired definition
+            for k, v in carried.items():
+                cache[k] = v
 
     # Confidence grades
     n_hvac = cache["observation_count_heat"] + cache["observation_count_cool"]
@@ -536,8 +580,6 @@ def rebuild_model_cache(all_obs: list[dict]) -> dict:
         "k_vent",
         "k_vent_window",
         "k_solar",
-        "swing_heat_f",
-        "swing_cool_f",
         "avg_r_squared_passive",
     ):
         if cache[k] is not None:
@@ -1344,9 +1386,6 @@ _K_ACTIVE_COOL_MAX = -0.5
 _THERMAL_MIN_POST_HEAT_SAMPLES = 4  # mirrors THERMAL_MIN_POST_HEAT_SAMPLES (Phase B: was 10)
 _THERMAL_HVAC_MIN_DECAY_F = 0.3  # mirrors THERMAL_HVAC_MIN_DECAY_F
 _THERMAL_HVAC_MIN_SIGNAL_F = 0.5  # mirrors THERMAL_HVAC_MIN_SIGNAL_F — min ΔT for single-point
-_SWING_DEFAULT_F = 1.5  # default thermostat swing when no observations available
-_SWING_MIN_F = 0.1  # minimum plausible swing (°F)
-_SWING_MAX_F = 5.0  # maximum plausible swing (°F)
 
 
 def _hvac_category(hvac_str: str | None) -> str:
@@ -1484,30 +1523,99 @@ def _chart_entries_to_ols_samples(
     return result
 
 
-def compute_swing_from_hvac_events(
-    on_entry: dict,
-    off_entry: dict,
-    mode: str,
-) -> float | None:
-    """Compute thermostat swing from a chart_log hvac_action_change event pair.
+def compute_swing_samples_from_chart_log(entries: list[dict]) -> dict[str, list[dict]]:
+    """Swing samples (``{"heat": [...], "cool": [...]}``) from chart_log ``hvac_action_change`` rows.
 
-    on_entry: chart_log entry when HVAC turned ON (indoor = T_start)
-    off_entry: chart_log entry when HVAC turned OFF (indoor = T_end)
-    mode: "heat" or "cool"
+    Pairs each real heating/cooling start row with the following stop row and judges the cycle
+    with the SAME pure function production uses (``swing.evaluate_swing_cycle``), so the live
+    coordinator and this backfill cannot disagree. Only event rows are used (the 30-min poll
+    rows are not edges). chart_log keeps no exact setpoint-change time, so a cycle is treated
+    as a setpoint jump (excluded) unless the start row's setpoint is CONFIRMED by every row back
+    to one at least ``THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S`` older: stricter than live, never
+    looser. (Comparing with just the previous row was looser than live: a 30-min poll row or an
+    ``override`` row written seconds after CA's/the occupant's change already carries the NEW
+    setpoint, so the jump start that follows looked steady.) chart_log also has no HVAC-mode
+    field; an off->heat switch shows up as a row with no setpoint and is excluded the same way.
 
-    Returns swing in °F or None if signal insufficient or bounds fail.
+    Readings: ONLY ``indoor_primary`` (the always-primary reading live sampling uses) is read,
+    never ``indoor``, which is the comfort-facing value and carries the sleep-window bedroom swap.
+    Rows without it (every chart_log written before v0.8.34) give no sample - live re-learns
+    after the migration, so an empty backfill on old data is the safe outcome. Reading resolution
+    is inferred from those readings (unit unknown here, so Fahrenheit then Celsius grids); the
+    same ``THERMAL_SWING_REARM_WINDOW_S`` flap guard as live applies.
     """
-    t_start = on_entry.get("indoor")
-    t_end = off_entry.get("indoor")
-    if t_start is None or t_end is None:
+    rows = [e for e in entries if e.get("ts")]
+    event_rows = [e for e in rows if e.get("event") == "hvac_action_change"]
+    inferred = _swing.infer_resolution_f([e.get("indoor_primary") for e in event_rows])
+    resolution = inferred if inferred is not None else 0.0
+    out: dict[str, list[dict]] = {"heat": [], "cool": []}
+    open_cycle: dict | None = None
+    last_off: dict[str, str] = {}
+    for idx, row in enumerate(rows):
+        if row.get("event") == "hvac_action_change":
+            cat = _hvac_category(row.get("hvac"))
+            if open_cycle is not None and cat != open_cycle["mode"]:
+                verdict = _swing.evaluate_swing_cycle(
+                    mode=open_cycle["mode"],
+                    ts=open_cycle["ts"],
+                    setpoint_f=open_cycle["setpoint_f"],
+                    on_indoor_f=open_cycle["on_indoor_f"],
+                    off_indoor_f=row.get("indoor_primary"),
+                    off_setpoint_f=row.get("setpoint"),
+                    seconds_since_setpoint_change=open_cycle["since"],
+                    resolution_f=resolution,
+                    seconds_since_previous_off=open_cycle["since_off"],
+                )
+                if verdict.sample is not None:
+                    out[open_cycle["mode"]].append(verdict.sample)
+                last_off[open_cycle["mode"]] = row["ts"]
+                open_cycle = None
+            if cat in ("heat", "cool") and open_cycle is None:
+                sp = row.get("setpoint")
+                steady = _setpoint_confirmed_steady(rows, idx)
+                open_cycle = {
+                    "mode": cat,
+                    "ts": row["ts"],
+                    "setpoint_f": sp,
+                    "on_indoor_f": row.get("indoor_primary"),
+                    "since": None if steady else 0.0,
+                    "since_off": _seconds_between(last_off.get(cat), row["ts"]),
+                }
+    return out
+
+
+def _seconds_between(earlier: str | None, later: str) -> float | None:
+    """Seconds from ISO ``earlier`` to ISO ``later``; None when ``earlier`` is missing/unparseable."""
+    if earlier is None:
         return None
-    delta = abs(t_end - t_start)
-    if delta < _THERMAL_HVAC_MIN_SIGNAL_F:
+    try:
+        return (datetime.fromisoformat(str(later)) - datetime.fromisoformat(str(earlier))).total_seconds()
+    except TypeError, ValueError:
         return None
-    swing = delta / 2.0
-    if not (_SWING_MIN_F <= swing <= _SWING_MAX_F):
-        return None
-    return round(swing, 2)
+
+
+def _setpoint_confirmed_steady(rows: list[dict], idx: int) -> bool:
+    """True when ``rows[idx]``'s setpoint is unchanged on every earlier row back to (and including)
+    the first one at least the setpoint-change window older (Issue #1234). Any differing or missing
+    setpoint in that span, or no row old enough to confirm it, means a possible jump (False)."""
+    sp = rows[idx].get("setpoint")
+    try:
+        on_t = datetime.fromisoformat(str(rows[idx]["ts"]))
+    except TypeError, ValueError:
+        return False
+    if sp is None:
+        return False
+    for j in range(idx - 1, -1, -1):
+        prev_sp = rows[j].get("setpoint")
+        if prev_sp is None or abs(prev_sp - sp) >= 1e-6:
+            return False
+        try:
+            age_s = (on_t - datetime.fromisoformat(str(rows[j]["ts"]))).total_seconds()
+        except TypeError, ValueError:
+            return False
+        if age_s >= _swing.THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S:
+            return True
+    return False
 
 
 def run_hvac_replay_ols(
@@ -1912,26 +2020,14 @@ def main() -> None:
             n_act = len(cycle["active_samples"])
             n_post = len(cycle["post_samples"])
             if obs:
-                # Compute thermostat swing from the on/off event entries.
-                # on_entry = first active sample (indoor at HVAC-on transition)
-                # off_entry = first post sample (indoor at HVAC-off transition)
-                _active = cycle["active_samples"]
-                _post = cycle["post_samples"]
-                if _active and _post:
-                    swing_val = compute_swing_from_hvac_events(_active[0], _post[0], mode=mode_tag)
-                    if swing_val is not None:
-                        obs["swing_f"] = swing_val
-
                 k_p_str = f"{obs['k_passive']:+.4f}" if obs["k_passive"] is not None else "proxy"
                 k_a_str = f"{obs['k_active']:+.4f}" if obs["k_active"] is not None else "None"
                 r2_p_val = obs.get("r_squared_passive")
                 r2_str = f"{r2_p_val:.3f}" if r2_p_val is not None else "n/a"
-                swing_str = f"{obs['swing_f']:.2f}°F" if obs.get("swing_f") is not None else "n/a"
                 print(
                     f"  [{mode_tag}] {ts_short}  "
                     f"n_pre={n_pre} n_act={n_act} n_post={n_post}  "
-                    f"k_passive={k_p_str} k_active={k_a_str} R²={r2_str}  "
-                    f"swing={swing_str}  COMMITTED [low]"
+                    f"k_passive={k_p_str} k_active={k_a_str} R²={r2_str}  COMMITTED [low]"
                 )
                 obs_list.append(obs)
             else:
@@ -1945,8 +2041,18 @@ def main() -> None:
             for reason, count in sorted(reject_reasons.items()):
                 print(f"  {reason}: {count}")
 
-        if not obs_list:
-            print("\nNo HVAC obs to write — done.")
+        # Thermostat swing (Issue #1234): independent of the k fits above. Same pure rules as production.
+        swing_samples = compute_swing_samples_from_chart_log(filtered)
+        for _m, _samples in swing_samples.items():
+            _summary = _swing.summarize_swing_samples(_samples)
+            print(
+                f"  swing_{_m}: {len(_samples)} sample(s) -> "
+                f"{_summary['value_f'] if _summary['value_f'] is not None else 'n/a'} F "
+                f"(resolution {_summary['resolution_f']} F, off-point {_summary['off_point_f']})"
+            )
+
+        if not obs_list and not any(swing_samples.values()):
+            print("\nNo HVAC obs or swing samples to write — done.")
             return
 
         if args.dry_run:
@@ -1959,25 +2065,9 @@ def main() -> None:
         existing_obs: list[dict] = db.get("thermal_observations", [])
         print(f"  Existing obs: {len(existing_obs)}")
 
-        # Build index of swing_f values from chart_log-computed obs so we can patch DB
-        # copies that were stored before swing detection was implemented.
-        computed_swing: dict[tuple[str, str], float] = {
-            (o["timestamp"], o["hvac_mode"]): o["swing_f"] for o in obs_list if o.get("swing_f") is not None
-        }
-
         existing_replay_keys = {
             (o.get("timestamp"), o.get("hvac_mode")) for o in existing_obs if o.get("source") == "replay"
         }
-
-        # Patch existing obs missing swing_f with values computed from chart_log.
-        patched = 0
-        for obs in existing_obs:
-            key = (obs.get("timestamp", ""), obs.get("hvac_mode", ""))
-            if key in computed_swing and obs.get("swing_f") is None:
-                obs["swing_f"] = computed_swing[key]
-                patched += 1
-        if patched:
-            print(f"  Patched {patched} existing obs with swing_f from chart_log")
 
         new_obs = [o for o in obs_list if (o["timestamp"], o["hvac_mode"]) not in existing_replay_keys]
         print(f"  New HVAC replay obs (after dedup): {len(new_obs)}")
@@ -1991,7 +2081,10 @@ def main() -> None:
             merged = merged[-_THERMAL_OBS_CAP:]
 
         print("\nRebuilding EWMA model cache from all obs...")
-        new_model = rebuild_model_cache(merged)
+        new_model = rebuild_model_cache(merged, existing_cache=db.get("thermal_model_cache"))
+        for _m, _samples in swing_samples.items():
+            if _samples:
+                _swing.apply_swing_samples(new_model, _m, _samples)
         db["thermal_observations"] = merged
         db["thermal_model_cache"] = new_model
 
@@ -2003,6 +2096,8 @@ def main() -> None:
             "k_vent_window",
             "confidence_k_passive",
             "confidence_k_hvac",
+            "swing_heat_f",
+            "swing_cool_f",
         )
         for k in _hvac_keys:
             print(f"  {k}: {new_model.get(k)}")
@@ -2144,7 +2239,7 @@ def main() -> None:
 
     # Rebuild EWMA model cache from all obs
     print("\nRebuilding EWMA model cache from all obs...")
-    new_model = rebuild_model_cache(merged)
+    new_model = rebuild_model_cache(merged, existing_cache=db.get("thermal_model_cache"))
     db["thermal_observations"] = merged
     db["thermal_model_cache"] = new_model
 

@@ -540,66 +540,181 @@ class TestHvacReplayOls:
 
 
 class TestSwingBackfill:
-    """Tests for swing detection in --hvac backfill mode (Issue #130 Phase C0–C4)."""
+    """Swing backfill (Issue #1234): chart_log -> the thermostat's own hysteresis, via the shared
+    pure rules in custom_components/climate_advisor/swing.py (no second copy in this tool)."""
 
-    def test_swing_heat_from_events(self):
-        """Heat cycle: T_start=66 (on), T_end=70 (off) → swing = |70-66|/2 = 2.0°F."""
-        on_entry = {"indoor": 66.0, "hvac": "heating", "event": "hvac_action_change"}
-        off_entry = {"indoor": 70.0, "hvac": "idle", "event": "hvac_action_change"}
-        result = tr.compute_swing_from_hvac_events(on_entry, off_entry, mode="heat")
-        assert result == 2.0
+    @staticmethod
+    def _rows(mode, sp, on, off, prev_sp):
+        run = "heating" if mode == "heat" else "cooling"
+        return [
+            {"ts": "2026-11-01T13:30:00+00:00", "hvac": "idle", "indoor": on + 0.3, "setpoint": prev_sp},
+            {
+                "ts": "2026-11-01T14:00:00+00:00",
+                "hvac": run,
+                "indoor": on,
+                "indoor_primary": on,
+                "setpoint": sp,
+                "event": "hvac_action_change",
+            },
+            {
+                "ts": "2026-11-01T14:08:00+00:00",
+                "hvac": "idle",
+                "indoor": off,
+                "indoor_primary": off,
+                "setpoint": sp,
+                "event": "hvac_action_change",
+            },
+        ]
 
-    def test_swing_cool_from_events(self):
-        """Cool cycle: T_start=78 (on), T_end=74 (off) → swing = |74-78|/2 = 2.0°F."""
-        on_entry = {"indoor": 78.0, "hvac": "cooling", "event": "hvac_action_change"}
-        off_entry = {"indoor": 74.0, "hvac": "idle", "event": "hvac_action_change"}
-        result = tr.compute_swing_from_hvac_events(on_entry, off_entry, mode="cool")
-        assert result == 2.0
+    def test_heat_start_point_below_setpoint(self):
+        out = tr.compute_swing_samples_from_chart_log(self._rows("heat", 69.0, 67.64, 68.18, 69.0))
+        assert [s["value_f"] for s in out["heat"]] == [1.36]
+        assert out["cool"] == []
 
-    def test_swing_small_delta_skipped(self):
-        """Delta=0.3°F < _THERMAL_HVAC_MIN_SIGNAL_F=0.5 → None (signal too small)."""
-        on_entry = {"indoor": 68.0, "hvac": "heating", "event": "hvac_action_change"}
-        off_entry = {"indoor": 68.3, "hvac": "idle", "event": "hvac_action_change"}
-        result = tr.compute_swing_from_hvac_events(on_entry, off_entry, mode="heat")
-        assert result is None
+    def test_cool_start_point_above_setpoint(self):
+        out = tr.compute_swing_samples_from_chart_log(self._rows("cool", 75.0, 76.4, 75.6, 75.0))
+        assert [s["value_f"] for s in out["cool"]] == [1.4]
 
-    def test_swing_bounds_high(self):
-        """Delta=12°F → swing=6.0 > _SWING_MAX_F=5.0 → None (out of bounds)."""
-        on_entry = {"indoor": 60.0, "hvac": "heating", "event": "hvac_action_change"}
-        off_entry = {"indoor": 72.0, "hvac": "idle", "event": "hvac_action_change"}
-        result = tr.compute_swing_from_hvac_events(on_entry, off_entry, mode="heat")
-        assert result is None
+    def test_half_the_rise_is_no_longer_the_definition(self):
+        """66 -> 70 under setpoint 69: the old |end-start|/2 gave 2.0; the start point is 3.0 below."""
+        out = tr.compute_swing_samples_from_chart_log(self._rows("heat", 69.0, 66.0, 70.0, 69.0))
+        assert [s["value_f"] for s in out["heat"]] == [3.0]
 
-    def test_swing_missing_indoor(self):
-        """on_entry missing 'indoor' key → None (cannot compute without T_start)."""
-        on_entry = {"hvac": "heating", "event": "hvac_action_change"}
-        off_entry = {"indoor": 70.0, "hvac": "idle", "event": "hvac_action_change"}
-        result = tr.compute_swing_from_hvac_events(on_entry, off_entry, mode="heat")
-        assert result is None
+    def test_wrong_direction_and_non_positive_skipped(self):
+        assert tr.compute_swing_samples_from_chart_log(self._rows("heat", 69.0, 67.0, 66.0, 69.0))["heat"] == []
+        assert tr.compute_swing_samples_from_chart_log(self._rows("heat", 69.0, 69.5, 70.0, 69.0))["heat"] == []
 
-    def test_rebuild_cache_includes_swing(self):
-        """Two heat obs with swing_f set → cache must accumulate swing_heat_f EWMA
-        and observation_count_swing_heat == 2."""
-        obs_list = [
+    def test_setpoint_jump_or_unknown_previous_setpoint_skipped(self):
+        assert tr.compute_swing_samples_from_chart_log(self._rows("heat", 69.0, 67.0, 68.5, 65.0))["heat"] == []
+        assert tr.compute_swing_samples_from_chart_log(self._rows("heat", 69.0, 67.0, 68.5, None))["heat"] == []
+
+    def test_jump_confirmed_only_by_a_row_written_after_the_change_is_skipped(self):
+        """Live excludes a start 3-4 s after a setpoint/mode change; replay must not be looser.
+
+        The 30-min poll row (written after apply_classification) and the ``override`` row both carry
+        the NEW setpoint seconds before the start, so "same as the previous row" is no evidence.
+        """
+        poll_after_write = [
+            {"ts": "2026-11-01T13:30:00+00:00", "hvac": "idle", "indoor": 67.6, "setpoint": 68.0},
+            {"ts": "2026-11-01T14:00:00+00:00", "hvac": "idle", "indoor": 67.6, "setpoint": 70.0},
+            {
+                "ts": "2026-11-01T14:00:03+00:00",
+                "hvac": "heating",
+                "indoor": 67.6,
+                "indoor_primary": 67.6,
+                "setpoint": 70.0,
+                "event": "hvac_action_change",
+            },
+            {
+                "ts": "2026-11-01T14:15:00+00:00",
+                "hvac": "idle",
+                "indoor": 69.2,
+                "indoor_primary": 69.2,
+                "setpoint": 70.0,
+                "event": "hvac_action_change",
+            },
+        ]
+        assert tr.compute_swing_samples_from_chart_log(poll_after_write)["heat"] == []
+        mode_override = [
+            {"ts": "2026-11-01T13:00:00+00:00", "hvac": "off", "indoor": 66.0, "setpoint": None},
+            {"ts": "2026-11-01T13:10:00+00:00", "hvac": "idle", "indoor": 66.0, "setpoint": 69.0, "event": "override"},
+            {
+                "ts": "2026-11-01T13:10:04+00:00",
+                "hvac": "heating",
+                "indoor": 66.0,
+                "indoor_primary": 66.0,
+                "setpoint": 69.0,
+                "event": "hvac_action_change",
+            },
+            {
+                "ts": "2026-11-01T13:25:00+00:00",
+                "hvac": "idle",
+                "indoor": 68.1,
+                "indoor_primary": 68.1,
+                "setpoint": 69.0,
+                "event": "hvac_action_change",
+            },
+        ]
+        assert tr.compute_swing_samples_from_chart_log(mode_override)["heat"] == []
+        # Control: the same setpoint also confirmed by a row >= the window older IS a sample.
+        confirmed = [{**poll_after_write[0], "setpoint": 70.0}] + poll_after_write[1:]
+        assert [s["value_f"] for s in tr.compute_swing_samples_from_chart_log(confirmed)["heat"]] == [2.4]
+
+    def test_poll_rows_are_not_edges(self):
+        rows = [{**r, "event": None} for r in self._rows("heat", 69.0, 67.0, 68.5, 69.0)]
+        assert tr.compute_swing_samples_from_chart_log(rows)["heat"] == []
+
+    def test_whole_degree_log_reports_resolution_one(self):
+        """Readings on the whole-F grid (3+ distinct) are inferred whole-degree from the readings."""
+        rows = []
+        for i, (on, off) in enumerate([(68.0, 68.0), (67.0, 68.0), (66.0, 69.0)]):
+            base = f"2026-11-0{i + 1}"
+            for r in self._rows("heat", 69.0, on, off, 69.0):
+                rows.append({**r, "ts": r["ts"].replace("2026-11-01", base)})
+        samples = tr.compute_swing_samples_from_chart_log(rows)["heat"]
+        assert len(samples) == 3 and all(s["resolution_f"] == 1.0 for s in samples)
+
+    def test_too_few_distinct_readings_is_not_called_whole_degree(self):
+        """One repeated whole reading proves nothing about granularity; replay has no source to fall back on."""
+        rows = []
+        for i in range(3):
+            base = f"2026-11-0{i + 1}"
+            for r in self._rows("heat", 69.0, 68.0, 68.0, 69.0):
+                rows.append({**r, "ts": r["ts"].replace("2026-11-01", base)})
+        samples = tr.compute_swing_samples_from_chart_log(rows)["heat"]
+        assert len(samples) == 3 and all(s["resolution_f"] == 0.0 for s in samples)
+
+    def test_sleep_window_row_samples_the_primary_sensor_not_the_bedroom(self):
+        """Issue #1234 D2: ``indoor`` is the sleep-window bedroom swap; the swing must use the hall (primary)."""
+        rows = self._rows("heat", 69.0, 67.64, 68.18, 69.0)
+        for r in rows[1:]:
+            r["indoor"] = r["indoor"] - 2.0  # the bedroom, ~2 F colder than the hall
+        samples = tr.compute_swing_samples_from_chart_log(rows)["heat"]
+        assert [s["value_f"] for s in samples] == [1.36]  # setpoint - hall, not 3.36 from the bedroom
+
+    def test_rows_without_indoor_primary_give_no_sample(self):
+        """Historical chart_log rows (before v0.8.34) carry no primary reading: no backfill, live re-learns."""
+        rows = self._rows("heat", 69.0, 67.64, 68.18, 69.0)
+        for r in rows:
+            r.pop("indoor_primary", None)
+        assert tr.compute_swing_samples_from_chart_log(rows) == {"heat": [], "cool": []}
+
+    def test_hvac_action_flap_gives_no_second_sample(self):
+        """heating -> idle -> heating within seconds is one run, not a second drift to the trigger point."""
+        rows = self._rows("heat", 69.0, 67.64, 68.18, 69.0)
+        flap_on = {**rows[1], "ts": "2026-11-01T14:08:05+00:00", "indoor": 68.18, "indoor_primary": 68.18}
+        flap_off = {**rows[2], "ts": "2026-11-01T14:12:00+00:00", "indoor": 68.5, "indoor_primary": 68.5}
+        samples = tr.compute_swing_samples_from_chart_log([*rows, flap_on, flap_off])["heat"]
+        assert [s["value_f"] for s in samples] == [1.36]
+
+    def test_rebuild_does_not_recompute_swing_from_observations(self):
+        """A legacy obs ``swing_f`` can never re-poison the cache."""
+        obs = [
             {
                 "timestamp": "2026-01-01T00:00:00+00:00",
                 "date": "2026-01-01",
                 "hvac_mode": "heat",
-                "swing_f": 2.0,
+                "swing_f": 0.5,
                 "confidence_grade": "low",
                 "k_passive": None,
                 "k_active": 5.0,
-            },
-            {
-                "timestamp": "2026-01-02T00:00:00+00:00",
-                "date": "2026-01-02",
-                "hvac_mode": "heat",
-                "swing_f": 3.0,
-                "confidence_grade": "low",
-                "k_passive": None,
-                "k_active": 5.0,
-            },
+            }
         ]
-        cache = tr.rebuild_model_cache(obs_list)
-        assert cache["swing_heat_f"] is not None, "swing_heat_f should be set after 2 heat obs with swing_f"
-        assert cache["observation_count_swing_heat"] == 2
+        cache = tr.rebuild_model_cache(obs)
+        assert cache["swing_heat_f"] is None
+        assert cache["observation_count_swing_heat"] == 0
+
+    def test_rebuild_carries_current_swing_and_resets_the_retired_one(self):
+        current = {"swing_heat_f": 1.4, "observation_count_swing_heat": 7, "swing_definition_version": 2}
+        assert tr.rebuild_model_cache([], existing_cache=current)["swing_heat_f"] == 1.4
+        legacy = {"swing_heat_f": 0.59, "observation_count_swing_heat": 21}
+        rebuilt = tr.rebuild_model_cache([], existing_cache=legacy)
+        assert rebuilt["swing_heat_f"] is None and rebuilt["observation_count_swing_heat"] == 0
+
+    def test_live_and_replayed_sample_for_the_same_cycle_do_not_double_count(self):
+        cache = {}
+        live = {"ts": "2026-11-01T14:00:00.123456+00:00", "value_f": 1.4, "resolution_f": 0.0, "off_point_f": 0.9}
+        replay = {**live, "ts": "2026-11-01T14:00:00.123999+00:00"}
+        tr._swing.apply_swing_samples(cache, "heat", [live])
+        tr._swing.apply_swing_samples(cache, "heat", [replay])
+        assert cache["observation_count_swing_heat"] == 1 and len(cache["swing_heat_samples"]) == 1

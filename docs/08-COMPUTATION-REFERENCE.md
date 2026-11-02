@@ -601,35 +601,46 @@ python tools/thermal_replay.py --hvac --days 60             # commit to learning
 | Proxy-aware gate in `_check_hvac_stabilization()` | `coordinator.py` ~line 2951 |
 | `run_hvac_replay_ols()` | `tools/thermal_replay.py` ~line 817 |
 
-#### 5e-vii. Thermostat Swing — Deadband Auto-Detection (Issue #102)
+#### 5e-vii. Thermostat Swing - the thermostat's own hysteresis (Issue #102, redefined by Issue #1234)
 
-**Formula:** `swing_f = abs(T_end - T_start) / 2`
+**Formula (one-sided, per real on-transition):**
+```
+swing_heat_f = setpoint - indoor     at hvac_action -> heating
+swing_cool_f = indoor - setpoint     at hvac_action -> cooling
+```
+Retired: `abs(T_end - T_start) / 2` (half the rise per run) and its `THERMAL_HVAC_MIN_SIGNAL_F` gate.
 
 **Bounds:**
 | Parameter | Min | Max | Notes |
 |---|---|---|---|
-| `swing_heat_f` | 0.1°F | 5.0°F | `THERMAL_SWING_MIN_F` / `THERMAL_SWING_MAX_F` |
-| `swing_cool_f` | 0.1°F | 5.0°F | Same bounds, independent EWMA |
+| `swing_heat_f` | 0.1 F | 5.0 F | `THERMAL_SWING_MIN_F` / `THERMAL_SWING_MAX_F`; non-positive (on at/inside the setpoint) gives no sample |
+| `swing_cool_f` | 0.1 F | 5.0 F | Same bounds, independent |
 
-**Minimum signal:** `abs(T_end - T_start) >= THERMAL_HVAC_MIN_SIGNAL_F` (0.5°F).
-Cycles below this produce no swing observation.
+**Exclusions:** on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` of a setpoint/HVAC-mode change; phantom (mode-fallback) sessions; `hvac_action` flapping (on within `THERMAL_SWING_REARM_WINDOW_S` of the previous off, same direction); wrong-direction runs (heat that cooled / cool that warmed). Rules: `swing.evaluate_swing_cycle` (shared by `coordinator.py` and `tools/thermal_replay.py`).
 
-**Unit conversion:** Swing is a temperature delta — use `convert_delta()` (multiply
+**Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` samples. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot is not collected yet (#1233).
+
+**Thermostats with no `hvac_action`:** sampling uses only real `hvac_action` heating/cooling edges, so a thermostat that never reports `hvac_action` never learns a swing and stays at `THERMAL_SWING_DEFAULT_F` (1.5 F, "estimated").
+
+**Unit conversion:** Swing is a temperature delta - use `convert_delta()` (multiply
 by 5/9 for Celsius), never `from_fahrenheit()`. The +32 offset does not apply.
 
 **Display rule:**
-- `swing_heat_f is None` → show `±1.5°F (estimated)` in gray italic
-- `swing_heat_f is not None` → show `±X.X°F` with no hint
+- `swing_heat_f is None` -> show `1.5 F below setpoint (estimated)` in gray italic
+- `swing_heat_f is not None` -> show `X.X F below setpoint` (heat) / `above setpoint` (cool), no hint
 
 **Constants:**
 | Constant | Value | Purpose |
 |---|---|---|
 | `THERMAL_SWING_DEFAULT_F` | 1.5 | Default before any learning |
 | `THERMAL_SWING_MIN_F` | 0.1 | Sanity lower bound |
-| `THERMAL_SWING_MAX_F` | 5.0 | Sanity upper bound (rejects multi-cycle blur) |
-| `THERMAL_SWING_CONF_LOW` | 1 | none → low threshold |
-| `THERMAL_SWING_CONF_MEDIUM` | 3 | low → medium threshold |
-| `THERMAL_SWING_CONF_HIGH` | 10 | medium → high threshold |
+| `THERMAL_SWING_MAX_F` | 5.0 | Sanity upper bound |
+| `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` | 120 | Setpoint/mode-change jump window |
+| `THERMAL_SWING_ESTIMATOR_WINDOW` | 15 | Median window / retained samples |
+| `THERMAL_SWING_REARM_WINDOW_S` | 60 | On within this long of the previous off = `hvac_action` flap, not a sample |
+| `THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F` | 1.0 | Fallback quantisation of the climate_fallback reading until 3 distinct readings exist (x1.8 = 1.8 F on Celsius); otherwise inferred from the readings |
+| `THERMAL_SWING_DEFINITION_VERSION` | 2 | Cache marker; older caches are nulled on load |
+| `THERMAL_SWING_CONF_LOW` / `_MEDIUM` / `_HIGH` | 1 / 3 / 10 | none -> low -> medium -> high thresholds |
 
 #### 5e-viii. Solar Phase Offset — Two-EWMA Architecture (Issue #312)
 

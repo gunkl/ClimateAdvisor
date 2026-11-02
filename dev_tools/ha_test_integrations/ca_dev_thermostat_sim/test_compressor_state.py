@@ -39,6 +39,7 @@ def _decide_compressor_state(
     min_run_seconds: float,
     min_off_seconds: float,
     now: datetime,
+    off_offset: float | None = None,
 ) -> tuple[bool, datetime | None, datetime | None]:
     """Hand-transcribed copy of climate.py::_decide_compressor_state — see its
     docstring there for the authoritative version. Verified identical by inspection."""
@@ -56,8 +57,9 @@ def _decide_compressor_state(
             return True, now, last_off_ts
         return compressor_on, last_on_ts, last_off_ts
 
-    wants_off = (mode == "heat" and current_temp >= target_temp + deadband) or (
-        mode == "cool" and current_temp <= target_temp - deadband
+    stop = deadband if off_offset is None else off_offset
+    wants_off = (mode == "heat" and current_temp >= target_temp + stop) or (
+        mode == "cool" and current_temp <= target_temp - stop
     )
     can_turn_off = last_on_ts is None or (now - last_on_ts).total_seconds() >= min_run_seconds
     if wants_off and can_turn_off:
@@ -222,6 +224,42 @@ correct_result, _, _ = _decide_compressor_state(
     now=NOW,
 )
 _check("with the reset, a fresh-off compressor correctly stays off in the same dead zone", correct_result is False)
+
+
+# Issue #1234: asymmetric deadband. Start at target-1.4, stop at target-0.9 (off_offset=-0.9).
+def _asym(current, on):
+    return _decide_compressor_state(
+        mode="heat",
+        current_temp=current,
+        target_temp=69.0,
+        deadband=1.4,
+        compressor_on=on,
+        last_on_ts=None,
+        last_off_ts=None,
+        min_run_seconds=0.0,
+        min_off_seconds=0.0,
+        now=NOW,
+        off_offset=-0.9,
+    )[0]
+
+
+_check("asymmetric heat: off above the start point (68.0 > 67.6) stays off", _asym(68.0, False) is False)
+_check("asymmetric heat: turns on at target-1.4 (67.6)", _asym(67.6, False) is True)
+_check("asymmetric heat: stops at target-0.9 (68.1), not at target+1.4", _asym(68.1, True) is False)
+_check("asymmetric heat: keeps running below the stop point (68.0)", _asym(68.0, True) is True)
+_default_stop = _decide_compressor_state(
+    mode="heat",
+    current_temp=68.1,
+    target_temp=69.0,
+    deadband=1.4,
+    compressor_on=True,
+    last_on_ts=None,
+    last_off_ts=None,
+    min_run_seconds=0.0,
+    min_off_seconds=0.0,
+    now=NOW,
+)[0]
+_check("default (off_offset=None) stays symmetric: still running at 68.1 (stop is target+1.4)", _default_stop is True)
 
 print()
 if _FAILURES:

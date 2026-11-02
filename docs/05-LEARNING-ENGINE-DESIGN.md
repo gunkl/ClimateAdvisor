@@ -430,43 +430,101 @@ The live coordinator reads `sensor.santa_maria_hallway_current_temperature` at 0
 resolution and samples at the exact HVAC state-change moment — expected to substantially
 exceed the 51% chart_log acceptance rate.
 
-### Thermostat Swing Detection (Issue #102)
+### Thermostat Swing Detection (Issue #102, redefined by Issue #1234)
 
-**What it measures:** The thermostat's deadband half-amplitude — how many °F the
-indoor temperature overshoots or undershoots the commanded setpoint before HVAC
-fires or shuts off. Heat and cool have independent swing values.
+**What it measures:** the thermostat's OWN hysteresis - how far past the setpoint the room is
+allowed to drift before the equipment starts. It is one-sided and heat/cool are independent:
 
-**Formula (setpoint-agnostic):**
 ```
-swing_f = abs(T_end - T_start) / 2
+swing_heat_f = setpoint - indoor    at the real heat-on transition (hvac_action -> heating)
+swing_cool_f = indoor - setpoint    at the real cool-on transition (hvac_action -> cooling)
 ```
-where T_start = indoor temp at HVAC-on event, T_end = indoor temp at HVAC-off event.
-Mathematically equivalent to (undershoot + overshoot) / 2 relative to setpoint.
-No setpoint is required because the two-sided deadband is symmetric around the setpoint.
 
-**Storage:** `swing_heat_f` and `swing_cool_f` in `thermal_model_cache`. Both are
-EWMA-accumulated independently. The alpha weight matches the k_active grade-based
-alpha (high=0.30, medium=0.15, low=0.05).
+(Through v0.8.33 it was `abs(T_end - T_start) / 2` - half the temperature rise per run, learned
+only on the k-fit commit path. That is not the deadband: steady cycles read 0 and were dropped,
+CA's own setpoint jumps supplied most samples, and falling-temperature and phantom sessions
+polluted it; the owner's thermostat heats ~1.4 F below setpoint while 0.59 F was learned. It was
+the original #102 design, not a regression.)
 
-**Default:** `THERMAL_SWING_DEFAULT_F = 1.5°F` — displayed as "estimated (default)"
-in the dashboard before any observations accumulate.
+**Where it is sampled:** `coordinator._track_swing_edges()` on every thermostat state change,
+independent of the k_active observation pipeline. A candidate opens at a real compressor-active
+`hvac_action` edge (setpoint + the finest indoor reading) and is judged when the cycle ends. The
+pure rules live in ONE module, `custom_components/climate_advisor/swing.py`
+(`evaluate_swing_cycle`), shared by the coordinator and `tools/thermal_replay.py`.
 
-**Confidence tiers (per mode):**
+**Thermostats that never report `hvac_action`:** the swing is sampled ONLY at real `hvac_action`
+heating/cooling edges, so a thermostat that does not report `hvac_action` (or only ever reports
+`fan`/`idle`) never produces a sample. Its swing stays at `THERMAL_SWING_DEFAULT_F` (1.5 F, shown as
+"estimated") - the mode-fallback session cannot say where the equipment really started.
+
+**Exclusions (no sample):**
+- on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` (120 s) after a setpoint **or HVAC
+  mode** change - a jump by CA or the occupant, not hysteresis. Exactly the window length is sampled;
+  there is no "setpoint unchanged for N minutes" rule;
+- phantom sessions: an `hvac_mode` change while `hvac_action` positively reads `idle`/`off` has no
+  real edge, so it opens no swing cycle and (coordinator `_async_thermostat_changed`) starts no HVAC
+  observation either (also stops k_active pollution);
+- `hvac_action` flapping: an on-transition within `THERMAL_SWING_REARM_WINDOW_S` (60 s) of the
+  previous off-transition in the same direction (heating -> idle -> heating) is the same run, not a new
+  drift to the trigger point;
+- wrong-direction runs (heat whose temperature fell, cool whose temperature rose) - no `abs()`;
+- non-positive samples (on at/inside the setpoint) and values outside
+  `[THERMAL_SWING_MIN_F, THERMAL_SWING_MAX_F]`.
+
+**Reading and quantisation:** the primary indoor reading (`IndoorTempReading.primary_value`, never the
+sleep-window swap) is used. The reading granularity is inferred from the readings themselves
+(`swing.infer_resolution_f` over the window's on/off readings, in the configured unit): whole F -> 1.0,
+half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, anything finer (e.g. an Ecobee's tenths, even on the
+`climate_fallback` source) -> 0.0. With fewer than 3 distinct readings it falls back to what the source
+implies: a configured sensor / input_number is fine (0.0), `climate_fallback` is one whole degree of the
+configured unit (`THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F` = 1.0 F, x1.8 = 1.8 F on Celsius). A quantised
+sample is `setpoint - k` with the true value within +/- resolution/2. The cache keeps
+`swing_{heat,cool}_resolution_f`; it is metadata, the value is never shifted.
+
+**Estimator:** the median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` (15) accepted samples (robust to
+the odd long-recovery outlier, no alpha to tune, follows a changed thermostat setting within ~8 cycles).
+
+**Kept separately (never mixed into the swing):** `swing_{heat,cool}_off_point_f` - the stop point
+(`setpoint - indoor` at heat-off, same sign convention; recorded only if the setpoint was unchanged
+during the run). Coast overshoot: not collected yet (#1233) - it needs post-off samples; the
+observation record keeps `setpoint_f` and `peak_indoor_f` for a later consumer such as #1194.
+
+**Storage:** `thermal_model_cache` - `swing_heat_f`/`swing_cool_f` (median),
+`swing_*_samples` (the retained window), `swing_*_resolution_f`, `swing_*_off_point_f`,
+`observation_count_swing_*` (accepted samples ever), `swing_definition_version`.
+
+**Migration:** the learning DB has no schema version; `swing_definition_version` in the cache is the
+marker. A cache without the current value (everything learned before v0.8.34) has its swing values,
+counts and samples nulled on load (`swing.reset_swing_cache`), falling back to the default until
+re-learned.
+
+**Default:** `THERMAL_SWING_DEFAULT_F = 1.5 F` - displayed as "estimated" until a sample exists.
+
+**Confidence tiers (per mode, by `observation_count_swing_*`):**
 | Count | Grade |
 |---|---|
 | 0 | "none" |
-| 1–2 | "low" |
-| 3–9 | "medium" |
+| 1-2 | "low" |
+| 3-9 | "medium" |
 | 10+ | "high" |
 
-**Backfill:** `python tools/thermal_replay.py --hvac --days 60 --write` computes
-swing from chart_log `hvac_action_change` event entries. These entries record indoor
-temp at the exact HVAC state-change moment, giving precise T_start and T_end even
-for short cycles (5–10 min). Swing backfill is more permissive than OLS — cycles
-that fail k_active OLS can still contribute swing observations.
+**Backfill:** `python tools/thermal_replay.py --hvac --days 60 --write` pairs chart_log
+`hvac_action_change` rows and judges them with the same `evaluate_swing_cycle`. It reads ONLY the rows'
+`indoor_primary` (the same always-primary reading live uses; `indoor` is the comfort-facing value and
+carries the sleep-window bedroom swap). Rows without it - every chart_log written before v0.8.34 - give no
+sample; live re-learns after the migration, so an empty backfill on old data is the safe outcome. The
+same flap guard applies; the resolution is inferred from the readings (unit unknown, so Fahrenheit then
+Celsius grids; 0.0 when too few distinct readings). chart_log has no
+exact setpoint-change time and no HVAC-mode field, so replay treats a start as a jump unless its
+setpoint is confirmed by every earlier row back to one at least `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S`
+(120 s) older - stricter than live, never looser (just the previous row is not enough: the 30-min
+poll row and the `override` row are written seconds after a change and already carry the new
+setpoint). `rebuild_model_cache()` never recomputes swing from observations (a legacy `swing_f` cannot
+re-poison it) and carries the existing swing fields over.
 
-**Decisions:** D27 (setpoint-agnostic formula), D28 (min(active_samples) for cool
-trough), D29 (swing integrated into --hvac mode), D30 (rows hidden until first HVAC obs).
+**Decisions:** D27 (setpoint-agnostic formula) and D28 (min(active_samples) cool trough) are
+superseded by Issue #1234; D29 (swing in `--hvac` mode) and D30 (rows hidden until first HVAC obs)
+stand.
 
 ### `record_thermal_observation(obs: dict) -> None`
 

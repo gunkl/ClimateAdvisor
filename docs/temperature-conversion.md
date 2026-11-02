@@ -92,7 +92,7 @@ def unit_mismatch(attr: object, configured: str) -> str | None:
 | `next_fallback_episode` | `coordinator._note_outdoor_sensor_state` (outdoor), `coordinator._refresh_indoor_sensor_health` (indoor) | Pure once-per-episode transition `(reason, announced, since, now) -> (kind, announced, since, minutes_down)`, `kind` in `none` / `fallback` / `changed` / `recovered`; the caller owns logging and event emission (Issue #1033) |
 | `to_fahrenheit` | `coordinator.py`, config flow validation | Normalize user-entered Celsius setpoints to internal °F; `_get_hourly_forecast_data()` uses it to normalise the hourly forecast at its source (Issue #1015); `_get_outdoor_temp()` uses it for the sensor path and the `weather_attrs["temperature"]` fallback only |
 | `format_temp` | `coordinator.py`, `briefing.py`, `automation.py` (engine `_t()`), `learning.py`, `ai_skills_context.py` | Human-readable temperature strings in briefings, Activity Log reasons and the dashboard |
-| `convert_delta` | `coordinator.py` (thermal model display), `temperature.format_temp_delta()` and `display_delta()` (both delegate to it), `sensor.py` | Display thermal rates (k_active_heat, swing_f) in correct unit |
+| `convert_delta` | `coordinator.py` (thermal model display), `temperature.format_temp_delta()` and `display_delta()` (both delegate to it), `sensor.py` | Display thermal rates (k_active_heat) and the swing (setpoint-to-start distance, Issue #1234) in the correct unit |
 | `format_temp_delta` | `coordinator.py` (stall alert gap), `automation.py` (engine `_td()`), `learning.py` (override-magnitude and forecast-bias suggestion text), `ai_skills_context.py`, `briefing.py` | Human-readable delta strings (e.g., "setback of 5°C"); built on `convert_delta` |
 
 ### from_fahrenheit and to_fahrenheit
@@ -120,7 +120,7 @@ convert_delta(10.0, "fahrenheit")   → 10.0  # passthrough
 
 **Critical rule:** Any value that represents a *difference* or *rate* must use `convert_delta` / `format_temp_delta`. Using `from_fahrenheit` on a delta produces incorrect results (e.g., `from_fahrenheit(9.0, "celsius")` → −12.8°C, which is wrong for a 9°F swing).
 
-Affected values: `swing_f`, `k_active_heat` (°F/hr), `k_active_cool` (°F/hr), setback deltas, comfort band widths.
+Affected values: `swing_heat_f`/`swing_cool_f` (and their resolution/off-point), `k_active_heat` (°F/hr), `k_active_cool` (°F/hr), setback deltas, comfort band widths.
 
 ## Unit Detection
 

@@ -56,11 +56,11 @@ from .const import (
     THERMAL_SWING_CONF_LOW,
     THERMAL_SWING_CONF_MEDIUM,
     THERMAL_SWING_DEFAULT_F,
-    THERMAL_SWING_MAX_F,
-    THERMAL_SWING_MIN_F,
+    THERMAL_SWING_DEFINITION_VERSION,
     WEATHER_BIAS_MAX_OBS,
 )
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
+from .swing import apply_swing_samples, reset_swing_cache
 from .temperature import format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
@@ -205,6 +205,38 @@ def _apply_two_param_solar_update(cache: dict, obs: dict, grade: str) -> None:
     if k_sol is not None and obs.get("two_param"):
         alpha_sol = {"high": 0.3, "medium": 0.15, "low": 0.05}.get(grade, 0.05)
         _ewma_update_field(cache, "k_solar", k_sol, alpha_sol)
+
+
+def _new_thermal_cache() -> dict:
+    """A fresh, empty thermal_model_cache (the one place its key set is spelled out)."""
+    return {
+        "k_passive": None,
+        "k_active_heat": None,
+        "k_active_cool": None,
+        "k_vent_window": None,
+        "k_vent_fan": None,
+        "k_solar": None,
+        "solar_phase_offset_h": None,
+        "solar_phase_offset_last_obs_date": None,
+        "solar_phase_offset_ac_h": None,
+        "solar_phase_offset_ac_obs_count": 0,
+        "solar_phase_offset_ac_last_obs_date": None,
+        "observation_count_heat": 0,
+        "observation_count_cool": 0,
+        "observation_count_passive": 0,
+        "observation_count_vent_window": 0,
+        "observation_count_vent_fan": 0,
+        "observation_count_solar": 0,
+        "swing_heat_f": None,
+        "swing_cool_f": None,
+        "observation_count_swing_heat": 0,
+        "observation_count_swing_cool": 0,
+        "swing_definition_version": THERMAL_SWING_DEFINITION_VERSION,
+        "last_observation_date": None,
+        "avg_r_squared_passive": None,
+        "confidence_k_passive": "none",
+        "confidence_k_hvac": "none",
+    }
 
 
 def _grade_swing_confidence(count: int) -> str:
@@ -1010,6 +1042,15 @@ class LearningEngine:
                             type(val).__name__,
                         )
                         setattr(self._state, field_name, None)
+                # Issue #1234: the swing DEFINITION changed (half the temperature rise per run ->
+                # the thermostat's own hysteresis). Null values learned under the old one so they
+                # re-learn; they fall back to THERMAL_SWING_DEFAULT_F meanwhile.
+                _cache_mig = self._state.thermal_model_cache
+                if isinstance(_cache_mig, dict) and reset_swing_cache(_cache_mig):
+                    _LOGGER.info(
+                        "Thermal model cache: swing values from the retired definition reset (Issue #1234); "
+                        "they re-learn from real heat/cool start points"
+                    )
                 # Validate pending_observations is a dict
                 if not isinstance(self._state.pending_observations, dict):
                     self._state.pending_observations = {}
@@ -1123,33 +1164,7 @@ class LearningEngine:
 
         cache = self._state.thermal_model_cache
         if cache is None:
-            cache = {
-                "k_passive": None,
-                "k_active_heat": None,
-                "k_active_cool": None,
-                "k_vent_window": None,
-                "k_vent_fan": None,
-                "k_solar": None,
-                "solar_phase_offset_h": None,
-                "solar_phase_offset_last_obs_date": None,
-                "solar_phase_offset_ac_h": None,
-                "solar_phase_offset_ac_obs_count": 0,
-                "solar_phase_offset_ac_last_obs_date": None,
-                "observation_count_heat": 0,
-                "observation_count_cool": 0,
-                "observation_count_passive": 0,
-                "observation_count_vent_window": 0,
-                "observation_count_vent_fan": 0,
-                "observation_count_solar": 0,
-                "swing_heat_f": None,
-                "swing_cool_f": None,
-                "observation_count_swing_heat": 0,
-                "observation_count_swing_cool": 0,
-                "last_observation_date": None,
-                "avg_r_squared_passive": None,
-                "confidence_k_passive": "none",
-                "confidence_k_hvac": "none",
-            }
+            cache = _new_thermal_cache()
         elif ("k_vent" in cache or "observation_count_fan_only" in cache) and not getattr(
             self, "_logged_legacy_k_vent_present", False
         ):
@@ -1218,23 +1233,27 @@ class LearningEngine:
                     cache["k_solar"] = (1.0 - alpha) * cache["k_solar"] + alpha * k_solar
             cache["observation_count_solar"] = cache.get("observation_count_solar", 0) + 1
 
-        swing_val = obs.get("swing_f")
-        if swing_val is not None:
-            if mode == "heat":
-                _s_key, _s_cnt = "swing_heat_f", "observation_count_swing_heat"
-            elif mode == "cool":
-                _s_key, _s_cnt = "swing_cool_f", "observation_count_swing_cool"
-            else:
-                _s_key = _s_cnt = None
-            if _s_key:
-                if cache.get(_s_key) is None:
-                    cache[_s_key] = swing_val
-                else:
-                    cache[_s_key] = (1.0 - alpha) * cache[_s_key] + alpha * swing_val
-                cache[_s_cnt] = cache.get(_s_cnt, 0) + 1
+        # Issue #1234: swing is NOT derived from k-fit observations any more. It is the thermostat's
+        # own hysteresis, sampled at each real on-transition (record_swing_sample), so a rejected
+        # k fit no longer drops it and a legacy ``swing_f`` on an old observation is ignored.
 
         cache["last_observation_date"] = obs.get("date")
         self._state.thermal_model_cache = cache
+
+    def record_swing_sample(self, mode: str, sample: dict) -> None:
+        """Fold one accepted swing sample (``swing.evaluate_swing_cycle``) into the cache.
+
+        The thermostat's own hysteresis is sampled at the real on-transition, independent of
+        whether the cycle's k_active fit later commits (Issue #1234). In-memory only; the caller
+        persists via ``save_state``.
+        """
+        if mode not in ("heat", "cool") or not isinstance(sample, dict) or "ts" not in sample:
+            return
+        cache = self._state.thermal_model_cache
+        if cache is None:
+            cache = _new_thermal_cache()
+            self._state.thermal_model_cache = cache
+        apply_swing_samples(cache, mode, [sample])
 
     def update_solar_phase_offset(self, observed_h: float, alpha: float) -> None:
         """EWMA update for solar_phase_offset_h from a phase observation.
@@ -1254,33 +1273,7 @@ class LearningEngine:
 
         cache = self._state.thermal_model_cache
         if cache is None:
-            cache = {
-                "k_passive": None,
-                "k_active_heat": None,
-                "k_active_cool": None,
-                "k_vent_window": None,
-                "k_vent_fan": None,
-                "k_solar": None,
-                "solar_phase_offset_h": None,
-                "solar_phase_offset_last_obs_date": None,
-                "solar_phase_offset_ac_h": None,
-                "solar_phase_offset_ac_obs_count": 0,
-                "solar_phase_offset_ac_last_obs_date": None,
-                "observation_count_heat": 0,
-                "observation_count_cool": 0,
-                "observation_count_passive": 0,
-                "observation_count_vent_window": 0,
-                "observation_count_vent_fan": 0,
-                "observation_count_solar": 0,
-                "swing_heat_f": None,
-                "swing_cool_f": None,
-                "observation_count_swing_heat": 0,
-                "observation_count_swing_cool": 0,
-                "last_observation_date": None,
-                "avg_r_squared_passive": None,
-                "confidence_k_passive": "none",
-                "confidence_k_hvac": "none",
-            }
+            cache = _new_thermal_cache()
 
         current = cache.get("solar_phase_offset_h")
         new_val = obs_clamped if current is None else (1.0 - alpha) * float(current) + alpha * obs_clamped
@@ -1496,6 +1489,10 @@ class LearningEngine:
             "swing_cool_f_display": (
                 cache.get("swing_cool_f") if cache.get("swing_cool_f") is not None else THERMAL_SWING_DEFAULT_F
             ),
+            "swing_heat_resolution_f": cache.get("swing_heat_resolution_f", 0.0),
+            "swing_cool_resolution_f": cache.get("swing_cool_resolution_f", 0.0),
+            "swing_heat_off_point_f": cache.get("swing_heat_off_point_f"),
+            "swing_cool_off_point_f": cache.get("swing_cool_off_point_f"),
             "observation_count_swing_heat": cache.get("observation_count_swing_heat", 0),
             "observation_count_swing_cool": cache.get("observation_count_swing_cool", 0),
             "confidence_swing_heat": _grade_swing_confidence(cache.get("observation_count_swing_heat", 0)),
@@ -1872,27 +1869,6 @@ class LearningEngine:
             "confidence_grade": grade,
             "schema_version": 2,
         }
-
-        # Swing (deadband half-amplitude): setpoint-agnostic formula
-        _start_sw = obs.get("start_indoor_f")
-        _mode_sw = obs.get("hvac_mode", "")
-        _actives_sw = event.get("active_samples", [])
-        if _mode_sw in ("heat", "cool") and _start_sw is not None and _actives_sw:
-            if _mode_sw == "heat":
-                # Use last active sample (HVAC shutoff temp), not global peak which
-                # includes post-heat overshoot and biases swing high
-                _end_sw = _actives_sw[-1].get("indoor_temp_f")
-            else:
-                _end_sw = min(
-                    (s["indoor_temp_f"] for s in _actives_sw if "indoor_temp_f" in s),
-                    default=None,
-                )
-            if _end_sw is not None:
-                _delta_sw = abs(_end_sw - _start_sw)
-                if _delta_sw >= THERMAL_HVAC_MIN_SIGNAL_F:
-                    _swing = _delta_sw / 2.0
-                    if THERMAL_SWING_MIN_F <= _swing <= THERMAL_SWING_MAX_F:
-                        obs["swing_f"] = round(_swing, 2)
 
         _LOGGER.info(
             "Thermal observation committed: mode=%s grade=%s k_passive=%.4f k_active=%s R²_p=%.3f",

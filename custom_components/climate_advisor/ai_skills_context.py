@@ -590,7 +590,8 @@ fan_status values explained:
 
 Heating/cooling deadband (thermostat behavior — not a CA fault):
   Thermostats have a built-in deadband. Heating fires when indoor drops ~1-2°F
-  below the setpoint and runs until slightly above. If CA commanded heat mode
+  below the setpoint (the learned heat swing: Climate Advisor measures it at each real
+  heat start) and runs until near or slightly past the setpoint. If CA commanded heat mode
   at comfort_heat=68°F and indoor=67°F, the thermostat reporting hvac_action=idle
   or hvac_action=fan is expected deadband behavior — not a CA failure.
 
@@ -3784,7 +3785,10 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
     re-deriving: (1) hvac_mode=off but hvac_action reports active — flagged unless
     it's the expected CA-fan-only-mode case (is_ca_fan_running() is the single
     source of truth here, Issue #458); (2) indoor temp vs. comfort band, using the
-    thermostat's own swing/deadband so a within-deadband shortfall isn't flagged.
+    thermostat's own swing so a within-hysteresis shortfall isn't flagged. Since Issue #1234 the
+    swing is how far BELOW the setpoint the thermostat lets the room fall before heating (how far
+    ABOVE before cooling), so ``comfort_heat - indoor > swing_heat`` is exactly "the room has
+    drifted past the point where the thermostat itself would have started heating".
     """
     data: dict[str, Any] = coordinator.data or {}
     options: dict[str, Any] = coordinator.config or {}
@@ -3812,6 +3816,8 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
                 "possible stale coordinator data or thermostat reporting bug"
             )
 
+    # One-sided thermostat hysteresis (swing_heat_f below / swing_cool_f above the setpoint), learned
+    # from real on-transitions (Issue #1234); THERMAL_SWING_DEFAULT_F until a sample exists.
     _swing_heat_f = THERMAL_SWING_DEFAULT_F
     _swing_cool_f = THERMAL_SWING_DEFAULT_F
     learning = getattr(coordinator, "learning", None)

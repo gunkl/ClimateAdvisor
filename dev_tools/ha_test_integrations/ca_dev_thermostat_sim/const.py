@@ -17,6 +17,13 @@ CONF_OUTDOOR_SOURCE = "outdoor_source"
 CONF_TICK_SECONDS = "tick_seconds"
 CONF_DEADBAND_HEAT_F = "deadband_heat_f"
 CONF_DEADBAND_COOL_F = "deadband_cool_f"
+# Issue #1234: optional ASYMMETRIC deadband. ``deadband_*_f`` is where the compressor STARTS (heat:
+# target - deadband; cool: target + deadband). ``off_offset_*_f`` is where it STOPS, as a signed distance
+# past the target in the direction of travel (heat stops at target + off_offset_heat_f; cool at target -
+# off_offset_cool_f). A real thermostat that starts heat at target-1.4 and stops at target-0.9 is
+# deadband_heat_f=1.4, off_offset_heat_f=-0.9. Unset (the default) keeps the symmetric deadband.
+CONF_OFF_OFFSET_HEAT_F = "off_offset_heat_f"
+CONF_OFF_OFFSET_COOL_F = "off_offset_cool_f"
 CONF_MIN_RUN_SECONDS = "min_run_seconds"
 CONF_MIN_OFF_SECONDS = "min_off_seconds"
 

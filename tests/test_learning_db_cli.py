@@ -221,3 +221,17 @@ class TestDailyArgparseFlag:
         # At least one of these must indicate "not requested".
         not_requested = (daily_n is None) or (show_daily is False) or (show_daily is None)
         assert not_requested, f"Expected daily not requested when flag absent, got args={vars(args)}"
+
+
+def test_model_summary_warns_on_unmigrated_swing(capsys):
+    """Issue #1234: an on-disk cache with swing data but no swing_definition_version is the retired value."""
+    old = {"thermal_model_cache": {"swing_heat_f": 0.59, "observation_count_swing_heat": 21}}
+    _ldb._print_model_summary(old)
+    assert "RETIRED definition" in capsys.readouterr().out
+    new = {
+        "thermal_model_cache": {"swing_heat_f": 1.4, "observation_count_swing_heat": 7, "swing_definition_version": 2}
+    }
+    _ldb._print_model_summary(new)
+    assert "RETIRED definition" not in capsys.readouterr().out
+    _ldb._print_model_summary({"thermal_model_cache": {"k_passive": -0.1}})  # fresh, no swing data: no warning
+    assert "RETIRED definition" not in capsys.readouterr().out

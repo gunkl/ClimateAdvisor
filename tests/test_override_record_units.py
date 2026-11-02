@@ -155,6 +155,9 @@ class TestThermalObservationSetpointSource:
 
         from tests.test_hvac_session_detection import _get_coordinator_class
 
-        src = inspect.getsource(_get_coordinator_class()._start_hvac_observation)
+        cls = _get_coordinator_class()
+        # Issue #1234: the setpoint read moved into the one shared helper (also used by the swing sampler).
+        assert "self._read_thermostat_setpoint_f(_cs_sw" in inspect.getsource(cls._start_hvac_observation)
+        src = inspect.getsource(cls._read_thermostat_setpoint_f)
         assert 'get("target_temperature")' not in src
-        assert 'read_state_temp_f(_cs_sw, "temperature"' in src
+        assert 'read_state_temp_f(state, "temperature"' in src

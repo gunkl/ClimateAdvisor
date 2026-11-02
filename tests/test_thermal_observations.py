@@ -32,7 +32,6 @@ if "homeassistant" not in sys.modules:
 
 from custom_components.climate_advisor.const import (  # noqa: E402
     MIN_THERMAL_OBSERVATIONS,
-    OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
     OBS_TYPE_PASSIVE_DECAY,
     OBS_TYPE_SOLAR_GAIN,
@@ -3608,277 +3607,129 @@ class TestSinglePointKActive:
 
 
 class TestSwingComputation:
-    """Tests for thermostat swing computation in the learning engine.
+    """Thermal-model plumbing for the thermostat's own hysteresis (Issue #1234).
 
-    Swing = half-amplitude of the thermostat deadband: (|T_end - T_start|) / 2.
-    Computed in _commit_event_from_dict() for hvac_heat/hvac_cool observations.
-    Stored in obs["swing_f"] and tracked in the EWMA cache as swing_heat_f / swing_cool_f.
+    The sampling rules are exercised end-to-end in tests/test_swing_hysteresis_1234.py; this class
+    covers the cache/estimator/display contract of LearningEngine.
     """
 
     def _make_engine(self, tmp_path):
-        """Build a LearningEngine backed by tmp_path."""
         from custom_components.climate_advisor.learning import LearningEngine
 
         engine = LearningEngine(tmp_path)
         engine.load_state()
         return engine
 
-    def _make_hvac_event(
-        self,
-        *,
-        start_f: float,
-        peak_f: float | None = None,
-        hvac_mode: str = "heat",
-        active_temps: list[float],
-        n_post: int = 5,
-    ) -> dict:
-        """Build a minimal hvac event dict sufficient for swing computation."""
-        active_samples = [
-            {
-                "indoor_temp_f": t,
-                "outdoor_temp_f": 55.0,
-                "elapsed_minutes": float(i * 10),
-                "timestamp": f"2026-04-28T12:{i:02d}:00+00:00",
-            }
-            for i, t in enumerate(active_temps)
+    @staticmethod
+    def _sample(i: int, value: float, **extra) -> dict:
+        return {"ts": f"2026-11-0{1 + i // 20}T{i % 20:02d}:00:00", "value_f": value, "resolution_f": 0.0, **extra}
+
+    def test_commit_path_no_longer_produces_a_swing(self, tmp_path):
+        """A committed k_active observation carries no swing_f: the old |end-start|/2 is retired."""
+        engine = self._make_engine(tmp_path)
+        active = [
+            {"indoor_temp_f": t, "outdoor_temp_f": 55.0, "elapsed_minutes": float(i * 10), "timestamp": f"t{i}"}
+            for i, t in enumerate([66.0, 68.0, 70.0])
         ]
-        post_samples = [
+        post = [
             {
-                "indoor_temp_f": active_temps[-1] - i * 0.2,
+                "indoor_temp_f": 70.0 - i * 0.2,
                 "outdoor_temp_f": 55.0,
-                "elapsed_minutes": float(len(active_temps) * 10 + i * 10),
-                "timestamp": f"2026-04-28T13:{i:02d}:00+00:00",
+                "elapsed_minutes": 30.0 + i * 10,
+                "timestamp": f"p{i}",
             }
-            for i in range(n_post)
+            for i in range(5)
         ]
-        return {
-            "event_id": "test-swing",
-            "hvac_mode": hvac_mode,
-            "session_mode": hvac_mode,
-            "start_indoor_f": start_f,
-            "peak_indoor_f": peak_f if peak_f is not None else max(active_temps),
-            "active_samples": active_samples,
-            "post_heat_samples": post_samples,
+        event = {
+            "event_id": "e",
+            "hvac_mode": "heat",
+            "session_mode": "heat",
+            "start_indoor_f": 66.0,
+            "peak_indoor_f": 70.0,
+            "active_samples": active,
+            "post_heat_samples": post,
             "pre_heat_samples": [],
-            "session_minutes": len(active_temps) * 10.0,
+            "session_minutes": 30.0,
         }
-
-    def _commit_with_mocked_dt(self, engine, event, obs_type=OBS_TYPE_HVAC_HEAT, force_grade="low"):
-        """Run _commit_event_from_dict with dt_util and OLS mocked."""
-        dt_mock = _make_dt_mock()
         with (
-            patch("custom_components.climate_advisor.learning.dt_util", dt_mock),
-            patch(
-                "custom_components.climate_advisor.learning.compute_k_passive",
-                return_value=(-0.05, 0.85, None),
-            ),
-            patch(
-                "custom_components.climate_advisor.learning.compute_k_active",
-                return_value=(2.5, 0.9),
-            ),
+            patch("custom_components.climate_advisor.learning.dt_util", _make_dt_mock()),
+            patch("custom_components.climate_advisor.learning.compute_k_passive", return_value=(-0.05, 0.85, None)),
+            patch("custom_components.climate_advisor.learning.compute_k_active", return_value=(2.5, 0.9)),
         ):
-            result, reject, r2 = engine._commit_event_from_dict(event, force_grade=force_grade, obs_type=obs_type)
-        return result
+            obs, _reject, _r2 = engine._commit_event_from_dict(event, force_grade="low", obs_type=OBS_TYPE_HVAC_HEAT)
+        assert obs is not None and "swing_f" not in obs
+        assert engine.get_thermal_model()["swing_heat_f"] is None
 
-    # ------------------------------------------------------------------
-    # A0-1: basic heat swing
-    # ------------------------------------------------------------------
-
-    def test_swing_basic_heat(self, tmp_path):
-        """Heat obs: swing_f = abs(peak - start) / 2."""
-        engine = self._make_engine(tmp_path)
-        event = self._make_hvac_event(
-            start_f=66.0,
-            peak_f=70.0,
-            hvac_mode="heat",
-            active_temps=[68.0, 70.0],
-        )
-        obs = self._commit_with_mocked_dt(engine, event)
-        assert obs is not None, "commit must succeed"
-        assert "swing_f" in obs, f"swing_f missing from obs: {obs}"
-        assert obs["swing_f"] == 2.0, f"Expected 2.0, got {obs['swing_f']}"
-
-    # ------------------------------------------------------------------
-    # A0-2: basic cool swing
-    # ------------------------------------------------------------------
-
-    def test_swing_basic_cool(self, tmp_path):
-        """Cool obs: swing_f = abs(trough - start) / 2 (trough = min of active_temps)."""
-        engine = self._make_engine(tmp_path)
-        event = self._make_hvac_event(
-            start_f=78.0,
-            hvac_mode="cool",
-            active_temps=[76.0, 74.0],
-        )
-        obs = self._commit_with_mocked_dt(engine, event, obs_type=OBS_TYPE_HVAC_COOL)
-        assert obs is not None, "commit must succeed"
-        assert "swing_f" in obs, f"swing_f missing from obs: {obs}"
-        # start=78, trough=74, delta=4, swing=2.0
-        assert obs["swing_f"] == 2.0, f"Expected 2.0, got {obs['swing_f']}"
-
-    # ------------------------------------------------------------------
-    # A0-3: below THERMAL_HVAC_MIN_SIGNAL_F — no swing_f
-    # ------------------------------------------------------------------
-
-    def test_swing_below_min_signal(self, tmp_path):
-        """delta < THERMAL_HVAC_MIN_SIGNAL_F (0.5°F) — swing_f must be absent."""
-        from custom_components.climate_advisor.const import THERMAL_HVAC_MIN_SIGNAL_F
+    def test_estimator_is_the_median_of_the_last_k_samples(self, tmp_path):
+        from custom_components.climate_advisor.const import THERMAL_SWING_ESTIMATOR_WINDOW
 
         engine = self._make_engine(tmp_path)
-        # delta = 0.4 < 0.5 → no swing
-        event = self._make_hvac_event(
-            start_f=70.0,
-            peak_f=70.4,
-            hvac_mode="heat",
-            active_temps=[70.2, 70.4],
-        )
-        obs = self._commit_with_mocked_dt(engine, event)
-        assert obs is not None, "commit must succeed"
-        assert "swing_f" not in obs, (
-            f"swing_f should be absent for delta < {THERMAL_HVAC_MIN_SIGNAL_F}°F, got {obs.get('swing_f')}"
-        )
+        engine.record_swing_sample("heat", self._sample(0, 4.9))  # old outlier falls out of the window
+        for i in range(1, THERMAL_SWING_ESTIMATOR_WINDOW + 1):
+            engine.record_swing_sample("heat", self._sample(i, 1.4 if i % 2 else 1.5))
+        model = engine.get_thermal_model()
+        assert model["swing_heat_f"] in (1.4, 1.45, 1.5)
+        assert model["observation_count_swing_heat"] == THERMAL_SWING_ESTIMATOR_WINDOW + 1
+        assert len(engine._state.thermal_model_cache["swing_heat_samples"]) == THERMAL_SWING_ESTIMATOR_WINDOW
 
-    # ------------------------------------------------------------------
-    # A0-4: swing too high (> THERMAL_SWING_MAX_F) — no swing_f
-    # ------------------------------------------------------------------
-
-    def test_swing_out_of_bounds_high(self, tmp_path):
-        """delta=12°F → swing=6.0 > THERMAL_SWING_MAX_F(5.0) — swing_f must be absent."""
+    def test_single_outlier_does_not_move_the_median(self, tmp_path):
         engine = self._make_engine(tmp_path)
-        event = self._make_hvac_event(
-            start_f=66.0,
-            peak_f=78.0,  # delta=12, swing=6.0
-            hvac_mode="heat",
-            active_temps=[72.0, 78.0],
-        )
-        obs = self._commit_with_mocked_dt(engine, event)
-        assert obs is not None, "commit must succeed"
-        assert "swing_f" not in obs, (
-            f"swing_f should be absent when swing > THERMAL_SWING_MAX_F, got {obs.get('swing_f')}"
-        )
+        for i, v in enumerate([1.4, 1.4, 1.5, 4.0, 1.4, 1.5, 1.4]):
+            engine.record_swing_sample("cool", self._sample(i, v))
+        assert engine.get_thermal_model()["swing_cool_f"] == pytest.approx(1.4)
 
-    # ------------------------------------------------------------------
-    # A0-5: swing too low (< THERMAL_SWING_MIN_F) — no swing_f
-    # ------------------------------------------------------------------
-
-    def test_swing_out_of_bounds_low(self, tmp_path):
-        """delta=0.16°F → swing=0.08 < THERMAL_SWING_MIN_F(0.1) — swing_f must be absent."""
+    def test_quantised_samples_report_their_interval(self, tmp_path):
         engine = self._make_engine(tmp_path)
-        event = self._make_hvac_event(
-            start_f=70.0,
-            peak_f=70.16,  # delta=0.16, swing=0.08 < 0.1
-            hvac_mode="heat",
-            active_temps=[70.08, 70.16],
-        )
-        # delta=0.16 >= THERMAL_HVAC_MIN_SIGNAL_F(0.5)? No — 0.16 < 0.5.
-        # Need delta >= 0.5 but swing < 0.1. delta=0.16 is already below min_signal.
-        # Use delta=0.20 (>= 0.5 is impossible with swing=0.08 since swing=delta/2=0.1).
-        # Exactly at boundary: delta=0.20 → swing=0.10 = THERMAL_SWING_MIN_F (excluded by <, not <=).
-        # To get swing < 0.1: delta < 0.2. But delta < 0.5 is already rejected by min_signal.
-        # The min_signal check fires first, so this test uses delta=0.16 (< 0.5 min_signal).
-        # Restate: delta=0.16 is filtered by MIN_SIGNAL check, so swing_f absent.
-        obs = self._commit_with_mocked_dt(engine, event)
-        assert obs is not None, "commit must succeed"
-        assert "swing_f" not in obs, (
-            f"swing_f should be absent when swing < THERMAL_SWING_MIN_F, got {obs.get('swing_f')}"
-        )
+        for i in range(3):
+            engine.record_swing_sample("heat", self._sample(i, 1.0, resolution_f=1.0))
+        model = engine.get_thermal_model()
+        assert model["swing_heat_f"] == pytest.approx(1.0)
+        assert model["swing_heat_resolution_f"] == pytest.approx(1.0)
 
-    # ------------------------------------------------------------------
-    # A0-6: EWMA update
-    # ------------------------------------------------------------------
-
-    def test_swing_ewma_update(self, tmp_path):
-        """Two heat obs with swing_f=2.0 then 3.0 (grade=low, alpha=0.05) update cache correctly."""
+    def test_whole_number_readings_flag_a_whole_degree_sensor_even_if_reported_fine(self, tmp_path):
+        """Resolution is inferred from the READINGS (Issue #1234 D3), not from the value differences:
+        3+ distinct whole-F on/off readings flag whole-degree although the source claimed fine."""
         engine = self._make_engine(tmp_path)
+        for i, (on, off) in enumerate([(67.0, 68.0), (66.0, 68.0), (67.0, 69.0)]):
+            engine.record_swing_sample(
+                "heat",
+                self._sample(i, 2.0, resolution_f=0.0, on_indoor_f=on, off_indoor_f=off, reading_unit="fahrenheit"),
+            )
+        assert engine.get_thermal_model()["swing_heat_resolution_f"] == pytest.approx(1.0)
 
-        obs1 = {
-            "hvac_mode": "heat",
-            "confidence_grade": "low",
-            "swing_f": 2.0,
-            "date": "2026-04-28",
-        }
-        obs2 = {
-            "hvac_mode": "heat",
-            "confidence_grade": "low",
-            "swing_f": 3.0,
-            "date": "2026-04-28",
-        }
-        engine._update_thermal_model_cache(obs1)
-        engine._update_thermal_model_cache(obs2)
-
-        cache = engine._state.thermal_model_cache
-        # After obs1: swing_heat_f = 2.0 (first → seed)
-        # After obs2: swing_heat_f = 0.95*2.0 + 0.05*3.0 = 1.9 + 0.15 = 2.05
-        assert cache["observation_count_swing_heat"] == 2, (
-            f"Expected 2 swing heat obs, got {cache['observation_count_swing_heat']}"
-        )
-        expected = 0.95 * 2.0 + 0.05 * 3.0  # = 2.05
-        assert abs(cache["swing_heat_f"] - expected) < 1e-6, (
-            f"EWMA mismatch: expected {expected}, got {cache['swing_heat_f']}"
-        )
-
-    # ------------------------------------------------------------------
-    # A0-7: default fallback in get_thermal_model()
-    # ------------------------------------------------------------------
+    def test_heat_and_cool_are_independent(self, tmp_path):
+        engine = self._make_engine(tmp_path)
+        for i in range(5):
+            engine.record_swing_sample("heat", self._sample(i, 1.4))
+        model = engine.get_thermal_model()
+        assert model["confidence_swing_heat"] == "medium"
+        assert model["confidence_swing_cool"] == "none"
+        assert model["swing_cool_f"] is None
 
     def test_swing_default_fallback(self, tmp_path):
-        """Empty/None cache → swing_heat_f is None, swing_heat_f_display is 1.5."""
         engine = self._make_engine(tmp_path)
-        # Ensure no cache
         engine._state.thermal_model_cache = None
-
         model = engine.get_thermal_model()
-        assert model["swing_heat_f"] is None, (
-            f"swing_heat_f should be None for empty cache, got {model['swing_heat_f']}"
-        )
-        assert model["swing_heat_f_display"] == 1.5, (
-            f"swing_heat_f_display should default to 1.5, got {model['swing_heat_f_display']}"
-        )
+        assert model["swing_heat_f"] is None
+        assert model["swing_heat_f_display"] == 1.5
 
-    # ------------------------------------------------------------------
-    # A0-8: confidence grade thresholds
-    # ------------------------------------------------------------------
-
-    @pytest.mark.parametrize(
-        "count,expected",
-        [
-            (0, "none"),
-            (1, "low"),
-            (3, "medium"),
-            (10, "high"),
-        ],
-    )
+    @pytest.mark.parametrize("count,expected", [(0, "none"), (1, "low"), (3, "medium"), (10, "high")])
     def test_swing_confidence_grades(self, count, expected):
-        """_grade_swing_confidence returns correct tier for each count."""
         from custom_components.climate_advisor.learning import _grade_swing_confidence
 
-        result = _grade_swing_confidence(count)
-        assert result == expected, f"count={count}: expected {expected!r}, got {result!r}"
+        assert _grade_swing_confidence(count) == expected
 
-    # ------------------------------------------------------------------
-    # A0-9: heat and cool tracked independently
-    # ------------------------------------------------------------------
-
-    def test_swing_independence(self, tmp_path):
-        """5 heat obs → confidence_swing_heat=medium; 0 cool obs → confidence_swing_cool=none."""
-        engine = self._make_engine(tmp_path)
-
-        for _ in range(5):
-            obs = {
-                "hvac_mode": "heat",
-                "confidence_grade": "low",
-                "swing_f": 2.0,
-                "date": "2026-04-28",
-            }
-            engine._update_thermal_model_cache(obs)
-
-        model = engine.get_thermal_model()
-        assert model["confidence_swing_heat"] == "medium", (
-            f"5 heat obs should give 'medium', got {model['confidence_swing_heat']}"
+    def test_pure_rules_edge_cases(self):
+        from custom_components.climate_advisor.swing import (
+            SWING_REJECT_MISSING_INPUT,
+            SWING_REJECT_OUT_OF_BOUNDS,
+            evaluate_swing_cycle,
         )
-        assert model["confidence_swing_cool"] == "none", (
-            f"0 cool obs should give 'none', got {model['confidence_swing_cool']}"
-        )
+
+        base = {"mode": "heat", "ts": "t", "setpoint_f": 70.0, "on_indoor_f": 68.6, "off_indoor_f": 69.0}
+        assert evaluate_swing_cycle(**base).sample["value_f"] == 1.4
+        assert evaluate_swing_cycle(**{**base, "off_indoor_f": None}).reason == SWING_REJECT_MISSING_INPUT
+        assert evaluate_swing_cycle(**{**base, "on_indoor_f": 60.0}).reason == SWING_REJECT_OUT_OF_BOUNDS
 
 
 # ---------------------------------------------------------------------------

@@ -140,8 +140,14 @@ class ChartStateLog:
         lower: float | None = None,
         upper: float | None = None,
         nat_vent_target: float | None = None,
+        indoor_primary: float | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
+
+        indoor_primary: the always-primary indoor reading (``IndoorTempReading.primary_value``,
+            never the sleep-window swap that ``indoor`` may carry), written on
+            ``hvac_action_change`` rows (Issue #1234) for the swing backfill. The key is present
+            only when a value is given, so other rows and older logs are unchanged.
 
         fan_running: fan is physically on right now (active, manual override, or
             untracked).  False when nat-vent is armed but the fan is between cycles,
@@ -183,6 +189,8 @@ class ChartStateLog:
         }
         if event is not None:
             entry["event"] = event
+        if indoor_primary is not None:
+            entry["indoor_primary"] = indoor_primary
 
         self._entries.append(entry)
         self._maybe_prune()

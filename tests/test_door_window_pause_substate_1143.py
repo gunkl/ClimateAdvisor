@@ -60,7 +60,6 @@ def _fsm_inputs(**overrides) -> DoorWindowFsmInputs:
         "grace_active": False,
         "pre_pause_mode_active": False,
         "now": datetime(2026, 10, 28, 14, 0, tzinfo=UTC),
-        "nat_vent_gate_ruled_out": True,
     }
     base.update(overrides)
     return DoorWindowFsmInputs(**base)

@@ -6561,13 +6561,9 @@ class AutomationEngine:
         direct-pause path) — both automatically become FSM-authoritative-capable
         through this one shared wrapper rather than needing individual treatment.
 
-        Issue #757 Phase 6 Step 4 fix: passes ``nat_vent_gate_ruled_out=True`` — both
-        real callers already independently confirmed nat-vent/WHF does NOT currently
-        own HVAC before ever calling this method (see each caller's own guard), for
-        reasons SENSOR_OPENED's own ``decide_nat_vent_gate()`` recomputation cannot see
-        (see ``DoorWindowFsmInputs.nat_vent_gate_ruled_out``'s docstring for the full
-        incident this closes — golden scenario
-        ``issue_629_comfort_band_arm_through_open_window``).
+        Issue #1142: SENSOR_OPENED means "the caller chose to pause" -- both real callers already
+        independently confirmed nat-vent/WHF does NOT currently own HVAC before ever calling this method
+        (see each caller's own guard), and the door/window FSM no longer re-derives the nat-vent gate.
 
         Returns True if HVAC was actively turned off (a real mode transition happened),
         False if HVAC was already off and only the pause flag was set (or if the
@@ -6583,7 +6579,6 @@ class AutomationEngine:
 
         self._resolve_door_window_pause_flags(
             kind=DoorWindowFsmEventKind.SENSOR_OPENED,
-            nat_vent_gate_ruled_out=True,
             hvac_already_off=hvac_already_off,
         )
         # _paused_entity/_paused_since aren't part of _apply_door_window_fsm_state()'s
@@ -6911,7 +6906,6 @@ class AutomationEngine:
                 # _pause_for_door_window(): tell the FSM the gate is ruled out.
                 self._resolve_door_window_pause_flags(
                     kind=DoorWindowFsmEventKind.SENSOR_OPENED,
-                    nat_vent_gate_ruled_out=True,
                     hvac_already_off=hvac_already_off,
                 )
                 self._paused_entity = entity_id
@@ -9781,9 +9775,19 @@ class AutomationEngine:
             # _re_pause_for_open_sensor() is scheduled below, so that task can select
             # its action by reading the already-applied flag instead of independently
             # recomputing the gate and re-writing them.
+            # Issue #1142: the prediction is the nat-vent FSM's own answer for the re-check that follows (same
+            # profile, with the override and grace the handler is about to clear already read as cleared), not a
+            # simplified copy of the gate that could not see the start guards or a soft start.
+            _will_start = self._nat_vent_start_decision(
+                NAT_VENT_START_GRACE_RECHECK,
+                indoor=self._get_indoor_temp_f(),
+                outdoor=self._last_outdoor_temp,
+                override_cleared=True,
+            ).to_state in (NatVentLifecycleState.ACTIVE_FULL_GATE, NatVentLifecycleState.ACTIVE_SOFT_START)
             self._resolve_door_window_pause_flags(
                 kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
                 origin_state=_origin_state,
+                nat_vent_will_start=_will_start,
             )
             self._clear_manual_override_active(
                 "grace_expired", keep_fan_override=_expiring_trigger != "fan_manual_override"
@@ -12108,6 +12112,7 @@ class AutomationEngine:
         apply_reactivation_floor: bool = False,
         start_guards: bool = False,
         soft_start_enabled: bool = True,
+        override_cleared: bool = False,
     ):
         """Build the FSM's input snapshot from current engine state (Issue #594
         Phase R, Step 2). Issue #757 Phase 6 Step 5: this was previously also shared
@@ -12117,6 +12122,10 @@ class AutomationEngine:
         axes, so this is now the sole builder.
 
         Args:
+            override_cleared: Issue #1142. Build the snapshot as it will read AFTER the grace-expiry handler has
+                cleared the manual override and ended the grace (override/grace inputs forced off). Only
+                ``_on_grace_expired()``'s prediction of the re-check passes True; it runs before
+                ``_clear_manual_override_active()`` but the re-check task runs after it.
             soft_start_enabled: Issue #1142. ``NatVentFsmInputs.soft_start_enabled``: the start sites resolve it
                 from their profile and ``CONF_NAT_VENT_SOFT_START_ENABLED``; every other caller keeps True.
             start_guards: Issue #1138 (#1142 D2). ``True`` at the four sites that can START
@@ -12215,6 +12224,9 @@ class AutomationEngine:
         _fan_hardware_active = fan_hardware_active if fan_hardware_active is not None else bool(self._fan_active)
         _override_active = bool(self._fan_override_active or self._manual_override_active)
         _grace_active = grace_active if grace_active is not None else bool(self._grace_active)
+        if override_cleared:
+            _override_active = bool(self._fan_override_active)
+            _grace_active = False
         _sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat_raw))
         _in_sleep_window_val = _in_sleep_window(now, self.config)
         if apply_reactivation_floor:
@@ -12261,8 +12273,8 @@ class AutomationEngine:
             # Issue #1205: the #134 overheat exception never overrides the occupant's fan-off hold. Read live from
             # the engine (not from the grace_active override above, which a caller may force False).
             fan_off_hold_active=self._fan_off_hold_active(),
-            manual_override_active=bool(self._manual_override_active),
-            manual_override_mode=self._manual_override_mode,
+            manual_override_active=bool(self._manual_override_active) and not override_cleared,
+            manual_override_mode=None if override_cleared else self._manual_override_mode,
             start_veto=self._build_nat_vent_start_veto_inputs(now=now, indoor=indoor, outdoor=outdoor)
             if start_guards
             else None,
@@ -12270,7 +12282,12 @@ class AutomationEngine:
         )
 
     def _nat_vent_start_decision(
-        self, profile: NatVentStartProfile, *, indoor: float | None, outdoor: float | None
+        self,
+        profile: NatVentStartProfile,
+        *,
+        indoor: float | None,
+        outdoor: float | None,
+        override_cleared: bool = False,
     ) -> NatVentTransition:
         """Ask the nat-vent FSM "may a fan session start now?" for one site's profile (Issue #1142).
 
@@ -12295,6 +12312,7 @@ class AutomationEngine:
             apply_reactivation_floor=profile.apply_reactivation_floor,
             start_guards=True,
             soft_start_enabled=_soft_start,
+            override_cleared=override_cleared,
         )
         _state = self.nat_vent_lifecycle_state if profile.live_lifecycle_state else NatVentLifecycleState.INACTIVE
         return _nat_vent_transition(_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_inputs))
@@ -12593,7 +12611,7 @@ class AutomationEngine:
         self,
         *,
         now: datetime,
-        nat_vent_gate_ruled_out: bool = False,
+        nat_vent_will_start: bool = False,
         hvac_already_off: bool | None = None,
     ):
         """Build the door/window FSM's input snapshot from current engine state
@@ -12663,7 +12681,7 @@ class AutomationEngine:
             automation_grace_would_start=self._grace_would_start("automation", now),
             manual_override_owns_hvac=self._manual_change_protected(),
             now=now,
-            nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
+            nat_vent_will_start=nat_vent_will_start,
             hvac_already_off=hvac_already_off,
         )
 
@@ -12785,7 +12803,7 @@ class AutomationEngine:
         *,
         kind: DoorWindowFsmEventKind,
         origin_state: DoorWindowLifecycleState | None = None,
-        nat_vent_gate_ruled_out: bool = False,
+        nat_vent_will_start: bool = False,
         hvac_already_off: bool | None = None,
     ) -> None:
         """Single dispatch point for every door/window flag-derivation call site
@@ -12807,11 +12825,9 @@ class AutomationEngine:
         pause action: the live thermostat mode read inside the builder is taken after CA itself
         commanded it off, so it cannot tell an active pause from an idle one.
 
-        ``nat_vent_gate_ruled_out``: forwarded to ``_build_door_window_fsm_inputs()`` —
-        see ``DoorWindowFsmInputs.nat_vent_gate_ruled_out``'s own docstring (Issue #757
-        Phase 6 Step 4 fix). ``_pause_for_door_window()`` and ``handle_door_window_open()``'s
-        pause fall-through (Issue #1132) are the only real callers that pass ``True`` --
-        both have already decided PAUSE on the legacy side before dispatching.
+        ``nat_vent_will_start`` (Issue #1142): the nat-vent FSM's answer to "may a fan session start right now?",
+        forwarded to ``_build_door_window_fsm_inputs()``. Only ``_on_grace_expired()`` passes it (GRACE_TIMER_EXPIRED
+        predicts the outcome of the re-pause task that follows); every other dispatch leaves it False.
 
         Issue #717: also the single emit point for DOOR_PAUSE_STARTED/ENDED — every
         real door/window pause transition already funnels through here regardless of
@@ -12833,7 +12849,7 @@ class AutomationEngine:
                 kind=kind,
                 inputs=self._build_door_window_fsm_inputs(
                     now=dt_util.now(),
-                    nat_vent_gate_ruled_out=nat_vent_gate_ruled_out,
+                    nat_vent_will_start=nat_vent_will_start,
                     hvac_already_off=hvac_already_off,
                 ),
             ),

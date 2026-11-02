@@ -429,3 +429,51 @@ class TestSoftStartEdges:
         assert engine._natural_vent_active is False
         assert engine._paused_by_door is True
         assert notify.called, "a pause that stays is announced"
+
+
+# ---------------------------------------------------------------------------
+# Step 3 -- the grace-expiry prediction is the nat-vent FSM's own answer (flags right after _on_grace_expired,
+# BEFORE the re-check task runs)
+# ---------------------------------------------------------------------------
+
+
+def _expire_grace(engine) -> None:
+    engine._grace_active = True
+    engine._last_grace_trigger = "automation"
+    engine._last_resume_source = "automation"
+    with (
+        patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY),
+        patch(f"{_AUTOMATION}.dt_util.parse_datetime", side_effect=datetime.fromisoformat),
+    ):
+        engine._on_grace_expired("automation", 300, False)
+
+
+class TestGraceExpiryPredictionIsTheFsmsAnswer:
+    def test_plain_gate_predicts_no_pause(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        _expire_grace(engine)
+        assert engine._paused_by_door is False
+
+    def test_soft_start_predicts_no_pause(self):
+        engine = _whf_soft_start_engine()
+        _expire_grace(engine)
+        assert engine._paused_by_door is False
+
+    def test_forecast_veto_predicts_the_pause(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        _forecast_peak_ahead(engine)
+        _expire_grace(engine)
+        assert engine._paused_by_door is True, "a vetoed start is a pause from the first instant"
+
+    def test_no_working_fan_predicts_the_pause(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        engine.config.pop(CONF_FAN_MODE)
+        _expire_grace(engine)
+        assert engine._paused_by_door is True
+
+    def test_manual_override_being_cleared_does_not_block_the_prediction(self):
+        engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
+        engine._manual_override_active = True
+        engine._manual_override_mode = "cool"
+        _expire_grace(engine)
+        assert engine._paused_by_door is False, "the re-check runs after the override is cleared"

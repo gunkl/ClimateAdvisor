@@ -63,17 +63,18 @@ class TestFromNormal:
         t = transition(DoorWindowLifecycleState.NORMAL, _ev(DoorWindowFsmEventKind.SENSOR_OPENED, hvac_mode="off"))
         assert t.to_state == DoorWindowLifecycleState.PAUSED_IDLE
 
-    def test_sensor_opened_nat_vent_eligible_stays_normal(self):
-        # outdoor 60 < indoor 76, outdoor < threshold 80 -> nat-vent gate passes (with a fan, Issue #1140)
+    def test_sensor_opened_means_the_caller_chose_to_pause(self):
+        """Issue #1142: SENSOR_OPENED no longer re-derives the nat-vent gate. Whatever the temperatures say
+        (outdoor 60 < indoor 76 would pass a gate; a fan is configured), the caller already asked the nat-vent
+        FSM and chose PAUSE, so the transition records the pause."""
         t = transition(
             DoorWindowLifecycleState.NORMAL,
             _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0, fan_mode="whole_house_fan"),
         )
-        assert t.to_state == DoorWindowLifecycleState.NORMAL
-        assert t.outcome == "nat_vent_eligible"
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+        assert t.outcome == "pause"
 
     def test_sensor_opened_same_window_without_a_fan_pauses(self):
-        # Issue #1140 mirror: identical temperatures, no working fan -> an open window is just an open window
         t = transition(
             DoorWindowLifecycleState.NORMAL,
             _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0, fan_mode="disabled"),
@@ -289,32 +290,18 @@ class TestFromPaused:
 
 
 class TestFromGrace:
-    def test_sensor_opened_outdoor_too_warm_suppressed(self):
-        t = transition(DoorWindowLifecycleState.GRACE, _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=90.0))
-        assert t.to_state == DoorWindowLifecycleState.GRACE
-        assert t.outcome == "grace_suppressed"
-
-    def test_sensor_opened_real_gate_fails_suppressed_not_composite_state(self):
-        # Issue #655 fix: the grace guard is now gated on the real reactivation gate
-        # (nat_vent_gate_entered), not an outdoor-only proxy. outdoor==indoor (76==76)
-        # means the real gate fails (not strictly less), so this must stay suppressed
-        # — it must NOT fall through to a composite paused state, even though outdoor
-        # alone (76 < threshold 80) would have looked "cool enough" under the old,
-        # since-removed proxy check this scenario used to exercise.
-        t = transition(
-            DoorWindowLifecycleState.GRACE,
-            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=76.0, indoor=76.0, hvac_mode="cool"),
-        )
-        assert t.to_state == DoorWindowLifecycleState.GRACE
-        assert t.outcome == "grace_suppressed"
-
-    def test_sensor_opened_falls_through_to_nat_vent_eligible_stays_grace(self):
-        t = transition(
-            DoorWindowLifecycleState.GRACE,
-            _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=60.0, indoor=76.0, fan_mode="whole_house_fan"),
-        )
-        assert t.to_state == DoorWindowLifecycleState.GRACE
-        assert t.outcome == "nat_vent_eligible"
+    def test_sensor_opened_from_grace_records_the_pause_during_grace(self):
+        """Issue #1142: the grace question (a grace that tolerates a still-open sensor) is answered by the handler
+        BEFORE it dispatches; a SENSOR_OPENED that arrives means the pause was chosen, so grace is preserved
+        under the composite state whatever the temperatures say."""
+        for kwargs in (
+            {"outdoor": 90.0},
+            {"outdoor": 76.0, "indoor": 76.0, "hvac_mode": "cool"},
+            {"outdoor": 60.0, "indoor": 76.0, "fan_mode": "whole_house_fan"},
+        ):
+            t = transition(DoorWindowLifecycleState.GRACE, _ev(DoorWindowFsmEventKind.SENSOR_OPENED, **kwargs))
+            assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE, kwargs
+            assert t.outcome == "pause"
 
     def test_nat_vent_exited_sensor_still_open_to_composite_state(self):
         t = transition(DoorWindowLifecycleState.GRACE, _ev(DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN))
@@ -342,7 +329,18 @@ class TestFromGrace:
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
         assert t.outcome == "re_pause"
 
-    def test_grace_timer_expired_re_pause_nat_vent_eligible_goes_normal(self):
+    def test_grace_timer_expired_re_pause_nat_vent_will_start_goes_normal(self):
+        """Issue #1142: the prediction is the nat-vent FSM's own answer, passed in -- not a second copy of the gate."""
+        t = transition(
+            DoorWindowLifecycleState.GRACE,
+            _ev(DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED, any_sensor_open=True, nat_vent_will_start=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
+        assert t.outcome == "re_pause"
+
+    def test_grace_timer_expired_re_pause_ignores_temperatures_when_the_fsm_said_no(self):
+        # outdoor 60 < indoor 76 with a fan would pass a simplified gate, but the nat-vent FSM (start guards, lockout,
+        # a refused fan) said no -> the re-pause is a real pause
         t = transition(
             DoorWindowLifecycleState.GRACE,
             _ev(
@@ -351,16 +349,8 @@ class TestFromGrace:
                 outdoor=60.0,
                 indoor=76.0,
                 fan_mode="whole_house_fan",
+                nat_vent_will_start=False,
             ),
-        )
-        assert t.to_state == DoorWindowLifecycleState.NORMAL
-        assert t.outcome == "re_pause"
-
-    def test_grace_timer_expired_re_pause_without_a_fan_goes_to_the_pause(self):
-        # Issue #1140 mirror: same temperatures, no working fan -> the re-pause is a real pause
-        t = transition(
-            DoorWindowLifecycleState.GRACE,
-            _ev(DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED, any_sensor_open=True, outdoor=60.0, indoor=76.0),
         )
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
 

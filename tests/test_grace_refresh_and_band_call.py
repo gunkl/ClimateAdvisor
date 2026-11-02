@@ -70,6 +70,8 @@ def _minimal_engine() -> AutomationEngine:
             "_manual_grace_cancel": None,
             "_automation_grace_cancel": None,
             "_grace_active": True,  # grace is active when expiry fires
+            "_outdoor_temp_today_peak": None,
+            "_outdoor_temp_today_sample_count": 0,
             "_last_resume_source": "manual",
             "_grace_end_time": None,
             "_grace_duration_seconds": 0,

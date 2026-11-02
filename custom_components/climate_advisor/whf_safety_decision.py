@@ -43,9 +43,35 @@ WHF_ACTIVE_HVAC_MODES = frozenset({"heat", "cool", "heat_cool", "auto"})
 WHF_SETTLE_AFTER_ON_S = 10.0
 WHF_SEALED_CONFIRM_S = 10.0
 WHF_SENSOR_UNKNOWN_GRACE_S = 60.0
+# Issue #1215: how long after Climate Advisor's own WHF stop command the physical reading is still ALLOWED to read
+# "on". The fan is read through a power-detect helper that lags the command: 15.3 s and 16.0 s measured on the
+# production install (15:06:45.9 -> 15:07:01.26, 15:12:35.02 -> 15:12:51.07), 15.5 s typical. 20 s is the 16.0 s worst
+# case plus a 4 s margin; it is also inside Rule 1's 30 s bound, so a stop that really did not take is still retried
+# in time for the next 30 s window. Inside it, "control entity off, physical on" is expected lag, never drift.
+WHF_STOP_CONVERGE_WINDOW_S = 20.0
+# The mirror for a start: the power reading shows "on" ~5.5 s after the command (15:12:30.135 -> 15:12:35.622).
+# 10 s is that, doubled. Inside it, "control entity on, physical off" is the fan spinning up, not the #449 drift.
+WHF_START_CONVERGE_WINDOW_S = 10.0
 # After a safety stop the enforcer re-checks this long later: a stop that did not take is retried, and a
-# command-only fan (no readable physical state) is treated as off from then on (Issue #1176).
-WHF_STOP_VERIFY_S = 12.0
+# command-only fan (no readable physical state) is treated as off from then on (Issue #1176). Issue #1215: it
+# fires just after the convergence window (it was 12 s, i.e. BEFORE a 15.5 s lag could ever have confirmed the stop).
+WHF_STOP_VERIFY_S = WHF_STOP_CONVERGE_WINDOW_S + 0.5
+# Issue #1215: a stop that did not take is retried (a plain ``turn_off``, never an "on" first) at most this many times,
+# so at most 1 + 2 = 3 commands per stop episode. One command is all a working install needs; the retries cover a
+# dropped one-way RF transmission, and each costs a whole convergence window, so three attempts span ~60 s, enough to
+# know the stop is not taking without ever becoming the 66-commands-in-two-minutes storm of 2026-11-01.
+WHF_STOP_MAX_RETRIES = 2
+# After the retries are spent the enforcer leaves the fan alone this long (the alert has been raised) and then starts
+# a fresh episode, so a fan that stays on is re-attempted every 5 minutes, not every 15 s tick. Equals the toggle floor.
+WHF_STOP_GIVEUP_HOLD_S = 300.0
+# Issue #1215: after a sealed-house stop the HVAC restore waits until the fan has read physically off this long. Just
+# over the 5.5 s power-reading lag on a start: a restart commanded by anything while the stop was confirming would show
+# as "on" within that time, so a restore never lands on a fan that is about to read on again (15:12:35 -> 15:12:46).
+WHF_RESTORE_QUIET_S = 6.0
+# Issue #1215: after an OCCUPANT remote press (seen at once as an RF event) the power reading still lags: 5.5 s on the
+# production history, 8-15 s in #1198, up to the firmware's 20 s on-lag default. For that long Climate Advisor starts
+# no fan of its own (the fan is on its way up; a start would send off, then on, to it).
+WHF_OCCUPANT_PRESS_PENDING_S = 20.0
 # An on-transition this close to Climate Advisor's own last real fan command is CA's, not the occupant's.
 WHF_OWN_COMMAND_ECHO_S = 45.0
 
@@ -114,6 +140,10 @@ class WhfSafetyInputs:
     occupant_fan_on_at  -> when the occupant turned the fan on (None: not an occupant action)
     occupant_hvac_on_at -> when the occupant turned HVAC on (None: not an occupant action)
     whf_owns_hvac       -> HVAC is already suppressed for a WHF session
+    stop_in_flight_for_s -> Issue #1215: seconds since Climate Advisor's own stop command while that stop is still
+                           inside its convergence window and the fan has not yet read off; None otherwise. The power
+                           reading lags the command, so "running" inside the window is the stop working, not a fresh
+                           violation.
     """
 
     fan_mode: str
@@ -126,6 +156,7 @@ class WhfSafetyInputs:
     occupant_fan_on_at: datetime | None
     occupant_hvac_on_at: datetime | None
     whf_owns_hvac: bool
+    stop_in_flight_for_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +168,7 @@ class WhfSafetyDecision:
     retry_in_s: float | None = None
     stale_sensor_count: int = 0  # sensors counted closed because they were unknown for > 60 s
     sealed: bool = False
+    in_flight: bool = False  # Issue #1215: NONE because Climate Advisor's own stop is still converging
 
 
 def sensor_reading(
@@ -188,6 +220,18 @@ def decide_whf_safety(inputs: WhfSafetyInputs) -> WhfSafetyDecision:
     running = inputs.fan_on if inputs.fan_on is not None else inputs.fan_believed_on
     if not running:
         return WhfSafetyDecision(WhfSafetyAction.NONE, "fan not running")
+
+    # Issue #1215: Climate Advisor's own stop is still converging. One stop runs at a time: the physical reading lags
+    # the command, so "running" inside the window is the stop working, not a fresh violation. Deciding again here is
+    # what restarted the fan 29 times in two minutes. The window ends (and the stop is judged, retried or reported)
+    # in the shell, not here.
+    if inputs.stop_in_flight_for_s is not None:
+        return WhfSafetyDecision(
+            WhfSafetyAction.NONE,
+            f"stop in flight ({inputs.stop_in_flight_for_s:.0f}s of {WHF_STOP_CONVERGE_WINDOW_S:.0f}s):"
+            " awaiting the physical reading",
+            in_flight=True,
+        )
 
     stale = sum(
         1 for s in inputs.sensors if s.unknown_for_s is not None and s.unknown_for_s > WHF_SENSOR_UNKNOWN_GRACE_S

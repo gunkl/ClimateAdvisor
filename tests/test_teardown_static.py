@@ -215,7 +215,6 @@ _BARE_TASK_RATCHET = {
     ("coordinator.py", "_occupancy_away_timer_expired"): 1,
     ("coordinator.py", "_on_post_grace_fan_check"): 1,
     ("coordinator.py", "_on_startup_coalesce_timer"): 1,
-    ("coordinator.py", "_on_whf_release_reclassify"): 1,
     ("coordinator.py", "_schedule_retry"): 1,
     ("coordinator.py", "_tou_av_window_start"): 1,
     ("coordinator.py", "_update_comfort_stall"): 2,

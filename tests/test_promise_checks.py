@@ -452,6 +452,22 @@ class TestP9WhfSealed:
         rs = [rd(0, fan_on=True, contacts_open=False), rd(0.5, fan_on=True, contacts_open=True)]
         assert hits_for("whf_sealed", make_input(rs), self.WHF) == []
 
+    def test_1215_a_closed_run_is_measured_to_the_reading_that_closed_it_not_the_last_sample_inside_it(self):
+        """2026-11-01: the fan ran 15:04:04 -> 15:07:01 (177 s) and the promise reported 87 s, because the last STORED
+        reading inside the run was at +87 s and the window-open reading that ended it was not counted."""
+        rs = [
+            rd(0.0, fan_on=True, contacts_open=False),
+            rd(87 / 60, fan_on=True, contacts_open=False),
+            rd(177 / 60, fan_on=True, contacts_open=True),  # 15:06:44 window opens (reading taken at the transition)
+        ]
+        (h,) = hits_for("whf_sealed", make_input(rs), self.WHF)
+        assert "177 seconds" in h.detail, h.detail
+
+    def test_1215_a_run_with_a_single_stored_reading_that_was_closed_late_is_no_longer_invisible(self):
+        rs = [rd(0.0, fan_on=True, contacts_open=False), rd(3.0, fan_on=False, contacts_open=False)]
+        (h,) = hits_for("whf_sealed", make_input(rs), self.WHF)
+        assert "180 seconds" in h.detail, h.detail
+
     def test_twin_observe_only_and_the_occupant_was_notified_is_accepted(self):
         """Owner decision 1: with automation off CA cannot stop the fan; the promise there is 'you were told'."""
         rs = [rd(m, fan_on=True, contacts_open=False) for m in range(0, 6)]

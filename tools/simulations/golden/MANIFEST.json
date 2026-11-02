@@ -439,8 +439,8 @@
     "issue": 498
   },
   "issue_882_sealed_house_whf_override": {
-    "sha256": "06044ee94af8376230512f26c8259576d86044462adfb36d401c59d1845fd35a",
-    "signed": "2026-09-09",
+    "sha256": "1a8e698986a86beda18934949f3367937e42de975a4d8f999a3776d308838794",
+    "signed": "2026-11-01",
     "issue": 882
   },
   "issue_764_bedtime_economizer_teardown_gate": {

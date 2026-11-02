@@ -277,6 +277,12 @@ from .temperature import (
 from .thermal_lead_time import compute_lead_minutes_from_rate
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
+    WHF_OCCUPANT_PRESS_PENDING_S,
+    WHF_RESTORE_QUIET_S,
+    WHF_START_CONVERGE_WINDOW_S,
+    WHF_STOP_CONVERGE_WINDOW_S,
+    WHF_STOP_GIVEUP_HOLD_S,
+    WHF_STOP_MAX_RETRIES,
     WHF_STOP_VERIFY_S,
     SensorReading,
     WhfSafetyAction,
@@ -1166,6 +1172,7 @@ class AutomationEngine:
     _whf_safety_queued: bool = False
     _whf_safety_retry_cancel: Any | None = None
     _whf_safety_verify_cancel: Any | None = None
+    _whf_safety_quiet_cancel: Any | None = None  # Issue #1215: re-asks the HVAC restore after its quiet window
     # When the occupant last turned HVAC on (heat/cool/heat_cool) at the thermostat; None = CA's own
     # commands never count (rule 2 compares OCCUPANT actions only).
     _occupant_hvac_on_at: datetime | None = None
@@ -1174,6 +1181,19 @@ class AutomationEngine:
     # Issue #1176: a sealed-house stop's HVAC restore waits for the fan to read physically off.
     _whf_restore_pending: bool = False
     _whf_restore_verify_passed: bool = False
+    # Issue #1215: the stop memory. Climate Advisor's last command to the whole-house fan control entity
+    # (direction "on"/"off", when, and whether the entity read "on" just before), and whether the physical reading
+    # has since confirmed it. The power reading lags a command by up to ~16 s, so this is what tells "the stop is
+    # converging" from "the stop did not take" (``_whf_command_in_flight``).
+    _whf_last_command: tuple[str, datetime, bool | None] | None = None
+    _whf_last_command_confirmed: bool = False
+    _whf_stop_attempts: int = 0  # stop commands sent in the current episode (reset when the fan reads off)
+    _whf_stop_gave_up_at: datetime | None = None
+    _whf_stop_failure_alerted: bool = False
+    _whf_off_seen_at: datetime | None = None  # when the fan was first seen physically off since a stop (restore quiet)
+    _whf_forced_start_cancel: Any | None = None
+    _occupant_fan_action_at: datetime | None = None  # Issue #1215: last occupant press seen (RF event or power change)
+    _whf_forced_start_at: datetime | None = None
     _whf_safety_unenforceable_logged: bool = False
     _whf_safety_observe_logged: bool = False
     # When the occupant last pressed the WHOLE-HOUSE fan (not the thermostat blower); None = no WHF press.
@@ -2695,6 +2715,10 @@ class AutomationEngine:
                 Issue #1045 ``"persisted"``) — marks this override as restored across an HA
                 restart rather than freshly detected, for the log line and Activity event.
         """
+        if restored_from is None and not hvac_fan:
+            # Issue #1215: an occupant WHF action (RF event or power change); a restart re-arm or the thermostat's
+            # own blower is not one.
+            self.note_occupant_fan_action()
         # Issue #731 Phase 5: origin_state captured before any of this method's writes —
         # routed through _resolve_fan_fsm_state(). See the resolve call below (after all
         # the real direct writes) for the "group 1" wiring shape.
@@ -2951,6 +2975,9 @@ class AutomationEngine:
                 origin_state=_settle_origin_state,
             )
             return
+
+        # Issue #1215: an occupant fan action -- past the wrong-fan and RF-timer settle returns, which are not.
+        self.note_occupant_fan_action()
 
         if _manual_origin is not None:
             _LOGGER.info(
@@ -10967,12 +10994,154 @@ class AutomationEngine:
         override flag is the best remaining evidence. ``_fan_active`` is deliberately NOT consulted:
         a safety stop exists to catch the fan CA does not own.
         """
+        # Issue #1215: inside the convergence window of Climate Advisor's own stop the lagging reading still says
+        # "on". That is the stop working, not a fan to stop again (a second command here restarted the fan).
+        if self._whf_stop_in_flight() is not None:
+            return False
         cb = self._get_fan_physical_state_callback
         if cb is not None:
             physical = cb()
             if physical is not None:
                 return physical is True
         return bool(self._fan_override_active)
+
+    # ── Issue #1215: the WHF command memory ───────────────────────────────────────────────────
+    # The dual-entity install reads the fan through a power-detect helper that lags every command (~5.5 s to show
+    # on, ~15.5 s to show off on the production install). Without a memory of what Climate Advisor itself just
+    # commanded, "control entity off, physical on" after a stop looks like drift and was "corrected" by an on-then-off
+    # transition that restarted the fan, 29 times in two minutes. ONE predicate (``_whf_command_in_flight``) answers
+    # "is the physical reading still allowed to disagree with my last command" for the safety decision, the safety
+    # idempotency checks, ``_deactivate_fan``, ``_command_whf_control_entity`` and drift reconciliation.
+
+    def note_occupant_fan_action(self) -> None:
+        """Remember that the OCCUPANT just acted on the whole-house fan (RF remote event or power change).
+
+        Read by ``_activate_fan`` (do not start a fan the occupant is in the middle of starting: the power reading
+        lags an RF press by 5-20 s, so the fan still reads off) and by the forced-start second step (an occupant
+        action since step 1 aborts it). Issue #1215.
+        """
+        self._occupant_fan_action_at = dt_util.now()
+
+    def _occupant_fan_action_pending(self) -> bool:
+        at = self._occupant_fan_action_at
+        if not isinstance(at, datetime):
+            return False
+        try:
+            age = (dt_util.now() - at).total_seconds()
+        except TypeError:
+            return False
+        return 0 <= age < WHF_OCCUPANT_PRESS_PENDING_S
+
+    def _whf_hvac_restore_deferred(self) -> bool:
+        """True while a WHF stop's HVAC restore belongs to the ONE gated release (Issue #1215, Rule 2).
+
+        Every HVAC restore after a whole-house-fan stop must go through ``_complete_whf_safety_release``: while a
+        sealed-house stop's release is pending, or the house is sealed and the fan still reads physically on, no
+        other path (the untracked-fan reconcile, a nat-vent exit, a deferred closed-window exit) may write the
+        pre-fan mode back or release the suppression. Otherwise a fan that cannot be stopped runs beside a restored
+        AC (CRITICAL ac_whf_mutex). The gated release itself clears ``_whf_restore_pending`` first and runs only
+        once the fan reads physically off, so it is never blocked by this.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return False
+        if self._whf_restore_pending:
+            return True
+        return self._fan_physically_on_for_release() and self._whf_start_blocked_by_sealed_house()
+
+    def _record_whf_command(self, direction: str, *, control_was_on: bool | None) -> None:
+        """Remember Climate Advisor's own command to the WHF control entity (direction ``"on"``/``"off"``)."""
+        self._whf_last_command = (direction, dt_util.now(), control_was_on)
+        self._whf_last_command_confirmed = False
+
+    def last_whf_command_direction(self, within_s: float = 30.0) -> str | None:
+        """Direction (``"on"``/``"off"``) of Climate Advisor's last WHF control command if it is still recent.
+
+        Used by the RF echo guard to match an incoming remote event to the command it could be an echo of.
+        ``None`` when there is no recent WHF command, or a newer fan command of another kind (the thermostat
+        blower) owns the echo window, so the caller falls back to treating every event as a possible echo.
+        """
+        mem = self._whf_last_command
+        if mem is None:
+            return None
+        direction, at, _ = mem
+        try:
+            age = (dt_util.now() - at).total_seconds()
+        except TypeError:
+            return None
+        if age < 0 or age >= within_s:
+            return None
+        cmd_time = self._fan_command_time
+        if isinstance(cmd_time, datetime):
+            try:
+                if (cmd_time - at).total_seconds() > 1.0:
+                    return None
+            except TypeError:
+                return None
+        return direction
+
+    def _whf_command_in_flight(self, direction: str) -> float | None:
+        """Seconds since Climate Advisor's last WHF ``direction`` command while its effect is still converging.
+
+        In flight = the last command went that way, is younger than its convergence window
+        (``WHF_STOP_CONVERGE_WINDOW_S`` / ``WHF_START_CONVERGE_WINDOW_S``) and the physical reading has not yet
+        shown the commanded state. The moment it does, the command is confirmed and stays confirmed (a later
+        reading the other way is a real change, not lag). Unreadable physical state (command-only install) falls
+        back to the window alone. ``None`` when nothing is converging.
+        """
+        mem = self._whf_last_command
+        if mem is None or mem[0] != direction or self._whf_last_command_confirmed:
+            return None
+        window = WHF_STOP_CONVERGE_WINDOW_S if direction == "off" else WHF_START_CONVERGE_WINDOW_S
+        try:
+            age = (dt_util.now() - mem[1]).total_seconds()
+        except TypeError:
+            return None
+        if age < 0 or age >= window:
+            return None
+        cb = self._get_fan_physical_state_callback
+        physical = cb() if cb is not None else None
+        if isinstance(physical, bool) and physical is (direction == "on"):
+            self._whf_last_command_confirmed = True
+            return None
+        return age
+
+    def _whf_stop_in_flight(self) -> float | None:
+        """Seconds since Climate Advisor's own WHF stop while it is still converging, else None (Issue #1215)."""
+        return self._whf_command_in_flight("off")
+
+    def _whf_control_state_is(self, state: str) -> bool:
+        entity = self.config.get(CONF_FAN_ENTITY)
+        current = self.hass.states.get(entity) if entity else None
+        return current is not None and current.state == state
+
+    def _note_whf_fan_read_off(self) -> None:
+        """The fan reads physically off: the stop episode (attempts, give-up, failure report) is over (Issue #1215)."""
+        self._whf_safety_seen_off_since_stop = True
+        self._whf_stop_attempts = 0
+        self._whf_stop_gave_up_at = None
+        self._whf_stop_failure_alerted = False
+
+    def _reset_whf_stop_episode(self) -> None:
+        """End the stop episode: attempts, give-up hold and failure report start fresh (Issue #1215)."""
+        self._whf_stop_attempts = 0
+        self._whf_stop_gave_up_at = None
+        self._whf_stop_failure_alerted = False
+
+    def _whf_stop_hold_active(self, now: datetime) -> bool:
+        """True while the enforcer is holding off after giving up on a stop (Issue #1215)."""
+        gave_up = self._whf_stop_gave_up_at
+        if gave_up is None:
+            return False
+        try:
+            if (now - gave_up).total_seconds() < WHF_STOP_GIVEUP_HOLD_S:
+                return True
+        except TypeError:
+            pass
+        self._whf_stop_gave_up_at = None  # hold over: the next stop starts a fresh episode
+        self._whf_stop_attempts = 0
+        self._whf_stop_failure_alerted = False
+        return False
 
     def _whf_safety_snapshot(self) -> WhfSafetySnapshot:
         """Ground-truth snapshot: from the coordinator callback, else from the bare engine callbacks."""
@@ -11013,7 +11182,12 @@ class AutomationEngine:
         # truth when readable, else Climate Advisor's own flags (the unenforceable-install fallback).
         physical = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
         if physical is False:
-            self._whf_safety_seen_off_since_stop = True
+            self._note_whf_fan_read_off()
+        # Issue #1215: one stop at a time. While Climate Advisor's own stop is converging (the power reading lags the
+        # command) or the enforcer is holding after giving up, every trigger (the fan entity flipping because of OUR
+        # command, the tick, the settle timer) would only re-decide the same stop.
+        if self._whf_stop_in_flight() is not None or self._whf_stop_hold_active(dt_util.now()):
+            return
         # A sealed-house stop whose HVAC restore is still waiting needs the check to run even though the fan
         # now reads off (that reading is what releases it) -- Issue #1176.
         if not self._whf_restore_pending and (
@@ -11044,7 +11218,12 @@ class AutomationEngine:
             return await self._enforce_whf_safety_locked(trigger, sealed_confirmed=sealed_confirmed)
 
     def _cancel_whf_safety_timers(self) -> None:
-        for attr in ("_whf_safety_retry_cancel", "_whf_safety_verify_cancel"):
+        for attr in (
+            "_whf_safety_retry_cancel",
+            "_whf_safety_verify_cancel",
+            "_whf_safety_quiet_cancel",
+            "_whf_forced_start_cancel",
+        ):
             cancel = getattr(self, attr, None)
             if cancel:
                 cancel()
@@ -11100,7 +11279,7 @@ class AutomationEngine:
 
         snap = self._whf_safety_snapshot()
         if snap.fan_on is False:
-            self._whf_safety_seen_off_since_stop = True
+            self._note_whf_fan_read_off()
         if self._whf_restore_pending:
             # Issue #1176: the HVAC restore of an earlier sealed-house stop is waiting for the fan to read off.
             if trigger == "stop_verify":
@@ -11130,8 +11309,17 @@ class AutomationEngine:
                 occupant_fan_on_at=self._occupant_fan_on_at() or snap.occupant_fan_on_at,
                 occupant_hvac_on_at=self._occupant_hvac_on_at or snap.occupant_hvac_on_at,
                 whf_owns_hvac=self._whf_owns_hvac(),
+                stop_in_flight_for_s=self._whf_stop_in_flight(),
             )
         )
+
+        # Nothing to stop any more (a window opened, the fan is off): the stop episode, if any, is over.
+        if (
+            decision.action in (WhfSafetyAction.NONE, WhfSafetyAction.DEFER)
+            and not decision.in_flight
+            and not decision.sealed
+        ):
+            self._reset_whf_stop_episode()
 
         if decision.stale_sensor_count and decision.action is not WhfSafetyAction.NONE:
             self._alert_whf_stale_sensors(snap, decision.stale_sensor_count)
@@ -11170,16 +11358,32 @@ class AutomationEngine:
         reason_text = (
             "sealed house — stopping whole-house fan" if sealed else "HVAC turned on — stopping whole-house fan"
         )
-        _LOGGER.warning(
-            "WHF safety stop: reason=%s trigger=%s sealed=%s fan_on=%s fan_override=%s rf_timer_h=%s nat_vent=%s",
+        now = dt_util.now()
+        if self._whf_stop_hold_active(now):
+            _LOGGER.debug("WHF safety stop: held after giving up, next attempt later (trigger=%s)", trigger)
+            return None
+        attempt = self._whf_stop_attempts + 1
+        if attempt > 1:
+            # The previous stop's convergence window has ended and the fan still reads on: judge it.
+            if attempt > 1 + WHF_STOP_MAX_RETRIES:
+                self._give_up_whf_stop(trigger=trigger)
+                return None
+            self._judge_unconverged_whf_stop(trigger=trigger)
+        _LOGGER.info(
+            "WHF safety stop sending plain turn_off: attempt=%d/%d reason=%s trigger=%s sealed=%s fan_on=%s"
+            " control=%s fan_override=%s rf_timer_h=%s nat_vent=%s",
+            attempt,
+            1 + WHF_STOP_MAX_RETRIES,
             decision.reason,
             trigger,
             sealed,
             snap.fan_on,
+            self._whf_control_state_name(),
             self._fan_override_active,
             self._fan_remote_timer_hours,
             self._natural_vent_active,
         )
+        _command_before = self._whf_last_command
         result = await self._deactivate_fan(
             reason=reason_text,
             # Owner principle (Issue #1133): no hand-back. A sealed-house stop gives the thermostat back through
@@ -11192,16 +11396,89 @@ class AutomationEngine:
             emit_event=emit_event,
             safety=True,
         )
+        if (
+            result is FanCommandResult.EXECUTED
+            and self._whf_last_command is not _command_before
+            and self._whf_last_command is not None
+            and self._whf_last_command[0] == "off"
+        ):
+            self._whf_stop_attempts = attempt
         if sealed and result in (FanCommandResult.EXECUTED, FanCommandResult.ALREADY_IN_STATE):
             self._whf_restore_pending = True
             # Nothing was commanded when the fan was already off, so there is no verify window to wait for.
             self._whf_restore_verify_passed = result is FanCommandResult.ALREADY_IN_STATE
+            if result is FanCommandResult.ALREADY_IN_STATE:
+                self._whf_off_seen_at = now - timedelta(seconds=WHF_RESTORE_QUIET_S)  # off already: no quiet to wait
+            else:
+                self._whf_off_seen_at = None
             self._cancel_fan_thermo_backstop()  # the release this stop used to make also ended the backstop
         if result is FanCommandResult.EXECUTED:
             self._after_whf_safety_stop(result, sealed=sealed, reason=reason_text, trigger=trigger)
         if self._whf_restore_pending:
             await self._complete_whf_safety_release(trigger=trigger)
         return result
+
+    def _whf_control_state_name(self) -> str:
+        entity = self.config.get(CONF_FAN_ENTITY)
+        current = self.hass.states.get(entity) if entity else None
+        return str(current.state) if current is not None else "none"
+
+    def _judge_unconverged_whf_stop(self, *, trigger: str) -> None:
+        """A stop's convergence window ended with the fan still on and Climate Advisor about to retry (Issue #1215).
+
+        If the control entity reads off, a plain ``turn_off`` is no transition at all -- on a template fan it
+        transmits nothing -- so the retry cannot be trusted to work: say so, loudly, now. (The retry still goes out;
+        another stack may act on it. It is never an "on" first: that would restart the fan in a sealed house.)
+        """
+        if not self._whf_stop_failure_alerted and self._whf_control_state_is("off"):
+            self._whf_stop_failure_alerted = True
+            self._alert_whf_stop_failed(trigger=trigger, attempts=self._whf_stop_attempts)
+
+    def _give_up_whf_stop(self, *, trigger: str) -> None:
+        """The retries are spent and the fan still runs: report once, then hold off for a while (Issue #1215)."""
+        self._whf_stop_gave_up_at = dt_util.now()
+        if not self._whf_stop_failure_alerted:
+            self._whf_stop_failure_alerted = True
+            self._alert_whf_stop_failed(trigger=trigger, attempts=self._whf_stop_attempts)
+        _LOGGER.warning(
+            "WHF safety stop gave up: attempts=%d hold_s=%.0f trigger=%s control=%s -- the fan is still running on a"
+            " sealed house; no further command for the hold, then a fresh attempt",
+            self._whf_stop_attempts,
+            WHF_STOP_GIVEUP_HOLD_S,
+            trigger,
+            self._whf_control_state_name(),
+        )
+
+    def _alert_whf_stop_failed(self, *, trigger: str, attempts: int) -> None:
+        """WARNING + occupant alert + Activity Record row: the whole-house fan will not stop (Issue #1215).
+
+        The loud half of the firmware-option-1 contract. Climate Advisor stops the fan with a plain ``turn_off``
+        and nothing else; a QuietCool controller whose fan entity does not follow the remote's real power state
+        reads "off" for a fan started from the remote, so that command transmits nothing and the fan keeps running.
+        There is no on-then-off fallback (it restarts the fan in a sealed house); the occupant is told instead.
+        """
+        mem = self._whf_last_command
+        control_was_on = mem[2] if mem is not None and mem[0] == "off" else None
+        if control_was_on is False:
+            detail = "control entity already reads off (firmware may not reflect remote power state)"
+        else:
+            detail = f"the fan was still running after {max(attempts, 1)} off command(s)"
+        _LOGGER.warning(
+            "WHF safety stop failed: whole-house fan could not be stopped: %s"
+            " attempts=%d trigger=%s control=%s role=%s",
+            detail,
+            attempts,
+            trigger,
+            self._whf_control_state_name(),
+            self.role,
+        )
+        self._record_action("Whole-house fan could not be stopped", detail)
+        if not self._recent_duplicate("whf_stop_failed", (control_was_on is False,), window_seconds=3600):
+            self._notify_whf_safety(
+                "Climate Advisor — whole-house fan could not be stopped",
+                f"The whole-house fan is running with every door and window closed and Climate Advisor could not stop"
+                f" it: {detail}. Turn it off at the remote or the wall switch, or open a window.",
+            )
 
     async def _observe_only_whf_notice(self, trigger: str) -> None:
         """Observe-only: notify ONCE per sealed-house episode that the whole-house fan is running (Issue #1144).
@@ -11327,9 +11604,24 @@ class AutomationEngine:
         if not self._whf_restore_pending:
             return False
         if self._fan_physically_on_for_release():
+            self._whf_off_seen_at = None  # on (again): the quiet window starts over when it next reads off
             return True
         physical = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
-        return physical is None and not self._whf_restore_verify_passed
+        if physical is None:
+            return not self._whf_restore_verify_passed
+        # Issue #1215: read off is not yet "stopped for good". Heat/cool waits until the fan has read off for the quiet
+        # window, so a fan that restarts while the stop is still confirming never meets a restored thermostat.
+        return self._whf_restore_quiet_remaining_s() > 0
+
+    def _whf_restore_quiet_remaining_s(self) -> float:
+        """Seconds left of the quiet window after the fan first read physically off following a stop (Issue #1215)."""
+        now = dt_util.now()
+        if self._whf_off_seen_at is None:
+            self._whf_off_seen_at = now
+        try:
+            return max(0.0, WHF_RESTORE_QUIET_S - (now - self._whf_off_seen_at).total_seconds())
+        except TypeError:
+            return 0.0
 
     async def _complete_whf_safety_release(self, *, trigger: str) -> bool:
         """Give the thermostat back after a sealed-house safety stop once the fan is confirmed off (Issue #1176).
@@ -11345,15 +11637,21 @@ class AutomationEngine:
         if self._whf_safety_release_blocked():
             # DEBUG: re-asked on every 15 s tick while a stuck fan keeps reading on (the stop itself is logged).
             _LOGGER.debug(
-                "WHF safety: HVAC restore held until the fan reads off"
-                " (trigger=%s fan_physically_on=%s verify_passed=%s)",
+                "WHF safety: HVAC restore held until the fan reads off and stays off"
+                " (trigger=%s fan_physically_on=%s verify_passed=%s quiet_remaining_s=%.1f)",
                 trigger,
                 self._fan_physically_on_for_release(),
                 self._whf_restore_verify_passed,
+                self._whf_restore_quiet_remaining_s() if not self._fan_physically_on_for_release() else -1.0,
             )
+            if not self._fan_physically_on_for_release() and self._get_fan_physical_state_callback:
+                _remaining = self._whf_restore_quiet_remaining_s()
+                if _remaining > 0:
+                    self._schedule_whf_safety_timer("_whf_safety_quiet_cancel", _remaining + 0.5, "restore_quiet")
             return False
         self._whf_restore_pending = False
         self._whf_restore_verify_passed = False
+        self._whf_off_seen_at = None
         # Issue #1181 (owner decision D1): "sealed" here can mean a sensor has been dark for over a minute (the
         # enforcer then counts it closed so a dead sensor never keeps the fan running). If that sensor last read
         # OPEN it still holds the door/window pause: release the fan's suppression but write no heat/cool mode;
@@ -15115,29 +15413,32 @@ class AutomationEngine:
                 " not this function"
             )
 
-    async def _command_whf_control_entity(self, desired_on: bool, *, reason: str) -> bool:
-        """Command the WHF control/transmitter entity, guarding against HA's belief-based
-        command dedup in dual-entity (split control/detect) setups (Issue #449).
+    async def _command_whf_control_entity(self, desired_on: bool, *, reason: str, safety: bool = False) -> bool:
+        """Command the WHF control/transmitter entity (Issues #449, #1215).
 
-        Scope: WHOLE_HOUSE_FAN/BOTH archetypes only, and only when dual-entity feedback
-        ground truth is available (``_get_fan_physical_state_callback`` returns non-None).
-        Single-entity/command-only WHF setups and FAN_MODE_HVAC are entirely untouched —
-        a single-entity control can be trusted, and the separate HVAC fan-mode command
-        path is unaffected.
+        Scope: WHOLE_HOUSE_FAN/BOTH archetypes only. Single-entity/command-only WHF setups and FAN_MODE_HVAC
+        are untouched (no ground truth to compare, a plain command), apart from the command memory below.
 
-        A one-way transmitter entity has no feedback of its own; its HA-reported state
-        can silently drift from physical reality. Confirmed via real HA history (Issue
-        #449): ~14 repeated ``turn_on`` calls produced zero state transitions once the
-        entity's HA-reported state already read "on", because the physical fan had been
-        turned off by something outside HA's command path. When the control entity's
-        belief already matches the desired state AND ground truth disagrees, force a
-        real transition by commanding the OPPOSITE state first, waiting 5 seconds, then
-        the desired state. When both signals already agree, do nothing — no redundant
-        command.
+        **Stop (``desired_on=False``): always ONE plain ``turn_off``.** Never "on then off", never a ``turn_on``
+        into a sealed house. The 2026-11-01 incident: this helper saw "control entity off, physical on" (the power
+        reading lags a stop by ~15.5 s, so that is the normal look of a stop that is working) and "corrected" it
+        with ``turn_on``, 5 s, ``turn_off`` -- the ``turn_on`` restarted the fan 29 times in two minutes. It relies
+        on the controller firmware making its fan entity follow the remote's real power state (QuietCool firmware
+        option 1), so a remote-started fan reads "on" and a plain off is a real, transmitted transition. If it
+        does not, the off transmits nothing and the enforcer reports it (``_alert_whf_stop_failed``); there is no
+        fallback. A stop already converging (``_whf_stop_in_flight``) is not sent again.
+
+        **Start (``desired_on=True``): the #449 drift correction stays, gated.** A one-way transmitter entity can
+        read "on" while the fan is physically off after a wall switch or power loss (the firmware change only
+        covers the remote), and a plain ``turn_on`` to an entity already reading "on" transmits nothing (confirmed
+        in real history, #449: 14 repeated turn_on calls, zero transitions, fan off for hours). So when the
+        entity reads "on", the fan is off and nothing was just commanded, it forces a real transition: ``turn_off``
+        now, ``turn_on`` 5 s later in its own task (outside the decision lock) which re-checks the gates. It never
+        runs inside a start's spin-up lag (``_whf_command_in_flight("on")``: control on, physical not yet on is
+        lag, not drift) and never into a sealed house.
 
         Returns:
-            True if an HA service call was issued, False if the desired state was
-            already confirmed correct and nothing needed to change.
+            True if an HA service call was issued, False if nothing needed to change or the start was refused.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -15146,37 +15447,166 @@ class AutomationEngine:
         if not fan_entity:
             return False
         domain = fan_entity.split(".")[0]  # "fan" or "switch"
-        desired_service = "turn_on" if desired_on else "turn_off"
+        direction = "on" if desired_on else "off"
 
         ground_truth = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
+        control_state = self.hass.states.get(fan_entity)
+        control_is_on = (control_state.state == "on") if control_state is not None else None
+        control_matches_desired = bool(control_state and (control_state.state == "on") == desired_on)
 
-        if ground_truth is not None:
-            control_state = self.hass.states.get(fan_entity)
-            control_matches_desired = bool(control_state and (control_state.state == "on") == desired_on)
-            if control_matches_desired and ground_truth == desired_on:
-                _LOGGER.debug(
-                    "WHF control entity and detected physical state already agree (%s) — no command needed (%s)",
-                    "on" if desired_on else "off",
+        if ground_truth is not None and control_matches_desired and ground_truth == desired_on:
+            _LOGGER.debug(
+                "WHF control entity and detected physical state already agree (%s) — no command needed (%s)",
+                direction,
+                reason,
+            )
+            return False
+
+        if not desired_on:
+            # Issue #1215: a non-safety stop (the untracked-fan reconcile, a nat-vent exit) sends no fan command while
+            # a sealed-house stop episode or its give-up hold owns the fan: the enforcer paces its own retries, and a
+            # second sender bypassed the hold (a plain off every reconcile cooldown).
+            if (
+                not safety
+                and ground_truth is True
+                and (self._whf_restore_pending or self._whf_stop_hold_active(dt_util.now()))
+                and self._whf_start_blocked_by_sealed_house()
+            ):
+                _LOGGER.info(
+                    "WHF control stop skipped: sealed-house stop episode owns the fan hold_active=%s reason=%s",
+                    self._whf_stop_gave_up_at is not None,
                     reason,
                 )
                 return False
-            if control_matches_desired and ground_truth != desired_on:
-                _LOGGER.warning(
-                    "WHF control entity already reads %s but detected physical state"
-                    " disagrees — forcing a real transition before reasserting (%s)",
-                    "on" if desired_on else "off",
+            in_flight = self._whf_stop_in_flight()
+            if in_flight is not None:
+                _LOGGER.info(
+                    "WHF control stop skipped: already stopping in_flight_s=%.1f window_s=%.0f control=%s reason=%s",
+                    in_flight,
+                    WHF_STOP_CONVERGE_WINDOW_S,
+                    "on" if control_is_on else "off",
                     reason,
                 )
-                opposite_service = "turn_off" if desired_on else "turn_on"
-                await self._call_fan_service_with_context(domain, opposite_service, fan_entity)
-                await asyncio.sleep(5)
-                await self._call_fan_service_with_context(domain, desired_service, fan_entity)
-                return True
+                return False
+            await self._send_whf_control_command(False, fan_entity, domain, control_was_on=control_is_on)
+            return True
 
-        # Not dual-entity mode, ground truth unavailable this tick, or control entity
-        # doesn't yet match the desired state — a plain command is a genuine transition.
-        await self._call_fan_service_with_context(domain, desired_service, fan_entity)
+        # ---- start ----
+        if self._whf_start_blocked_by_sealed_house():
+            _LOGGER.warning(
+                "WHF control start refused: house sealed, never turn_on into a sealed house reason=%s role=%s",
+                reason,
+                self.role,
+            )
+            return False
+        if ground_truth is not None and control_matches_desired and ground_truth is False:
+            in_flight_start = self._whf_command_in_flight("on")
+            if in_flight_start is not None:
+                _LOGGER.info(
+                    "WHF control start skipped: spin-up lag, not drift in_flight_s=%.1f window_s=%.0f reason=%s",
+                    in_flight_start,
+                    WHF_START_CONVERGE_WINDOW_S,
+                    reason,
+                )
+                return False
+            _LOGGER.warning(
+                "WHF control forcing a real transition: control entity reads on but the fan is physically off"
+                " (off now, on in 5 s) reason=%s role=%s",
+                reason,
+                self.role,
+            )
+            await self._send_whf_control_command(False, fan_entity, domain, control_was_on=True, memory="cycle")
+            self._whf_forced_start_at = dt_util.now()
+
+            @callback
+            def _second_step_due(_now: Any) -> None:
+                self._whf_forced_start_cancel = None
+                self._spawn_whf_task(self._finish_forced_whf_start(fan_entity, domain, reason))
+
+            self._rearm_timer("_whf_forced_start_cancel", 5.0, _second_step_due)
+            return True
+
+        # Not dual-entity mode, ground truth unavailable this tick, or the control entity does not yet read
+        # "on" -- a plain command is a genuine transition.
+        await self._send_whf_control_command(True, fan_entity, domain, control_was_on=control_is_on)
         return True
+
+    async def _send_whf_control_command(
+        self,
+        turn_on: bool,
+        fan_entity: str,
+        domain: str,
+        *,
+        control_was_on: bool | None,
+        memory: str | None = None,
+    ) -> None:
+        """The one place a WHF control-entity service call is made: remember it, then send it (Issue #1215).
+
+        ``memory`` overrides the remembered direction: the off step of a forced START is remembered as ``"cycle"``,
+        so it is neither a stop in flight nor an echo of a stop, and both transitions stay possible echoes.
+        """
+        if not (_latched(self) or self.dry_run is True):
+            self._record_whf_command(memory or ("on" if turn_on else "off"), control_was_on=control_was_on)
+        await self._call_fan_service_with_context(domain, "turn_on" if turn_on else "turn_off", fan_entity)
+
+    async def _finish_forced_whf_start(self, fan_entity: str, domain: str, reason: str) -> None:
+        """Second step of a forced start, 5 s after its ``turn_off``, outside the decision lock that started it.
+
+        Re-checks every gate at send time, because up to 5 s have passed: Climate Advisor must still want the fan
+        on, the occupant must not have taken over, the house must not have sealed. A refusal is logged with its
+        outcome; a sealed house also closes the session it was starting (the fan is off and stays off).
+        """
+        if _latched(self):
+            return
+        try:
+            async with self._decision_pass("forced_whf_start"):
+                _started = self._whf_forced_start_at
+                _occupant_since = bool(
+                    isinstance(self._occupant_fan_action_at, datetime)
+                    and isinstance(_started, datetime)
+                    and self._occupant_fan_action_at >= _started
+                )
+                # Issue #1205: an occupant fan-off pause that began inside the 5 s gap forbids this start too.
+                _hold = self._fan_off_hold_active() is True
+                if not self._fan_active or self._fan_override_active or _occupant_since or _hold:
+                    _LOGGER.info(
+                        "WHF forced start second step skipped: fan_active=%s fan_override=%s occupant_acted=%s"
+                        " fan_off_hold=%s reason=%s",
+                        self._fan_active,
+                        self._fan_override_active,
+                        _occupant_since,
+                        _hold,
+                        reason,
+                    )
+                    if _occupant_since and self._fan_active and not self._fan_override_active and not _hold:
+                        # The occupant's action in the gap was an OFF (an on or timer press would have started a fan
+                        # override): the fan is already off from step 1, so no power transition will report it.
+                        # Treat it as the occupant's fan-off it is -- Issue #1205's fan-off pause starts.
+                        self.on_fan_turned_off(fan_before="on", fan_after="off")
+                    return
+                if self._whf_start_blocked_by_sealed_house():
+                    _LOGGER.warning(
+                        "WHF forced start abandoned: house sealed, no turn_on into a sealed house reason=%s role=%s",
+                        reason,
+                        self.role,
+                    )
+                    await self._deactivate_fan(
+                        reason="forced start abandoned — house sealed",
+                        restore_hvac=True,
+                        release_suppression=True,
+                        emit_event=False,
+                        safety=True,
+                    )
+                    return
+                self._fan_command_time = dt_util.now()
+                self._fan_command_pending = True
+                try:
+                    await self._send_whf_control_command(True, fan_entity, domain, control_was_on=False)
+                finally:
+                    self._fan_command_pending = False
+                _LOGGER.info("WHF forced start second step sent: turn_on reason=%s role=%s", reason, self.role)
+        except Exception:
+            _LOGGER.warning("WHF forced start second step failed: reason=%s role=%s", reason, self.role, exc_info=True)
 
     async def _call_service_with_context(
         self, domain: str, service: str, data: dict[str, Any], *, kind: str, blocking: bool = False
@@ -15462,6 +15892,18 @@ class AutomationEngine:
                 reason,
                 _hold_key,
             )
+            return FanCommandResult.SUPPRESSED
+
+        # Issue #1215: the occupant just pressed the remote (the RF event is seen at once, the power reading follows
+        # 5-20 s later) -- the fan is on its way up, and a start here would send off then on to a fan that is starting.
+        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._occupant_fan_action_pending():
+            _LOGGER.info(
+                "Fan activation skipped: occupant fan press still settling pending_s=%.0f reason=%s role=%s",
+                WHF_OCCUPANT_PRESS_PENDING_S,
+                reason,
+                self.role,
+            )
+            # SUPPRESSED, not OVERRIDDEN: no override keeps heat/cool off here, so an open window must still pause it.
             return FanCommandResult.SUPPRESSED
 
         # Issue #714: a manual override to an active HVAC mode (heat/cool/heat_cool)
@@ -16293,6 +16735,10 @@ class AutomationEngine:
         recent_fan_command = bool(
             self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0)
         )
+        # Issue #1215: the same command-memory predicate as the safety stop -- a start still spinning up (control
+        # entity on, power reading not yet on) is lag, not drift.
+        if not recent_fan_command and self._whf_command_in_flight("on") is not None:
+            recent_fan_command = True
         # Issue #988: FAN_MODE_HVAC has no separate physical-state callback (there's no
         # second entity to poll) — its "ground truth is available" condition is simply
         # "the climate entity resolves", checked inline below rather than via this callback.
@@ -16555,6 +17001,16 @@ class AutomationEngine:
         """
         if release_suppression is None:
             release_suppression = restore_hvac
+        if (restore_hvac or release_suppression) and self._whf_hvac_restore_deferred():
+            # Issue #1215 (Rule 2): the one gated release owns this restore; it waits for the fan to read off.
+            _LOGGER.info(
+                "HVAC restore deferred to the sealed-house release: reason=%s restore_pending=%s fan_on=%s",
+                reason,
+                self._whf_restore_pending,
+                self._fan_physically_on_for_release(),
+            )
+            restore_hvac = False
+            release_suppression = False
         if restore_hvac and self._manual_change_protected():
             # Issue #1147 mirror (#1133 family): the ONE place a fan stop writes a pre-suppression HVAC
             # mode back. Every nat-vent / WHF exit that bypasses _exit_nat_vent() reaches that write
@@ -16785,7 +17241,7 @@ class AutomationEngine:
                 fan_entity = self.config.get(CONF_FAN_ENTITY)
                 if fan_entity:
                     domain = fan_entity.split(".")[0]
-                    _commanded = await self._command_whf_control_entity(False, reason=reason)
+                    _commanded = await self._command_whf_control_entity(False, reason=reason, safety=safety)
                     if _commanded:
                         _command_issued = True
                         self._fan_toggle_command_time = _toggle_stamp

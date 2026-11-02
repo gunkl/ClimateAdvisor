@@ -133,3 +133,57 @@ def parse_remote_speed_event(event_type: str | None) -> str | None:
     a speed press, else ``None``.
     """
     return event_type if event_type in REMOTE_SPEED_TOKENS else None
+
+
+def remote_event_is_echo_of(direction: str | None, event_type: str | None) -> bool:
+    """Whether an RF remote ``event_type`` can be the device echoing Climate Advisor's own last command (Issue #1215).
+
+    The QuietCool receiver hears its own transmitter (Issue #567), so a CA command can come back as a remote event
+    seconds later. The echo is always the SAME kind of event as the command: CA's ``turn_off`` is echoed as ``off``
+    and nothing else, so a ``timer_*`` / speed / ``on`` token seconds after CA's off is the occupant at the remote
+    (2026-11-01 15:07: a ``timer_1h`` press 22 s after CA's stop was dropped as an "echo" and he got the 180-minute
+    default). CA's ``turn_on`` is echoed as the device re-announcing the running state (``on``, a speed such as the
+    15:04:16.5 ``low``, or its default timer), so every token except ``off`` stays suppressed there; an ``off`` right
+    after CA's start is the occupant stopping it.
+
+    ``direction`` is ``"on"``/``"off"`` for a recent WHF control command, ``None`` when unknown (a thermostat blower
+    command, or none recent): everything stays a possible echo, the pre-#1215 behaviour.
+    """
+    if direction == "off":
+        return event_type == "off"
+    if direction in ("on", "cycle"):
+        # "cycle" is the forced start (off now, on 5 s later): its echoes are on-side tokens too, and an occupant
+        # ``off`` pressed during it must never be dropped (the second step then also aborts).
+        return event_type != "off"
+    return True
+
+
+def fan_transition_is_echo_of(direction: str | None, is_on: bool) -> bool:
+    """Whether a fan entity turning on/off can be the lagging echo of Climate Advisor's own last command (Issue #1215).
+
+    The sibling of ``remote_event_is_echo_of`` for the physical-entity listener. The power reading lags a command by
+    seconds (5.5 s on, 15.5 s off), so a transition the SAME way as CA's last command is that command arriving; a
+    transition the OTHER way (the fan turning ON seconds after CA's stop) cannot be, it is the occupant. ``None`` or
+    any other value (unknown, or a forced-start cycle whose first step is an off): every transition stays a possible
+    echo, the pre-#1215 behaviour.
+    """
+    if direction == "on":
+        return is_on
+    if direction == "off":
+        return not is_on
+    return True
+
+
+def is_dual_entity_transmitter_event(
+    fan_entity: str | None, state_entity: str | None, feedback_enabled: bool, event_entity_id: object
+) -> bool:
+    """True when a fan state change is the control (transmitter) entity of a dual-entity WHF install (Issue #1215).
+
+    Dual-entity = a ``fan_state_entity`` distinct from the ``fan_entity`` with ``fan_state_feedback`` on. On such an
+    install the transmitter is not a witness of the occupant (the firmware flips it by itself), so occupant on/off
+    detection reads the power entity and the RF remote events only. Single-entity and command-only installs are
+    never dual-entity.
+    """
+    if not (fan_entity and state_entity and state_entity != fan_entity and feedback_enabled):
+        return False
+    return event_entity_id == fan_entity

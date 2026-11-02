@@ -274,9 +274,12 @@ from .fan_mode_resolver import (
 from .fan_status import (
     FAN_STATUS_THERMOSTAT,
     fan_entity_on,
+    fan_transition_is_echo_of,
     is_ca_fan_running,
+    is_dual_entity_transmitter_event,
     parse_remote_speed_event,
     parse_remote_timer_event,
+    remote_event_is_echo_of,
     resolve_untracked_fan_status,
 )
 from .hvac_action import is_hvac_action_active, is_hvac_compressor_active
@@ -921,6 +924,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1144: one-shot armed when a door/window sensor goes unavailable, so the WHF safety
         # check re-runs once it has been unknown for the 60 s benefit of the doubt (cancelled on shutdown).
         self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
+        self._whf_release_reclassify_cancel: Callable[[], None] | None = None  # Issue #1215
         self._whf_safety_started_at: datetime | None = None
         # Issue #1178: when the whole-house-fan entity last woke from unavailable/unknown (a reconnect, not a press).
         self._whf_reconnect_changed_at: datetime | None = None
@@ -6119,6 +6123,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state:
             return
 
+        # Issue #1215: a promise reading at the transition, so a sealed-house run (P9) ends where the window opened.
+        self._record_promise_reading()
+
         # Issue #489: refresh immediately on every raw transition (open or closed) so
         # contact_status/contact_sensors reflect live sensor state right away. This is
         # display-only — it does not affect the debounce below, which still exclusively
@@ -7253,6 +7260,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         state, not about who caused it. Running after the override is recorded also avoids re-creating
         the #1130 refresh race.
         """
+        # Issue #1215: take a promise reading AT the transition (evidence first, before every early return), so the
+        # whole-house-fan sealed-house promise (P9) sees when a run starts and when it ends, not only the last
+        # periodic sample inside it (on 2026-11-01 it reported 87 s for a fan that ran 177 s).
+        self._record_promise_reading()
         # Issue #361: command-only mode — entity state changes are command echoes, not physical signals.
         if not self._fan_state_feedback_enabled():
             _LOGGER.debug(
@@ -7287,6 +7298,38 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
 
         if new_state.state == old_state.state:
+            return
+
+        # Issue #1215: on a dual-entity install the TRANSMITTER (control) entity is not a witness of what the
+        # occupant did. The QuietCool firmware flips it on its own (a remote press sets it at once, and it corrects
+        # itself from the power reading after a lag: off at 90 s for a start that never produced power, or a brief
+        # "on" when an off lags past 25 s), none of which is a person at the fan. Occupant on/off detection comes
+        # only from the POWER entity (below) and the RF remote events (_async_fan_remote_changed). Everything else
+        # the transmitter fed stays: the promise reading above, the reconnect stamp above, and the WHF safety
+        # re-check (decorator), which keys on the physical reading anyway. No display refresh here: it would run
+        # before the press was classified (the #1130 race).
+        if is_dual_entity_transmitter_event(
+            self.config.get(CONF_FAN_ENTITY),
+            self.config.get(CONF_FAN_STATE_ENTITY),
+            self._fan_state_feedback_enabled(),
+            event.data.get("entity_id"),
+        ):
+            # Not an override, but still the occupant's start on its way (HomeKit / HA UI flips the transmitter now,
+            # the power reading follows): mark it so CA's own start does not read the lag as #449 drift.
+            _ctx = event.context
+            if (
+                not self.automation_engine._fan_command_pending
+                and not self.automation_engine.fan_command_context_matches(
+                    getattr(_ctx, "id", None), getattr(_ctx, "parent_id", None)
+                )
+            ):
+                self.automation_engine.note_occupant_fan_action()
+            _LOGGER.info(
+                "Fan transmitter entity change ignored for override detection: %s -> %s"
+                " (dual-entity install: only the power entity and RF remote events detect the occupant)",
+                old_state.state,
+                new_state.state,
+            )
             return
 
         # Issue #510: refresh immediately on every genuine physical transition, regardless of
@@ -7460,9 +7503,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 return
 
-            # Skip if a fan command was issued recently (cloud thermostat echo guard)
+            # Skip if a fan command was issued recently (cloud thermostat echo guard). Issue #1215: only a transition
+            # the same way as CA's last WHF command can be its lagging echo; the fan turning ON seconds after CA's
+            # stop is the occupant at the remote (the sibling of the RF-event guard in _async_fan_remote_changed).
             if self._is_recent_fan_command(threshold_seconds=30.0):
-                return
+                _direction = self.automation_engine.last_whf_command_direction(30.0)
+                if fan_transition_is_echo_of(_direction, is_on):
+                    return
+                _LOGGER.info(
+                    "Fan transition processed: cannot be an echo of CA's last command is_on=%s ca_command=%s",
+                    is_on,
+                    _direction,
+                )
 
             if is_on and not self.automation_engine._fan_active:
                 # Fan turned on externally — manual override
@@ -7580,12 +7632,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # _is_recent_fan_command()'s definition) — event.context matching isn't available
         # here since CA never calls a service on this receive-only entity.
         if self._is_recent_fan_command(threshold_seconds=30.0):
-            _LOGGER.debug(
-                "Fan RF remote event ignored — recent CA-issued fan command (echo guard), event_type=%s",
+            # Issue #1215: type-aware. An echo is the same kind of event as the command it echoes; a timer / speed /
+            # on press after CA's turn_off is the occupant (15:07: timer_1h, 22 s after CA's stop, was dropped and
+            # he got the 180 minute default instead of one hour).
+            _direction = self.automation_engine.last_whf_command_direction(30.0)
+            if remote_event_is_echo_of(_direction, event_type):
+                _LOGGER.debug(
+                    "Fan RF remote event ignored — recent CA-issued fan command (echo guard), event_type=%s"
+                    " ca_command=%s",
+                    event_type,
+                    _direction,
+                )
+                return
+            _LOGGER.info(
+                "Fan RF remote event processed: cannot be an echo of CA's last command event_type=%s ca_command=%s",
                 event_type,
+                _direction,
             )
-            return
 
+        # Issue #1215: a remote event that is not an echo is the occupant at the fan (see note_occupant_fan_action).
+        self.automation_engine.note_occupant_fan_action()
         is_timer, hours = parse_remote_timer_event(event_type)
         speed = parse_remote_speed_event(event_type)
 
@@ -7943,6 +8009,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         back so the comfort-program setpoint does not win.
         """
         await asyncio.sleep(5)
+        await self._async_reassert_setpoint_now(reason)
+
+    async def _async_reassert_setpoint_now(self, reason: str) -> None:
+        """The re-assertion itself, with the 5 s settle already waited by the caller (Issue #1215)."""
         try:
             classification = self._current_classification
             if classification is None:
@@ -7966,7 +8036,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 exc_info=True,
             )
 
-    @callback
     def _on_whf_release_reclassify(self, reason: str = "WHF release") -> None:
         """Called by the engine when a manual/remote WHF session releases HVAC suppression
         (Issue #495, ``AutomationEngine._release_whf_and_reclassify``).
@@ -7975,8 +8044,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         separate reclassify path — both scenarios are "a WHF-related HVAC suppression just
         ended, push CA's current classification back to the thermostat" and share the same
         5s-settle-then-reclassify mechanics.
+
+        Deliberately NOT ``@callback``-decorated (Issue #1215): it is a plain synchronous method the engine calls
+        from the event loop, and under the test stubs ``@callback`` replaces the method with a mock, which made the
+        whole release-reclassify invisible to the harness.
         """
-        self.hass.async_create_task(self._async_reassert_setpoint_after_fan_off(reason))
+        # Issue #1215: the 5 s settle runs on Home Assistant's own timer (cancelled on unload), not as a sleep inside a
+        # task, so it is visible to the time-stepped harness and a reload cannot leave it running on a dead instance.
+        _LOGGER.info("WHF release reclassify armed: settle_s=5 reason=%s", reason)
+        _previous = getattr(self, "_whf_release_reclassify_cancel", None)
+        if _previous is not None:
+            _previous()
+
+        @callback
+        def _settled(_now: Any) -> None:
+            self._whf_release_reclassify_cancel = None
+            self._spawn(self._async_reassert_setpoint_now(reason))
+
+        self._whf_release_reclassify_cancel = async_call_later(self.hass, 5, self._zone_scoped_sync(_settled))
 
     @callback
     def _on_post_grace_fan_check(self) -> None:
@@ -13074,6 +13159,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._whf_unknown_sensor_cancel is not None:  # Issue #1144
                 self._whf_unknown_sensor_cancel()
                 self._whf_unknown_sensor_cancel = None
+            if getattr(self, "_whf_release_reclassify_cancel", None) is not None:  # Issue #1215
+                self._whf_release_reclassify_cancel()
+                self._whf_release_reclassify_cancel = None
 
             for unsub in self._unsub_listeners:
                 unsub()

@@ -31,6 +31,8 @@ from custom_components.climate_advisor.const import (
 from custom_components.climate_advisor.entity_health import EntityHealthIssue, entity_health_consequence
 from custom_components.climate_advisor.ode_ceiling_guard import OdeCeilingGuardOutcome
 from custom_components.climate_advisor.whf_safety_decision import (
+    WHF_RESTORE_QUIET_S,
+    WHF_STOP_VERIFY_S,
     SensorReading,
     WhfSafetySnapshot,
     house_is_sealed,
@@ -626,6 +628,9 @@ class _Clock:
     def now(self) -> datetime:
         return self.t
 
+    def advance(self, seconds: float) -> None:
+        self.t += timedelta(seconds=seconds)
+
 
 @pytest.fixture
 def clock():
@@ -706,7 +711,13 @@ class TestRestoreWaitsForTheFanToReadOff:
         engine.request_whf_safety_check("fan_entity")  # the fan-state listener's trigger
         assert engine._whf_safety_queued is True, "a fan that now reads off never reached the release"
         engine._whf_safety_queued = False
+        clock.advance(2)  # in flight is over (the reading confirmed the stop) but the quiet window is not (#1215)
         _enforce(engine, "fan_entity")
+        assert not _restored_cool(engine), "heat/cool came back the moment the fan first read off (#1215 quiet window)"
+        engine._reclassify_callback.assert_not_called()
+
+        clock.advance(WHF_RESTORE_QUIET_S)
+        _enforce(engine, "restore_quiet")
 
         engine._reclassify_callback.assert_called_once()
         assert _restored_cool(engine), "the pre-fan mode was not given back once the fan read off"
@@ -717,7 +728,7 @@ class TestRestoreWaitsForTheFanToReadOff:
         assert len([c for c in engine._set_hvac_mode.await_args_list if c.args[0] == "cool"]) == 1
 
     def test_a_fan_that_reads_off_the_moment_it_is_stopped_is_released_at_once(self, clock):
-        """Symmetric control: the physical reading is off immediately, so nothing waits."""
+        """Symmetric control: the physical reading is off immediately, so only the quiet window (#1215) waits."""
         engine, world = _fan_engine(fan_on=True)
 
         async def _turn_off(domain, service, *a, **k):
@@ -726,6 +737,9 @@ class TestRestoreWaitsForTheFanToReadOff:
 
         engine.hass.services.async_call.side_effect = _turn_off
         assert _enforce(engine) is FanCommandResult.EXECUTED
+        assert not _restored_cool(engine), "restored in the same breath as the stop (no quiet window, #1215)"
+        clock.advance(WHF_RESTORE_QUIET_S)
+        _enforce(engine, "restore_quiet")
 
         engine._reclassify_callback.assert_called_once()
         assert _restored_cool(engine)
@@ -743,7 +757,8 @@ class TestRestoreWaitsForTheFanToReadOff:
         _enforce(engine, "tick")  # still inside the verify window
         engine._reclassify_callback.assert_not_called()
 
-        _enforce(engine, "stop_verify")  # the 12 s verify has passed
+        clock.advance(WHF_STOP_VERIFY_S)
+        _enforce(engine, "stop_verify")  # the verify window has passed
         engine._reclassify_callback.assert_called_once()
         assert _restored_cool(engine)
         assert engine._pre_fan_hvac_mode is None
@@ -759,12 +774,15 @@ class TestRestoreWaitsForTheFanToReadOff:
         engine, world = _fan_engine(fan_on=True)
         _enforce(engine)
         engine._fan_override_active = True
+        clock.advance(WHF_STOP_VERIFY_S)  # the stop's convergence window has passed and the fan still reads on
         assert _enforce(engine, "stop_verify") is FanCommandResult.EXECUTED  # fan still on: stopped again
         engine._reclassify_callback.assert_not_called()
         assert not _restored_cool(engine)
 
         world["fan_on"] = False
         _enforce(engine, "fan_entity")
+        clock.advance(WHF_RESTORE_QUIET_S)  # Issue #1215: and the restore waits out the quiet window
+        _enforce(engine, "restore_quiet")
         engine._reclassify_callback.assert_called_once()
         assert _restored_cool(engine)
 
@@ -781,6 +799,8 @@ class TestRestoreWaitsForTheFanToReadOff:
         _enforce(engine)
         world["fan_on"] = False
         _enforce(engine, "fan_entity")
+        clock.advance(WHF_RESTORE_QUIET_S)  # Issue #1215: the restore waits out the quiet window
+        _enforce(engine, "restore_quiet")
 
         assert not _restored_cool(engine), "cooling was written back into a window whose sensor last read open"
         assert engine._pre_fan_hvac_mode is None, "the fan's suppression was never released"

@@ -4916,22 +4916,33 @@ class TestCommandWhfControlEntity:
         engine.hass.services.async_call.assert_not_called()
 
     def test_want_on_control_on_ground_truth_off_forces_toggle(self):
-        """The confirmed real-world bug: control claims on but the fan is really off —
-        must force off->wait->on, not a single (silently-dropped) turn_on."""
+        """The confirmed real-world bug (#449): control claims on but the fan is really off — must force a real
+        transition, not a single (silently-dropped) turn_on. Issue #1215: the off goes out now and the turn_on 5 s
+        later in its own task, outside the decision lock (there is no sleep inside the helper any more)."""
         engine = self._engine(control_state="on", ground_truth=False)
+        engine._fan_active = True
+        timers: list = []
 
         with (
-            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=lambda hass, delay, fn: timers.append((delay, fn)) or MagicMock(),
+            ),
             patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)),
         ):
             commanded = asyncio.run(engine._command_whf_control_entity(True, reason="test"))
+            calls = engine.hass.services.async_call.call_args_list
+            assert commanded is True
+            assert [c.args for c in calls] == [("fan", "turn_off", {"entity_id": "fan.whf"})]
+            assert [d for d, _ in timers] == [5.0], "the turn_on must be a deferred 5 s step, not an inline sleep"
 
-        assert commanded is True
+            asyncio.run(engine._finish_forced_whf_start("fan.whf", "fan", "test"))
+
         calls = engine.hass.services.async_call.call_args_list
-        assert len(calls) == 2
-        assert calls[0].args == ("fan", "turn_off", {"entity_id": "fan.whf"})
-        assert calls[1].args == ("fan", "turn_on", {"entity_id": "fan.whf"})
-        mock_sleep.assert_awaited_once_with(5)
+        assert [c.args for c in calls] == [
+            ("fan", "turn_off", {"entity_id": "fan.whf"}),
+            ("fan", "turn_on", {"entity_id": "fan.whf"}),
+        ]
 
     def test_want_off_control_off_ground_truth_off_leaves_alone(self):
         """Both signals agree the fan is really off — no command needed."""
@@ -4942,9 +4953,11 @@ class TestCommandWhfControlEntity:
         assert commanded is False
         engine.hass.services.async_call.assert_not_called()
 
-    def test_want_off_control_off_ground_truth_on_forces_toggle(self):
-        """Mirror-image stuck-off case: control claims off but the fan is really still
-        running — must force on->wait->off."""
+    def test_want_off_control_off_ground_truth_on_sends_one_plain_off_and_never_a_turn_on(self):
+        """Issue #1215 (was: "forces on->wait->off"). Control reads off but the fan still runs: with the firmware
+        following the remote's real power state this is a stop whose power reading has not caught up yet, and the
+        old on-then-off restarted the fan 29 times in two minutes. A stop is ONE plain turn_off, never a turn_on,
+        and there is no sleep to hold the decision lock."""
         engine = self._engine(control_state="off", ground_truth=True)
 
         with (
@@ -4954,11 +4967,71 @@ class TestCommandWhfControlEntity:
             commanded = asyncio.run(engine._command_whf_control_entity(False, reason="test"))
 
         assert commanded is True
-        calls = engine.hass.services.async_call.call_args_list
-        assert len(calls) == 2
-        assert calls[0].args == ("fan", "turn_on", {"entity_id": "fan.whf"})
-        assert calls[1].args == ("fan", "turn_off", {"entity_id": "fan.whf"})
-        mock_sleep.assert_awaited_once_with(5)
+        assert [c.args for c in engine.hass.services.async_call.call_args_list] == [
+            ("fan", "turn_off", {"entity_id": "fan.whf"})
+        ]
+        mock_sleep.assert_not_awaited()
+
+    def test_a_stop_already_converging_is_not_sent_again(self):
+        """Issue #1215: a second stop inside the first one's convergence window is the same stop."""
+        engine = self._engine(control_state="on", ground_truth=True)
+        clock = [datetime(2026, 11, 1, 15, 12, 14)]
+        with patch("custom_components.climate_advisor.automation.dt_util.now", side_effect=lambda: clock[0]):
+            assert asyncio.run(engine._command_whf_control_entity(False, reason="first")) is True
+            engine.hass.states.get.return_value.state = "off"  # the entity flipped; the power reading still says on
+            clock[0] += timedelta(seconds=5)
+            assert asyncio.run(engine._command_whf_control_entity(False, reason="second")) is False
+        assert len(engine.hass.services.async_call.call_args_list) == 1
+
+    def test_a_start_inside_the_spin_up_lag_is_not_drift(self):
+        """Issue #1215 mirror A: control on + power reading not yet on, seconds after CA's own turn_on, is the fan
+        spinning up. The #449 off-then-on there would stop a fan CA just started."""
+        engine = self._engine(control_state="off", ground_truth=False)
+        clock = [datetime(2026, 11, 1, 15, 12, 30)]
+        with patch("custom_components.climate_advisor.automation.dt_util.now", side_effect=lambda: clock[0]):
+            assert asyncio.run(engine._command_whf_control_entity(True, reason="start")) is True  # plain turn_on
+            engine.hass.states.get.return_value.state = "on"  # the entity flipped; the power reading lags 5.5 s
+            clock[0] += timedelta(seconds=2)
+            assert asyncio.run(engine._command_whf_control_entity(True, reason="re-entry")) is False
+        assert [c.args[1] for c in engine.hass.services.async_call.call_args_list] == ["turn_on"]
+
+    def test_a_start_after_the_lag_with_the_fan_still_off_is_the_449_drift_and_still_forces_a_transition(self):
+        """The evidence the off-then-on stays for the START direction: entity on, fan off 30 s after the last
+        command (a wall switch or power loss; the firmware change only covers the remote)."""
+        engine = self._engine(control_state="on", ground_truth=False)
+        engine._fan_active = True
+        clock = [datetime(2026, 11, 1, 15, 12, 30)]
+        engine._record_whf_command("on", control_was_on=False)
+        clock[0] += timedelta(seconds=30)
+        with (
+            patch("custom_components.climate_advisor.automation.dt_util.now", side_effect=lambda: clock[0]),
+            patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()),
+        ):
+            engine._whf_last_command = ("on", datetime(2026, 11, 1, 15, 12, 30), False)
+            assert asyncio.run(engine._command_whf_control_entity(True, reason="drift")) is True
+        assert [c.args[1] for c in engine.hass.services.async_call.call_args_list] == ["turn_off"]
+
+    def test_a_forced_start_never_turns_on_into_a_sealed_house(self):
+        """Issue #1215: the 5 s second step re-checks the gates; the house sealed meanwhile -> no turn_on."""
+        engine = self._engine(control_state="off", ground_truth=False)
+        engine._fan_active = True
+        engine._whf_start_blocked_by_sealed_house = MagicMock(return_value=True)
+        engine._deactivate_fan = AsyncMock()
+        asyncio.run(engine._finish_forced_whf_start("fan.whf", "fan", "drift"))
+        assert not [c for c in engine.hass.services.async_call.call_args_list if c.args[1] == "turn_on"]
+        engine._deactivate_fan.assert_awaited_once()
+        # and the helper itself refuses a turn_on while sealed
+        assert asyncio.run(engine._command_whf_control_entity(True, reason="x")) is False
+        assert not [c for c in engine.hass.services.async_call.call_args_list if c.args[1] == "turn_on"]
+
+    def test_a_forced_start_never_turns_on_inside_an_occupant_fan_off_pause(self):
+        """Issue #1205 x #1215: the occupant turned the fan off inside the 5 s gap and that started the fan-off
+        pause -> the second step sends no turn_on."""
+        engine = self._engine(control_state="off", ground_truth=False)
+        engine._fan_active = True
+        engine._fan_off_hold_active = MagicMock(return_value=True)
+        asyncio.run(engine._finish_forced_whf_start("fan.whf", "fan", "drift"))
+        assert not [c for c in engine.hass.services.async_call.call_args_list if c.args[1] == "turn_on"]
 
     def test_control_does_not_match_desired_sends_single_direct_command(self):
         """Control genuinely needs to transition — no toggle needed, one command."""
@@ -4996,15 +5069,23 @@ class TestCommandWhfControlEntityWiring:
         state_mock.state = "on"
         engine.hass.states.get = MagicMock(return_value=state_mock)
         engine._get_fan_physical_state_callback = MagicMock(return_value=False)
+        timers: list = []
 
         with (
-            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()),
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=lambda hass, delay, fn: timers.append((delay, fn)) or MagicMock(),
+            ),
             patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)),
         ):
             asyncio.run(engine._activate_fan(reason="test"))
+            calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
+            assert [c.args[1] for c in calls] == ["turn_off"], f"Expected the forced toggle's first step, got {calls}"
+            assert [d for d, _ in timers if d == 5.0], "the turn_on step must be deferred (#1215: no inline sleep)"
+            asyncio.run(engine._finish_forced_whf_start("fan.whf", "fan", "test"))
 
         calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
-        assert len(calls) == 2, f"Expected the forced toggle (2 calls), got {calls}"
+        assert [c.args[1] for c in calls] == ["turn_off", "turn_on"], f"Expected the forced toggle, got {calls}"
         assert engine._fan_active is True
 
     def test_deactivate_fan_uses_the_new_helper(self):
@@ -5017,13 +5098,14 @@ class TestCommandWhfControlEntityWiring:
         engine._get_fan_physical_state_callback = MagicMock(return_value=True)
 
         with (
-            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()),
+            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep,
             patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)),
         ):
             asyncio.run(engine._deactivate_fan(reason="test"))
 
         calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
-        assert len(calls) == 2, f"Expected the forced toggle (2 calls), got {calls}"
+        assert [c.args[1] for c in calls] == ["turn_off"], f"Expected ONE plain turn_off (#1215), got {calls}"
+        mock_sleep.assert_not_awaited()
         assert engine._fan_active is False
 
     def test_drift_correction_schedules_control_entity_reconcile(self):

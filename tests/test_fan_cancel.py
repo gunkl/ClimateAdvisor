@@ -22,7 +22,7 @@ import sys
 import types
 from datetime import datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure HA stubs are installed before any coordinator import.
 if "homeassistant" not in sys.modules:
@@ -344,6 +344,10 @@ class TestFanCancelCoordinator:
 
         mod = importlib.import_module("custom_components.climate_advisor.coordinator")
         method = types.MethodType(mod.ClimateAdvisorCoordinator._async_reassert_setpoint_after_fan_off, coord)
+        # Issue #1215: the body moved to _async_reassert_setpoint_now (the settle is a timer elsewhere)
+        coord._async_reassert_setpoint_now = types.MethodType(
+            mod.ClimateAdvisorCoordinator._async_reassert_setpoint_now, coord
+        )
 
         # Patch asyncio.sleep so the test doesn't block 5 seconds
         import asyncio as _asyncio
@@ -369,6 +373,10 @@ class TestFanCancelCoordinator:
 
         mod = importlib.import_module("custom_components.climate_advisor.coordinator")
         method = types.MethodType(mod.ClimateAdvisorCoordinator._async_reassert_setpoint_after_fan_off, coord)
+        # Issue #1215: the body moved to _async_reassert_setpoint_now (the settle is a timer elsewhere)
+        coord._async_reassert_setpoint_now = types.MethodType(
+            mod.ClimateAdvisorCoordinator._async_reassert_setpoint_now, coord
+        )
 
         import asyncio as _asyncio
         from unittest.mock import patch
@@ -606,3 +614,45 @@ class TestFanEntityContextProvenance:
 def _freeze_module_now(frozen_now):
     """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
     frozen_now(_frozen_now_value())
+
+
+class TestReleaseReclassifyIsTimerBased:
+    """Issue #1215: the post-release re-assertion's 5 s settle is HA's own timer, not a sleep inside a task."""
+
+    def _coord(self):
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = MagicMock()
+        coord._whf_release_reclassify_cancel = None
+        coord.hass = MagicMock()
+        coord._zone_scoped_sync = lambda fn: fn
+        coord._async_reassert_setpoint_now = MagicMock(return_value="coro")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._on_whf_release_reclassify, coord)
+        return mod, coord, method
+
+    def test_arms_a_5s_timer_and_runs_the_reassertion_when_it_fires(self):
+        mod, coord, method = self._coord()
+        timers = []
+        with (
+            patch.object(
+                mod, "async_call_later", side_effect=lambda hass, delay, fn: timers.append((delay, fn)) or "h"
+            ),
+            patch.object(mod, "callback", side_effect=lambda fn: fn),
+        ):
+            method("WHF release")
+        assert [d for d, _ in timers] == [5]
+        coord._spawn.assert_not_called()  # nothing runs until the timer fires
+        timers[0][1](None)
+        coord._async_reassert_setpoint_now.assert_called_once_with("WHF release")
+        coord._spawn.assert_called_once_with("coro")
+
+    def test_a_second_release_replaces_the_pending_timer(self):
+        mod, coord, method = self._coord()
+        cancels = []
+        with (
+            patch.object(mod, "async_call_later", side_effect=lambda h, d, f: lambda: cancels.append(1)),
+            patch.object(mod, "callback", side_effect=lambda fn: fn),
+        ):
+            method("a")
+            coord._whf_release_reclassify_cancel = lambda: cancels.append(1)
+            method("b")
+        assert cancels == [1]

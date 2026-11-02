@@ -19,8 +19,10 @@ the record writes happen in ``_activate_fan``/``_deactivate_fan`` and the clears
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
+
+from .time_utils import instant_after
 
 
 class FanToggleRateLimitOutcome(Enum):
@@ -85,7 +87,7 @@ def decide_fan_toggle_rate_limit(
     if elapsed >= inputs.min_interval_s:
         return FanToggleRateLimitOutcome.ALLOW, None
 
-    applies_at = inputs.last_toggle_command_time + timedelta(seconds=inputs.min_interval_s)
+    applies_at = instant_after(inputs.min_interval_s, now=inputs.last_toggle_command_time)
     if inputs.rate_limited_until == applies_at and inputs.rate_limited_direction == inputs.action:
         return FanToggleRateLimitOutcome.DEFER_DUPLICATE, applies_at
 

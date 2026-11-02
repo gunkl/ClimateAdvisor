@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.40] — 2026-11-02
+
+- Fix #1222: leaving home right after you change the thermostat now ends that change's grace period along with the change itself, so the dashboard no longer says "Grace period active" in an empty house and the log no longer shows a false "Stuck grace detected" error a few minutes later.
+- Fix #1208: coming home on a warm or mild day now restores your comfort temperature as soon as you arrive, instead of keeping the away setback for up to 30 minutes while the notification said comfort was being restored. The same fix applies when a window closes, when fan ventilation ends, when the economizer stops and when you press Resume on the dashboard. While the HVAC fan is ventilating through an open window, arriving home now keeps heating and cooling off on every kind of day.
+- Fix #1209: a brief thermostat glitch that goes straight back to the mode Climate Advisor set is no longer treated as your own change on warm and mild days, so it no longer pauses Climate Advisor for an hour. Turning the thermostat off yourself is still always respected.
+- Fix #1199: fan-off holds, fan run times and grace periods that span a daylight-saving change now last the time you asked for, rather than an hour too long in autumn or an hour too short in spring. Their end times, and the overnight pre-cool start, now show the correct local time.
+
 ## [0.8.39] — 2026-11-02
 
 - Fix #1231 (#1218): after the time the briefing tells you to close the windows (17:00 on a mild day, 10:00 on a warm day), the Status card no longer keeps saying "windows open (as planned)", and a window left open is handled again: past its delay (10 minutes by default) Climate Advisor pauses the heating and cooling or runs the fan as usual. Before, the planned window time ran on for hours (one zone ended it at 20:02 for a 17:00 close). It also ends correctly after a short automatic pause or a cancelled override, and a forecast close time dated tomorrow no longer changes today's window time. No case was found where heating or cooling ran into an open window.

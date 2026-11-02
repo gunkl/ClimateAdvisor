@@ -1,0 +1,104 @@
+{
+  "name": "issue_1222_leaving_home_ends_override_grace",
+  "description": "Issue #1222: the occupant sets the thermostat to heat on a hot afternoon, Climate Advisor confirms it and starts the override's grace, and then everyone leaves. Leaving home drops the override for the away setback, and the grace that protected it must end with it, not keep running until the coordinator's stuck-grace watchdog reaps it with an ERROR.",
+  "source": "live",
+  "issue": 1222,
+  "notes": [
+    "Owner-approved for golden 2026-11-02.",
+    "Live example: 2026-11-01 13:07:41 to 13:12:41, ERROR 'Stuck grace detected' after leaving home with an override.",
+    "Occupant outcome: the dashboard and the next-action text kept saying 'Grace period active' in an empty house already in setback, and the grace's end-time bookkeeping stayed armed until the watchdog fired.",
+    "manual_grace_seconds is 6000 so the grace cannot have run out by itself at the end of the scenario: _grace_active False at 21:15 is caused by the away transition ending it.",
+    "field_equals reads engine_state as a snapshot at scenario end (see run_production.py), so the away event is the last mutation and the assertions are judged against the state right after the clear.",
+    "(a) Scenario effectiveness: without the fix (_end_grace_left_protecting_nothing() call in _apply_occupancy_away_vacation_decision()), _grace_active stays True and the second field_equals fails. Verified by reverting the call in a scratch copy.",
+    "(b) Two-way alignment (single engine, Issue #236): docs/grace-periods-spec.md (Occupancy Interaction, FAQ, callsite table) and docs/occupancy-dispatch-spec.md describe the same behaviour in the same change.",
+    "(c) User outcome if this fails in future: the grace of an override that is already gone keeps the dashboard saying a grace is active and lets the watchdog log a false ERROR after every departure that follows a thermostat change.",
+    "Whole-house-fan and hvac_fan homes, vacation, the fan-override variant and the controls (fan-off, window-close, nat-vent-exit graces survive) are covered by tests/test_occupancy_leave_reaps_override_grace_1222.py and tests_ha/test_occupancy_leave_reaps_override_grace_1222.py."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 6000,
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-06-10T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon, indoor above comfort_cool."
+    },
+    {
+      "time": "2026-06-10T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "today_high": 90,
+      "hvac_mode": "cool",
+      "note": "Hot-day classification: hvac_mode=cool set explicitly (harness default is off)."
+    },
+    {
+      "time": "2026-06-10T21:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "Occupant switches the thermostat to heat: override detection starts the confirm window."
+    },
+    {
+      "time": "2026-06-10T21:10:00",
+      "type": "temp_update",
+      "hvac_mode": "heat",
+      "indoor_f": 72.0,
+      "outdoor_f": 72.0,
+      "note": "Confirm window passes with the thermostat still diverging: override confirmed, grace begins (6000 s)."
+    },
+    {
+      "time": "2026-06-10T21:15:00",
+      "type": "occupancy_away",
+      "note": "Everyone leaves five minutes into the grace: the away setback drops the override."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T21:10:00",
+      "expect": "override_confirmed",
+      "track": "integration",
+      "reason": "Precondition: the heat change is confirmed as an override, which starts the grace this scenario then ends by leaving home."
+    },
+    {
+      "at": "2026-06-10T21:15:00",
+      "expect": "override_cleared",
+      "track": "logic",
+      "reason": "Leaving home clears the manual override (Issue #220)."
+    },
+    {
+      "at": "2026-06-10T21:15:00",
+      "expect": "field_equals",
+      "field": "engine_state._grace_active",
+      "value": false,
+      "track": "logic",
+      "reason": "The grace protected only the override that was just cleared, so it ends with it (Issue #1222) instead of waiting for the stuck-grace watchdog."
+    },
+    {
+      "at": "2026-06-10T21:15:00",
+      "expect": "event_emitted",
+      "event": "grace_cancelled",
+      "payload_subset": {
+        "reason": "occupancy_away",
+        "protects_override": true
+      },
+      "track": "logic",
+      "reason": "The ending is announced as an intentional away-transition cancel, not left for the watchdog."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Leaving home ends the cleared override's grace at once",
+    "observed_behavior": "_grace_active False right after the away transition; grace_cancelled (reason occupancy_away, protects_override true) emitted; before the fix the grace stayed active until the stuck-grace watchdog reaped it",
+    "expected_behavior": "_grace_active is False right after the away transition and grace_cancelled (reason occupancy_away) is emitted"
+  }
+}

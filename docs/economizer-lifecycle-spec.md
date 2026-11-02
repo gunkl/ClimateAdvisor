@@ -42,7 +42,7 @@
 
 | From | Condition | To | Notes |
 |---|---|---|---|
-| any | `day_type != "hot"` (including no classification yet) | `INACTIVE` | Deactivates via `_deactivate_economizer()` if a session was active — resumes AC if the classification's `hvac_mode == "cool"`. |
+| any | `day_type != "hot"` (including no classification yet) | `INACTIVE` | Deactivates via `_deactivate_economizer()` if a session was active — restores comfort through `_set_temperature_for_mode()` for any classification (Issue #1208: a hot day reclassified warm/mild carries the `off` label but its band is still armed), unless the occupant's change is protected. |
 | any | `_natural_vent_active == True` | **unchanged** (`deferred=True`) | Defer, not a transition — see the asymmetry callout in the Anchors table. |
 | any | eligible (`windows_physically_open and outdoor <= comfort_cool + delta and in_window and direction_ok`) and `aggressive_savings` | `MAINTAIN` | Savings mode shortcuts past the indoor-temp phase check entirely. |
 | any | eligible, not `aggressive_savings`, `indoor > comfort_cool` | `COOL_DOWN` | |
@@ -102,7 +102,7 @@ async def _deactivate_economizer(self, outdoor_temp: float) -> None:
     ...  # HVAC-resume block runs unconditionally either way
 ```
 
-Same fallback direction as nat-vent's exit-side mirror: a rate-limited fan-stop command means the fan is still physically running, so the session flags must stay active — `_check_window_cooling_opportunity_fsm()` derives its `current_state` input from these same flags on its next tick, so clearing them early would leave nothing to retry the stop. The HVAC-resume block (re-arming `cool` mode from the current classification, when applicable) runs unconditionally regardless of the fan result — the same asymmetry `_exit_nat_vent()` already has on its own sensors-closed branch (HVAC always resumes; only the fan-session bookkeeping is gated).
+Same fallback direction as nat-vent's exit-side mirror: a rate-limited fan-stop command means the fan is still physically running, so the session flags must stay active — `_check_window_cooling_opportunity_fsm()` derives its `current_state` input from these same flags on its next tick, so clearing them early would leave nothing to retry the stop. The HVAC-resume block (a comfort restore through `_set_temperature_for_mode()`, family from the resolved band, any classification since Issue #1208; skipped while the occupant's change is protected) runs unconditionally regardless of the fan result — the same asymmetry `_exit_nat_vent()` already has on its own sensors-closed branch (HVAC always resumes; only the fan-session bookkeeping is gated).
 
 **Log-level split, same convention as #931/#935's own follow-up fix (Issue #935 follow-up):** `OVERRIDDEN` is a genuine anomaly (WARNING); `RATE_LIMITED_NEW` (a fresh deferral) is routine anti-cycling behavior worth noting once (INFO); `RATE_LIMITED_DUP` (a repeat hit within an already-reported deferral window) is per-tick noise (DEBUG) — this is the same three-way split `_apply_nat_vent_fsm_state_after_activation()` and `_end_nat_vent_session()`'s callers use, not a new logging policy invented for the economizer.
 

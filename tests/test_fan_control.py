@@ -2185,8 +2185,13 @@ class TestNatVentComfortFloorExit:
 
         assert len(_get_service_calls(engine, "climate", "set_hvac_mode")) == 0
 
-    def test_comfort_floor_exit_skips_hvac_restore_when_classification_off(self):
-        """Classification hvac_mode='off' → fan deactivated but no set_hvac_mode call."""
+    def test_comfort_floor_exit_arms_the_floor_when_classification_off(self):
+        """Classification hvac_mode='off' (a mild day) → fan deactivated AND the comfort floor armed (Issue #1208).
+
+        Rewritten from ``..._skips_hvac_restore_when_classification_off``: that name pinned the bug. The "off" label
+        is not a plan to leave HVAC off -- Climate Advisor arms the comfort band on mild/warm days every cycle -- so
+        a house that fell to its comfort floor while ventilating must have heat armed, exactly as on a cool day.
+        The old assertion (no mode write) let the cooled house sit with the thermostat Off until the next cycle."""
         cls_off = object.__new__(DayClassification)
         cls_off.day_type = DAY_TYPE_MILD
         cls_off.trend_direction = "stable"
@@ -2214,7 +2219,8 @@ class TestNatVentComfortFloorExit:
         assert len(fan_calls) == 1
         assert fan_calls[0][0][2]["fan_mode"] == "auto"
 
-        assert len(_get_service_calls(engine, "climate", "set_hvac_mode")) == 0
+        hvac_calls = _get_service_calls(engine, "climate", "set_hvac_mode")
+        assert [c[0][2]["hvac_mode"] for c in hvac_calls] == ["heat"]
 
     def test_comfort_floor_exit_emits_event(self):
         """Comfort-floor exit fires the nat_vent_comfort_floor_exit event with indoor_temp payload.

@@ -449,8 +449,10 @@ class TestOccupancyHomeEmitsEvent:
         assert evt_data["mode"] == "cool"
         assert evt_data["target_f"] == engine.config["comfort_cool"]
 
-    def test_hvac_off_emits_no_comfort_event(self):
-        """HVAC off classification → no occupancy_comfort_restored event."""
+    def test_hvac_off_label_emits_a_comfort_event_for_its_band_family(self):
+        """HVAC "off" label (warm/mild day) → the comfort band IS restored, so the event is emitted (Issue #1208).
+
+        Rewritten from ``test_hvac_off_emits_no_comfort_event``: expecting no restore on arrival was the bug."""
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="off")
         engine.hass.states.get.return_value = _thermostat_state("off")
@@ -463,7 +465,7 @@ class TestOccupancyHomeEmitsEvent:
         asyncio.run(engine.handle_occupancy_home())
 
         comfort_events = [(n, d) for n, d in events if n == "occupancy_comfort_restored"]
-        assert comfort_events == [], f"Expected no comfort event for off mode, got {events}"
+        assert [d["mode"] for _n, d in comfort_events] in (["cool"], ["heat"]), events
 
 
 class TestMorningWakeupEmitsEvent:

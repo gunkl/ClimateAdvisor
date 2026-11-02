@@ -25,7 +25,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure HA stubs are installed before any coordinator import.
@@ -58,6 +58,9 @@ _PATCH_CALLBACK = "custom_components.climate_advisor.automation.callback"
 _PATCH_DT_NOW = "custom_components.climate_advisor.automation.dt_util.now"
 _PATCH_COORDINATOR_DT_NOW = "custom_components.climate_advisor.coordinator.dt_util.now"
 _FIXED_NOW = datetime(2026, 7, 12, 20, 0, 0)
+# Issue #1199: grace end instants are aware UTC, so a clock that is compared with them must be aware too
+# (production's dt_util.now() always is).
+_FIXED_NOW_AWARE = _FIXED_NOW.replace(tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +401,7 @@ class TestLastWinsRefresh:
         with (
             patch(_PATCH_CALL_LATER) as mock_call_later,
             patch(_PATCH_CALLBACK, side_effect=lambda f: f),
-            patch(_PATCH_DT_NOW, return_value=_FIXED_NOW),
+            patch(_PATCH_DT_NOW, return_value=_FIXED_NOW_AWARE),
         ):
             mock_call_later.return_value = MagicMock()
             engine.handle_fan_manual_override(duration_override=28800, remote_timer_hours=8.0)
@@ -412,7 +415,7 @@ class TestLastWinsRefresh:
         with (
             patch(_PATCH_CALL_LATER) as mock_call_later,
             patch(_PATCH_CALLBACK, side_effect=lambda f: f),
-            patch(_PATCH_DT_NOW, return_value=_FIXED_NOW),
+            patch(_PATCH_DT_NOW, return_value=_FIXED_NOW_AWARE),
         ):
             mock_call_later.return_value = MagicMock()
             engine.handle_fan_manual_override(duration_override=28800, remote_timer_hours=8.0, is_remote_event=True)
@@ -438,7 +441,7 @@ class TestLastWinsRefresh:
         with (
             patch(_PATCH_CALL_LATER) as mock_call_later,
             patch(_PATCH_CALLBACK, side_effect=lambda f: f),
-            patch(_PATCH_DT_NOW, return_value=_FIXED_NOW),
+            patch(_PATCH_DT_NOW, return_value=_FIXED_NOW_AWARE),
         ):
             mock_call_later.return_value = MagicMock()
             engine.handle_fan_manual_override(duration_override=28800, remote_timer_hours=8.0, is_remote_event=True)

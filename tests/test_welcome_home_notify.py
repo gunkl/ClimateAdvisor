@@ -257,15 +257,24 @@ class TestWelcomeHomeTemperatureProximityCheck:
             _run(engine.handle_occupancy_home())
         assert engine._last_welcome_home_notified == _FIXED_NOW
 
-    def test_no_proximity_check_for_hvac_off(self):
-        """hvac_mode='off' skips proximity check entirely — notify regardless of temp."""
-        hass = _make_hass(climate_temp=72.0)
-        engine = _make_engine(hass=hass)
-        engine._current_classification = _make_classification(hvac_mode="off")
-        notify_mock = AsyncMock()
-        engine._notify = notify_mock
-        _run(engine.handle_occupancy_home())
-        notify_mock.assert_called_once()
+    def test_hvac_off_label_gets_the_proximity_check_of_its_band_family(self):
+        """hvac_mode='off' (warm/mild day) is judged on the armed band's family, like a hot day (Issue #1208).
+
+        Rewritten from ``test_no_proximity_check_for_hvac_off``: that premise ("off means nothing is armed, so
+        notify regardless of temp") was the bug. Climate Advisor arms the comfort band on "off" days and the arrival
+        restore now writes it, so a house already near its comfort edge needs no "Restoring" push, and a house far
+        from it still gets one."""
+        near = _make_engine(hass=_make_hass(climate_temp=72.0))
+        near._current_classification = _make_classification(hvac_mode="off")
+        near._notify = AsyncMock()
+        _run(near.handle_occupancy_home())
+        near._notify.assert_not_called()
+
+        far = _make_engine(hass=_make_hass(climate_temp=85.0))
+        far._current_classification = _make_classification(hvac_mode="off")
+        far._notify = AsyncMock()
+        _run(far.handle_occupancy_home())
+        far._notify.assert_called_once()
 
 
 # ── Debounce check ────────────────────────────────────────────────

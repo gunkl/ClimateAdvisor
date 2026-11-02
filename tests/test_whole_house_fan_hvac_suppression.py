@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -908,10 +908,13 @@ class TestManualWhfOnSuppressesHvac:
         assert engine._fan_override_active is False
         assert engine._fan_remote_speed == "medium"
 
-    def test_two_rapid_manual_overrides_do_not_reclobber_pre_fan_hvac_mode(self):
+    def test_two_rapid_manual_overrides_do_not_reclobber_pre_fan_hvac_mode(self, frozen_now):
         """Two manual-override calls in quick succession (the live incident: a physical
         fan-on at 20:45:32 followed by an RF remote press at 20:48:40) must not re-capture
         _pre_fan_hvac_mode from a possibly-already-suppressed thermostat read."""
+        # Issue #1199: grace end instants are stored as aware UTC; HA's dt_util.now() is always aware, so the
+        # module's naive frozen clock cannot be compared with them (the second override reads the first grace's end).
+        frozen_now(_frozen_now_value().replace(tzinfo=UTC))
         engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="cool")
         engine._emit_event_callback = MagicMock()
         captured = _run_scheduled_suppress(engine)

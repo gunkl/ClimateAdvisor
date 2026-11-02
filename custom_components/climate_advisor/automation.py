@@ -299,6 +299,7 @@ from .temperature import (
     to_fahrenheit,
 )
 from .thermal_lead_time import compute_lead_minutes_from_rate
+from .time_utils import instant_after
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
     WHF_OCCUPANT_PRESS_PENDING_S,
@@ -3415,7 +3416,7 @@ class AutomationEngine:
             "applies_at=%s start_seq=%s (Issue #1205)",
             site,
             reason,
-            applies_at.strftime("%H:%M:%S"),
+            dt_util.as_local(applies_at).strftime("%H:%M:%S"),
             self._fan_start_seq,
         )
 
@@ -3456,7 +3457,7 @@ class AutomationEngine:
             " (Issue #1212)",
             reason,
             recorded_dir,
-            recorded_at.strftime("%H:%M:%S") if isinstance(recorded_at, datetime) else recorded_at,
+            dt_util.as_local(recorded_at).strftime("%H:%M:%S") if isinstance(recorded_at, datetime) else recorded_at,
             _pending_dropped,
         )
         if _pending_dropped:
@@ -3469,7 +3470,7 @@ class AutomationEngine:
         _LOGGER.info(
             "Fan manual-origin pending discarded: reason=%s applies_at=%s deferral_record_cleared=%s (Issue #1205)",
             reason,
-            applies_at.strftime("%H:%M:%S"),
+            dt_util.as_local(applies_at).strftime("%H:%M:%S"),
             record_cleared,
         )
 
@@ -3511,7 +3512,7 @@ class AutomationEngine:
         self._fan_manual_origin_pending = None
         _LOGGER.info(
             "Fan manual-origin pending promoted, deferred start applied: applies_at=%s run=%s (Issue #1205)",
-            pending[0].strftime("%H:%M:%S"),
+            dt_util.as_local(pending[0]).strftime("%H:%M:%S"),
             self._fan_on_since,
         )
         self._arm_fan_manual_origin("deferred_reactivation_applied", "grace_expiry_reactivation_retry", kind="restart")
@@ -3954,7 +3955,8 @@ class AutomationEngine:
                 # followed the user's flip, the user's return to the original mode would look like a fresh
                 # override, and the locked golden ``override_self_resolve_transient`` (flip at 10:00, back
                 # at 10:04:59, self-resolve at 10:10) would become a second ``override_detected``.
-                # ``_confirm_override_expired`` itself does not read this field.
+                # ``_confirm_override_expired`` reads it (Issue #1209) only to self-resolve a return to CA's own
+                # RUNNING mode; an Off is never matched against it (#1159).
                 # ``_record_commanded_mode`` instead judges a "real change" against the LIVE mode, so a CA
                 # write that reverses this user change is recorded.
         confirm_seconds = int(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS))
@@ -4074,6 +4076,8 @@ class AutomationEngine:
                     setpoint_override=is_always_confirm_origin(source),
                     current_mode=current_mode,
                     classification_mode=cls_mode,
+                    # Issue #1209 (C2): read LIVE at expiry, never a snapshot taken at detection.
+                    commanded_mode=self._ca_commanded_mode(),
                 )
                 is OverrideConfirmPathOutcome.CONFIRM
             ):
@@ -4879,7 +4883,7 @@ class AutomationEngine:
         # floor/ceiling are the already-resolved, aggressive-savings-adjusted band
         # edges — the FSM's against-grain deadband is measured from these, not raw
         # comfort_heat/comfort_cool (Design §1).
-        _day_mode = {"ceiling": "cool", "floor": "heat"}.get(band.active, band.active)
+        _day_mode = self._band_day_mode(band)
         _resolved_mode = self._resolve_comfort_family_via_fsm(
             _day_mode, floor=band.floor, ceiling=band.ceiling, now=dt_util.now()
         )
@@ -5049,6 +5053,10 @@ class AutomationEngine:
         finally:
             self._mode_change_reason = prior
             self._mode_change_band = prior_band
+
+    def _ca_commanded_mode(self) -> str | None:
+        """The mode Climate Advisor itself last commanded (None: never). The one read of it (Issue #1209)."""
+        return getattr(self, "_last_commanded_hvac_mode", None)
 
     def _record_commanded_mode(self, mode: str, reason_text: str | None = None) -> None:
         """Single writer of ``_last_commanded_hvac_mode`` (Issue #1066).
@@ -6421,6 +6429,25 @@ class AutomationEngine:
                 reason="flat comfort band (resolver unavailable)",
             )
 
+    @staticmethod
+    def _band_day_mode(band: ComfortBand) -> str:
+        """The comfort family ("cool" / "heat") a band's active edge defends (Issue #1208).
+
+        Occupant: on a warm or mild day the classifier's label is "off" yet Climate Advisor arms the comfort band
+        (``_apply_comfort_band()`` keys on ``band.active``). Every restore path (arrival home, door close, nat-vent
+        exit, economizer off, dashboard resume) must key on the SAME edge, not on the label, or it silently writes
+        nothing on exactly those days. ``ceiling`` -> ``cool``, ``floor`` -> ``heat``; the single mapping both the
+        band arm and the restores use.
+        """
+        return {"ceiling": "cool", "floor": "heat"}.get(band.active, band.active)
+
+    def _comfort_restore_family(self, c: DayClassification) -> str:
+        """The family ("heat"/"cool") a comfort restore for ``c`` writes right now (Issue #1208).
+
+        Derived from the resolved band, never from ``c.hvac_mode`` (which is "off" on warm/mild days).
+        """
+        return self._band_day_mode(self._resolved_comfort_band(c))
+
     def _log_restore_via_selector(self, c: DayClassification, band: ComfortBand, mode: str, reason: str) -> None:
         """Issue #1073 (S6): INFO line for a restore resolved through the selector on the resolved band."""
         if mode not in ("heat", "cool"):
@@ -6516,11 +6543,23 @@ class AutomationEngine:
             _band = self._resolved_comfort_band(c)
             _resolved_floor = _band.floor
             _resolved_ceiling = _band.ceiling
+        # Issue #1208: the day mode comes from the resolved band's active edge, NOT from the label. On a warm or
+        # mild day ``c.hvac_mode`` is "off" while the band is armed, and keying on the label made every restore
+        # (arrival home, door close, nat-vent exit, economizer off, dashboard resume) a silent no-op on those days.
+        if _band is not None and self._blower_session_holds_hvac_off():
+            # A blower ventilation session with a window open keeps the thermostat Off (Rule 3; #1142 D7) -- the same
+            # hold ``_apply_comfort_band()`` applies. The band lands when the window closes or the session ends.
+            _LOGGER.info(
+                "Comfort restore not written: blower ventilation with a window open holds the thermostat Off (%s)",
+                reason,
+            )
+            await self._apply_nat_vent_hvac_state()
+            return None
         _resolved_mode = (
             c.hvac_mode
             if target_override is not None
             else self._resolve_comfort_family_via_fsm(
-                c.hvac_mode,
+                self._band_day_mode(_band),
                 floor=_resolved_floor,
                 ceiling=_resolved_ceiling,
                 now=dt_util.now(),
@@ -7193,7 +7232,7 @@ class AutomationEngine:
                     "Nat vent not started (%s): fan-off hold active (until %s) — fan stays off (Issue #1006), "
                     "pausing HVAC for the open window instead",
                     entity_id,
-                    self._fan_off_hold_until.strftime("%H:%M") if self._fan_off_hold_until else "?",
+                    dt_util.as_local(self._fan_off_hold_until).strftime("%H:%M") if self._fan_off_hold_until else "?",
                 )
             elif _response is DoorOpenResponse.PAUSE_REACTIVATION_LOCKOUT:
                 _LOGGER.info(
@@ -7994,9 +8033,9 @@ class AutomationEngine:
                     # restores would write the WRONG mode first on a hot day (cool, then heat a
                     # few ms later -- a mode double write the plan removed). Release the WHF
                     # suppression without restoring; the selector call restores the right mode.
-                    _selector_follows = bool(
-                        self._current_classification and self._current_classification.hvac_mode in ("heat", "cool")
-                    )
+                    # Issue #1208: any classification -- the selector resolves the family from the armed band, so a
+                    # warm/mild ("off") label no longer skips the restore.
+                    _selector_follows = bool(self._current_classification)
                     _comfort_floor_result = await self._deactivate_fan(
                         reason=(f"natural vent exit: {self._indoor_le_comfort_floor(indoor, _vent_floor)}"),
                         restore_hvac=not _selector_follows,
@@ -8043,15 +8082,15 @@ class AutomationEngine:
                         )
                     elif self._current_classification:
                         c = self._current_classification
-                        if c.hvac_mode in ("heat", "cool"):
-                            # Issue #1066 (F4): no blind _set_hvac_mode(c.hvac_mode) here -- the
-                            # selector call below writes mode + setpoint in one explicit switch.
-                            with self._mode_change_context("nat_vent"):
-                                await self._set_temperature_for_mode(
-                                    c,
-                                    reason="natural vent comfort-floor exit — restoring comfort",
-                                )
-                            self._start_grace_period("automation", trigger="nat_vent_exit_resume")
+                        # Issue #1066 (F4): no blind _set_hvac_mode(c.hvac_mode) here -- the
+                        # selector call below writes mode + setpoint in one explicit switch.
+                        # Issue #1208: no label gate -- the family comes from the armed band.
+                        with self._mode_change_context("nat_vent"):
+                            await self._set_temperature_for_mode(
+                                c,
+                                reason="natural vent comfort-floor exit — restoring comfort",
+                            )
+                        self._start_grace_period("automation", trigger="nat_vent_exit_resume")
                     return
 
                 if exit_decision.reason == NatVentExitReason.AWAY_CEILING:
@@ -9970,12 +10009,16 @@ class AutomationEngine:
         restore_mode = None
         if self._current_classification:
             restore_mode = self._current_classification.hvac_mode
-            if restore_mode and restore_mode != "off":
+            if restore_mode:
                 # Issue #1066 (F4): for heat/cool no blind _set_hvac_mode(restore_mode) first -- on a
                 # hot day it would write cool and the selector call below heat a few ms later; the
                 # selector call writes mode + setpoint in one explicit switch. Other modes
                 # (heat_cool/auto) have no selector write, so the restore stays (Issue #284).
-                if restore_mode not in ("heat", "cool"):
+                # Issue #1208: the old ``restore_mode != "off"`` guard (Issue #47) assumed an "off" label meant
+                # "leave HVAC off". It does not: on a warm/mild day the comfort band is armed, so a dashboard resume
+                # must restore it. What the guard rightly prevented -- a BLIND ``set_hvac_mode("off")`` -- stays
+                # prevented: "off" is excluded from the blind write below, the selector write resolves the family.
+                if restore_mode not in ("heat", "cool", "off"):
                     await self._set_hvac_mode(
                         restore_mode,
                         reason="user resumed from door/window pause",
@@ -10077,7 +10120,7 @@ class AutomationEngine:
         if grace is None:
             return False  # Grace period disabled
 
-        duration = int((grace.at - now).total_seconds())
+        duration = int((grace.at - dt_util.as_utc(now)).total_seconds())
         should_notify = grace.should_notify
 
         self._last_nat_vent_eval_key = None  # Issue #1095: a new grace is a new blocker; log it at INFO
@@ -10096,7 +10139,7 @@ class AutomationEngine:
             _LOGGER.info(
                 "Fan-off hold continues past %s grace: hold_until=%s override_mode=%s override_active=%s",
                 trigger or "unlabelled",
-                self._fan_off_hold_until.isoformat() if self._fan_off_hold_until else None,
+                dt_util.as_local(self._fan_off_hold_until).isoformat() if self._fan_off_hold_until else None,
                 self._manual_override_mode or self._override_confirm_mode,
                 self._manual_override_active,
             )
@@ -10209,7 +10252,7 @@ class AutomationEngine:
             and getattr(self, "_fan_remote_timer_hours", None) is not None
             and _expiring_trigger == "fan_manual_override"  # Issue #1205 F3: a thermostat grace is not the timer's end
         ):
-            self._timer_boundary_settle_until = dt_util.now() + timedelta(seconds=TIMER_BOUNDARY_SETTLE_SECONDS)
+            self._timer_boundary_settle_until = instant_after(TIMER_BOUNDARY_SETTLE_SECONDS)
             _LOGGER.debug(
                 "RF-timer-linked grace expiring — arming %ss timer-boundary settle window",
                 TIMER_BOUNDARY_SETTLE_SECONDS,
@@ -10964,28 +11007,10 @@ class AutomationEngine:
         _LOGGER.info("Bedtime setback: clearing any pending override state before applying sleep setback")
         self.clear_manual_override(reason="bedtime")
 
-        # Issue #874: clear_manual_override() clears the override flags but does not
-        # cancel a grace period tied to that override — left unattended, an
-        # override-protecting grace stays orphaned (_grace_active=True) for up to one
-        # coordinator cycle until coordinator.py's _check_orphaned_grace() watchdog
-        # force-cancels it (confirmed via live production logs). This only targets
-        # override-protecting grace — mirroring _check_orphaned_grace()'s own
-        # four-condition check (coordinator.py) — so non-override graces (fan-off
-        # cooldown, window-close-resume, nat-vent-exit-resume, physical-drift-correction)
-        # are left alone, exactly as the watchdog itself would leave them. Mirrors
-        # cancel_override()'s minimal FSM-correctness subset (timer cancellation + FSM
-        # dispatch) — not its dashboard-cancel-button side effects (event emission,
-        # forced refresh), which don't belong at this internal, scheduled transition point.
-        if (
-            self._grace_active
-            and self._grace_protects_override
-            and not self._manual_override_active
-            and not self._fan_override_active
-        ):
-            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-            self._cancel_grace_intentionally("bedtime", remote_timer_hours=_rf_timer_hours_before_clear)
-            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
+        # Issue #874 / #1222: clear_manual_override() clears the override flags but not the grace tied to that
+        # override; ending it here (one shared helper, same predicate as the coordinator's orphaned-grace watchdog)
+        # keeps the watchdog's ERROR for real inconsistencies. Non-override graces are left alone.
+        self._end_grace_left_protecting_nothing("bedtime", remote_timer_hours=_rf_timer_hours_before_clear)
 
         c = self._current_classification
         if not c:
@@ -11341,28 +11366,10 @@ class AutomationEngine:
         _LOGGER.info("Morning wakeup: clearing any pending override state before restoring comfort")
         self.clear_manual_override(reason="morning_wakeup")
 
-        # Issue #874: clear_manual_override() clears the override flags but does not
-        # cancel a grace period tied to that override — left unattended, an
-        # override-protecting grace stays orphaned (_grace_active=True) for up to one
-        # coordinator cycle until coordinator.py's _check_orphaned_grace() watchdog
-        # force-cancels it (confirmed via live production logs). This only targets
-        # override-protecting grace — mirroring _check_orphaned_grace()'s own
-        # four-condition check (coordinator.py) — so non-override graces (fan-off
-        # cooldown, window-close-resume, nat-vent-exit-resume, physical-drift-correction)
-        # are left alone, exactly as the watchdog itself would leave them. Mirrors
-        # cancel_override()'s minimal FSM-correctness subset (timer cancellation + FSM
-        # dispatch) — not its dashboard-cancel-button side effects (event emission,
-        # forced refresh), which don't belong at this internal, scheduled transition point.
-        if (
-            self._grace_active
-            and self._grace_protects_override
-            and not self._manual_override_active
-            and not self._fan_override_active
-        ):
-            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-            self._cancel_grace_intentionally("morning_wakeup", remote_timer_hours=_rf_timer_hours_before_clear)
-            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
+        # Issue #874 / #1222: clear_manual_override() clears the override flags but not the grace tied to that
+        # override; ending it here (one shared helper, same predicate as the coordinator's orphaned-grace watchdog)
+        # keeps the watchdog's ERROR for real inconsistencies. Non-override graces are left alone.
+        self._end_grace_left_protecting_nothing("morning_wakeup", remote_timer_hours=_rf_timer_hours_before_clear)
 
         # Deactivate fan if still running from overnight — unless the user is overriding it
         # or nat-vent/WHF currently owns HVAC (Issue #498 fix — see docstring note above).
@@ -12223,14 +12230,21 @@ class AutomationEngine:
             self._reclassify_callback()
         return True
 
-    def _end_grace_left_protecting_nothing(self, reason: str) -> None:
-        """End, on purpose, an override grace that no longer protects anything (Issue #1204 edge).
+    def _end_grace_left_protecting_nothing(self, reason: str, *, remote_timer_hours: float | None = None) -> None:
+        """End, on purpose, an override grace that no longer protects anything (Issues #1204 edge, #874, #1222).
 
         ``_end_fan_override_for_rule2_stop()`` keeps the fan override's grace for the occupant's pending HVAC change
         (it blocks a nat-vent restart over it). When that change then self-resolves, the grace protects nothing:
         the coordinator's orphaned-grace watchdog would reap it with an ERROR meant for a real inconsistency. End it
         here instead, through the same cancel + FSM pair ``_end_fan_override_and_grace()`` uses. The predicate is
         the watchdog's own (``decide_orphaned_grace``), so the two can never disagree.
+
+        Also the one place the three "a transition cleared the override" callers end its grace (Issue #1222):
+        bedtime and wake-up (#874) and leaving home (away/vacation). Only an override-protecting grace is touched, so
+        fan-off, window-close, dashboard-resume and nat-vent-exit graces (``grace_protects_override`` False) and
+        their holds survive. ``clear_manual_override()`` has already run, so the predicate sees no override left.
+        ``remote_timer_hours`` is the caller's ``_fan_remote_timer_hours`` read BEFORE that clear (the clear wipes
+        it, and the ``grace_cancelled`` row reports the RF-timer length); None when no fan override was running.
         """
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
         from .override_orphaned_grace import decide_orphaned_grace
@@ -12243,7 +12257,7 @@ class AutomationEngine:
             override_confirm_pending=bool(self._override_confirm_pending),
         ):
             return
-        self._cancel_grace_intentionally(reason)
+        self._cancel_grace_intentionally(reason, remote_timer_hours=remote_timer_hours)
         self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
 
     def _end_fan_override_for_rule2_stop(self, result: FanCommandResult) -> None:
@@ -12464,7 +12478,7 @@ class AutomationEngine:
         """
         applies_at = self._fan_rate_limited_until
         return (
-            f"deferred (5-min floor, applies {applies_at.strftime('%H:%M:%S')})"
+            f"deferred (5-min floor, applies {dt_util.as_local(applies_at).strftime('%H:%M:%S')})"
             if isinstance(applies_at, datetime)
             else "deferred (5-min floor)"
         )
@@ -13633,7 +13647,12 @@ class AutomationEngine:
         if until is None:
             return
         self._fan_off_hold_until = None
-        _LOGGER.info("Fan-off hold ended: reason=%s hold_until=%s role=%s", reason, until.isoformat(), self.role)
+        _LOGGER.info(
+            "Fan-off hold ended: reason=%s hold_until=%s role=%s",
+            reason,
+            dt_util.as_local(until).isoformat(),
+            self.role,
+        )
         # Issue #1205: an occupant's cancel that ends the hold while NO fan-off grace is running (a thermostat
         # override's grace replaced it) has no grace_cancelled event to tell the journal, so say so here. When the
         # fan-off grace IS running, its own grace_cancelled follows and closes the episode (no double row).
@@ -13727,6 +13746,7 @@ class AutomationEngine:
             grace_would_start=self._manual_grace_would_start(now),
             decision_mode=decision_mode,
             decision_mode_resolved=True,
+            commanded_mode=self._ca_commanded_mode(),
         )
 
     def _grace_would_start(self, source: str, now: datetime) -> bool:
@@ -14569,7 +14589,7 @@ class AutomationEngine:
         _until_ts: str | None = None
         if isinstance(_ran, int | float) and isinstance(_win, int | float):
             # Absolute expiry = (when the family last ran) + window = now + (window - minutes since).
-            _until_ts = (now + timedelta(minutes=max(0.0, float(_win) - float(_ran)))).isoformat()
+            _until_ts = instant_after(max(0.0, float(_win) - float(_ran)) * 60.0, now=now).isoformat()
         self._last_comfort_hold = {
             "ts": now.isoformat(),
             "candidate_family": decision.hold_candidate_family,
@@ -15356,7 +15376,14 @@ class AutomationEngine:
                 self._manual_override_mode,
                 self._manual_override_time,
             )
+            # Issue #1222: the clear wipes the fan override's RF-timer hours; the grace_cancelled row reports them.
+            _rf_timer_hours_before_clear = self._fan_remote_timer_hours
             self.clear_manual_override(reason=f"occupancy_{mode}")
+            # Leaving home drops the override; the grace that protected it has nothing left to protect. End it now
+            # instead of leaving it for coordinator._check_orphaned_grace() to reap with an ERROR.
+            self._end_grace_left_protecting_nothing(
+                f"occupancy_{mode}", remote_timer_hours=_rf_timer_hours_before_clear
+            )
 
         if decision.outcome is AwayVacationOutcome.NO_CLASSIFICATION:
             if mode == "away":
@@ -15433,16 +15460,19 @@ class AutomationEngine:
         indoor_temp = self._get_indoor_temp_f()
         comfort_f: float | None = None
         setback_f: float | None = None
-        if c is not None and c.hvac_mode in ("heat", "cool"):
-            comfort_f = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
-            setback_f = self.config["setback_heat"] if c.hvac_mode == "heat" else self.config["setback_cool"]
+        # Issue #1208: the family the arrival restore will write, from the armed band (not the "off" label of a
+        # warm/mild day). ``handle_occupancy_home()`` has already set the occupancy to home, so this is the home band.
+        family = self._comfort_restore_family(c) if c is not None else None
+        if family in ("heat", "cool"):  # family is None without a classification
+            comfort_f = self.config["comfort_heat"] if family == "heat" else self.config["comfort_cool"]
+            setback_f = self.config["setback_heat"] if family == "heat" else self.config["setback_cool"]
         debounce_seconds = self.config.get(CONF_WELCOME_HOME_DEBOUNCE, DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS)
         seconds_since: float | None = None
         if self._last_welcome_home_notified is not None:
             seconds_since = (dt_util.now() - self._last_welcome_home_notified).total_seconds()
         inputs = HomeInputs(
             has_classification=c is not None,
-            hvac_mode=c.hvac_mode if c is not None else None,
+            hvac_mode=family,
             indoor_temp_f=indoor_temp,
             comfort_f=comfort_f,
             setback_f=setback_f,
@@ -15514,6 +15544,8 @@ class AutomationEngine:
             return  # mirrors legacy's `if not c: return`
 
         c = self._current_classification
+        # Issue #1208: the family the restore writes (band-derived), for every log/event/notification below.
+        family = self._comfort_restore_family(c)
         if decision.restore_deferred_reason is not None:
             # Issue #1050 (#1048 #18): the restore waits for the reason to clear.
             self._occupancy_restore_deferred_pending = True
@@ -15522,7 +15554,7 @@ class AutomationEngine:
             _LOGGER.info(
                 "Occupancy home — restore deferred: reason=%s mode=%s (resumes once the reason clears)",
                 decision.restore_deferred_reason,
-                c.hvac_mode,
+                family,
             )
             if self._emit_event_callback and not self._recent_duplicate(
                 "occupancy_restore_deferred", (decision.restore_deferred_reason,), window_seconds=600
@@ -15530,7 +15562,7 @@ class AutomationEngine:
                 self._emit_event_callback(
                     "occupancy_restore_deferred",
                     {
-                        "mode": c.hvac_mode,
+                        "mode": family,
                         "reason": decision.restore_deferred_reason,
                         "indoor_f": decision.indoor_temp_f,
                     },
@@ -15538,20 +15570,23 @@ class AutomationEngine:
         if decision.restore:
             self._occupancy_restore_deferred_pending = False
             with self._mode_change_context("restore"):
-                await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {c.hvac_mode} comfort")
-            comfort = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
+                await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
+            # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
+            # next to its floor arms heat); report the family it actually armed.
+            written = {"heating": "heat", "cooling": "cool"}.get(self._comfort_mode_family or "", family)
+            comfort = self.config["comfort_heat"] if written == "heat" else self.config["comfort_cool"]
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "occupancy_comfort_restored",
-                    {"mode": c.hvac_mode, "target_f": comfort, "indoor_f": decision.indoor_temp_f},
+                    {"mode": written, "target_f": comfort, "indoor_f": decision.indoor_temp_f},
                 )
 
         if decision.notify is HomeNotifyOutcome.SUPPRESSED_NEAR_COMFORT:
             # Issue #1036: the value the decision used (non-None by construction on this
             # outcome) — a fresh read after the restore await could be None.
             indoor_temp = decision.indoor_temp_f
-            comfort = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
-            setback = self.config["setback_heat"] if c.hvac_mode == "heat" else self.config["setback_cool"]
+            comfort = self.config["comfort_heat"] if family == "heat" else self.config["comfort_cool"]
+            setback = self.config["setback_heat"] if family == "heat" else self.config["setback_cool"]
             _LOGGER.info(
                 "Welcome home notification suppressed — indoor %.1f°F already near comfort %.1f°F"
                 " (dist_comfort=%.1f < dist_setback=%.1f)",
@@ -16621,7 +16656,7 @@ class AutomationEngine:
             _log(
                 "Fan activation refused: occupant's fan-off hold active reason=%s hold_until=%s",
                 reason,
-                _hold_key,
+                dt_util.as_local(self._fan_off_hold_until).isoformat() if self._fan_off_hold_until else None,
             )
             return FanCommandResult.SUPPRESSED
 
@@ -16732,7 +16767,7 @@ class AutomationEngine:
         if _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_DUPLICATE:
             _LOGGER.debug(
                 "Fan toggle already deferred until %s — skipping duplicate report (%s)",
-                _rl_transition.rate_limit_applies_at.strftime("%H:%M:%S"),
+                dt_util.as_local(_rl_transition.rate_limit_applies_at).strftime("%H:%M:%S"),
                 reason,
             )
         elif _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
@@ -16743,7 +16778,7 @@ class AutomationEngine:
                 FAN_MIN_TOGGLE_INTERVAL_S,
                 "activate",
                 reason,
-                _rl_transition.rate_limit_applies_at.strftime("%H:%M:%S"),
+                dt_util.as_local(_rl_transition.rate_limit_applies_at).strftime("%H:%M:%S"),
             )
         if _rl_transition.rate_limit_outcome is not FanToggleRateLimitOutcome.ALLOW:
             return (
@@ -17937,7 +17972,7 @@ class AutomationEngine:
         if _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_DUPLICATE:
             _LOGGER.debug(
                 "Fan toggle already deferred until %s — skipping duplicate report (%s)",
-                _rl_transition.rate_limit_applies_at.strftime("%H:%M:%S"),
+                dt_util.as_local(_rl_transition.rate_limit_applies_at).strftime("%H:%M:%S"),
                 reason,
             )
         elif _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
@@ -17948,7 +17983,7 @@ class AutomationEngine:
                 FAN_MIN_TOGGLE_INTERVAL_S,
                 "deactivate",
                 reason,
-                _rl_transition.rate_limit_applies_at.strftime("%H:%M:%S"),
+                dt_util.as_local(_rl_transition.rate_limit_applies_at).strftime("%H:%M:%S"),
             )
         if _rl_transition.rate_limit_outcome is not FanToggleRateLimitOutcome.ALLOW:
             return (
@@ -18434,15 +18469,18 @@ class AutomationEngine:
         else:
             self._economizer_active = False
             self._economizer_phase = "inactive"
-        if c and c.hvac_mode == "cool" and self._manual_change_protected():
+        # Issue #1208: no ``hvac_mode == "cool"`` gate. The economizer ends on a hot day (label "cool") AND when the
+        # day is reclassified warm/mild (label "off", band still armed); the latter used to leave the thermostat as
+        # the economizer left it. The restore resolves the family from the armed band.
+        if c and self._manual_change_protected():
             self._note_deferred_to_protected_change()
-        elif c and c.hvac_mode == "cool":
+        elif c:
             # Issue #1066 (F4): no blind _set_hvac_mode("cool") first -- the selector call below
             # writes mode + setpoint (and may legitimately arm heat if the floor needs defending).
             with self._mode_change_context("restore"):
                 await self._set_temperature_for_mode(
                     c,
-                    reason="economizer off — restoring comfort cooling",
+                    reason="economizer off — restoring comfort",
                 )
         _LOGGER.info("Economizer deactivated: outdoor=%s", format_temp(outdoor_temp, unit))
 

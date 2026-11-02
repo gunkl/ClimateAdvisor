@@ -207,6 +207,7 @@ graph TD
 
 **Key behaviors:**
 - Restores the current day classification's recommended HVAC mode (e.g. `cool` on a hot day), not a previously stored state.
+- On a warm/mild day (label `off`) the armed comfort band is restored: the family comes from the resolved band, and no blind `set_hvac_mode("off")` is sent (Issue #1208).
 - Starts a full manual override grace period (default 30 min). During this window, new contact sensor open events cannot re-pause HVAC.
 - IS recorded as a manual override — `apply_classification` will skip HVAC mode changes until the grace expires or a schedule boundary clears it.
 - Status string `"resumed — door/window override"` is surfaced in the Current Status pane and sensor entity.

@@ -113,6 +113,10 @@ A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING:
 
 See [temperature-conversion.md](temperature-conversion.md#unit-change-handling-issue-1015).
 
+### Persisted end instants are UTC (Issue #1199)
+
+`automation_state.grace_end_time`, `fan_off_hold_until` and `fan_override_until` are ISO-8601 strings of **UTC** instants (`2026-11-01T09:01:30+00:00`), written from datetimes built by `time_utils.instant_after()`. Before #1199 they were local wall-clock plus a timedelta with a local offset (`2026-11-01T02:01:30-08:00`), which is one hour wrong when the span crosses a daylight-saving change. Restore reads either form with `datetime.fromisoformat()` (a `fan_off_hold_until` / `fan_override_until` string with no offset is read as UTC; `grace_end_time` has always been written with an offset and gets no such fallback), computes the remaining time against `dt_util.now()` as a true instant, and re-arms through the normal grace start, so the new string is UTC. A restart that restores a string written by the old code is wrong by at most the original one-hour DST error, once; no migration is needed. Displays convert with `dt_util.as_local()`.
+
 ## Invariants
 
 1. **The original state file is never partially overwritten.** All writes go to a `.tmp` file; only `os.replace()` makes the new content visible.

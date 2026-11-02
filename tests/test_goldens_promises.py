@@ -67,7 +67,8 @@ def _describe(hits) -> str:
 
 def test_all_goldens_discovered() -> None:
     # Issue #1200: 89 after two sensorless whole-house-fan goldens moved to unsupported/.
-    assert len(_GOLDEN_FILES) >= 89, f"expected the full golden set, found {len(_GOLDEN_FILES)}"
+    # Issues #1208 (x2), #1209, #1222: 93 after their regression scenarios were promoted.
+    assert len(_GOLDEN_FILES) >= 93, f"expected the full golden set, found {len(_GOLDEN_FILES)}"
 
 
 @pytest.mark.parametrize("path", _GOLDEN_FILES, ids=lambda p: p.stem)

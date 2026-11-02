@@ -133,6 +133,7 @@ class OverrideGraceFsmInputs:
       setpoint_override       -> is_always_confirm_origin(the detected override's source): "setpoint" or "pause"
       current_mode             -> self.hass.states.get(self.climate_entity).state
       classification_mode      -> self._current_classification.hvac_mode
+      commanded_mode           -> self._ca_commanded_mode() (Issue #1209): CA's last commanded mode, read live
       manual_override_active   -> self._manual_override_active
       manual_override_mode      -> self._manual_override_mode
       manual_override_source    -> self._manual_override_source
@@ -178,6 +179,9 @@ class OverrideGraceFsmInputs:
     # confirm-path decisions unchanged. ``decision_mode_resolved`` False keeps the legacy behaviour.
     decision_mode: str | None = None
     decision_mode_resolved: bool = False
+    # Issue #1209: the mode Climate Advisor last commanded (None: never). The confirm-expiry split self-resolves a
+    # change that has returned to it, exactly as the engine's expiry closure does.
+    commanded_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -278,6 +282,7 @@ def _transition_from_no_grace(
             setpoint_override=inputs.setpoint_override,
             current_mode=inputs.current_mode or "unknown",
             classification_mode=inputs.classification_mode,
+            commanded_mode=inputs.commanded_mode,
         )
         if path == OverrideConfirmPathOutcome.CONFIRM and inputs.grace_would_start:
             next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
@@ -417,6 +422,7 @@ def _transition_from_grace_unprotected(
             setpoint_override=inputs.setpoint_override,
             current_mode=inputs.current_mode or "unknown",
             classification_mode=inputs.classification_mode,
+            commanded_mode=inputs.commanded_mode,
         )
         if path == OverrideConfirmPathOutcome.CONFIRM:
             # _confirm_override() cancels the unprotected grace and starts a fresh

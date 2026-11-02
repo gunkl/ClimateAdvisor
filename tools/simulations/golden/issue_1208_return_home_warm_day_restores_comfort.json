@@ -1,14 +1,16 @@
 {
   "name": "issue_1208_return_home_warm_day_restores_comfort",
-  "description": "Issue #1208: warm day (classifier derives hvac_mode=off, comfort band armed). User leaves and the away setback is held; on returning at 14:00 the comfort ceiling must be restored on arrival, not up to 30 minutes later when the next classification cycle runs. Currently FAILS on production: the occupant who comes home to a warm house still has the 80F away ceiling until the 14:30 cycle.",
+  "description": "Issue #1208 (fixed): warm day (classifier derives hvac_mode=off, comfort band armed). The occupant leaves and the away setback is held through two classification cycles; on returning at 14:00 the comfort ceiling (75F) is restored on arrival, not up to 30 minutes later when the next classification cycle runs.",
   "source": "issue-report",
   "issue": 1208,
   "notes": [
-    "Reproduces Issue #1208 (bug-reproducing scenario, expected to FAIL until production is fixed; verdict.type=negative so simulate.py reports EXPECTED FAIL).",
-    "Occupant outcome: the occupant returns home on a warm afternoon and the thermostat still holds the away setback ceiling (80F) instead of the comfort ceiling (75F), so the home stays warm until the next 30-minute classification cycle.",
-    "Two assertions: (1) at 14:00 the arrival must restore comfort (comfort_restored, 75F); (2) at 14:30 the armed band ceiling must equal comfort_cool (75F).",
-    "Before Issue #85, apply_classification() would overwrite away setback with comfort temps every 30 minutes; this scenario's earlier steps (10:00/10:30 setback held) still verify that fix.",
-    "Promote to golden/ once Issue #1208 is fixed and this scenario passes."
+    "Regression scenario for Issue #1208 (fixed, owner-approved for golden 2026-11-02): before the fix the 'off' label made the arrival restore a no-op and the 80F away ceiling stayed until the next 30-minute cycle.",
+    "Occupant outcome: the occupant comes home on a warm afternoon and the thermostat gets the 75F comfort ceiling at once.",
+    "Before Issue #85, apply_classification() would overwrite away setback with comfort temps every 30 minutes; the 10:00/10:30 setback assertions still verify that fix.",
+    "(a) Scenario effectiveness: with the band-derived mode in _set_temperature_for_mode / the arrival family reverted, the 14:00 comfort_restored assertion fails (setback stays); this scenario reported EXPECTED FAIL on main before the fix.",
+    "(b) Docs <-> production: docs/08-COMPUTATION-REFERENCE.md (E10, comfort restore on off days) and docs/occupancy-dispatch-spec.md step 3 describe the band-derived restore implemented in the same change.",
+    "(c) User outcome if this regresses: on warm days the occupant returns to a house held at the away setback for up to 30 minutes while the push says comfort is being restored.",
+    "Mild-day (heat family) sibling: issue_1208_return_home_mild_day_restores_comfort. Both fan modes, the door-close / nat-vent / economizer / resume mirrors and the Rule 3 blower hold are covered by tests/test_return_home_off_day_1208.py and tests_ha/test_return_home_off_day_1208.py."
   ],
   "config": {
     "comfort_heat": 70,
@@ -94,9 +96,9 @@
     }
   ],
   "verdict": {
-    "type": "negative",
-    "summary": "Issue #1208: on return home on a warm day the comfort ceiling is not restored on arrival (the away setback persists)",
-    "observed_behavior": "setback_applied (80F) at 14:00 after the occupant returns home",
+    "type": "positive",
+    "summary": "Issue #1208: returning home on a warm day restores the comfort ceiling on arrival",
+    "observed_behavior": "comfort_restored (75F) at 14:00; armed band ceiling 75F at 14:30",
     "expected_behavior": "comfort_restored (75F) at 14:00, and the comfort band ceiling equals comfort_cool (75F) at 14:30"
   }
 }

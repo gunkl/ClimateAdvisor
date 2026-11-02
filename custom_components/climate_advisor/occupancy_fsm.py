@@ -161,7 +161,10 @@ class HomeInputs:
 
     Field-by-field correspondence to the real ``AutomationEngine``/config reads:
       has_classification -> self._current_classification is not None
-      hvac_mode           -> self._current_classification.hvac_mode (None if absent)
+      hvac_mode           -> the family the arrival restore writes: the resolved comfort band's
+                               active edge (``AutomationEngine._comfort_restore_family()``,
+                               Issue #1208), NOT the classification label, which is "off" on
+                               warm/mild days; None if there is no classification
       indoor_temp_f        -> self._get_indoor_temp_f()
       comfort_f            -> comfort_heat/comfort_cool matching hvac_mode (None
                                unless hvac_mode in ("heat", "cool"))

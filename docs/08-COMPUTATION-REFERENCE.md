@@ -3883,8 +3883,11 @@ module-level `_sleep_sensor_miss_streaks` dict (an INFO-then-WARNING escalation 
 dependent and shared across zones using one sensor) was **removed in Issue #1033**.
 The failure is reported in `IndoorTempReading.sleep_reason` and announced once per
 episode by `_refresh_indoor_sensor_health()` (INFO log, `indoor_sensor_unavailable`
-with `role=sleep`). An `INFO` line (`"Using sleep indoor sensor" entity=<id>
-value=<X.X>°F`) still fires whenever the sleep reading is actually used.
+with `role=sleep`). The `"Using sleep indoor sensor" entity=<id> value=<X.X>°F` line is `INFO` only when the
+comfort-facing source changes for that zone (and `"Indoor reading source changed to the primary source"` on the way
+back); every other call logs it at `DEBUG` (Issue #1194 a: the outer loop resolves every minute, which made the old
+per-call `INFO` ~600 lines a night). The per-zone memory behind this (`indoor_temp._logged_indoor_source`, keyed by
+climate entity) is log-only: it never changes a reading or a decision.
 
 **Provenance, computed once.** `resolve_indoor_temp_with_provenance()` returns
 an `IndoorTempReading(value, source_entity, primary_value, reason, sleep_reason)` — `value`/
@@ -3983,6 +3986,106 @@ sleep-sensor streak lines (`Sleep sensor unavailable (n/2)`, `... available agai
 owns the push notification for a missing/unavailable primary sensor; the Activity Log owns
 the timeline, reason and recovery (see `docs/entity-health-brief.md`).
 
+### Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)
+
+**Occupant outcome.** The hallway thermostat only sees its own sensor. On a sleep-sensor night the bedroom can sit
+below the sleep floor (measured: 64.0 F against a 66 F floor, 624 of 640 minutes below it) while the hallway reads at
+its setpoint and the furnace never starts. While CA is using a REMOTE sensor reading for a context, it therefore acts
+as an outer loop on that sensor: it nudges the setpoint it writes in small steps so the thermostat, on its own sensor
+and its own hysteresis, produces the target at the remote sensor, and steps the nudge back down as soon as the
+remote room is warm enough. The thermostat is never asked to do anything it does not already do (no on/off cycling
+by CA), and the occupant gets the sleep temperature in the bedroom.
+
+**Scope and keying (generic).** Keyed on `indoor_temp` provenance, not on "sleep": `IndoorTempReading.remote_context`
+is set (today `"sleep"`, `REMOTE_CONTEXT_SLEEP`) exactly when the comfort-facing `value` came from a remote sensor
+instead of `primary_value`. A future remote-sensor context sets it in `indoor_temp.py` and adds its configured-entity
+test to `AutomationEngine._remote_sensor_configured()`; nothing else changes. No separate toggle: on whenever the
+sleep sensor is configured, for that sensor's context. Installs without one run none of this.
+
+**The single setpoint path.** `AutomationEngine._set_temperature_impl()` is the ONE place the offset is applied.
+Every CA setpoint writer reaches it (`_apply_comfort_band`, `_set_temperature_for_mode`, wake-up, bedtime, pre-cool,
+TOU pre-conditioning, restores, the post-fan verify repair, the setpoint retry, and the outer loop itself), so no
+caller carries a copy. `temperature` stays the comfort TARGET for everything that judges comfort (sanity check,
+retry, re-asserts); the thermostat is told `target + offset` (heat) / `target - offset` (cool).
+`_pending_setpoint_single` is the COMMANDED value (what the read-back verify compares and diagnostics quote);
+`_pending_setpoint_target` is the target a re-asserting writer passes back in, so the offset is never applied twice.
+
+**The rule (heat; cool mirrors).** `swing` = learned `swing_heat_f` / `swing_cool_f` read from the engine's thermal
+model (read-only; default `THERMAL_SWING_DEFAULT_F` = 1.5 F when unlearned; learning of the swing is #1234, not
+touched here). `gap` = `target - remote` (heat) or `remote - target` (cool).
+
+| Remote vs target | Equipment | Since last raise | Action | New offset |
+|---|---|---|---|---|
+| `gap > swing` | idle | never, or at least the startup wait | RAISE one step | `min(offset + step, cap)` |
+| `gap > swing` | idle | less than the startup wait | hold (`awaiting_startup`) | unchanged |
+| `gap > swing` | running (heating/cooling) | any | hold (`equipment_running`: the step worked) | unchanged |
+| `gap > swing` | any | any, offset already at cap | hold (`at_cap`) | unchanged |
+| `-swing <= gap <= swing` | any | any | hold (`in_band`) | unchanged |
+| `gap < -swing`, offset > 0 | any | any (not delayed by the wait) | STEP DOWN one step | `max(offset - step, 0)` |
+| `gap < -swing`, offset = 0 | any | any | hold (`nothing_to_lower`) | 0 |
+
+At most one step per check; a write is made only when the commanded value changes. `step` = 2 F / 1 C (1.8 F
+internal), applied as a delta (`remote_offset.step_f(unit)`); the cap below is likewise a delta.
+
+**Caps (the tighter wins).** At most +4 F / +2 C (3.6 F internal) beyond the target in the gap direction, and never past
+the OPPOSITE comfort-band edge: heating never above the resolved band's ceiling, cooling never below its floor
+(`remote_offset.max_magnitude_f()`, band from `_resolved_comfort_band()`, flat `comfort_heat`/`comfort_cool` when there
+is no classification yet). A target already past the opposite edge (TOU banking) gets no offset. The cap is evaluated
+for the target of EACH write, so a writer with a different target is clamped on its own. Because CA writes a single
+setpoint in heat or cool mode (Issue #301), a heat_cool/auto dead-band is never in play; there is no minimum-dead-band
+constant in the integration to enforce.
+
+**Startup wait and actuation feedback.** After a raise CA waits for the thermostat to start before raising again:
+`startup_wait_s(latency)` = the thermostat's MEASURED raise-to-start latency plus 60 s, never below 120 s and never above
+the 300 s default used where nothing has been measured. The coordinator's equipment-activity hook
+(`_note_equipment_activity` -> `AutomationEngine.note_remote_offset_actuation()`) records the first heating/cooling
+`hvac_action` after a raise and feeds an EWMA of the latency (measured on the reference thermostat: 2-5 s); it only
+refines the wait. The hold comes from the live `hvac_action`: no raise while the equipment is running. Owner decision
+2026-11-02 ("fired -> hold", as built): once that cycle ends, a remote reading still below target - swing allows the next
+raise after the startup wait; the offset is not frozen at the step that fired. Restart: in-memory only, clean slate.
+
+**Freshness.** The remote reading is used only if `last_reported` (falling back to `last_updated`, via
+`temperature.is_sensor_stale`) is within `REMOTE_OFFSET_FRESHNESS_MINUTES` = 120 min (`indoor_temp.remote_reading_fresh()`);
+`input_number` helpers are exempt. Older -> the offset is dropped and the next check rewrites the plain setpoint
+(today's behaviour). This is separate from, and much tighter than, the 12 h `INDOOR_SENSOR_STALE_HOURS` fallback above.
+The measured sensor reports on change in ~0.18 F steps and idled up to 105 min, which is why `last_reported` is used.
+
+**Checks.** `AutomationEngine.remote_offset_check()` runs on every remote-sensor update (the `#964`
+`_on_sleep_indoor_temp_changed` listener, inside the sleep window, after the reactive checks) and from a 1-minute
+`async_track_time_interval` floor (`REMOTE_OFFSET_CHECK_INTERVAL_S`, registered next to that listener). Re-entrancy
+guarded; a no-op in dry-run, after shutdown, with no setpoint written yet, or when the thermostat is not in the
+target's mode (the loop never changes the mode).
+
+**Gates in this increment (safe default).** No offset is applied or written while the shared scheduled-band gate says
+defer (`desired_state.decide_scheduled_band_gate`: away/vacation, manual override, door/window pause, nat-vent or WHF
+ownership) or an override confirmation is pending. A closed gate resets the offset to 0 and marks the thermostat's
+held value unknown. While it is unknown, the first check after the gate reopens compares the thermostat's LIVE setpoint
+with what CA would command now and re-writes it once unless it already matches within half a step, so an offset can
+never stay on the thermostat after the episode that closed the gate (a stranded +4 F) waiting for some unrelated
+writer.
+
+**Failed loop write: roll back and back off.** When the loop's own write is not `EXECUTED` (failed, rejected,
+blocked, superseded, unconfirmed) the offset goes back to the value the thermostat holds (no silent climb to the cap)
+and the startup-wait clock is not started. The loop then waits until the LATER of `SETPOINT_RETRY_DELAY_S` (900 s,
+the same interval as the read-back verify's setpoint retry) and the next remote-sensor report after the failure (only
+the interval when the remote sensor is no longer in use), so a refusing thermostat sees about 4 attempts an hour instead
+of 60, and the first write after recovery is one step. Any executed setpoint write, from any writer, ends the back-off.
+
+Full gate coverage in both fan modes, context
+entry/exit transitions, the Status "clamped" display and the chart target/commanded split are the later increments
+(#1194 b, c, d); the simulation bedroom node and Tier A/B scenarios are (e). Cool mode is simulation-tested only.
+
+**Before / after (heat, sleep window, bedroom 64.0 F, target 66 F, hallway at setpoint).**
+
+| Situation | Before | After |
+|---|---|---|
+| Bedroom below target - swing | setpoint 66 F, furnace idle all night | 68 F, then 70 F (cap) if the thermostat has not started within the wait |
+| Furnace started, bedroom rises above target + swing | n/a | offset steps down one step per check; cycle ends on the thermostat's own hysteresis |
+| Bedroom inside the band | setpoint 66 F | setpoint 66 F (offset unchanged, no write) |
+| Remote sensor silent for > 120 min | setpoint 66 F | setpoint 66 F (offset dropped) |
+| Occupant changes the setpoint / window opens / WHF runs | CA stands down | CA stands down, offset forgotten |
+| Sleep window ends | wake band written | wake band written with no offset (the indoor reading is primary again) |
+
 ### Test coverage
 
 | Test | File |
@@ -4002,6 +4105,7 @@ the timeline, reason and recovery (see `docs/entity-health-brief.md`).
 | `TestSleepSensorOverrideBothCallPaths` | `tests/test_indoor_temp_helper.py` |
 | Indoor sensor failure: resolver reasons, `next_fallback_episode`, funnel announcements, Settings suffix (Issue #1033) | `tests/test_indoor_temp_helper.py`, `tests/test_indoor_sensor_fallback.py`, `tests/test_fallback_episode.py`, `tests/test_api.py`, `tests/test_activity_renderers.py` (written by the implementing agents; names not verified at doc time) |
 | `issue_895_sleep_indoor_sensor_swap` (pending scenario) | `tools/simulations/pending/` |
+| Remote-sensor outer loop offset core (Issue #1194 a): pure decision, units, provenance, heat/cool, caps, swing source, freshness, startup wait, single-path callers, gates, coordinator wiring | `tests/test_remote_offset_1194a.py` |
 
 ---
 

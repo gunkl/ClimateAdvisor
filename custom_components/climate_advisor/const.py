@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.37"
+VERSION = "0.8.38"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -565,6 +565,31 @@ OUTDOOR_SENSOR_STALE_HOURS = 6.0
 # Uncalibrated: 10 days of the install's only dedicated indoor-type sensor showed a max 2 h gap
 # between value-change records (true report cadence unknown) — revisit with real history.
 INDOOR_SENSOR_STALE_HOURS = 12.0
+
+# Issue #1194 (a): remote-sensor outer loop. While the comfort-facing indoor reading comes from a REMOTE
+# sensor (today: the bedroom sensor in the sleep window) CA nudges the thermostat's setpoint so the
+# thermostat -- which only sees its own sensor -- produces the target at the remote sensor.
+# Step and cap are DISPLAY-unit deltas (F installs 2 / 4, C installs 1 / 2); remote_offset.py converts.
+REMOTE_OFFSET_STEP_F: float = 2.0
+REMOTE_OFFSET_STEP_C: float = 1.0
+REMOTE_OFFSET_CAP_F: float = 4.0  # at most this far beyond the target in the gap direction
+REMOTE_OFFSET_CAP_C: float = 2.0
+# Freshness of the remote reading, measured on ``last_reported`` (not last_changed: this class of sensor
+# reports on change in ~0.18F steps and was observed idle for up to 105 min). Older -> plain setpoint.
+# Separate from (and much tighter than) the 12 h INDOOR_SENSOR_STALE_HOURS fallback rule above.
+REMOTE_OFFSET_FRESHNESS_MINUTES: float = 120.0
+REMOTE_OFFSET_CHECK_INTERVAL_S: int = 60  # the 1-minute floor under the remote-sensor update listener
+# Startup wait after a raise before a further raise is allowed (thermostat actuation feedback): the
+# measured thermostat latency plus a margin, never below the minimum, and this default where unmeasured.
+REMOTE_OFFSET_DEFAULT_WAIT_S: float = 300.0
+REMOTE_OFFSET_MIN_WAIT_S: float = 120.0
+REMOTE_OFFSET_WAIT_MARGIN_S: float = 60.0
+REMOTE_OFFSET_LATENCY_EWMA_ALPHA: float = 0.3
+# Delay before a setpoint write is retried: the read-back verify's retry after a rejected setpoint, and the outer
+# loop's back-off after one of its own writes was not executed (it also waits for a new remote report).
+SETPOINT_RETRY_DELAY_S: int = 900
+# The remote-context label carried by IndoorTempReading.remote_context for the sleep-window bedroom sensor.
+REMOTE_CONTEXT_SLEEP: str = "sleep"
 
 # Sensor attributes
 ATTR_DAY_TYPE = "day_type"

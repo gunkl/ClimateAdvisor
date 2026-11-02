@@ -42,7 +42,9 @@ unavailable (``IndoorTempReading.reason`` / ``sleep_reason``: ``not_configured``
 the once-per-episode log line and Activity Log events are owned by exactly one event-loop
 caller (``coordinator._refresh_indoor_sensor_health``). Announcing from here would be unsafe:
 ``get_chart_data`` reaches this module from an executor thread, and ``coordinator._emit_event``
-itself calls back into the indoor read. Per-call diagnostics are therefore DEBUG only.
+itself calls back into the indoor read. Per-call diagnostics are therefore DEBUG only; the one INFO line (sleep
+sensor in use / back on the primary source) fires only when a zone's source changes, through a log-only memory
+(``_logged_indoor_source``, Issue #1194 a) that never affects a reading.
 """
 
 from __future__ import annotations
@@ -53,7 +55,14 @@ from typing import Any, NamedTuple
 
 from homeassistant.util import dt as dt_util
 
-from .const import INDOOR_SENSOR_STALE_HOURS, TEMP_SOURCE_INPUT_NUMBER, TEMP_SOURCE_SENSOR, is_unavailable_state
+from .const import (
+    INDOOR_SENSOR_STALE_HOURS,
+    REMOTE_CONTEXT_SLEEP,
+    REMOTE_OFFSET_FRESHNESS_MINUTES,
+    TEMP_SOURCE_INPUT_NUMBER,
+    TEMP_SOURCE_SENSOR,
+    is_unavailable_state,
+)
 from .temperature import is_sensor_stale, read_attribute_temp_f, read_sensor_state_f
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,6 +91,10 @@ class IndoorTempReading(NamedTuple):
     # used. Trailing + defaulted so existing 3-argument constructions keep working.
     reason: str | None = None
     sleep_reason: str | None = None
+    # Issue #1194: the REMOTE context whose sensor supplied ``value`` (``REMOTE_CONTEXT_SLEEP`` today), or None
+    # when ``value`` is the primary reading. This is the provenance the remote-sensor outer loop keys on
+    # (remote value vs ``primary_value``), so a future remote-sensor context only has to set it here.
+    remote_context: str | None = None
 
 
 def _resolve_primary_indoor_temp_f(
@@ -189,14 +202,49 @@ def resolve_indoor_temp_with_provenance(
             hass=hass, unit=unit, sleep_indoor_temp_entity=sleep_indoor_temp_entity, now=now
         )
         if val_f is not None:
-            _LOGGER.info(
-                "Using sleep indoor sensor entity=%s value=%.1f°F",
-                sleep_indoor_temp_entity,
-                val_f,
+            _log_indoor_source(climate_entity, sleep_indoor_temp_entity, val_f, remote=True)
+            return IndoorTempReading(
+                val_f, sleep_indoor_temp_entity, primary_val, primary_reason, None, REMOTE_CONTEXT_SLEEP
             )
-            return IndoorTempReading(val_f, sleep_indoor_temp_entity, primary_val, primary_reason, None)
 
+    _log_indoor_source(climate_entity, primary_entity, primary_val, remote=False)
     return IndoorTempReading(primary_val, primary_entity, primary_val, primary_reason, sleep_reason)
+
+
+# Issue #1194 (a): LOG-ONLY memory of the comfort-facing source last logged per zone (keyed by climate entity), so the
+# "using the sleep sensor" line is INFO once per source change and DEBUG on every other call. The remote-sensor outer
+# loop resolves every minute, which made the old per-call INFO ~600 lines a night. Resolution itself stays a pure read:
+# nothing here feeds any decision or the returned reading. Callers on an executor thread (``get_chart_data``) can at
+# worst race one duplicate or missing INFO line (single-key dict get/set), never a wrong reading.
+_logged_indoor_source: dict[str, str | None] = {}
+
+
+def _log_indoor_source(zone: str, source: str | None, value_f: float | None, *, remote: bool) -> None:
+    previous = _logged_indoor_source.get(zone, "<unset>")
+    _logged_indoor_source[zone] = source
+    changed = previous != source and (previous != "<unset>" or remote)
+    if remote:
+        (_LOGGER.info if changed else _LOGGER.debug)(
+            "Using sleep indoor sensor entity=%s value=%.1f°F", source, value_f if value_f is not None else float("nan")
+        )
+    elif changed:
+        _LOGGER.info("Indoor reading source changed to the primary source entity=%s (was %s)", source, previous)
+
+
+def remote_reading_fresh(state: Any, entity_id: str | None, now: datetime) -> bool:
+    """True when a remote sensor's reading is recent enough for the remote-sensor outer loop (Issue #1194).
+
+    Age is measured on ``last_reported`` (``is_sensor_stale`` falls back to ``last_updated``): these sensors
+    report on change in coarse steps and can sit idle for 100+ minutes, so ``last_changed`` would mark a
+    healthy sensor stale. Older than ``REMOTE_OFFSET_FRESHNESS_MINUTES`` -> not fresh -> the caller uses the
+    plain setpoint. ``input_number`` helpers legitimately stay unchanged for days, so they are always fresh
+    (same exemption as the resolver). Fails open when timestamps are unavailable, like ``is_sensor_stale``.
+    """
+    if state is None:
+        return False
+    if entity_id and entity_id.startswith("input_number."):
+        return True
+    return not is_sensor_stale(state, REMOTE_OFFSET_FRESHNESS_MINUTES / 60.0, now)
 
 
 def resolve_indoor_temp_f(

@@ -95,6 +95,7 @@ custom_components/climate_advisor/
 ├── comfort_family_decision.py  # Pure leaf: decide_comfort_family() / effective_margin() -- nearest-edge arming of the heat or cool family (Issue #1066; supersedes the #827 day-type-default-edge machinery; Issue #1073 adds the recency-gated settling guard). No HA imports.
 ├── comfort_family_fsm.py  # Thin transition layer around the leaf: transition() / ComfortFamilyDwellState -- the 600 s anti-chatter dwell (breaches bypass it). The dwell clock reads the persisted mode-change ring buffer (Issue #1073), so it survives a restart.
 ├── control_quality.py     # Pure builder of the `control_quality` diagnostic block from the commanded-mode ring buffer + chart log (Issue #1066). See Debugging Guide.
+├── remote_offset.py             # Pure core of the remote-sensor outer loop (Issue #1194 a): two-sided hysteresis decision, step/cap in internal-F deltas, startup wait, opposite-band-edge cap. Engine owns state and writes.
 ├── setpoint_verify_decision.py  # Pure decision cores: the post-fan setpoint verify check (architecture-reset Step 2), plus `decide_mode_alignment()` / `ModeAlignmentOutcome` -- the "did the thermostat take the requested mode?" read-back (Issue #1049). See docs/08-COMPUTATION-REFERENCE.md "Command shapes since #301".
 │
 ├── classification_fsm.py  # Classification decision FSM — stateless, composes decide_scheduled_band_gate() + decide_ode_ceiling_guard() (Issue #742). See §FSM Decision Layer.
@@ -285,7 +286,9 @@ climate_entity: climate.living_room
 outdoor_temp_entity: sensor.outdoor_temp (optional)
 indoor_temp_entity: sensor.indoor_temp (optional)
 sleep_indoor_temp_entity: sensor.bedroom_temp (optional — Issue #895; used for comfort/automation
-  instead of the primary indoor sensor while the sleep schedule is active, never for thermal learning)
+  instead of the primary indoor sensor while the sleep schedule is active, never for thermal learning;
+  since Issue #1194 (a) it is also the remote sensor of the setpoint outer loop, see
+  docs/08-COMPUTATION-REFERENCE.md "Remote-sensor outer loop")
 comfort_heat: 70 (°F)
 comfort_cool: 75 (°F)
 setback_heat: 60 (°F)

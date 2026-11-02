@@ -122,8 +122,11 @@ from .const import (
     OCCUPANCY_VACATION,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
     PEAK_DECLINE_MARGIN_F,
+    REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
     REVISIT_DELAY_SECONDS,
+    SETPOINT_RETRY_DELAY_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
+    THERMAL_SWING_DEFAULT_F,
     TIMER_BOUNDARY_SETTLE_SECONDS,
     VACATION_SETBACK_EXTRA,
 )
@@ -221,7 +224,12 @@ from .fan_toggle_rate_limit import (
 )
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
-from .indoor_temp import resolve_indoor_temp_f
+from .indoor_temp import (
+    IndoorTempReading,
+    remote_reading_fresh,
+    resolve_indoor_temp_f,
+    resolve_indoor_temp_with_provenance,
+)
 from .lifecycle_dispatcher import LifecycleDispatcher
 from .lifecycle_events import LifecycleEvent, LifecycleEventType
 from .nat_vent_cycling import NatVentCyclingInputs, compute_nat_vent_target, decide_nat_vent_cycling
@@ -263,6 +271,15 @@ from .override_grace_lifecycle import (
     GraceState,
     OverrideConfirmState,
     OverrideGraceLifecycleState,
+)
+from .remote_offset import (
+    RemoteContext,
+    RemoteOffsetAction,
+    cap_f,
+    decide_remote_offset,
+    max_magnitude_f,
+    startup_wait_s,
+    step_f,
 )
 from .setpoint_verify_decision import (
     ModeAlignmentOutcome,
@@ -1574,6 +1591,22 @@ class AutomationEngine:
         # single setpoint validation: commanded temp (internal Fahrenheit)
         self._pending_setpoint_single: float | None = None
         self._pending_setpoint_mode: str | None = None  # single setpoint validation: commanded mode ("cool"|"heat")
+        # Issue #1194 (a): the COMFORT target behind ``_pending_setpoint_single`` (which is the COMMANDED value,
+        # i.e. target + remote-sensor offset). Re-asserting writers pass this back through the single setpoint
+        # path so the offset is never applied twice.
+        self._pending_setpoint_target: float | None = None
+        # Issue #1194 (a): remote-sensor outer loop state (see ``remote_offset_check``). In-memory only: a restart
+        # is a clean slate (offset 0, applied unknown) exactly like the manual-override state.
+        self._remote_target_f: float | None = None  # comfort target of the last setpoint write (internal F)
+        self._remote_target_mode: str | None = None  # "heat" | "cool" of that write
+        self._remote_offset_f: float = 0.0  # offset magnitude beyond the target in the gap direction (>= 0)
+        self._remote_offset_applied_f: float | None = None  # magnitude last commanded to the thermostat; None=unknown
+        self._remote_context_key: str | None = None  # "<context>:<entity>" the offset belongs to; None = no context
+        self._remote_raise_at: datetime | None = None  # when the last raise was commanded (startup-wait clock)
+        self._remote_raise_pending_feedback: bool = False  # raise sent, thermostat start not yet seen
+        self._remote_startup_latency_s: float | None = None  # measured raise->equipment-start latency (EWMA)
+        self._remote_offset_check_running: bool = False  # re-entrancy guard (sensor event + 1-minute floor)
+        self._remote_write_failed_at: datetime | None = None  # the loop's own last write was not executed (back-off)
         # Issue #411: consecutive setpoint_rejected count for the current commanded value.
         # Reset to 0 whenever a setpoint is confirmed/accepted; incremented on each rejection.
         # On the 2nd+ consecutive rejection, the retry nudges the setpoint by ±1°F first to
@@ -5696,6 +5729,7 @@ class AutomationEngine:
         reason: str,
         mode: str = "cool",
         skip_setpoint_sanity_check: bool = False,
+        keep_pre_cool_hold: bool = False,
     ) -> HvacCommandResult:
         """Set the thermostat target temperature; record the write's final outcome (Issue #1049).
 
@@ -5707,9 +5741,15 @@ class AutomationEngine:
         Issue #1120: every setpoint write supersedes a held pre-cool band (``_pre_cool_band_in_force``);
         ``handle_pre_cool()`` records it again after ITS write is sent, so the only writer that leaves it
         set is pre-cool itself.
+
+        Issue #1194 (a): ``temperature`` is the COMFORT target; the remote-sensor outer loop's offset is applied
+        inside ``_set_temperature_impl`` (the one setpoint path). ``keep_pre_cool_hold=True`` is for the loop's own
+        offset-step rewrite only: it re-sends the SAME target with a different offset, so it must not release a
+        held pre-cool band the way a new target does.
         """
-        self._pre_cool_band_in_force = None
-        self._pre_cool_band_since = None
+        if not keep_pre_cool_hold:
+            self._pre_cool_band_in_force = None
+            self._pre_cool_band_since = None
         result = await self._set_temperature_impl(
             temperature,
             reason=reason,
@@ -5768,6 +5808,16 @@ class AutomationEngine:
                 )
             return HvacCommandResult.WHF_BLOCKED
         unit = self._temp_unit
+        # Issue #1194 (a): THE one place the remote-sensor offset is applied -- every CA setpoint writer (wake,
+        # bedtime, pre-cool, TOU, band apply, restores, retries, the outer loop itself) reaches the thermostat
+        # through here, so none carries a copy. ``temperature`` stays the comfort TARGET for everything that
+        # judges comfort (sanity check, retry, re-asserts); ``commanded`` is what the thermostat is told.
+        _target_f = temperature
+        if mode in ("heat", "cool"):
+            self._remote_target_f = _target_f
+            self._remote_target_mode = mode
+        _offset_f = self._remote_offset_for_write(_target_f, mode)
+        temperature = _target_f + _offset_f
         # Convert internal °F to user's unit before sending to HA climate entity
         service_temp = from_fahrenheit(temperature, unit)
         if _refuse_if_shut_down(self, f"set temperature {temperature}"):
@@ -5788,22 +5838,23 @@ class AutomationEngine:
         # exists to catch in normal comfort-band writes.
         if skip_setpoint_sanity_check:
             pass
-        elif mode == "cool" and temperature < (self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT) - 1.0):
+        elif mode == "cool" and _target_f < (self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT) - 1.0):
             _LOGGER.error(
                 "SETPOINT INCONSISTENCY: cool mode but target %.1fF is below comfort_heat threshold",
-                temperature,
+                _target_f,
             )
-            self._emit_engine_incident("setpoint_mode_inconsistency", {"hvac_mode": mode, "setpoint_f": temperature})
-        elif mode == "heat" and temperature > (self.config.get("comfort_cool", DEFAULT_COMFORT_COOL) + 1.0):
+            self._emit_engine_incident("setpoint_mode_inconsistency", {"hvac_mode": mode, "setpoint_f": _target_f})
+        elif mode == "heat" and _target_f > (self.config.get("comfort_cool", DEFAULT_COMFORT_COOL) + 1.0):
             _LOGGER.error(
                 "SETPOINT INCONSISTENCY: heat mode but target %.1fF is above comfort_cool threshold",
-                temperature,
+                _target_f,
             )
-            self._emit_engine_incident("setpoint_mode_inconsistency", {"hvac_mode": mode, "setpoint_f": temperature})
+            self._emit_engine_incident("setpoint_mode_inconsistency", {"hvac_mode": mode, "setpoint_f": _target_f})
         # Set state tracking BEFORE the write so the validation callback always
         # compares against the intended final setpoint.
         _now = dt_util.now()
-        self._pending_setpoint_single = temperature
+        self._pending_setpoint_single = temperature  # COMMANDED value (target + offset): what verify compares
+        self._pending_setpoint_target = _target_f  # comfort target: what re-asserting writers pass back in
         self._pending_setpoint_mode = mode
         self._write_seq += 1
         _my_seq = self._write_seq
@@ -5908,7 +5959,8 @@ class AutomationEngine:
                 # dt_util is a bare, unpatched MagicMock in these tests, so a mocked
                 # `(at - now).total_seconds()` returns a MagicMock, not a real float.
                 _retry_seq = _my_seq
-                _retry_temp = temperature
+                _retry_temp = _target_f  # re-sent through the single path, which re-applies the offset
+                _retry_commanded = temperature  # what the thermostat rejected: the nudge works from this
                 _retry_mode = mode
 
                 async def _retry_callback(_now: Any) -> None:
@@ -5937,7 +5989,7 @@ class AutomationEngine:
                         _LOGGER.info("Setpoint retry skipped -- manual override active/pending")
                         return
                     if _action is SetpointRetryAction.NUDGE_THEN_TARGET:
-                        _nudge_temp_f = _retry_temp + 1.0 if _retry_mode == "cool" else _retry_temp - 1.0
+                        _nudge_temp_f = _retry_commanded + 1.0 if _retry_mode == "cool" else _retry_commanded - 1.0
                         _nudge_temp = from_fahrenheit(_nudge_temp_f, unit)
                         _LOGGER.warning(
                             "Retrying setpoint write after repeated rejection (streak=%d):"
@@ -6022,7 +6074,7 @@ class AutomationEngine:
                 def _schedule_retry(_now: Any) -> None:
                     self.hass.async_create_task(_retry_callback(_now))
 
-                self._rearm_timer("_setpoint_retry_cancel", 900, _schedule_retry)
+                self._rearm_timer("_setpoint_retry_cancel", SETPOINT_RETRY_DELAY_S, _schedule_retry)
             else:
                 self._setpoint_reject_streak = 0
                 _LOGGER.info(
@@ -6047,8 +6099,260 @@ class AutomationEngine:
             reason,
             self.role,
         )
+        self._remote_offset_applied_f = abs(_offset_f)  # the thermostat now holds target + this (the loop diffs on it)
+        if _call.ok:
+            self._remote_write_failed_at = None  # a write went through: the outer loop's failed-write back-off is over
         self._record_action(f"Set temp to {format_temp(temperature, unit)} (mode={mode})", reason)
         return HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED
+
+    # ------------------------------------------------------------------
+    # Issue #1194 (a): remote-sensor outer loop -- the offset core
+    # ------------------------------------------------------------------
+    # While the comfort-facing indoor reading comes from a REMOTE sensor (``IndoorTempReading.remote_context``;
+    # today the bedroom sensor in the sleep window) the thermostat, which only sees its own sensor, may never
+    # start. CA therefore adds a stepped OFFSET to the setpoint it writes. The offset is applied in exactly one
+    # place (``_set_temperature_impl`` -> ``_remote_offset_for_write``); ``remote_offset_check`` only moves the
+    # offset (one step per check) and re-sends the same target through that path. Gating (override, door/window
+    # pause, WHF, away/vacation) is the shared scheduled-band gate in this increment; context entry/exit events,
+    # Status "clamped" and the chart split are later increments (#1194 b-e).
+
+    def _remote_sensor_configured(self) -> bool:
+        """Whether any remote-sensor context is configured at all (today: the sleep-window bedroom sensor).
+
+        The offset machinery is inert, and costs nothing per write, on installs without one. A future remote-sensor
+        context adds its own configured-entity test here.
+        """
+        return bool(self.config.get("sleep_indoor_temp_entity"))
+
+    def _remote_offset_gated(self) -> bool:
+        """True while CA must not write an offset (occupant, window, fan or away setback owns the thermostat).
+
+        Reuses ``decide_scheduled_band_gate`` (override / door-window pause / nat-vent or WHF / away or vacation)
+        plus the unconfirmed-change window, the same set every scheduled band writer defers on.
+        """
+        if self._override_confirm_pending:
+            return True
+        return (
+            decide_scheduled_band_gate(
+                occupancy_mode=self._occupancy_mode,
+                manual_override_active=self._manual_override_active,
+                paused_by_door=self._paused_by_door,
+                natural_vent_active=self._natural_vent_active,
+                whf_owns_hvac=self._whf_owns_hvac(),
+            )
+            is not ScheduledBandGate.PROCEED
+        )
+
+    def _remote_context(self) -> RemoteContext | None:
+        """The remote sensor supplying the indoor reading right now, or None when the primary sensor does."""
+        reading = self._get_indoor_reading()
+        if reading.remote_context is None or reading.value is None or not reading.source_entity:
+            return None
+        state = self.hass.states.get(reading.source_entity)
+        reported = getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+        return RemoteContext(
+            key=f"{reading.remote_context}:{reading.source_entity}",
+            value_f=reading.value,
+            fresh=remote_reading_fresh(state, reading.source_entity, dt_util.utcnow()),
+            reported_at=reported if isinstance(reported, datetime) else None,
+        )
+
+    def _remote_swing_f(self, mode: str) -> float:
+        """The hysteresis at the remote sensor: the learned swing for the mode, else the default (read-only)."""
+        value = (self._thermal_model or {}).get("swing_heat_f" if mode == "heat" else "swing_cool_f")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 < value < float("inf"):
+            return THERMAL_SWING_DEFAULT_F
+        return float(value)
+
+    def _remote_offset_cap_for(self, target_f: float, mode: str) -> float:
+        """Largest offset allowed for ``target_f``: the tighter of the +cap and the OPPOSITE comfort-band edge."""
+        classification = self._current_classification
+        if classification is not None:
+            band = self._resolved_comfort_band(classification)
+            floor, ceiling = band.floor, band.ceiling
+        else:
+            floor = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+            ceiling = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+        return max_magnitude_f(mode, target_f, floor=floor, ceiling=ceiling, cap_f=cap_f(self._temp_unit))
+
+    def _reset_remote_offset(self, *, applied_unknown: bool = False) -> None:
+        """Back to no offset, no pending step; ``applied_unknown`` if the thermostat's held value is no longer known."""
+        self._remote_offset_f = 0.0
+        self._remote_raise_at = None
+        self._remote_raise_pending_feedback = False
+        if applied_unknown:
+            self._remote_offset_applied_f = None
+
+    def _sync_remote_context(self, key: str | None) -> None:
+        """Entering or leaving a remote context starts from no offset (the evaluation is fresh)."""
+        if key != self._remote_context_key:
+            _LOGGER.info("Remote-sensor context changed: %s -> %s -- offset reset to 0", self._remote_context_key, key)
+            self._remote_context_key = key
+            self._reset_remote_offset()
+
+    def _remote_offset_for_write(self, target_f: float, mode: str) -> float:
+        """Signed offset (internal F delta) to add to ``target_f`` for THIS write, via the single setpoint path.
+
+        0 unless the indoor reading is coming from a fresh remote sensor AND no gate is active. Heating raises
+        the setpoint (+), cooling lowers it (-); clamped to the caps for this target, so a writer with a
+        different target (pre-cool, TOU, a different band) can never push past the opposite band edge.
+        """
+        if mode not in ("heat", "cool") or not self._remote_sensor_configured():
+            return 0.0
+        ctx = self._remote_context()
+        self._sync_remote_context(ctx.key if ctx is not None and ctx.fresh else None)
+        if ctx is None or not ctx.fresh:
+            return 0.0
+        if self._remote_offset_gated():
+            self._reset_remote_offset(applied_unknown=True)
+            return 0.0
+        magnitude = min(self._remote_offset_f, self._remote_offset_cap_for(target_f, mode))
+        return magnitude if mode == "heat" else -magnitude
+
+    async def remote_offset_check(self) -> None:
+        """One check of the outer loop at the remote sensor (Issue #1194 a).
+
+        Called on every remote-sensor update and by a 1-minute floor timer. Two-sided hysteresis at the REMOTE
+        sensor with the learned swing: raise one step when it is more than ``swing`` below the target (heat;
+        above for cool) -- after the startup wait / actuation feedback and never while the equipment runs --
+        step down one step when it is more than ``swing`` past the target on the other side, hold in between.
+        Writes only when the commanded value changes, and only to a thermostat that is in the target's mode.
+        """
+        if self._remote_offset_check_running or self.dry_run is True or not self._remote_sensor_configured():
+            return
+        if _refuse_if_shut_down(self, "remote offset check"):
+            return
+        target, mode = self._remote_target_f, self._remote_target_mode
+        if target is None or mode not in ("heat", "cool"):
+            return
+        self._remote_offset_check_running = True
+        try:
+            await self._remote_offset_check_locked(target, mode)
+        finally:
+            self._remote_offset_check_running = False
+
+    async def _remote_offset_check_locked(self, target: float, mode: str) -> None:
+        now = dt_util.now()
+        ctx = self._remote_context()
+        fresh = ctx is not None and ctx.fresh
+        self._sync_remote_context(ctx.key if fresh and ctx is not None else None)
+        if self._remote_offset_gated():
+            # The occupant / a window / the fan / an away setback owns the thermostat: write nothing, forget the offset.
+            self._reset_remote_offset(applied_unknown=True)
+            return
+        live = self.hass.states.get(self.climate_entity)
+        if live is None or getattr(live, "state", None) != mode:
+            return  # never switch the thermostat's mode from the outer loop
+        if self._remote_offset_backing_off(now, ctx if fresh else None):
+            return  # the loop's last write failed: no retry storm (see ``_remote_offset_backing_off``)
+        raised = False
+        desired = 0.0
+        note = "remote sensor not in use"
+        if fresh and ctx is not None:
+            swing = self._remote_swing_f(mode)
+            decision = decide_remote_offset(
+                mode=mode,
+                target_f=target,
+                remote_f=ctx.value_f,
+                swing_f=swing,
+                magnitude_f=self._remote_offset_f,
+                step_f=step_f(self._temp_unit),
+                max_magnitude_f=self._remote_offset_cap_for(target, mode),
+                seconds_since_raise=(now - self._remote_raise_at).total_seconds() if self._remote_raise_at else None,
+                wait_s=startup_wait_s(self._remote_startup_latency_s),
+                equipment_active=self._live_hvac_action() == ("heating" if mode == "heat" else "cooling"),
+            )
+            desired = decision.magnitude_f
+            self._remote_offset_f = desired  # read by the single setpoint path for the write below
+            raised = decision.action is RemoteOffsetAction.RAISE
+            note = (
+                f"{decision.reason}: remote {self._t(ctx.value_f)} vs target {self._t(target)} swing {self._td(swing)}"
+            )
+        applied = self._remote_offset_applied_f
+        if applied is None:
+            # Unknown (a gate closed, or the context changed, while an offset was in force): the thermostat may still
+            # hold an offset CA no longer tracks. Compare the LIVE setpoint with what CA would command now and re-write
+            # once unless it already matches (within half a step), so a stranded offset never outlives the gate.
+            live_sp = read_state_temp_f(live, "temperature", self._temp_unit)
+            if live_sp is None:
+                if desired <= 1e-6:
+                    return
+            elif abs(live_sp - (target + (desired if mode == "heat" else -desired))) < step_f(self._temp_unit) / 2:
+                self._remote_offset_applied_f = desired
+                return
+        elif abs(desired - applied) <= 1e-6:
+            return  # nothing to change on the thermostat: write only when the step changes
+        result = await self._set_temperature(
+            target,
+            reason=f"remote-sensor offset {self._td(desired)} ({note})",
+            mode=mode,
+            keep_pre_cool_hold=True,
+        )
+        if result is HvacCommandResult.EXECUTED:
+            if raised:
+                self._remote_raise_at = now  # the startup-wait clock starts only for a step that was really sent
+                self._remote_raise_pending_feedback = True
+            return
+        # Not executed (failed / rejected / blocked / superseded / unconfirmed): the thermostat holds what it held, so
+        # the offset goes back to the applied value (no silent climb to the cap) and the loop backs off instead of
+        # retrying every minute. The first write after recovery is therefore a single step from what the thermostat
+        # really has.
+        self._remote_offset_f = self._remote_offset_applied_f or 0.0
+        self._remote_write_failed_at = now
+        _LOGGER.warning(
+            "Remote-sensor offset write not executed (%s) -- holding at %s, retry after %ds and a new remote report",
+            result.value,
+            self._td(self._remote_offset_f),
+            SETPOINT_RETRY_DELAY_S,
+        )
+
+    def _remote_offset_backing_off(self, now: datetime, ctx: RemoteContext | None) -> bool:
+        """True while the loop waits after one of its own writes was not executed (Issue #1194 a).
+
+        Back-off ends at the LATER of: ``SETPOINT_RETRY_DELAY_S`` (the existing 15-minute setpoint-retry interval) after
+        the failure, and the next remote-sensor report after it. When the remote sensor is no longer in use (stale /
+        context left) there is no report to wait for, so only the interval applies. Any executed setpoint write, from
+        any writer, clears it (``_set_temperature_impl``).
+        """
+        failed = self._remote_write_failed_at
+        if failed is None:
+            return False
+        try:
+            if (now - failed).total_seconds() < SETPOINT_RETRY_DELAY_S:
+                return True
+            reported = ctx.reported_at if ctx is not None else None
+            if isinstance(reported, datetime) and reported <= failed:
+                return True
+        except TypeError:  # naive/aware clock mix (stubs): never block the loop on bookkeeping
+            pass
+        self._remote_write_failed_at = None
+        return False
+
+    def note_remote_offset_actuation(self, direction: str, when: datetime) -> None:
+        """The thermostat was seen heating/cooling (``direction`` "heat"/"cool") at ``when`` -- actuation feedback.
+
+        Feeds the startup wait only: if a raise is awaiting feedback and the equipment started within its wait
+        window, the raise-to-start latency refines the wait for the next raise. The hold itself is the live
+        ``hvac_action`` check in the loop (no raise while running); once the cycle ends a further raise is allowed.
+        """
+        if not self._remote_raise_pending_feedback or self._remote_raise_at is None:
+            return
+        if direction != self._remote_target_mode:
+            return
+        elapsed = (when - self._remote_raise_at).total_seconds()
+        if elapsed < 0:
+            return
+        self._remote_raise_pending_feedback = False
+        if elapsed > startup_wait_s(self._remote_startup_latency_s):
+            return  # a start this long after the step is not a response to it
+        previous = self._remote_startup_latency_s
+        alpha = REMOTE_OFFSET_LATENCY_EWMA_ALPHA
+        self._remote_startup_latency_s = elapsed if previous is None else (1 - alpha) * previous + alpha * elapsed
+        _LOGGER.info(
+            "Remote-sensor offset: thermostat started %.0fs after the step (latency estimate %.0fs)",
+            elapsed,
+            self._remote_startup_latency_s,
+        )
 
     def _resolved_comfort_band(self, c: DayClassification) -> ComfortBand:
         """The comfort band in force right now for ``c`` (Issue #1073, S6): the SAME
@@ -16576,7 +16880,13 @@ class AutomationEngine:
                         _expected_temp,
                         _expected_mode,
                     )
-                    await self._set_temperature(_expected_temp, reason="post-fan-verify/repair", mode=_expected_mode)
+                    # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
+                    # ``_expected_temp`` is the commanded value and would be offset twice.
+                    await self._set_temperature(
+                        self._pending_setpoint_target if self._pending_setpoint_target is not None else _expected_temp,
+                        reason="post-fan-verify/repair",
+                        mode=_expected_mode,
+                    )
 
             @callback
             def _verify_setpoint_after_fan_on(_now: Any) -> None:
@@ -17781,7 +18091,13 @@ class AutomationEngine:
                         _expected_temp,
                         _expected_mode,
                     )
-                    await self._set_temperature(_expected_temp, reason="post-fan-verify/repair", mode=_expected_mode)
+                    # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
+                    # ``_expected_temp`` is the commanded value and would be offset twice.
+                    await self._set_temperature(
+                        self._pending_setpoint_target if self._pending_setpoint_target is not None else _expected_temp,
+                        reason="post-fan-verify/repair",
+                        mode=_expected_mode,
+                    )
 
             @callback
             def _verify_setpoint_after_fan_off(_now: Any) -> None:
@@ -18101,15 +18417,27 @@ class AutomationEngine:
         could raise uncaught instead of being treated as unavailable. Reads
         ``self.config``/``self.hass`` fresh on every call — no caching.
         """
-        return resolve_indoor_temp_f(
-            hass=self.hass,
-            source=self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
-            unit=self._temp_unit,
-            indoor_temp_entity=self.config.get("indoor_temp_entity"),
-            climate_entity=self.climate_entity,
-            in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
-            sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
-        )
+        return resolve_indoor_temp_f(**self._indoor_resolver_kwargs())
+
+    def _indoor_resolver_kwargs(self) -> dict[str, Any]:
+        """The one set of arguments the indoor-temperature resolver is called with (Issue #1194).
+
+        Shared by ``_get_indoor_temp_f()`` (value only) and ``_get_indoor_reading()`` (value + provenance) so
+        the remote-sensor outer loop can never be reading a different sensor than the decisions are.
+        """
+        return {
+            "hass": self.hass,
+            "source": self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
+            "unit": self._temp_unit,
+            "indoor_temp_entity": self.config.get("indoor_temp_entity"),
+            "climate_entity": self.climate_entity,
+            "in_sleep_window": _in_sleep_window(dt_util.now(), self.config),
+            "sleep_indoor_temp_entity": self.config.get("sleep_indoor_temp_entity"),
+        }
+
+    def _get_indoor_reading(self) -> IndoorTempReading:
+        """The comfort-facing indoor reading WITH provenance (remote value vs ``primary_value``), Issue #1194."""
+        return resolve_indoor_temp_with_provenance(**self._indoor_resolver_kwargs())
 
     def _recent_duplicate(
         self,

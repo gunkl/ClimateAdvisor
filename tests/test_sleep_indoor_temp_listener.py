@@ -50,6 +50,7 @@ def _make_coord(*, sleep_time: str = "22:30", wake_time: str = "06:30") -> Magic
     ae.nat_vent_temperature_check = AsyncMock()
     ae.fan_thermostat_check = AsyncMock()
     ae.comfort_family_temperature_check = AsyncMock()
+    ae.remote_offset_check = AsyncMock()  # Issue #1194 (a): the sleep listener also drives the outer loop
     coord.automation_engine = ae
 
     coord._get_indoor_temp = MagicMock(return_value=66.0)

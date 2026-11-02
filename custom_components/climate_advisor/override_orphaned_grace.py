@@ -12,8 +12,9 @@ going through the single choke point (``cancel_override()``) that clears both to
 
 Colocated in one module, not split across two, because they must be proven mutually
 exclusive for every reachable input tuple — a unit test in ``test_override_orphaned_grace.py``
-asserts this directly. Reused unchanged by ``coordinator._check_orphaned_grace()``'s and
-the Issue #321 stuck-grace check's own pure cores.
+asserts this directly. ``decide_orphaned_grace()`` IS ``coordinator._check_orphaned_grace()``'s condition (the
+watchdog calls it, Issue #1216; before that it was a copy that had drifted). ``decide_stuck_override()`` mirrors the
+Issue #321 stuck-grace check.
 """
 
 from __future__ import annotations
@@ -27,21 +28,31 @@ def decide_orphaned_grace(
     grace_protects_override: bool,
     manual_override_active: bool,
     fan_override_active: bool,
+    override_confirm_pending: bool,
 ) -> bool:
-    """Pure reimplementation of ``coordinator._check_orphaned_grace()`` (Issue #508/#530).
+    """``coordinator._check_orphaned_grace()``'s condition (Issues #508/#530/#1216).
 
     Field-by-field correspondence:
       grace_active             -> self.automation_engine._grace_active
       grace_protects_override   -> self.automation_engine._grace_protects_override
       manual_override_active    -> self.automation_engine._manual_override_active
       fan_override_active       -> self.automation_engine._fan_override_active
+      override_confirm_pending  -> self.automation_engine._override_confirm_pending
 
     True iff a grace period started for a real override is still running with no override
     flag left to justify it — self-heals by force-cancelling grace. Scoped via
     ``grace_protects_override`` (Issue #530) so fan-off/window-close/dashboard-resume
-    grace (never override-protecting) is never misread as orphaned.
+    grace (never override-protecting) is never misread as orphaned. Issue #1216: a change still awaiting
+    confirmation is what the grace protects -- coordinator Fix D keeps the replaced override's grace running for the
+    occupant's second change, PENDING for the whole confirmation window; reaping it dropped that change (Rule 2).
     """
-    return grace_active and grace_protects_override and not manual_override_active and not fan_override_active
+    return (
+        grace_active
+        and grace_protects_override
+        and not manual_override_active
+        and not fan_override_active
+        and not override_confirm_pending
+    )
 
 
 def decide_stuck_override(

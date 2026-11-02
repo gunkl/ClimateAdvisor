@@ -171,6 +171,7 @@ def _make_stuck_grace_coord_stub(
     ae._natural_vent_active = False
     ae._fan_active = False
     ae._fan_override_active = False
+    ae._override_confirm_pending = False  # Issue #1216: nothing awaiting confirmation
     ae._manual_override_active = manual_override_active
     ae._grace_active = grace_active
     ae._grace_end_time = grace_end_time
@@ -545,12 +546,26 @@ class TestOrphanedGraceDetection:
         coord.automation_engine._cancel_grace_timers_action.assert_called_once()
         coord._emit_event.assert_called_once()
 
+    # Issue #757 Phase 6 Step 4: TestOrphanedGraceRefreshesDoorWindowFsm (Issue #679) was
+    # removed — it tested `_check_orphaned_grace()` re-notifying the door/window
+    # diagnostic FSM (`coordinator._door_window_fsm_state`), machinery removed this step
+    # along with the door/window shadow-comparison axes it fed (zero other consumers,
+    # confirmed by grep before deletion).
 
-# Issue #757 Phase 6 Step 4: TestOrphanedGraceRefreshesDoorWindowFsm (Issue #679) was
-# removed — it tested `_check_orphaned_grace()` re-notifying the door/window
-# diagnostic FSM (`coordinator._door_window_fsm_state`), machinery removed this step
-# along with the door/window shadow-comparison axes it fed (zero other consumers,
-# confirmed by grep before deletion).
+    def test_orphaned_grace_not_cancelled_while_a_change_awaits_confirmation(self):
+        """Issue #1216: Fix D keeps the replaced override's grace for the occupant's second, still-pending change --
+        reaping it dropped that change (Rule 2: newest occupant action wins)."""
+        coord = _make_stuck_grace_coord_stub(
+            manual_override_active=False, grace_active=True, grace_end_time="2026-06-12T21:53:00+00:00"
+        )
+        coord.automation_engine._grace_protects_override = True
+        coord.automation_engine._override_confirm_pending = True
+        coord.automation_engine._cancel_grace_timers_action = MagicMock()
+
+        coord._check_orphaned_grace()
+
+        coord.automation_engine._cancel_grace_timers_action.assert_not_called()
+        coord._emit_event.assert_not_called()
 
 
 class TestGraceProtectsOverrideClassification:

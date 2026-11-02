@@ -85,7 +85,7 @@ custom_components/climate_advisor/
 ├── override_confirm_split.py # Pure decision core: override confirmation's PATH A (confirmed)/PATH B (self-resolved transient) split (Issue #639).
 ├── override_cancel_outcome.py  # Pure outcome classification for cancel_override() (Issue #639).
 ├── override_match.py     # Pure decision core: does the active override already match automation's current decision? (Issue #639).
-├── override_orphaned_grace.py  # Pure predicates for the two mirror-image grace/override watchdogs — Issue #508 (grace without override) and Issue #321 (override stuck past due grace-end) (Issue #639).
+├── override_orphaned_grace.py  # Pure predicates for the two mirror-image grace/override watchdogs — Issue #508 (grace without override; skipped while a manual change is pending in its confirmation window, Issue #1216) and Issue #321 (override stuck past due grace-end) (Issue #639).
 ├── override_supersession.py  # Pure decision core: override detection and Issue #201/#282's "second override during active grace" replace-not-stack behavior.
 │
 ├── fan_thermostat_decision.py  # Pure decision core: the tick-level fan thermostatic stop check (architecture-reset Step 2).

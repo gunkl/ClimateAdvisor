@@ -252,17 +252,18 @@ class TestFromGraceUnprotected:
         )
         assert t.to_state == _IDLE_NONE
 
-    def test_protecting_grace_expiring_still_clears_a_pending_confirmation(self):
-        """Control: the occupant's own grace expiring is unchanged by #1156."""
-        t = transition(_PENDING_PROTECTING, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED))
+    def test_protecting_grace_expiring_with_a_confirmed_override_clears_a_pending_confirmation(self):
+        """Control: a confirmed override's grace expiring ends the override and the pending change with it."""
+        t = transition(
+            _PENDING_PROTECTING, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED, manual_override_active=True)
+        )
         assert t.to_state == _IDLE_NONE
 
-    def test_fan_override_grace_expiring_keeps_a_pending_press(self):
-        """Issue #1158 (M1): a whole-house-fan override grace protects but is not the occupant's thermostat grace."""
-        t = transition(
-            _PENDING_PROTECTING,
-            _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED, grace_is_occupants_own=False),
-        )
+    def test_protecting_grace_expiring_with_no_confirmed_override_keeps_a_pending_press(self):
+        """Issues #1158 (M1) / #1216: a whole-house-fan override grace, or the occupant's own earlier thermostat grace
+        that Fix D kept after a second change replaced its override -- either way the pending change is the newest
+        occupant action and survives the grace expiring."""
+        t = transition(_PENDING_PROTECTING, _ev(OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED))
         assert t.to_state == (OverrideConfirmState.PENDING, GraceState.NONE)
 
     def test_override_detected_confirm_enabled_lands_pending(self):

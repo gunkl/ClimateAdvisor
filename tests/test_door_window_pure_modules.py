@@ -78,57 +78,75 @@ class TestDecidePauseEntry:
 
 
 class TestDecideDoorOpenResponse:
+    """Issue #1142: the module is the handler's real decision chain (order: paused, protected change, grace,
+    temperature gate, fan-off hold, lockout, start veto, start)."""
+
     def _inputs(self, **overrides):
         base = dict(
             paused_by_door=False,
+            manual_change_protected=False,
             grace_active=False,
-            outdoor=70.0,
-            comfort_cool=78.0,
-            nat_vent_delta=2.0,
-            nat_vent_gate_entered=False,
+            grace_ignored=False,
+            start_viable=False,
+            start_vetoed=False,
+            fan_off_hold_active=False,
+            reactivation_locked_out=False,
         )
         base.update(overrides)
         return DoorOpenResponseInputs(**base)
 
     def test_already_paused_noop(self):
-        result = decide_door_open_response(self._inputs(paused_by_door=True))
-        assert result == DoorOpenResponse.ALREADY_PAUSED_NOOP
+        assert decide_door_open_response(self._inputs(paused_by_door=True)) == DoorOpenResponse.ALREADY_PAUSED_NOOP
 
-    def test_grace_active_gate_not_entered_suppressed(self):
-        # Issue #655 fix: grace-active fallthrough is gated on the real reactivation
-        # gate result, not a coarse outdoor-only proxy — outdoor alone can no longer
-        # decide this. A cool outdoor temp with the real gate still False must NOT
-        # fall through (the exact premature-pause bug #655 reported).
-        result = decide_door_open_response(self._inputs(grace_active=True, outdoor=65.0, nat_vent_gate_entered=False))
+    def test_protected_occupant_change_is_not_paused(self):
+        result = decide_door_open_response(self._inputs(manual_change_protected=True, start_viable=True))
+        assert result == DoorOpenResponse.PROTECTED_CHANGE_NOOP
+
+    def test_grace_holds_the_pause_when_no_fan_session_would_start(self):
+        result = decide_door_open_response(self._inputs(grace_active=True))
         assert result == DoorOpenResponse.GRACE_SUPPRESSED
 
-    def test_grace_active_outdoor_unavailable_suppressed(self):
-        result = decide_door_open_response(self._inputs(grace_active=True, outdoor=None))
+    def test_grace_holds_the_pause_when_the_start_would_be_vetoed(self):
+        """#1142 D3: 'viable by temperature' but vetoed is NOT a start, so the grace holds."""
+        result = decide_door_open_response(self._inputs(grace_active=True, start_vetoed=True))
         assert result == DoorOpenResponse.GRACE_SUPPRESSED
 
-    def test_grace_active_gate_entered_never_falls_through_to_pause(self):
-        # Once the shared gate is entered, the same result is reused at the final
-        # nat-vent-vs-pause branch below — grace-active fallthrough can only land on
-        # NAT_VENT_ELIGIBLE (or PLANNED_WINDOW_NOOP), never PAUSE. This invariant is
-        # the fix: #655's bug was reachable exactly because the old coarse proxy and
-        # the real gate could disagree, letting a "cool enough" outdoor temp fall
-        # through the grace suppression only to still land on PAUSE moments later.
-        result = decide_door_open_response(self._inputs(grace_active=True, outdoor=65.0, nat_vent_gate_entered=True))
-        assert result == DoorOpenResponse.NAT_VENT_ELIGIBLE
+    def test_grace_with_a_start_falls_through_to_the_start(self):
+        result = decide_door_open_response(self._inputs(grace_active=True, start_viable=True))
+        assert result == DoorOpenResponse.START_NAT_VENT
 
-    def test_nat_vent_eligible(self):
-        result = decide_door_open_response(self._inputs(nat_vent_gate_entered=True))
-        assert result == DoorOpenResponse.NAT_VENT_ELIGIBLE
+    def test_a_grace_that_turns_no_hvac_on_never_holds_the_pause(self):
+        result = decide_door_open_response(self._inputs(grace_active=True, grace_ignored=True))
+        assert result == DoorOpenResponse.PAUSE
+
+    def test_start_when_the_gate_passes(self):
+        assert decide_door_open_response(self._inputs(start_viable=True)) == DoorOpenResponse.START_NAT_VENT
 
     def test_default_pause(self):
-        result = decide_door_open_response(self._inputs())
-        assert result == DoorOpenResponse.PAUSE
+        assert decide_door_open_response(self._inputs()) == DoorOpenResponse.PAUSE
+
+    def test_fan_off_hold_beats_a_start(self):
+        result = decide_door_open_response(self._inputs(start_viable=True, fan_off_hold_active=True))
+        assert result == DoorOpenResponse.PAUSE_FAN_OFF_HOLD
+
+    def test_lockout_beats_a_start_and_a_veto(self):
+        for kwargs in ({"start_viable": True}, {"start_vetoed": True}):
+            result = decide_door_open_response(self._inputs(reactivation_locked_out=True, **kwargs))
+            assert result == DoorOpenResponse.PAUSE_REACTIVATION_LOCKOUT
+
+    def test_vetoed_start_pauses_and_says_why(self):
+        result = decide_door_open_response(self._inputs(start_vetoed=True))
+        assert result == DoorOpenResponse.PAUSE_START_VETOED
 
     def test_precedence_already_paused_beats_everything(self):
         result = decide_door_open_response(
-            self._inputs(paused_by_door=True, grace_active=True, nat_vent_gate_entered=True)
+            self._inputs(paused_by_door=True, manual_change_protected=True, grace_active=True, start_viable=True)
         )
         assert result == DoorOpenResponse.ALREADY_PAUSED_NOOP
+
+    def test_gate_failure_ignores_hold_and_lockout(self):
+        result = decide_door_open_response(self._inputs(fan_off_hold_active=True, reactivation_locked_out=True))
+        assert result == DoorOpenResponse.PAUSE
 
     def test_planned_window_no_longer_exists_as_an_outcome(self):
         """Issue #1211 (A3): the planned window is not a door-open outcome any more."""

@@ -179,6 +179,7 @@ from .door_window_lifecycle import (
     DoorWindowLifecycleState,
     derive_door_window_lifecycle_state,
 )
+from .door_window_open_response import DoorOpenResponse, DoorOpenResponseInputs, decide_door_open_response
 from .economizer_lifecycle import (
     EconomizerLifecycleInputs,
     EconomizerLifecycleState,
@@ -233,7 +234,6 @@ from .nat_vent_gate import (
     NatVentSoftStartGateInputs,
     NatVentStartVeto,
     NatVentStartVetoInputs,
-    decide_nat_vent_gate,
     decide_nat_vent_soft_start_gate,
     explain_nat_vent_gate,
 )
@@ -6616,24 +6616,57 @@ class AutomationEngine:
         from .door_window_fsm import DoorWindowFsmEventKind
 
         async with self._decision_pass("handle_door_window_open"):
-            if self._paused_by_door:
+            # Issue #1142: the ONE start question, asked ONCE of the nat-vent FSM with this site's profile
+            # (``NAT_VENT_START_WINDOW_OPEN``): a fresh open, hysteresis never applied, grace forced off (the grace
+            # question is answered by the chain below from this same answer), asked from INACTIVE (a second window
+            # opening during a live session must not route through the exit chain), start guards on, soft start
+            # accepted (owner decision 2026-11-01: after the debounce the handler may start a soft-start session
+            # directly instead of pausing first, D1).
+            outdoor = self._last_outdoor_temp
+            indoor = self._get_indoor_temp_f()
+            _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_WINDOW_OPEN, indoor=indoor, outdoor=outdoor)
+            _fan_off_hold = self._fan_off_hold_active()  # the occupant's off still in force (Issue #1205)
+            _grace_ignored = bool(self._grace_active and self._grace_protects_no_hvac_on_change())
+            _start_viable = _fsm_result.to_state in (
+                NatVentLifecycleState.ACTIVE_FULL_GATE,
+                NatVentLifecycleState.ACTIVE_SOFT_START,
+            )
+            _start_veto = _fsm_result.veto
+            # Issue #699: the reactivation lockout applies here too (an exit moments ago must not be undone by a
+            # window opening against the same unmoved reading -- the same check the idle-open path uses).
+            _locked_out = is_reactivation_locked_out(
+                outdoor_exit_time=self._nat_vent_outdoor_exit_time,
+                now=dt_util.now(),
+                lockout_seconds=float(
+                    self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
+                ),
+            )
+            # The handler's real decision chain (Issue #1142): ``door_window_open_response`` owns the order of the
+            # guards; this method only resolves their inputs and acts on the answer.
+            _response = decide_door_open_response(
+                DoorOpenResponseInputs(
+                    paused_by_door=bool(self._paused_by_door),
+                    manual_change_protected=self._manual_change_protected(),
+                    grace_active=bool(self._grace_active),
+                    grace_ignored=_grace_ignored,
+                    start_viable=_start_viable,
+                    start_vetoed=_start_veto is not None,
+                    fan_off_hold_active=_fan_off_hold,
+                    reactivation_locked_out=_locked_out,
+                )
+            )
+            if _response is DoorOpenResponse.ALREADY_PAUSED_NOOP:
                 return  # Already paused
 
-            # Issue #1133 (design gap since #3, extends #1119 from an already-open window to a
-            # window that opens LATER) and Issue #1148 (the #655 bypass below fell through to a
-            # pause over a live manual grace): the occupant's own change wins over an open
-            # window (owner rule 1). Placed ahead of every grace branch because
-            # ``_grace_active`` is the wrong test -- with ``manual_grace_seconds=0`` a confirmed
-            # override has no grace flag at all, and inside a manual grace the #655 real-gate
-            # bypass used to fall through here with the nat-vent FSM already refusing entry
-            # (``override_active``), so the "fall through" always ended in a pause over the
-            # occupant's heat/cool. Nat-vent cannot start over an override (the FSM refuses
-            # it), so there is nothing left to decide: return, do not pause. Switching off for
-            # the still-open window happens at the designed moment instead -- grace expiry
-            # (``_on_grace_expired()`` clears the override, then ``_re_pause_for_open_sensor()``
-            # pauses) -- and, for a grace-less override, when it ends by another path and the
-            # next scheduled routine's live re-check runs.
-            if self._manual_change_protected():
+            # Issue #1133 (design gap since #3, extends #1119 from an already-open window to a window that opens
+            # LATER) and Issue #1148: the occupant's own change wins over an open window (owner rule 1), ahead of
+            # every grace branch (``_grace_active`` is the wrong test -- with ``manual_grace_seconds=0`` a confirmed
+            # override has no grace flag at all). Nat-vent cannot start over an override, so there is nothing left
+            # to decide: do not pause. Switching off for the still-open window happens at the designed moment
+            # instead -- grace expiry (``_on_grace_expired()`` clears the override, then
+            # ``_re_pause_for_open_sensor()`` pauses) -- and, for a grace-less override, when it ends by another
+            # path and the next scheduled routine's live re-check runs.
+            if _response is DoorOpenResponse.PROTECTED_CHANGE_NOOP:
                 self._note_deferred_to_protected_change()
                 _LOGGER.info(
                     "Pause skipped: occupant's manual change protected entity=%s "
@@ -6645,58 +6678,37 @@ class AutomationEngine:
                 )
                 return
 
-            # Issue #1201: a fan_off grace keeps the fan OFF (Issue #1006) but not HVAC running -- the pause
-            # proceeds and the nat-vent start below is refused for as long as that grace runs.
-            _fan_off_grace_running = self._grace_is_fan_off_grace()  # which grace timer runs (log label only)
-            _fan_off_hold = self._fan_off_hold_active()  # the occupant's off still in force (Issue #1205)
-            if self._grace_active and self._grace_protects_no_hvac_on_change():
-                # Issue #1172: the occupant's blower press turns no HVAC on, so its grace is no reason to
-                # hold off the pause (owner rule 3, after the sensor debounce). The blower keeps running (#1180).
-                # Issue #1201: same for a fan_off grace -- stopping a fan turns no HVAC on.
+            if _grace_ignored:
+                # Issue #1172: the occupant's blower press turns no HVAC on, so its grace is no reason to hold off
+                # the pause (owner rule 3, after the sensor debounce). The blower keeps running (#1180).
+                # Issue #1201: same for a fan_off grace -- stopping a fan turns no HVAC on; the nat-vent start is
+                # refused for as long as the fan-off hold lasts (#1006/#1205).
                 _LOGGER.info(
                     "Door/window open (%s): %s grace does not hold off the pause — "
                     "HVAC stays off while a window is open (trigger=%s)",
                     entity_id,
-                    "fan-off" if _fan_off_grace_running else "blower override",
+                    "fan-off" if self._grace_is_fan_off_grace() else "blower override",
                     self._last_grace_trigger,
                 )
-            elif self._grace_active:
-                # Issue #655: this used to short-circuit on a coarse outdoor-only
-                # proxy (outdoor < comfort_cool + nat_vent_delta) instead of the real
-                # 4-variable reactivation gate computed a few lines below — the two
-                # could disagree, letting a "cool enough" outdoor reading fall through
-                # the grace suppression only to still hit a pause moments later when
-                # the real gate (which also needs indoor/comfort_heat) said no. Reuse
-                # the same shared gate here instead of a hand-copied proxy.
-                # (A fan_off grace never reaches here: Issue #1201 -- it holds the fan off, not the pause;
-                # see the branch above and the nat-vent refusal below. A *protected* occupant change
-                # returned at the top.)
-                _outdoor_g = self._last_outdoor_temp
-                _comfort_cool_g = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-                _nat_vent_delta_g = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-                _grace_gate_entered = self._nat_vent_may_reactivate(
-                    outdoor=_outdoor_g,
-                    indoor=self._get_indoor_temp_f(),
-                    comfort_heat=self._nat_vent_reactivation_floor(),
-                    comfort_cool=_comfort_cool_g,
-                    nat_vent_delta=_nat_vent_delta_g,
+
+            if _response is DoorOpenResponse.GRACE_SUPPRESSED:
+                # Issue #655 / #1142 D3: the grace holds the pause UNLESS a fan session would really start now. That
+                # is the nat-vent FSM's answer (the same one the start below acts on: forecast-peak/thermal-floor
+                # guards, lockout and soft start included), not a temperature-only copy of the gate that said
+                # "viable" and was then vetoed -- which paused the window inside the grace.
+                _LOGGER.info(
+                    "Door/window open (%s) but %s grace period active — not pausing (no fan session would "
+                    "start now: veto=%s)",
+                    entity_id,
+                    self._last_resume_source,
+                    _start_veto.reason if _start_veto is not None else None,
                 )
-                if not _grace_gate_entered:
-                    _LOGGER.info(
-                        "Door/window open (%s) but %s grace period active — not pausing",
-                        entity_id,
-                        self._last_resume_source,
-                    )
-                    return
-                # else: real gate says reactivation is viable — fall through to the
-                # nat-vent-vs-pause decision below, same as before.
+                return
 
             # Issue #1211 (A3, owner decision O8b): the planned window period is NOT an early return here
-            # any more. It used to return silently and let the coordinator's NEXT refresh start nat-vent (via
-            # the comfort-band guard + paused re-activation) -- observed 14.5 min late with the AC cooling
-            # into the open window. The one nat-vent entry gate below now decides: start nat-vent when it
-            # passes, pause right here when it refuses. The planned window only exempts the lazy
-            # ``_sync_paused_by_door_with_live_sensors()`` reconcile (no event, no occupant action).
+            # any more. The one nat-vent entry gate decides: start nat-vent when it passes, pause right here when
+            # it refuses. The planned window only exempts the lazy ``_sync_paused_by_door_with_live_sensors()``
+            # reconcile (no event, no occupant action).
             if self._is_within_planned_window_period():
                 _LOGGER.info(
                     "Door/window open (%s) during planned window period — running the nat-vent gate (day_type=%s)",
@@ -6704,16 +6716,13 @@ class AutomationEngine:
                     self._current_classification.day_type if self._current_classification else "unknown",
                 )
 
-            # Check for natural ventilation opportunity before falling through to pause
-            outdoor = self._last_outdoor_temp
             comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             nat_vent_threshold = comfort_cool + nat_vent_delta
-            indoor = self._get_indoor_temp_f()
             comfort_heat = self._nat_vent_reactivation_floor()
             _LOGGER.debug(
                 "Nat vent gate check (%s): outdoor=%s indoor=%s comfort_heat=%.1f threshold=%.1f | "
-                "dir=%s floor=%s ceiling=%s",
+                "dir=%s floor=%s ceiling=%s response=%s",
                 entity_id,
                 f"{outdoor:.1f}" if outdoor is not None else "unavailable",
                 f"{indoor:.1f}" if indoor is not None else "unavailable",
@@ -6722,63 +6731,26 @@ class AutomationEngine:
                 outdoor is not None and indoor is not None and outdoor < indoor,
                 indoor is not None and indoor > comfort_heat,
                 outdoor is not None and outdoor < nat_vent_threshold,
+                _response.value,
             )
-            # Issue #1142: the ONE start question, asked of the nat-vent FSM with this site's profile
-            # (``NAT_VENT_START_WINDOW_OPEN``): a fresh open, hysteresis never applied, grace forced off (the
-            # pre-check above already answered it), asked from INACTIVE (a second window opening during a live
-            # session must not route through the exit chain), start guards on, soft start accepted (owner decision
-            # 2026-11-01: after the debounce the handler may start a soft-start session directly instead of
-            # pausing first, Issue #1142 D1).
-            _fsm_result = self._nat_vent_start_decision(NAT_VENT_START_WINDOW_OPEN, indoor=indoor, outdoor=outdoor)
-            _start_veto = _fsm_result.veto
-            # "Entered" = the temperature gate passed (full gate or soft start); the lockout check below
-            # applies to a vetoed start exactly as it did to a guard-skipped one.
-            _nat_vent_gate_entered = (
-                _fsm_result.to_state
-                in (NatVentLifecycleState.ACTIVE_FULL_GATE, NatVentLifecycleState.ACTIVE_SOFT_START)
-                or _start_veto is not None
-            )
-            if _fan_off_hold and _nat_vent_gate_entered:
-                # Issue #1201 / #1006: the occupant just stopped the fan -- leave it stopped. The grace passes
-                # grace_active=False to the FSM above, so refuse the start here explicitly.
+            if _response is DoorOpenResponse.PAUSE_FAN_OFF_HOLD:
+                # Issue #1201 / #1006 / #1205: the occupant just stopped the fan -- leave it stopped.
                 _LOGGER.info(
                     "Nat vent not started (%s): fan-off hold active (until %s) — fan stays off (Issue #1006), "
                     "pausing HVAC for the open window instead",
                     entity_id,
                     self._fan_off_hold_until.strftime("%H:%M") if self._fan_off_hold_until else "?",
                 )
-                _nat_vent_gate_entered = False
-                _start_veto = None
-
-            # Issue #699: this call site never consulted the reactivation lockout at
-            # all — unlike check_natural_vent_conditions()'s idle-open path (both its
-            # FSM and legacy branches), which already does. Confirmed live (Issue #821
-            # investigation): AWAY_CEILING's exit branch deliberately does NOT set
-            # _paused_by_door, so a door/window opening moments after an AWAY_CEILING
-            # (or any other) exit could reach this method and reactivate nat-vent
-            # against the same unmoved temperature reading the exit had just reacted
-            # to, with no lockout in effect — the same-tick/near-tick thrash Issue #699
-            # described. Wiring in the same lockout check
-            # check_natural_vent_conditions()'s idle-open path already uses closes this
-            # gap; a separate, small change from the new comfort-family lockout's own
-            # same-tick guard (Design §4) — the two are not the same mechanism.
-            if _nat_vent_gate_entered and is_reactivation_locked_out(
-                outdoor_exit_time=self._nat_vent_outdoor_exit_time,
-                now=dt_util.now(),
-                lockout_seconds=float(
-                    self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
-                ),
-            ):
+            elif _response is DoorOpenResponse.PAUSE_REACTIVATION_LOCKOUT:
                 _LOGGER.info(
                     "Nat vent reactivation via door/window open (%s) locked out — recent exit still within lockout",
                     entity_id,
                 )
-                _nat_vent_gate_entered = False
-                _start_veto = None
-
-            if _nat_vent_gate_entered and _start_veto is not None:
+            _nat_vent_gate_entered = _response is DoorOpenResponse.START_NAT_VENT
+            _vetoed_start = _response is DoorOpenResponse.PAUSE_START_VETOED
+            if _vetoed_start and _start_veto is not None:
                 self._report_nat_vent_start_veto(_start_veto, entity_id=entity_id)
-            elif _nat_vent_gate_entered:
+            if _nat_vent_gate_entered:
                 # Capture mode before nat_vent changes
                 _old_mode_nv = self.hass.states.get(self.climate_entity)
                 _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
@@ -6884,7 +6856,7 @@ class AutomationEngine:
                         self._emit_event_callback("sensor_opened", _sensor_opened_payload)
                     return
 
-            if not _nat_vent_gate_entered:
+            if _response is DoorOpenResponse.PAUSE:
                 _LOGGER.info(
                     "Nat vent not started (%s): outdoor=%s indoor=%s — "
                     "primary gates failed (dir=%s floor=%s ceiling=%s) — proceeding to HVAC pause check",
@@ -13291,65 +13263,6 @@ class AutomationEngine:
             caller="_resolve_override_grace_fsm_state",
         )
 
-    def _nat_vent_may_reactivate(
-        self,
-        *,
-        outdoor: float | None,
-        indoor: float | None,
-        comfort_heat: float,
-        comfort_cool: float,
-        nat_vent_delta: float,
-        hysteresis: float = 0.0,
-    ) -> bool:
-        """Shared 4-part reactivation gate for nat-vent (Issue #411, Pass 4).
-
-        Extracted from 4 call sites (``handle_door_window_open``, the paused-by-door
-        reactivation block, ``_re_pause_for_open_sensor``, and the Issue #134
-        comfort-ceiling re-entry check in ``check_natural_vent_conditions``) that each
-        hand-copied this identical condition — a documented prior production bug
-        (#402) came from exactly this duplication drifting out of sync. Callers keep
-        their own
-        additional guards (e.g. the door-open path's rising-forecast check) and their
-        own post-gate actions (starting the fan, clearing ``_paused_by_door``,
-        applying nat-vent HVAC state) — this function returns only the shared boolean
-        gate, mirroring how ``_ceiling_threshold()`` is scoped as a value helper.
-
-        Architecture-reset Step 2 follow-up: the decision itself now lives in
-        ``nat_vent_gate.decide_nat_vent_gate()`` — differential + substitution
-        tested against this exact call (see tools/nat_vent_gate_diff.py,
-        tools/nat_vent_gate_substitution_diff.py). This method only reconstructs
-        the ``NatVentGateInputs`` from already-caller-resolved values (``comfort_heat``
-        is already sleep-window-resolved by every caller via
-        ``_nat_vent_reactivation_floor()``, so ``in_sleep_window=False`` here is not a
-        second resolution — it's a pass-through that keeps the pure core's own
-        sleep-window branch a no-op, since that resolution already happened once).
-
-        Args:
-            outdoor: Current outdoor temperature (°F), or None if unavailable.
-            indoor: Current indoor temperature (°F), or None if unavailable.
-            comfort_heat: Comfort floor (°F) — indoor must be above this. Already
-                sleep-window-resolved by the caller (via ``_nat_vent_reactivation_floor()``).
-            comfort_cool: Comfort ceiling (°F) — used for the archetype-aware ceiling check.
-            nat_vent_delta: Added to comfort_cool to form the outdoor threshold —
-                every real call site already holds this as a separate local before
-                summing it into a threshold, so passing it through unchanged (instead
-                of the pre-summed threshold) avoids re-deriving it via subtraction.
-            hysteresis: Subtracted from indoor in the outdoor/indoor delta check. Callers
-                that don't apply hysteresis (handle_door_window_open, _re_pause_for_open_sensor)
-                pass 0.0 (the default); the paused-by-door reactivation block passes the
-                configured nat-vent hysteresis.
-        """
-        return decide_nat_vent_gate(
-            self._nat_vent_gate_inputs(
-                outdoor=outdoor,
-                indoor=indoor,
-                comfort_heat=comfort_heat,
-                comfort_cool=comfort_cool,
-                nat_vent_delta=nat_vent_delta,
-                hysteresis=hysteresis,
-            )
-        )
-
     def _nat_vent_gate_inputs(
         self,
         *,
@@ -13384,7 +13297,7 @@ class AutomationEngine:
         nat_vent_delta: float,
         hysteresis: float = 0.0,
     ) -> list[str]:
-        """Why ``_nat_vent_may_reactivate()`` says no (empty list = it says yes). Issue #1095."""
+        """Why the temperature gate says no (empty list = it says yes). Issue #1095."""
         return explain_nat_vent_gate(
             self._nat_vent_gate_inputs(
                 outdoor=outdoor,

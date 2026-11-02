@@ -2362,6 +2362,14 @@ class TestIssue504DebounceGatesIdleOpen:
 # ---------------------------------------------------------------------------
 
 
+def _temperature_gate(engine, **kwargs) -> bool:
+    """The shared 4-part temperature gate for the engine's config (Issue #1142: ``_nat_vent_may_reactivate()`` was
+    deleted -- it had no production caller left; the nat-vent FSM asks this same pure gate)."""
+    from custom_components.climate_advisor.nat_vent_gate import decide_nat_vent_gate  # noqa: PLC0415
+
+    return decide_nat_vent_gate(engine._nat_vent_gate_inputs(**kwargs))
+
+
 class TestNatVentMayReactivateDirect:
     """Direct unit tests of the extracted shared 4-part reactivation gate,
     _nat_vent_may_reactivate(), in isolation from any call site.
@@ -2373,24 +2381,24 @@ class TestNatVentMayReactivateDirect:
     def test_gate_passes_all_four_conditions_met(self):
         """All four sub-conditions satisfied -> True."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=68.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=68.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is True
 
     def test_gate_fails_on_missing_outdoor(self):
         """outdoor is None -> False (short-circuit before any other check)."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=None, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=None, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
     def test_gate_fails_on_missing_indoor(self):
         """indoor is None -> False (short-circuit before any other check)."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=68.0, indoor=None, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=68.0, indoor=None, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2400,8 +2408,8 @@ class TestNatVentMayReactivateDirect:
         outdoor=74, indoor=74, hysteresis=0 -> 74 < 74-0 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=74.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=74.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2411,8 +2419,8 @@ class TestNatVentMayReactivateDirect:
         outdoor=73.5, indoor=74.0, hysteresis=1.0 -> 73.5 < 73.0 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=73.5, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0, hysteresis=1.0
+        result = _temperature_gate(
+            engine, outdoor=73.5, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0, hysteresis=1.0
         )
         assert result is False
 
@@ -2422,8 +2430,8 @@ class TestNatVentMayReactivateDirect:
         indoor=70, comfort_heat=70 -> 70 > 70 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=70.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=65.0, indoor=70.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2433,8 +2441,8 @@ class TestNatVentMayReactivateDirect:
         outdoor=78, threshold=78 -> 78 < 78 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=78.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=78.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2444,8 +2452,8 @@ class TestNatVentMayReactivateDirect:
         indoor=76, comfort_cool=75 -> ceiling_threshold=75, 76 <= 75 is False.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
-        result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2456,8 +2464,8 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
-        result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
+        result = _temperature_gate(
+            engine, outdoor=65.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is True, (
             "WHF archetype: _ceiling_threshold() returns None, so indoor far past comfort_cool "
@@ -2472,8 +2480,8 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
-        result = engine._nat_vent_may_reactivate(
-            outdoor=91.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=20.0
+        result = _temperature_gate(
+            engine, outdoor=91.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=20.0
         )
         assert result is False, "WHF still requires outdoor < indoor - hysteresis"
 
@@ -2602,8 +2610,8 @@ class TestIssue402ClassOscillationPrevention:
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
 
         # Reactivation gate: must allow (ceiling exempt), pure direction-only.
-        reactivate_ok = engine._nat_vent_may_reactivate(
-            outdoor=80.0, indoor=90.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=16.0
+        reactivate_ok = _temperature_gate(
+            engine, outdoor=80.0, indoor=90.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=16.0
         )
         assert reactivate_ok is True
 
@@ -2630,8 +2638,8 @@ class TestIssue402ClassOscillationPrevention:
         engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=76.0)
         # Default fan_mode is HVAC-fan archetype (not WHF/BOTH) in _make_engine.
 
-        reactivate_ok = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0
+        reactivate_ok = _temperature_gate(
+            engine, outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0
         )
         assert reactivate_ok is False, "HVAC-fan archetype: ceiling exceeded must block reactivation"
 

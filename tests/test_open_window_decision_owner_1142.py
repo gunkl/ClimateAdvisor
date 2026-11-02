@@ -44,8 +44,6 @@ from tests.test_restore_resolved_band import _classification, _make_engine
 
 _AWAY_SETBACK_COOL = 80.0
 
-_XF_D3 = pytest.mark.xfail(strict=True, reason="#1142 D3: grace pre-check and nat-vent FSM disagree")
-
 
 def _blower_engine(
     *,
@@ -205,7 +203,6 @@ class TestD2QuietPause:
 
 
 class TestD3GraceAgreement:
-    @_XF_D3
     def test_forecast_veto_inside_automation_grace_does_not_pause(self):
         engine = _engine(mode="cool", indoor=72.0, outdoor=65.0)
         _forecast_peak_ahead(engine)
@@ -622,3 +619,38 @@ class TestBlowerEdges:
             _tick(engine, seconds)
         assert engine._paused_by_door is False
         assert engine._test_state.state == "heat"
+
+
+# ---------------------------------------------------------------------------
+# #1205 x #1142: the occupant's fan-off hold beats every start, soft start included
+# ---------------------------------------------------------------------------
+
+
+class TestFanOffHoldStillBeatsSoftStart:
+    def _held(self, engine):
+        engine._fan_off_hold_until = _DAY + timedelta(minutes=30)
+        return engine
+
+    def test_handler_does_not_soft_start_over_the_hold(self):
+        engine = self._held(_whf_soft_start_engine())
+        _notes(engine)
+        _open(engine)
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+
+    def test_grace_recheck_does_not_soft_start_over_the_hold(self):
+        engine = self._held(_whf_soft_start_engine())
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False
+        engine._pre_pause_mode = "cool"
+        _at(lambda: engine._re_pause_for_open_sensor())
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+
+    def test_paused_reactivation_does_not_soft_start_over_the_hold(self):
+        engine = self._held(_whf_soft_start_engine())
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False
+        engine._pre_pause_mode = "cool"
+        _tick(engine, 0)
+        assert engine._natural_vent_active is False

@@ -55,7 +55,8 @@
 | `DEFER_PAUSED` | — | `NOT_EVALUATED_PAUSED_DEFER` | No |
 | `DEFER_NAT_VENT` | `aggressive_savings=True` | `NOT_EVALUATED_SAVINGS_NAT_VENT` | No |
 | `DEFER_NAT_VENT` | `fan_mode` in (WHOLE_HOUSE, BOTH) | `NOT_EVALUATED_WHF_ARCHETYPE` | No |
-| `DEFER_NAT_VENT` | `fan_mode` is HVAC or DISABLED, `aggressive_savings=False` | `EVALUATED` | Yes |
+| `DEFER_NAT_VENT` | `fan_mode` is HVAC (Issue #1142 D7: blower ventilation holds the thermostat Off) | `NOT_EVALUATED_BLOWER_NAT_VENT` | No |
+| `DEFER_NAT_VENT` | `fan_mode` is DISABLED, `aggressive_savings=False` | `EVALUATED` | Yes |
 | `PROCEED` | — | `EVALUATED` | Yes |
 
 **`DEFER_OVERRIDE` is structurally unreachable** at this call site: the real method's `self._manual_override_active` early-return always fires *before* `decide_scheduled_band_gate()` is ever called, so `DEFER_OVERRIDE` can never be returned here. If it somehow were, it would fall through to the ceiling guard exactly like `PROCEED` — `classification_fsm.py` mirrors this exactly (only 3 explicit short-circuit branches, not 4).

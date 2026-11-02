@@ -14,9 +14,13 @@ from __future__ import annotations
 import logging
 import platform
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, time
 
+from homeassistant.util import dt as dt_util
+
 from .automation import (
+    ComfortBand,
     _in_sleep_window,
     awake_comfort_edges,
     compute_pre_cool_target,
@@ -25,7 +29,6 @@ from .automation import (
 )
 from .classifier import DayClassification
 from .const import (
-    COLD_DAY_SETBACK_DEPTH_F,
     DAY_TYPE_COLD,
     DAY_TYPE_COOL,
     DAY_TYPE_HOT,
@@ -34,8 +37,6 @@ from .const import (
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
-    DEFAULT_SETBACK_DEPTH_COOL_F,
-    DEFAULT_SETBACK_DEPTH_F,
     ECONOMIZER_TEMP_DELTA,
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
@@ -46,6 +47,7 @@ from .nat_vent_plan import (
     describe_close_timing,
     describe_nat_vent_cutoff_reason,
     describe_reopen_clause,
+    effective_window_close,
     resolve_window_pair,
     resolve_with_fallback,
 )
@@ -55,6 +57,219 @@ _LOGGER = logging.getLogger(__name__)
 
 # strftime format for 12-hour without leading zero (platform-dependent)
 _FMT_HOUR = "%#I:%M %p" if platform.system() == "Windows" else "%-I:%M %p"
+
+
+@dataclass(frozen=True)
+class _CloseFact:
+    """The dated moment today's planned window period ends, resolved by ``effective_window_close()``.
+
+    ``dynamic``: the forecast-derived cutoff is in play (dated today, or already behind us), so its reason may be
+    stated. False means today's static configured close (a cutoff dated another day says nothing about today).
+    ``already``: the close condition was already true when the plan was built -> the briefing says "now".
+    """
+
+    at: datetime
+    dynamic: bool
+    already: bool
+
+    @property
+    def text(self) -> str:
+        """'11:00 AM', or 'now' when the close condition was already reached."""
+        return describe_close_timing(self.at.strftime(_FMT_HOUR), self.already)
+
+
+@dataclass(frozen=True)
+class _BriefingFacts:
+    """Everything the briefing says about the house, gathered ONCE at write time (Issue #1231, absorbs #1219).
+
+    The briefing is written on demand or on the morning schedule from what is known at that moment, so every
+    sentence and TLDR row reads from here -- never from its own re-derivation -- and a value that is unknown or
+    not applied is simply absent (None) rather than guessed. ``unoccupied`` (away/vacation) means the engine
+    holds the away/vacation setback all day and all night (``handle_bedtime`` defers to it), so nothing at-home
+    -- no hold temperature, bedtime, pre-cool or window advice -- is promised.
+    """
+
+    occupancy_mode: str
+    unoccupied: bool
+    band: ComfortBand  # the band the thermostat is armed with right now (awake) for this occupancy
+    awake_heat: float
+    awake_cool: float
+    normal_bedtime: float | None  # the edge the engine arms at bedtime at home (None: no setback / unoccupied)
+    bedtime_target: float | None  # adaptive value when learned, else normal_bedtime (None when unoccupied)
+    windows_advice: bool  # warm/mild: windows recommended today AND someone home
+    near_miss: bool
+    close: _CloseFact | None  # warm/mild/hot-morning planned close; None when no window advice applies
+    evening_open: datetime | None  # warm/mild reopen, pair-validated against the dynamic close
+    ceiling_breach: datetime | None  # warm: indoor forecast to reach the ceiling TODAY (another day -> None)
+    hot_morning: bool
+    hot_evening: bool
+    hot_evening_open: time | None
+    pre_cool_target: float | None  # warm-day "tonight I'll cool the home" target (None when unoccupied)
+    hot_pre_cool_target: float | None  # hot-day overnight pre-cool target (None when unoccupied / not expected)
+    economizer_threshold: float  # comfort_cool + ECONOMIZER_TEMP_DELTA: the outdoor temperature windows close at
+
+
+def _local(moment: datetime, now: datetime) -> datetime:
+    """``moment`` in ``now``'s timezone (both aware), unchanged otherwise."""
+    if moment.tzinfo is not None and now.tzinfo is not None:
+        return moment.astimezone(now.tzinfo)
+    return moment
+
+
+def _close_fact(cutoff: datetime | None, already: bool, static_close: time | None, now: datetime) -> _CloseFact | None:
+    """Resolve a close time through the ONE shared helper (``effective_window_close()``)."""
+    at = effective_window_close(cutoff, already, static_close, now)
+    if at is None:
+        return None
+    dynamic = cutoff is not None and (already or at == cutoff)
+    return _CloseFact(at=at, dynamic=dynamic, already=cutoff is not None and already)
+
+
+def _gives_window_advice(c: DayClassification, occupancy_mode: str) -> bool:
+    """Whether the briefing may talk about opening/closing windows today (Issue #1211).
+
+    Only when windows are recommended for the day (outside air helps today) AND someone is home: an empty house
+    (away/vacation) gets no window instructions even though the flag stays set for the automation.
+    """
+    # The briefing is the day's plan, so it follows the classifier's forecast-based answer. The coordinator's
+    # live outdoor gate can clear ``windows_recommended`` for a few hours (a cold house on a cool morning) and
+    # restore it later; the briefing text neither flaps with it nor depends on the moment it was rendered, and
+    # the regeneration trigger keys on the same ``forecast_windows_recommended``. (The live direction is the
+    # Next User Action card's job.) ``windows_recommended`` alone still counts, for callers that build a
+    # classification by hand.
+    recommended = bool(c.forecast_windows_recommended or c.windows_recommended)
+    return recommended and occupancy_mode not in ("away", "vacation")
+
+
+def _is_mild_near_miss(c: DayClassification, comfort_heat: float, *, unoccupied: bool, advice: bool) -> bool:
+    """A mild day whose forecast high is just under the comfort floor (Issue #1211, owner decision O7).
+
+    The forecast ran 5-10 F low on every recorded flip day, so instead of going silent the briefing says
+    outside air may help later. Never on an estimated low, never away, never when windows are already advised.
+    """
+    return (
+        c.day_type == DAY_TYPE_MILD
+        and not advice
+        and not unoccupied
+        and not c.low_is_estimated
+        and comfort_heat - WINDOWS_NEAR_MISS_F <= c.today_high < comfort_heat
+    )
+
+
+def _gather_briefing_facts(
+    c: DayClassification,
+    config: dict,
+    *,
+    occupancy_mode: str = "home",
+    bedtime_setback_heat: float | None = None,
+    bedtime_setback_cool: float | None = None,
+    warm_events: dict | None = None,
+    mild_events: dict | None = None,
+    hot_events: dict | None = None,
+    runtime_config: dict | None = None,
+    now: datetime | None = None,
+    awake_edges: tuple[float, float] | None = None,
+) -> _BriefingFacts:
+    """Gather the briefing's facts once (Issue #1231). ``config`` is the TLDR-shape dict built by
+    ``generate_briefing()`` (comfort/setback/sleep_time/wake_time/aggressive_savings)."""
+    now = now if now is not None else dt_util.now()
+    unoccupied = occupancy_mode in ("away", "vacation")
+    savings = bool(config.get("aggressive_savings", False))
+    # The engine's band selector reads sleep_heat/sleep_cool from its config; carry them from the runtime config
+    # when we have it (else it falls back to its own documented defaults, exactly as the engine would).
+    band_cfg = dict(config)
+    for key in ("sleep_heat", "sleep_cool"):
+        if runtime_config and key in runtime_config:
+            band_cfg[key] = runtime_config[key]
+    band = select_comfort_band(
+        c, band_cfg, occupancy_mode=occupancy_mode, in_sleep_window=False, aggressive_savings=savings
+    )
+    awake_heat, awake_cool = (
+        awake_edges if awake_edges is not None else awake_comfort_edges(config, aggressive_savings=savings)
+    )
+
+    # Bedtime: the edge handle_bedtime() arms at home is the sleep band's edge on this day's side. The adaptive
+    # value (when learned) wins; unoccupied there is no at-home bedtime at all (the away setback is held).
+    normal_bedtime: float | None = None
+    bedtime_target: float | None = None
+    if not unoccupied and c.hvac_mode in ("heat", "cool"):
+        asleep = select_comfort_band(
+            c, band_cfg, occupancy_mode="home", in_sleep_window=True, aggressive_savings=savings
+        )
+        normal_bedtime = asleep.floor if c.hvac_mode == "heat" else asleep.ceiling
+        adaptive = bedtime_setback_heat if c.hvac_mode == "heat" else bedtime_setback_cool
+        bedtime_target = adaptive if adaptive is not None else normal_bedtime
+
+    windows_advice = _gives_window_advice(c, occupancy_mode)
+    near_miss = _is_mild_near_miss(c, config["comfort_heat"], unoccupied=unoccupied, advice=windows_advice)
+
+    close: _CloseFact | None = None
+    evening_open: datetime | None = None
+    hot_morning = hot_evening = False
+    hot_evening_open: time | None = None
+    events = warm_events or mild_events
+    # A breach dated another day says nothing about today, so the briefing says less (no "around 2:00 PM").
+    _breach = events.get("ceiling_breach_time") if events else None
+    ceiling_breach = _local(_breach, now) if _breach is not None else None
+    if ceiling_breach is not None and ceiling_breach.date() != now.date():
+        ceiling_breach = None
+    if c.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD) and windows_advice:
+        cutoff = events.get("nat_vent_cutoff") if events else None
+        # Never let the forecast cutoff produce a close at or before the open time: fall back to the static hour.
+        if cutoff is not None and c.window_open_time and cutoff.time() <= c.window_open_time:
+            cutoff = None
+        already = bool(events and events.get("nat_vent_cutoff_already_reached"))
+        close = _close_fact(cutoff, already, c.window_close_time, now)
+        _open = events.get("evening_open_time") if events else None
+        if close is not None and close.dynamic and cutoff is not None and _open is not None:
+            _, ok = resolve_window_pair(cutoff, None, _open, None)
+            evening_open = _local(_open, now) if ok is not None else None
+    elif c.day_type == DAY_TYPE_HOT and not unoccupied:
+        hot_morning = _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning)
+        hot_evening = _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening)
+        cutoff = hot_events.get("nat_vent_cutoff") if hot_events else None
+        already = bool(hot_events and hot_events.get("nat_vent_cutoff_already_reached"))
+        evening_dt = hot_events.get("evening_open_time") if hot_events else None
+        if hot_morning:
+            close = _close_fact(cutoff, already, c.window_opportunity_morning_end, now)
+        if hot_morning and hot_evening:
+            # Issue #878: close/open resolved TOGETHER so an open before its own close is never shown.
+            _dyn_close = cutoff if close is not None and close.dynamic else None
+            _, hot_evening_open = resolve_window_pair(
+                _dyn_close, c.window_opportunity_morning_end, evening_dt, c.window_opportunity_evening_start
+            )
+            hot_evening = hot_evening_open is not None
+        elif hot_evening:
+            hot_evening_open = resolve_with_fallback(evening_dt, c.window_opportunity_evening_start)
+
+    # Overnight pre-cool: only when it is actually expected to run tonight and someone is home to be promised it.
+    pre_cool_target = None if unoccupied else bedtime_setback_cool
+    hot_pre_cool_target: float | None = None
+    if c.day_type == DAY_TYPE_HOT and not unoccupied and runtime_config is not None:
+        _modifier = resolve_pre_cool_modifier(c, runtime_config)
+        if _modifier is not None:
+            hot_pre_cool_target = compute_pre_cool_target(runtime_config, _modifier)
+
+    return _BriefingFacts(
+        occupancy_mode=occupancy_mode,
+        unoccupied=unoccupied,
+        band=band,
+        awake_heat=awake_heat,
+        awake_cool=awake_cool,
+        normal_bedtime=normal_bedtime,
+        bedtime_target=bedtime_target,
+        windows_advice=windows_advice,
+        near_miss=near_miss,
+        close=close,
+        evening_open=evening_open,
+        ceiling_breach=ceiling_breach,
+        hot_morning=hot_morning,
+        hot_evening=hot_evening,
+        hot_evening_open=hot_evening_open,
+        pre_cool_target=pre_cool_target,
+        hot_pre_cool_target=hot_pre_cool_target,
+        economizer_threshold=config["comfort_cool"] + ECONOMIZER_TEMP_DELTA,
+    )
 
 
 def generate_briefing(
@@ -86,6 +301,7 @@ def generate_briefing(
     current_outdoor_temp: float | None = None,
     overnight_heat_engaged: bool = False,
     automation_overridden: bool = False,
+    now: datetime | None = None,
 ) -> str:
     """Generate the daily climate briefing message.
 
@@ -260,17 +476,21 @@ def generate_briefing(
             else None
         )
 
-    tldr_lines = _generate_tldr_table(
+    # Issue #1231: every fact the briefing states, gathered once here (the TLDR header's comfort band included).
+    facts = _gather_briefing_facts(
         c,
         config,
-        temp_unit=temp_unit,
+        occupancy_mode=occupancy_mode,
         bedtime_setback_heat=bedtime_setback_heat,
         bedtime_setback_cool=bedtime_setback_cool,
-        occupancy_mode=occupancy_mode,
         warm_events=warm_events,
         mild_events=mild_events,
         hot_events=hot_events,
+        runtime_config=runtime_config,
+        now=now,
+        awake_edges=(awake_heat, awake_cool),
     )
+    tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit, facts=facts)
 
     if verbosity == "tldr_only":
         briefing_text = "\n".join(tldr_lines).rstrip()
@@ -291,86 +511,36 @@ def generate_briefing(
 
     # Conversational body
     if c.day_type == DAY_TYPE_HOT:
-        lines.extend(
-            _hot_day_plan(
-                c,
-                comfort_cool,
-                setback_cool,
-                wake_time,
-                sleep_time,
-                fan_mode=fan_mode,
-                temp_unit=temp_unit,
-                runtime_config=runtime_config,
-                hot_events=hot_events,
-                armed_cool=awake_cool,
-            )
-        )
+        lines.extend(_hot_day_plan(c, facts, fan_mode=fan_mode, temp_unit=temp_unit))
     elif c.day_type == DAY_TYPE_WARM:
         lines.extend(
             _warm_day_plan(
                 c,
-                comfort_cool,
-                wake_time,
-                sleep_time,
+                facts,
                 fan_mode=fan_mode,
                 temp_unit=temp_unit,
                 warm_events=warm_events,
-                pre_cool_target=bedtime_setback_cool,
                 current_indoor_temp=current_indoor_temp,
                 current_outdoor_temp=current_outdoor_temp,
                 overnight_heat_engaged=overnight_heat_engaged,
-                armed_cool=awake_cool,
-                armed_heat=awake_heat,
-                windows_advice=_gives_window_advice(c, occupancy_mode),
-                away=occupancy_mode in ("away", "vacation"),
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
         lines.extend(
             _mild_day_plan(
                 c,
-                comfort_heat,
-                wake_time,
-                sleep_time,
+                facts,
                 temp_unit=temp_unit,
                 mild_events=mild_events,
                 current_indoor_temp=current_indoor_temp,
                 current_outdoor_temp=current_outdoor_temp,
                 overnight_heat_engaged=overnight_heat_engaged,
-                armed_heat=awake_heat,
-                armed_cool=awake_cool,
-                windows_advice=_gives_window_advice(c, occupancy_mode),
-                away=occupancy_mode in ("away", "vacation"),
-                near_miss=_is_mild_near_miss(
-                    c, comfort_heat, occupancy_mode, advice=_gives_window_advice(c, occupancy_mode)
-                ),
             )
         )
     elif c.day_type == DAY_TYPE_COOL:
-        lines.extend(
-            _cool_day_plan(
-                c,
-                comfort_heat,
-                setback_heat,
-                wake_time,
-                sleep_time,
-                temp_unit=temp_unit,
-                bedtime_setback_heat=bedtime_setback_heat,
-                armed_heat=awake_heat,
-            )
-        )
+        lines.extend(_cool_day_plan(c, facts, temp_unit=temp_unit))
     elif c.day_type == DAY_TYPE_COLD:
-        lines.extend(
-            _cold_day_plan(
-                c,
-                comfort_heat,
-                setback_heat,
-                wake_time,
-                sleep_time,
-                temp_unit=temp_unit,
-                bedtime_setback_heat=bedtime_setback_heat,
-            )
-        )
+        lines.extend(_cold_day_plan(c, facts, temp_unit=temp_unit))
 
     _LOGGER.debug("Dispatched %s day plan", c.day_type)
 
@@ -386,16 +556,7 @@ def generate_briefing(
         )
     )
     lines.append("")
-    lines.extend(
-        _fresh_air_section(
-            c,
-            awake_heat,
-            awake_cool,
-            debounce_seconds,
-            temp_unit=temp_unit,
-            away=occupancy_mode in ("away", "vacation"),
-        )
-    )
+    lines.extend(_fresh_air_section(c, facts, debounce_seconds, temp_unit=temp_unit))
 
     # Grace period status — only shown when a grace period is currently active,
     # or when grace periods are configured to a non-default value worth explaining
@@ -415,9 +576,7 @@ def generate_briefing(
     lines.extend(
         _tonight_preview(
             c,
-            comfort_heat,
-            comfort_cool,
-            sleep_time,
+            facts,
             temp_unit=temp_unit,
             adaptive_thermal_active=adaptive_thermal_active,
         )
@@ -458,22 +617,6 @@ def _window_event_available(events: dict | None, key: str, opportunity_flag: boo
     return (events is not None and events.get(key) is not None) or opportunity_flag
 
 
-def _gives_window_advice(c: DayClassification, occupancy_mode: str) -> bool:
-    """Whether the briefing may talk about opening/closing windows today (Issue #1211).
-
-    Only when windows are recommended for the day (outside air helps today) AND someone is home: an empty house
-    (away/vacation) gets no window instructions even though the flag stays set for the automation.
-    """
-    # The briefing is the day's plan, so it follows the classifier's forecast-based answer. The coordinator's
-    # live outdoor gate can clear ``windows_recommended`` for a few hours (a cold house on a cool morning) and
-    # restore it later; the briefing text neither flaps with it nor depends on the moment it was rendered, and
-    # the regeneration trigger keys on the same ``forecast_windows_recommended``. (The live direction is the
-    # Next User Action card's job.) ``windows_recommended`` alone still counts, for callers that build a
-    # classification by hand.
-    recommended = bool(c.forecast_windows_recommended or c.windows_recommended)
-    return recommended and occupancy_mode not in ("away", "vacation")
-
-
 def _says_air_wont_help(c: DayClassification) -> bool:
     """Whether the briefing may SAY outside air will not help today (Issue #1211).
 
@@ -490,21 +633,6 @@ def _band_text(floor: float, ceiling: float, temp_unit: str) -> str:
     return f"{format_temp(floor, temp_unit)[:-2]}\u2013{format_temp(ceiling, temp_unit)}"
 
 
-def _is_mild_near_miss(c: DayClassification, comfort_heat: float, occupancy_mode: str, *, advice: bool) -> bool:
-    """A mild day whose forecast high is just under the comfort floor (Issue #1211, owner decision O7).
-
-    The forecast ran 5-10 F low on every recorded flip day, so instead of going silent the briefing says
-    outside air may help later. Never on an estimated low, never away, never when windows are already advised.
-    """
-    return (
-        c.day_type == DAY_TYPE_MILD
-        and not advice
-        and occupancy_mode not in ("away", "vacation")
-        and not c.low_is_estimated
-        and comfort_heat - WINDOWS_NEAR_MISS_F <= c.today_high < comfort_heat
-    )
-
-
 def _generate_tldr_table(
     c: DayClassification,
     config: dict,
@@ -515,6 +643,8 @@ def _generate_tldr_table(
     warm_events: dict | None = None,
     mild_events: dict | None = None,
     hot_events: dict | None = None,
+    facts: _BriefingFacts | None = None,
+    now: datetime | None = None,
 ) -> list[str]:
     """Generate a plain-text aligned TLDR summary table.
 
@@ -523,38 +653,42 @@ def _generate_tldr_table(
         config: Dict with comfort_heat, comfort_cool, setback_heat, setback_cool,
             sleep_time, wake_time keys.
         temp_unit: Display unit — "fahrenheit" or "celsius".
-        bedtime_setback_heat: Adaptive bedtime heat setback temperature, if learned.
-        bedtime_setback_cool: Adaptive bedtime cool setback temperature, if learned.
-        warm_events: Result of compute_nat_vent_plan(), pre-computed once in
-            generate_briefing() (Issue #518) so the header's window-close time always
-            agrees with the conversational body — never re-derive it independently here.
-        mild_events: Same, for MILD days (Issue #534) — only one of warm_events/mild_events
-            is ever populated for a given classification's day_type.
+        facts: Issue #1231 — the briefing facts gathered once by ``generate_briefing()`` (every row reads
+            from them, so the header can never disagree with the body). When omitted (direct calls, tests)
+            they are gathered here from the remaining arguments, through the same function.
+        bedtime_setback_heat / bedtime_setback_cool, occupancy_mode, warm_events / mild_events / hot_events,
+        now: inputs to that gather; ignored when ``facts`` is given. The events are the result of
+            compute_nat_vent_plan(), pre-computed once in generate_briefing() (Issue #518) so the header's
+            window-close time always agrees with the conversational body.
 
     Returns:
         List of lines forming a plain-text aligned table.
     """
-    comfort_heat = config["comfort_heat"]
-    comfort_cool = config["comfort_cool"]
+    if facts is None:
+        facts = _gather_briefing_facts(
+            c,
+            config,
+            occupancy_mode=occupancy_mode,
+            bedtime_setback_heat=bedtime_setback_heat,
+            bedtime_setback_cool=bedtime_setback_cool,
+            warm_events=warm_events,
+            mild_events=mild_events,
+            hot_events=hot_events,
+            now=now,
+        )
     sleep_time = config["sleep_time"]
+    occupancy_mode = facts.occupancy_mode
 
     # --- Day Type row ---
     day_type_val = f"{c.day_type.title()} ({format_temp(c.today_high, temp_unit)})"
 
     # --- HVAC Mode row (Issue #85: show setback temps when away/vacation) ---
     # Issue #1088: print the edge the thermostat is actually armed with -- vacation's extra setback
-    # included -- by reading the engine's band selector, not the raw config keys. A morning snapshot: the
-    # TOU away/vacation widening is not threaded in (the briefing is a morning snapshot). Issue #1091:
-    # aggressive_savings now reflects the real Prefer savings flag, so the row quotes the awake band the
-    # thermostat is armed with (the body sentences quote the same band via awake_comfort_edges).
-    _band = select_comfort_band(
-        c,
-        config,
-        occupancy_mode=occupancy_mode,
-        in_sleep_window=False,
-        aggressive_savings=bool(config.get("aggressive_savings", False)),
-    )
-    if occupancy_mode in ("away", "vacation"):
+    # included -- by reading the engine's band selector (resolved once into the facts), not the raw config keys.
+    # A morning snapshot: the TOU away/vacation widening is not threaded in. Issue #1091: the band reflects the
+    # real Prefer savings flag, so the row quotes the awake band the thermostat is armed with.
+    _band = facts.band
+    if facts.unoccupied:
         if c.hvac_mode == "cool":
             hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
         elif c.hvac_mode == "heat":
@@ -569,82 +703,37 @@ def _generate_tldr_table(
         # Issue #1211: hvac_mode "off" on a warm/mild day is NOT "off": the comfort band is armed (heat below
         # the floor, cool above the ceiling). Say what is held, and "(windows day)" only when it is true.
         hvac_val = f"Comfort band {_band_text(_band.floor, _band.ceiling, temp_unit)}"
-        if _gives_window_advice(c, occupancy_mode):
+        if facts.windows_advice:
             hvac_val += " (windows day)"
 
     # --- Windows row ---
-    threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
-    if _gives_window_advice(c, occupancy_mode) and c.window_open_time and c.window_close_time:
-        # Prefer the same ODE-derived cutoff the conversational body uses (Issue #518, extended
-        # to MILD days in #534) \u2014 falls back to the classifier's static hour only when no
-        # forecast curve exists. warm_events/mild_events are mutually exclusive (populated only
-        # for their matching day_type). Issue #876: morning OPEN time is intentionally dropped
-        # from this row too \u2014 it carries no useful information \u2014 so the row now shows only the
-        # close time, matching the conversational body.
-        _events = warm_events or mild_events
-        _cutoff = _events.get("nat_vent_cutoff") if _events else None
-        # Defensive second guard (belt-and-suspenders alongside compute_nat_vent_plan()'s
-        # own window_open_time bound): never let the ODE cutoff produce a close time at or
-        # before the open time \u2014 fall back to the classifier's static close hour instead of
-        # displaying a nonsensical (or negative-width, pre-#876) close.
-        if _cutoff is not None and _cutoff.time() <= c.window_open_time:
-            _cutoff = None
-        # Issue #878-followup: only trust the "already reached" flag when the dynamic
-        # cutoff actually survived to be used (not reset to None by the guard above,
-        # and not falling back to the static hour) — a static fallback is never a
-        # stale "now" artifact, it's a plain configured hour.
-        _already = _cutoff is not None and bool(_events and _events.get("nat_vent_cutoff_already_reached"))
-        close_time = resolve_with_fallback(_cutoff, c.window_close_time)
-        close_t = describe_close_timing(close_time.strftime(_FMT_HOUR), _already)
-        windows_val = f"Close by {close_t}"
-    elif _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning) and (
-        _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening)
-    ):
-        # Issue #878: close/open resolved TOGETHER — see resolve_window_pair()'s
-        # docstring for the exact incident (Close by 6:00 PM / Open 5:00 PM+) this
-        # prevents. Eligibility (has_morning/has_evening above) is real-data-first,
-        # matching _hot_day_plan()'s identical logic via the same shared helper.
-        _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
-        _evening_dt = hot_events.get("evening_open_time") if hot_events else None
-        _close_time, _evening_open_time = resolve_window_pair(
-            _close_dt, c.window_opportunity_morning_end, _evening_dt, c.window_opportunity_evening_start
-        )
-        # Issue #878-followup: same already-reached guard as the Warm/Mild row above.
-        _already = _close_dt is not None and bool(hot_events and hot_events.get("nat_vent_cutoff_already_reached"))
-        m_end = describe_close_timing(_close_time.strftime(_FMT_HOUR).lstrip("0"), _already)
-        if _evening_open_time is not None:
-            e_start = _evening_open_time.strftime(_FMT_HOUR).lstrip("0")
-            windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)}) / Open {e_start}+"
-        else:
-            # resolve_window_pair() dropped a nonsensical open time — render as
-            # morning-only rather than fabricate a pairing.
-            windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)})"
-    elif _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning):
-        _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
-        _already = _close_dt is not None and bool(hot_events and hot_events.get("nat_vent_cutoff_already_reached"))
-        m_end_raw = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end).strftime(_FMT_HOUR).lstrip("0")
-        m_end = describe_close_timing(m_end_raw, _already)
-        windows_val = f"Close by {m_end} (<{format_temp(threshold, temp_unit)})"
-    elif _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening):
-        _evening_dt = hot_events.get("evening_open_time") if hot_events else None
-        e_start = resolve_with_fallback(_evening_dt, c.window_opportunity_evening_start).strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"Open {e_start} onward"
+    # Issue #1231: every close time is the dated one from the facts (``effective_window_close()``), so a cutoff
+    # dated another day is never shown as today's time; an empty house gets no window advice at all.
+    threshold = facts.economizer_threshold
+    if c.day_type != DAY_TYPE_HOT and facts.windows_advice and c.window_open_time and facts.close is not None:
+        # Issue #876: the morning OPEN time is intentionally dropped from this row -- it carries no useful
+        # information -- so the row shows only the close time, matching the conversational body.
+        windows_val = f"Close by {facts.close.text}"
+    elif facts.hot_morning and facts.hot_evening and facts.close is not None:
+        # Issue #878: close/open resolved TOGETHER (see resolve_window_pair()) -- the incident (Close by 6:00 PM /
+        # Open 5:00 PM+) is prevented when the facts were gathered.
+        e_start = facts.hot_evening_open.strftime(_FMT_HOUR)
+        windows_val = f"Close by {facts.close.text} (<{format_temp(threshold, temp_unit)}) / Open {e_start}+"
+    elif facts.hot_morning and facts.close is not None:
+        windows_val = f"Close by {facts.close.text} (<{format_temp(threshold, temp_unit)})"
+    elif facts.hot_evening and facts.hot_evening_open is not None:
+        windows_val = f"Open {facts.hot_evening_open.strftime(_FMT_HOUR)} onward"
     else:
         windows_val = "Closed all day"
 
     # --- Bedtime Setback row ---
+    # Issue #1231: one bedtime number (adaptive when learned, else the normal bedtime setpoint) shared with the
+    # body; while away/vacation the engine holds the away setback all night, so that is what the row says.
     sleep_str = sleep_time.strftime(_FMT_HOUR)
-    if c.hvac_mode == "cool":
-        # setback for cool days goes up (warmer is fine when sleeping)
-        bedtime_temp = (
-            bedtime_setback_cool if bedtime_setback_cool is not None else comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F
-        )
-        bedtime_val = f"{format_temp(bedtime_temp, temp_unit)} at {sleep_str}"
-    elif c.hvac_mode == "heat":
-        bedtime_temp = (
-            bedtime_setback_heat if bedtime_setback_heat is not None else comfort_heat - DEFAULT_SETBACK_DEPTH_F
-        )
-        bedtime_val = f"{format_temp(bedtime_temp, temp_unit)} at {sleep_str}"
+    if facts.unoccupied:
+        bedtime_val = "away setback held"
+    elif facts.bedtime_target is not None:
+        bedtime_val = f"{format_temp(facts.bedtime_target, temp_unit)} at {sleep_str}"
     else:
         bedtime_val = "No setback"
 
@@ -688,67 +777,40 @@ def _trend_description(c: DayClassification, temp_unit: str = FAHRENHEIT) -> str
 
 def _hot_day_plan(
     c,
-    comfort_cool,
-    setback_cool,
-    wake_time,
-    sleep_time,
+    facts: _BriefingFacts,
     fan_mode: str = FAN_MODE_DISABLED,
     temp_unit: str = FAHRENHEIT,
-    runtime_config: dict | None = None,
-    hot_events: dict | None = None,
-    armed_cool: float | None = None,
 ) -> list[str]:
-    """Conversational plan for hot days (85\u00b0F+)."""
-    threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
+    """Conversational plan for hot days (85\u00b0F+).
+
+    Issue #1231: every value comes from ``facts``. An empty house (away/vacation) gets the lead line only --
+    the engine holds the away setback all day and night, so no hold temperature, pre-cool, window or blind
+    advice is promised.
+
+    Issue #876: morning-close and evening-open times are derived from the same ODE-crossing mechanism
+    WARM/MILD use (nat_vent_plan.compute_nat_vent_plan()), falling back to the static classifier hour when no
+    forecast curve is available yet (resolved in ``_gather_briefing_facts()`` through
+    ``effective_window_close()``); the morning OPEN time is intentionally dropped from the displayed text.
+
+    Issue #878: has_morning/has_evening reflect whether a REAL crossing was computed, not just the coarse
+    today/tomorrow-low eligibility heuristic, and close/open are resolved TOGETHER via resolve_window_pair() so
+    a pairing like "Close by 6:00 PM / Open 5:00 PM+" can never render.
+    """
+    if facts.unoccupied:
+        return ["A hot day, and the house is empty, so the away settings below are what apply."]
+
+    threshold = facts.economizer_threshold
     # Issue #1091: display-only armed ceiling (Prefer savings widens it); thresholds stay on raw comfort_cool.
-    _hold = comfort_cool if armed_cool is None else armed_cool
+    _hold = facts.awake_cool
+    close = facts.close
+    has_morning = facts.hot_morning and close is not None
+    has_evening = facts.hot_evening and facts.hot_evening_open is not None
 
-    # Issue #876: morning-close and evening-open times are derived from the same
-    # ODE-crossing mechanism WARM/MILD already use (nat_vent_plan.compute_nat_vent_plan()),
-    # falling back to the static classifier hour when no forecast curve is available yet
-    # \u2014 the morning OPEN time is intentionally dropped from the displayed text
-    # entirely (it carries no useful information; see Issue #876's plan).
-    #
-    # Issue #878: has_morning/has_evening now reflect whether a REAL crossing was
-    # computed, not just the coarse today/tomorrow-low eligibility heuristic (which
-    # has zero relationship to when an ODE-derived crossing actually falls) \u2014 dynamic
-    # forecast data wins when it exists. When both are available, close/open are
-    # resolved TOGETHER via resolve_window_pair(): the day after #876 shipped, this
-    # exact seam let a close time resolve to 6:00 PM (unbounded ODE scan \u2014 a
-    # legitimate forecast outcome) while open silently fell back to the static 5:00 PM
-    # fallback, rendering "Close by 6:00 PM / Open 5:00 PM+". resolve_window_pair()
-    # drops the open time instead of ever displaying it before the close time.
-    _close_dt = hot_events.get("nat_vent_cutoff") if hot_events else None
-    _evening_open_dt = hot_events.get("evening_open_time") if hot_events else None
-    has_morning = _window_event_available(hot_events, "nat_vent_cutoff", c.window_opportunity_morning)
-    has_evening = _window_event_available(hot_events, "evening_open_time", c.window_opportunity_evening)
-    _close_time: time | None = None
-    _evening_open_time: time | None = None
-    if has_morning and has_evening:
-        _close_time, _evening_open_time = resolve_window_pair(
-            _close_dt, c.window_opportunity_morning_end, _evening_open_dt, c.window_opportunity_evening_start
-        )
-        if _evening_open_time is None:
-            has_evening = False
-    elif has_morning:
-        _close_time = resolve_with_fallback(_close_dt, c.window_opportunity_morning_end)
-    elif has_evening:
-        _evening_open_time = resolve_with_fallback(_evening_open_dt, c.window_opportunity_evening_start)
-
-    # Issue #878-followup: only trust "already reached" when the dynamic close time
-    # actually survived to be used — a static fallback is a plain configured hour,
-    # never a stale "now" artifact from the forward-only ODE scan.
-    _already_close = _close_dt is not None and bool(hot_events and hot_events.get("nat_vent_cutoff_already_reached"))
-
-    # Issue #558: only claim overnight pre-cool banking when it's actually expected to run
-    # tonight (resolve_pre_cool_modifier() \u2014 the same gate handle_pre_cool() uses), and phrase
-    # it prospectively ("tonight") rather than asserting a past event that may not have happened
-    # (e.g. the home was away overnight, or the trigger hasn't fired yet today).
-    _modifier = resolve_pre_cool_modifier(c, runtime_config) if runtime_config is not None else None
-    if _modifier is not None:
-        _pre_cool_target = compute_pre_cool_target(runtime_config, _modifier)
+    # Issue #558: only claim overnight pre-cool banking when it's actually expected to run tonight
+    # (resolve_pre_cool_modifier() -- the same gate handle_pre_cool() uses), and phrase it prospectively.
+    if facts.hot_pre_cool_target is not None:
         opener = (
-            f"Tonight I'll pre-cool the house to about {format_temp(_pre_cool_target, temp_unit)} while"
+            f"Tonight I'll pre-cool the house to about {format_temp(facts.hot_pre_cool_target, temp_unit)} while"
             f" outdoor air is still cool \u2014 that banking strategy cuts energy use over the course"
             f" of the day."
         )
@@ -759,11 +821,11 @@ def _hot_day_plan(
         )
     lines = [opener]
 
-    if has_morning and has_evening:
-        m_end = _close_time.strftime(_FMT_HOUR)
-        e_start = _evening_open_time.strftime(_FMT_HOUR)
+    if has_morning:
+        # Issue #878-followup: "already reached" is only meaningful when the dynamic cutoff is in play -- a
+        # static fallback hour (including a cutoff dated another day) is a plain configured hour.
         lines.append("")
-        if _already_close:
+        if close.already:
             lines.append(
                 f"Outdoor's already above {format_temp(threshold, temp_unit)} \u2014 close up for the day"
                 f" now. I'll handle the AC transition."
@@ -771,39 +833,21 @@ def _hot_day_plan(
         else:
             lines.append(
                 f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
-                f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
+                f" for the day (around {close.text}) \u2014 I'll handle the AC transition. Until then,"
                 f" enjoy the cross-breeze."
             )
         lines.append("")
         lines.append(
             f"Once closed, keep blinds drawn on sun-facing windows"
             f" (especially west-facing after noon). I'll hold things at"
-            f" {format_temp(_hold, temp_unit)}."
+            f" {format_temp(_hold, temp_unit)}" + ("." if has_evening else " for the rest of the day.")
         )
-        lines.append("")
-        lines.append(describe_reopen_clause(e_start, reopening_from_closed_all_day=False))
-    elif has_morning:
-        m_end = _close_time.strftime(_FMT_HOUR)
-        lines.append("")
-        if _already_close:
+        if has_evening:
+            lines.append("")
             lines.append(
-                f"Outdoor's already above {format_temp(threshold, temp_unit)} \u2014 close up for the day"
-                f" now. I'll handle the AC transition."
+                describe_reopen_clause(facts.hot_evening_open.strftime(_FMT_HOUR), reopening_from_closed_all_day=False)
             )
-        else:
-            lines.append(
-                f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
-                f" for the day (around {m_end}) \u2014 I'll handle the AC transition. Until then,"
-                f" enjoy the cross-breeze."
-            )
-        lines.append("")
-        lines.append(
-            f"Once closed, keep blinds drawn on sun-facing windows"
-            f" (especially west-facing after noon). I'll hold things at"
-            f" {format_temp(_hold, temp_unit)} for the rest of the day."
-        )
     elif has_evening:
-        e_start = _evening_open_time.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(
             f"Today's a keep-it-sealed kind of day. Close the blinds on sun-facing"
@@ -811,7 +855,9 @@ def _hot_day_plan(
             f" at {format_temp(_hold, temp_unit)}."
         )
         lines.append("")
-        lines.append(describe_reopen_clause(e_start, reopening_from_closed_all_day=True))
+        lines.append(
+            describe_reopen_clause(facts.hot_evening_open.strftime(_FMT_HOUR), reopening_from_closed_all_day=True)
+        )
     else:
         lines.append("")
         lines.append(
@@ -830,20 +876,13 @@ def _hot_day_plan(
 
 def _warm_day_plan(
     c,
-    comfort_cool,
-    wake_time,
-    sleep_time,
+    facts: _BriefingFacts,
     fan_mode: str = FAN_MODE_DISABLED,
     temp_unit: str = FAHRENHEIT,
-    pre_cool_target: float | None = None,
     warm_events: dict | None = None,
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
     overnight_heat_engaged: bool = False,
-    armed_cool: float | None = None,
-    armed_heat: float | None = None,
-    windows_advice: bool | None = None,
-    away: bool = False,
 ) -> list[str]:
     """Conversational plan for warm days (75-85\u00b0F).
 
@@ -881,44 +920,36 @@ def _warm_day_plan(
     neither way.
     """
     lines = []
-    if windows_advice is None:
-        windows_advice = bool(c.windows_recommended)
+    windows_advice = facts.windows_advice
+    away = facts.unoccupied
     # Issue #1211: the band the thermostat actually holds today, quoted from the armed edges.
-    _held_cool = comfort_cool if armed_cool is None else armed_cool
-    _held_heat = _held_cool if armed_heat is None else armed_heat
-    _band_desc = _band_text(_held_heat, _held_cool, temp_unit) if armed_heat is not None else None
+    _held_cool = facts.awake_cool
+    _band_desc = _band_text(facts.awake_heat, _held_cool, temp_unit)
     # Issue #1093: the AC-handoff sentences quote the ceiling the thermostat is armed with (Prefer
-    # savings widens it), read from awake_comfort_edges() by the caller -- never comfort_cool + margin here.
-    _hold = comfort_cool if armed_cool is None else armed_cool
+    # savings widens it), read from awake_comfort_edges() -- never comfort_cool + margin here.
+    _hold = _held_cool
 
     _events = warm_events
-    _nat_vent_cutoff = _events["nat_vent_cutoff"] if _events else None
-    _nat_vent_cutoff_reason = _events.get("nat_vent_cutoff_reason") if _events else None
-    _ceiling_breach = _events["ceiling_breach_time"] if _events else None
-    _evening_open_time = _events.get("evening_open_time") if _events else None
-
-    # Issue #940: close/reopen pairing was never checked here (only Hot's paths were
-    # guarded by #878/#879, despite the PR claiming Warm/Mild too) \u2014 called purely as a
-    # pass/fail signal since resolve_window_pair() returns bare `time` objects and
-    # _evening_open_time is compared as a `datetime` below (line ~844); neither side has
-    # a static fallback in scope here, so both static_* args are None.
-    if _nat_vent_cutoff is not None and _evening_open_time is not None:
-        _, _pair_open_check = resolve_window_pair(_nat_vent_cutoff, None, _evening_open_time, None)
-        if _pair_open_check is None:
-            _evening_open_time = None
+    # Issue #1231: the close is the dated one from the facts. A forecast cutoff dated another day is the static
+    # path (no dynamic reason / already-reached phrasing); a cutoff in play carries its reason.
+    _close = facts.close
+    _dynamic = _close is not None and _close.dynamic
+    _nat_vent_cutoff_reason = _events.get("nat_vent_cutoff_reason") if _events and _dynamic else None
+    _ceiling_breach = facts.ceiling_breach  # dated today only (Issue #1231)
+    _evening_open_time = facts.evening_open  # Issue #940: pair-validated against the close when gathered
 
     # Issue #876: the morning OPEN time is intentionally dropped from this sentence \u2014
     # it carries no useful information (windows day starts, full stop). Only the
     # dynamically-computed close time matters here.
     if windows_advice and c.window_open_time:
-        if _nat_vent_cutoff is not None:
-            close_t = _nat_vent_cutoff.strftime(_FMT_HOUR)
+        if _dynamic:
+            close_t = _close.at.strftime(_FMT_HOUR)
             # Issue #878-followup: the ODE crossing scan is forward-only from "now", so
             # when the close condition is already true at render time, the scan can only
             # return the nearest future grid point \u2014 not a real future prediction. Asserting
             # it as "Close up at {HH:MM}" hours after the real (earlier) crossing already
             # passed is a false future-scheduled claim.
-            _already = bool(_events and _events.get("nat_vent_cutoff_already_reached"))
+            _already = _close.already
             # Issue #535: two distinct reasons the cutoff can fire \u2014 outdoor air rising
             # above indoor (the original predicate), or indoor forecast to reach the
             # comfort floor first. Same close time either way; different sentence why
@@ -959,22 +990,13 @@ def _warm_day_plan(
         lines.append("A warm day, and the house is empty, so the away settings below are what apply.")
     elif overnight_heat_engaged:
         lines.append(
-            "The heater ran a bit overnight before settling"
-            + (
-                f" — the thermostat is holding {_band_desc} today."
-                if _band_desc
-                else " — the thermostat has it from here."
-            )
+            f"The heater ran a bit overnight before settling \u2014 the thermostat is holding {_band_desc} today."
         )
     elif _says_air_wont_help(c):
-        lines.append(
-            f"Outside air won't do much for the house today, so the thermostat holds {_band_desc}."
-            if _band_desc
-            else "Outside air won't do much for the house today, so the thermostat has it."
-        )
+        lines.append(f"Outside air won't do much for the house today, so the thermostat holds {_band_desc}.")
     else:
         # Low is estimated: say neither that windows help nor that they don't.
-        lines.append(f"The thermostat holds {_band_desc} today." if _band_desc else "The thermostat has it today.")
+        lines.append(f"The thermostat holds {_band_desc} today.")
 
     if windows_advice and fan_mode != FAN_MODE_DISABLED:
         lines.append("I'll use the fan to boost cross-ventilation when windows are open.")
@@ -1000,13 +1022,12 @@ def _warm_day_plan(
             else " The AC will step in automatically if it's needed to hold that ceiling."
         )
         lines.append(f"Indoor temps are forecast to reach {format_temp(_hold, temp_unit)} around {breach_t}.{_tail}")
-    elif windows_advice and c.window_close_time:
-        close_t = c.window_close_time.strftime(_FMT_HOUR)
+    elif windows_advice and _close is not None and not _close.already:
         lines.append(
-            f"Close up by {close_t} before outdoor temps climb \u2014 seal the cool"
+            f"Close up by {_close.text} before outdoor temps climb \u2014 seal the cool"
             f" air inside so the AC can take over above {format_temp(_hold, temp_unit)}."
         )
-    elif windows_advice:
+    elif windows_advice and _close is None:
         lines.append(
             f"The AC will step in above {format_temp(_hold, temp_unit)} as a safety net if"
             f" needed, but with good airflow you probably won't need it."
@@ -1015,10 +1036,10 @@ def _warm_day_plan(
         lines.append(f"The AC will step in above {format_temp(_hold, temp_unit)} to hold your comfort ceiling.")
 
     # Pre-cool night mention: warming trend + a lower sleep ceiling is planned
-    if pre_cool_target is not None and getattr(c, "setback_modifier", 0.0) < 0:
+    if facts.pre_cool_target is not None and getattr(c, "setback_modifier", 0.0) < 0:
         lines.append("")
         lines.append(
-            f"Tonight I'll cool the home to {format_temp(pre_cool_target, temp_unit)} while"
+            f"Tonight I'll cool the home to {format_temp(facts.pre_cool_target, temp_unit)} while"
             f" you sleep to build up cold thermal mass before tomorrow's heat — so the house"
             f" coasts longer before the AC needs to kick in."
         )
@@ -1047,19 +1068,12 @@ def _warm_day_plan(
 
 def _mild_day_plan(
     c,
-    comfort_heat,
-    wake_time,
-    sleep_time,
+    facts: _BriefingFacts,
     temp_unit: str = FAHRENHEIT,
     mild_events: dict | None = None,
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
     overnight_heat_engaged: bool = True,
-    armed_heat: float | None = None,
-    armed_cool: float | None = None,
-    windows_advice: bool | None = None,
-    near_miss: bool = False,
-    away: bool = False,
 ) -> list[str]:
     """Conversational plan for mild days (60-74\u00b0F).
 
@@ -1087,12 +1101,13 @@ def _mild_day_plan(
     classifier decided so on a real forecast low (``_says_air_wont_help()``), and an estimated low asserts
     neither way.
     """
-    if windows_advice is None:
-        windows_advice = bool(c.windows_recommended)
+    windows_advice = facts.windows_advice
+    away = facts.unoccupied
+    near_miss = facts.near_miss
     # Issue #1091: display-only armed floor (Prefer savings widens it).
-    _shown_heat = comfort_heat if armed_heat is None else armed_heat
-    _band_desc = _band_text(_shown_heat, armed_cool, temp_unit) if armed_cool is not None else None
-    _holding = f"the thermostat holds {_band_desc}" if _band_desc else "the thermostat holds your comfort band"
+    _shown_heat = facts.awake_heat
+    _band_desc = _band_text(_shown_heat, facts.awake_cool, temp_unit)
+    _holding = f"the thermostat holds {_band_desc}"
     if not windows_advice:
         if away:
             # Nobody is home: no claim about the air, and no awake band (the away section quotes the setbacks).
@@ -1124,35 +1139,31 @@ def _mild_day_plan(
 
     if windows_advice and c.window_open_time:
         # Issue #876: the morning OPEN time is intentionally dropped from this
-        # sentence — it carries no useful information.
+        # sentence \u2014 it carries no useful information.
         lines.append("")
         lines.append(
             "Open south and east windows for a natural cross-breeze that freshens the air and warms the house for free."
         )
 
-    # Issue #534: prefer the ODE-derived cutoff when available (same forecast already validated
-    # accurate for warm days), matching docs/08-COMPUTATION-REFERENCE.md \u00a76d \u2014 falls back to the
-    # classifier's static hour only when no forecast curve exists (fresh install, uncalibrated
-    # model), same fallback pattern _generate_tldr_table() already uses for warm days.
-    _mild_cutoff = mild_events.get("nat_vent_cutoff") if mild_events else None
-    _mild_cutoff_reason = mild_events.get("nat_vent_cutoff_reason") if mild_events else None
-    _close_time = resolve_with_fallback(_mild_cutoff, c.window_close_time)
-    if windows_advice and _close_time:
-        close_t = _close_time.strftime(_FMT_HOUR)
-        # Issue #878-followup: same already-reached guard as _warm_day_plan() — only
-        # meaningful when the dynamic cutoff is actually in play (a static fallback
-        # hour is never a stale "now" artifact).
-        _already = _mild_cutoff is not None and bool(mild_events and mild_events.get("nat_vent_cutoff_already_reached"))
+    # Issue #534: prefer the ODE-derived cutoff when available, matching docs/08-COMPUTATION-REFERENCE.md
+    # \u00a76d. Issue #1231: the close is the dated one from the facts (``effective_window_close()``) -- a cutoff
+    # dated another day is the static path (no reason, no already-reached phrasing).
+    _close = facts.close
+    _dynamic = _close is not None and _close.dynamic
+    _mild_cutoff_reason = mild_events.get("nat_vent_cutoff_reason") if mild_events and _dynamic else None
+    if windows_advice and _close is not None:
+        # Issue #878-followup: "already reached" is only meaningful when the dynamic cutoff is in play.
+        _already = _close.already
         # Issue #847: same reason branch + #430 live sanity check as _warm_day_plan()
-        # — only meaningful when the ODE-derived cutoff (with its reason) is actually
+        # \u2014 only meaningful when the ODE-derived cutoff (with its reason) is actually
         # in play; the static classifier-hour fallback has no reason to branch on.
-        _effective_reason = _mild_cutoff_reason if _mild_cutoff is not None else None
+        _effective_reason = _mild_cutoff_reason if _dynamic else None
         if _effective_reason == "comfort_floor" and not free_cooling_direction_ok(
             current_outdoor_temp, current_indoor_temp
         ):
             _LOGGER.warning(
-                "Nat-vent cutoff reason overridden for briefing text — comfort_floor no longer"
-                " live at render time: indoor=%.1f°F outdoor=%.1f°F (outdoor has already risen"
+                "Nat-vent cutoff reason overridden for briefing text \u2014 comfort_floor no longer"
+                " live at render time: indoor=%.1f\u00b0F outdoor=%.1f\u00b0F (outdoor has already risen"
                 " above indoor). reason %s -> outdoor_rise",
                 current_indoor_temp,
                 current_outdoor_temp,
@@ -1162,78 +1173,67 @@ def _mild_day_plan(
         lines.append("")
         if _already and _effective_reason == "outdoor_rise":
             lines.append(
-                f"Close up now — outdoor's already warmed past indoor. If the house dips below"
+                f"Close up now \u2014 outdoor's already warmed past indoor. If the house dips below"
                 f" {format_temp(_shown_heat, temp_unit)} tonight, the heater comes back on"
                 f" automatically."
             )
         else:
             reason_fragment = (
-                "to trap the warmth" if _mild_cutoff is None else describe_nat_vent_cutoff_reason(_effective_reason)
+                "to trap the warmth" if not _dynamic else describe_nat_vent_cutoff_reason(_effective_reason)
             )
-            close_phrase = describe_close_timing(close_t, _already)
             prep = "" if _already else "by "
             lines.append(
-                f"Close up {prep}{close_phrase} {reason_fragment}. If the house dips below"
+                f"Close up {prep}{_close.text} {reason_fragment}. If the house dips below"
                 f" {format_temp(_shown_heat, temp_unit)} tonight, the heater comes back on"
                 f" automatically."
             )
 
-    # Issue #876: MILD days had no evening-reopen sentence at all — new, mirroring
-    # _warm_day_plan()'s equivalent (same outdoor_rise-only gate; see
-    # nat_vent_plan.py's compute_nat_vent_plan() docstring for why comfort_floor
-    # cutoffs never populate this).
-    _evening_open_time = mild_events.get("evening_open_time") if mild_events else None
-    # Issue #940: same pairing gap as _warm_day_plan() — use the raw dynamic
-    # _mild_cutoff here (not the resolve_with_fallback()-resolved _close_time above),
-    # since mixing an already-resolved static-fallback close against a raw dynamic
-    # open would misrepresent which side is "dynamic" for the cross-midnight check.
-    if windows_advice and _mild_cutoff is not None and _evening_open_time is not None:
-        _, _pair_open_check = resolve_window_pair(_mild_cutoff, None, _evening_open_time, None)
-        if _pair_open_check is None:
-            _evening_open_time = None
-    if windows_advice and _evening_open_time is not None:
-        rec_t = _evening_open_time.strftime(_FMT_HOUR)
+    # Issue #876: MILD days had no evening-reopen sentence at all \u2014 mirroring _warm_day_plan()'s equivalent
+    # (outdoor_rise-only; see nat_vent_plan.py's compute_nat_vent_plan() docstring). Issue #940: the open is
+    # pair-validated against the dynamic close when the facts are gathered.
+    if windows_advice and facts.evening_open is not None:
+        rec_t = facts.evening_open.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(f"Reopen windows around {rec_t} when the evening air cools back down.")
 
     return lines
 
 
-def _cool_day_plan(
-    c,
-    comfort_heat,
-    setback_heat,
-    wake_time,
-    sleep_time,
-    temp_unit: str = FAHRENHEIT,
-    bedtime_setback_heat: float | None = None,
-    armed_heat: float | None = None,
-) -> list[str]:
-    """Conversational plan for cool days (45-59\u00b0F)."""
-    setback_display = (
-        bedtime_setback_heat if bedtime_setback_heat is not None else comfort_heat - DEFAULT_SETBACK_DEPTH_F
-    )
-    # Issue #1091: display-only armed floor (Prefer savings widens it); the bedtime fallback stays raw.
-    _shown_heat = comfort_heat if armed_heat is None else armed_heat
-    return [
-        f"Heater day \u2014 too cool outside for windows. I'll hold {format_temp(_shown_heat, temp_unit)}"
+def _cool_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT) -> list[str]:
+    """Conversational plan for cool days (45-59\u00b0F).
+
+    Issue #1231: an empty house (away/vacation) gets the lead line only -- the engine holds the away setback
+    all day and night, so no hold temperature and no bedtime set-back is promised. At home the bedtime number is
+    the one the TLDR row shows (``facts.bedtime_target``).
+    """
+    if facts.unoccupied:
+        return ["A cool day, and the house is empty, so the away settings below are what apply."]
+    # Issue #1091: display-only armed floor (Prefer savings widens it).
+    lines = [
+        f"Heater day \u2014 too cool outside for windows. I'll hold {format_temp(facts.awake_heat, temp_unit)}"
         f" through the day.",
-        "",
-        f"At bedtime I'll set back to {format_temp(setback_display, temp_unit)}"
-        " \u2014 most people sleep better a little cooler.",
     ]
+    if facts.bedtime_target is not None:
+        lines.append("")
+        lines.append(
+            f"At bedtime I'll set back to {format_temp(facts.bedtime_target, temp_unit)}"
+            " \u2014 most people sleep better a little cooler."
+        )
+    return lines
 
 
-def _cold_day_plan(
-    c,
-    comfort_heat,
-    setback_heat,
-    wake_time,
-    sleep_time,
-    temp_unit: str = FAHRENHEIT,
-    bedtime_setback_heat: float | None = None,
-) -> list[str]:
-    """Conversational plan for cold days (below 45\u00b0F)."""
+def _cold_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT) -> list[str]:
+    """Conversational plan for cold days (below 45\u00b0F).
+
+    Issue #1231: an empty house (away/vacation) gets the lead line only. At home, the bedtime target is compared
+    against the NORMAL bedtime setpoint (``facts.normal_bedtime``, the edge the engine arms at bedtime) -- never
+    against ``setback_heat``, which is the AWAY setpoint. The engine arms that same edge every heating night, so
+    when the two are the same number there is no cold-day adjustment to describe (owner decision, option A): the
+    plain "At bedtime I'll set back to X." Only a learned value that differs is a "conservative setback ... instead
+    of the usual" one. Body and TLDR quote the same number.
+    """
+    if facts.unoccupied:
+        return ["A cold day, and the house is empty, so the away settings below are what apply."]
     lines = [
         "Cold day \u2014 heater runs all day. Help it out: close north-side curtains,"
         " open south-facing ones for free solar heat, and minimize time holding"
@@ -1246,15 +1246,17 @@ def _cold_day_plan(
         lines.append("")
         lines.append("Tomorrow's even colder, so expect the heater to work harder in the morning.")
 
-    setback_display = (
-        bedtime_setback_heat if bedtime_setback_heat is not None else comfort_heat - COLD_DAY_SETBACK_DEPTH_F
-    )
-    lines.append("")
-    lines.append(
-        f"Tonight I'm using a conservative setback \u2014 {format_temp(setback_display, temp_unit)}"
-        f" instead of the usual {format_temp(setback_heat, temp_unit)}. When it's this cold, a"
-        f" deeper setback takes too long to recover from in the morning."
-    )
+    if facts.bedtime_target is not None:
+        _target = format_temp(facts.bedtime_target, temp_unit)
+        lines.append("")
+        if facts.normal_bedtime is None or format_temp(facts.normal_bedtime, temp_unit) == _target:
+            lines.append(f"At bedtime I'll set back to {_target}.")
+        else:
+            lines.append(
+                f"Tonight I'm using a conservative setback \u2014 {_target} instead of the usual"
+                f" {format_temp(facts.normal_bedtime, temp_unit)}. When it's this cold, a deeper setback takes too"
+                f" long to recover from in the morning."
+            )
 
     return lines
 
@@ -1357,18 +1359,17 @@ def _leaving_home_section(
 
 def _fresh_air_section(
     c,
-    comfort_heat: float,
-    comfort_cool: float,
+    facts: _BriefingFacts,
     debounce_seconds: int = DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     temp_unit: str = FAHRENHEIT,
     natural_vent_active: bool = False,
     current_outdoor_temp: float | None = None,
-    away: bool = False,
 ) -> list[str]:
     """User-centric section about opening windows/doors for fresh air.
 
-    ``away`` (away/vacation): the thermostat is holding the setback band, not the awake band, so the
-    "holding X-Y today" clause is left out rather than quoting the wrong band (Issue #1211).
+    Issue #1231: while the house is empty (away/vacation) the thermostat is holding the setback band, not the
+    awake band, so no branch quotes the awake comfort value ("pull back down to 76\u00b0F", "hold your 76\u00b0F
+    target", "holding 68-74\u00b0F today") -- it is left out rather than quoting the wrong value (Issue #1211).
 
     Affirms the user's choice first, then explains impact and recovery.
     Varies by HVAC mode since the impact differs significantly.
@@ -1376,25 +1377,32 @@ def _fresh_air_section(
     """
     debounce_minutes = max(1, debounce_seconds // 60)
     debounce_desc = f"{debounce_minutes} minute" if debounce_minutes == 1 else f"{debounce_minutes} minutes"
+    away = facts.unoccupied
+    comfort_cool = facts.awake_cool
 
     if natural_vent_active and current_outdoor_temp is not None:
+        _target = "" if away else f" to hold your {format_temp(comfort_cool, temp_unit)} target"
         return [
             f"Windows are open and outdoor air is {format_temp(current_outdoor_temp, temp_unit)} \u2014"
-            f" I'll use the fan to hold your {format_temp(comfort_cool, temp_unit)} target"
+            f" I'll use the fan{_target}"
             f" without running the AC. Once you close up, I'll resume normal cooling."
         ]
 
     if c.hvac_mode == "cool":
+        _pull_back = (
+            ""
+            if away
+            else f" Just know that on a day like today it may take a bit longer to pull back down to"
+            f" {format_temp(comfort_cool, temp_unit)}, so if you want to minimize the impact, shorter"
+            f" is better \u2014 and try to keep other windows and doors shut while"
+            f" you've got one open."
+        )
         return [
             f"If you want to crack a window for some fresh air, no problem \u2014"
             f" it's your house. I'll keep the AC running for a bit in"
             f" case it's just a quick thing, but if it stays open past {debounce_desc}"
             f" I'll shut the AC off so you're not cooling the outdoors. Once you"
-            f" close up, I'll fire the AC back up right away. Just know that on a"
-            f" day like today it may take a bit longer to pull back down to"
-            f" {format_temp(comfort_cool, temp_unit)}, so if you want to minimize the impact, shorter"
-            f" is better \u2014 and try to keep other windows and doors shut while"
-            f" you've got one open.",
+            f" close up, I'll fire the AC back up right away.{_pull_back}",
         ]
     elif c.hvac_mode == "heat":
         return [
@@ -1412,7 +1420,7 @@ def _fresh_air_section(
         _holding_clause = (
             ""
             if away
-            else f" \u2014 the thermostat is holding {_band_text(comfort_heat, comfort_cool, temp_unit)} today"
+            else f" \u2014 the thermostat is holding {_band_text(facts.awake_heat, comfort_cool, temp_unit)} today"
         )
         return [
             f"If you want to open a window for some fresh air, go for it{_holding_clause}."
@@ -1462,24 +1470,29 @@ def _grace_period_section(
 
 def _tonight_preview(
     c,
-    comfort_heat,
-    comfort_cool,
-    sleep_time,
+    facts: _BriefingFacts,
     temp_unit: str = FAHRENHEIT,
     adaptive_thermal_active: bool = False,
 ) -> list[str]:
-    """Conversational preview of tonight and tomorrow based on trend."""
+    """Conversational preview of tonight and tomorrow based on trend.
+
+    Issue #1231: while the house is empty the engine holds the away setback all night, so no "I'll set back more
+    aggressively tonight" promise and no bedtime-tuning line is made.
+    """
     _LOGGER.debug(
         "Tonight preview \u2014 trend=%s, magnitude=%.1f\u00b0F",
         c.trend_direction,
         c.trend_magnitude,
     )
     if c.trend_direction == "warming" and c.trend_magnitude >= 5:
-        lines = [
-            f"Looking ahead \u2014 tomorrow's warmer at {format_temp(c.tomorrow_high, temp_unit)}, so"
-            f" I'm going to set back a bit more aggressively tonight. Less"
-            f" heating needed means energy saved while you sleep.",
-        ]
+        if facts.unoccupied:
+            lines = [f"Looking ahead \u2014 tomorrow's warmer at {format_temp(c.tomorrow_high, temp_unit)}."]
+        else:
+            lines = [
+                f"Looking ahead \u2014 tomorrow's warmer at {format_temp(c.tomorrow_high, temp_unit)}, so"
+                f" I'm going to set back a bit more aggressively tonight. Less"
+                f" heating needed means energy saved while you sleep.",
+            ]
     elif c.trend_direction == "cooling" and c.trend_magnitude >= 5:
         lines = [
             f"Looking ahead \u2014 tomorrow's cooler at {format_temp(c.tomorrow_high, temp_unit)}, so"
@@ -1490,6 +1503,6 @@ def _tonight_preview(
             f"Tomorrow looks pretty similar to today \u2014 {format_temp(c.tomorrow_high, temp_unit)}"
             f" for a high. Nothing special planned overnight.",
         ]
-    if adaptive_thermal_active and c.hvac_mode in ("heat", "cool"):
+    if adaptive_thermal_active and c.hvac_mode in ("heat", "cool") and not facts.unoccupied:
         lines.append("Bedtime setback and pre-heat timing are tuned to your home's actual heating performance.")
     return lines

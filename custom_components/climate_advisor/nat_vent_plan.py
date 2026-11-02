@@ -91,6 +91,37 @@ def resolve_with_fallback(dynamic: datetime | None, static: time | None) -> time
     return dynamic.time() if dynamic is not None else static
 
 
+def effective_window_close(
+    cutoff: datetime | None,
+    already_reached: bool,
+    static_close: time | None,
+    now: datetime,
+) -> datetime | None:
+    """The dated moment today's planned window period ends (Issue #1231, absorbs #1218).
+
+    The one place the engine's window period and the briefing's close time are resolved, so the two can
+    never disagree:
+
+    - ``already_reached`` (the forward-only scan found the crossing already behind us; the cutoff is just the
+      next grid point after "now") -> the period has ended: ``now``.
+    - a cutoff dated another day than ``now`` -> today's static close (a cutoff tomorrow says nothing about
+      when today's period ends).
+    - a cutoff today -> the cutoff.
+    - no cutoff -> today's static close, or None when there is none.
+
+    Comparisons use dated values, never the bare time of day.
+    """
+    if cutoff is not None and already_reached:
+        return now
+    if cutoff is not None:
+        _local = cutoff.astimezone(now.tzinfo) if cutoff.tzinfo is not None and now.tzinfo is not None else cutoff
+        if _local.date() == now.date():
+            return _local
+    if static_close is None:
+        return None
+    return now.replace(hour=static_close.hour, minute=static_close.minute, second=0, microsecond=0)
+
+
 def resolve_window_pair(
     dynamic_close: datetime | None,
     static_close: time | None,

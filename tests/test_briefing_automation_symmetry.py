@@ -47,7 +47,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from custom_components.climate_advisor.briefing import _mild_day_plan, _warm_day_plan
+from custom_components.climate_advisor.briefing import _gather_briefing_facts, _mild_day_plan, _warm_day_plan
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import DAY_TYPE_MILD, DAY_TYPE_WARM
 from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
@@ -73,6 +73,35 @@ def _make_classification(day_type: str, today_high: float, today_low: float = 50
         tomorrow_high=today_high,
         tomorrow_low=today_low,
     )
+
+
+# Issue #1231: the briefing resolves close times against "now", and this file builds its cutoffs on 2026-05-11.
+_TEST_NOW = datetime(2026, 5, 11, 6, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_briefing_now(frozen_now):
+    frozen_now(_TEST_NOW)
+
+
+def _facts(c, **events):
+    cfg = {
+        "comfort_heat": COMFORT_HEAT,
+        "comfort_cool": COMFORT_COOL,
+        "setback_heat": 60.0,
+        "setback_cool": 80.0,
+        "sleep_time": DEFAULT_SLEEP,
+        "wake_time": DEFAULT_WAKE,
+    }
+    return _gather_briefing_facts(c, cfg, now=_TEST_NOW, **events)
+
+
+def _warm_plan(c, warm_events=None, **kw):
+    return _warm_day_plan(c, _facts(c, warm_events=warm_events), warm_events=warm_events, **kw)
+
+
+def _mild_plan(c, mild_events=None, **kw):
+    return _mild_day_plan(c, _facts(c, mild_events=mild_events), mild_events=mild_events, **kw)
 
 
 def _shared_nat_vent_plan(reason: str, cutoff: datetime) -> dict:
@@ -129,10 +158,7 @@ class TestBriefingAutomationSymmetry:
         plan = _shared_nat_vent_plan("comfort_floor", cutoff)
         expected_phrase = describe_nat_vent_cutoff_reason("comfort_floor")
 
-        if day_type == DAY_TYPE_WARM:
-            lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=plan)
-        else:
-            lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=plan)
+        lines = _warm_plan(c, warm_events=plan) if day_type == DAY_TYPE_WARM else _mild_plan(c, mild_events=plan)
         briefing_text = "\n".join(lines)
 
         assert expected_phrase in briefing_text, (
@@ -148,10 +174,7 @@ class TestBriefingAutomationSymmetry:
         expected_phrase = describe_nat_vent_cutoff_reason("outdoor_rise")
         comfort_floor_phrase = describe_nat_vent_cutoff_reason("comfort_floor")
 
-        if day_type == DAY_TYPE_WARM:
-            lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=plan)
-        else:
-            lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=plan)
+        lines = _warm_plan(c, warm_events=plan) if day_type == DAY_TYPE_WARM else _mild_plan(c, mild_events=plan)
         briefing_text = "\n".join(lines)
 
         assert expected_phrase in briefing_text, (
@@ -191,9 +214,9 @@ class TestComfortFloorLiveSanityCheckFallback:
         # this forecast-derived reason describes is no longer live at render time.
         kwargs = {"current_indoor_temp": 70.0, "current_outdoor_temp": 80.0}
         if day_type == DAY_TYPE_WARM:
-            lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=plan, **kwargs)
+            lines = _warm_plan(c, warm_events=plan, **kwargs)
         else:
-            lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=plan, **kwargs)
+            lines = _mild_plan(c, mild_events=plan, **kwargs)
         text = "\n".join(lines)
 
         assert comfort_floor_phrase not in text, (
@@ -221,9 +244,9 @@ class TestComfortFloorLiveSanityCheckFallback:
         # comfort_floor risk is still live.
         kwargs = {"current_indoor_temp": 70.0, "current_outdoor_temp": 55.0}
         if day_type == DAY_TYPE_WARM:
-            lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=plan, **kwargs)
+            lines = _warm_plan(c, warm_events=plan, **kwargs)
         else:
-            lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=plan, **kwargs)
+            lines = _mild_plan(c, mild_events=plan, **kwargs)
         text = "\n".join(lines)
 
         assert comfort_floor_phrase in text, (

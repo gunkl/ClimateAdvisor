@@ -12,6 +12,7 @@ from datetime import UTC, datetime, time, timedelta
 import pytest
 
 from custom_components.climate_advisor.briefing import (
+    _gather_briefing_facts,
     _generate_tldr_table,
     _grace_period_section,
     _leaving_home_section,
@@ -91,6 +92,62 @@ def _generate(classification: DayClassification, **kwargs) -> str:
         predicted_outdoor_future=kwargs.get("predicted_outdoor_future"),
         runtime_config=kwargs.get("runtime_config", DEFAULT_CONFIG),
     )
+
+
+# Issue #1231: the briefing resolves window close times against "now" (``effective_window_close()``), so a cutoff
+# dated another day is never printed as today's time. These tests build their forecast curves/cutoffs on
+# 2026-05-11, so the clock is frozen on that morning (the shared ``frozen_now`` fixture).
+_TEST_NOW = datetime(2026, 5, 11, 6, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_briefing_now(frozen_now):
+    frozen_now(_TEST_NOW)
+
+
+def _facts(
+    c,
+    *,
+    occupancy_mode: str = "home",
+    warm_events=None,
+    mild_events=None,
+    hot_events=None,
+    savings: bool = False,
+    bedtime_setback_heat=None,
+    bedtime_setback_cool=None,
+    runtime_config=None,
+    now=None,
+):
+    """Gather the briefing facts exactly as generate_briefing() does, for tests that call a plan directly."""
+    cfg = _make_config()
+    cfg["aggressive_savings"] = savings
+    return _gather_briefing_facts(
+        c,
+        cfg,
+        occupancy_mode=occupancy_mode,
+        bedtime_setback_heat=bedtime_setback_heat,
+        bedtime_setback_cool=bedtime_setback_cool,
+        warm_events=warm_events,
+        mild_events=mild_events,
+        hot_events=hot_events,
+        runtime_config=runtime_config,
+        now=now,
+    )
+
+
+_FACT_KEYS = ("occupancy_mode", "savings", "bedtime_setback_heat", "bedtime_setback_cool", "runtime_config", "now")
+
+
+def _warm_plan(c, warm_events=None, **kw):
+    """_warm_day_plan() with the facts gathered the way generate_briefing() gathers them."""
+    fact_kw = {k: kw.pop(k) for k in _FACT_KEYS if k in kw}
+    return _warm_day_plan(c, _facts(c, warm_events=warm_events, **fact_kw), warm_events=warm_events, **kw)
+
+
+def _mild_plan(c, mild_events=None, **kw):
+    """_mild_day_plan() with the facts gathered the way generate_briefing() gathers them."""
+    fact_kw = {k: kw.pop(k) for k in _FACT_KEYS if k in kw}
+    return _mild_day_plan(c, _facts(c, mild_events=mild_events, **fact_kw), mild_events=mild_events, **kw)
 
 
 def _make_indoor_curve(
@@ -579,8 +636,10 @@ class TestCoolDayBriefing:
     def test_mentions_bedtime_setback(self):
         c = _make_classification("cool", today_high=55, today_low=35)
         result = _generate(c)
-        # Bedtime setback is comfort_heat - 4 = 66
-        assert "66" in result
+        # Issue #1231: the bedtime number is the edge the engine arms at bedtime (sleep_heat from the runtime
+        # config = 62), not a hard-coded comfort_heat - 4.
+        assert "At bedtime I'll set back to 62" in result
+        assert "62\u00b0F at 10:30 PM" in result
 
     def test_mentions_windows_closed(self):
         c = _make_classification("cool", today_high=55, today_low=35)
@@ -599,8 +658,11 @@ class TestColdDayBriefing:
     def test_mentions_conservative_setback(self):
         c = _make_classification("cold", today_high=38, today_low=22)
         result = _generate(c)
-        # Conservative setback is comfort_heat - 3 = 67
-        assert "67" in result
+        # Issue #1231: the bedtime number is the engine's bedtime edge (sleep_heat = 62), not comfort_heat - 3; it
+        # equals the normal bedtime setpoint, so there is no cold-day adjustment to describe (option A).
+        assert "At bedtime I'll set back to 62\u00b0F." in result
+        assert "conservative setback" not in result
+        assert "instead of the usual" not in result
 
     def test_mentions_curtains(self):
         c = _make_classification("cold", today_high=38, today_low=22)
@@ -639,12 +701,13 @@ class TestColdDayBriefing:
         assert "67" not in result
 
     def test_cold_day_plan_falls_back_to_default_when_setback_none(self):
-        """_cold_day_plan falls back to comfort_heat - 3 when bedtime_setback_heat is None."""
+        """_cold_day_plan falls back to the normal bedtime setpoint (sleep_heat) when bedtime_setback_heat is None."""
         c = _make_classification("cold", today_high=38, today_low=22)
         # bedtime_setback_heat defaults to None in _generate when not supplied
         result = _generate(c, comfort_heat=70.0)
-        # Fallback: 70 - 3 = 67 should appear in the cold-day plan text
-        assert "67" in result
+        # Issue #1231: fallback is the engine's bedtime edge (sleep_heat = 62), in the body AND the TLDR row
+        assert "At bedtime I'll set back to 62\u00b0F." in result
+        assert "Bedtime Setback: 62\u00b0F at 10:30 PM" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1197,8 +1260,7 @@ class TestTldrTable:
         c = _make_classification("hot", today_high=92, today_low=82, tomorrow_low=70)
         rows = _generate_tldr_table(c, _make_config())
         table = "\n".join(rows)
-        assert "5:00 PM" in table or "5" in table
-        assert "78" in table
+        assert "Open 5:00 PM onward" in table
         assert "6:00 AM" not in table
 
     def test_tldr_hot_day_windows_neither(self):
@@ -1234,12 +1296,11 @@ class TestTldrTable:
         assert "Closed all day" in table
 
     def test_tldr_contains_bedtime_heat_info(self):
-        """Heat mode: bedtime setback should be comfort_heat - 4."""
+        """Heat mode: the bedtime row is the edge the engine arms at bedtime (sleep_heat), Issue #1231."""
         c = _make_classification("cool", today_high=55, today_low=35)
-        rows = _generate_tldr_table(c, _make_config())
+        rows = _generate_tldr_table(c, {**_make_config(), "sleep_heat": 66.0})
         table = "\n".join(rows)
-        # COMFORT_HEAT=70, setback = 70-4 = 66
-        assert "66" in table
+        assert "66\u00b0F at 10:30 PM" in table
         assert "10:30 PM" in table  # DEFAULT_SLEEP
 
     def test_tldr_contains_bedtime_cool_info(self):
@@ -1439,8 +1500,9 @@ class TestAdaptiveThermalBriefing:
         assert "62" in result
 
     def test_tldr_table_falls_back_to_default_when_none(self):
-        """generate_briefing with bedtime_setback_heat=None → uses comfort_heat - 4."""
-        from custom_components.climate_advisor.const import DEFAULT_SETBACK_DEPTH_F
+        """generate_briefing with bedtime_setback_heat=None and no runtime config → the engine's default
+        bedtime edge (DEFAULT_SLEEP_HEAT), Issue #1231 -- not comfort_heat - 4."""
+        from custom_components.climate_advisor.const import DEFAULT_SLEEP_HEAT
 
         c = _make_classification("cool", today_high=55, today_low=35)
         result = generate_briefing(
@@ -1453,9 +1515,7 @@ class TestAdaptiveThermalBriefing:
             sleep_time=DEFAULT_SLEEP,
             bedtime_setback_heat=None,
         )
-        # Default: comfort_heat (70) - DEFAULT_SETBACK_DEPTH_F (4) = 66
-        expected = str(int(COMFORT_HEAT - DEFAULT_SETBACK_DEPTH_F))
-        assert expected in result
+        assert f"{DEFAULT_SLEEP_HEAT:.0f}\u00b0F at 10:30 PM" in result
 
     def test_adaptive_thermal_active_adds_sentence(self):
         """adaptive_thermal_active=True → 'tuned to your home's actual heating performance' appears."""
@@ -2190,6 +2250,20 @@ class TestResolveWindowPairInvariant:
                 time(18, 0),
                 id="static_close_dynamic_open_after",
             ),
+            # Next-day dates (Issue #1231): with BOTH sides dynamic the check compares the dated datetimes
+            # directly, never their bare times of day. A close dated tomorrow 11:00 with a same-day open at
+            # 18:00 puts the open BEFORE the close on the real timeline (the time-of-day compare 18:00 > 11:00
+            # would wrongly keep it), so the open is dropped. The returned close is still its bare time -- the
+            # briefing's own dated close comes from effective_window_close(), not from this pair resolver.
+            pytest.param(
+                _SEP_8.replace(day=9, hour=11),
+                None,
+                _SEP_8.replace(hour=18),
+                None,
+                time(11, 0),
+                None,
+                id="dynamic_close_tomorrow_open_same_day_dropped",
+            ),
             # Both static, sane fallback ordering (today's real constants) — kept.
             pytest.param(None, time(9, 0), None, time(17, 0), time(9, 0), time(17, 0), id="both_static_sane"),
             # Both static, but an (intentionally adversarial) insane fallback
@@ -2217,6 +2291,13 @@ class TestResolveWindowPairInvariant:
         # expected value — this is the line that must hold for every case above.
         if open_ is not None and close is not None:
             assert open_ > close
+
+    def test_dynamic_close_today_open_tomorrow_is_kept(self):
+        """Issue #1231 mirror of the next-day case: close today 19:00, open dated tomorrow 02:00. The bare
+        time-of-day compare (02:00 < 19:00) would wrongly drop this legitimate overnight reopen; the dated compare
+        keeps it (so the generic ``open_ > close`` time-of-day assert above does not apply to it)."""
+        close, open_ = resolve_window_pair(_SEP_8.replace(hour=19), None, _SEP_8.replace(day=9, hour=2), None)
+        assert (close, open_) == (time(19, 0), time(2, 0))
 
     def test_dropped_pairing_logs_warning_naming_both_values(self, caplog):
         """CLAUDE.md Observability Requirements: a guard that clamps/overrides a
@@ -2326,7 +2407,7 @@ class TestWarmDayPlanFloorWording:
             "ceiling_breach_time": None,
             "evening_open_time": None,
         }
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        lines = _warm_plan(c, warm_events=warm_events)
         text = "\n".join(lines)
         # Issue #847: wording now flows through the shared describe_nat_vent_cutoff_reason()
         # helper (nat_vent_plan.py), which changed the exact outdoor_rise phrase from
@@ -2344,7 +2425,7 @@ class TestWarmDayPlanFloorWording:
             "ceiling_breach_time": None,
             "evening_open_time": None,
         }
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        lines = _warm_plan(c, warm_events=warm_events)
         text = "\n".join(lines)
         assert "since indoor's already down to your comfort floor" in text
         assert "outdoor air will be warmer than inside" not in text
@@ -2369,14 +2450,14 @@ class TestMildDayPlanFloorWording:
 
     def test_outdoor_rise_reason_uses_outdoor_wording(self):
         c = _make_classification("mild", today_high=68, today_low=50)
-        cutoff = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        cutoff = datetime(2026, 5, 11, 11, 0, 0, tzinfo=UTC)
         mild_events = {
             "nat_vent_cutoff": cutoff,
             "nat_vent_cutoff_reason": "outdoor_rise",
             "ceiling_breach_time": None,
             "evening_open_time": None,
         }
-        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        lines = _mild_plan(c, mild_events=mild_events)
         text = "\n".join(lines)
         # Issue #847: shared describe_nat_vent_cutoff_reason() phrase, same as
         # _warm_day_plan()'s counterpart above.
@@ -2385,14 +2466,14 @@ class TestMildDayPlanFloorWording:
 
     def test_comfort_floor_reason_uses_generic_wording(self):
         c = _make_classification("mild", today_high=68, today_low=50)
-        cutoff = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        cutoff = datetime(2026, 5, 11, 11, 0, 0, tzinfo=UTC)
         mild_events = {
             "nat_vent_cutoff": cutoff,
             "nat_vent_cutoff_reason": "comfort_floor",
             "ceiling_breach_time": None,
             "evening_open_time": None,
         }
-        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        lines = _mild_plan(c, mild_events=mild_events)
         text = "\n".join(lines)
         assert "since indoor's already down to your comfort floor" in text
         assert "outdoor air will be warmer than inside" not in text
@@ -2402,7 +2483,7 @@ class TestMildDayPlanFloorWording:
         from before this fix — falls back to c.window_close_time with the existing
         generic "trap the warmth" wording, since there's no reason to branch on."""
         c = _make_classification("mild", today_high=68, today_low=50)
-        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=None)
+        lines = _mild_plan(c, mild_events=None)
         text = "\n".join(lines)
         assert "trap the warmth" in text
 
@@ -2420,7 +2501,7 @@ class TestMildDayPlanFloorWording:
             "ceiling_breach_time": None,
             "evening_open_time": bad_reopen,
         }
-        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        lines = _mild_plan(c, mild_events=mild_events)
         text = "\n".join(lines)
         assert "Reopen windows" not in text
 
@@ -2436,7 +2517,7 @@ class TestMildDayPlanFloorWording:
             "ceiling_breach_time": None,
             "evening_open_time": overnight_reopen,
         }
-        lines = _mild_day_plan(c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=mild_events)
+        lines = _mild_plan(c, mild_events=mild_events)
         text = "\n".join(lines)
         assert "evening air cools back down" in text
 
@@ -2458,17 +2539,13 @@ class TestMildDayPlanOvernightHeatWording:
 
     def test_heat_engaged_keeps_i_warmed_wording(self):
         c = _make_classification("mild", today_high=68, today_low=48)
-        lines = _mild_day_plan(
-            c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=None, overnight_heat_engaged=True
-        )
+        lines = _mild_plan(c, mild_events=None, overnight_heat_engaged=True)
         text = "\n".join(lines)
         assert "I warmed to" in text
 
     def test_no_overnight_heat_uses_neutral_wording(self):
         c = _make_classification("mild", today_high=68, today_low=48)
-        lines = _mild_day_plan(
-            c, COMFORT_HEAT, DEFAULT_WAKE, DEFAULT_SLEEP, mild_events=None, overnight_heat_engaged=False
-        )
+        lines = _mild_plan(c, mild_events=None, overnight_heat_engaged=False)
         text = "\n".join(lines)
         assert "I warmed" not in text
 
@@ -2493,25 +2570,15 @@ class TestWarmDayPlanOvernightHeatWording:
         # Issue #1211: not a windows day (low 75 is too warm to cool the house) -> no window wording, and no
         # "HVAC is off" claim while the comfort band is armed.
         c = _make_classification("warm", today_high=80, today_low=75)
-        lines = _warm_day_plan(
-            c,
-            COMFORT_COOL,
-            DEFAULT_WAKE,
-            DEFAULT_SLEEP,
-            warm_events=None,
-            overnight_heat_engaged=False,
-            armed_heat=68.0,
-            armed_cool=74.0,
-        )
+        lines = _warm_plan(c, warm_events=None, overnight_heat_engaged=False, savings=True)
         text = "\n".join(lines)
         assert "HVAC is off" not in text
-        assert "holds 68" in text and "74" in text
+        # comfort 70-75 widened by the savings margin -> the armed band 68-77
+        assert "holds 68\u201377" in text
 
     def test_overnight_heat_engaged_drops_hvac_off_claim(self):
         c = _make_classification("warm", today_high=80, today_low=75)
-        lines = _warm_day_plan(
-            c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=None, overnight_heat_engaged=True
-        )
+        lines = _warm_plan(c, warm_events=None, overnight_heat_engaged=True)
         text = "\n".join(lines)
         assert "HVAC is off this morning." not in text
 
@@ -2551,7 +2618,7 @@ class TestWarmDayPlanReopenWording:
             "ceiling_breach_time": None,
             "evening_open_time": None,
         }
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        lines = _warm_plan(c, warm_events=warm_events)
         text = "\n".join(lines)
         # The close sentence still fires (comfort_floor cutoff was reported)...
         assert "since indoor's already down to your comfort floor" in text
@@ -2570,7 +2637,7 @@ class TestWarmDayPlanReopenWording:
             "ceiling_breach_time": None,
             "evening_open_time": recovery,
         }
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        lines = _warm_plan(c, warm_events=warm_events)
         text = "\n".join(lines)
         assert "evening air cools back down" in text
 
@@ -2590,7 +2657,7 @@ class TestWarmDayPlanReopenWording:
             "ceiling_breach_time": None,
             "evening_open_time": bad_reopen,
         }
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        lines = _warm_plan(c, warm_events=warm_events)
         text = "\n".join(lines)
         assert "Reopen windows" not in text
 
@@ -2607,7 +2674,7 @@ class TestWarmDayPlanReopenWording:
             "ceiling_breach_time": None,
             "evening_open_time": overnight_reopen,
         }
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=warm_events)
+        lines = _warm_plan(c, warm_events=warm_events)
         text = "\n".join(lines)
         assert "evening air cools back down" in text
 
@@ -2673,7 +2740,7 @@ class TestIssue788ReportedScenario:
             window_open_time=time(6, 0),
         )
         c = _make_classification("warm", today_high=80, today_low=60)
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=events)
+        lines = _warm_plan(c, warm_events=events)
         text = "\n".join(lines)
         assert "since indoor's already down to your comfort floor" in text
         assert "Reopen windows" not in text
@@ -2698,7 +2765,7 @@ class TestIssue788ReportedScenario:
         assert events["evening_open_time"] > events["nat_vent_cutoff"]
 
         c = _make_classification("warm", today_high=80, today_low=60)
-        lines = _warm_day_plan(c, COMFORT_COOL, DEFAULT_WAKE, DEFAULT_SLEEP, warm_events=events)
+        lines = _warm_plan(c, warm_events=events)
         text = "\n".join(lines)
         assert "Reopen windows" in text
         assert "evening air cools back down" in text
@@ -2846,10 +2913,8 @@ class TestBriefingShowsSavingsBand:
         assert "held at or above 70" not in body
 
     def test_mild_day_unengaged_opener_quotes_floor(self):
-        from custom_components.climate_advisor.briefing import _mild_day_plan
-
         c = _make_classification("mild", today_high=68)
-        lines = _mild_day_plan(c, 70.0, DEFAULT_WAKE, DEFAULT_SLEEP, overnight_heat_engaged=False, armed_heat=68.0)
+        lines = _mild_plan(c, overnight_heat_engaged=False, savings=True)
         assert "held at or above 68" in " ".join(lines)
 
     def test_celsius_quotes_converted_widened_edges(self):
@@ -2980,7 +3045,9 @@ class TestWindowAdviceGating1211:
             c = _make_classification("mild", today_high=high, today_low=50)
             for k, v in kw.items():
                 setattr(c, k, v)
-            return _is_mild_near_miss(c, 68.0, occupancy, advice=c.windows_recommended)
+            return _is_mild_near_miss(
+                c, 68.0, unoccupied=occupancy in ("away", "vacation"), advice=c.windows_recommended
+            )
 
         assert near(63) is True  # exactly 5 below
         assert near(67.9) is True
@@ -3004,3 +3071,224 @@ class TestWindowAdviceGating1211:
         text = _generate(c)
         assert "(windows day)" in text
         assert "Close by" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #1231 (absorbs #1219): one set of briefing facts gathered at write time
+# ---------------------------------------------------------------------------
+
+# The reference house: comfort 70/75, away setback 60/80, bedtime (sleep) 66/78.
+REF_CONFIG = {
+    "comfort_heat": 70.0,
+    "comfort_cool": 75.0,
+    "setback_heat": 60.0,
+    "setback_cool": 80.0,
+    "sleep_heat": 66.0,
+    "sleep_cool": 78.0,
+    "threshold_hot": 85,
+    "nat_vent_hysteresis_f": 1.0,
+}
+
+
+def _ref(c, **kwargs) -> str:
+    return generate_briefing(
+        classification=c,
+        comfort_heat=70.0,
+        comfort_cool=75.0,
+        setback_heat=60.0,
+        setback_cool=80.0,
+        wake_time=DEFAULT_WAKE,
+        sleep_time=DEFAULT_SLEEP,
+        runtime_config=kwargs.pop("runtime_config", REF_CONFIG),
+        **kwargs,
+    )
+
+
+def _row(text: str, name: str) -> str:
+    return next(line.strip() for line in text.splitlines() if line.strip().startswith(f"{name}:"))
+
+
+class TestColdDayBedtimeComparison1231:
+    """Cold day at home: the bedtime target is compared with the NORMAL bedtime setpoint (the sleep band edge the
+    engine arms), never with ``setback_heat`` (the AWAY setpoint); body and TLDR quote one number."""
+
+    def _cold(self):
+        return _make_classification("cold", today_high=41, today_low=24)
+
+    def test_equal_to_the_normal_bedtime_is_a_plain_bedtime_setback(self):
+        """Option A: the engine arms the same edge every heating night, so an equal number is no cold-day
+        adjustment -- no "conservative" claim and no "instead of the usual" clause."""
+        text = _ref(self._cold())
+        assert "At bedtime I'll set back to 66°F." in text
+        assert "conservative setback" not in text and "instead of the usual" not in text
+        assert _row(text, "Bedtime Setback") == "Bedtime Setback: 66°F at 10:30 PM"
+
+    def test_adaptive_value_differing_from_the_normal_bedtime_is_compared_with_it(self):
+        text = _ref(self._cold(), bedtime_setback_heat=67.0)
+        assert "conservative setback — 67°F instead of the usual 66°F." in text
+        assert _row(text, "Bedtime Setback") == "Bedtime Setback: 67°F at 10:30 PM"
+
+    def test_the_away_setback_is_never_the_usual_bedtime(self):
+        text = _ref(self._cold(), bedtime_setback_heat=65.0)
+        para = next(p for p in text.split("\n\n") if "conservative setback" in p)
+        assert "instead of the usual 66°F" in para
+        assert "60" not in para
+
+    def test_body_and_tldr_quote_the_same_number_without_an_adaptive_value(self):
+        text = _ref(self._cold())
+        assert "set back to 66°F." in text and "66°F at" in text
+        assert "67" not in text  # the old COLD_DAY_SETBACK_DEPTH_F (comfort - 3) split is gone
+
+
+class TestAwayBriefingPromisesNothingAtHome1231:
+    """Away/vacation on every day type: the engine holds the away/vacation setback all day and all night, so the
+    briefing promises no at-home temperature, bedtime, pre-cool or window action."""
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_hot_day(self, occupancy):
+        c = _make_classification("hot", today_high=92, today_low=65, tomorrow_high=98, trend_direction="warming")
+        text = _ref(c, occupancy_mode=occupancy, bedtime_setback_cool=77.0)
+        low = text.lower()
+        assert "a hot day, and the house is empty" in low
+        for phrase in (
+            "i'll hold",
+            "pre-cool",
+            "cool the home to",
+            "close up for",
+            "reopen",
+            "blinds",
+            "pull back down",
+        ):
+            assert phrase not in low
+        assert _row(text, "Windows") == "Windows: Closed all day"
+        assert _row(text, "Bedtime Setback") == "Bedtime Setback: away setback held"
+        assert "76°F" not in text and "75°F" not in text  # no awake comfort value quoted
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_cool_day(self, occupancy):
+        c = _make_classification("cool", today_high=52, today_low=40)
+        text = _ref(c, occupancy_mode=occupancy, bedtime_setback_heat=64.0)
+        low = text.lower()
+        assert "a cool day, and the house is empty" in low
+        assert "i'll hold" not in low and "at bedtime" not in low and "set back to" not in low
+        assert _row(text, "Bedtime Setback") == "Bedtime Setback: away setback held"
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_cold_day(self, occupancy):
+        c = _make_classification("cold", today_high=35, today_low=25)
+        text = _ref(c, occupancy_mode=occupancy)
+        low = text.lower()
+        assert "a cold day, and the house is empty" in low
+        assert "conservative setback" not in low and "instead of the usual" not in low
+        assert _row(text, "Bedtime Setback") == "Bedtime Setback: away setback held"
+
+    def test_vacation_quotes_the_vacation_setback_in_the_header(self):
+        c = _make_classification("cold", today_high=35, today_low=25)
+        assert _row(_ref(c, occupancy_mode="vacation"), "HVAC Mode") == "HVAC Mode: Heat at 57°F"
+
+    def test_fresh_air_cool_branch_does_not_quote_the_awake_value_while_away(self):
+        c = _make_classification("hot", today_high=92, today_low=65)
+        away = _ref(c, occupancy_mode="away")
+        home = _ref(c)
+        assert "pull back down" not in away
+        assert "pull back down to 75°F" in home
+
+    def test_tonight_preview_makes_no_bedtime_promise_while_away(self):
+        c = _make_classification("hot", today_high=92, tomorrow_high=102, trend_direction="warming", trend_magnitude=10)
+        away = _ref(c, occupancy_mode="away", adaptive_thermal_active=True)
+        home = _ref(c, adaptive_thermal_active=True)
+        assert "set back a bit more aggressively" not in away and "tuned to your home" not in away
+        assert "set back a bit more aggressively" in home and "tuned to your home" in home
+
+    def test_guest_is_treated_as_home(self):
+        c = _make_classification("cold", today_high=35, today_low=25)
+        text = _ref(c, occupancy_mode="guest")
+        assert "At bedtime I'll set back to 66°F." in text
+        assert _row(text, "Bedtime Setback") == "Bedtime Setback: 66°F at 10:30 PM"
+
+
+class TestWindowCloseIsDated1231:
+    """A forecast cutoff dated another day must not be printed as today's close time."""
+
+    TOMORROW = datetime(2026, 5, 12, 10, 30, tzinfo=UTC)
+
+    def _events(self, cutoff, already=False):
+        return {
+            "nat_vent_cutoff": cutoff,
+            "nat_vent_cutoff_reason": "outdoor_rise",
+            "nat_vent_cutoff_already_reached": already,
+            "ceiling_breach_time": None,
+            "evening_open_time": None,
+        }
+
+    def test_warm_tomorrow_dated_cutoff_prints_todays_static_close(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        events = self._events(self.TOMORROW)
+        table = "\n".join(_generate_tldr_table(c, _make_config(), warm_events=events))
+        body = "\n".join(_warm_plan(c, warm_events=events))
+        assert "Close by 10:00 AM" in table and "10:30 AM" not in table
+        # static path: the dynamic "reason" phrasing is not used for a cutoff that is not today's
+        assert "before outdoor air warms past indoor" not in body
+        assert "10:30 AM" not in body and "Close up by 10:00 AM" in body
+
+    def test_warm_todays_cutoff_still_prints_the_forecast_time(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        events = self._events(datetime(2026, 5, 11, 11, 30, tzinfo=UTC))
+        table = "\n".join(_generate_tldr_table(c, _make_config(), warm_events=events))
+        body = "\n".join(_warm_plan(c, warm_events=events))
+        assert "Close by 11:30 AM" in table
+        assert "Close up at 11:30 AM" in body
+
+    def test_mild_tomorrow_dated_cutoff_prints_todays_static_close(self):
+        c = _make_classification("mild", today_high=68, today_low=50)
+        events = self._events(self.TOMORROW)
+        table = "\n".join(_generate_tldr_table(c, _make_config(), mild_events=events))
+        body = "\n".join(_mild_plan(c, mild_events=events))
+        assert "Close by 5:00 PM" in table
+        assert "Close up by 5:00 PM to trap the warmth" in body
+
+    def test_hot_tomorrow_dated_cutoff_prints_todays_static_close(self):
+        c = _make_classification("hot", today_high=92, today_low=65)
+        events = self._events(self.TOMORROW)
+        table = "\n".join(_generate_tldr_table(c, _make_config(), hot_events=events))
+        assert "Close by 9:00 AM" in table and "10:30 AM" not in table
+
+    def test_ceiling_breach_dated_tomorrow_is_not_printed_as_today(self):
+        """Symmetry of the dated close: a breach the forecast puts tomorrow says nothing about today."""
+        c = _make_classification("warm", today_high=80, today_low=60)
+        events = {**self._events(None), "ceiling_breach_time": datetime(2026, 5, 12, 14, 0, tzinfo=UTC)}
+        body = "\n".join(_warm_plan(c, warm_events=events))
+        assert "2:00 PM" not in body and "forecast to reach" not in body
+
+    def test_ceiling_breach_today_is_still_printed(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        events = {**self._events(None), "ceiling_breach_time": datetime(2026, 5, 11, 14, 0, tzinfo=UTC)}
+        body = "\n".join(_warm_plan(c, warm_events=events))
+        assert "forecast to reach" in body and "2:00 PM" in body
+
+    def test_already_reached_keeps_the_now_phrasing(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        events = self._events(datetime(2026, 5, 11, 7, 0, tzinfo=UTC), already=True)
+        table = "\n".join(_generate_tldr_table(c, _make_config(), warm_events=events))
+        body = "\n".join(_warm_plan(c, warm_events=events))
+        assert "Close by now" in table
+        assert "Close up now" in body
+
+    def test_already_reached_hot_keeps_the_now_phrasing(self):
+        c = _make_classification("hot", today_high=92, today_low=65)
+        events = self._events(datetime(2026, 5, 11, 7, 0, tzinfo=UTC), already=True)
+        table = "\n".join(_generate_tldr_table(c, _make_config(), hot_events=events))
+        assert "Close by now" in table
+
+    def test_generate_briefing_takes_now_for_deterministic_dating(self):
+        c = _make_classification("warm", today_high=80, today_low=60)
+        events = self._events(self.TOMORROW)
+        same_day = datetime(2026, 5, 12, 6, 0, tzinfo=UTC)
+        on_the_day = generate_briefing(
+            c, 70.0, 75.0, 60.0, 80.0, DEFAULT_WAKE, DEFAULT_SLEEP, nat_vent_plan=events, now=same_day
+        )
+        day_before = generate_briefing(
+            c, 70.0, 75.0, 60.0, 80.0, DEFAULT_WAKE, DEFAULT_SLEEP, nat_vent_plan=events, now=_TEST_NOW
+        )
+        assert "Close by 10:30 AM" in on_the_day
+        assert "Close by 10:00 AM" in day_before

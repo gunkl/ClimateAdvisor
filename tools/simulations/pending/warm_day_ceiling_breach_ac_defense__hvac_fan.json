@@ -43,7 +43,7 @@
       "day_type": "warm",
       "hvac_mode": "off",
       "windows_recommended": true,
-      "note": "Warm-day classification (forecast high 80 / low 60, matching the 62-76F readings): the classifier derives hvac_mode=off and windows_recommended=true for 06:00-10:00, so the 8:05 AM window opening is a planned window with a fan configured and starts nat-vent (via the coordinator refresh and the paused-reactivation path). Indoor=72F >= comfort_heat=70F so no comfort-floor guard fires.",
+      "note": "Warm-day classification (forecast high 80 / low 60, matching the 62-76F readings): the classifier derives hvac_mode=off and windows_recommended=true for 06:00-10:00, so the 8:05 AM window opening is a planned window with a fan configured and starts nat-vent from the door/window handler itself (A3: the handler runs the nat-vent gate, no coordinator refresh involved). Indoor=72F >= comfort_heat=70F so no comfort-floor guard fires.",
       "today_high": 80,
       "today_low": 60,
       "window_open_time": "06:00",
@@ -61,13 +61,6 @@
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
       "note": "User opens window. outdoor=65F < indoor=72.5F, indoor > comfort_heat=70F, outdoor <= threshold 77F — nat vent activates. _paused_by_door=False while nat-vent is active."
-    },
-    {
-      "time": "2026-05-20T08:05:00",
-      "type": "temp_update",
-      "indoor_f": 72.5,
-      "outdoor_f": 65.0,
-      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
     },
     {
       "time": "2026-05-20T10:00:00",

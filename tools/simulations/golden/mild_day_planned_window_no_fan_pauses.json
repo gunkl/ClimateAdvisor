@@ -1,5 +1,5 @@
 {
-  "name": "mild_day_planned_window_no_pause",
+  "name": "mild_day_planned_window_no_fan_pauses",
   "description": "Mild day with windows_recommended=True and planned window 10:00–17:00. Outdoor is cooler than indoor but no fan is configured. Sensor opens at 12:00 (inside the window). Issue #1211 (A3): the planned window is no longer an exemption in the handler — the nat-vent entry gate runs and, with no working fan, refuses, so the handler pauses right there (the HVAC was already off; the pause is recorded and the occupant notified).",
   "source": "synthetic",
   "issue": 229,
@@ -8,7 +8,6 @@
     "Before #1211 production returned silently inside the planned window and the pause (or the nat-vent start) happened only a refresh later, through the comfort-band guard. Now the handler decides.",
     "outdoor=65F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor < threshold — the temperature gate passes, but no fan is configured (fan_mode defaults to disabled), so there is no working fan and nat-vent is refused; the handler pauses.",
     "Nat-vent starting from the handler inside the period is covered by the pending scenario mild_day_planned_window_natvent_start_1211 (fan configured).",
-    "Name kept for the manifest; 'no_pause' describes the pre-#1211 behaviour (rename is an owner call).",
     "Covers Priority 6 mild_day_planned_window from plan abundant-mapping-clarke.md (C5×E1 cell)."
   ],
   "config": {

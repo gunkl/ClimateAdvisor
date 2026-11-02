@@ -144,19 +144,9 @@
     "issue": 229
   },
   "away_natvent_exits_at_comfort_ceiling": {
-    "sha256": "6fcc1f7281855401ecdb4ad8788d4c5b34e133a62c894ffd9225399d4015ac27",
+    "sha256": "0cb107221f21a53d2177fe80f56a9f4feb8694eca639359f4f10ba5453a46e23",
     "signed": "2026-11-01",
     "issue": 231
-  },
-  "mild_day_planned_window_no_pause": {
-    "sha256": "a17495b36a2e18d9f7e4fde438b874f5d544ef2f30d4d424cf51f724086c1f24",
-    "signed": "2026-11-01",
-    "issue": 229
-  },
-  "warm_day_planned_window_no_pause": {
-    "sha256": "c7f27382b83fcbd7cdcfc0a48d448e9f25622a7b5a785f8ac2dbaf29259e0e60",
-    "signed": "2026-11-01",
-    "issue": 229
   },
   "away_morning_wakeup_skipped_assertion": {
     "sha256": "e2da9031d1034ed556fc6c813731bd863f090b147ecec390258a7348c80746a4",
@@ -305,11 +295,6 @@
   },
   "grace_full_lifecycle_sensor_still_open": {
     "sha256": "ea90e2fdd0c21780e13b0da4deee07e5739015fb5e8d7234be033ef96d02afdf",
-    "signed": "2026-11-01",
-    "issue": 229
-  },
-  "grace_window_period_no_repause": {
-    "sha256": "b8bf63668b8f5f8eed15bd2bc400849f522387f84eed1b4347a7264ff8cb7262",
     "signed": "2026-11-01",
     "issue": 229
   },
@@ -467,5 +452,20 @@
     "sha256": "253552818e6e451211d6be478c8261c9b6f0bc22701c5ab4dfe6db53d29c546c",
     "signed": "2026-11-01",
     "issue": 1193
+  },
+  "mild_day_planned_window_no_fan_pauses": {
+    "sha256": "e423c600f4cd21554d10036f0971eb05c3d99eb5cafc1475a20310f76561921a",
+    "signed": "2026-11-01",
+    "issue": 229
+  },
+  "warm_day_planned_window_no_fan_pauses": {
+    "sha256": "78afc437683409223982cc82cd0c429547124047020069cf8e926e737037786d",
+    "signed": "2026-11-01",
+    "issue": 229
+  },
+  "grace_window_period_no_fan_pauses_once": {
+    "sha256": "1b64dbd0d2c2ce4ed1839b1268f5709506ced2e59bd4657342acb2aee7ca3bc5",
+    "signed": "2026-11-01",
+    "issue": 229
   }
 }

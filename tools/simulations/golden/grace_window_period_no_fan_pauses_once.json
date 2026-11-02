@@ -1,5 +1,5 @@
 {
-  "name": "grace_window_period_no_repause",
+  "name": "grace_window_period_no_fan_pauses_once",
   "description": "Warm day with planned window period 06:00–10:00 (windows_recommended=True, hvac_mode=off), no fan configured. Sensor opens at 07:00 during the window. Issue #1211 (A3): the planned window is no longer an exemption — the nat-vent gate runs, refuses (no fan) and the handler pauses at once; the second window at 07:05 finds the HVAC already paused (no second pause).",
   "source": "synthetic",
   "issue": 229,
@@ -31,8 +31,7 @@
     "This was a real, previously-silent bug — any scenario spanning briefing_time/wake_time/",
     "sleep_time/midnight would have silently dropped that callback's entire effect.",
     "Issue #1211 (A3, owner decision O8b): the planned-window early return in handle_door_window_open() (and the matching grace-expiry / _re_pause_for_open_sensor exemptions) is gone. The 07:00 open now runs the nat-vent entry gate; with no fan configured it refuses and the handler pauses (paused). 07:05: already paused, nothing new.",
-    "Revert test (original #476 migration): disabling the planned-window exemption used to fail the 07:00/07:05 assertions; the assertions now encode the post-#1211 behaviour and fail if the handler stops pausing (or silently does nothing).",
-    "Name kept for the manifest; 'no_repause' describes the pre-#1211 behaviour (rename is an owner call)."
+    "Revert test (original #476 migration): disabling the planned-window exemption used to fail the 07:00/07:05 assertions; the assertions now encode the post-#1211 behaviour and fail if the handler stops pausing (or silently does nothing)."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,

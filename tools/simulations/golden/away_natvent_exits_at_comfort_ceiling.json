@@ -47,13 +47,6 @@
       "note": "Window opens: outdoor 65F < indoor 72F, indoor > comfort_heat 70F, outdoor < threshold 77F \u2014 nat-vent activates"
     },
     {
-      "time": "2026-07-10T09:01:00",
-      "type": "temp_update",
-      "indoor_f": 72.0,
-      "outdoor_f": 65.0,
-      "note": "Same-instant refresh so the (zero-debounce) sensor timer fires: the harness only advances its virtual clock on event boundaries."
-    },
-    {
       "time": "2026-07-10T10:00:00",
       "type": "occupancy_away",
       "note": "User leaves. Production: only setpoint changes to setback_cool=79F. Nat-vent continues running."

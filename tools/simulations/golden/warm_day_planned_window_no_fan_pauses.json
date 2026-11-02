@@ -1,5 +1,5 @@
 {
-  "name": "warm_day_planned_window_no_pause",
+  "name": "warm_day_planned_window_no_fan_pauses",
   "description": "Warm day with windows_recommended=True and planned window 06:00–10:00. No fan is configured. Sensor opens at 08:00 (inside the window). Issue #1211 (A3): the planned window is no longer an exemption in the handler — the nat-vent entry gate runs and, with no working fan, refuses, so the handler pauses right there.",
   "source": "synthetic",
   "issue": 229,
@@ -7,7 +7,6 @@
     "The _is_within_planned_window_period() check: requires windows_recommended=True AND hvac_mode='off' AND current time between window_open_time and window_close_time.",
     "Issue #1211 (A3, owner decision O8b): handle_door_window_open() no longer returns on it; the nat-vent entry gate decides (start nat-vent, or pause). The planned window now only exempts the lazy sync reconcile.",
     "No fan is configured, so nat-vent is refused (no working fan) and the handler pauses. Nat-vent starting inside the period is covered by the pending scenario warm_day_planned_window_natvent_start_1211.",
-    "Name kept for the manifest; 'no_pause' describes the pre-#1211 behaviour (rename is an owner call).",
     "Covers Priority 6 warm_day_planned_window from plan abundant-mapping-clarke.md (C2×E1 cell)."
   ],
   "config": {

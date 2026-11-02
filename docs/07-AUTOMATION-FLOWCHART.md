@@ -13,8 +13,8 @@ For temperature formulas and threshold values see [docs/08-COMPUTATION-REFERENCE
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What gate conditions can block the 30-minute poll from applying a classification? | Two gates: `_manual_override_active` (user changed thermostat) and `_first_run` with HVAC already running (treated as manual override). Both cause `apply_classification()` to skip the HVAC mode change. | [§1. Main Decision Loop](07-AUTOMATION-FLOWCHART.md#1-main-decision-loop-30-minute-poll) |
-| How does the door/window pause flow work from sensor open to HVAC off? | Sensor open → debounce timer (default 5 min) → verify still open → check grace, planned window period → **check nat-vent first** (if outdoor cooler than indoor, fan on, band stays armed, no shutoff) → if nat-vent gates fail: set `_hvac_command_pending` → HVAC off + notification. | [§4. Door/Window Pause Flow](07-AUTOMATION-FLOWCHART.md#4-doorwindow-pause-flow) |
-| When a grace period expires, what prevents it from blindly restoring HVAC? | `_grace_expired()` calls `_re_pause_for_open_sensor()`, which checks `_is_within_planned_window_period()` before re-pausing — sensors open in a recommended window period are not re-paused. | [§4b. Grace Expiry with Planned Window Period Check](07-AUTOMATION-FLOWCHART.md#4b-grace-expiry-with-planned-window-period-check) |
+| How does the door/window pause flow work from sensor open to HVAC off? | Sensor open → debounce timer (default 5 min) → verify still open → check grace → **check nat-vent first (also inside a planned window period — Issue #1211)** (if outdoor cooler than indoor, fan on, band stays armed, no shutoff) → if nat-vent gates fail: set `_hvac_command_pending` → HVAC off + notification. | [§4. Door/Window Pause Flow](07-AUTOMATION-FLOWCHART.md#4-doorwindow-pause-flow) |
+| When a grace period expires, what prevents it from blindly restoring HVAC? | `_grace_expired()` calls `_re_pause_for_open_sensor()`, which runs the nat-vent gate and re-pauses when it refuses — there is no planned-window exemption any more (Issue #1211); the planned window only exempts the lazy sync reconcile. | [§4b. Grace Expiry with Planned Window Period Check](07-AUTOMATION-FLOWCHART.md#4b-grace-expiry-with-planned-window-period-check) |
 | How does manual override protection work — what sets it and what clears it? | `_async_thermostat_changed()` detects mode changes not preceded by `_hvac_command_pending`; starts a **10-min confirmation window** (`_override_confirm_pending = True`). If thermostat is still divergent after the window (PATH A), sets `_manual_override_active = True` and starts grace. If it self-reverted (PATH B), no grace. Cleared at wakeup or bedtime schedule boundary. | [§5. Manual Override Protection](07-AUTOMATION-FLOWCHART.md#5-manual-override-protection) |
 | What are the natural ventilation exit conditions and in what order are they checked? | Priority order: **1** all sensors closed → **2** comfort floor exit (sleep-aware: `sleep_heat - hysteresis` during the sleep window, `comfort_heat` otherwise, Issue #402) → **3** away-mode ceiling exit → **4** outdoor-rise exit (outdoor ≥ indoor) → **5** ceiling threshold exit (outdoor > comfort_cool + delta). First match wins. The predictive "proactive floor exit" (thermal-model prediction) that previously sat at priority 4 was removed in Issue #959 — it was ending nat-vent sessions early on a forecast, causing overnight sessions to settle at the bare comfort floor instead of their intended cycling target; the reactive comfort-floor exit and cycling-ladder thresholds already cover the safety case. During the sleep window, session-continuation cycling is handled separately by `nat_vent_temperature_check()` (fan off at `sleep_heat`, on at `sleep_heat + 2×hysteresis`) — the old "Priority 0 sleep-ceiling reached" exit was removed in Issue #371 and is not part of the current design. | [§12b. Continuous Monitoring](07-AUTOMATION-FLOWCHART.md#12b-continuous-monitoring-check_natural_vent_conditions) |
 | What HVAC state does `_apply_nat_vent_hvac_state()` arm when nat-vent activates, and how does `aggressive_savings` change it? | `FAN_MODE_HVAC` + `aggressive_savings=False` → full comfort band `[comfort_heat, comfort_cool]` (compressor can assist if breeze can't hold ceiling). `FAN_MODE_HVAC` + `aggressive_savings=True` → heat-only at `comfort_heat` (floor protected, ceiling disarmed — no compressor through open windows). `WHOLE_HOUSE` or `DISABLED` → no-op. | [§12c. Nat-Vent HVAC State](07-AUTOMATION-FLOWCHART.md#12c-nat-vent-hvac-state--_apply_nat_vent_hvac_state) |
@@ -71,7 +71,7 @@ graph TD
     B -->|No| D{today_high >= 75?}
     D -->|Yes| E[day_type = warm\nhvac_mode = off]
     D -->|No| F{today_high >= 60?}
-    F -->|Yes| G[day_type = mild\nhvac_mode = off\nwindows_recommended = True]
+    F -->|Yes| G[day_type = mild\nhvac_mode = off\nwindows_recommended = outdoor_air_helps\n(high reaches comfort_heat, #1211)]
     F -->|No| H{today_high >= 45?}
     H -->|Yes| I[day_type = cool\nhvac_mode = heat]
     H -->|No| J[day_type = cold\nhvac_mode = heat]
@@ -158,9 +158,8 @@ graph TD
     G -->|No| H[Discard - closed in time]
     G -->|Yes| I{_grace_active?}
     I -->|Yes| J[Skip pause - grace active]
-    I -->|No| K{_is_within_planned_window_period?}
-    K -->|Yes| L[Skip pause\nlog 'not pausing - windows recommended']
-    K -->|No| NV{Nat-vent conditions met?\noutdoor < indoor\nAND indoor > comfort_heat\nAND outdoor < threshold}
+    I -->|No| K[Issue #1211: no planned-window exemption here]
+    K --> NV{Nat-vent conditions met?\noutdoor < indoor\nAND indoor > comfort_heat\nAND outdoor < threshold}
     NV -->|Yes| NVA[Fan on · band stays armed\n_natural_vent_active = True\nHVAC NOT set off]
     NV -->|No| M{_paused_by_door\nalready True?}
     M -->|Yes| N[Already paused - skip]
@@ -180,18 +179,18 @@ graph TD
 
 ### 4b. Grace Expiry with Planned Window Period Check
 
-When a grace period expires and a sensor is still open, `_grace_expired()` calls `_re_pause_for_open_sensor()`. Before re-pausing, the system first checks whether the open sensor is expected (i.e., within the planned window period for the current classification).
+When a grace period expires and a sensor is still open, `_grace_expired()` calls `_re_pause_for_open_sensor()`. Issue #1211: the planned window period is no longer an exemption here; the nat-vent gate decides (hand-off, or re-pause).
 
 ```mermaid
 graph TD
     A[Grace period expires] --> B{Any contact sensor\nstill open?}
     B -->|No| C[Clear grace - resume normal automation]
-    B -->|Yes| D{_is_within_planned_window_period?}
-    D -->|Yes| E[Clear grace\nReturn - sensors open as expected\nno re-pause needed]
+    B -->|Yes| D{Nat-vent gate passes?}
+    D -->|Yes| E[Hand off to nat-vent\nfan on, band armed]
     D -->|No| F[Re-pause HVAC\n_paused_by_door = True\nSet HVAC off\nSend notification]
 ```
 
-**Key behavior:** The planned window period check in the grace expiry path prevents an annoying cycle where the system resumes HVAC after a grace period, immediately re-pauses because a window is still open, and then sends a duplicate notification — all during the time window when open windows are the intended state.
+**Key behavior (Issue #1211):** inside the planned window period a window still open at grace expiry is handled exactly like one outside it: nat-vent when the gate passes, a re-pause when it refuses. The previous planned-window early return let the HVAC run against the open window until a later coordinator refresh.
 
 ### 4a. Resume from Pause (User Action)
 

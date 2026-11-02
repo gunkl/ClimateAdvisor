@@ -6,7 +6,7 @@ Line numbers are `custom_components/climate_advisor/automation.py` unless anothe
 ## 0. Owner constraints that shape this plan
 
 - Build on the FSM layer (docs/02 §FSM Decision Layer: the FSMs are the sole authority). No new layer above it. Precedent for one shared pure function: `desired_state.decide_scheduled_band_gate` (#498).
-- The planned window gates **pause**, not nat-vent start (#1139, docs/08 §16, matrix rows C2/C5, golden `mild_all_day_nat_vent_only`). Not a start-gate option.
+- The planned window gates **pause**, not nat-vent start (#1139, docs/08 §16, matrix rows C2/C5, golden `mild_all_day_nat_vent_only`). Not a start-gate option. **Issue #1211 made this true in code:** the handler no longer returns early inside the period (it ran no start at all and relied on the next refresh); it runs the gate, starts nat-vent when it passes and pauses when it refuses (owner decision O8b); `_sync_paused_by_door_with_live_sensors()` keeps the exemption.
 - Household rules: (1) WHF never on a sealed house; (2) WHF and HVAC never together, newest occupant action wins; (3) HVAC stays paused while a window is open unless a manual override turned it on.
 - Golden scenarios are locked. Anything that flips one stops at an owner decision.
 

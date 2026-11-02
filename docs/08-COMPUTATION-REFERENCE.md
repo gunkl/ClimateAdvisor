@@ -1582,12 +1582,20 @@ when ODE forecast curves aren't calibrated yet.
 | Day Type | Windows Recommended? | Displayed Close Time | Displayed Evening-Open Time | Condition |
 |---|---|---|---|---|
 | `hot` | Not a traditional recommendation — window *opportunities* only | `nat_vent_cutoff` when ODE available, else `ECONOMIZER_MORNING_END_HOUR` (9:00 AM fallback) | `evening_open_time` when ODE available (only for an `outdoor_rise` cutoff — see below) **and it resolves strictly after the close time** (Issue #878 — see "Window timing invariants" below), else `ECONOMIZER_EVENING_START_HOUR` (5:00 PM fallback), unless that fallback would itself be at/before the close time, in which case no open time is shown at all | Morning opportunity: `today_low <= 80` **or** a real ODE-computed close crossing exists; evening opportunity: `tomorrow_low <= 80` **or** a real ODE-computed reopen crossing exists (Issue #878: real forecast data always overrides this coarse heuristic — see below) |
-| `warm` | Yes (if condition met) | `nat_vent_cutoff` when ODE available, else `WARM_WINDOW_CLOSE_HOUR` (10:00 AM fallback) | `evening_open_time` when ODE available and cutoff reason is `outdoor_rise`; **no fallback shown** if unavailable (sentence is simply omitted, same as before #876) | `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` = `today_low <= 72°F` (defaults) |
-| `mild` | Always yes | `nat_vent_cutoff` when ODE available, else `MILD_WINDOW_CLOSE_HOUR` (5:00 PM fallback) | Same as WARM — new sentence added by #876, MILD never had one before | No condition — always recommended |
+| `warm` | Only when outside air helps (shared rule below) | `nat_vent_cutoff` when ODE available, else `WARM_WINDOW_CLOSE_HOUR` (10:00 AM fallback) | `evening_open_time` when ODE available and cutoff reason is `outdoor_rise`; **no fallback shown** if unavailable (sentence is simply omitted, same as before #876) | `outdoor_air_helps()`: `today_high >= comfort_heat` and `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` (= `today_low <= 71°F` at the default 74°F ceiling), configured comfort values |
+| `mild` | Only when outside air helps (shared rule below) | `nat_vent_cutoff` when ODE available, else `MILD_WINDOW_CLOSE_HOUR` (5:00 PM fallback) | Same as WARM — new sentence added by #876, MILD never had one before | Same `outdoor_air_helps()` rule: the day's high (`max(forecast, observed so far)`) reaches `comfort_heat`. Times stay set either way; only the recommendation is conditional |
 | `cool` | No | — | — | — |
 | `cold` | No | — | — | — |
 
-**Warm-day window condition formula:** `today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA` = `75 - 3 = 72°F` at defaults. Constant: `WARM_WINDOW_OPEN_HOUR = 6` (computed, no longer displayed), `WARM_WINDOW_CLOSE_HOUR = 10`. The static `WARM_WINDOW_CLOSE_HOUR` is only a fallback — `generate_briefing()`'s single per-day-type call into `nat_vent_plan.compute_nat_vent_plan()` (correcting this doc's earlier reference to a `_derive_warm_day_events()` function, which does not exist in current code — see the module docstring in `nat_vent_plan.py`, Issue #817) overrides it with the ODE-derived `nat_vent_cutoff` whenever a forecast curve is available, the same cascade §6d documents for MILD days.
+**Shared outside-air rule (Issue #1211, `temperature.outdoor_air_helps()` / `outdoor_direction_ok()`):** one rule answers "would outside air help today?" for warm AND mild days, with the occupant's configured comfort band (the old warm rule used the DEFAULT ceiling, and mild days were always recommended).
+
+- **Stage A, forecast range (classifier):** `today_high >= comfort_heat` and `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` (= `comfort_cool - 3`; **71°F at the default 74°F ceiling** — the earlier "75 - 3 = 72°F" here was stale). `today_high` is already `max(forecast high, outdoor seen so far)`, so the recommendation recovers on its own as the day warms (the forecast ran 5-10°F low on every recorded flip day). `WINDOWS_RECOMMENDED_HYSTERESIS_F = 1.5°F` of slack keeps an already-recommended day recommended so a forecast on a threshold does not flip every 30-minute cycle. A missing or estimated forecast low (`low_is_estimated`, the old `outdoor - 15` stand-in) returns `None` → **not recommended**; the stored value is unchanged so the ODE and outdoor curve keep working, and the daily record stores no forecast low for it.
+- **Stage B, direction (live gate and Next User Action card):** with an indoor reading, indoor above the ceiling needs outdoor cooler, indoor below the floor needs outdoor warmer, indoor in the band does not veto. `_apply_outdoor_windows_gate()` clears `windows_recommended` when outdoor > `comfort_cool` or stage B fails (no indoor reading: the old floor−15°F extreme-cold cutoff). Stage A is never applied to a live reading (outdoor only reaches the floor around midday).
+- `DayClassification.forecast_windows_recommended` keeps the classifier's own answer (hysteresis seed, briefing drift trigger #4); `windows_recommended` is what the live gate may clear. The restore path puts the persisted values back (`__post_init__` would recompute and resurrect a gate-cleared flag).
+- The record flag (`DailyRecord.windows_recommended`) means "recommended at any point today" (credit and denominator agree).
+- Briefing: header `Comfort band 68–74°F` plus ` (windows day)` only when recommended and someone is home; no window tip, fan-ventilation sentence, "close up by" or "reopen" line otherwise, and none at all for away/vacation; a mild forecast high within `WINDOWS_NEAR_MISS_F` (5°F) below the floor says outside air may help later. Pinned by `tests/test_briefing_window_corpus_1211.py`.
+
+Constants: `WARM_WINDOW_OPEN_HOUR = 6`, `WARM_WINDOW_CLOSE_HOUR = 10`. The static `WARM_WINDOW_CLOSE_HOUR` is only a fallback — `generate_briefing()`'s single per-day-type call into `nat_vent_plan.compute_nat_vent_plan()` overrides it with the ODE-derived `nat_vent_cutoff` whenever a forecast curve is available, the same cascade §6d documents for MILD days.
 
 **MILD-day window times (v0.3.46+):** Open time is always `MILD_WINDOW_OPEN_HOUR = 10` (computed, no longer displayed as of #876). Close time uses `nat_vent_cutoff` when the ODE is calibrated, otherwise falls back to `MILD_WINDOW_CLOSE_HOUR = 17` (5:00 PM). See [§6d. MILD Day Dynamic Window Close Time](#6d-mild-day-dynamic-window-close-time-fix-c-issue-147).
 
@@ -3144,7 +3152,7 @@ All three must be true simultaneously for the check to return `True`:
 
 | # | Condition | Details |
 |---|---|---|
-| 1 | `windows_recommended == True` | Classification set this flag at classification time — `warm` day (when `today_low` is low enough) or `mild` day (always) |
+| 1 | `windows_recommended == True` | The classifier's shared outside-air rule (Issue #1211) on a `warm` or `mild` day, then the live outdoor gate |
 | 2 | Current local time is within the recommended open window | `warm`: 6:00 AM – 10:00 AM; `mild`: 10:00 AM – 5:00 PM (constants: `WARM_WINDOW_OPEN_HOUR`, `WARM_WINDOW_CLOSE_HOUR`, `MILD_WINDOW_OPEN_HOUR`, `MILD_WINDOW_CLOSE_HOUR`) — but see the ODE-cutoff override note below; these static hours are only the fallback bound |
 | 3 | HVAC mode is `off` | The classification itself set HVAC to `off` for warm/mild days — if HVAC is running (e.g. classification changed to cool/heat), normal pause rules apply |
 
@@ -3161,13 +3169,13 @@ change in the ODE curve still updates the boundary, just not a same-cycle sensor
 
 ### What It Suppresses
 
-When `_is_within_planned_window_period()` returns `True`, the following are suppressed:
+Issue #1211 (A3, owner decision O8b) narrowed this: the planned window is **no longer an exemption in the door/window event handlers**.
 
-- **Pause** — `handle_door_window_open()` logs "not pausing (windows recommended)" and returns without pausing
-- **Re-pause after grace expiry** — `_grace_expired()` and `_re_pause_for_open_sensor()` clear grace and return without re-pausing
-- **Duplicate open notifications** — no notification is sent when the open sensor is expected
+- **Door/window open (after the debounce) inside the period:** `handle_door_window_open()` runs the nat-vent entry gate itself. Gate passes → nat-vent starts from the handler (before, it returned silently and nat-vent started only through the next coordinator refresh: the comfort-band guard paused, then the paused re-activation started it — observed 14.5 minutes late with the AC cooling into the open window). Gate refuses (no working fan, indoor not above the floor, outdoor not cooler, hvac_fan above the ceiling, …) → the handler **pauses right there**. The hvac_fan "above the ceiling → wait" refusal, rule 2 (`_whf_owns_hvac`) and the manual-override / fan-off-hold protections are unchanged (they run before this point).
+- **Grace expiry and `_re_pause_for_open_sensor()`:** the planned-window branch is gone; a sensor still open at expiry is re-paused or handed to nat-vent by the nested gate.
+- **Still exempt:** the lazy `_sync_paused_by_door_with_live_sensors()` reconcile (no event, no occupant action) does not pause for an open sensor inside the period. Because the period ends silently (clock past the close time, or the flag cleared by the live gate / a reclassification), `consume_planned_window_exit_edge()` reports the active → inactive edge from the 5-minute tick and from the gate, and `async_sync_after_planned_window_exit()` then runs that same pause-only reconcile (owner decision O4: no wait for the next 30-minute cycle).
 
-During the planned window HVAC is already off by plan (hvac_mode=off on windows-recommended days), so no separate door/window pause is recorded or notified. Natural ventilation is not suppressed (matrix rows C2/C5, golden mild_all_day_nat_vent_only).
+Natural ventilation is never suppressed by the planned window (matrix rows C2/C5, golden mild_all_day_nat_vent_only). Goldens `mild_day_planned_window_no_pause`, `warm_day_planned_window_no_pause` and `grace_window_period_no_repause` keep their (historical) names but now assert `paused` for a no-fan install; the fan-configured twins are pending `*_planned_window_natvent_start_1211`.
 
 ### Where It Is Checked
 
@@ -3518,8 +3526,8 @@ This is the definitive reference for expected system behavior across all classif
 | C1 | Hot | cool | False | N/A |
 | C2 | Warm | band `[comfort_heat, comfort_cool]` ¹ | True | In period (6–10 AM) |
 | C3 | Warm | band `[comfort_heat, comfort_cool]` ¹ | True | Outside period |
-| C4 | Warm | band `[comfort_heat, comfort_cool]` ¹ | False | N/A (today_low too high) |
-| C5 | Mild | band `[comfort_heat, comfort_cool]` ¹ | True | In period (10 AM – 5 PM) |
+| C4 | Warm | band `[comfort_heat, comfort_cool]` ¹ | False | N/A (outside air does not help: `today_low` too high, or a missing/estimated low) |
+| C5 | Mild | band `[comfort_heat, comfort_cool]` ¹ | True (the high reaches `comfort_heat`; otherwise this is a C4-shaped row) | In period (10 AM – 5 PM) |
 | C6 | Cool | heat | False | N/A |
 | C7 | Cold | heat | False | N/A |
 
@@ -3545,10 +3553,10 @@ This is the definitive reference for expected system behavior across all classif
 | | E1: Sensor Open | E2: All Closed | E3: Grace+Open | E4: Override | E5: Fan Change | E6: Class Change | E7: Resume | E8: Restart Reconcile |
 |---|---|---|---|---|---|---|---|---|
 | C1 (hot/cool) | Pause HVAC→off, notify | Resume to cool, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` (§9e) | Re-apply classification | Resume cool, manual grace | Fan adopt-on (nat-vent eligible) or turn-off (not eligible); `Fan reconcile:` logged |
-| **C2 (warm/band/win=T/in)** | **No pause** (planned window); reactivation gated by archetype-aware ceiling (§6c/§17 — WHF: direction-only; HVAC-fan: blocked once indoor > ceiling) | No-op (not paused) | **No re-pause** (planned); same archetype-aware ceiling gate applies | N/A (not paused) | Fan on, band stays armed for `FAN_MODE_HVAC`; for WHF, `apply_classification()` short-circuits before the band write (Issue #392 Fix 1b, §9) | Re-apply band `[comfort_heat, comfort_cool]` (`FAN_MODE_HVAC` only — WHF short-circuits per §9); §6b backstop fires if indoor < comfort_heat | N/A (not paused) | Fan adopt-on (nat-vent eligible) or turn-off; band re-armed by coalesce |
+| **C2 (warm/band/win=T/in)** | **Nat-vent starts in the handler when the gate passes** (§6c/§17 — WHF: direction-only; HVAC-fan: blocked once indoor > ceiling); **gate refuses → pause in the handler** (Issue #1211, no planned-window exemption) | No-op (not paused) | **Re-pause or nat-vent hand-off by the same gate** (no planned-window exemption, Issue #1211) | N/A (not paused) | Fan on, band stays armed for `FAN_MODE_HVAC`; for WHF, `apply_classification()` short-circuits before the band write (Issue #392 Fix 1b, §9) | Re-apply band `[comfort_heat, comfort_cool]` (`FAN_MODE_HVAC` only — WHF short-circuits per §9); §6b backstop fires if indoor < comfort_heat | N/A (not paused) | Fan adopt-on (nat-vent eligible) or turn-off; band re-armed by coalesce |
 | C3 (warm/band/win=T/out) | No pause (band armed, not paused); same archetype-aware ceiling gate | No-op | N/A | N/A | Fan on, band stays armed for `FAN_MODE_HVAC`; WHF short-circuits per §9 | Re-apply band (`FAN_MODE_HVAC` only); §6b backstop fires if indoor < comfort_heat | N/A | Fan turn-off (outside window period → not nat-vent eligible) or no-fan |
 | C4 (warm/band/win=F) | No pause (band armed, not paused) | No-op | N/A | N/A | Band stays armed | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A | Fan turn-off if physically running (no sensors open → not nat-vent eligible) |
-| **C5 (mild/band/win=T/in)** | **No pause** (planned window); same archetype-aware ceiling gate | No-op | **No re-pause** (planned); same gate | N/A | Fan on, band stays armed for `FAN_MODE_HVAC`; WHF short-circuits per §9 | Re-apply band `[comfort_heat, comfort_cool]` (`FAN_MODE_HVAC` only) | N/A | Fan adopt-on (nat-vent eligible) or turn-off; band re-armed |
+| **C5 (mild/band/win=T/in)** | **Nat-vent starts in the handler when the gate passes; gate refuses → pause in the handler** (same archetype-aware ceiling gate, Issue #1211) | No-op | **Re-pause or nat-vent hand-off by the same gate** | N/A | Fan on, band stays armed for `FAN_MODE_HVAC`; WHF short-circuits per §9 | Re-apply band `[comfort_heat, comfort_cool]` (`FAN_MODE_HVAC` only) | N/A | Fan adopt-on (nat-vent eligible) or turn-off; band re-armed |
 | C6 (cool/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` | Re-apply | Resume heat, manual grace | Fan turn-off (heat day → not nat-vent eligible) or no-fan |
 | C7 (cold/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` | Re-apply | Resume heat, manual grace | Fan turn-off (cold day → not nat-vent eligible) or no-fan |
 
@@ -3584,11 +3592,11 @@ This logic table MUST be kept current for any changes to automation behavior.
 
 | Cell | Test File | Test Name |
 |------|-----------|-----------|
-| C2×E1 | test_windows_recommended_integration.py | test_no_pause_when_windows_recommended_warm_day |
-| C5×E1 | test_windows_recommended_integration.py | test_no_pause_when_windows_recommended_mild_day |
+| C2×E1 | test_windows_recommended_integration.py | test_pauses_inside_warm_planned_window_when_gate_refuses (+ tests_ha/test_door_open_in_period_1211.py) |
+| C5×E1 | test_windows_recommended_integration.py | test_pauses_inside_mild_planned_window_when_gate_refuses |
 | C1×E1 | test_windows_recommended_integration.py | test_pause_still_fires_for_hot_day |
-| C2×E1 (grace) | test_windows_recommended_integration.py | test_no_grace_when_windows_recommended |
-| C2×E3 | test_windows_recommended_integration.py | test_grace_expiry_no_repause_during_window_period |
+| C2×E1 (grace) | test_windows_recommended_integration.py | test_pause_without_grace_inside_planned_window |
+| C2×E3 | test_windows_recommended_integration.py | test_grace_expiry_repauses_during_window_period |
 | C2→C1×E6 | test_windows_recommended_integration.py | test_classification_change_warm_to_hot_enables_pause |
 | C3×E1 | test_windows_recommended_integration.py | test_pause_fires_outside_window_period_with_active_hvac |
 | C2×E6 (band armed) | test_warm_day_comfort_gap.py | TestWarmDayBandArmingReplacesComfortGap — band `[comfort_heat, comfort_cool]` armed; §6b backstop only if band lapses |

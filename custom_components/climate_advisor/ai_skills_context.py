@@ -720,6 +720,52 @@ async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) 
         return "=== HVAC ENTITY ===\n  unavailable\n"
 
 
+def _swing_context_lines(thermal: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """Swing lines for the investigator: what it means, how it was learned, what was thrown away (Issue #1233)."""
+    unit = config.get("temp_unit", "fahrenheit") if isinstance(config, dict) else "fahrenheit"
+    dbg = thermal.get("swing_debug") or {}
+    lines = ["", f"  Thermostat swing — {thermal.get('swing_definition') or dbg.get('definition') or ''}"]
+    for mode, side in (("heat", "below"), ("cool", "above")):
+        value = thermal.get(f"swing_{mode}_f")
+        count = thermal.get(f"observation_count_swing_{mode}", 0)
+        if value is None:
+            lines.append(f"  {mode} swing: not measured yet ({count} accepted cycles; the default is only an estimate)")
+        else:
+            res = thermal.get(f"swing_{mode}_resolution_f") or 0.0
+            res_txt = f", readings quantised to {format_temp_delta(res, unit, 1)}" if res else ""
+            lines.append(
+                f"  {mode} swing: {format_temp_delta(value, unit, 1)} {side} setpoint"
+                f" (median of the last accepted cycles; {count} accepted in total{res_txt})"
+            )
+        block = dbg.get(mode) or {}
+        counts = block.get("reject_counts") or {}
+        if counts:
+            lines.append(
+                "    rejected cycles (not hysteresis): "
+                + ", ".join(f"{k} x{v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+            )
+        recent = block.get("recent") or []
+        if recent:
+            lines.append(
+                "    recent cycles: "
+                + "; ".join(
+                    (
+                        f"accepted {format_temp_delta(r['value_f'], unit, 1)}"
+                        if r.get("accepted")
+                        else f"rejected {r.get('reason')}"
+                    )
+                    for r in recent
+                )
+            )
+        coast = thermal.get(f"coast_{mode}_f")
+        if coast is not None:
+            lines.append(
+                f"    {mode} coast (kept apart from the swing): the room goes {format_temp_delta(coast, unit, 1)} "
+                f"further after the equipment stops ({thermal.get(f'observation_count_coast_{mode}', 0)} windows)"
+            )
+    return lines
+
+
 async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
     """Build learning engine sections from coordinator.learning."""
     hours: int = min(max(int(kwargs.get("hours", 168)), 1), 720)
@@ -781,6 +827,7 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 "  the live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below,",
                 "  which are windowed to 90 days and capped. A large gap between them is expected",
                 "  on installs with enough history and does not indicate lost data (Issue #586).",
+                *_swing_context_lines(thermal, getattr(coordinator, "config", None) or {}),
                 "",
             ]
         except Exception:

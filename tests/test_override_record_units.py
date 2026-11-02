@@ -160,4 +160,11 @@ class TestThermalObservationSetpointSource:
         assert "self._read_thermostat_setpoint_f(_cs_sw" in inspect.getsource(cls._start_hvac_observation)
         src = inspect.getsource(cls._read_thermostat_setpoint_f)
         assert 'get("target_temperature")' not in src
-        assert 'read_state_temp_f(state, "temperature"' in src
+        # Issue #1233: the attribute preference moved into the shared swing.pick_setpoint (also used by
+        # tools/swing_audit.py). Check what it READS rather than the literal text of the old one-off code.
+        assert "pick_setpoint(" in src
+        from custom_components.climate_advisor.swing import setpoint_attrs_for
+
+        for mode in ("heat", "cool"):
+            assert setpoint_attrs_for(mode)[0] == "temperature"
+            assert "target_temperature" not in setpoint_attrs_for(mode)

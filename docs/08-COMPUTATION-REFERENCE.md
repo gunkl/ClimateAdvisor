@@ -619,7 +619,7 @@ Retired: `abs(T_end - T_start) / 2` (half the rise per run) and its `THERMAL_HVA
 
 **Exclusions:** on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` of a setpoint/HVAC-mode change; phantom (mode-fallback) sessions; `hvac_action` flapping (on within `THERMAL_SWING_REARM_WINDOW_S` of the previous off, same direction); wrong-direction runs (heat that cooled / cool that warmed). Rules: `swing.evaluate_swing_cycle` (shared by `coordinator.py` and `tools/thermal_replay.py`).
 
-**Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` samples. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot is not collected yet (#1233).
+**Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` samples. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot (Issue #1233) is a separate quantity, below.
 
 **Thermostats with no `hvac_action`:** sampling uses only real `hvac_action` heating/cooling edges, so a thermostat that never reports `hvac_action` never learns a swing and stays at `THERMAL_SWING_DEFAULT_F` (1.5 F, "estimated").
 
@@ -642,6 +642,29 @@ by 5/9 for Celsius), never `from_fahrenheit()`. The +32 offset does not apply.
 | `THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F` | 1.0 | Fallback quantisation of the climate_fallback reading until 3 distinct readings exist (x1.8 = 1.8 F on Celsius); otherwise inferred from the readings |
 | `THERMAL_SWING_DEFINITION_VERSION` | 2 | Cache marker; older caches are nulled on load |
 | `THERMAL_SWING_CONF_LOW` / `_MEDIUM` / `_HIGH` | 1 / 3 / 10 | none -> low -> medium -> high thresholds |
+| `THERMAL_SWING_AUDIT_CAP` | 50 | Newest judged cycles kept per mode in `swing_*_audit` (Issue #1233); `swing_*_reject_counts` are cumulative |
+| `THERMAL_COAST_MAX_S` | 1800 | A coast window ends at the latest this long after the stop |
+| `THERMAL_COAST_MAX_F` | 5.0 | A larger post-off rise/fall is weather or another actor, not coast (`out_of_bounds`) |
+| `THERMAL_COAST_ESTIMATOR_WINDOW` | 15 | Median window / retained coast windows |
+
+**Audit trail (Issue #1233):** each judged cycle is stored as `{ts, mode, accepted, reason, value_f, setpoint_f,
+setpoint_age_s, on_indoor_f, off_indoor_f, indoor_entity, resolution_f, reading_unit, trigger, since_prev_off_s}`.
+`reason` is `ok` or one of `swing.SWING_REJECT_REASONS` in check order: `missing_input`, `setpoint_change`,
+`short_restart`, `wrong_direction`, `non_positive`, `out_of_bounds`. Debug with `tools/learning_db.py --swing`; check
+the learned value against the equipment with `tools/swing_audit.py`. See [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md).
+
+**Coast overshoot (Issue #1233) - NOT part of the swing:**
+```
+heat: coast_f = max(0, peak_after_off   - off_reading)     past_setpoint_f = peak   - setpoint
+cool: coast_f = max(0, off_reading - trough_after_off)     past_setpoint_f = setpoint - trough
+```
+`peak`/`trough` = extreme primary indoor reading from the thermostat-chosen stop (no setpoint/HVAC-mode change in
+the same event or in the `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` = 120 s before it, `swing.coast_stop_was_commanded`) to the first of the next
+equipment start, a setpoint/HVAC-mode change, or `THERMAL_COAST_MAX_S`. Needs at least one post-off reading.
+Estimator: median of the last 15 windows (`coast_{heat,cool}_f`, `coast_*_past_setpoint_f`); a window cut short is a
+lower bound (`ended_by` is stored). Rules: `swing.coast_thermostat_event` / `coast_feed` (the window driver, shared by the coordinator and
+`tools/swing_audit.py`) / `build_coast_sample` / `coast_extreme` / `coast_timed_out`.
+Not backfilled by `thermal_replay` (chart_log has no primary reading between `hvac_action_change` rows).
 
 #### 5e-viii. Solar Phase Offset — Two-EWMA Architecture (Issue #312)
 

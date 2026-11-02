@@ -251,7 +251,6 @@ from .const import (
     THERMAL_SOLAR_PHASE_OFFSET_MAX,
     THERMAL_SOLAR_PHASE_OFFSET_MIN,
     THERMAL_SOLAR_SAMPLE_INTERVAL_S,
-    THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F,
     THERMAL_VENT_MIN_SAMPLES,
     THERMAL_VENT_MIN_SIGNAL_F,
     THERMAL_VENTILATED_MIN_DELTA_F,
@@ -337,7 +336,15 @@ from .scheduler import (
     resolve_tou_phase,
 )
 from .state import StatePersistence
-from .swing import evaluate_swing_cycle
+from .swing import (
+    build_swing_audit_record,
+    coast_feed,
+    coast_thermostat_event,
+    evaluate_swing_cycle,
+    pick_setpoint,
+    setpoint_or_mode_changed,
+    whole_degree_resolution_f,
+)
 from .temperature import (
     convert_delta,
     display_delta,
@@ -503,6 +510,44 @@ _VACATION_ACTION_MESSAGES: tuple[str, ...] = (
 )
 
 
+def _swing_debug_for_display(summary: dict[str, Any], unit: str) -> dict[str, Any]:
+    """The learning engine's swing audit summary (all degF) in the user's display unit (Issue #1233)."""
+    out: dict[str, Any] = {"definition": summary.get("definition")}
+    for mode in ("heat", "cool"):
+        block = summary.get(mode) or {}
+        recent = []
+        for r in block.get("recent") or []:
+            recent.append(
+                {
+                    "ts": r.get("ts"),
+                    "mode": r.get("mode"),
+                    "accepted": r.get("accepted"),
+                    "reason": r.get("reason"),
+                    "value": display_delta(r.get("value_f"), unit, 2),
+                    "setpoint": display_temp(r.get("setpoint_f"), unit, 1),
+                    "setpoint_age_s": r.get("setpoint_age_s"),
+                    "on_indoor": display_temp(r.get("on_indoor_f"), unit, 2),
+                    "off_indoor": display_temp(r.get("off_indoor_f"), unit, 2),
+                    "indoor_entity": r.get("indoor_entity"),
+                    "resolution": display_delta(r.get("resolution_f"), unit, 2),
+                    "reading_unit": r.get("reading_unit"),
+                    "trigger": r.get("trigger"),
+                    "since_prev_off_s": r.get("since_prev_off_s"),
+                }
+            )
+        out[mode] = {**block, "recent": recent}
+    return out
+
+
+def _coast_for_display(thermal_model: dict[str, Any], mode: str, unit: str) -> dict[str, Any]:
+    """Coast overshoot for the chart payload: apart from the swing, which stays the on-point hysteresis."""
+    return {
+        "value": display_delta(thermal_model.get(f"coast_{mode}_f"), unit, 2),
+        "past_setpoint": display_delta(thermal_model.get(f"coast_{mode}_past_setpoint_f"), unit, 2),
+        "count": thermal_model.get(f"observation_count_coast_{mode}", 0),
+    }
+
+
 def _instance_tag(coordinator: Any) -> str:
     """Entry id plus object id, so two instances of one zone are told apart in logs (#1102)."""
     return f"{getattr(coordinator, '_entry_id', '') or '?'}#{id(coordinator):x}"
@@ -652,6 +697,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     _swing_candidates: dict[str, dict] | None = None
     _last_setpoint_change_ts: datetime | None = None
     _swing_last_off_ts: dict[str, datetime] | None = None  # "heat"/"cool" -> last real off-edge (flap guard)
+    # Issue #1233: open coast windows ("heat"/"cool" -> {ts, off_indoor_f, extreme_f, setpoint_f, n_post, off_dt}):
+    # after an equipment stop we watch how far the room keeps going until the next on-edge, a setpoint/mode
+    # change or THERMAL_COAST_MAX_S. Not persisted (a restart drops the open window).
+    _coast_candidates: dict[str, dict] | None = None
     _stall_direction: str | None = None
     _stall_since: datetime | None = None
     _stall_announced_direction: str | None = None
@@ -1261,6 +1310,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             @callback
             def _async_indoor_temp_changed(event: Any) -> None:
                 self._refresh_indoor_sensor_health()  # Issue #1033: unconditional, not fan-gated
+                # Issue #1233: a dedicated sensor ticks between thermostat events - those ticks are the
+                # post-off readings the coast window needs. Never raises (diagnostic only).
+                try:
+                    if self._coast_feed(dt_util.now()):
+                        self._spawn(self._save_learning_state())
+                except Exception:  # noqa: BLE001
+                    _LOGGER.warning("Coast tracking on indoor sensor change failed", exc_info=True)
                 ae = self.automation_engine
                 if ae._fan_active or ae._natural_vent_active:
                     self.hass.async_create_task(
@@ -4449,12 +4505,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         engine or ``get_chart_data`` (runs in an executor thread). Event loop only.
         """
         reading = self._get_indoor_temp_with_provenance()
-        source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
-        primary_entity = (
-            self.config.get("indoor_temp_entity")
-            if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
-            else self.config.get("climate_entity")
-        )
+        primary_entity = self._primary_indoor_entity()
         self._note_indoor_sensor_state("primary", reading.reason, primary_entity, reading.primary_value)
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
         if sleep_entity and _in_sleep_window(dt_util.now(), self.config):
@@ -4520,6 +4571,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         keep working unchanged.
         """
         return self._get_indoor_temp_with_provenance().value
+
+    async def _save_learning_state(self) -> None:
+        """Persist the learning state off the event loop (for sync callbacks that cannot await)."""
+        await self._executor_job(self.learning.save_state)
+
+    def _primary_indoor_entity(self) -> str | None:
+        """Entity id behind the always-primary indoor reading (sensor/input_number, else the climate entity)."""
+        source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
+        return (
+            self.config.get("indoor_temp_entity")
+            if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+            else self.config.get("climate_entity")
+        )
+
+    def _zone_log_id(self) -> str:
+        """Zone identifier for log lines: the config entry id, else the climate entity (Issue #1233)."""
+        return self.zone_label or self.config.get("climate_entity") or "unknown"
 
     def _get_indoor_temp_with_provenance(self) -> IndoorTempReading:
         """Comfort-facing indoor temp + provenance + always-primary value (Issue #895).
@@ -8891,10 +8959,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         climate entities expose ``temperature``, not ``target_temperature``).
         """
         unit = self.config.get("temp_unit", "fahrenheit")
-        sp_f = read_state_temp_f(state, "temperature", unit)
-        if sp_f is None:
-            sp_f = read_state_temp_f(state, "target_temp_low" if mode == "heat" else "target_temp_high", unit)
-        return sp_f
+        return pick_setpoint(lambda attr: read_state_temp_f(state, attr, unit), mode)
 
     def _swing_reading_resolution_f(self) -> float:
         """SOURCE-implied granularity of the primary indoor reading (a fallback only).
@@ -8906,21 +8971,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) != TEMP_SOURCE_CLIMATE_FALLBACK:
             return 0.0
-        unit = self.config.get("temp_unit", "fahrenheit")
-        return THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F * (1.8 if unit == "celsius" else 1.0)
+        return whole_degree_resolution_f(self.config.get("temp_unit", "fahrenheit"))
 
-    def _note_setpoint_change(self, old_state: Any, new_state: Any, now: datetime) -> None:
+    def _note_setpoint_change(self, old_state: Any, new_state: Any, now: datetime) -> bool:
         """Stamp when the thermostat's setpoint or HVAC mode last changed (Issue #1234).
 
         Both are commands (CA's or the occupant's) that can start equipment at once from wherever
         the room is, so an on-transition shortly after is a jump, not the thermostat's hysteresis.
+        Returns True when this event carried such a change (Issue #1233: it also ends a coast window).
         """
-        changed = old_state.state != new_state.state or any(
-            old_state.attributes.get(_a) != new_state.attributes.get(_a)
-            for _a in ("temperature", "target_temp_low", "target_temp_high")
+        changed = setpoint_or_mode_changed(
+            old_state.state, old_state.attributes.get, new_state.state, new_state.attributes.get
         )
         if changed:
             self._last_setpoint_change_ts = now
+        return changed
 
     async def _track_swing_edges(self, old_state: Any, new_state: Any) -> None:
         """Open/close swing-sample cycles on REAL ``hvac_action`` edges only (Issue #1234).
@@ -8930,17 +8995,43 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ``swing.evaluate_swing_cycle`` and record the sample in the learning engine. Independent
         of the k_active observation pipeline (a rejected k fit no longer drops the sample), and
         a mode-fallback "phantom" session never has a real edge, so it never opens a cycle.
-        Never raises: a bug here must not break override detection.
+
+        Issue #1233: the same edges drive the coast window (how far the room keeps going after the
+        equipment stops), which is recorded apart from the swing. Never raises: a bug here must not
+        break override detection.
         """
         try:
             now = dt_util.now()
-            self._note_setpoint_change(old_state, new_state, now)
+            changed = self._note_setpoint_change(old_state, new_state, now)
             old_action = str(old_state.attributes.get("hvac_action", "")).lower()
             new_action = str(new_state.attributes.get("hvac_action", "")).lower()
             dirs = {"heating": "heat", "cooling": "cool"}
             old_dir = dirs.get(old_action) if is_hvac_compressor_active(old_action) else None
             new_dir = dirs.get(new_action) if is_hvac_compressor_active(new_action) else None
+            # Coast windows (Issue #1233): the start/end rules live in swing.coast_thermostat_event (shared with
+            # tools/swing_audit.py). Applied here, before any await, so an interleaved event sees them settled.
+            since_change = (
+                (now - self._last_setpoint_change_ts).total_seconds()
+                if self._last_setpoint_change_ts is not None
+                else None
+            )
+            if self._coast_candidates is None:
+                self._coast_candidates = {}
+            coast_saved = self._coast_record(
+                coast_thermostat_event(
+                    self._coast_candidates,
+                    now=now,
+                    reading=self._get_indoor_temp_with_provenance().primary_value,
+                    changed=changed,
+                    old_dir=old_dir,
+                    new_dir=new_dir,
+                    seconds_since_setpoint_change=since_change,
+                    off_setpoint_f=self._read_thermostat_setpoint_f(new_state, old_dir) if old_dir else None,
+                )
+            )
             if old_dir == new_dir:
+                if coast_saved:
+                    await self._executor_job(self.learning.save_state)
                 return
             if self._swing_candidates is None:
                 self._swing_candidates = {}
@@ -8965,40 +9056,129 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "seconds_since_setpoint_change": since,
                     "seconds_since_previous_off": (now - last_off).total_seconds() if last_off is not None else None,
                     "resolution_f": self._swing_reading_resolution_f(),
+                    "indoor_entity": self._primary_indoor_entity(),
                 }
+            # Persist a closed coast window only now: an await before the swing state above is settled
+            # would let the next thermostat event run first and lose this edge (Issue #1233).
+            if coast_saved:
+                await self._executor_job(self.learning.save_state)
         except Exception:  # noqa: BLE001 - diagnostic learning must never break the listener
             _LOGGER.warning("Swing sampling edge handling failed", exc_info=True)
 
     async def _close_swing_cycle(self, mode: str, new_state: Any, now: datetime) -> None:
-        """Judge the cycle that just ended and record its swing sample (if it earned one)."""
+        """Judge the cycle that just ended; keep its inputs and verdict, and its sample if it earned one."""
         cand = (self._swing_candidates or {}).pop(mode, None)
         if cand is None:
             return
+        off_indoor = self._get_indoor_temp_with_provenance().primary_value
+        unit = self.config.get("temp_unit", "fahrenheit")
         verdict = evaluate_swing_cycle(
             mode=mode,
             ts=cand["ts"],
             setpoint_f=cand["setpoint_f"],
             on_indoor_f=cand["on_indoor_f"],
-            off_indoor_f=self._get_indoor_temp_with_provenance().primary_value,
+            off_indoor_f=off_indoor,
             off_setpoint_f=self._read_thermostat_setpoint_f(new_state, mode),
             seconds_since_setpoint_change=cand["seconds_since_setpoint_change"],
             resolution_f=cand["resolution_f"],
             seconds_since_previous_off=cand.get("seconds_since_previous_off"),
-            reading_unit=self.config.get("temp_unit", "fahrenheit"),
+            reading_unit=unit,
         )
-        if verdict.sample is None:
-            _LOGGER.debug("Swing sample skipped: mode=%s reason=%s", mode, verdict.reason)
-            return
-        self.learning.record_swing_sample(mode, verdict.sample)
+        # Issue #1233: every judged cycle is kept with its inputs, accepted or not.
+        record = build_swing_audit_record(
+            mode,
+            verdict,
+            ts=cand["ts"],
+            setpoint_f=cand["setpoint_f"],
+            setpoint_age_s=cand["seconds_since_setpoint_change"],
+            on_indoor_f=cand["on_indoor_f"],
+            off_indoor_f=off_indoor,
+            indoor_entity=cand.get("indoor_entity"),
+            resolution_f=cand["resolution_f"],
+            reading_unit=unit,
+            since_prev_off_s=cand.get("seconds_since_previous_off"),
+        )
+        before = (self.learning.get_thermal_model() or {}).get(f"swing_{mode}_f")
+        self.learning.record_swing_audit(mode, record)
+        if verdict.sample is not None:
+            self.learning.record_swing_sample(mode, verdict.sample)
         await self._executor_job(self.learning.save_state)
+        if verdict.sample is None:
+            _LOGGER.debug(
+                "Swing sample rejected: zone=%s mode=%s reason=%s setpoint=%s setpoint_age_s=%s on=%s off=%s source=%s",
+                self._zone_log_id(),
+                mode,
+                verdict.reason,
+                record["setpoint_f"],
+                record["setpoint_age_s"],
+                record["on_indoor_f"],
+                record["off_indoor_f"],
+                record["indoor_entity"],
+            )
+            return
+        model = self.learning.get_thermal_model() or {}
         _LOGGER.info(
-            "Swing sample recorded: mode=%s value=%.2f resolution=%.1f setpoint=%.1f off_point=%s",
+            "Swing sample accepted: zone=%s mode=%s value=%.2f setpoint=%.1f setpoint_age_s=%s on=%.2f off=%.2f"
+            " source=%s resolution=%.1f off_point=%s median %s->%s (n=%d)",
+            self._zone_log_id(),
             mode,
             verdict.sample["value_f"],
-            verdict.sample["resolution_f"],
             verdict.sample["setpoint_f"],
+            record["setpoint_age_s"],
+            verdict.sample["on_indoor_f"],
+            verdict.sample["off_indoor_f"],
+            record["indoor_entity"],
+            verdict.sample["resolution_f"],
             verdict.sample["off_point_f"],
+            before,
+            model.get(f"swing_{mode}_f"),
+            len(self.learning._state.thermal_model_cache.get(f"swing_{mode}_samples") or []),
         )
+
+    # ------------------------------------------------------------------
+    # Issue #1233 - coast overshoot (peak after heat-off / trough after cool-off)
+    # ------------------------------------------------------------------
+
+    def _coast_feed(self, now: datetime) -> bool:
+        """A dedicated indoor sensor ticked: fold its reading into the open coast windows (``swing.coast_feed``).
+
+        Returns True when a window closed and changed the learning cache (caller persists).
+        """
+        if not self._coast_candidates:
+            return False
+        return self._coast_record(
+            coast_feed(self._coast_candidates, now, self._get_indoor_temp_with_provenance().primary_value)
+        )
+
+    def _coast_record(self, closed: list) -> bool:
+        """Log and record the coast windows the shared driver closed. True when a sample was recorded."""
+        recorded = False
+        for mode, ended_by, verdict in closed:
+            if verdict.sample is None:
+                _LOGGER.debug(
+                    "Coast sample skipped: zone=%s mode=%s reason=%s ended_by=%s",
+                    self._zone_log_id(),
+                    mode,
+                    verdict.reason,
+                    ended_by,
+                )
+                continue
+            self.learning.record_coast_sample(mode, verdict.sample)
+            recorded = True
+            _LOGGER.info(
+                "Coast sample recorded: zone=%s mode=%s coast=%.2f past_setpoint=%s off=%.2f %s=%.2f n_post=%d"
+                " ended_by=%s",
+                self._zone_log_id(),
+                mode,
+                verdict.sample["coast_f"],
+                verdict.sample["past_setpoint_f"],
+                verdict.sample["off_indoor_f"],
+                "peak" if mode == "heat" else "trough",
+                verdict.sample["extreme_f"],
+                verdict.sample["n_post"],
+                ended_by,
+            )
+        return recorded
 
     async def _start_hvac_observation(self, session_mode: str) -> None:
         """Begin a new HVAC thermal observation (heat or cool)."""
@@ -9029,7 +9209,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         first_sample = self._get_current_sample(0.0)
         if first_sample is None:
             _LOGGER.info(
-                "Thermal HVAC observation not started [type=%s reason=%s n=0/? dt=0.00°F/? elapsed=0m]",
+                "Thermal HVAC observation not started [zone=%s type=%s reason=%s n=0/? dt=0.00°F/? elapsed=0m]",
+                self._zone_log_id(),
                 obs_type,
                 REJECT_INDOOR_UNAVAILABLE,
             )
@@ -9053,7 +9234,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self._executor_job(self.learning.save_state)
             return
         _LOGGER.info(
-            "_start_hvac_observation: type=%s starting (prior obs=%s)",
+            "_start_hvac_observation: zone=%s type=%s starting (prior obs=%s)",
+            self._zone_log_id(),
             obs_type,
             list(self._pending_observations.keys()),
         )
@@ -9123,7 +9305,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pending_observations[obs_type] = obs
         await self._executor_job(self.learning.save_state)
         _LOGGER.info(
-            "Thermal HVAC observation started: obs_id=%s mode=%s indoor=%.1f°F",
+            "Thermal HVAC observation started: zone=%s obs_id=%s mode=%s indoor=%.1f°F",
+            self._zone_log_id(),
             obs["obs_id"],
             session_mode,
             indoor,
@@ -12945,6 +13128,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "observation_count_swing_cool": thermal_model.get("observation_count_swing_cool", 0),
                 "confidence_swing_heat": thermal_model.get("confidence_swing_heat", "none"),
                 "confidence_swing_cool": thermal_model.get("confidence_swing_cool", "none"),
+                # Issue #1233: how the swing was learned (recent cycles + inputs, reject counts) and what
+                # it means, plus the coast overshoot - reported apart from the swing.
+                "swing_debug": _swing_debug_for_display(thermal_model.get("swing_debug") or {}, unit),
+                "coast_heat": _coast_for_display(thermal_model, "heat", unit),
+                "coast_cool": _coast_for_display(thermal_model, "cool", unit),
                 "solar_phase_offset_h": thermal_model.get("solar_phase_offset_h"),
             },
             "state_log": log_entries,

@@ -60,7 +60,14 @@ from .const import (
     WEATHER_BIAS_MAX_OBS,
 )
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
-from .swing import apply_swing_samples, reset_swing_cache
+from .swing import (
+    SWING_DEFINITION_TEXT,
+    apply_coast_samples,
+    apply_swing_samples,
+    record_swing_audit,
+    reset_swing_cache,
+    swing_debug_summary,
+)
 from .temperature import format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
@@ -997,6 +1004,10 @@ class LearningEngine:
         self._state = LearningState()
         self._last_suggestion_keys: list[str] = []
 
+    def _zone_log_id(self) -> str:
+        """Zone identifier for log lines (the config entry id; ``-`` for the legacy unscoped engine)."""
+        return getattr(self, "_entry_id", "") or "-"
+
     def load_state(self) -> None:
         """Load learning state from disk (blocking I/O — run via executor)."""
         migrate_legacy_storage_file(self._storage_dir, LEARNING_DB_FILE, self._entry_id)
@@ -1255,6 +1266,33 @@ class LearningEngine:
             self._state.thermal_model_cache = cache
         apply_swing_samples(cache, mode, [sample])
 
+    def _swing_cache(self) -> dict:
+        cache = self._state.thermal_model_cache
+        if cache is None:
+            cache = _new_thermal_cache()
+            self._state.thermal_model_cache = cache
+        return cache
+
+    def record_swing_audit(self, mode: str, record: dict) -> None:
+        """Keep the inputs and verdict of one judged cycle, accepted or rejected (Issue #1233).
+
+        Bounded per mode (``THERMAL_SWING_AUDIT_CAP``); the per-reason reject counters are
+        cumulative. In-memory only - the caller persists via ``save_state``.
+        """
+        if mode not in ("heat", "cool") or not isinstance(record, dict):
+            return
+        record_swing_audit(self._swing_cache(), mode, record)
+
+    def record_coast_sample(self, mode: str, sample: dict) -> None:
+        """Fold one closed coast window (peak after heat-off / trough after cool-off) into the cache.
+
+        Stored apart from the swing (``coast_{mode}_*``): the swing is the on-point hysteresis and
+        must never absorb what happens after the equipment stops (Issue #1233).
+        """
+        if mode not in ("heat", "cool") or not isinstance(sample, dict) or "ts" not in sample:
+            return
+        apply_coast_samples(self._swing_cache(), mode, [sample])
+
     def update_solar_phase_offset(self, observed_h: float, alpha: float) -> None:
         """EWMA update for solar_phase_offset_h from a phase observation.
 
@@ -1497,6 +1535,16 @@ class LearningEngine:
             "observation_count_swing_cool": cache.get("observation_count_swing_cool", 0),
             "confidence_swing_heat": _grade_swing_confidence(cache.get("observation_count_swing_heat", 0)),
             "confidence_swing_cool": _grade_swing_confidence(cache.get("observation_count_swing_cool", 0)),
+            # Issue #1233: how the swing was learned (recent cycles with inputs, reject counts) and
+            # what it means; coast overshoot is reported SEPARATELY from the swing.
+            "swing_definition": SWING_DEFINITION_TEXT,
+            "swing_debug": swing_debug_summary(cache),
+            "coast_heat_f": cache.get("coast_heat_f"),
+            "coast_cool_f": cache.get("coast_cool_f"),
+            "coast_heat_past_setpoint_f": cache.get("coast_heat_past_setpoint_f"),
+            "coast_cool_past_setpoint_f": cache.get("coast_cool_past_setpoint_f"),
+            "observation_count_coast_heat": cache.get("observation_count_coast_heat", 0),
+            "observation_count_coast_cool": cache.get("observation_count_coast_cool", 0),
             "learning_health": learning_health or {},
         }
 
@@ -1569,8 +1617,9 @@ class LearningEngine:
                             "two_param": True,
                         }
                         _LOGGER.info(
-                            "Thermal obs 2-param PRIMARY commit: mode=%s "
+                            "Thermal obs 2-param PRIMARY commit: zone=%s mode=%s "
                             "k_env=%.4f k_solar=%.3f R²=%.3f sf_range=%.2f n=%d",
+                            self._zone_log_id(),
                             hvac_mode_tag_2p,
                             _k_env_2p,
                             _k_solar_2p,
@@ -1645,7 +1694,8 @@ class LearningEngine:
                         )
 
             _LOGGER.info(
-                "Thermal observation committed: mode=%s grade=%s k_passive=%.4f R²_p=%.3f",
+                "Thermal observation committed: zone=%s mode=%s grade=%s k_passive=%.4f R²_p=%.3f",
+                self._zone_log_id(),
                 hvac_mode_tag,
                 obs["confidence_grade"],
                 obs["k_passive"],
@@ -1698,7 +1748,8 @@ class LearningEngine:
                 "schema_version": 2,
             }
             _LOGGER.info(
-                "Thermal observation committed: mode=solar grade=%s k_solar=%.3f R²=%.3f",
+                "Thermal observation committed: zone=%s mode=solar grade=%s k_solar=%.3f R²=%.3f",
+                self._zone_log_id(),
                 obs["confidence_grade"],
                 k_solar,
                 r2_solar,
@@ -1871,7 +1922,8 @@ class LearningEngine:
         }
 
         _LOGGER.info(
-            "Thermal observation committed: mode=%s grade=%s k_passive=%.4f k_active=%s R²_p=%.3f",
+            "Thermal observation committed: zone=%s mode=%s grade=%s k_passive=%.4f k_active=%s R²_p=%.3f",
+            self._zone_log_id(),
             session_mode,
             grade,
             k_p,

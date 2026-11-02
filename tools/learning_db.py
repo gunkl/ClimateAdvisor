@@ -12,6 +12,7 @@ Usage:
     python3 tools/learning_db.py --model        # model summary only
     python3 tools/learning_db.py --thermal      # chart_log endpoint observations only
     python3 tools/learning_db.py --last N       # last N rejections per type (default 5)
+    python3 tools/learning_db.py --swing        # how the swing was learned, coast (Issue #1233)
 """
 
 from __future__ import annotations
@@ -249,10 +250,180 @@ def _print_model_summary(db: dict) -> None:
 
     print(f"swing_heat:    {_swing_field('heat')}")
     print(f"swing_cool:    {_swing_field('cool')}")
+
+    def _coast_field(mode: str) -> str:
+        # Issue #1233: coast overshoot is kept apart from the swing (heat: peak above the off reading).
+        val = cache.get(f"coast_{mode}_f")
+        cnt = cache.get(f"observation_count_coast_{mode}", 0)
+        if val is None:
+            return f"None  ({cnt} windows)"
+        past = cache.get(f"coast_{mode}_past_setpoint_f")
+        past_txt = f", {past:+.2f} F past setpoint" if past is not None else ""
+        return f"{val:.2f} F beyond the off reading  ({cnt} windows{past_txt})"
+
+    print(f"coast_heat:    {_coast_field('heat')}")
+    print(f"coast_cool:    {_coast_field('cool')}")
+    print("(--swing: per-cycle inputs, reject reasons, recomputed median, coast windows)")
     print(f"conf_passive:  {conf_passive}")
     print(f"conf_hvac:     {conf_hvac}")
     print(f"last_obs:      {last_obs}")
     print()
+
+
+def _fmt_num(v: Any, decimals: int = 2) -> str:
+    return "-" if v is None else f"{float(v):.{decimals}f}"
+
+
+def _fmt_age(seconds: Any) -> str:
+    if seconds is None:
+        return "-"
+    seconds = float(seconds)
+    if seconds < 120:
+        return f"{seconds:.0f}s"
+    if seconds < 7200:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def format_swing_debug(db: dict, last_n: int = 15) -> str:
+    """Per-sample swing table, reject histogram, recomputed median and coast (Issue #1233).
+
+    Occupant framing: a homeowner checks the learned swing against what their own thermostat does.
+    Every judged cycle (accepted or rejected) is listed with the inputs that decided it, the stored
+    median is recomputed from the retained samples with the SAME function production uses, and the
+    coast overshoot is shown in its own section because it is NOT part of the swing.
+    """
+    swing = _load_swing_module()
+    cache = db.get("thermal_model_cache") if isinstance(db, dict) else None
+    out: list[str] = [
+        "Thermostat swing: how it was learned",
+        "=====================================",
+        swing.SWING_DEFINITION_TEXT,
+        "",
+    ]
+    has_swing = isinstance(cache, dict) and any(
+        cache.get(f"swing_{m}_audit") or cache.get(f"swing_{m}_samples") or cache.get(f"swing_{m}_f") is not None
+        for m in ("heat", "cool")
+    )
+    if not has_swing:
+        out.append("(no swing samples recorded yet)")
+        if isinstance(cache, dict) and any(cache.get(f"coast_{m}_samples") for m in ("heat", "cool")):
+            out.append("")
+            out += _format_coast_section(cache, last_n)
+        return "\n".join(out) + "\n"
+    if swing.needs_swing_migration(cache):
+        out.append("WARNING: swing values are from the RETIRED definition (no swing_definition_version).")
+        out.append("  They are NOT the thermostat's hysteresis; the integration resets them on its next load.")
+        out.append("")
+    for mode in ("heat", "cool"):
+        out += _format_swing_mode_section(swing, cache, mode, last_n)
+        out.append("")
+    out += _format_coast_section(cache, last_n)
+    return "\n".join(out) + "\n"
+
+
+def _format_swing_mode_section(swing: Any, cache: dict, mode: str, last_n: int) -> list[str]:
+    title = (
+        "Heat swing (degrees below setpoint at heat-on)"
+        if mode == "heat"
+        else "Cool swing (degrees above setpoint at cool-on)"
+    )
+    p = f"swing_{mode}"
+    samples = [s for s in (cache.get(f"{p}_samples") or []) if isinstance(s, dict)]
+    audit = [r for r in (cache.get(f"{p}_audit") or []) if isinstance(r, dict)]
+    counts = cache.get(f"{p}_reject_counts") or {}
+    summary = swing.summarize_swing_samples(samples)
+    stored = cache.get(f"{p}_f")
+    lines = [title, "-" * len(title)]
+    verdict = ""
+    if summary["value_f"] is not None and stored is not None and abs(summary["value_f"] - float(stored)) > 0.005:
+        verdict = "  MISMATCH: the stored value disagrees with the retained samples"
+    res = summary["resolution_f"] or 0.0
+    interval = f" +/-{res / 2:.2f}" if res else ""
+    lines.append(
+        f"stored {_fmt_num(stored)}  |  recomputed median {_fmt_num(summary['value_f'])}{interval}"
+        f" of the last {len(samples)} accepted sample(s)  |  resolution {res:.2f} F"
+        f"  |  off-point {_fmt_num(summary['off_point_f'])}{verdict}"
+    )
+    lines.append(f"lifetime accepted samples: {cache.get(f'observation_count_{p}', 0)}")
+    rows = audit[-last_n:] if last_n > 0 else []
+    if rows:
+        lines.append("")
+        lines.append(f"Last {len(rows)} judged cycle(s), newest last:")
+        lines.append(
+            f"  {'start (local ts)':<26} {'verdict':<18} {'value':>6} {'setpt':>6} {'sp age':>7} {'on':>7} {'off':>7}"
+            f" {'res':>5} {'unit':<10} {'trigger':<11} source"
+        )
+        for r in rows:
+            verdict_txt = "accepted" if r.get("accepted") else f"rejected:{r.get('reason')}"
+            lines.append(
+                f"  {str(r.get('ts'))[:26]:<26} {verdict_txt:<18} {_fmt_num(r.get('value_f')):>6}"
+                f" {_fmt_num(r.get('setpoint_f'), 1):>6} {_fmt_age(r.get('setpoint_age_s')):>7}"
+                f" {_fmt_num(r.get('on_indoor_f')):>7} {_fmt_num(r.get('off_indoor_f')):>7}"
+                f" {_fmt_num(r.get('resolution_f'), 1):>5} {str(r.get('reading_unit') or '-'):<10}"
+                f" {str(r.get('trigger') or '-'):<11} {r.get('indoor_entity') or '-'}"
+            )
+    elif samples:
+        lines.append("(no audit rows - samples predate the per-cycle audit)")
+    elif stored is not None:
+        lines.append("(a stored value with no retained samples or audit rows - learned before Issue #1234/#1233)")
+    window_rej: dict[str, int] = {}
+    for r in audit:
+        if not r.get("accepted"):
+            window_rej[str(r.get("reason"))] = window_rej.get(str(r.get("reason")), 0) + 1
+    lines.append("")
+    lines.append("Reject histogram (lifetime / in the retained window):")
+    reasons = list(swing.SWING_REJECT_REASONS)
+    reasons += [k for k in counts if k not in reasons]
+    if not any(counts.get(k) or window_rej.get(k) for k in reasons):
+        lines.append("  (none)")
+    for k in reasons:
+        if counts.get(k) or window_rej.get(k):
+            lines.append(
+                f"  {k:<18} {int(counts.get(k, 0)):>5} / {window_rej.get(k, 0):<3}"
+                f" {'#' * min(int(counts.get(k, 0)), 40)}"
+            )
+    return lines
+
+
+def _format_coast_section(cache: dict, last_n: int) -> list[str]:
+    title = "Coast overshoot (NOT part of the swing)"
+    lines = [
+        title,
+        "-" * len(title),
+        "After the equipment stops the room keeps going: heat -> peak above the off reading, cool -> trough below it.",
+        "A window is a LOWER bound when something (the next run, a setpoint change) cut it short.",
+    ]
+    any_rows = False
+    for mode, word in (("heat", "peak"), ("cool", "trough")):
+        samples = [s for s in (cache.get(f"coast_{mode}_samples") or []) if isinstance(s, dict)]
+        if not samples:
+            lines.append(f"{mode}: no coast windows recorded yet")
+            continue
+        any_rows = True
+        lines.append(
+            f"{mode}: median coast {_fmt_num(cache.get(f'coast_{mode}_f'))} F ({word} past the off reading),"
+            f" {_fmt_num(cache.get(f'coast_{mode}_past_setpoint_f'))} F past the setpoint"
+            f"  ({cache.get(f'observation_count_coast_{mode}', 0)} windows)"
+        )
+        ended: dict[str, int] = {}
+        for s in samples:
+            ended[str(s.get("ended_by"))] = ended.get(str(s.get("ended_by")), 0) + 1
+        lines.append("  ended by: " + ", ".join(f"{k} x{v}" for k, v in sorted(ended.items())))
+        for s in samples[-last_n:] if last_n > 0 else []:
+            lines.append(
+                f"  {str(s.get('ts'))[:26]:<26} off {_fmt_num(s.get('off_indoor_f')):>6}"
+                f" {word} {_fmt_num(s.get('extreme_f')):>6}"
+                f" coast {_fmt_num(s.get('coast_f')):>5} past-sp {_fmt_num(s.get('past_setpoint_f')):>5}"
+                f" n={s.get('n_post')} window {_fmt_age(s.get('window_s'))} ended_by {s.get('ended_by')}"
+            )
+    if not any_rows:
+        lines.append("(coast needs readings after a thermostat stop; none recorded yet)")
+    return lines
+
+
+def _print_swing_debug(db: dict, last_n: int) -> None:
+    print(format_swing_debug(db, last_n))
 
 
 # ---------------------------------------------------------------------------
@@ -906,6 +1077,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--thermal", action="store_true", help="Show chart_log endpoint observations only")
     parser.add_argument("--pending", action="store_true", help="Show persisted pending observations")
     parser.add_argument(
+        "--swing",
+        action="store_true",
+        help=(
+            "Show how the swing was learned: per-cycle inputs and verdicts, reject histogram, recomputed "
+            "median, and coast overshoot (Issue #1233). Rows follow --last (default 15)."
+        ),
+    )
+    parser.add_argument(
         "--check-587",
         action="store_true",
         dest="check_587",
@@ -914,7 +1093,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "vent_window_decay/vent_fan_decay split (post-deploy validation)"
         ),
     )
-    parser.add_argument("--last", type=int, default=5, metavar="N", help="Last N rejections per type (default 5)")
+    parser.add_argument(
+        "--last",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Last N rejections per type (default 5) or, with --swing, last N cycles per mode (default 15)",
+    )
     parser.add_argument(
         "--type",
         dest="obs_type",
@@ -953,8 +1138,17 @@ def main() -> None:
     show_pending = getattr(args, "pending", False)
     show_check_587 = getattr(args, "check_587", False)
     filter_type = getattr(args, "obs_type", None)
+    show_swing = getattr(args, "swing", False)
+    last_n = args.last if args.last is not None else (15 if show_swing else 5)
     section_flag = (
-        args.rejections or args.committed or args.model or args.thermal or show_daily or show_pending or show_check_587
+        args.rejections
+        or args.committed
+        or args.model
+        or args.thermal
+        or show_daily
+        or show_pending
+        or show_check_587
+        or show_swing
     )
     show_model = args.model or args.thermal or not section_flag
     show_rejections = args.rejections or not section_flag
@@ -974,8 +1168,11 @@ def main() -> None:
         _print_model_summary(db)
         _print_solar_model_section(db)
 
+    if show_swing:
+        _print_swing_debug(db, last_n)
+
     if show_rejections:
-        _print_rejection_log(db, last_n=args.last, filter_type=filter_type)
+        _print_rejection_log(db, last_n=last_n, filter_type=filter_type)
 
     if show_committed:
         _print_committed(db)

@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.40"
+VERSION = "0.8.41"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1491,6 +1491,16 @@ THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F: float = 1.0
 # Persisted-cache marker for the swing DEFINITION. Caches without it (or older) hold the retired
 # |T_off - T_on| / 2 values, which are nulled on load so they re-learn (Issue #1234).
 THERMAL_SWING_DEFINITION_VERSION: int = 2
+# Issue #1233: every evaluated heat/cool cycle (accepted OR rejected) is kept with its inputs so a
+# homeowner can see why the learned swing is what it is. Newest N per mode; the per-reason reject
+# counters are cumulative and not bounded by this window.
+THERMAL_SWING_AUDIT_CAP: int = 50
+# Issue #1233: coast overshoot - how far the room keeps going after the equipment STOPS (heat: peak
+# above the off reading; cool: trough below it). Recorded apart from the swing, which stays the
+# on-point hysteresis. Tracking ends at the next on-edge, a setpoint/mode change, or this bound.
+THERMAL_COAST_MAX_S: float = 1800.0
+THERMAL_COAST_MAX_F: float = 5.0  # a larger rise/fall in the window is weather or another actor, not coast
+THERMAL_COAST_ESTIMATOR_WINDOW: int = 15
 THERMAL_SWING_CONF_LOW: int = 1
 THERMAL_SWING_CONF_MEDIUM: int = 3
 THERMAL_SWING_CONF_HIGH: int = 10

@@ -36,7 +36,7 @@ The automation logic table and all threshold constants in this document are expr
 | Why must `_async_thermostat_changed()` check all three command-pending flags, not just `_hvac_command_pending`? | Automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()`. The fan command sets `_fan_command_pending` but leaves `_hvac_command_pending` False. Checking only `_hvac_command_pending` bypasses the override-detection guard during that window. | [§9b Compound command-pending guard](08-COMPUTATION-REFERENCE.md#compound-command-pending-guard-in-_async_thermostat_changed-issue-205206) |
 | Why was a manual mode override not detected on dual-setpoint (`heat_cool`) thermostats? | CA commands `heat_cool` mode but the old code compared the thermostat's `hvac_mode` against `classification.hvac_mode` (e.g., `"cool"`). A user switching from `heat_cool` to `cool` evaluated as equal and was ignored. Fix: compare against `_last_commanded_hvac_mode` first. | [§9b Mode Override Detection — `_last_commanded_hvac_mode`](08-COMPUTATION-REFERENCE.md#mode-override-detection--_last_commanded_hvac_mode-issue-269-bug-c) |
 | Why was a manual setpoint change not detected on dual-setpoint (`heat_cool`) thermostats? | In `heat_cool` mode the `temperature` attribute is `None`; only `target_temp_low`/`target_temp_high` are populated. The setpoint override check now reads those attributes when mode is `heat_cool`. | [§9b Dual Setpoint Override Detection](08-COMPUTATION-REFERENCE.md#dual-setpoint-override-detection--heat_cool-mode-issue-269-bug-d) |
-| Why do cloud thermostats (Nest, Ecobee) falsely trigger fan overrides after HVAC mode changes? | Cloud polling echoes `fan_mode` attribute changes as delayed side-effects 30–120 s after the command, outside the 30 s `_is_recent_hvac_command` window. The `_is_expected_confirmation` flag extends suppression to 120 s for the `fan_mode` path. | [§9b `_is_expected_confirmation`](08-COMPUTATION-REFERENCE.md#_is_expected_confirmation-issue-269-bug-a) |
+| Why do cloud thermostats (Nest, Ecobee) falsely trigger fan overrides after HVAC mode changes? | Cloud polling echoes `fan_mode` attribute changes as delayed side-effects 30–120 s after the command, outside the 30 s `_is_recent_hvac_command(30)` window of the `fan_mode` path (the mode path uses 3 s). The `_is_expected_confirmation` flag extends suppression to 120 s for the `fan_mode` path. | [§9b `_is_expected_confirmation`](08-COMPUTATION-REFERENCE.md#_is_expected_confirmation-issue-269-bug-a) |
 | What is the comfort-band programming model introduced in Issue #249? | CA programs a floor+ceiling band every 30 min via one `select_comfort_band` decision and one `_apply_comfort_band` actuation; the thermostat's own deadband holds the house inside the band continuously — no more off+supervisor pattern. | [§6e Comfort-Band Programming](08-COMPUTATION-REFERENCE.md#6e-comfort-band-programming-issue-249) |
 | What command shape does `_apply_comfort_band` emit per thermostat capability? | One single-setpoint write (Issue #301): `cool` + `set_temperature(ceiling)` or `heat` + `set_temperature(floor)`, family chosen by §6f; no `heat_cool` dual-band write even on dual-capable devices. | [§6e — `_apply_comfort_band` command shapes](08-COMPUTATION-REFERENCE.md#_apply_comfort_band-command-shapes) |
 | Which edge (heat or cool) does the thermostat guard when indoor is inside the band, and how fast does it switch (Issue #1066)? | Nearest-edge arming: below floor -> heat and above ceiling -> cool immediately (ignores the 600 s dwell); at or below `floor + m` heat, at or above `ceiling - m` cool, strictly between keep the thermostat's actual mode; `m` = fixed 2 F arming margin clamped to one third of band width (Issue #1073: no longer a setting). Since #1073 an against-the-grain switch in the margin zone or a shallow breach (within the `comfort_deadband_{day_type}_f` tolerance) shortly after the opposite side ran is HELD by the settling guard; see [comfort-edge-selection-spec.md](comfort-edge-selection-spec.md). Replaces the #827 day-type-default / against-grain / sustain machinery. | [§6f Comfort-Family Nearest-Edge Arming](08-COMPUTATION-REFERENCE.md#6f-comfort-family-nearest-edge-arming-issue-1066--supersedes-827843858867) |
@@ -2017,16 +2017,16 @@ All three flags must be tested together. Testing only `_hvac_command_pending` is
 
 The fix (Issue #206) expands the guard at both the pause-path and normal-path detection sites to `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending`. If **any** of the three flags is `True`, the state change is treated as automation-issued and suppressed.
 
-**`_is_recent_hvac_command(threshold_seconds=3.0)`** is a secondary guard that inspects `_hvac_command_time` to catch race conditions where the HVAC flag was already cleared before the listener fired.
+**`_is_recent_hvac_command()`** is a secondary guard that inspects `_hvac_command_time` (stamped by every CA mode and setpoint write) to catch race conditions where the HVAC flag was already cleared before the listener fired. The window depends on the path: **3 s** (the default) for the mode-change override paths (pause path, mode-to-mode supersession, main path), and **30 s** for the setpoint path (with `_is_recent_temp_command(30)`) and the thermostat `fan_mode` path. An occupant change inside the window is indistinguishable from CA's echo and is not detected (see [§11 Just after the window](#startup-coalescing-window--occupant-changes-are-not-supported-owner-decision-issue-1235)).
 
-**`_is_expected_confirmation` (Issue #269 Bug A):** A third suppression layer for the `fan_mode` attribute-change path specifically. Cloud thermostats (e.g., Nest, Ecobee via cloud polling) sometimes echo a `fan_mode` attribute change as a delayed side-effect of an HVAC mode transition, arriving 30–120 seconds after the original command — outside the 30-second `_is_recent_hvac_command` window. When `_is_expected_confirmation` is `True`, the `fan_mode` change guard suppresses false override detection for up to 120 seconds after the last HVAC command.
+**`_is_expected_confirmation` (Issue #269 Bug A):** A third suppression layer for the `fan_mode` attribute-change path specifically. Cloud thermostats (e.g., Nest, Ecobee via cloud polling) sometimes echo a `fan_mode` attribute change as a delayed side-effect of an HVAC mode transition, arriving 30–120 seconds after the original command — outside the 30-second `_is_recent_hvac_command(30)` window that the `fan_mode` path uses. When `_is_expected_confirmation` is `True`, the `fan_mode` change guard suppresses false override detection for up to 120 seconds after the last HVAC command.
 
 **`_is_recent_fan_command(threshold_seconds=30.0)` (Issue #239):** A fourth suppression layer for direct fan service calls. `climate.set_fan_mode` calls do not update `_hvac_command_time`, so `_is_recent_hvac_command()` never fires for fan-mode echoes. This guard reads `_fan_command_time` (set at the start of `_activate_fan()` and `_deactivate_fan()`) and suppresses false overrides within 30 seconds of any fan command.
 
 | Guard | Type | Applies to | Window | Purpose |
 |---|---|---|---|---|
 | `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending` | Flag check (synchronous) | All command types | Until cleared | Primary: suppresses both paths during any automation-issued command |
-| `_is_recent_hvac_command(threshold_seconds=30.0)` | Timestamp check | HVAC mode / setpoint changes | 30 s | Secondary: catches races where the HVAC flag cleared before the HA event arrived |
+| `_is_recent_hvac_command()` | Timestamp check | HVAC mode changes: 3 s (default). Setpoint and thermostat `fan_mode` changes: 30 s | 3 s / 30 s | Secondary: catches races where the HVAC flag cleared before the HA event arrived |
 | `_is_expected_confirmation` | Boolean flag | Fan_mode attribute changes from HVAC mode transitions | 120 s | Tertiary: suppresses delayed fan_mode echoes from HVAC mode changes on cloud thermostats |
 | `_is_recent_fan_command(threshold_seconds=30.0)` | Timestamp check | Fan mode changes (`climate.set_fan_mode`) | 30 s | Quaternary: suppresses fan echo races where `_fan_command_pending` cleared before the HA event arrived |
 
@@ -2270,7 +2270,7 @@ All 4 callers now derive this signal via `coordinator._derive_thermostat_fan_run
 
 **Issue #790 — `adopt-on`'s eligibility gate now honors the reactivation lockout, and `turn-off` now arms it, for all 4 call sites.** Before this fix, `_reconcile_fan_on_startup_locked()` hardcoded `paused_by_door=False` into the FSM inputs feeding the `adopt-on`/`turn-off` decision above (this section's own table), on the claim (`nat_vent_reactivation_lockout.py`'s docstring) that the function "runs at most once per restart/30-min backstop, structurally incapable of sub-minute repeats." That claim was false for 2 of the 4 real callers — the `thermostat_state_change` (Issue #347, this section) and post-grace-expiry sites are event-driven, not cadence-bound, and can fire sub-minute. The hardcoded `False` meant the reactivation lockout (§ armed by every `_exit_nat_vent()` exit reason above `is_reactivation_locked_out()`) was structurally unreachable from this decision point, for any trigger. A symmetric gap existed on the `turn-off` branch's own `_exit_nat_vent()` call, which never passed `set_outdoor_exit_time=True` — so a turn-off issued from this call site left no lockout timer for a subsequent trigger to check, even after the check-side fix. Both are fixed: the eligibility check now reads `self._paused_by_door`'s real value, and the `turn-off` branch now arms the lockout like every other exit reason. Safe uniformly across all 4 triggers — including the 2 cadence-bound ones (`ha_restart`, `backstop_30min`) — because `_nat_vent_outdoor_exit_time` is never persisted across HA restarts (`state.py`), so the lockout can only fire when a real exit was armed earlier in the same running process. See `tools/simulations/pending/issue_790_reconcile_startup_bypasses_lockout.json` for the regression scenario.
 
-The 5-minute `_first_run` coalesce window already suppresses override detection (coordinator's `_async_thermostat_changed` override guard), so the turn-off command is not misread as a user manual action.
+The 5-minute startup coalesce window (`_startup_coalesce_active`) already suppresses override detection (coordinator's `_async_thermostat_changed` override guard), so the turn-off command is not misread as a user manual action.
 
 **Issue #627 — the `backstop_30min` call site (below) was NOT covered by that suppression window, and that gap caused a real AC/whole-house-fan mutex violation.** `restore_state()`'s Issue #263/#327 clean-slate wipes `_fan_override_active` on every restart but correctly *preserves* `_pre_fan_hvac_mode` — the flag `_whf_owns_hvac()` actually depends on to keep HVAC suppressed. The coordinator's periodic `backstop_30min` "untracked fan" reconcile (a separate call site from `_do_startup_coalesce`'s own `reconcile_fan_on_startup(trigger="ha_restart")`, described below) used *only* `_fan_override_active` as its gate — not `_startup_coalesce_active`, unlike every sibling override-detection check in `coordinator.py` (the same "Startup coalescing active — suppressing X detection" idiom quoted throughout this section). It fired on the very first `_async_update_data()` cycle after restart, before the 300s coalescing window had any chance to settle, using the exact flag clean-slate had just zeroed. On a live install (2026-08-11), this misread a whole-house fan still legitimately running under a pre-restart RF-remote timer as "unwarranted," turned it off, and released `_pre_fan_hvac_mode` via `_deactivate_fan()` — which then let the next `apply_classification()` cycle commit the thermostat to Cool mode ~34 seconds later with nothing left to stop it. The fix: `coordinator._should_run_untracked_fan_backstop()` now also requires `not self._startup_coalesce_active`, so this call site is delayed until the same coalescing boundary `_do_startup_coalesce()`'s own `reconcile_fan_on_startup(trigger="ha_restart")` call already respects — no change to the clean-slate policy itself, the nat-vent-eligibility test, or the WHF/HVAC mutex's single-choke-point design (`_whf_owns_hvac()`). See `tools/simulations/unsupported/restart_whf_ac_mutex_backstop_race.json` for the regression scenario (uses the harness's new `simulate_restart`/`fan_backstop_tick` event types, added in the same PR, to drive the real production continuity boundary rather than a mirror of it). Issue #1200 moved that scenario to `unsupported/`: it needs a sensorless whole-house fan, now an unsupported configuration. The gate itself is pinned by `tests/test_fan_control.py::TestShouldRunUntrackedFanBackstop`, and a restart keeping a running WHF override by `tests/test_fan_manual_override_restart.py::TestManualOverrideSurvivesRestart`.
 
@@ -2505,7 +2505,7 @@ With (A) restart clearing `_fan_override_active` and (B) coalesce reconciling th
 
 #### Interaction with §11 Clean-Slate Restart Policy
 
-The fan clean-slate introduced in (A) is consistent with §11: `_fan_override_active` joins `_manual_override_active`, `_grace_active`, and `_override_confirm_pending` as fields that are always cleared on restart. The coalesce step (B) performs the same role for fan state that the `_first_run` startup override check (§11 Startup Override Logic) performs for HVAC state — it re-derives the correct ownership decision from live conditions rather than trusting stale persisted flags.
+The fan clean-slate introduced in (A) is consistent with §11: `_fan_override_active` joins `_manual_override_active`, `_grace_active`, and `_override_confirm_pending` as fields that are always cleared on restart. The coalesce step (B) performs the same role for fan state that `apply_classification()` at coalesce end performs for HVAC state — it re-derives the correct decision from live conditions rather than trusting stale persisted flags (see §11 Startup Coalescing Window).
 
 | Field | Preserved across restart? | Notes |
 |---|---|---|
@@ -2972,21 +2972,62 @@ CA always starts in full clean-slate automation mode after an HA restart. `resto
 
 **A window already open BEFORE restart never fires that listener at all (Issue #523).** The `None → "on"` state-change listener only fires on a genuine transition — if the sensor was already `"on"` before HA restarted (the common case: the window was open, causing the "briefly re-arms" trade-off above, right when the restart happened), there is no transition for `_async_door_window_changed` to catch. `_do_startup_coalesce()`'s own raw `_is_sensor_open()` read at the 5-minute mark is the *only* mechanism that observes this case. Before this fix, `_do_startup_coalesce()` hand-rolled its own incomplete nat-vent gate purely to decide whether to call `handle_door_window_open()` at all — when that pre-check favored declining nat-vent (e.g. outdoor warmer than indoor), the call never happened, `_paused_by_door` was never (re)set, and `apply_classification()` armed a fresh comfort band against the still-open window. Fixed by having `_do_startup_coalesce()` delegate unconditionally to `handle_door_window_open()` whenever a sensor is open, letting it make the nat-vent-vs-pause decision with its own complete gate — the same single source of truth the normal runtime path already uses. A second, compounding gap: `handle_door_window_open()`'s pause branch only ever set `_paused_by_door=True` when the current HVAC mode was not already `"off"` — exactly the state `_do_startup_coalesce()` finds after a restart where the window was already open (HVAC had already been paused/suppressed before the restart). Both `handle_door_window_open()` and `_re_pause_for_open_sensor()` now share a `_pause_for_door_window()` helper that sets the flag in both branches (mode-change or not), closing a drift the two call sites already had once (`_re_pause_for_open_sensor()`, added in #47, already got this right; the older `handle_door_window_open()` never did).
 
-**Settling window:** `restore_state()` sets `_first_run = True`. The coordinator's `_async_update_data()` delays the first full automation evaluation by 5 minutes (`_first_run` guard) to let the thermostat and HA state settle before CA takes any HVAC action. This replaces the role previously played by persisted override state in preventing false automations after restart.
+**Settling window:** the coordinator starts with `_startup_coalesce_active = True` and `_do_startup_coalesce()` delays the first full automation evaluation by 5 minutes (`STARTUP_COALESCE_SECONDS`, Issue #321) to let the thermostat and HA state settle before CA takes any HVAC action. This replaces the role previously played by persisted override state in preventing false automations after restart.
 
-### Startup Override Logic
+### Startup Coalescing Window — Occupant Changes Are Not Supported (owner decision, Issue #1235)
 
-On first data update after startup, Climate Advisor checks whether the HVAC's current mode matches the day classification's recommended mode before setting a manual override:
+The 5-minute window after HA starts (`STARTUP_COALESCE_SECONDS` = 300 s, gated by
+`coordinator._startup_coalesce_active`, Issue #321) exists so the system can **calm down and become stable** before
+Climate Advisor acts: entities re-register, cloud integrations reconnect, restored states are replaced by live ones.
+**Changing the thermostat or a fan during this window is not supported, and what happens is the intended behaviour:**
 
-| HVAC state | Classification recommends | Result |
+| When | What Climate Advisor does |
+|---|---|
+| During the window: thermostat mode / setpoint / `fan_mode` change | `_async_thermostat_changed()` returns early — no override, no confirm-pending, no grace, nothing deferred |
+| During the window: fan entity or RF-remote press | Dropped by `_suppress_during_startup_coalescing()` (#491); the remote's timestamp is still recorded (#1198) |
+| Coalesce end (`_do_startup_coalesce()`) | `apply_classification()` applies the day's plan (a mode/setpoint set during the window is replaced, with no override and no notice); `reconcile_fan_on_startup()` decides from the live fan state |
+| After coalesce end | Occupant changes are detected normally (override, confirm window, grace) |
+
+**Do not "fix" this by tracking or replaying state changes made during the window** (owner, Issue #1235: "if we
+start tracking state changes during the coalescing period we create new mistakes and problems"). A change seen
+during the window cannot be told apart reliably from restart artifacts (restored-vs-live differences, availability
+recovery, late echoes of CA's own commands); that is the #321 failure (a spurious 30-minute grace after every
+restart) the window was built to prevent. Issue #1235 proposed deferred detection at coalesce end and was closed as
+intended behaviour. An occupant who wants a different setting right after a restart changes it again after the window.
+
+**The one exception is safety, not ownership.** The rule-2 WHF/HVAC mutex still runs during the window and uses
+`_occupant_fan_on_at_from_ground_truth()` / `_occupant_hvac_on_at_from_ground_truth()` (#1144) only to decide which of
+two devices running together is newer, so the WHF and HVAC never run together. Those stamps never create an override.
+
+**History:** the old "Startup Override Logic" table (heat on a cool day → "Manual override set", Issue #42,
+`_check_startup_override`) was deleted in b17104d (Issue #321, v0.4.18); a restart never creates an override.
+`_first_run` still exists but only gates the coordinator's first-update bookkeeping; the occupant-change gate is
+`_startup_coalesce_active`. Pinned by `tests/test_startup_coalesce.py::test_no_override_during_coalesce_window`.
+
+**Just after the window: the echo guards, not coalescing (traced for #1235 observation A).** Coalesce end makes two
+thermostat writes: `apply_classification()` inside `_do_startup_coalesce()` (t = 0), then the
+`async_request_refresh()` that `_do_startup_coalesce()` schedules as it returns. HA's refresh debouncer runs it about
+10 s later, and its regular-cycle `apply_classification()` writes the setpoint again, even when nothing changed.
+Each write stamps `_hvac_command_time` and `_temp_command_time`, and the recent-command guards in
+`_async_thermostat_changed()` ([§9b guard table](#_is_expected_confirmation-issue-269-bug-a)) then treat an occupant
+change as CA's own echo:
+
+| Occupant change after coalesce end (real HA, 1 s clock) | Guard | Measured result |
 |---|---|---|
-| `off` / `unavailable` / `unknown` | any | No override set |
-| `heat` | `heat` | No override — modes match |
-| `heat` | `cool` or `off` | Manual override set — respects current state |
-| `cool` | `cool` | No override — modes match |
-| `cool` | `heat` or `off` | Manual override set — respects current state |
+| Mode, 0–2 s or 10–12 s after | `_is_recent_hvac_command()` default 3 s | Not detected; the comfort-edge selector restores the plan's mode about 2.5 min later |
+| Mode, 3–9 s, or from 13 s | — | Detected: override, confirm window, grace |
+| Setpoint, 0–39 s after | `_is_recent_hvac_command(30)` / `_is_recent_temp_command(30)` | Not detected. A change before the +10 s write is overwritten by it; a later one stays until CA's next setpoint write (the next 30-min cycle), which restores the plan's setpoint with no override and no notice |
+| Setpoint, from 41 s | — | Detected |
+| Thermostat `fan_mode` (blower, `hvac_fan`) | `_is_recent_hvac_command(30)` | Same 30 s rule (from the code, not measured) |
 
-This prevents unnecessary override lockouts after a Home Assistant restart when the HVAC is already in the mode that Climate Advisor would have set anyway. See Issue #42. This check runs after the 5-minute `_first_run` settling window.
+None of this is specific to restarts: the same 3 s (mode) and 30 s (setpoint, blower) windows follow **every** CA
+climate write, including the setpoint re-affirmed each 30-minute cycle. They exist because a thermostat reports
+CA's own command back asynchronously. The Issue #1109 command context cannot replace them, because a non-matching
+context proves nothing on a polling cloud thermostat (owner decision D6). The two writes at coalesce end only put two
+of these windows back to back, about 40 s for a setpoint change. Every guard dates from the original design
+(#42/#47, #220, #321), so this is not a regression. Probe: real-HA `house.restart(settle=False)` with
+`tests_ha/house/builder.SIM_STEP` patched to 1 s; see the 30 s-slice pitfall in
+[DEVELOPMENT.md](DEVELOPMENT.md#real-ha-tier-the-house-markers-revert-proof-snapshots-step-2-issue-1127).
 
 ### PATH B Notification — Transient Thermostat Adjustment (Issue #200)
 

@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.37"
+VERSION = "0.8.38"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -460,6 +460,21 @@ COMFORT_MODE_CHANGE_LOG_CAP = 200
 # phantom switch). Also the window in which a repeated command is treated as part of the same
 # change rather than a new one (``_record_commanded_mode``).
 COMFORT_RECENT_COMMAND_WINDOW_S = 30.0
+
+# Issue #1232: how long Climate Advisor remembers one of its own thermostat setpoint writes so the
+# thermostat reporting it back late (cloud thermostats echo 30-120 s after the write) is recognised as
+# CA's own echo and never read as the occupant changing the setpoint (a false manual override pauses
+# automation for the manual grace period). Owner decision 2026-11-02: 180 s. See own_write_echo.py.
+SETPOINT_ECHO_WINDOW_S = 180.0
+
+# Issue #1232: cap on the remembered-writes list (several writes in flight, echoed in order, are each recognised; the
+# cap only bounds memory if a thermostat never answers).
+SETPOINT_ECHO_MEMORY_MAX = 16
+
+# Issue #1232: setpoint rounding step assumed when the thermostat does not advertise
+# ``target_temp_step`` (Celsius thermostats commonly round to 0.5, Fahrenheit ones to 1).
+SETPOINT_ECHO_DEFAULT_STEP_C = 0.5
+SETPOINT_ECHO_DEFAULT_STEP_F = 1.0
 
 # Issue #1073 (S7): cap on the persisted settling-guard hold-episode log
 # (AutomationEngine.comfort_holds), read by the control-quality report.

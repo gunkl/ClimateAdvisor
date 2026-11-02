@@ -147,6 +147,13 @@ from .override_confirm_split import (
     is_always_confirm_origin,
 )
 from .override_match import decide_override_matches_decision
+from .own_write_echo import (
+    OwnSetpointWrite,
+    context_id_matches,
+    decide_setpoint_echo,
+    prune_own_writes,
+    resolve_step,
+)
 
 if TYPE_CHECKING:
     from .classification_fsm import ClassificationDecision
@@ -1617,6 +1624,10 @@ class AutomationEngine:
         # from the fan set on purpose: the fan set GATES a decision (fan override suppression in
         # coordinator._async_fan_entity_changed); the climate set is diagnostic only (D6).
         self._recent_climate_command_context_ids: list[tuple[str, datetime]] = []
+        # Issue #1232: bounded memory of CA's own setpoint writes (entity, attribute, value, time, Context id), so a
+        # cloud thermostat echoing a write 30-120 s late is recognised by value/Context and not read as the occupant.
+        # Transient (a 180 s memory is meaningless across a restart); see own_write_echo.py.
+        self._own_setpoint_writes: list[OwnSetpointWrite] = []
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
@@ -4957,12 +4968,14 @@ class AutomationEngine:
             _LOGGER.info("[DRY RUN] Would call climate.%s %s role=%s", service, data, self.role)
             return ClimateCallResult(ClimateCallOutcome.DRY_RUN)
         # Issue #1109: carries a recorded CA Context (diagnostic only), like fan commands.
+        _ctx = Context()
         task = asyncio.ensure_future(
-            self._call_service_with_context("climate", service, data, kind="climate", blocking=True)
+            self._call_service_with_context("climate", service, data, kind="climate", blocking=True, context=_ctx)
         )
         try:
             await asyncio.wait_for(asyncio.shield(task), CLIMATE_CALL_TIMEOUT_S)
         except TimeoutError:
+            self._settle_own_setpoint_write(_ctx.id, sent=True)  # state unknown: keep remembering it
             # The shielded call keeps running; make sure a late exception is retrieved.
             task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
             _LOGGER.warning(
@@ -4973,6 +4986,7 @@ class AutomationEngine:
             )
             return ClimateCallResult(ClimateCallOutcome.TIMEOUT)
         except Exception as err:
+            self._settle_own_setpoint_write(_ctx.id, sent=False)  # never reached the thermostat: nothing will echo
             if is_climate_validation_error(err):
                 _LOGGER.warning(
                     "%s: rejected by Home Assistant validation, skipped (service=%s): %s", label, service, err
@@ -4980,6 +4994,7 @@ class AutomationEngine:
                 return ClimateCallResult(ClimateCallOutcome.REJECTED, err)
             _LOGGER.error("%s: %s", label, err)
             return ClimateCallResult(ClimateCallOutcome.FAILED, err)
+        self._settle_own_setpoint_write(_ctx.id, sent=True)
         return ClimateCallResult(ClimateCallOutcome.OK)
 
     @contextlib.contextmanager
@@ -15984,7 +15999,14 @@ class AutomationEngine:
             _LOGGER.warning("WHF forced start second step failed: reason=%s role=%s", reason, self.role, exc_info=True)
 
     async def _call_service_with_context(
-        self, domain: str, service: str, data: dict[str, Any], *, kind: str, blocking: bool = False
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, Any],
+        *,
+        kind: str,
+        blocking: bool = False,
+        context: Context | None = None,
     ) -> None:
         """Issue one CA command carrying a fresh, recorded HA Context (Issues #482, #1109).
 
@@ -16004,8 +16026,11 @@ class AutomationEngine:
             # no context is recorded either.
             _LOGGER.info("[DRY RUN] Would call %s.%s %s role=%s", domain, service, entity_id, self.role)
             return
-        cmd_context = Context()
+        cmd_context = context if context is not None else Context()
         self._record_command_context(kind, cmd_context.id)
+        if kind == "climate" and service == "set_temperature":
+            # Issue #1232: remembered BEFORE the call, so a fast echo is covered.
+            self._remember_own_setpoint_write(data, cmd_context.id)
         self._observe_command(domain, service, data, kind)
         _LOGGER.debug(
             "Sending %s.%s entity=%s context_id=%s kind=%s role=%s",
@@ -16055,6 +16080,105 @@ class AutomationEngine:
         """
         await self._call_service_with_context(domain, service, {"entity_id": entity_id}, kind="fan")
 
+    def _remember_own_setpoint_write(self, data: dict[str, Any], context_id: str | None) -> None:
+        """Remember each setpoint attribute of one CA ``climate.set_temperature`` call (Issue #1232).
+
+        ``data`` values are in the thermostat's own unit, exactly as sent. Bounded: writes past the echo
+        window are dropped and only the newest ``SETPOINT_ECHO_MEMORY_MAX`` are kept, so several writes in
+        flight are each recognised. Never raises: a malformed value just is not remembered.
+        """
+        entity_id = data.get("entity_id")
+        if not isinstance(entity_id, str):
+            return
+        now = dt_util.now()
+        new: list[OwnSetpointWrite] = []
+        for attribute in ("temperature", "target_temp_low", "target_temp_high"):
+            raw = data.get(attribute)
+            if raw is None or isinstance(raw, bool):
+                continue
+            try:
+                value = float(raw)
+            except TypeError, ValueError:
+                continue
+            new.append(OwnSetpointWrite(entity_id, attribute, value, now, context_id))
+        if not new:
+            return
+        try:
+            kept = prune_own_writes(getattr(self, "_own_setpoint_writes", []), now)
+            self._own_setpoint_writes = list(prune_own_writes([*kept, *new], now))
+        except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
+            self._own_setpoint_writes = new
+
+    def _settle_own_setpoint_write(self, context_id: str, *, sent: bool) -> None:
+        """After the awaited call returns: forget a write that never reached the thermostat, else restart its window.
+
+        The window runs from when the (blocking) call RETURNED, like ``_restamp_climate_command_times``: a slow
+        cloud thermostat holds the call ~25 s and its echo follows after that (Issue #1049).
+        """
+        writes = getattr(self, "_own_setpoint_writes", None)
+        if not writes:
+            return
+        if not sent:
+            self._own_setpoint_writes = [w for w in writes if w.context_id != context_id]
+            return
+        now = dt_util.now()
+        self._own_setpoint_writes = [replace(w, written_at=now) if w.context_id == context_id else w for w in writes]
+
+    def recognise_own_setpoint_echo(
+        self,
+        observed: dict[str, Any],
+        *,
+        step: Any = None,
+        event_context_id: str | None = None,
+        event_context_parent_id: str | None = None,
+        event_context_user_id: str | None = None,
+    ) -> bool:
+        """True when this thermostat setpoint change is CA's own write coming back (Issue #1232).
+
+        ``observed`` maps each CHANGED setpoint attribute to its new reported value; ``step`` is the
+        thermostat's advertised ``target_temp_step`` (None -> a unit default). An echo is consumed from the
+        memory (cleared on arrival); anything else, or anything outside the window, is left for the
+        caller to evaluate as a possible occupant change. The one recognition rule is
+        ``own_write_echo.decide_setpoint_echo``.
+        """
+        writes = getattr(self, "_own_setpoint_writes", None)
+        if not writes:
+            return False
+        config = getattr(self, "config", None)
+        unit = config.get("temp_unit") if isinstance(config, dict) else None
+        now = dt_util.now()
+        try:
+            verdict = decide_setpoint_echo(
+                writes=writes,
+                entity_id=self.climate_entity,
+                observed=observed,
+                now=now,
+                step=resolve_step(step, unit),
+                event_context_id=event_context_id if isinstance(event_context_id, str) else None,
+                event_context_parent_id=event_context_parent_id if isinstance(event_context_parent_id, str) else None,
+                event_context_user_id=event_context_user_id if isinstance(event_context_user_id, str) else None,
+            )
+        except TypeError:  # naive/aware (or stubbed) clock mix: no memory, so evaluate as before
+            return False
+        # Cleared on echo arrival or window end (spec step 4).
+        try:
+            live = prune_own_writes(writes, now)
+        except TypeError:
+            live = ()
+        # Consumed (the echo's own writes) and superseded (older writes of the same attribute it moved past, #1232 D3).
+        consumed = set(verdict.consumed) | set(verdict.superseded)
+        self._own_setpoint_writes = [w for w in live if w not in consumed]
+        if verdict.recognised:
+            _LOGGER.info(
+                "Setpoint change recognised as Climate Advisor's own write echoing back (%s): observed=%s "
+                "age_s=%s role=%s",
+                verdict.reason,
+                observed,
+                [round((now - w.written_at).total_seconds()) for w in verdict.consumed],
+                self.role,
+            )
+        return verdict.recognised
+
     def _record_fan_command_context(self, context_id: str) -> None:
         """Record a just-issued CA fan-command context id (Issue #561); see ``_record_command_context``."""
         self._record_command_context("fan", context_id)
@@ -16088,7 +16212,7 @@ class AutomationEngine:
             return False
         cutoff = dt_util.now() - timedelta(seconds=30)
         return any(
-            ts >= cutoff and cid in (event_context_id, event_context_parent_id)
+            ts >= cutoff and context_id_matches(cid, event_context_id, event_context_parent_id)
             for cid, ts in getattr(self, _COMMAND_CONTEXT_SETS[kind], [])
         )
 

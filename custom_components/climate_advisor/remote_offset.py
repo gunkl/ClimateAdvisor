@@ -126,3 +126,32 @@ def decide_remote_offset(
             return RemoteOffsetDecision(RemoteOffsetAction.HOLD, m, "awaiting_startup")
         return RemoteOffsetDecision(RemoteOffsetAction.RAISE, min(m + step_f, max_magnitude_f), "raised")
     return RemoteOffsetDecision(RemoteOffsetAction.HOLD, m, "in_band")
+
+
+class RemoteOffsetGate(StrEnum):
+    """What the outer loop may do right now (Issue #1194 b); asked by the write path AND the check."""
+
+    PROCEED = "proceed"  # nobody owns the thermostat: the loop steps, every writer applies the offset
+    FREEZE = "freeze"  # a monitored door/window is open but still inside its debounce: hold the offset as is
+    CLOSED = "closed"  # an owner (occupant, pause, fan, away setback, a window open past its debounce): offset 0
+
+
+def decide_remote_offset_gate(*, owner_holds: bool, sensor_open: bool, debounce_pending: bool) -> RemoteOffsetGate:
+    """The ONE gate rule of the outer loop (Issue #1194 b, owner decision D1 = FREEZE).
+
+    ``owner_holds``: the occupant's protected change, or the shared scheduled-band gate (away / vacation, override,
+    door/window pause, nat-vent or WHF ownership) says defer. ``sensor_open``: a monitored door/window reads open now
+    (or went dark after reading open). ``debounce_pending``: a monitored sensor is still inside its open debounce.
+
+    * An owner -> CLOSED (forget the offset; the owner commands the thermostat).
+    * Open inside the debounce -> FREEZE: no raise, no step down, no reset and no loop write; any other writer
+      re-applies the HELD offset. A blip changes nothing; an open that outlasts the debounce becomes the pause (rule 3)
+      and the pause is an owner.
+    * Open past the debounce with no pause (e.g. the occupant resumed into an open window) -> CLOSED: no extra degrees
+      into a settled-open window.
+    """
+    if owner_holds:
+        return RemoteOffsetGate.CLOSED
+    if sensor_open:
+        return RemoteOffsetGate.FREEZE if debounce_pending else RemoteOffsetGate.CLOSED
+    return RemoteOffsetGate.PROCEED

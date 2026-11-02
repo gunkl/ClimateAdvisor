@@ -276,8 +276,10 @@ from .override_grace_lifecycle import (
 from .remote_offset import (
     RemoteContext,
     RemoteOffsetAction,
+    RemoteOffsetGate,
     cap_f,
     decide_remote_offset,
+    decide_remote_offset_gate,
     max_magnitude_f,
     startup_wait_s,
     step_f,
@@ -6155,9 +6157,11 @@ class AutomationEngine:
     # today the bedroom sensor in the sleep window) the thermostat, which only sees its own sensor, may never
     # start. CA therefore adds a stepped OFFSET to the setpoint it writes. The offset is applied in exactly one
     # place (``_set_temperature_impl`` -> ``_remote_offset_for_write``); ``remote_offset_check`` only moves the
-    # offset (one step per check) and re-sends the same target through that path. Gating (override, door/window
-    # pause, WHF, away/vacation) is the shared scheduled-band gate in this increment; context entry/exit events,
-    # Status "clamped" and the chart split are later increments (#1194 b-e).
+    # offset (one step per check) and re-sends the same target through that path. Gating is the ONE predicate
+    # ``_remote_offset_gate`` (Issue #1194 b): CLOSED for an owner (override/pending, the door/window pause, nat-vent /
+    # WHF ownership, away/vacation, a window open past its debounce), FREEZE while a door/window is open inside its
+    # debounce (hold the offset as is). Context entry/exit events, Status "clamped" and the chart split are later
+    # increments (#1194 c-e).
 
     def _remote_sensor_configured(self) -> bool:
         """Whether any remote-sensor context is configured at all (today: the sleep-window bedroom sensor).
@@ -6167,15 +6171,28 @@ class AutomationEngine:
         """
         return bool(self.config.get("sleep_indoor_temp_entity"))
 
-    def _remote_offset_gated(self) -> bool:
-        """True while CA must not write an offset (occupant, window, fan or away setback owns the thermostat).
+    def _remote_offset_gate(self) -> RemoteOffsetGate:
+        """The ONE gate predicate of the outer loop (Issue #1194 b); the write path and the check both ask it.
 
-        Reuses ``decide_scheduled_band_gate`` (override / door-window pause / nat-vent or WHF / away or vacation)
-        plus the unconfirmed-change window, the same set every scheduled band writer defers on.
+        It composes existing predicates and owns no gate logic of its own (the rule is the pure
+        ``remote_offset.decide_remote_offset_gate``):
+
+        * owner: ``_manual_change_protected()`` (the occupant's confirmed override OR a change still inside its
+          confirmation window, Issue #1133) or ``decide_scheduled_band_gate`` (away/vacation, manual override,
+          door/window pause, nat-vent or WHF ownership -- the gate every scheduled band writer defers on; it covers
+          both fan modes) -> CLOSED;
+        * ``_any_monitored_sensor_holding_open()`` (open now, or dark after reading open, #1181) while
+          ``_sensor_debounce_pending`` -> FREEZE (owner decision D1): the offset already on the thermostat is held, the
+          loop neither steps nor writes, and every other writer re-applies the held value. A blip therefore changes
+          nothing (no setpoint flapping on a busy door); an open that outlasts the debounce becomes the door/window
+          pause, an owner (rule 3);
+        * open past the debounce with no pause -> CLOSED.
+
+        A bare grace (automation, fan-off, blower press, a protecting grace whose override already cleared) is NOT a
+        gate: it is a timer for an owner, not an owner (no band writer defers on it), and holding the loop for it would
+        leave the bedroom cold after every window close (CA's own 5-minute resume grace) for nothing.
         """
-        if self._override_confirm_pending:
-            return True
-        return (
+        owner_holds = self._manual_change_protected() or (
             decide_scheduled_band_gate(
                 occupancy_mode=self._occupancy_mode,
                 manual_override_active=self._manual_override_active,
@@ -6184,6 +6201,12 @@ class AutomationEngine:
                 whf_owns_hvac=self._whf_owns_hvac(),
             )
             is not ScheduledBandGate.PROCEED
+        )
+        sensor_open = not owner_holds and self._any_monitored_sensor_holding_open()
+        return decide_remote_offset_gate(
+            owner_holds=owner_holds,
+            sensor_open=sensor_open,
+            debounce_pending=sensor_open and self._sensor_debounce_pending,
         )
 
     def _remote_context(self) -> RemoteContext | None:
@@ -6246,9 +6269,10 @@ class AutomationEngine:
         self._sync_remote_context(ctx.key if ctx is not None and ctx.fresh else None)
         if ctx is None or not ctx.fresh:
             return 0.0
-        if self._remote_offset_gated():
+        if self._remote_offset_gate() is RemoteOffsetGate.CLOSED:
             self._reset_remote_offset(applied_unknown=True)
             return 0.0
+        # PROCEED, or FREEZE (a door/window open inside its debounce): the HELD offset, never dropped, never stepped.
         magnitude = min(self._remote_offset_f, self._remote_offset_cap_for(target_f, mode))
         return magnitude if mode == "heat" else -magnitude
 
@@ -6279,9 +6303,14 @@ class AutomationEngine:
         ctx = self._remote_context()
         fresh = ctx is not None and ctx.fresh
         self._sync_remote_context(ctx.key if fresh and ctx is not None else None)
-        if self._remote_offset_gated():
+        gate = self._remote_offset_gate()
+        if gate is RemoteOffsetGate.CLOSED:
             # The occupant / a window / the fan / an away setback owns the thermostat: write nothing, forget the offset.
             self._reset_remote_offset(applied_unknown=True)
+            return
+        if gate is RemoteOffsetGate.FREEZE:
+            # A door/window is open inside its debounce (owner decision D1): hold the offset exactly as it is -- no
+            # step, no reset, no write. If it closes in time nothing happened; if not, the pause (CLOSED) takes over.
             return
         live = self.hass.states.get(self.climate_entity)
         if live is None or getattr(live, "state", None) != mode:

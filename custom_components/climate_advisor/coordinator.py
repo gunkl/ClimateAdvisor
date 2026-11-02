@@ -6268,9 +6268,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._record_promise_reading()
 
         # Issue #489: refresh immediately on every raw transition (open or closed) so
-        # contact_status/contact_sensors reflect live sensor state right away. This is
-        # display-only — it does not affect the debounce below, which still exclusively
-        # gates the HVAC pause/resume and nat-vent decision.
+        # contact_status/contact_sensors reflect live sensor state right away. It does not
+        # affect the debounce below, which still exclusively gates the HVAC pause/resume and
+        # nat-vent decision. It is NOT display-only: the refresh runs the regular cycle
+        # (apply_classification -> band apply), which writes the comfort setpoint through the
+        # single setpoint path -- with the remote-sensor offset HELD while the sensor is inside
+        # its debounce (Issue #1194 b, FREEZE).
         self.hass.async_create_task(self.async_request_refresh())
 
         # Issue #1181: remember the last REAL reading (old state first, so a missed earlier event still
@@ -6505,10 +6508,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         await self._async_run_temp_reactive_checks()
         # Issue #1194 (a): every remote-sensor update is also a check of the outer loop's offset.
-        await self.automation_engine.remote_offset_check()
+        await self._async_remote_offset_tick(event)
 
     async def _async_remote_offset_tick(self, _now: Any) -> None:
-        """1-minute floor under the remote-sensor listener (Issue #1194 a)."""
+        """1-minute floor under the remote-sensor listener, and the listener's own check (Issue #1194 a).
+
+        The one entry to the outer loop. Issue #1194 (b): silent during the 300 s startup-coalescing window -- the
+        window in which an occupant's thermostat change is not detected (Issue #1235, unsupported), so the loop adds no
+        writes of its own there. It has no target after a restart anyway (the target is learned from CA's first
+        setpoint write), so this only matters when another writer wrote inside the window.
+        """
+        if self._suppress_during_startup_coalescing("remote offset check"):
+            return
         await self.automation_engine.remote_offset_check()
 
     @_whf_safety_after_event(_whf_after_thermostat_event)

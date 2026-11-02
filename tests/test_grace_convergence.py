@@ -163,9 +163,19 @@ class TestGraceConvergence:
         engine.handle_bedtime = _fake_handle_bedtime
 
         apply_classification_called = []
+        apply_classification_kwargs = []
 
-        async def _fake_apply_classification(c):
+        async def _fake_apply_classification(
+            c,
+            predicted_indoor=None,
+            indoor_temp=None,
+            nat_vent_cutoff=None,
+            nat_vent_cutoff_already_reached=False,
+        ):
             apply_classification_called.append(c)
+            apply_classification_kwargs.append(
+                {"nat_vent_cutoff": nat_vent_cutoff, "nat_vent_cutoff_already_reached": nat_vent_cutoff_already_reached}
+            )
 
         engine.apply_classification = _fake_apply_classification
 
@@ -194,11 +204,25 @@ class TestGraceConvergence:
             handle_bedtime_called.append(True)
 
         engine.handle_bedtime = _fake_handle_bedtime
+        # Issue #1231: the plan's close is already behind us; grace expiry must not drop it (that re-opened the period)
+        cutoff = datetime(2026, 3, 20, 15, 0, 0)
+        engine._nat_vent_cutoff = cutoff
+        engine._nat_vent_cutoff_already_reached = True
 
         apply_classification_called = []
+        apply_classification_kwargs = []
 
-        async def _fake_apply_classification(c):
+        async def _fake_apply_classification(
+            c,
+            predicted_indoor=None,
+            indoor_temp=None,
+            nat_vent_cutoff=None,
+            nat_vent_cutoff_already_reached=False,
+        ):
             apply_classification_called.append(c)
+            apply_classification_kwargs.append(
+                {"nat_vent_cutoff": nat_vent_cutoff, "nat_vent_cutoff_already_reached": nat_vent_cutoff_already_reached}
+            )
 
         engine.apply_classification = _fake_apply_classification
 
@@ -210,6 +234,7 @@ class TestGraceConvergence:
         assert apply_classification_called, "apply_classification() should have been called outside bedtime window"
         assert not handle_bedtime_called, "handle_bedtime() should NOT be called outside bedtime window"
         assert apply_classification_called[0] is classification
+        assert apply_classification_kwargs[0] == {"nat_vent_cutoff": cutoff, "nat_vent_cutoff_already_reached": True}
 
     def test_grace_expiry_no_classification_no_crash(self):
         """_apply_current_scheduled_state does nothing gracefully when no classification set."""
@@ -243,9 +268,19 @@ class TestGraceConvergence:
         engine._current_classification = classification
 
         apply_classification_called = []
+        apply_classification_kwargs = []
 
-        async def _fake_apply_classification(c):
+        async def _fake_apply_classification(
+            c,
+            predicted_indoor=None,
+            indoor_temp=None,
+            nat_vent_cutoff=None,
+            nat_vent_cutoff_already_reached=False,
+        ):
             apply_classification_called.append(c)
+            apply_classification_kwargs.append(
+                {"nat_vent_cutoff": nat_vent_cutoff, "nat_vent_cutoff_already_reached": nat_vent_cutoff_already_reached}
+            )
 
         engine.apply_classification = _fake_apply_classification
 

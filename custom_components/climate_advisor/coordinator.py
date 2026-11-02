@@ -7033,6 +7033,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             old_temp = old_state.attributes.get("temperature")
             _setpoint_changed = new_temp != old_temp
 
+        # Issue #1232: a cloud thermostat can report Climate Advisor's own setpoint write 30-120 s after it was sent,
+        # past the 30 s recency guards below. Recognise it by Context, else by value (after rounding to the
+        # thermostat's step) against the engine's bounded memory of what CA wrote, inside the 180 s echo window.
+        # ``is True`` keeps MagicMock-stubbed engines inert. Computed only for a real setpoint change; a recognised
+        # echo is consumed from the memory here, whichever other guard would also have suppressed it.
+        _own_setpoint_echo = False
+        if _setpoint_changed and not _is_availability_recovery:
+            _ev_context = getattr(event, "context", None)
+            _own_setpoint_echo = (
+                self.automation_engine.recognise_own_setpoint_echo(
+                    {_a: new_state.attributes.get(_a) for _a in _sp_attrs},
+                    step=new_state.attributes.get("target_temp_step"),
+                    event_context_id=getattr(_ev_context, "id", None),
+                    event_context_parent_id=getattr(_ev_context, "parent_id", None),
+                    event_context_user_id=getattr(_ev_context, "user_id", None),
+                )
+                is True
+            )
+
         _setpoint_candidate = bool(
             _setpoint_changed
             # Issue #1049: a reconnecting thermostat has no prior setpoint — that is a reading
@@ -7045,6 +7064,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self.automation_engine._fan_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not self._is_recent_temp_command(threshold_seconds=30.0)
+            and not _own_setpoint_echo  # Issue #1232: CA's own write echoing back late (value/Context match)
             and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _fan_cancel_in_this_event  # Issue #359 Fix A: fan-off echo suppresses grace
         )

@@ -32,10 +32,10 @@ from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature
 from homeassistant.components.climate.const import FAN_AUTO, FAN_ON
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
@@ -232,6 +232,12 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._last_on_ts: datetime | None = None
         self._last_off_ts: datetime | None = None
 
+        # Cloud-thermostat echo delay (Issue #1232): seconds between a ``set_temperature`` call and the thermostat
+        # reporting it (real cloud thermostats answer 30-120 s late, with no Context of the caller's). 0 = the
+        # historical instant, Context-carrying behaviour; only the test house turns it on (``set_echo_delay``).
+        self._echo_delay_s: float = 0.0
+        self._cancel_echo: list[Any] = []
+
     async def async_added_to_hass(self) -> None:
         """Restore prior simulated state (if any) and start the tick timer."""
         await super().async_added_to_hass()
@@ -282,6 +288,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self.async_on_remove(
             async_track_time_interval(self.hass, self._async_tick, timedelta(seconds=self._tick_seconds))
         )
+        self.async_on_remove(self._cancel_pending_echoes)
 
     def apply_manual_temperature_override(self, value: float) -> None:
         """Jump the simulated indoor temperature directly (Issue #898) — called by
@@ -402,6 +409,28 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         Issue #830 traced to: the sim entity, not CA's decision logic, silently discarded
         every heat/cool command sent through the (correct, by-design) combined call path.
         """
+        if self._echo_delay_s > 0:
+            pending = dict(kwargs)
+
+            @callback
+            def _answer(_now: datetime) -> None:  # @callback: runs in the event loop (it writes entity state)
+                self._apply_set_temperature(pending)
+
+            self._cancel_echo.append(async_call_later(self.hass, self._echo_delay_s, _answer))
+            return
+        self._apply_set_temperature(kwargs)
+
+    def _cancel_pending_echoes(self) -> None:
+        for cancel in self._cancel_echo:
+            cancel()
+        self._cancel_echo.clear()
+
+    def set_echo_delay(self, seconds: float) -> None:
+        """Make the thermostat report a ``set_temperature`` ``seconds`` after the call (0 = instant, the default)."""
+        self._echo_delay_s = float(seconds)
+
+    def _apply_set_temperature(self, kwargs: dict[str, Any]) -> None:
+        """Apply (and report) one ``set_temperature`` call -- immediately, or when its cloud echo is due."""
         hvac_mode = kwargs.get("hvac_mode")
         if hvac_mode is not None:
             new_mode = HVACMode(hvac_mode) if not isinstance(hvac_mode, HVACMode) else hvac_mode

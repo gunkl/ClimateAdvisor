@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.50] — 2026-11-03
+
+- #1279 (test tooling and docs only, nothing changes at home): the newly working nightly test failed on simulated days where the occupant switched the whole-house fan on and then pressed heat or AC again within 1 to 2 seconds. Climate Advisor reads a press that close to its own "HVAC off" as the thermostat echoing its command, so the heating or cooling ran beside the fan for 13 to 30 minutes. This is the case closed as #1203. The owner has confirmed it is not a supported occupant action: you would turn the fan on and the HVAC off, never back on within seconds. So the generated days no longer produce a press inside 3 seconds, and their fast case now presses 3 to 5 seconds after the fan, which Climate Advisor handles by stopping the fan at once. The #1203 test excuse and its expected-failure tests are removed. The 3-second boundary days stay as tests, so widening the echo window, or removing the newest-action-wins rule, still fails them. The computation reference now describes this as an unsupported action rather than a known limitation.
+
 ## [0.8.49] — 2026-11-03
 
 - Fix #1278 (test tooling only, nothing changes at home): the nightly test of thousands of generated household days had failed every night since it was added. The GitHub runner ran out of memory and was killed, so no result was produced and nobody was told. The cause was the simulator's stand-in for Home Assistant's `@callback` decorator. It was a MagicMock, so it replaced three Climate Advisor methods with a do-nothing mock: the whole-house-fan sealed-house safety tick, the thermal sample tick and the post-grace fan check. It also recorded every call to them forever, about 25 MB per simulated day. It now behaves like Home Assistant's: the decorated methods really run in simulation, and memory stays flat at about 110 MB.

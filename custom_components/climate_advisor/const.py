@@ -461,11 +461,11 @@ COMFORT_MODE_CHANGE_LOG_CAP = 200
 # change rather than a new one (``_record_commanded_mode``).
 COMFORT_RECENT_COMMAND_WINDOW_S = 30.0
 
-# Issue #1232: how long Climate Advisor remembers one of its own thermostat setpoint writes so the
+# Issues #1232, #1246: how long Climate Advisor remembers one of its own thermostat setpoint or HVAC mode writes so the
 # thermostat reporting it back late (cloud thermostats echo 30-120 s after the write) is recognised as
-# CA's own echo and never read as the occupant changing the setpoint (a false manual override pauses
+# CA's own echo and never read as the occupant changing the setpoint or mode (a false manual override pauses
 # automation for the manual grace period). Owner decision 2026-11-02: 180 s. See own_write_echo.py.
-SETPOINT_ECHO_WINDOW_S = 180.0
+OWN_WRITE_ECHO_WINDOW_S = 180.0
 
 # Issue #1232: cap on the remembered-writes list (several writes in flight, echoed in order, are each recognised; the
 # cap only bounds memory if a thermostat never answers).

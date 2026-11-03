@@ -151,8 +151,10 @@ from .override_confirm_split import (
 )
 from .override_match import decide_override_matches_decision
 from .own_write_echo import (
+    OwnModeWrite,
     OwnSetpointWrite,
     context_id_matches,
+    decide_mode_echo,
     decide_setpoint_echo,
     prune_own_writes,
     resolve_step,
@@ -1688,6 +1690,9 @@ class AutomationEngine:
         # cloud thermostat echoing a write 30-120 s late is recognised by value/Context and not read as the occupant.
         # Transient (a 180 s memory is meaningless across a restart); see own_write_echo.py.
         self._own_setpoint_writes: list[OwnSetpointWrite] = []
+        # Issue #1246: the same memory for CA's own HVAC MODE writes (a door-close restore then a family flip is two
+        # writes inside the echo window; ``_last_commanded_hvac_mode`` keeps only the last). Transient too.
+        self._own_mode_writes: list[OwnModeWrite] = []
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
@@ -5100,6 +5105,42 @@ class AutomationEngine:
         """The mode Climate Advisor itself last commanded (None: never). The one read of it (Issue #1209)."""
         return getattr(self, "_last_commanded_hvac_mode", None)
 
+    def _remember_own_mode_write(self, mode: str) -> None:
+        """Remember a mode write for the echo window (Issue #1246); pruned like the setpoint memory."""
+        now = dt_util.now()
+        try:
+            kept = prune_own_writes(getattr(self, "_own_mode_writes", []), now)
+            self._own_mode_writes = list(prune_own_writes([*kept, OwnModeWrite(mode, now)], now))
+        except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
+            self._own_mode_writes = [OwnModeWrite(mode, now)]
+
+    def recognise_own_mode_echo(self, observed_mode: str) -> bool:
+        """True when this thermostat mode change is one of CA's own recent mode writes coming back (Issue #1246).
+
+        Membership in the recent-write list, not equality with the last write. An echo is consumed from the memory
+        (with the older writes it moved past); a mode CA did not write inside the window is left for the caller to
+        judge as a possible occupant change. The one rule is ``own_write_echo.decide_mode_echo``.
+        """
+        writes = getattr(self, "_own_mode_writes", None)
+        if not writes:
+            return False
+        now = dt_util.now()
+        try:
+            verdict = decide_mode_echo(writes=writes, observed_mode=observed_mode, now=now)
+            live = prune_own_writes(writes, now)
+        except TypeError:  # naive/aware (or stubbed) clock mix: no memory, so evaluate as before
+            return False
+        gone = set(verdict.consumed) | set(verdict.superseded)
+        self._own_mode_writes = [w for w in live if w not in gone]
+        if verdict.recognised:
+            _LOGGER.info(
+                "Mode change to %s recognised as Climate Advisor's own write echoing back: age_s=%s role=%s",
+                observed_mode,
+                [round((now - w.written_at).total_seconds()) for w in verdict.consumed],
+                self.role,
+            )
+        return verdict.recognised
+
     def _record_commanded_mode(self, mode: str, reason_text: str | None = None) -> None:
         """Single writer of ``_last_commanded_hvac_mode`` (Issue #1066).
 
@@ -5108,6 +5149,7 @@ class AutomationEngine:
         misarmed minutes and switch latency at minute resolution (the chart log is ~30 min).
         """
         prev = getattr(self, "_last_commanded_hvac_mode", None)
+        self._remember_own_mode_write(mode)
         # Issue #1073 (S3): a command that merely re-affirms the mode the thermostat is ALREADY in
         # is not a mode change and must not move the mode-change clock. A command issued moments
         # after the previous one (live state still lagging) is judged by ``prev`` alone.
@@ -5337,6 +5379,10 @@ class AutomationEngine:
             self._temp_command_time = _now
         self._last_commanded_hvac_time = _now
         self._hvac_command_time = _now
+        if getattr(
+            self, "_own_mode_writes", None
+        ):  # the echo window runs from when the (slow) call returned (Issue #1246)
+            self._own_mode_writes[-1] = replace(self._own_mode_writes[-1], written_at=_now)
 
     def _emit_engine_incident(self, incident_class: str, extra: dict[str, Any]) -> None:
         """Emit an engine-side ``incident_detected`` via the shared payload builder (Issue #1049)."""

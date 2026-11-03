@@ -3,7 +3,8 @@
 Occupant story: she turns the whole-house fan on with every window closed; Climate Advisor stops it ~10 s later
 (household rule 1). The engine ended the fan override and its grace, but the Status card kept reading
 "grace period (manual) — WHF override — 3h" for another 15-26 s, until the fan power entity's lagging off reading
-happened to refresh the coordinator. The cards read ``coordinator.data``, so ending a grace must push them (display only).
+happened to refresh the coordinator. The cards read ``coordinator.data``, so ending a grace must push them
+(display only).
 
 Second gap on the same stop: when the sealed decision stops the fan and it already reads off
 (``ALREADY_IN_STATE``), the override and grace were left running for the rest of the timer.
@@ -26,7 +27,7 @@ def _occupant_pressed_the_fan_on(engine) -> None:
 
 
 class TestSealedStopPushesTheCards:
-    def test_executed_stop_ends_the_grace_and_pushes_the_cards(self, clock):
+    def test_executed_stop_ends_the_grace_and_pushes_the_cards(self, clock):  # noqa: F811
         engine, _ = _engine()
         _occupant_pressed_the_fan_on(engine)
         engine._push_card_status_callback = push = MagicMock()
@@ -38,7 +39,7 @@ class TestSealedStopPushesTheCards:
         assert engine._fan_override_active is False
         push.assert_called()
 
-    def test_the_cards_are_pushed_only_once_the_ending_is_complete(self, clock):
+    def test_the_cards_are_pushed_only_once_the_ending_is_complete(self, clock):  # noqa: F811
         """A push made mid-ending would render the grace as still active and show it until the next refresh."""
         engine, _ = _engine()
         _occupant_pressed_the_fan_on(engine)
@@ -49,13 +50,13 @@ class TestSealedStopPushesTheCards:
 
         assert seen and all(s == (False, False) for s in seen), seen
 
-    def test_nothing_running_no_push(self, clock):
+    def test_nothing_running_no_push(self, clock):  # noqa: F811
         engine, _ = _engine()
         engine._push_card_status_callback = push = MagicMock()
         engine._end_fan_override_and_grace(reason="whf_safety_stop")
         push.assert_not_called()
 
-    def test_leaving_home_ending_a_grace_pushes_the_cards(self, clock):
+    def test_leaving_home_ending_a_grace_pushes_the_cards(self, clock):  # noqa: F811
         """Mirror (production 2026-11-02 10:23): the away setback ends the occupant's change and its grace (#1222)."""
         engine, _ = _engine()
         engine._grace_active = True
@@ -70,7 +71,7 @@ class TestSealedStopPushesTheCards:
 
 
 class TestSealedStopOfAFanThatAlreadyReadsOff:
-    def test_already_off_still_ends_the_override_and_grace(self, clock):
+    def test_already_off_still_ends_the_override_and_grace(self, clock):  # noqa: F811
         engine, _ = _engine()
         _occupant_pressed_the_fan_on(engine)
         engine._push_card_status_callback = push = MagicMock()
@@ -83,4 +84,6 @@ class TestSealedStopOfAFanThatAlreadyReadsOff:
         assert engine._grace_active is False, "the grace ran on for the rest of the timer over a fan that was off"
         assert engine._fan_override_active is False
         push.assert_called()
-        assert not getattr(engine, "_whf_safety_stop_times", []), "no command went out: not a stop for the oscillation alert"
+        assert not getattr(engine, "_whf_safety_stop_times", []), (
+            "no command went out: not a stop for the oscillation alert"
+        )

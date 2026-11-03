@@ -40,6 +40,25 @@ def _parse_ts(ts_str: str) -> datetime | None:
     return None
 
 
+def _bucket_comfort_target(group: list[dict[str, Any]]) -> float | None:
+    """The averaged room comfort target of a bucket, or None when no row in it carried ``comfort_target``.
+
+    Issue #1194 (d): ``comfort_target`` exists only on rows where the remote-sensor outer loop held an offset; on
+    every other row the room's target IS the thermostat ``setpoint``. Each row therefore contributes its comfort target
+    when it has one and its setpoint otherwise -- the same preference ``_extract_historical_effective_target()``
+    applies to a raw row -- so a 7d/30d/1y bucket that holds part of an offset night still charts the room's target,
+    not the commanded value. Buckets without any offset row get no key (unchanged; the extractor uses setpoint).
+    """
+    if not any(e.get("comfort_target") is not None for e in group):
+        return None
+    vals = [
+        e["comfort_target"] if e.get("comfort_target") is not None else e["setpoint"]
+        for e in group
+        if e.get("comfort_target") is not None or e.get("setpoint") is not None
+    ]
+    return round(sum(vals) / len(vals), 1)
+
+
 class ChartStateLog:
     """Rolling log of HVAC state snapshots and event markers for charting."""
 
@@ -141,6 +160,7 @@ class ChartStateLog:
         upper: float | None = None,
         nat_vent_target: float | None = None,
         indoor_primary: float | None = None,
+        comfort_target: float | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -160,6 +180,10 @@ class ChartStateLog:
             prediction. The caller is responsible for resolving these once per cycle
             (see coordinator.py's ``_target_band_lower_upper_now()``) and passing the
             already-resolved values here; this method does not compute them.
+        comfort_target: the room's comfort target (internal F) on a row where the remote-sensor outer loop holds an
+            offset (Issue #1194 d), so ``setpoint`` (what the thermostat was told) and the target the room is
+            supposed to reach are charted apart. The key is present only when an offset was in force, so every other
+            row and older logs are unchanged.
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -191,6 +215,8 @@ class ChartStateLog:
             entry["event"] = event
         if indoor_primary is not None:
             entry["indoor_primary"] = indoor_primary
+        if comfort_target is not None:
+            entry["comfort_target"] = comfort_target
 
         self._entries.append(entry)
         self._maybe_prune()
@@ -312,6 +338,7 @@ class ChartStateLog:
             lower_vals = [e["lower"] for e in group if e.get("lower") is not None]
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
+            comfort_target = _bucket_comfort_target(group)
 
             summary: dict[str, Any] = {
                 "ts": bucket_key,
@@ -334,6 +361,8 @@ class ChartStateLog:
                     round(sum(nat_vent_target_vals) / len(nat_vent_target_vals), 1) if nat_vent_target_vals else None
                 ),
             }
+            if comfort_target is not None:
+                summary["comfort_target"] = comfort_target
             if events:
                 summary["event"] = events
             result.append(summary)
@@ -364,6 +393,7 @@ class ChartStateLog:
             lower_vals = [e["lower"] for e in group if e.get("lower") is not None]
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
+            comfort_target = _bucket_comfort_target(group)
 
             summary: dict[str, Any] = {
                 "ts": f"{day_key}T00:00:00+00:00",
@@ -392,6 +422,8 @@ class ChartStateLog:
                     round(sum(nat_vent_target_vals) / len(nat_vent_target_vals), 1) if nat_vent_target_vals else None
                 ),
             }
+            if comfort_target is not None:
+                summary["comfort_target"] = comfort_target
             if events:
                 summary["events"] = events
             result.append(summary)

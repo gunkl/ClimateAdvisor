@@ -1,0 +1,920 @@
+{
+  "description": "A whole night (20:30 -> 06:35) recorded from the closed-loop two-node house (tools/sim_harness/remote_night.py): the hallway thermostat cycles on its own asymmetric deadband (starts at setpoint - 1.5, stops at setpoint - 0.5), the bedroom lags and cools to 64.5 F, the bedroom sensor reports on change with last_reported, and the loop (learned swing 0.59 F) nudges the setpoint through the real coordinator. The realised events replay without the plant.",
+  "config": {
+    "climate_entity": "climate.test_thermostat",
+    "comfort_heat": 68.0,
+    "comfort_cool": 75.0,
+    "sleep_heat": 66.0,
+    "sleep_cool": 72.0,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ]
+  },
+  "thermal_model": {
+    "swing_heat_f": 0.59,
+    "swing_cool_f": 0.59
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 69.5,
+      "outdoor_f": 54.0
+    },
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.28
+    },
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle"
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime"
+    },
+    {
+      "time": "2026-11-02T20:44:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.1
+    },
+    {
+      "time": "2026-11-02T21:00:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 53.5
+    },
+    {
+      "time": "2026-11-02T21:28:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-02T21:58:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.74
+    },
+    {
+      "time": "2026-11-02T22:26:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.56
+    },
+    {
+      "time": "2026-11-02T22:34:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 52.1
+    },
+    {
+      "time": "2026-11-02T22:53:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.38
+    },
+    {
+      "time": "2026-11-02T23:20:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-02T23:46:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.02
+    },
+    {
+      "time": "2026-11-03T00:03:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 50.8
+    },
+    {
+      "time": "2026-11-03T00:11:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.84
+    },
+    {
+      "time": "2026-11-03T00:37:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.66
+    },
+    {
+      "time": "2026-11-03T01:02:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.48
+    },
+    {
+      "time": "2026-11-03T01:27:00",
+      "type": "temp_update",
+      "indoor_f": 67.5,
+      "outdoor_f": 49.5
+    },
+    {
+      "time": "2026-11-03T01:27:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.3
+    },
+    {
+      "time": "2026-11-03T01:33:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "heating"
+    },
+    {
+      "time": "2026-11-03T01:34:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 49.4
+    },
+    {
+      "time": "2026-11-03T01:38:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T01:39:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T01:39:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle"
+    },
+    {
+      "time": "2026-11-03T01:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.46
+    },
+    {
+      "time": "2026-11-03T01:41:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 68.18
+    },
+    {
+      "time": "2026-11-03T01:42:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.82
+    },
+    {
+      "time": "2026-11-03T01:43:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T01:44:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.46
+    },
+    {
+      "time": "2026-11-03T01:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.28
+    },
+    {
+      "time": "2026-11-03T01:46:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.1
+    },
+    {
+      "time": "2026-11-03T01:47:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T01:49:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.74
+    },
+    {
+      "time": "2026-11-03T01:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.56
+    },
+    {
+      "time": "2026-11-03T01:52:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.38
+    },
+    {
+      "time": "2026-11-03T01:54:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T01:57:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.02
+    },
+    {
+      "time": "2026-11-03T02:00:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.84
+    },
+    {
+      "time": "2026-11-03T02:05:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.66
+    },
+    {
+      "time": "2026-11-03T02:12:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.48
+    },
+    {
+      "time": "2026-11-03T02:27:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.3
+    },
+    {
+      "time": "2026-11-03T02:30:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "heating"
+    },
+    {
+      "time": "2026-11-03T02:34:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 48.5
+    },
+    {
+      "time": "2026-11-03T02:35:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T02:36:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T02:36:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle"
+    },
+    {
+      "time": "2026-11-03T02:37:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T02:38:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 68.18
+    },
+    {
+      "time": "2026-11-03T02:39:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.82
+    },
+    {
+      "time": "2026-11-03T02:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T02:41:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.46
+    },
+    {
+      "time": "2026-11-03T02:42:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.28
+    },
+    {
+      "time": "2026-11-03T02:43:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.1
+    },
+    {
+      "time": "2026-11-03T02:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T02:46:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.74
+    },
+    {
+      "time": "2026-11-03T02:47:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.56
+    },
+    {
+      "time": "2026-11-03T02:49:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.38
+    },
+    {
+      "time": "2026-11-03T02:51:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T02:54:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.02
+    },
+    {
+      "time": "2026-11-03T02:58:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.84
+    },
+    {
+      "time": "2026-11-03T03:03:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.66
+    },
+    {
+      "time": "2026-11-03T03:05:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 48.1
+    },
+    {
+      "time": "2026-11-03T03:11:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.48
+    },
+    {
+      "time": "2026-11-03T03:28:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.3
+    },
+    {
+      "time": "2026-11-03T03:31:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "heating"
+    },
+    {
+      "time": "2026-11-03T03:34:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 47.6
+    },
+    {
+      "time": "2026-11-03T03:36:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T03:37:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T03:37:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle"
+    },
+    {
+      "time": "2026-11-03T03:38:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T03:39:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 68.18
+    },
+    {
+      "time": "2026-11-03T03:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.82
+    },
+    {
+      "time": "2026-11-03T03:41:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T03:42:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.46
+    },
+    {
+      "time": "2026-11-03T03:43:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.28
+    },
+    {
+      "time": "2026-11-03T03:44:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.1
+    },
+    {
+      "time": "2026-11-03T03:46:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T03:47:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.74
+    },
+    {
+      "time": "2026-11-03T03:48:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.56
+    },
+    {
+      "time": "2026-11-03T03:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.38
+    },
+    {
+      "time": "2026-11-03T03:52:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T03:55:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.02
+    },
+    {
+      "time": "2026-11-03T03:59:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.84
+    },
+    {
+      "time": "2026-11-03T04:04:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.66
+    },
+    {
+      "time": "2026-11-03T04:12:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.48
+    },
+    {
+      "time": "2026-11-03T04:25:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 46.9
+    },
+    {
+      "time": "2026-11-03T04:28:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.3
+    },
+    {
+      "time": "2026-11-03T04:31:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "heating"
+    },
+    {
+      "time": "2026-11-03T04:32:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 46.8
+    },
+    {
+      "time": "2026-11-03T04:36:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T04:37:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T04:37:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle"
+    },
+    {
+      "time": "2026-11-03T04:38:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T04:39:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 68.18
+    },
+    {
+      "time": "2026-11-03T04:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.82
+    },
+    {
+      "time": "2026-11-03T04:41:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T04:42:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.46
+    },
+    {
+      "time": "2026-11-03T04:43:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.28
+    },
+    {
+      "time": "2026-11-03T04:44:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.1
+    },
+    {
+      "time": "2026-11-03T04:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T04:47:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.74
+    },
+    {
+      "time": "2026-11-03T04:48:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.56
+    },
+    {
+      "time": "2026-11-03T04:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.38
+    },
+    {
+      "time": "2026-11-03T04:52:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T04:55:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.02
+    },
+    {
+      "time": "2026-11-03T04:58:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.84
+    },
+    {
+      "time": "2026-11-03T05:03:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.66
+    },
+    {
+      "time": "2026-11-03T05:11:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.48
+    },
+    {
+      "time": "2026-11-03T05:25:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.3
+    },
+    {
+      "time": "2026-11-03T05:28:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "heating"
+    },
+    {
+      "time": "2026-11-03T05:33:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 45.9
+    },
+    {
+      "time": "2026-11-03T05:33:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T05:34:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T05:34:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle"
+    },
+    {
+      "time": "2026-11-03T05:35:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T05:36:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 68.18
+    },
+    {
+      "time": "2026-11-03T05:37:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.82
+    },
+    {
+      "time": "2026-11-03T05:38:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.64
+    },
+    {
+      "time": "2026-11-03T05:39:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.46
+    },
+    {
+      "time": "2026-11-03T05:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.28
+    },
+    {
+      "time": "2026-11-03T05:41:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.1
+    },
+    {
+      "time": "2026-11-03T05:42:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T05:44:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.74
+    },
+    {
+      "time": "2026-11-03T05:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.56
+    },
+    {
+      "time": "2026-11-03T05:47:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.38
+    },
+    {
+      "time": "2026-11-03T05:48:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 45.6
+    },
+    {
+      "time": "2026-11-03T05:49:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T05:52:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.02
+    },
+    {
+      "time": "2026-11-03T05:55:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.84
+    },
+    {
+      "time": "2026-11-03T06:00:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.66
+    },
+    {
+      "time": "2026-11-03T06:07:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.48
+    },
+    {
+      "time": "2026-11-03T06:21:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 65.3
+    },
+    {
+      "time": "2026-11-03T06:24:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "heating"
+    },
+    {
+      "time": "2026-11-03T06:28:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 45.0
+    },
+    {
+      "time": "2026-11-03T06:29:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2
+    },
+    {
+      "time": "2026-11-03T06:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.92
+    },
+    {
+      "time": "2026-11-03T06:30:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle"
+    },
+    {
+      "time": "2026-11-03T06:35:00",
+      "type": "temp_update",
+      "note": "End of scenario (lets the 06:30 wake boundary pass)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-03T06:29:59",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "The whole night through the real coordinator on the two-node house: every setpoint the loop wrote, in order (raise, raise, then step down once the register plume lifts the reading past target + swing).",
+      "values": [
+        68.0,
+        70.0,
+        68.0,
+        66.0,
+        68.0,
+        70.0,
+        68.0,
+        66.0,
+        68.0,
+        70.0,
+        68.0,
+        66.0,
+        68.0,
+        70.0,
+        68.0,
+        66.0,
+        68.0,
+        70.0,
+        68.0,
+        66.0,
+        68.0,
+        70.0
+      ],
+      "since": "2026-11-02T20:30:30"
+    },
+    {
+      "at": "2026-11-03T06:31:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Wake: the wake band is written plain (68), whatever offset the night ended on.",
+      "value": 68.0
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M08: the step-down deleted; M10: the offset not forgotten when the remote context ends. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)'; POC v2 comparison in docs/08 'Simulation coverage'. Matches production. The sequence is a regression pin of the loop's current behaviour on this synthetic night, not a design requirement.",
+    "(c) Occupant outcome if this regressed: The sleeper's whole night, not a vignette: the sequence of setpoints the thermostat is actually given."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A full cold night with swing 0.59 F: raise, raise, furnace runs, plume pushes the reading past target + swing, step down, wake plain.",
+    "observed_behavior": "Writes between entry and wake are exactly the recorded sequence; the wake write is the plain 68 F.",
+    "expected_behavior": "Two-sided hysteresis at the remote sensor with the learned swing."
+  },
+  "name": "remote_offset_1194e_closed_loop_night_cold_bedroom_swing_0_59",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

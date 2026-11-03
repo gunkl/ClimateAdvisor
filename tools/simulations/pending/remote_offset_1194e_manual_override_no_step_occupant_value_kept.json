@@ -1,0 +1,140 @@
+{
+  "description": "With the offset at the cap the occupant dials the thermostat to 73 F. The real coordinator confirms an override; for the whole override the bedroom swings through both sides of the hysteresis band and CA writes NOTHING; the occupant's value stays. When the manual grace ends, CA re-asserts the plain 66 F (offset forgotten).",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:20:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "temperature": 73.0,
+      "note": "The occupant dials the thermostat to 73 F (the furnace is idle)."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 69.0,
+      "note": "Bedroom swings past target + swing (66 + 1.5): a step-down would be due."
+    },
+    {
+      "time": "2026-11-02T21:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "Bedroom back far below target: a raise would be due."
+    },
+    {
+      "time": "2026-11-02T21:55:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "After the override's grace ended: the bedroom is still far below target."
+    },
+    {
+      "time": "2026-11-02T22:05:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:19:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Precondition: CA's offset is at the +4 F cap when the occupant turns the dial.",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-02T21:22:30",
+      "expect": "event_emitted",
+      "track": "integration",
+      "reason": "The occupant's dial to 73 F was detected and confirmed as an override by the real coordinator.",
+      "event": "override_confirmed"
+    },
+    {
+      "at": "2026-11-02T21:36:59",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "From the dial until the override ends CA writes NOTHING, though the bedroom swings through both sides of the hysteresis band: the occupant's 73 F stays.",
+      "values": [],
+      "since": "2026-11-02T21:19:00"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M05: the whole gate predicate deleted (always PROCEED); M13: the override terms removed from the gate. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' override rows and 'Occupant change with an offset applied'. Matches production.",
+    "(c) Occupant outcome if this regressed: A person who turns the dial must not have the loop silently move it a minute later."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The occupant's own setpoint wins; CA does not step over it.",
+    "observed_behavior": "No CA set_temperature from the dial (21:20) until the grace expiry (21:37:00); then the plain 66 F.",
+    "expected_behavior": "Loop silent through pending and confirmed phases."
+  },
+  "name": "remote_offset_1194e_manual_override_no_step_occupant_value_kept",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

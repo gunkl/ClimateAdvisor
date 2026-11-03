@@ -765,7 +765,7 @@ class TestReassertersNeverDoubleTheOffset:
     def test_setpoint_retry(self):
         env = self._raised_then_reverted()
         self._thermostat_reports(env, 66.0)  # the thermostat did not take 68
-        env.advance(15)  # acceptance check -> retry armed
+        env.advance(185)  # the acceptance check waits out the 180 s echo window (#1194 e F1), then the retry is armed
         env.advance(905)  # retry fires
         assert env.sp_f() == [66.0, 68.0, 68.0]
 

@@ -1,0 +1,178 @@
+{
+  "description": "Heat night. The bedroom (sleep sensor) is 62 F against a 66 F sleep floor while the hallway thermostat is satisfied. The loop raises the thermostat by one 2 F step, the furnace starts within seconds, the loop HOLDS (no second step) while it runs, and steps back to 66 F once the register plume lifts the bedroom reading past target + swing.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 62.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T20:31:03",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "heating",
+      "note": "The hallway thermostat starts 3 s after the first step (66 -> 68): 'fired -> hold'."
+    },
+    {
+      "time": "2026-11-02T20:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 63.5,
+      "note": "Bedroom still far below target while the furnace runs: hold, NO raise to 70."
+    },
+    {
+      "time": "2026-11-02T20:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.0,
+      "note": "Bedroom warming (register plume on the sensor)."
+    },
+    {
+      "time": "2026-11-02T20:49:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 67.6,
+      "note": "Reading passes target + swing (66 + 1.5 = 67.5): step down."
+    },
+    {
+      "time": "2026-11-02T20:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.4,
+      "note": "Reading back in band."
+    },
+    {
+      "time": "2026-11-02T20:52:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat stops on its own hysteresis (hallway at its stop point)."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 66.2,
+      "note": "Bedroom holds the target for the rest of the hour: no more writes."
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T20:30:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Entering the sleep window starts from NO offset: the plain sleep floor, even though the bedroom is 4 F under it.",
+      "value": 66.0
+    },
+    {
+      "at": "2026-11-02T20:31:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "THE COMPENSATION: bedroom 62 F is more than the swing under 66 F, so the thermostat is told 66 + one 2 F step so it starts the furnace.",
+      "value": 68.0
+    },
+    {
+      "at": "2026-11-02T20:48:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "The furnace started within seconds ('fired -> hold'): while it runs and the room is still cold there is NO second step to 70, even though 63.5 F is far under target.",
+      "values": [
+        68.0
+      ],
+      "since": "2026-11-02T20:30:30"
+    },
+    {
+      "at": "2026-11-02T20:49:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "The register plume carries the reading past target + swing (67.6 > 67.5): the offset steps back to zero at once, the thermostat finishes on its own hysteresis.",
+      "value": 66.0
+    },
+    {
+      "at": "2026-11-02T21:39:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "Bedroom in band for the rest of the hour: no writes at all.",
+      "values": [],
+      "since": "2026-11-02T20:49:30"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M07: 'fired -> hold' deleted (a further raise while the equipment runs); M08: the step-down deleted. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': rule table rows 'gap > swing / idle / never raised' (RAISE), 'running' (hold, 'fired -> hold' owner decision 2026-11-02), 'gap < -swing, offset > 0' (STEP DOWN). Matches production.",
+    "(c) Occupant outcome if this regressed: A person asleep in a bedroom 4 F under their sleep temperature wakes up cold with the furnace never having run."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cold bedroom gets the furnace: one 2 F step, hold while it runs, step down at target + swing.",
+    "observed_behavior": "66 F at entry, 68 F one minute later, still 68 F while the furnace runs and the room is cold, 66 F as soon as the reading passes 67.5 F, then silence.",
+    "expected_behavior": "The sleeper's room is heated by a thermostat that cannot see it, without the thermostat ever being asked to do more than its own cycle, and the offset does not outstay its welcome."
+  },
+  "name": "remote_offset_1194e_heat_night_cold_bedroom_raise_hold_step_down",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

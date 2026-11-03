@@ -1,0 +1,209 @@
+{
+  "description": "Before the 20:30 sleep window a cold bedroom gets no offset (the primary sensor decides). Entering the window starts from zero and evaluates fresh; the offset is held through the night; at 06:30 the wake band is written with NO offset and the loop stays silent although the bedroom is still cold.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T19:59:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "Evening, before the sleep window."
+    },
+    {
+      "time": "2026-11-02T19:59:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "Bedroom already cold (primary sensor still decides before 20:30)."
+    },
+    {
+      "time": "2026-11-02T20:00:30",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": ""
+    },
+    {
+      "time": "2026-11-02T19:59:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": ""
+    },
+    {
+      "time": "2026-11-02T20:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: entering the remote context starts from no offset."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "Bedroom reports again (every 90 min: the sensor stays fresh through the night)."
+    },
+    {
+      "time": "2026-11-02T23:00:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": ""
+    },
+    {
+      "time": "2026-11-03T00:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": ""
+    },
+    {
+      "time": "2026-11-03T02:00:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": ""
+    },
+    {
+      "time": "2026-11-03T03:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": ""
+    },
+    {
+      "time": "2026-11-03T05:00:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": ""
+    },
+    {
+      "time": "2026-11-03T06:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 40.0
+    },
+    {
+      "time": "2026-11-03T06:25:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "Last report before wake."
+    },
+    {
+      "time": "2026-11-03T06:30:05",
+      "type": "wakeup",
+      "note": "Wake time: the sleep window ends; the wake band is written."
+    },
+    {
+      "time": "2026-11-03T06:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "Bedroom still cold but it is no longer the comfort sensor: no offset."
+    },
+    {
+      "time": "2026-11-03T06:50:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T20:29:59",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "BEFORE the sleep window the primary sensor decides: a cold bedroom gets no offset (the 68 F comfort target is written as is).",
+      "values": [
+        68.0
+      ],
+      "since": "2026-11-02T19:58:00"
+    },
+    {
+      "at": "2026-11-02T20:30:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "ENTRY: the sleep window begins at zero offset, even though the bedroom is already cold.",
+      "value": 66.0
+    },
+    {
+      "at": "2026-11-02T20:31:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "...and is evaluated fresh: the first step.",
+      "value": 68.0
+    },
+    {
+      "at": "2026-11-03T06:29:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Held at the cap all night (reports every 90 min keep the sensor fresh).",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-03T06:31:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "EXIT: the wake band is written with NO offset (plain 68 F), not 72 F or the cap.",
+      "value": 68.0
+    },
+    {
+      "at": "2026-11-03T06:49:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "After the window ends the bedroom is no longer the comfort sensor: no further offset writes, though it is still cold.",
+      "values": [],
+      "since": "2026-11-03T06:30:10"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M10: the offset not forgotten when the remote context ends. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Scope and keying', the before/after table row 'Sleep window ends'. Matches production at 0.8.44; increment (c) (context transitions) refines the same behaviour and must keep this scenario true.",
+    "(c) Occupant outcome if this regressed: The wake-up temperature must be the occupant's morning comfort target, not +4 F of overnight compensation."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Sleep-window entry starts at zero; exit leaves no offset.",
+    "observed_behavior": "68 F before the window, 66 F at 20:30, 68 F at 20:31; wake 68 F at 06:30; nothing afterwards.",
+    "expected_behavior": "Offset belongs to the remote context only (keyed on indoor_temp provenance)."
+  },
+  "name": "remote_offset_1194e_sleep_window_entry_starts_at_zero_and_exit_leaves_no_offset",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

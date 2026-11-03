@@ -1,0 +1,132 @@
+{
+  "description": "The loop has raised to the +4 F cap, then the bedroom sensor goes silent. 120 minutes after its last report the offset is dropped by the 1-minute timer (no new report needed) and the plain 66 F is written; the loop then stays quiet. When the sensor reports again it starts over from zero.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T23:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The sensor comes back after 3 h 15 min of silence: fresh again."
+    },
+    {
+      "time": "2026-11-02T23:55:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T22:29:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Before the 120-minute mark the last (cold) report still counts: the offset is at the +4 F cap.",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-02T22:30:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "THE FALLBACK: 120 minutes after the last report the offset is dropped and the plain 66 F is written (today's behaviour), by the 1-minute timer, with no new sensor report.",
+      "value": 66.0
+    },
+    {
+      "at": "2026-11-02T23:44:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "Then silence: exactly one fallback write, no churn, for over an hour.",
+      "values": [
+        66.0
+      ],
+      "since": "2026-11-02T22:29:30"
+    },
+    {
+      "at": "2026-11-02T23:55:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "The sensor reports again (cold): fresh, so the loop starts over from zero -- one step, then the next after the startup wait.",
+      "values": [
+        68.0,
+        70.0
+      ],
+      "since": "2026-11-02T23:44:00"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M04: the 120-minute freshness rule ignored; M10: the offset not forgotten when the remote context ends. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Freshness' and 'Checks' (the 1-minute floor). Matches production.",
+    "(c) Occupant outcome if this regressed: A dead battery must not leave the thermostat at +4 F on a stale cold reading all night."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A silent remote sensor falls back to today's plain setpoint after 120 minutes.",
+    "observed_behavior": "70 F until 22:29, 66 F written at 22:29:59, no writes until the sensor reports at 23:45, then 68 F and 70 F.",
+    "expected_behavior": "Older than 120 min on last_reported -> offset dropped, plain setpoint (separate from the 12 h rule)."
+  },
+  "name": "remote_offset_1194e_stale_remote_over_120_min_falls_back_to_plain_setpoint",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

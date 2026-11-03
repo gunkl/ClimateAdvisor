@@ -587,6 +587,7 @@
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(255,152,0,1)"></span><span>Actual Indoor</span></div>
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(33,150,243,1)"></span><span>Actual Outdoor</span></div>
       <div class="cl-item"><span class="cl-swatch" style="border-top:3px solid rgba(255,193,7,0.95)"></span><span>Target</span></div>
+      <div class="cl-item" id="legend-thermostat-set" style="display:none"><span class="cl-swatch" style="border-top:2px dashed rgba(255,193,7,0.95)"></span><span>Thermostat set</span></div>
     </div>
     <div class="chart-overlay-bar">
       <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Target band</label>
@@ -1119,7 +1120,13 @@
         // heat_cool mode above — so a thermostat write suppressed by an active whole-house-fan
         // session (or any other reason the real setpoint stops tracking CA's intent) showed no
         // indication of staleness. Mirror the same (CA: X) annotation here.
-        const caTargetSingle = data.hvac_mode === 'cool' ? data.ca_target_cool
+        // Issue #1194 (d): while the remote-sensor outer loop holds an offset the thermostat is DELIBERATELY at
+        // target + offset, so the band edge is the wrong thing to compare against (it read "70 (CA: 66)" all night).
+        // The thermostat is compared with what CA commanded; the offset itself is explained on its own line below.
+        // A real mismatch (the thermostat reporting something other than the commanded value) still shows (CA: X).
+        const ro = data.remote_offset;
+        const caTargetSingle = (ro && ro.expected_setpoint != null && ro.mode === data.hvac_mode) ? ro.expected_setpoint
+          : data.hvac_mode === 'cool' ? data.ca_target_cool
           : data.hvac_mode === 'heat' ? data.ca_target_heat
           : null;
         const divergedSingle = caTargetSingle != null && Math.abs(data.current_setpoint - caTargetSingle) > 1;
@@ -1147,7 +1154,7 @@
         </div>
         <div class="status-item">
           <div class="label">HVAC</div>
-          <div class="value">${data.hvac_mode || 'unknown'}${hvacTemps ? `<br><span style="font-size:0.8rem;opacity:0.85">${hvacTemps}</span>` : ''}<br><span style="font-size:0.85rem;opacity:0.75">${indoorDisplay} indoors</span></div>
+          <div class="value">${data.hvac_mode || 'unknown'}${hvacTemps ? `<br><span style="font-size:0.8rem;opacity:0.85">${hvacTemps}</span>` : ''}${data.remote_offset && data.remote_offset.text ? `<br><span class="remote-offset-line" style="font-size:0.8rem;opacity:0.85">${escapeHtml(data.remote_offset.text)}</span>` : ''}<br><span style="font-size:0.85rem;opacity:0.75">${indoorDisplay} indoors</span></div>
         </div>
         <div class="status-item">
           <div class="label">Status</div>
@@ -1854,6 +1861,33 @@
       order: 8,
     });
 
+    // Issue #1194 (d): while the remote-sensor outer loop holds an offset, "Target" above is the room's comfort target
+    // (what the bedroom is supposed to be) and this dashed line is what the thermostat was COMMANDED to (target +
+    // offset). Two series, so the offset never reads as a comfort-band change. Absent when no offset ever applied.
+    const commandedPts = (chartData.commanded_setpoint_history || [])
+      .map(e => ({ x: _parseTs(e.ts), y: e.target }))
+      .filter(p => p.x <= _nowMs);
+    const _hasCommanded = commandedPts.some(p => p.y != null);
+    // The legend item exists only while the series does (an offset night in the range).
+    const _cmdLegend = document.getElementById('legend-thermostat-set');
+    if (_cmdLegend) _cmdLegend.style.display = _hasCommanded ? '' : 'none';
+    if (_hasCommanded) {
+      datasets.push({
+        label: 'Thermostat set',
+        type: 'line',
+        data: commandedPts,
+        borderColor: CHART_COLORS.target,
+        borderWidth: 2,
+        borderDash: [6, 4],
+        pointRadius: 0,
+        tension: 0,
+        spanGaps: false,
+        yAxisID: 'y',
+        hidden: !setpointVisible,
+        order: 8,
+      });
+    }
+
     const nowMs = Date.now();
 
     // Defensive: destroy any orphaned chart on this canvas (e.g. from a prior failed init)
@@ -1880,6 +1914,23 @@
     // Crosshair cursor position (canvas-relative px); updated by caAnnotations afterEvent
     let _cursorPx = null;
     window.__test_cursorPx = null;
+
+    // Issue #1194 (d): the dashed "Thermostat set" value at the cursor -- the last commanded row at or before it, and
+    // nothing across a gap (the series has null rows outside offset stretches; it is never interpolated across them).
+    function _commandedHoverItem(chart, xVal) {
+      const ds = chart.data.datasets.find(d => d.label === 'Thermostat set');
+      if (!ds || ds.hidden || !ds.data || ds.data.length === 0) return '';
+      let last = null;
+      for (const p of ds.data) {
+        if (p.x > xVal) break;
+        last = p;
+      }
+      if (!last || last.y == null) return '';
+      return `<div class="chp-item">` +
+        `<span class="chp-dot" style="background:${CHART_COLORS.target}"></span>` +
+        `<span>Thermostat set: <strong>${Math.round(last.y)}°</strong></span>` +
+        `</div>`;
+    }
 
     // Render the hover panel for a given canvas-relative x pixel.
     // Called directly from afterEvent (every mousemove pixel) so the panel always reflects
@@ -1909,7 +1960,7 @@
           `<span class="chp-dot" style="background:${def.color}"></span>` +
           `<span>${def.short}: <strong>${Math.round(y)}°</strong></span>` +
           `</div>`;
-      }).join('');
+      }).join('') + _commandedHoverItem(chart, xVal);
 
       // HVAC/fan from nearest log entry
       let stateHtml = '';
@@ -2361,6 +2412,11 @@
     } else {
       const ds = _tempChart.data.datasets.find(d => d.label === label);
       if (ds) ds.hidden = !ds.hidden;
+      // Issue #1194 (d): the commanded-setpoint line follows the Target toggle.
+      if (name === 'setpoint' && ds) {
+        const cmd = _tempChart.data.datasets.find(d => d.label === 'Thermostat set');
+        if (cmd) cmd.hidden = ds.hidden;
+      }
     }
     _tempChart.update('none');
   }

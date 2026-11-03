@@ -50,6 +50,35 @@ def test_golden_passes_production_engine(scenario_path: Path) -> None:
     )
 
 
+# Issue #1194 (e): the remote-sensor outer loop's Tier A scenarios live in pending/ (goldens are locked until the
+# owner approves the scenario cards), so they are enforced here by name.  Every one runs through the REAL coordinator
+# and engine (use_coordinator, so the sleep-sensor listener and the 1-minute timer are real) and every assertion is
+# evaluated -- none is skipped.
+PENDING_DIR = TOOLS / "simulations" / "pending"
+_REMOTE_OFFSET_FILES = sorted(PENDING_DIR.glob("remote_offset_1194e_*.json"))
+
+
+@pytest.mark.parametrize(
+    "scenario_path", _REMOTE_OFFSET_FILES, ids=lambda p: p.stem.removeprefix("remote_offset_1194e_")
+)
+def test_remote_offset_1194e_pending_scenario_passes_production_engine(scenario_path: Path) -> None:
+    from simulate import run_scenario_production  # noqa: PLC0415
+
+    result = run_scenario_production(scenario_path, state="pending")
+    assert not result.get("callback_errors"), f"{scenario_path.stem}: callback errors: {result['callback_errors']}"
+    real = [a for a in result["assertions"] if not a.get("skipped")]
+    assert real and len(real) == len(result["assertions"]), "no assertion of a remote-offset scenario may be skipped"
+    assert result["passed"] is True, f"{scenario_path.stem}: " + "; ".join(
+        f"@{a['at']} expected={a['expected']!r} actual={a['actual']!r}"
+        for a in result["assertions"]
+        if a.get("pass") is False
+    )
+
+
+def test_remote_offset_1194e_scenarios_discovered() -> None:
+    assert len(_REMOTE_OFFSET_FILES) >= 17, "the remote-offset Tier A scenario set is missing"
+
+
 def test_all_goldens_discovered() -> None:
     """Guard against an empty parametrization silently passing."""
     assert len(_GOLDEN_FILES) >= 20, f"expected the full golden set, found {len(_GOLDEN_FILES)}"

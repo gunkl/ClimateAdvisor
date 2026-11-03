@@ -1,0 +1,158 @@
+{
+  "description": "With the offset at the +4 F cap, a door/window opens for 120 s inside a 300 s debounce and closes again. The offset is FROZEN: no reset to 66 F, no write, no flapping (owner decision D1).",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120,
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
+    "sensor_debounce_seconds": 300
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:29:12",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Seed the door/window sensor as closed."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "A busy door/window opens (debounce 300 s)."
+    },
+    {
+      "time": "2026-11-02T21:11:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.8,
+      "note": "Bedroom keeps reporting while the window is open inside the debounce."
+    },
+    {
+      "time": "2026-11-02T21:12:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "It closes after 120 s, inside the debounce: nothing happened."
+    },
+    {
+      "time": "2026-11-02T21:25:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.8,
+      "note": "Still cold."
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:09:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Precondition: the offset is at the +4 F cap before the door opens.",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-02T21:39:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "A window open for 120 s inside a 300 s debounce changes NOTHING: no reset to 66, no write, no flapping (owner decision D1 = FREEZE).",
+      "values": [],
+      "since": "2026-11-02T20:36:30"
+    },
+    {
+      "at": "2026-11-02T21:39:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "The held offset is still what the thermostat has.",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-02T21:39:00",
+      "expect": "event_emitted",
+      "track": "integration",
+      "reason": "The window really was seen open and closed by the real coordinator listener (so the freeze was exercised, not skipped).",
+      "event": "sensor_all_closed",
+      "payload_subset": {
+        "was_paused": false
+      }
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M06: FREEZE treated as CLOSED (a debounce blip resets the offset). Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' FREEZE rows and 'Debounce: FREEZE (owner decision D1)'. Matches production.",
+    "(c) Occupant outcome if this regressed: A door that opens for 20 s every few minutes must not flap the setpoint 66 <-> 68 F dozens of times an hour (measured 40/h with the earlier raw-open gate)."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A busy door does not move the setpoint (FREEZE inside the debounce).",
+    "observed_behavior": "No setpoint write at all between the cap (20:35:59) and the end; the thermostat still holds 70 F.",
+    "expected_behavior": "Held exactly as is inside the debounce; no loop write."
+  },
+  "name": "remote_offset_1194e_window_open_inside_debounce_freezes_the_offset",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

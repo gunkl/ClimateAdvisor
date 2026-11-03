@@ -122,8 +122,10 @@ from .const import (
     OCCUPANCY_VACATION,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
     PEAK_DECLINE_MARGIN_F,
+    REMOTE_OFFSET_EXIT_GRACE_S,
     REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
     REVISIT_DELAY_SECONDS,
+    SETPOINT_ECHO_WINDOW_S,
     SETPOINT_RETRY_DELAY_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     THERMAL_SWING_DEFAULT_F,
@@ -154,6 +156,7 @@ from .own_write_echo import (
     OwnSetpointWrite,
     context_id_matches,
     decide_setpoint_echo,
+    outstanding_own_write,
     prune_own_writes,
     resolve_step,
 )
@@ -274,10 +277,15 @@ from .override_grace_lifecycle import (
     OverrideGraceLifecycleState,
 )
 from .remote_offset import (
+    ClampLimit,
     RemoteContext,
+    RemoteLoopState,
     RemoteOffsetAction,
     RemoteOffsetGate,
+    RemoteOffsetState,
+    binding_limit,
     cap_f,
+    classify_loop_state,
     decide_remote_offset,
     decide_remote_offset_gate,
     max_magnitude_f,
@@ -1612,10 +1620,19 @@ class AutomationEngine:
         self._remote_offset_f: float = 0.0  # offset magnitude beyond the target in the gap direction (>= 0)
         self._remote_offset_applied_f: float | None = None  # magnitude last commanded to the thermostat; None=unknown
         self._remote_context_key: str | None = None  # "<context>:<entity>" the offset belongs to; None = no context
+        # Issue #1194 (c): context entry/exit bookkeeping (see ``_enter_remote_context`` / ``_exit_remote_context``).
+        self._remote_target_context: str | None = None  # context key in force when ``_remote_target_f`` was written
+        self._remote_entered_at: datetime | None = None  # when the current context began (entry hold clock)
+        self._remote_exit_at: datetime | None = None  # when the last context ENDED (exit grace clock); None = n/a
         self._remote_raise_at: datetime | None = None  # when the last raise was commanded (startup-wait clock)
         self._remote_raise_pending_feedback: bool = False  # raise sent, thermostat start not yet seen
         self._remote_startup_latency_s: float | None = None  # measured raise->equipment-start latency (EWMA)
         self._remote_offset_check_running: bool = False  # re-entrancy guard (sensor event + 1-minute floor)
+        # Issue #1194 (d): the loop's last decision reason (``RemoteOffsetDecision.reason``, or "stale"), STORED so
+        # Status, the chart, the AI context and the diagnostics describe the decision made, not a re-derived one.
+        self._remote_last_reason: str | None = None
+        # #1194 (b) gap: the CLOSED (window open, no owner) plain-target re-sync already ran this CLOSED episode.
+        self._remote_closed_resync_done: bool = False
         self._remote_write_failed_at: datetime | None = None  # the loop's own last write was not executed (back-off)
         # Issue #411: consecutive setpoint_rejected count for the current commanded value.
         # Reset to 0 whenever a setpoint is confirmed/accepted; incremented on each rejection.
@@ -5915,6 +5932,9 @@ class AutomationEngine:
         self._record_commanded_mode(mode, reason)
         self._last_commanded_hvac_time = _now
         self._hvac_command_time = _now
+        # What the thermostat reported BEFORE this write: the read-back verify tells "not answered yet" (still this
+        # value, the echo outstanding) from "answered with a different value" (Issue #1194 e F1).
+        _before_write_f = read_state_temp_f(self.hass.states.get(self.climate_entity), "temperature", unit)
         try:
             # Single call: hvac_mode + temperature together.  Including hvac_mode in every
             # call bypasses HA deduplication (the mode key makes each call distinct) and
@@ -5980,6 +6000,21 @@ class AutomationEngine:
             if outcome in (SetpointVerifyOutcome.STALE, SetpointVerifyOutcome.NO_READING):
                 return
             if outcome is SetpointVerifyOutcome.REASSERT:
+                _echo_wait_s = self._setpoint_echo_wait_s(service_temp, reported, _before_write_f)
+                if _echo_wait_s is not None:
+                    # A slow cloud thermostat: the write is still unanswered (it reports the value it had before, and
+                    # #1232's echo memory still holds this write). Not a rejection yet -- re-check when the echo
+                    # window ends; only then (no echo, or a different value) is it one (Issue #1194 e F1).
+                    _LOGGER.info(
+                        "Setpoint not answered yet: commanded=%.1f (%s mode), thermostat still reports=%.1f -- "
+                        "re-checking in %.0fs (echo window)",
+                        self._pending_setpoint_single,
+                        self._pending_setpoint_mode,
+                        reported,
+                        _echo_wait_s,
+                    )
+                    self._rearm_timer("_setpoint_retry_cancel", _echo_wait_s, _schedule_check)
+                    return
                 self._setpoint_reject_streak += 1
                 _LOGGER.error(
                     "Setpoint validation FAILED: commanded=%.1f (%s mode), "
@@ -6149,6 +6184,7 @@ class AutomationEngine:
             self.role,
         )
         self._remote_offset_applied_f = abs(_offset_f)  # the thermostat now holds target + this (the loop diffs on it)
+        self._remote_exit_at = None  # any writer's setpoint ends the exit's wait for "the next band" (Issue #1194 c)
         if _call.ok:
             self._remote_write_failed_at = None  # a write went through: the outer loop's failed-write back-off is over
         self._record_action(f"Set temp to {format_temp(temperature, unit)} (mode={mode})", reason)
@@ -6164,8 +6200,11 @@ class AutomationEngine:
     # offset (one step per check) and re-sends the same target through that path. Gating is the ONE predicate
     # ``_remote_offset_gate`` (Issue #1194 b): CLOSED for an owner (override/pending, the door/window pause, nat-vent /
     # WHF ownership, away/vacation, a window open past its debounce), FREEZE while a door/window is open inside its
-    # debounce (hold the offset as is). Context entry/exit events, Status "clamped" and the chart split are later
-    # increments (#1194 c-e).
+    # debounce (hold the offset as is). Context entry and exit (Issue #1194 c) is ONE function,
+    # ``_sync_remote_context``:
+    # entry starts from offset 0 and waits for the context's own band; exit clears the offset before any next band and
+    # lets that band's writer land before the loop writes the plain target itself. Status "clamped" and the chart split
+    # are later increments (#1194 d, e).
 
     def _remote_sensor_configured(self) -> bool:
         """Whether any remote-sensor context is configured at all (today: the sleep-window bedroom sensor).
@@ -6196,22 +6235,40 @@ class AutomationEngine:
         gate: it is a timer for an owner, not an owner (no band writer defers on it), and holding the loop for it would
         leave the bedroom cold after every window close (CA's own 5-minute resume grace) for nothing.
         """
-        owner_holds = self._manual_change_protected() or (
-            decide_scheduled_band_gate(
+        return self._remote_offset_gate_and_reason()[0]
+
+    def _remote_offset_gate_and_reason(self) -> tuple[RemoteOffsetGate, str | None]:
+        """``_remote_offset_gate`` plus WHY (a ``GATE_REASON_TEXT`` key); the one place the gate is composed."""
+        reason: str | None = None
+        if self._manual_change_protected():
+            reason = "occupant_change"
+        else:
+            scheduled = decide_scheduled_band_gate(
                 occupancy_mode=self._occupancy_mode,
                 manual_override_active=self._manual_override_active,
                 paused_by_door=self._paused_by_door,
                 natural_vent_active=self._natural_vent_active,
                 whf_owns_hvac=self._whf_owns_hvac(),
             )
-            is not ScheduledBandGate.PROCEED
-        )
+            if scheduled is not ScheduledBandGate.PROCEED:
+                reason = {
+                    ScheduledBandGate.DEFER_OCCUPANCY: "away",
+                    ScheduledBandGate.DEFER_OVERRIDE: "override",
+                    ScheduledBandGate.DEFER_PAUSED: "door_window_pause",
+                    ScheduledBandGate.DEFER_NAT_VENT: "fan",
+                }[scheduled]
+        owner_holds = reason is not None
         sensor_open = not owner_holds and self._any_monitored_sensor_holding_open()
-        return decide_remote_offset_gate(
+        gate = decide_remote_offset_gate(
             owner_holds=owner_holds,
             sensor_open=sensor_open,
             debounce_pending=sensor_open and self._sensor_debounce_pending,
         )
+        if gate is RemoteOffsetGate.FREEZE:
+            reason = "debounce"
+        elif gate is RemoteOffsetGate.CLOSED and reason is None:
+            reason = "window_open"
+        return gate, reason
 
     def _remote_context(self) -> RemoteContext | None:
         """The remote sensor supplying the indoor reading right now, or None when the primary sensor does."""
@@ -6234,31 +6291,210 @@ class AutomationEngine:
             return THERMAL_SWING_DEFAULT_F
         return float(value)
 
-    def _remote_offset_cap_for(self, target_f: float, mode: str) -> float:
-        """Largest offset allowed for ``target_f``: the tighter of the +cap and the OPPOSITE comfort-band edge."""
+    def _remote_band_edges(self) -> tuple[float, float]:
+        """The comfort band's (floor, ceiling) in force now: the edges the offset may not cross."""
         classification = self._current_classification
         if classification is not None:
             band = self._resolved_comfort_band(classification)
-            floor, ceiling = band.floor, band.ceiling
-        else:
-            floor = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-            ceiling = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+            return band.floor, band.ceiling
+        return (
+            float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
+            float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+        )
+
+    def _remote_offset_cap_for(self, target_f: float, mode: str) -> float:
+        """Largest offset allowed for ``target_f``: the tighter of the +cap and the OPPOSITE comfort-band edge."""
+        floor, ceiling = self._remote_band_edges()
         return max_magnitude_f(mode, target_f, floor=floor, ceiling=ceiling, cap_f=cap_f(self._temp_unit))
+
+    def remote_offset_state(self) -> RemoteOffsetState | None:
+        """The outer loop now, for Status, chart, AI and diagnostics (Issue #1194 d); None = no remote sensor.
+
+        A pure READ: the gate is asked (a predicate, as the write path asks it), freshness comes from the context, and
+        the decision is the reason the loop STORED when it decided (``_remote_last_reason``) -- nothing is re-decided.
+        """
+        if not self._remote_offset_in_play():
+            return None
+        now = dt_util.now()
+        ctx = self._remote_context()
+        fresh = ctx is not None and ctx.fresh
+        gate, gate_reason = self._remote_offset_gate_and_reason()
+        mode, target = self._remote_target_mode, self._remote_target_f
+        applied = self._remote_offset_applied_f
+        offset: float | None = None
+        if applied is not None:
+            offset = applied if mode == "heat" else -applied
+        commanded = self._pending_setpoint_single if applied is not None else None
+        last_reason = self._remote_last_reason
+        # Issue #1194 (c) edges, read from the same predicates the check acts on (nothing re-decided here):
+        awaiting = (
+            fresh
+            and ctx is not None
+            and gate is RemoteOffsetGate.PROCEED
+            and self._remote_awaiting_context_band(ctx, now)
+        )
+        state = classify_loop_state(
+            in_context=ctx is not None,
+            fresh=fresh,
+            gate=gate,
+            last_reason=last_reason,
+            offset_f=offset or 0.0,
+            awaiting_band=awaiting,
+            outstanding=ctx is None and bool(applied),
+        )
+        note: str | None = None
+        if state is RemoteLoopState.WAITING:
+            note = "context_band"
+        elif state is RemoteLoopState.CLEARING:
+            in_grace = self._remote_exit_at is not None and (
+                (now - self._remote_exit_at).total_seconds() < REMOTE_OFFSET_EXIT_GRACE_S
+            )
+            note = "exit_grace" if in_grace or not self._remote_offset_backing_off_now(now) else "backing_off"
+        clamp: ClampLimit | None = None
+        if state is RemoteLoopState.CLAMPED and mode in ("heat", "cool") and target is not None:
+            floor, ceiling = self._remote_band_edges()
+            clamp = binding_limit(mode, target, floor=floor, ceiling=ceiling, cap_f=cap_f(self._temp_unit))
+        age: float | None = None
+        if ctx is not None and isinstance(ctx.reported_at, datetime):
+            try:
+                age = max(0.0, (dt_util.utcnow() - ctx.reported_at).total_seconds())
+            except TypeError:  # naive/aware clock mix (stubs)
+                age = None
+        gated = state in (RemoteLoopState.GATED, RemoteLoopState.FROZEN)
+        # While clearing, the context that wrote the offset still names it (the last write's stamp).
+        key = (
+            ctx.key if ctx is not None else (self._remote_target_context if state is RemoteLoopState.CLEARING else None)
+        )
+        return RemoteOffsetState(
+            state=state,
+            context=key.split(":", 1)[0] if key else None,
+            mode=mode,
+            comfort_target_f=target,
+            commanded_f=commanded,
+            offset_f=offset,
+            gate_reason=gate_reason if gated else None,
+            clamp_limit=clamp,
+            last_reason=last_reason,
+            remote_value_f=ctx.value_f if ctx is not None else None,
+            remote_age_s=age,
+            cap_limit_f=cap_f(self._temp_unit),
+            note=note,
+        )
+
+    def _remote_offset_in_play(self) -> bool:
+        """A remote sensor is configured, or a context / an offset is still outstanding (an exit left to clear).
+
+        The one test both the check prelude and the Status read use, so Status never goes blank while the check is
+        still clearing an offset after the sensor was removed from the configuration (Issue #1194 c+d).
+        """
+        return (
+            self._remote_sensor_configured()
+            or self._remote_context_key is not None
+            or bool(self._remote_offset_applied_f)
+        )
+
+    def _remote_offset_backing_off_now(self, now: datetime) -> bool:
+        """The back-off interval alone (read-only): ``SETPOINT_RETRY_DELAY_S`` since the loop's own failed write."""
+        failed = self._remote_write_failed_at
+        if failed is None:
+            return False
+        try:
+            return (now - failed).total_seconds() < SETPOINT_RETRY_DELAY_S
+        except TypeError:
+            return False
 
     def _reset_remote_offset(self, *, applied_unknown: bool = False) -> None:
         """Back to no offset, no pending step; ``applied_unknown`` if the thermostat's held value is no longer known."""
         self._remote_offset_f = 0.0
         self._remote_raise_at = None
         self._remote_raise_pending_feedback = False
+        self._remote_last_reason = None
         if applied_unknown:
             self._remote_offset_applied_f = None
 
-    def _sync_remote_context(self, key: str | None) -> None:
-        """Entering or leaving a remote context starts from no offset (the evaluation is fresh)."""
-        if key != self._remote_context_key:
-            _LOGGER.info("Remote-sensor context changed: %s -> %s -- offset reset to 0", self._remote_context_key, key)
-            self._remote_context_key = key
-            self._reset_remote_offset()
+    def _sync_remote_context(self, ctx: RemoteContext | None) -> None:
+        """The ONE place a remote context begins or ends (Issue #1194 c); every reader of the context calls it first.
+
+        The context is keyed on ``IndoorTempReading.remote_context`` (``RemoteContext.key``) and nothing else, so any
+        future remote-sensor context gets the same entry and exit handling. ``ctx`` is what the shared resolver says
+        supplies the indoor reading right now (None = the primary sensor does). The offset belongs to a FRESH context:
+        a stale remote reading is a suspension (the offset is dropped, the plain target written, #1194 a), not an end.
+
+        * None -> K: ``_enter_remote_context``.   * K -> None (``ctx`` None, or stale): ``_exit_remote_context``.
+        * K1 -> K2 (one context handing straight to another): exit K1, then enter K2.
+        """
+        key = ctx.key if ctx is not None and ctx.fresh else None
+        previous = self._remote_context_key
+        if key == previous:
+            return
+        now = dt_util.now()
+        self._remote_context_key = key
+        if previous is not None:
+            self._exit_remote_context(previous, ended=ctx is None, now=now)
+        if key is not None:
+            self._enter_remote_context(key, now)
+
+    def _enter_remote_context(self, key: str, now: datetime) -> None:
+        """A remote context begins (Issue #1194 c): the loop starts from a known state and decides on its own band.
+
+        * offset 0, no pending step, no startup-wait clock and no actuation feedback carried over from an earlier
+          context (a stale raise clock would skip or lengthen the wait; the measured thermostat latency is a property
+          of the thermostat, not of the context, and is kept);
+        * the thermostat's applied value is whatever CA last wrote (0 for a plain write) or unknown (None after a
+          restart or a gate) -- the unknown case is resolved by reading the LIVE setpoint on the first decision
+          (``_remote_live_matches``, the same helper that clears a stranded offset);
+        * no loop decision until the context's own band has been written (``_remote_awaiting_context_band``).
+        """
+        _LOGGER.info("Remote-sensor context entered: %s -- offset 0, first decision after its own band", key)
+        self._reset_remote_offset()
+        self._remote_entered_at = now
+        self._remote_exit_at = None
+
+    def _exit_remote_context(self, previous: str, *, ended: bool, now: datetime) -> None:
+        """A remote context ends or is suspended (Issue #1194 c): the offset is cleared BEFORE any next band is applied.
+
+        The clear happens here, at the first reader of the new situation, so the next band's writer (it asks
+        ``_remote_offset_for_write``, which syncs first) always computes target + 0. ``ended`` (the resolver no longer
+        names a remote context at all: the window closed, the sensor was unconfigured or went unavailable) also starts
+        the exit grace: the loop's own plain-target write (needed only when nothing else writes) waits
+        ``REMOTE_OFFSET_EXIT_GRACE_S`` so a same-minute wake routine lands first and the two never compete.
+        """
+        _LOGGER.info(
+            "Remote-sensor context %s -- %s: offset cleared",
+            "ended" if ended else "suspended (stale reading)",
+            previous,
+        )
+        self._reset_remote_offset()
+        self._remote_entered_at = None
+        self._remote_exit_at = now if ended else None
+
+    def _forget_remote_offset(self) -> None:
+        """The context ended while another owner holds the thermostat: nothing of the offset is left to act on.
+
+        The owner (the occupant, the door/window pause, the fan, an away setback) commands the thermostat and writes its
+        own band when it lets go; the loop must neither remember an offset nor re-send a stale target later. Within a
+        context the thermostat's value is merely UNKNOWN after a gate (``_reset_remote_offset(applied_unknown=True)``);
+        here it is forgotten.
+        """
+        self._reset_remote_offset()
+        self._remote_offset_applied_f = 0.0
+        self._remote_exit_at = None
+
+    def _remote_awaiting_context_band(self, ctx: RemoteContext, now: datetime) -> bool:
+        """True while the loop must not decide yet: the target it would act on predates this context.
+
+        The bedtime routine writes the sleep band at the moment the sleep window opens, and the loop's first check can
+        land a few seconds before it. Deciding on the EVENING target would put an offset on a number the sleep zone
+        never meant to command, and the sleep band would then stack its own write on top. So the loop waits for a
+        setpoint written INSIDE this context (``_remote_target_context``), or for the startup wait to pass (nothing
+        wrote: decide on the target in force rather than stay silent all night).
+        """
+        if self._remote_target_context == ctx.key:
+            return False
+        entered = self._remote_entered_at
+        if entered is None:
+            return False
+        return (now - entered).total_seconds() < startup_wait_s(self._remote_startup_latency_s)
 
     def _remote_offset_for_write(self, target_f: float, mode: str) -> float:
         """Signed offset (internal F delta) to add to ``target_f`` for THIS write, via the single setpoint path.
@@ -6266,11 +6502,15 @@ class AutomationEngine:
         0 unless the indoor reading is coming from a fresh remote sensor AND no gate is active. Heating raises
         the setpoint (+), cooling lowers it (-); clamped to the caps for this target, so a writer with a
         different target (pre-cool, TOU, a different band) can never push past the opposite band edge.
+
+        Every write first syncs the context (so a band written at a context's start or end sees offset 0) and stamps
+        which context the target belongs to (Issue #1194 c).
         """
         if mode not in ("heat", "cool") or not self._remote_sensor_configured():
-            return 0.0
+            return 0.0  # (a sensor removed from the configuration is an exit the 1-minute check handles)
         ctx = self._remote_context()
-        self._sync_remote_context(ctx.key if ctx is not None and ctx.fresh else None)
+        self._sync_remote_context(ctx)
+        self._remote_target_context = ctx.key if ctx is not None else None
         if ctx is None or not ctx.fresh:
             return 0.0
         if self._remote_offset_gate() is RemoteOffsetGate.CLOSED:
@@ -6289,9 +6529,16 @@ class AutomationEngine:
         step down one step when it is more than ``swing`` past the target on the other side, hold in between.
         Writes only when the commanded value changes, and only to a thermostat that is in the target's mode.
         """
-        if self._remote_offset_check_running or self.dry_run is True or not self._remote_sensor_configured():
+        if self._remote_offset_check_running or self.dry_run is True:
             return
+        if not self._remote_offset_in_play():
+            return  # no remote sensor configured and no offset outstanding. (One still in force is an EXIT to clear.)
         if _refuse_if_shut_down(self, "remote offset check"):
+            return
+        if self._temp_command_pending:
+            # Another writer's setpoint (the bedtime / wake band) is still in flight: its target is already stamped,
+            # but the thermostat has not got it yet. Deciding now would send a second, competing value in the same
+            # second; the next check decides on what that write landed (Issue #1194 c).
             return
         target, mode = self._remote_target_f, self._remote_target_mode
         if target is None or mode not in ("heat", "cool"):
@@ -6306,12 +6553,26 @@ class AutomationEngine:
         now = dt_util.now()
         ctx = self._remote_context()
         fresh = ctx is not None and ctx.fresh
-        self._sync_remote_context(ctx.key if fresh and ctx is not None else None)
-        gate = self._remote_offset_gate()
-        if gate is RemoteOffsetGate.CLOSED:
-            # The occupant / a window / the fan / an away setback owns the thermostat: write nothing, forget the offset.
-            self._reset_remote_offset(applied_unknown=True)
+        self._sync_remote_context(ctx)
+        gate, gate_reason = self._remote_offset_gate_and_reason()
+        closed_resync = False
+        if gate is not RemoteOffsetGate.CLOSED:
+            self._remote_closed_resync_done = False  # a new CLOSED episode may clear a held offset once again
+        elif gate_reason != "window_open" or self._remote_closed_resync_done:
+            # An owner (occupant, pause, fan, away) holds the thermostat, or this episode's one re-sync is done.
+            if ctx is None:
+                self._forget_remote_offset()  # the context is over too: the owner's band is the successor (#1194 c)
+            else:
+                self._reset_remote_offset(applied_unknown=True)  # inside the context: re-check the live setpoint later
             return
+        else:
+            # A window open past its debounce with NO owner writing (no pause started: e.g. the sensor went dark after
+            # reading open). Nobody else will take the offset off, so the loop re-sends the PLAIN target once per
+            # CLOSED episode, through the single setpoint path (the gate makes it target + 0), only if the live
+            # setpoint differs (``_remote_live_matches``). It lowers the heat / raises the cool setpoint in the
+            # thermostat's current mode -- never a mode change, so rule 3 (no heat/cool into an open window) holds.
+            self._reset_remote_offset(applied_unknown=True)
+            closed_resync = True
         if gate is RemoteOffsetGate.FREEZE:
             # A door/window is open inside its debounce (owner decision D1): hold the offset exactly as it is -- no
             # step, no reset, no write. If it closes in time nothing happened; if not, the pause (CLOSED) takes over.
@@ -6319,12 +6580,23 @@ class AutomationEngine:
         live = self.hass.states.get(self.climate_entity)
         if live is None or getattr(live, "state", None) != mode:
             return  # never switch the thermostat's mode from the outer loop
+        if (
+            ctx is None
+            and self._remote_exit_at is not None
+            and (now - self._remote_exit_at).total_seconds() < REMOTE_OFFSET_EXIT_GRACE_S
+        ):
+            return  # the context just ended: let the next band's own writer land first (Issue #1194 c)
         if self._remote_offset_backing_off(now, ctx if fresh else None):
             return  # the loop's last write failed: no retry storm (see ``_remote_offset_backing_off``)
+        if not closed_resync and fresh and ctx is not None and self._remote_awaiting_context_band(ctx, now):
+            return  # the context's own band has not been written yet: never decide on the previous context's target
         raised = False
         desired = 0.0
-        note = "remote sensor not in use"
-        if fresh and ctx is not None:
+        note = "window open, no owner: plain target" if closed_resync else "remote sensor not in use"
+        self._remote_last_reason = "stale" if ctx is not None and not closed_resync else None
+        if closed_resync:
+            self._remote_closed_resync_done = True  # at most one write per CLOSED episode, whatever it returns
+        if fresh and ctx is not None and not closed_resync:
             swing = self._remote_swing_f(mode)
             decision = decide_remote_offset(
                 mode=mode,
@@ -6340,6 +6612,7 @@ class AutomationEngine:
             )
             desired = decision.magnitude_f
             self._remote_offset_f = desired  # read by the single setpoint path for the write below
+            self._remote_last_reason = decision.reason
             raised = decision.action is RemoteOffsetAction.RAISE
             note = (
                 f"{decision.reason}: remote {self._t(ctx.value_f)} vs target {self._t(target)} swing {self._td(swing)}"
@@ -6349,11 +6622,11 @@ class AutomationEngine:
             # Unknown (a gate closed, or the context changed, while an offset was in force): the thermostat may still
             # hold an offset CA no longer tracks. Compare the LIVE setpoint with what CA would command now and re-write
             # once unless it already matches (within half a step), so a stranded offset never outlives the gate.
-            live_sp = read_state_temp_f(live, "temperature", self._temp_unit)
-            if live_sp is None:
+            matches = self._remote_live_matches(live, target, mode, desired)
+            if matches is None:
                 if desired <= 1e-6:
                     return
-            elif abs(live_sp - (target + (desired if mode == "heat" else -desired))) < step_f(self._temp_unit) / 2:
+            elif matches:
                 self._remote_offset_applied_f = desired
                 return
         elif abs(desired - applied) <= 1e-6:
@@ -6382,6 +6655,18 @@ class AutomationEngine:
             SETPOINT_RETRY_DELAY_S,
         )
 
+    def _remote_live_matches(self, live: Any, target: float, mode: str, desired: float) -> bool | None:
+        """Does the thermostat's LIVE setpoint already hold what the loop would command (within half a step)?
+
+        None when the setpoint is unreadable. The one helper that turns an unknown applied value (after a restart, a
+        gate or a context change) into a known one -- used to clear a stranded offset (#1194 a) and at a context's first
+        decision (#1194 c).
+        """
+        live_sp = read_state_temp_f(live, "temperature", self._temp_unit)
+        if live_sp is None:
+            return None
+        return abs(live_sp - (target + (desired if mode == "heat" else -desired))) < step_f(self._temp_unit) / 2
+
     def _remote_offset_backing_off(self, now: datetime, ctx: RemoteContext | None) -> bool:
         """True while the loop waits after one of its own writes was not executed (Issue #1194 a).
 
@@ -6393,9 +6678,9 @@ class AutomationEngine:
         failed = self._remote_write_failed_at
         if failed is None:
             return False
+        if self._remote_offset_backing_off_now(now):
+            return True
         try:
-            if (now - failed).total_seconds() < SETPOINT_RETRY_DELAY_S:
-                return True
             reported = ctx.reported_at if ctx is not None else None
             if isinstance(reported, datetime) and reported <= failed:
                 return True
@@ -16506,6 +16791,42 @@ class AutomationEngine:
             self._own_setpoint_writes = list(prune_own_writes([*kept, *new], now))
         except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
             self._own_setpoint_writes = new
+
+    def _setpoint_echo_wait_s(
+        self, sent_value: float, reported_f: float | None, before_f: float | None
+    ) -> float | None:
+        """Seconds until the echo window of an UNANSWERED setpoint write ends, or None (the verify may judge it now).
+
+        Unanswered = the thermostat still reports the value it had before the write (``before_f``, internal F) and the
+        write (``sent_value``, the thermostat's unit, as sent) is still outstanding in #1232's echo memory
+        (``outstanding_own_write``). A thermostat that answered with a different value (clamped, refused) is never
+        waited for. Never raises: any bookkeeping problem means "judge now", as before.
+        """
+        if reported_f is None or before_f is None or abs(reported_f - before_f) >= 0.1:
+            return None
+        writes = getattr(self, "_own_setpoint_writes", None)
+        if not writes:
+            return None
+        config = getattr(self, "config", None)
+        unit = config.get("temp_unit") if isinstance(config, dict) else None
+        now = dt_util.now()
+        state = self.hass.states.get(self.climate_entity)
+        attrs = getattr(state, "attributes", None)
+        raw_step = attrs.get("target_temp_step") if isinstance(attrs, dict) else None
+        try:
+            write = outstanding_own_write(
+                writes,
+                entity_id=self.climate_entity,
+                attribute="temperature",
+                value=float(sent_value),
+                now=now,
+                step=resolve_step(raw_step, unit),
+            )
+            if write is None:
+                return None
+            return max(1.0, SETPOINT_ECHO_WINDOW_S - (now - write.written_at).total_seconds() + 1.0)
+        except TypeError, ValueError:
+            return None
 
     def _settle_own_setpoint_write(self, context_id: str, *, sent: bool) -> None:
         """After the awaited call returns: forget a write that never reached the thermostat, else restart its window.

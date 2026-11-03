@@ -870,7 +870,8 @@ class TestGatePredicateTable:
 
         for name in ("_remote_offset_for_write", "_remote_offset_check_locked"):
             src = inspect.getsource(getattr(AutomationEngine, name))
-            assert "self._remote_offset_gate()" in src, name
+            # ``_remote_offset_gate_and_reason`` IS the one composition (``_remote_offset_gate`` returns its [0]).
+            assert "self._remote_offset_gate()" in src or "self._remote_offset_gate_and_reason()" in src, name
             assert "decide_scheduled_band_gate" not in src and "_any_monitored_sensor" not in src, name
 
 

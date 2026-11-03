@@ -33,6 +33,7 @@ from custom_components.climate_advisor.invariant_watchdog import (  # noqa: E402
     SEVERITY_HARD,
     PromiseConfig,
     run_promise_checks,
+    run_promise_excused,
 )
 from custom_components.climate_advisor.promise_journal import (  # noqa: E402
     Command,
@@ -99,6 +100,9 @@ class PromiseReport:
     waived: list[ProbeHit] = field(default_factory=list)
     steps: int = 0
     stats: dict[str, int] = field(default_factory=dict)  # promise key -> distinct hits (incl. waived)
+    # Issue #1260: promise key -> excused_by -> {"runs": n, "minutes": m}. Time a named exception excused, counted
+    # apart from hits (a rise is visible; it is never a hit and never fails a run).
+    excused: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
 
     @property
     def clean(self) -> bool:
@@ -191,6 +195,7 @@ class PromiseProbe:
         self._hits: dict[str, ProbeHit] = {}  # dedup key -> first hit
         self._mode_set_events: list[tuple[datetime, dict]] = []  # recent thermostat_mode_set events (#1153)
         self._order: list[str] = []
+        self._excused: dict[str, dict[str, dict[str, float]]] = {}
 
     # ── wiring ────────────────────────────────────────────────────────────────
     def attach(self, session: Any) -> None:
@@ -232,6 +237,11 @@ class PromiseProbe:
             if etype == "thermostat_mode_set":
                 self._mode_set_events = [*self._mode_set_events[-63:], (ts, payload)]
         inp = self._journal.window(now)
+        for ex in run_promise_excused(inp, self._cfg, scope=SCOPE_TEST):
+            new_run, added = self._journal.excused_progress(ex.key, ex.minutes)
+            row = self._excused.setdefault(ex.promise, {}).setdefault(ex.excused_by, {"runs": 0, "minutes": 0.0})
+            row["runs"] += 1 if new_run else 0
+            row["minutes"] = round(row["minutes"] + added, 1)
         new: list[ProbeHit] = []
         for hit in run_promise_checks(inp, self._cfg, scope=SCOPE_TEST):
             key = str(hit.key)
@@ -271,7 +281,9 @@ class PromiseProbe:
         return new
 
     def report(self) -> PromiseReport:
-        rep = PromiseReport(steps=self._steps)
+        rep = PromiseReport(
+            steps=self._steps, excused={p: {b: dict(r) for b, r in d.items()} for p, d in self._excused.items()}
+        )
         for key in self._order:
             h = self._hits[key]
             rep.stats[h.promise] = rep.stats.get(h.promise, 0) + 1
@@ -449,10 +461,14 @@ class FakeHassPromiseSource:
         mode = None
         action = None
         setpoint = None
+        setpoint_low = None
+        setpoint_high = None
         if st is not None:
             mode = None if str(st.state).lower() in _UNREADABLE_STATES else str(st.state)
             action = st.attributes.get("hvac_action")
             setpoint = read_state_temp_f(st, "temperature", self._unit)
+            setpoint_low = read_state_temp_f(st, "target_temp_low", self._unit)
+            setpoint_high = read_state_temp_f(st, "target_temp_high", self._unit)
         fan_on = self._fan_physical_state(states)
         contacts_open: bool | None = None
         if self._contacts:
@@ -489,6 +505,8 @@ class FakeHassPromiseSource:
             outdoor_f=float(outdoor) if isinstance(outdoor, (int, float)) else None,
             forecast_high_f=float(high) if isinstance(high, (int, float)) else None,
             setpoint_f=setpoint,
+            setpoint_low_f=setpoint_low,
+            setpoint_high_f=setpoint_high,
             fan_on=fan_on,
             contacts_open=contacts_open,
             automation_enabled=self._automation_enabled(),

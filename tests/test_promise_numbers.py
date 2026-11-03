@@ -190,3 +190,59 @@ class TestOtherPromiseNumbersAreLooserThanProduction:
     def test_celsius_deltas_round_trip_without_changing_the_bound(self, tol_f):
         """The promise decides in F; only the occupant text is converted."""
         assert convert_delta(tol_f, "celsius") == pytest.approx(tol_f / 1.8)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #1260: P7's thermostat-deadband exception versus production's comfort tolerance (#1258)
+# ─────────────────────────────────────────────────────────────────────────────
+_DB_MODES = ("heat", "cool", "heat_cool", "auto", "off", "dry", "fan_only", "HEAT", "Heat_Cool", "", "unknown")
+
+
+def _deadband_hits(side: str, mode: str, past_f: float):
+    """Real P7 over an hour of an idle thermostat, correctly set, ``past_f`` beyond the band edge (default band)."""
+    cfg = PromiseConfig()
+    floor, ceiling = cfg.floor_lo(T0), cfg.ceiling_hi(T0)
+    indoor = floor - past_f if side == "below" else ceiling + past_f
+    edge = floor if side == "below" else ceiling
+    rs = tuple(
+        Reading(
+            ts=T0 + timedelta(minutes=m),
+            hvac_mode=mode,
+            hvac_action="idle",
+            indoor_f=indoor,
+            setpoint_f=edge,
+            setpoint_low_f=floor,
+            setpoint_high_f=ceiling,
+            forecast_high_f=50.0,
+            fan_on=False,
+        )
+        for m in range(0, 61, 10)
+    )
+    inp = PromiseInput(
+        now=rs[-1].ts, latest=rs[-1], readings=rs, commands=(), marks=(), episodes=(), observe_notices=()
+    )
+    return hits_for("comfort_kept", inp, cfg)
+
+
+class TestP7DeadbandIsNeverTighterThanProduction:
+    def test_deadband_is_no_tighter_than_the_production_cap(self):
+        assert NUMBERS.P7_THERMOSTAT_DEADBAND_F >= const.COMFORT_SWING_TOLERANCE_MAX_F
+
+    def test_deadband_is_never_looser_than_the_production_cap(self):
+        assert NUMBERS.P7_THERMOSTAT_DEADBAND_F <= const.COMFORT_SWING_TOLERANCE_MAX_F
+
+    @pytest.mark.parametrize("side", ["below", "above"])
+    @pytest.mark.parametrize("mode", _DB_MODES)
+    def test_p7_excuses_exactly_the_modes_production_says_hold_the_room(self, side, mode):
+        from custom_components.climate_advisor.swing import thermostat_holds_direction  # noqa: PLC0415
+
+        production_holds = thermostat_holds_direction("heat" if side == "below" else "cool", mode)
+        p7_excuses = _deadband_hits(side, mode, past_f=1.4) == []
+        assert p7_excuses == production_holds, (side, mode)
+
+    @pytest.mark.parametrize("side", ["below", "above"])
+    def test_the_boundary_is_the_production_cap_exactly(self, side):
+        mode = "heat" if side == "below" else "cool"
+        cap = const.COMFORT_SWING_TOLERANCE_MAX_F
+        assert _deadband_hits(side, mode, past_f=cap) == []
+        assert len(_deadband_hits(side, mode, past_f=cap + 0.1)) == 1

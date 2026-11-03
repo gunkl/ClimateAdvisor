@@ -68,7 +68,7 @@ Written once, run both inside production (log-only first, alert later) and after
 | 5 | `no_blind_fan_start` | #1037, #1042 | hard | log |
 | 5b | `blind_fan_continue` | #1037, #1043 | warning | log |
 | 6 | `mode_flip_rate` | #1066/#1073 flip-flop | warning | log |
-| 7 | `comfort_kept` | #1066 | warning | log |
+| 7 | `comfort_kept` (not outside the comfort range > 45 min while CA is in control, except while the thermostat itself is in the matching mode, idle, set at or inside the band edge, and the room is within 2.5°F of both that edge and the thermostat's own setpoint: the thermostat's own deadband, Issue #1260; excused time counted separately as `excused_by=thermostat_deadband`) | #1066, #1260 | warning | log |
 | 8 | `surfaces_agree` | band shown vs band held | hard (ratcheted) | none (test-only; not in `PROMISES`) |
 
 Decisions (user, 2026-10-29): promise 1 follows the user's configured settling tolerance minus 0.5 F of slack (flag zone `min(2.0, smallest tolerance) - 0.5`; lookback `min(120, configured window) - 5` min), both directions, each clause gated by the day's forecast high; promise 4's exception list is split by device (below); promise 5b is included.
@@ -76,6 +76,8 @@ Decisions (user, 2026-10-29): promise 1 follows the user's configured settling t
 Promise 4 exceptions. Fan override: natural grace expiry, dashboard cancel, bedtime, wake-up, occupancy away/vacation, a newer occupant action, supersede, adoption, restart. Thermostat override: the same list **minus bedtime and wake-up** (a command that undoes a thermostat override at bedtime or wake-up is the #1119 defect shape). `stuck_grace_recovered` is never an excuse. Fan-off grace: natural expiry, dashboard cancel, supersede, restart, indoor above the comfort ceiling.
 
 Journal: readings, commands and marks are kept 3 h (caps 400/128/128); episode marks are kept as long as the episode is open; dedup LRU 256; the per-promise `promise_stats` helpers are validated and capped. The journal is not persisted: after a restart every history-needing check sees no data and reports nothing.
+
+Issue #1260 (owner sign-off in the issue, 2026-11-02): promise 7 has ONE named, narrow exception, the thermostat's own deadband (`P7_THERMOSTAT_DEADBAND_F` = 2.5°F). It reads ground truth only (`hvac_mode`, `hvac_action`, `setpoint_f`, `setpoint_low_f`, `setpoint_high_f`, `indoor_f`); see `household-promises-spec.md`.
 
 Every temperature in `Reading`/`Command`/`Hit.evidence` is internal degrees F; only `Hit.detail` is rendered in the user's unit.
 

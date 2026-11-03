@@ -4327,8 +4327,7 @@ class AutomationEngine:
         if self._paused_by_door or decide_open_sensor_hold(
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
-            debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
         ):
             return None, None
         mode, band = self._preview_comfort_family(classification)
@@ -4903,8 +4902,7 @@ class AutomationEngine:
         if decide_open_sensor_hold(
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
-            debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
         ):
             _LOGGER.warning(
                 "_apply_comfort_band: monitored door/window open — refusing to arm active mode "
@@ -7389,8 +7387,7 @@ class AutomationEngine:
         if not decide_open_sensor_hold(
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
-            debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
         ):
             return  # nat-vent/WHF owns this, or not open / only transiently open — do not pause on a blip
         await self._pause_for_door_window(
@@ -13893,7 +13890,6 @@ class AutomationEngine:
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             within_planned_window=self._is_within_planned_window_period(),
             any_sensor_open=self._any_monitored_sensor_settled_open(),
-            sensor_debounce_pending=bool(self._sensor_debounce_pending),
             override_matches_current_decision=self._override_matches_current_decision(self._current_classification),
             grace_source=self._last_resume_source or "automation",
             natural_vent_active=bool(self._natural_vent_active),
@@ -15992,8 +15988,7 @@ class AutomationEngine:
         if decide_open_sensor_hold(
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
-            debounce_pending=self._sensor_debounce_pending,
-            any_sensor_open=self._any_monitored_sensor_holding_open(),
+            any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
         ):
             return "open_sensor"
         return None

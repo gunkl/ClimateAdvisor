@@ -464,24 +464,24 @@ class TestDecideScheduledWriteSeqCurrent:
 
 
 class TestDecideOpenSensorHold:
-    """Issue #1048 Phase 2: the one open-window predicate (all 16 input combinations)."""
+    """Issue #1048 Phase 2: the one open-window predicate (all 8 input combinations).
+
+    Issue #1229: the open input is the per-sensor settled read, not "any open AND nothing pending house-wide".
+    """
 
     def test_full_truth_table(self):
         import itertools
 
-        for nat, whf, debounce, open_ in itertools.product((False, True), repeat=4):
-            expected = open_ and not debounce and not nat and not whf
+        for nat, whf, settled in itertools.product((False, True), repeat=3):
+            expected = settled and not nat and not whf
             assert (
                 decide_open_sensor_hold(
                     natural_vent_active=nat,
                     whf_owns_hvac=whf,
-                    debounce_pending=debounce,
-                    any_sensor_open=open_,
+                    any_sensor_settled_open=settled,
                 )
                 is expected
-            ), (nat, whf, debounce, open_)
+            ), (nat, whf, settled)
 
     def test_only_hold_case_is_settled_open_sensor_with_no_owner(self):
-        assert decide_open_sensor_hold(
-            natural_vent_active=False, whf_owns_hvac=False, debounce_pending=False, any_sensor_open=True
-        )
+        assert decide_open_sensor_hold(natural_vent_active=False, whf_owns_hvac=False, any_sensor_settled_open=True)

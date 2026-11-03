@@ -294,6 +294,9 @@ def outdoor_direction_ok(
     indoor: float | None,
     comfort_heat: float,
     comfort_cool: float,
+    *,
+    heat_margin: float = 0.0,
+    cool_margin: float = 0.0,
 ) -> bool:
     """Stage B of the shared "would outside air help?" rule (Issue #1211): direction.
 
@@ -301,7 +304,11 @@ def outdoor_direction_ok(
       * indoor above the comfort ceiling -> outdoor must be cooler than indoor
         (the existing ``free_cooling_direction_ok``);
       * indoor below the comfort floor   -> outdoor must be warmer than indoor;
-      * indoor inside the band           -> nothing to correct, so direction does not veto.
+      * indoor inside the band           -> nothing to correct, so direction does not veto,
+        EXCEPT within ``heat_margin`` above the floor (cooler air would only start the heat) or
+        within ``cool_margin`` below the ceiling (warmer air would only start the AC) -- Issue #1276.
+        Callers pass the thermostat's own swing tolerance for a side the thermostat holds; the
+        default 0 keeps the plain band rule.
 
     Unknown readings do not veto (same convention as ``free_cooling_direction_ok``): the caller
     decides what to do with an unknown. Used by the live gate and the Next User Action card,
@@ -314,7 +321,9 @@ def outdoor_direction_ok(
         return free_cooling_direction_ok(outdoor, indoor)
     if indoor < comfort_heat:
         return outdoor > indoor
-    return True
+    if outdoor < indoor and indoor < comfort_heat + heat_margin:
+        return False
+    return not (outdoor > indoor and indoor > comfort_cool - cool_margin)
 
 
 def outdoor_air_helps(

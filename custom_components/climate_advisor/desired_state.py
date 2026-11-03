@@ -484,8 +484,7 @@ def decide_open_sensor_hold(
     *,
     natural_vent_active: bool,
     whf_owns_hvac: bool,
-    debounce_pending: bool,
-    any_sensor_open: bool,
+    any_sensor_settled_open: bool,
 ) -> bool:
     """True when a monitored door/window is genuinely open and nothing legitimately owns it.
 
@@ -494,12 +493,18 @@ def decide_open_sensor_hold(
     ``_sync_paused_by_door_with_live_sensors()`` and
     ``door_window_fsm.derive_door_window_lifecycle_state()``'s pause-entry tail.
 
-    Held (True) only when a sensor is open, its open/close debounce has settled (a blip is
-    not an open window), and neither nat-vent nor a whole-house-fan session owns the
-    HVAC/window relationship (they legitimately run with windows open). Callers layer
-    their own extra conditions (planned-window period, already-paused, grace) on top.
+    Held (True) only when a sensor is open past its OWN delay (a blip is not an open window)
+    and neither nat-vent nor a whole-house-fan session owns the HVAC/window relationship
+    (they legitimately run with windows open). Callers layer their own extra conditions
+    (planned-window period, already-paused, grace) on top.
+
+    Issue #1229: ``any_sensor_settled_open`` is the per-sensor read
+    (``AutomationEngine._any_monitored_sensor_settled_open()``). It used to be "any sensor
+    open AND nothing pending house-wide", so a second door inside its delay hid a window open
+    for hours and heating/cooling ran into it. A dark sensor that last read open still counts
+    (#1181: these are hold/restore reads; starting a pause asks the live-open read elsewhere).
     """
-    return any_sensor_open and not debounce_pending and not natural_vent_active and not whf_owns_hvac
+    return any_sensor_settled_open and not natural_vent_active and not whf_owns_hvac
 
 
 _OCCUPANCY_AWAY = "away"  # mirrors const.OCCUPANCY_AWAY

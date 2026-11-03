@@ -268,9 +268,27 @@ class TestEngineVouchesForTheSetpoint:
         assert engine._start_grace_period_action("manual", trigger="fan_manual_override")
         assert [d["continues"] for d in _superseded(engine)] == [False]
 
-    def test_no_continues_for_a_replacement_that_is_not_a_fan_override_grace(self):
+    def test_no_continues_for_a_replacement_that_is_not_a_fan_grace(self):
         engine = _engine(FAN_MODE_HVAC)
         _protected_setpoint_grace(engine)
+        assert engine._start_grace_period_action("manual", trigger="nat_vent_exit_resume")
+        assert [d["continues"] for d in _superseded(engine)] == [False]
+
+    def test_fan_off_grace_replacing_a_protected_setpoint_grace_says_it_continues(self):
+        """Issue #1281: production keeps the override live under the fan-off grace (it ends when that grace expires).
+
+        This replaced the #1204 negative control that expected ``False`` here: that pinned the journal closing the
+        setpoint as ``superseded_unreplaced`` while ``_manual_change_protected()`` was still True, a fault that never
+        happened, after which P4 stopped guarding the setpoint for the rest of the pause."""
+        engine = _engine(FAN_MODE_HVAC)
+        _protected_setpoint_grace(engine)
+        assert engine._start_grace_period_action("manual", trigger="fan_off")
+        assert [d["continues"] for d in _superseded(engine)] == [True]
+
+    def test_no_continues_for_a_fan_off_once_nothing_is_protected(self):
+        engine = _engine(FAN_MODE_HVAC)
+        _protected_setpoint_grace(engine)
+        engine._manual_override_active = False
         assert engine._start_grace_period_action("manual", trigger="fan_off")
         assert [d["continues"] for d in _superseded(engine)] == [False]
 
@@ -459,3 +477,63 @@ class TestKeptGraceThatProtectsNothingEndsOnPurpose:
         engine._end_grace_left_protecting_nothing("override_self_resolved")
         assert engine._grace_active is True
         assert not [t for t, _ in engine.seen if t == "grace_cancelled"]
+
+
+class TestBlowerOffKeepsTheSetpoint:
+    """Issue #1281 (the mirror of #1204): setpoint change, blower On, then blower back to Auto.
+
+    Occupant story (generated day 9003000097): you set cool at 16:47, press the blower on at 16:49 and set it back to
+    auto at 17:14. Your cool change stays in force under the fan-off pause until 17:44 and Climate Advisor writes
+    nothing to the thermostat before then, but P4 reported "ended your manual thermostat change 5 min early".
+    """
+
+    def _engine_stream(self, *, off_at: float, fan_off_s: int):
+        """Real engine events: setpoint grace (900 s from 14:00:30), blower grace (900 s from 14:02), blower off."""
+        engine = _engine(FAN_MODE_HVAC)
+        _protected_setpoint_grace(engine)
+        phases = [(0.5, list(engine.seen))]
+        mark = len(engine.seen)
+        engine._fan_override_active = True
+        engine._fan_override_is_hvac_fan = True
+        engine._fan_override_time = at(2).isoformat()
+        assert engine._start_grace_period_action("manual", trigger="fan_manual_override")
+        engine._grace_active = True  # the FSM flag-set runs in the coordinator (same convention as above)
+        engine._grace_protects_override = True
+        phases.append((2, engine.seen[mark:]))
+        mark = len(engine.seen)
+        engine._fan_override_active = False
+        assert engine._start_grace_period_action("manual", trigger="fan_off", duration_override=fan_off_s)
+        phases.append((off_at, engine.seen[mark:]))
+        mark = len(engine.seen)
+        engine._any_monitored_sensor_settled_open = lambda: False
+        engine._on_grace_expired("manual", fan_off_s, False)
+        phases.append((off_at + fan_off_s / 60, engine.seen[mark:]))
+        marks = events((0, "override_detected", {"detected_mode": "cool"}))
+        for minutes, phase in phases:
+            marks += [mark_from_event(at(minutes), t, d) for t, d in phase]
+        return marks
+
+    def test_the_engine_says_the_setpoint_continues_at_the_blower_off(self):
+        marks = self._engine_stream(off_at=12, fan_off_s=1800)
+        cancels = [m for m in marks if m.kind == "grace_cancelled" and m.ts == at(12)]
+        assert cancels and all(dict(m.attrs).get("continues") is True for m in cancels)
+
+    def test_blower_off_is_not_reported_as_ending_the_setpoint_early(self):
+        inp = make_input(_READINGS, (), self._engine_stream(off_at=12, fan_off_s=1800), now=at(60))
+        thermostat = next(e for e in inp.episodes if e.target == "thermostat")
+        assert thermostat.end_reason == "grace_expired" and thermostat.end_ts == at(42)
+        assert p4(inp) == []
+
+    def test_negative_control_ca_setpoint_reversal_inside_the_fan_off_pause_still_hits(self):
+        reversal = Command(
+            ts=at(14), target="thermostat", service="set_temperature", origin="ca", mode="cool", setpoint_f=75.0
+        )
+        inp = make_input(_READINGS, (reversal,), self._engine_stream(off_at=12, fan_off_s=1800), now=at(60))
+        assert p4(inp), "a Climate Advisor setpoint write inside the protected time must still be reported"
+
+    def test_negative_control_a_fan_off_pause_ending_before_the_later_grace_end_is_an_early_end(self):
+        """Fan-off pause 2 min from 14:12: the override ends at 14:14, before the blower grace's 14:17."""
+        inp = make_input(_READINGS, (), self._engine_stream(off_at=12, fan_off_s=120), now=at(60))
+        thermostat = next(e for e in inp.episodes if e.target == "thermostat")
+        assert thermostat.end_reason == "grace_expired_early"
+        assert [h.key.split(":")[1] for h in p4(inp)] == ["early_end"]

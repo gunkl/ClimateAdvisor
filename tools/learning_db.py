@@ -174,21 +174,32 @@ def _pad(text: str, width: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _load_swing_module():
-    """``custom_components/climate_advisor/swing.py`` loaded by path (the package needs Home Assistant).
+def _load_ca_module(name: str):
+    """``custom_components/climate_advisor/<name>.py`` loaded by path (the package needs Home Assistant).
 
-    Same approach as ``tools/thermal_replay.py``: one implementation of the swing rules, reused here.
+    Same approach as ``tools/thermal_replay.py``: one implementation of the engine's pure rules, reused here.
+    Only for the dependency-free modules that support standalone loading (``swing``, ``thermal_confidence``).
     """
     import importlib.util
 
-    path = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "swing.py"
-    spec = importlib.util.spec_from_file_location("_ca_swing_standalone", path)
+    path = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_ca_{name}_standalone", path)
     if spec.name in sys.modules:
         return sys.modules[spec.name]
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module  # dataclasses resolves string annotations via sys.modules
     spec.loader.exec_module(module)
     return module
+
+
+def _load_swing_module():
+    """The engine's pure swing rules (``swing.py``)."""
+    return _load_ca_module("swing")
+
+
+def _load_confidence_module():
+    """The engine's live confidence grades and physics-eligibility rule (``thermal_confidence.py``, Issue #1277)."""
+    return _load_ca_module("thermal_confidence")
 
 
 def _print_model_summary(db: dict) -> None:
@@ -214,8 +225,10 @@ def _print_model_summary(db: dict) -> None:
             result += f"  avg_R2={cache[r2_key]:.3f}"
         return result
 
-    conf_passive = cache.get("confidence_k_passive", cache.get("confidence", "?"))
-    conf_hvac = cache.get("confidence_k_hvac", cache.get("confidence", "?"))
+    # Issue #1277: graded live from the counts, as the engine does; stored copies were never refreshed.
+    _conf = _load_confidence_module()
+    conf_passive = _conf.grade_passive_confidence(cache)
+    conf_hvac = _conf.grade_hvac_confidence(cache)
     last_obs = cache.get("last_observation_date") or cache.get("last_obs") or "none"
 
     print("Thermal Model Summary")

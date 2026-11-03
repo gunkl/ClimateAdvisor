@@ -641,9 +641,11 @@ Returns the current accumulated thermal model from `thermal_model_cache`.
 }
 ```
 
-`confidence` (HVAC) is graded by `observation_count_heat + observation_count_cool`: `"none"` (< 3), `"low"` (3–9), `"medium"` (10–19), `"high"` (20+).
+`confidence` (HVAC) is graded by `observation_count_heat + observation_count_cool`: `"none"` (< 5, `MIN_THERMAL_OBSERVATIONS`), `"low"` (5–9), `"medium"` (10–19, `THERMAL_HVAC_CONF_MEDIUM`), `"high"` (20+, `THERMAL_HVAC_CONF_HIGH`).
 
-`confidence_k_passive` is graded independently by `observation_count_passive`: same thresholds. Physics prediction activates when either confidence is > `"none"` — enabling prediction on homes with zero HVAC cycles recorded (passive-only households).
+`confidence_k_passive` is graded by `observation_count_passive + observation_count_heat + observation_count_cool`: `"none"` (< 5), `"low"` (5–14), `"medium"` (15–29), `"high"` (30+) (`THERMAL_PASSIVE_CONF_*`). Physics prediction activates when either confidence is > `"none"` (or the gate bridge applies) — enabling prediction on homes with zero HVAC cycles recorded (passive-only households).
+
+**Single implementation (Issue #1277):** the grades and the physics-eligibility rule live in the pure module `thermal_confidence.py` (no Home Assistant import), used by `learning.py`, `coordinator._build_predicted_indoor_future` and, loaded by path, by `tools/engine_status.py`, `tools/learning_db.py --model` and `tools/thermal_replay.py`. They are always computed live from the counts; the persisted `thermal_model_cache` no longer stores `confidence_k_passive` / `confidence_k_hvac` (they were seeded `"none"` and never refreshed, so the tools reported physics ineligible while the engine used it; `load_state()` drops them).
 
 The legacy `heating_rate_f_per_hour` and `cooling_rate_f_per_hour` fields are kept for backward compatibility with `compute_bedtime_setback()` and `_compute_ramp_hours()`.
 

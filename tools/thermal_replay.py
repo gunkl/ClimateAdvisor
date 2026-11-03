@@ -447,6 +447,19 @@ def _load_swing_module():
 _swing = _load_swing_module()
 
 
+def _load_confidence_module():
+    """``thermal_confidence.py`` by path: the engine's live confidence grades (Issue #1277)."""
+    path = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "thermal_confidence.py"
+    spec = importlib.util.spec_from_file_location("_ca_thermal_confidence_standalone", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_confidence = _load_confidence_module()
+
+
 # ---------------------------------------------------------------------------
 # EWMA model cache rebuild — mirrors learning.py _update_thermal_model_cache
 # ---------------------------------------------------------------------------
@@ -488,6 +501,12 @@ _SWING_CACHE_KEYS = (
 )
 
 
+def _print_live_grades(cache: dict) -> None:
+    """Print the confidence grades the engine will compute from this cache's counts (Issue #1277)."""
+    print(f"  confidence_k_passive (live): {_confidence.grade_passive_confidence(cache)}")
+    print(f"  confidence_k_hvac (live): {_confidence.grade_hvac_confidence(cache)}")
+
+
 def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None) -> dict:
     """Recompute thermal_model_cache EWMA from all obs in chronological order.
 
@@ -523,8 +542,6 @@ def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None)
         "swing_definition_version": _swing.THERMAL_SWING_DEFINITION_VERSION,
         "avg_r_squared_passive": None,
         "last_observation_date": None,
-        "confidence_k_passive": "none",
-        "confidence_k_hvac": "none",
     }
 
     for obs in sorted_obs:
@@ -576,15 +593,7 @@ def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None)
             for k, v in carried.items():
                 cache[k] = v
 
-    # Confidence grades
-    n_hvac = cache["observation_count_heat"] + cache["observation_count_cool"]
-    cache["confidence_k_hvac"] = (
-        "high" if n_hvac >= 20 else "medium" if n_hvac >= 10 else "low" if n_hvac >= 1 else "none"
-    )
-    n_passive = cache["observation_count_passive"]
-    cache["confidence_k_passive"] = (
-        "high" if n_passive >= 10 else "medium" if n_passive >= 5 else "low" if n_passive >= 1 else "none"
-    )
+    # Confidence grades are not stored (Issue #1277): the engine grades them live from the counts.
 
     # Round for readability
     for k in (
@@ -2108,13 +2117,12 @@ def main() -> None:
             "k_active_heat",
             "k_active_cool",
             "k_vent_window",
-            "confidence_k_passive",
-            "confidence_k_hvac",
             "swing_heat_f",
             "swing_cool_f",
         )
         for k in _hvac_keys:
             print(f"  {k}: {new_model.get(k)}")
+        _print_live_grades(new_model)
 
         print(f"\nWriting {len(merged)} obs to HA learning DB...")
         write_learning_json_ssh(config, db)
@@ -2258,8 +2266,9 @@ def main() -> None:
     db["thermal_model_cache"] = new_model
 
     print("\nNew model after rebuild:")
-    for k in ("k_passive", "k_vent_window", "k_solar", "confidence_k_passive", "confidence_k_hvac"):
+    for k in ("k_passive", "k_vent_window", "k_solar"):
         print(f"  {k}: {new_model.get(k)}")
+    _print_live_grades(new_model)
 
     print(f"\nWriting {len(merged)} obs to HA learning DB...")
     write_learning_json_ssh(config, db)

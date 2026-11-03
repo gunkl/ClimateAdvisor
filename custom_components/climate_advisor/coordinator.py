@@ -285,7 +285,12 @@ from .fan_status import (
     remote_event_is_echo_of,
     resolve_untracked_fan_status,
 )
-from .hvac_action import is_hvac_action_active, is_hvac_action_reported_idle, is_hvac_compressor_active
+from .hvac_action import (
+    is_hvac_action_active,
+    is_hvac_compressor_active,
+    is_mode_fallback_running,
+    thermostat_reports_running,
+)
 from .incident_payload import build_incident_payload
 from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import (
@@ -372,6 +377,7 @@ from .temperature import (
     unit_key_from_attr,
     unit_mismatch,
 )
+from .thermal_confidence import physics_eligibility
 from .time_utils import instant_after
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
@@ -700,7 +706,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     _equipment_last_active: dict[str, datetime] | None = None  # "heat"/"cool" -> last hvac_action seen
     # Issue #1234: swing sampling state (class-level defaults so object.__new__ test stubs work).
     # Open heat/cool cycles awaiting their off-transition ("heat"/"cool" -> candidate dict); and when
-    # the thermostat's setpoint or HVAC mode last changed (a restart restarts it - not persisted).
+    # the thermostat's setpoint or HVAC mode last changed. Not persisted: setup stamps it instead (Issue #1256).
     _swing_candidates: dict[str, dict] | None = None
     _last_setpoint_change_ts: datetime | None = None
     _swing_last_off_ts: dict[str, datetime] | None = None  # "heat"/"cool" -> last real off-edge (flap guard)
@@ -1238,6 +1244,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Listeners: occupancy toggles
         self._subscribe_occupancy_listeners()
         self._occupancy_mode = self._compute_occupancy_mode()
+
+        # Issue #1256: startup counts as a setpoint change for swing sampling (before the listener exists).
+        self._stamp_setpoint_change_at_startup(dt_util.now())
 
         # Listeners: thermostat state (for tracking manual overrides and runtime)
         self._unsub_listeners.append(
@@ -6204,6 +6213,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _local_trigger.strftime("%H:%M"),
         )
 
+    def _thermostat_session_still_running(self) -> bool:
+        """Whether the thermostat's current state shows the tracked session running (Issue #1241).
+
+        Applies the session-edge rule of ``_async_thermostat_changed`` to the live state, so a session
+        is kept only when an edge with this state on both sides would keep it running. An unreadable
+        thermostat counts as not running.
+        """
+        state = self.hass.states.get(self.config["climate_entity"])
+        if state is None:
+            return False
+        ae = self.automation_engine
+        return thermostat_reports_running(
+            state.state,
+            str(state.attributes.get("hvac_action", "")).lower(),
+            ca_ventilating=bool(ae._fan_active or ae._natural_vent_active),
+        )
+
     async def _async_end_of_day(self, now: datetime) -> None:
         """Finalize the day's record and reset for tomorrow."""
         if self._today_record:
@@ -6255,9 +6281,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_nat_vent_cutoff = None
         self._briefing_nat_vent_cutoff_reason = None
         self._briefing_evening_open_time = None
-        self._hvac_on_since = None
-        self._thermostat_fan_only_on_since = None
-        self._hvac_session_mode = None
+        # Issue #1241: a session still running at 23:59 carries over. The flush above already credited
+        # today's part and reset its timer to now, so the rest lands in tomorrow's record (and the live
+        # getters keep counting). Clearing it here dropped every post-rollover minute. The clear was also
+        # the only daily bound on a session whose off-edge was missed, so keep that: drop the session
+        # unless the thermostat still reports it running by the same rule the session edges use.
+        if self._hvac_session_mode is not None and not self._thermostat_session_still_running():
+            _LOGGER.info(
+                "Day rollover: thermostat no longer reports the %s session running; ending it (Issue #1241)",
+                self._hvac_session_mode,
+            )
+            self._hvac_session_mode = None
+        if self._hvac_session_mode is None:
+            self._hvac_on_since = None
+            self._thermostat_fan_only_on_since = None
         self._last_violation_check = None
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
@@ -6844,7 +6881,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Some thermostats report hvac_action="fan" persistently (even when off/idle),
             # which would trap this branch indefinitely if we used the old `new_action and
             # old_action` guard.  Fall back to hvac_mode state for reliable edge detection.
-            idle_modes = {"off", "unavailable", "unknown", ""}
             # Issue #1240: the fallback is for thermostats whose hvac_action carries no signal
             # (missing, or "fan" persistently — #93). A side that positively reports "idle"/"off"
             # IS a signal: the equipment is not running, whatever hvac_mode is selected. Before,
@@ -6852,8 +6888,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # credited the whole idle window as runtime; and a "fan" heat session kept counting
             # after the thermostat turned idle until the mode was switched off. Applied to both
             # sides so the start, stop and glide edges agree.
-            was_running = old_state.state not in idle_modes and not is_hvac_action_reported_idle(old_action)
-            is_running = new_state.state not in idle_modes and not is_hvac_action_reported_idle(new_action)
+            was_running = is_mode_fallback_running(old_state.state, old_action)
+            is_running = is_mode_fallback_running(new_state.state, new_action)
             # Issue #986: this state-based fallback can't tell "hvac_mode is cool/heat and
             # the compressor just hasn't confirmed yet" apart from "CA's own fan-only
             # ventilation is running while hvac_mode happens to read cool/heat" — the
@@ -9036,6 +9072,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) != TEMP_SOURCE_CLIMATE_FALLBACK:
             return 0.0
         return whole_degree_resolution_f(self.config.get("temp_unit", "fahrenheit"))
+
+    def _stamp_setpoint_change_at_startup(self, now: datetime) -> None:
+        """Treat startup as a setpoint change for swing sampling (Issue #1256).
+
+        ``_last_setpoint_change_ts`` is in memory only, so after a restart a setpoint change made just
+        before it was unknown and the next on-edge inside ``THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S`` was
+        learned as hysteresis when it was the command jump. Stamping at setup excludes that one edge:
+        at most one legitimate sample is lost per restart and a jump is never accepted. The same age
+        also keeps a stop inside the window from opening a coast window (``coast_stop_was_commanded``).
+        """
+        self._last_setpoint_change_ts = now
 
     def _note_setpoint_change(self, old_state: Any, new_state: Any, now: datetime) -> bool:
         """Stamp when the thermostat's setpoint or HVAC mode last changed (Issue #1234).
@@ -14624,23 +14671,14 @@ def _build_predicted_indoor_future(
         # (inert home → k≈0 accepted by widened ventilated bounds in learning.py).
         # When k_vent_window = 0.0 exactly the ODE produces a flat prediction (T stays at
         # current_indoor_temp), which is correct for a perfectly inert home.
-        _k_passive_via_bridge = False
-        if (_k_passive is None or _conf_k_passive == "none") and _k_vent_window is not None and _k_vent_window <= 0:
-            _k_passive = _k_vent_window
-            _k_passive_via_bridge = True
+        _physics_eligible, _k_passive, _k_passive_via_bridge = physics_eligibility(
+            _conf, _conf_k_passive, _k_passive, _k_vent_window
+        )
+        if _k_passive_via_bridge:
             _LOGGER.debug(
                 "_build_predicted_indoor_future: gate bridge — using k_vent_window=%.4f as proxy k_passive",
                 _k_passive,
             )
-        _physics_eligible = (
-            (
-                _conf != "none"
-                or (_conf_k_passive is not None and _conf_k_passive not in (None, "none"))
-                or _k_passive_via_bridge  # bridge-provided k needs no confidence count
-            )
-            and _k_passive is not None
-            and (_k_passive < 0 or _k_passive_via_bridge)
-        )
         if _physics_eligible:
             _use_physics = True
             _LOGGER.debug(

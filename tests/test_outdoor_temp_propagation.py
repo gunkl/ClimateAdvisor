@@ -291,6 +291,7 @@ class TestAsyncEndOfDayRefetchesHourlyForecast:
         coord._pre_cool_status = "scheduled"
         coord._pre_cool_trigger_dt = None
         coord._pre_cool_target = None
+        coord._hvac_session_mode = None  # set in __init__ in production (Issue #1241 reads it at rollover)
 
         new_forecast = [_fc_entry("2026-05-12T00:00:00+00:00", 60.0)]
         coord._get_hourly_forecast_data = AsyncMock(return_value=new_forecast)

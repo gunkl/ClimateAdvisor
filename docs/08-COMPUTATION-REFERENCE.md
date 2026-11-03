@@ -369,7 +369,9 @@ the Engine Visibility section of `docs/thermal-model-v3-spec.md`.
 
 **Confidence grades**: `confidence_k_passive` is graded independently of `confidence_k_hvac`.
 Physics prediction activates when either confidence is > "none", enabling prediction on
-homes with passive-only observations (zero HVAC cycles recorded).
+homes with passive-only observations (zero HVAC cycles recorded). Grades and the eligibility
+rule are computed live from the observation counts by `thermal_confidence.py` (shared with the
+diagnostic tools, Issue #1277); they are not stored in the learning JSON.
 
 `confidence_k_solar` is graded from `observation_count_solar` (fixed in Issue #308 — was hardcoded `"none"`):
 
@@ -617,7 +619,7 @@ Retired: `abs(T_end - T_start) / 2` (half the rise per run) and its `THERMAL_HVA
 | `swing_heat_f` | 0.1 F | 5.0 F | `THERMAL_SWING_MIN_F` / `THERMAL_SWING_MAX_F`; non-positive (on at/inside the setpoint) gives no sample |
 | `swing_cool_f` | 0.1 F | 5.0 F | Same bounds, independent |
 
-**Exclusions:** on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` of a setpoint/HVAC-mode change; phantom (mode-fallback) sessions; `hvac_action` flapping (on within `THERMAL_SWING_REARM_WINDOW_S` of the previous off, same direction); wrong-direction runs (heat that cooled / cool that warmed). Rules: `swing.evaluate_swing_cycle` (shared by `coordinator.py` and `tools/thermal_replay.py`).
+**Exclusions:** on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` of a setpoint/HVAC-mode change (startup counts as one: `async_setup` stamps `_last_setpoint_change_ts`, which is not persisted, so a change made just before a restart can't be learned as hysteresis — Issue #1256; at most one sample is lost per restart); phantom (mode-fallback) sessions; `hvac_action` flapping (on within `THERMAL_SWING_REARM_WINDOW_S` of the previous off, same direction); wrong-direction runs (heat that cooled / cool that warmed). Rules: `swing.evaluate_swing_cycle` (shared by `coordinator.py` and `tools/thermal_replay.py`).
 
 **Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` samples. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot (Issue #1233) is a separate quantity, below.
 
@@ -895,9 +897,17 @@ All five fields default to `None` at record creation. On a fire night, `setback_
 
 Regression origin: ebbf5ab (Fix #93, 2026-04-08) widened the fallback guard from `if new_action and old_action` to "neither side heating/cooling", which swept in idle/off. The resolved session mode (`heat`/`cool`/`fan_only`, Issue #912) selects which counter the timer feeds; only `heat`/`cool` open a thermal observation.
 
-**Known open issue (#1241):** a run that crosses the 23:59 rollover flush loses its post-rollover runtime.
+**Day rollover (Issue #1241):** `_async_end_of_day` (23:59) flushes the running session into the day's record, which resets its timer to 23:59, and then keeps the session: the rest of the run lands in the next day's record and the live getters (`get_hvac_runtime_today()`, `get_thermostat_fan_only_runtime_today()`) keep counting, even before the first post-midnight cycle creates the new record. Before, it cleared `_hvac_on_since` / `_thermostat_fan_only_on_since` / `_hvac_session_mode`, so a 23:00–01:00 run credited 59 min and then 0 (regression origin 239cc20; 55c81ff/#912 extended the clear). Stale-session guard: the clear was also the only daily bound on a session whose off-edge was missed (an off-edge dropped during startup coalescing), so the session is kept only while the live thermostat state still reports it running by the edge rule above (`hvac_action.thermostat_reports_running`: heating/cooling, or the mode fallback without an idle/off report and without CA's own fan or nat-vent). An idle, off, unavailable or missing thermostat ends it at the rollover. The in-progress thermal observation never depended on the clear; it ends at the real off-edge.
 
-> **Test coverage:** `tests/test_phantom_runtime_1240.py` (idle windows, real edge after idle, cool mirror, fan_only and glide symmetry, stop-side mirror, #93/#986 fallback guards); `tests/test_hvac_session_detection.py`; real HA: `tests_ha/test_phantom_runtime_1240.py`.
+| Thermostat at 23:59 | Session | Today's record | Tomorrow |
+|---|---|---|---|
+| `heating`/`cooling`, or `fan_only` + `fan` | kept | credited to 23:59 | rest of the run |
+| mode heat/cool, no `hvac_action` (#93) | kept | credited to 23:59 | rest of the run |
+| `idle`/`off`, mode off, unavailable, no state | ended | credited to 23:59 (as before) | 0 |
+| mode cool + `fan` while CA's fan/nat-vent runs (#986) | ended | credited to 23:59 (as before) | 0 |
+| no session armed | nothing | — | — |
+
+> **Test coverage:** `tests/test_rollover_runtime_1241.py` (heat/cool/fan_only across 23:59, live getters after the rollover, stale-session guard); `tests/test_phantom_runtime_1240.py` (idle windows, real edge after idle, cool mirror, fan_only and glide symmetry, stop-side mirror, #93/#986 fallback guards); `tests/test_hvac_session_detection.py`; real HA: `tests_ha/test_phantom_runtime_1240.py`.
 
 ---
 

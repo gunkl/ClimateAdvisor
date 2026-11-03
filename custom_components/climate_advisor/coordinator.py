@@ -1109,6 +1109,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sensor_settled_open=self._any_sensor_settled_open,
             emit_event=self._emit_event,
             request_refresh=lambda: self.hass.async_create_task(self.async_request_refresh()),
+            push_card_status=self._push_override_card_status,
             # Issue #359: post-grace fan check callback — called by engine when any
             # grace period expires.
             post_grace_fan_check=self._on_post_grace_fan_check,
@@ -3130,6 +3131,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("windows_recommended → False: %s", reason)
         c.windows_recommended = False
         self._schedule_planned_window_exit_check()
+
+    def _push_override_card_status(self) -> None:
+        """Re-render the override/grace card fields in ``self.data`` and notify the entities (Issue #1264).
+
+        Display only: no automation cycle runs (the ``_apply_outdoor_temp`` pattern). The engine calls it once an
+        override or grace ending made off the listener path is complete (a WHF safety stop from its settle timer,
+        leaving home, bedtime), so the Status and Fan cards drop the ended grace at once instead of at the next
+        unrelated refresh.
+        """
+        if not getattr(self, "data", None) or not self.automation_engine:
+            return
+        self.data[ATTR_AUTOMATION_STATUS] = self._compute_automation_status()
+        self.data[ATTR_FAN_STATUS] = self._compute_fan_status()
+        self.data[ATTR_WHF_STATUS] = self._append_indoor_blind_suffix(self._compute_whf_status(), card="whf")
+        self.data[ATTR_HVAC_FAN_STATUS] = self._append_indoor_blind_suffix(self._compute_hvac_fan_status(), card="hvac")
+        self.data[ATTR_FAN_OVERRIDE_SINCE] = self.automation_engine._fan_override_time
+        self.async_update_listeners()
 
     def _apply_outdoor_temp(self, value: float | None, *, record_history: bool) -> None:
         """Propagate a newly-read outdoor temperature to every downstream consumer.

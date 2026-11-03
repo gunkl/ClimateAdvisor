@@ -3130,7 +3130,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if outdoor > comfort_cool:
             reason = f"outdoor {outdoor:.1f}°F above comfort_cool {comfort_cool:.1f}°F"
         elif indoor is not None:
-            if not self._outdoor_direction_ok(outdoor, indoor, comfort_heat, comfort_cool):
+            if not outdoor_direction_ok(outdoor, indoor, comfort_heat, comfort_cool):
                 reason = f"outdoor {outdoor:.1f}°F would move indoor {indoor:.1f}°F the wrong way"
         elif outdoor < comfort_heat - _WINDOWS_EXTREME_COLD_MARGIN:
             reason = (
@@ -11233,9 +11233,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issues #1211/#1276: ONE direction rule for every branch of this card (the windows-day evening branch
         # used the raw "outdoor cooler than indoor" test and told a house at its floor with the heat on to open
         # up). Stage B of the shared outside-air rule plus the thermostat's swing at a held edge, applied to the
-        # band the thermostat is ARMED with (the gate uses the configured band, so the two can differ when Prefer
-        # savings widens it). The card follows this live direction; the briefing follows the classifier's
-        # forecast answer, so the two can legitimately differ for part of a day.
+        # band the thermostat is ARMED with (the gate uses the configured band and no held-edge margin, so the two
+        # can differ when Prefer savings widens the band or the house sits within a swing of a held edge). The card
+        # follows this live direction; the briefing follows the classifier's forecast answer, so the two can
+        # legitimately differ for part of a day.
         direction_ok = self._outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool)
         # Air going the wrong way: cooler air into a house the heat is holding (or warmer air into one the AC is).
         heat_side_veto = outdoor_temp is not None and indoor_temp is not None and outdoor_temp < indoor_temp
@@ -11859,11 +11860,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         (or within one heat swing above) its floor with the heat side held is treated like a house below it, so
         cooler air is not "helping" -- it would only start the heat (mirror: warmer air near the ceiling with
         the cool side held). A door/window pause holds the thermostat Off on Climate Advisor's behalf, so the
-        mode the pause interrupted stands in for the live Off. Used by the live windows gate and every branch of
-        the Next User Action card, so they cannot disagree.
+        mode the pause interrupted stands in for the live Off. Used by every branch of the Next User Action card,
+        so its advice cannot disagree with itself. The live windows gate (``_apply_outdoor_windows_gate``) keeps
+        the plain band rule: clearing ``windows_recommended`` also ends the planned-window period and drops the
+        morning "Open windows at" plan, a control change that is the owner's call (Issue #1276).
         """
         ae = getattr(self, "automation_engine", None)  # partially built coordinators in tests
-        mode = self._thermostat_hvac_mode() if ae is not None else None
+        mode = self._thermostat_hvac_mode() if ae is not None and getattr(self, "hass", None) is not None else None
         if mode == "off" and ae is not None and ae._paused_by_door and ae._pre_pause_mode:
             mode = ae._pre_pause_mode
         swing_heat, swing_cool = self._learned_swings()

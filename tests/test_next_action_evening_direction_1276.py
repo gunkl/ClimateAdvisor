@@ -182,8 +182,9 @@ def _gate(indoor: float, outdoor: float, mode: str | None = "heat") -> bool:
     return coord._current_classification.windows_recommended
 
 
-def test_gate_reported_case_at_floor_clears_flag():
-    assert _gate(68.0, 60.6) is False
+def test_gate_keeps_its_plain_band_rule_at_the_floor():
+    """The gate drives the planned-window period (control), so it keeps the plain band rule (owner's call)."""
+    assert _gate(68.0, 60.6) is True
 
 
 def test_gate_below_floor_clears_flag_control():

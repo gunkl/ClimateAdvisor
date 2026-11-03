@@ -1,0 +1,162 @@
+{
+  "description": "Cool night, whole_house_fan home, outdoor air cooler than the 78 F bedroom: the window opens and natural ventilation starts (HVAC off, fan on). The cool offset is at its cap before the window opens; during and after ventilation the loop writes nothing.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "cool",
+    "fan_mode": "whole_house_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120,
+    "fan_entity": "fan.whf",
+    "fan_state_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
+    "sensor_debounce_seconds": 60,
+    "natural_vent_delta": 3.0
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 66.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 78.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:29:12",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Seed the door/window sensor as closed."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 95.0,
+      "today_low": 72.0,
+      "tomorrow_high": 95.0,
+      "tomorrow_low": 72.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "The occupant opens the window; outdoor air is cooler: natural ventilation."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 78.0,
+      "note": "Bedroom warm; natural ventilation owns the house."
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window closed."
+    },
+    {
+      "time": "2026-11-02T21:42:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 66.0,
+      "note": "The hallway reading moves: the comfort check runs against the bedroom reading (78 F, above the sleep ceiling)."
+    },
+    {
+      "time": "2026-11-02T21:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 78.0,
+      "note": "Still warm."
+    },
+    {
+      "time": "2026-11-02T22:05:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:11:30",
+      "expect": "event_emitted",
+      "track": "integration",
+      "reason": "Natural ventilation (the fan session) owns the house.",
+      "event": "sensor_opened",
+      "payload_subset": {
+        "result": "natural_ventilation"
+      }
+    },
+    {
+      "at": "2026-11-02T21:10:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Precondition: the cool offset is at the -4 F cap before the window opens.",
+      "value": 68.0
+    },
+    {
+      "at": "2026-11-02T22:04:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "While ventilating (thermostat Off) and after the window closes, no loop write: the offset is never pushed into the ventilating house.",
+      "values": [],
+      "since": "2026-11-02T20:36:30"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' natural-ventilation row. Matches production. LIMIT: the thermostat is Off during ventilation, so the loop is inert there anyway (it never changes the mode); deleting the nat-vent term does not change this scenario's writes (M11). The gate term is proven in tests/test_remote_offset_gates_1194b.py.",
+    "(c) Occupant outcome if this regressed: The loop must not fight a ventilating house by pushing the AC setpoint."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Natural ventilation owns the house; the loop stays out of it.",
+    "observed_behavior": "result=natural_ventilation at 21:11; no set_temperature after the cap.",
+    "expected_behavior": "Nat-vent closes the gate."
+  },
+  "name": "remote_offset_1194e_natural_ventilation_closes_the_gate_cool",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

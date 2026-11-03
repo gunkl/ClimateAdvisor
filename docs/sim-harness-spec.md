@@ -13,9 +13,10 @@
 | How does `predicted_indoor` in a `temp_update` event exercise the ODE ceiling guard? | After injecting temperatures and calling `check_natural_vent_conditions()`, `run_production` checks for `event["predicted_indoor"]`; if present and a classification exists, it calls `apply_classification(classification, predicted_indoor=predicted)` again — modelling the coordinator's periodic re-classification cycle. | [run_production — predicted_indoor Re-Classification](#run_production--predicted_indoor-re-classification) |
 | Which event types have no clean production entry point? | `fan_cycle_on`, `fan_cycle_off`, `grace_start`, `grace_end` — all driven internally by scheduler timers in production. The adapter skips them; `advance_to()` drives the timers that cover the same transitions. | [run_production — Unmapped Event Types](#run_production--unmapped-event-types) |
 | How are legacy `expect:` strings matched when production emits different event types? | `outcomes.production_decisions()` maps production event types to the legacy vocabulary (e.g. `bedtime_setback` → `setback_applied`, `sensor_opened result=natural_ventilation` → `natural_ventilation`). Unmapped production-only events are collected in `UNMAPPED_PRODUCTION_EVENTS` and silently skipped. | [outcomes — Event-to-Outcome Mapping](#outcomes--event-to-outcome-mapping) |
-| What custom assertion types exist and what guarantee do they test? | `nat_vent_not_active`, `nat_vent_still_active`, `override_active`, `override_cleared`, `nat_vent_fan_preserved`, `dual_setback_applied`, `ceiling_guard_fires_cool`, `ceiling_guard_dormant*`, `setpoint_consistent_with_mode`. Each tests the occupant-visible guarantee, not a label. | [outcomes — Custom Assertion Types](#outcomes--custom-assertion-types) |
+| What custom assertion types exist and what guarantee do they test? | `nat_vent_not_active`, `nat_vent_still_active`, `override_active`, `override_cleared`, `nat_vent_fan_preserved`, `dual_setback_applied`, `ceiling_guard_fires_cool`, `ceiling_guard_dormant*`, `setpoint_consistent_with_mode`, and (Issue #1194 e) `commanded_setpoint_at` / `setpoint_writes`. Each tests the occupant-visible guarantee, not a label. | [outcomes — Custom Assertion Types](#outcomes--custom-assertion-types) |
 | How does `ha_stubs.py` avoid metaclass conflicts between MagicMock and HA base classes? | It replaces MagicMock entries with real minimal base classes for `DataUpdateCoordinator`, `CoordinatorEntity`, `SensorEntity`, `RepairsFlow`, `ConfirmRepairFlow`, and enum types. These are the only bases that cause metaclass conflicts when subclassed by production code. | [ha_stubs — Idempotent Stub Installer](#ha_stubs--idempotent-stub-installer) |
 | What is the Session seam, and what do generated days, promises and surfaces add? | One `Session` protocol (`session.py`) is implemented by `FakeHassSession` (fast default) and `RealHASession` (real Home Assistant); `promise_probe.py` judges any run with the production promise registry, `generator.py` draws closed-loop days against a toy house, `surfaces.py` is test-only Promise 8. Three ratchet ledgers record known divergences. | [Session Seam, Generated Days and Promises](#session-seam-generated-days-and-promises-issues-1127-1128) |
+| What is the bedroom node, and how are the #1194 remote-sensor scenarios run? | `world.BedroomNode` is an optional second thermal node (coupling, lag, register plume on the sensor, `last_reported`), off by default and byte-identical to before when absent. Seventeen Tier A scenarios in `pending/remote_offset_1194e_*.json` run the real coordinator; the `remote_sensor_report` event, the `thermostat_echo_delay_s` config key and the `commanded_setpoint_at` / `setpoint_writes` assertions are the hooks; Tier B is `tests_ha/test_remote_offset_sim_1194e.py`. | [Remote Bedroom Node and the #1194 Scenarios](#remote-bedroom-node-and-the-1194-scenarios-issue-1194-e) |
 
 ---
 
@@ -90,6 +91,64 @@ Goldens are LOCKED; a divergence is recorded in a ledger, never by editing a sce
 **Excused time (Issue #1260).** Time a promise did not count under a named exception (today only P7's thermostat deadband, `excused_by=thermostat_deadband`) is not a hit and is in none of the ledgers above. It is reported beside hits: `PromiseReport.excused` per run and `excused_by_promise` (runs and minutes) in the nightly batch summary and the `replay` line, so a rise is visible. Minutes are counted from the excused intervals past a per-series `counted_until` (Issue #1262), so a stretch longer than the 3 h journal window is reported in full.
 
 **Code reference:** `tools/sim_harness/session.py`, `tools/sim_harness/generator.py` (`run_batch`, `run_day`, `replay_scenario`), `tools/sim_harness/surfaces.py` (`cli_surfaces`).
+
+---
+
+## Remote Bedroom Node and the #1194 Scenarios (Issue #1194 e)
+
+**Occupant outcome.** The hallway thermostat only sees the hallway. On a cold night the person asleep in the bedroom can be under their sleep temperature while the furnace never starts; Climate Advisor's remote-sensor outer loop (docs/08 "Remote-sensor outer loop on the thermostat setpoint") nudges the setpoint so it does. This section is how the harness proves that, in simulation, before the owner trusts it (cool mode ships simulation-tested only).
+
+### The plant: a second thermal node (`tools/sim_harness/world.py`)
+
+Physical plant only, no Climate Advisor logic. Optional and OFF by default: `HouseParams.bedroom` is `None` (omitted from `to_dict()` exactly like `off_offset_f`, #1234), the day generator never draws one, and `tests/test_remote_sim_1194e.py` pins the sha256 of seeds 0-59 x 3 profiles (`7d35f57c...`, taken on 0.8.44 before the node existed), so every generated plan, serialised house and replay file is byte-identical.
+
+| Piece | Model | Default (owner's home, POC v2) |
+|---|---|---|
+| Coupling | `dB/dt = k_hall (hallway - B) + k_env (outdoor - B)`; steady gap below the hallway `k_env/(k_hall+k_env) * (hallway - outdoor)`; lag `1/(k_hall+k_env)` | `k_hall` 1.7/h, `k_env` 0.28/h (about 3 F below the hallway on a 45 F night, 30 min lag) |
+| Plume | While the hallway equipment runs, and for `fan_overrun_min` after it stops, the register puts a plume on the SENSOR (never the room): dead time, then first-order rise to `plume_f` (heat +, cool -), decay once the air stops | `plume_f` 7 F, dead 4 min, rise tau 8 min, decay tau 11 min, overrun 2 min (fit to 12 measured cycles, max error 0.82 F, under the sensor quantum) |
+| Sensor | Reports on change in `sensor_step_c` steps; `reported_f` / `last_reported_min` / `age_min`; `silent=True` freezes the last report | 0.1 C (0.18 F) |
+| Thermostat | Unchanged `ToyHouse.decide_action` on the HALLWAY reading with the asymmetric deadband (`swing_f` start, `off_offset_f` stop, #1234) | starts at setpoint - 1.5, stops at setpoint - 0.5 |
+
+`ToyHouse(params, indoor_f, bedroom_f=None)` owns the node when `params.bedroom` is set and advances it after the hallway in `step()`.
+
+### Harness hooks added with the node
+
+| Hook | Where | Purpose |
+|---|---|---|
+| `remote_sensor_report` event (`entity`, `value_f`, optional `unit`) | `run_production._dispatch_event` | The remote sensor REPORTS: `states.async_set` (the real `_on_sleep_indoor_temp_changed` listener runs) stamped with `last_reported`/`last_updated` = the virtual clock. `external_entity_state_change` cannot stand in (it never stamps them, and an unstamped state counts as fresh forever). Silence is the absence of the event. |
+| `thermostat_echo_delay_s` config key | `FakeHass.set_echo_delay`, `run_production` | A cloud thermostat reports a `set_temperature` that many seconds later and without Climate Advisor's Context (#1232). The call is logged at once; only the state and its listener event are delayed. Absent = the instant context-carrying echo every other scenario sees. |
+| `commanded_setpoint_at` assertion (`value`) | `outcomes.check_assertion` | The last real `climate.set_temperature` at or before `at` equals `value`. |
+| `setpoint_writes` assertion (`values`, optional `since`) | `outcomes.check_assertion` | The exact ordered list of values written in `(since, at]`; `[]` asserts NO write. |
+| `tools/sim_harness/remote_night.py` | new module | A closed-loop night through the real coordinator (`run_night(NightSpec)`): the plant answers the thermostat, the bedroom reports, the thermostat cycles; returns writes, furnace runs, starts/hour, shortest off time, room minimum and degree-minutes short. `python -m tools.sim_harness.remote_night 0.59 1.0 1.5` prints the night-comparison rows. |
+
+**Rule-8 justification (`outcomes.py`).** The two assertion types are purely ADDITIVE: new `expect` strings no existing scenario uses, so no existing result can change. The previous semantics were not wrong; they could not say this at all (`expect_temp` reads the comfort TARGET a decision recorded, `field_equals` reads one end-of-run snapshot, `hvac_mode_never_commanded` scans modes only). They cannot let a real failure pass silently: both are exact comparisons against the service calls the engine really issued, a missing, extra or wrong write fails, and an empty `values` asserts no write.
+
+### Tier A scenarios (`tools/simulations/pending/remote_offset_1194e_*.json`)
+
+All 17 run the real `ClimateAdvisorCoordinator` + `AutomationEngine` (`use_coordinator: true`, so the sleep-sensor listener and the 1-minute timer are real), so every assertion is `track: "integration"` and is EVALUATED (never skipped); `simulator_support` is left at its default (true) because the production harness is the only engine. `tests/test_production_harness.py::test_remote_offset_1194e_pending_scenario_passes_production_engine` runs them on every commit. They stay in `pending/` until the owner approves the scenario cards (`/home/dev/ca-group-briefs/1194e-scenario-cards.md`); goldens are locked.
+
+| Scenario | Proves | Fails when (scratch-copy mutation) |
+|---|---|---|
+| `heat_night_cold_bedroom_raise_hold_step_down` | raise one step, furnace starts, HOLD (no second step), step down at target + swing | offset deleted; hold deleted; step-down deleted |
+| `cool_night_warm_bedroom_lowers_setpoint_and_steps_back` | the mirror image | same three |
+| `heat_cap_plus_4_when_thermostat_never_starts`, `cool_cap_minus_4_...` | the +4 / -4 F cap | offset deleted; cap removed |
+| `heat_cap_opposite_band_edge_ceiling`, `cool_cap_opposite_band_edge_floor` | the opposite band edge beats the +4 cap | offset deleted; edge cap ignored |
+| `stale_remote_over_120_min_falls_back_to_plain_setpoint` | plain setpoint by the 1-minute timer 120 min after the last report; restart from zero on the next report | offset deleted; freshness ignored; context not forgotten |
+| `window_open_inside_debounce_freezes_the_offset` | FREEZE: no write at all | offset deleted; FREEZE treated as CLOSED |
+| `window_open_past_debounce_pauses_then_exits_cleanly` | pause, then plain target + ONE step, never the stranded cap | offset deleted; whole gate deleted |
+| `manual_override_no_step_occupant_value_kept` | no CA write over the occupant's value | offset deleted; override terms removed; whole gate deleted |
+| `away_closes_the_gate_then_returns_plain_target_plus_one_step` | away setback has no offset | offset deleted; away term removed; whole gate deleted |
+| `whole_house_fan_ownership_closes_the_gate` | WHF-owned house: no write; clean restore | offset deleted; whole gate deleted |
+| `natural_ventilation_closes_the_gate_cool` | nat-vent owns the house (cool) | offset deleted only (see limits) |
+| `sleep_window_entry_starts_at_zero_and_exit_leaves_no_offset` | entry from zero; wake band plain | offset deleted; context not forgotten |
+| `ca_own_late_setpoint_echo_is_not_an_override` | #1232: a 90 s late, context-free echo is not the occupant | offset deleted; by-value echo recognition deleted |
+| `closed_loop_night_cold_bedroom_swing_1_5`, `..._swing_0_59` | a whole night recorded from the two-node house; the exact setpoint sequence | offset deleted; step-down deleted; (0.59) context not forgotten |
+
+**Limits, stated plainly.** (1) The whole-house-fan term alone and the nat-vent term alone cannot be isolated in Tier A: with a monitored window open the door/window pause closes the same gate, and a whole-house fan with no door/window sensor is unsupported (#1200; `test_no_scenario_runs_an_unsupported_sensorless_whole_house_fan` forbids it). Removing both terms leaves all 17 scenarios green; those terms are proven in `tests/test_remote_offset_gates_1194b.py`. (2) During natural ventilation the thermostat is Off and the loop never changes the mode, so that scenario cannot show the nat-vent gate term (it shows the offset and that nat-vent owns the house). (3) The two closed-loop night scenarios pin the loop's CURRENT sequence on a synthetic night; they are regression pins, not design requirements. (4) The sleep-window entry/exit scenario asserts the 0.8.44 behaviour (offset zero at entry, plain wake band); increment (c) refines the same boundary and must keep it true.
+
+### Tier B (real Home Assistant)
+
+HeadlessTarry is not in this repository; the tier that exercises what Tier A's virtual clock and instant thermostat cannot is the real-HA tier (`python scripts/test.py ha`, dev thermostat simulator, CI). `tests_ha/test_remote_offset_sim_1194e.py` (both fan modes): the 1-minute timer steps the loop with no new bedroom report; a silent sensor is dropped by the timer alone after 120 minutes; the loop's own steps echoing back 45 s and 110 s late (no cause for an override) while an occupant's real change in flight is still caught; a restart mid-night (nothing written inside the startup-coalescing window, never past the cap, no false override). Mutation check (CA_COMPONENT_ROOT overlay): offset deleted fails 4 tests x 2 fans, freshness ignored fails the silent-sensor test, by-value echo deleted fails the late-echo test, the floor timer deleted fails 4. Deleting the startup-coalescing silence does NOT fail the restart test: the loop has no target after a restart, so it is inert by construction (docs/08 'Startup coalescing').
 
 ---
 
@@ -298,6 +357,7 @@ The virtual clock `start` must be timezone-aware (`FakeScheduler.__init__` raise
 | `wakeup` | `engine.handle_morning_wakeup()` |
 | `economizer_check` | `engine.check_window_cooling_opportunity(...)` |
 | `thermostat_state_changed` | Injects thermostat state + `engine.handle_manual_override(...)` if conditions met |
+| `remote_sensor_report` (Issue #1194 e, coordinator mode) | `states.async_set(entity, value_f)` stamped with `last_reported` / `last_updated` = the virtual clock: the real sleep-sensor listener and the outer loop's 120-minute freshness rule see a real report |
 
 `_build_classification_from_event()` uses `object.__new__(DayClassification)` to bypass `__post_init__` (which would overwrite scenario-specified fields like `hvac_mode` by re-deriving them from `day_type`).
 

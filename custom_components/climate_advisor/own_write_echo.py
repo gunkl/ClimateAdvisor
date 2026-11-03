@@ -190,6 +190,32 @@ def decide_mode_echo(
     return ModeEchoVerdict(True, matches, tuple(w for i, w in enumerate(live) if i < newest and w not in matches))
 
 
+def outstanding_own_write(
+    writes: tuple[OwnSetpointWrite, ...] | list[OwnSetpointWrite],
+    *,
+    entity_id: str,
+    attribute: str,
+    value: float,
+    now: datetime,
+    step: float,
+    window_s: float = OWN_WRITE_ECHO_WINDOW_S,
+) -> OwnSetpointWrite | None:
+    """The newest remembered write of ``value`` to ``entity_id``.``attribute`` whose echo has not come back yet.
+
+    "Not answered yet" for the setpoint read-back verify (Issue #1194 e F1): the write is still in the memory (an echo
+    consumes it on arrival, ``decide_setpoint_echo``) and still inside the SAME echo window #1232 uses to recognise
+    it. None when there is no such write (consumed, superseded, or the window has ended).
+    """
+    for write in reversed(tuple(writes)):
+        if write.entity_id != entity_id or write.attribute != attribute:
+            continue
+        if (now - write.written_at).total_seconds() >= window_s:
+            continue
+        if values_match(write.value, value, step):
+            return write
+    return None
+
+
 def _applies(write: OwnSetpointWrite, attribute: str) -> bool:
     if write.attribute == attribute:
         return True

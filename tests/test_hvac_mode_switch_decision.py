@@ -240,6 +240,7 @@ class TestEngineModeSwitchBeforeWrite:
             cb10 = next(cb for d, cb in captured if d == 10)
             coros: list = []
             engine.hass.async_create_task = MagicMock(side_effect=lambda c: coros.append(c))
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             cb10(None)
             asyncio.run(coros.pop())
             wrong.state = "off"
@@ -296,6 +297,7 @@ class TestPendingRetryRespectsManualControl:
             asyncio.run(engine._set_temperature(72.0, reason="t", mode="heat"))
             coros: list = []
             engine.hass.async_create_task = MagicMock(side_effect=lambda c: coros.append(c))
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             next(cb for d, cb in captured if d == 10)(None)
             asyncio.run(coros.pop())
             setattr(engine, flag, True)  # user changes the thermostat during the 15-minute wait

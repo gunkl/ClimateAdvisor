@@ -57,6 +57,7 @@ from .const import (
 from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
 from .hvac_action import is_hvac_action_active
+from .remote_offset import remote_offset_lines, remote_offset_view_for
 from .swing import swing_tolerance, thermostat_holds_direction, within_thermostat_hysteresis
 from .temperature import UNIT_SYMBOL, display_temp, format_temp, format_temp_delta, read_attribute_temp_f
 
@@ -714,8 +715,16 @@ async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) 
             f"  current_temp:     {current_temp}",
             f"  target_temp_low:  {target_temp_low}",
             f"  target_temp_high: {target_temp_high}",
-            "",
         ]
+        # Issue #1194 (d): the remote-sensor outer loop, so an investigation can see WHY the thermostat sits at
+        # target + offset (loop state and reason, comfort target vs commanded setpoint, the remote reading's age).
+        _ro_view = remote_offset_view_for(
+            getattr(coordinator, "automation_engine", None), (coordinator.config or {}).get("temp_unit", "fahrenheit")
+        )
+        if _ro_view is not None:
+            lines.append("  remote_sensor_offset:")
+            lines.extend(remote_offset_lines(_ro_view))
+        lines.append("")
         return "\n".join(lines)
     except Exception:
         _LOGGER.warning("investigator: failed to read HVAC entity state — skipping")

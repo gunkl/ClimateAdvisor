@@ -245,6 +245,7 @@ class TestPayloadUnits:
             patch.object(automation_module, "callback", side_effect=lambda fn: fn),
         ):
             asyncio.run(engine._set_temperature(72.0, reason="t", mode="heat"))
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             _run_scheduled(engine, captured, 10)
             _run_scheduled(engine, captured, 900)
 
@@ -300,6 +301,7 @@ class TestWriteSeqBumpedByModeCommand:
             patch.object(automation_module, "callback", side_effect=lambda fn: fn),
         ):
             asyncio.run(engine._set_temperature(72.0, reason="t", mode="heat"))
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             _run_scheduled(engine, captured, 10)  # validation -> schedules the 900 s retry
             assert any(d == 900 for d, _ in captured)
 

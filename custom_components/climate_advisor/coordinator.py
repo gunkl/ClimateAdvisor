@@ -330,6 +330,7 @@ from .promise_journal import (
 from .promise_journal import (
     Reading as _PromiseReading,
 )
+from .remote_offset import RemoteOffsetState
 from .scheduler import (
     COST_TAG_HIGH,
     Schedule,
@@ -3533,6 +3534,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         windows_open=self._any_sensor_open(),
                         windows_recommended=bool(self._current_classification.windows_recommended),
                         setpoint=self._read_chart_setpoint(),
+                        comfort_target=self._read_chart_comfort_target(),
                         event="classification_change",
                         fan_running=self._fan_physically_running(_fan_status_cc) if self.automation_engine else False,
                         nat_vent_active=bool(
@@ -4339,6 +4341,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pred_outdoor=_pred_outdoor_val,
                 pred_indoor=_pred_indoor_val,
                 setpoint=_setpoint_f,
+                comfort_target=self._read_chart_comfort_target(),
                 fan_running=self._fan_physically_running(_fan_status_poll),
                 nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
                 lower=_band_lower_poll,
@@ -6810,6 +6813,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         else False
                     ),
                     setpoint=self._read_chart_setpoint(),
+                    comfort_target=self._read_chart_comfort_target(),
                     event="override",
                     fan_running=self._fan_physically_running(),
                     nat_vent_active=bool(
@@ -7070,6 +7074,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         else False
                     ),
                     setpoint=self._read_chart_setpoint(),
+                    comfort_target=self._read_chart_comfort_target(),
                     event="hvac_action_change",
                     fan_running=self._fan_physically_running(),
                     nat_vent_active=bool(
@@ -12171,6 +12176,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return "cooling"
         return hvac_action
 
+    def _read_chart_comfort_target(self) -> float | None:
+        """The room's comfort target (internal F) while the remote-sensor outer loop holds an offset, else None.
+
+        Issue #1194 (d): the chart log's ``setpoint`` is what the thermostat reports, which during an offset night is
+        the COMMANDED value (target + offset). The comfort target is recorded beside it, only on such rows, so the
+        chart can draw the room's target and the thermostat's command as two series and never show the offset as a
+        comfort-band change. Read from the engine's one description of the loop, never re-derived.
+        """
+        engine = self.automation_engine
+        getter = getattr(engine, "remote_offset_state", None)
+        if not callable(getter):
+            return None
+        try:
+            st = getter()
+        except Exception:  # noqa: BLE001 - a chart row must never fail on the loop description
+            return None
+        if not isinstance(st, RemoteOffsetState) or st.offset_f is None or abs(st.offset_f) < 1e-6:
+            return None
+        return st.comfort_target_f
+
     def _read_chart_setpoint(self) -> float | None:
         """Return the live thermostat's ``temperature`` (single-setpoint target) in °F,
         for chart_log's ``setpoint`` field (Phase 3a).
@@ -13183,6 +13208,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _effective_target_history = [
             {"ts": e["ts"], "target": _conv(e["target"])} for e in _extract_historical_effective_target(log_entries)
         ]
+        _commanded_setpoint_history = [
+            {"ts": e["ts"], "target": _conv(e["target"])} for e in _extract_historical_commanded_setpoint(log_entries)
+        ]
         if is_historical:
             _effective_target_forecast: list[dict] = []
         else:
@@ -13273,6 +13301,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "predicted_activity": _predicted_activity,
             "effective_target_history": _effective_target_history,
             "effective_target_forecast": _effective_target_forecast,
+            "commanded_setpoint_history": _commanded_setpoint_history,
             "unit": unit,
         }
 
@@ -15820,13 +15849,34 @@ def _extract_historical_effective_target(log_entries: list[dict]) -> list[dict]:
         if not ts:
             continue
         setpoint = e.get("setpoint")
-        if setpoint is not None:
+        comfort = e.get("comfort_target")
+        if comfort is not None:
+            # Issue #1194 (d): the remote-sensor outer loop holds an offset, so ``setpoint`` is the COMMANDED value
+            # (target + offset). The Target line is what the room is supposed to be; the commanded value is drawn as
+            # its own series (``_extract_historical_commanded_setpoint``). The offset is never a band change.
+            target = comfort
+        elif setpoint is not None:
             target = setpoint
         elif e.get("nat_vent_active"):
             target = e.get("nat_vent_target")
         else:
             target = None
         result.append({"ts": ts, "target": target})
+    return result
+
+
+def _extract_historical_commanded_setpoint(log_entries: list[dict]) -> list[dict]:
+    """Historical {ts, target} pairs of the thermostat's COMMANDED setpoint on rows where an offset was in force.
+
+    Issue #1194 (d): rows without a ``comfort_target`` (no offset) carry ``None`` so the chart's second line only
+    exists during an offset and breaks across every other stretch, exactly like the Target line's null handling.
+    """
+    result = []
+    for e in log_entries:
+        ts = e.get("ts")
+        if not ts:
+            continue
+        result.append({"ts": ts, "target": e.get("setpoint") if e.get("comfort_target") is not None else None})
     return result
 
 

@@ -1306,6 +1306,41 @@ def check_assertion(
                 return expect
         return False
 
+    # --- commanded_setpoint_at / setpoint_writes (Issue #1194 e) ---
+    # Two READ-ONLY views of the real ``climate.set_temperature`` calls in ``result.action_log``: what the thermostat
+    # was last TOLD at a time, and the exact ordered list of values told in a window.  The outer loop's whole effect
+    # is a sequence of stepped setpoints (target + 2, target + 4, back down), which no existing assertion can state:
+    # ``expect_temp`` reads the comfort TARGET a decision recorded, ``field_equals`` reads one end-of-run snapshot, and
+    # ``hvac_mode_never_commanded`` only scans modes.  Payloads:
+    #   commanded_setpoint_at: {"value": <F>}                         -> last set_temperature at/before ``at`` == value
+    #   setpoint_writes:       {"values": [<F>, ...], "since": <ISO>?}  -> the values written in (since, at], in order
+    # Rule-8 justification (test-infrastructure change): purely ADDITIVE -- two brand-new ``expect`` strings that no
+    # existing scenario uses, so no existing result can change.  The previous semantics were not wrong, they could not
+    # say this at all.  Could they let a real failure pass silently?  No: both are exact comparisons against the
+    # service calls the engine really issued (a missing or extra write, or a wrong value, fails; an empty ``values``
+    # list asserts NO write), and neither is evaluated unless a scenario names it.
+    if expect in ("commanded_setpoint_at", "setpoint_writes"):
+        at_str = assertion["at"]
+        writes = [
+            (_naive_iso(e["ts"]), float(e["data"]["temperature"]))
+            for e in result.action_log
+            if e.get("domain") == "climate"
+            and e.get("service") == "set_temperature"
+            and e.get("ts") is not None
+            and "temperature" in e.get("data", {})
+        ]
+        if expect == "commanded_setpoint_at":
+            upto = [v for ts, v in writes if ts <= at_str]
+            if upto and abs(upto[-1] - float(assertion["value"])) < 0.01:
+                return expect
+            return False
+        since = assertion.get("since", "")
+        got = [v for ts, v in writes if since < ts <= at_str]
+        want = [float(v) for v in assertion.get("values", [])]
+        if len(got) == len(want) and all(abs(a - b) < 0.01 for a, b in zip(got, want, strict=True)):
+            return expect
+        return False
+
     # --- field_equals (Issue #587, Part 3.6 groundwork) ---
     # Single-zone dotted-path field check — reuses the multi-zone
     # resolve_dotted_field() mechanism (tools/sim_harness/multi_zone_assertions.py)

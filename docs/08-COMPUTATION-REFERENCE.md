@@ -4074,7 +4074,10 @@ Every CA setpoint writer reaches it (`_apply_comfort_band`, `_set_temperature_fo
 TOU pre-conditioning, restores, the post-fan verify repair, the setpoint retry, and the outer loop itself), so no
 caller carries a copy. `temperature` stays the comfort TARGET for everything that judges comfort (sanity check,
 retry, re-asserts); the thermostat is told `target + offset` (heat) / `target - offset` (cool).
-`_pending_setpoint_single` is the COMMANDED value (what the read-back verify compares and diagnostics quote);
+`_pending_setpoint_single` is the COMMANDED value (what the read-back verify compares and diagnostics quote; the verify
+waits out the #1232 echo window for a write a slow cloud thermostat has not answered yet, so a late echo of a loop step is
+never a rejection, retry or nudge -- **Setpoint read-back and a late echo (Issue #1194 e F1)**, detailed in
+`docs/grace-periods-spec.md` "Setpoint echo recognition by value");
 `_pending_setpoint_target` is the target a re-asserting writer passes back in, so the offset is never applied twice.
 
 **The rule (heat; cool mirrors).** `swing` = learned `swing_heat_f` / `swing_cool_f` read from the engine's thermal
@@ -4131,9 +4134,15 @@ or the shared `desired_state.decide_scheduled_band_gate` (away/vacation, overrid
 ownership) -- is `CLOSED`; otherwise `_any_monitored_sensor_holding_open()` is `FREEZE` while `_sensor_debounce_pending`
 and `CLOSED` once the debounce is over (see the debounce rows).
 
-* `CLOSED`: the loop adds no offset and writes nothing, and the next check or CA write forgets the offset (the
-  thermostat's held value becomes "unknown"); the gate's owner commands the thermostat (Off, the setback, the occupant's
-  value) and the loop never overwrites it. On the first check after it reopens, the LIVE setpoint is compared with what CA
+* `CLOSED`: the loop adds no offset, and the next check or CA write forgets the offset (the thermostat's held value
+  becomes "unknown"); the gate's owner commands the thermostat (Off, the setback, the occupant's value) and the loop never
+  overwrites it, so with an owner the loop writes nothing. The one case with NO owner is a window open past its debounce
+  with no pause started (gate reason `window_open`: a dashboard resume into an open window, a sensor that went dark after
+  reading open): nobody else would take the offset off, so the check compares the LIVE setpoint with the plain target
+  (`_remote_live_matches`, desired 0) and, if they differ, writes the plain target ONCE per `CLOSED` episode through the
+  single setpoint path (`_remote_closed_resync_done`; re-armed when the gate leaves `CLOSED`), in the thermostat's
+  current mode only (it lowers the heat / raises the cool setpoint and never changes the mode, so owner rule 3 holds).
+  Before this (a #1194 b gap) the hallway stayed at the sleep target + up to 4 F with the window open. On the first check after it reopens, the LIVE setpoint is compared with what CA
   would command now and re-written once unless it already matches (within half a step), so no offset outlives the episode
   that closed the gate (a stranded +4 F) and none is applied twice. A gate that opens and closes again with no check and no
   CA write in between (shorter than the 1-minute floor, e.g. a phantom whole-house-fan press that the sealed-house safety
@@ -4148,7 +4157,7 @@ and `CLOSED` once the debounce is over (see the debounce rows).
 | Occupant changed the setpoint (pending) | the person | `_override_confirm_pending` via `_manual_change_protected()` | same | same | confirmed -> next row; self-resolved or cancelled -> plain target / one fresh step |
 | Occupant override (confirmed) | the person | `_manual_override_active` (`decide_scheduled_band_gate` and `_manual_change_protected()`) | same | same | grace expiry or Cancel Override -> plain target / one fresh step |
 | Door/window open, inside the debounce (`FREEZE`) | nobody yet: the offset is held as is | `_any_monitored_sensor_holding_open()` and `_sensor_debounce_pending` | same | same | closes inside the debounce -> nothing happened, the offset continues; outlasts it -> the pause (next row) |
-| Door/window open past the debounce with no pause (e.g. a dashboard resume into an open window) | CA, but no extra degrees into a settled-open window | `_any_monitored_sensor_holding_open()`, debounce over | same | same | close -> plain target / one fresh step |
+| Door/window open past the debounce with no pause (e.g. a dashboard resume into an open window) | CA, but no extra degrees into a settled-open window | `_any_monitored_sensor_holding_open()`, debounce over | same | same | at once: the loop writes the plain target once if the thermostat still holds an offset (no owner writes it); close -> plain target / one fresh step |
 | Door/window pause | CA's pause (HVAC Off) | `_paused_by_door` | same | same | close -> comfort restore writes the plain target, then a fresh step |
 | Natural ventilation | the fan session | `_natural_vent_active` | the WHF runs and owns the HVAC | the thermostat blower ventilates, the thermostat is held Off (#1142 D7) | window closes -> restore writes the plain target, then a fresh step |
 | Whole-house-fan ownership (occupant press, phantom RF press) | the fan | `_whf_owns_hvac()` | HVAC suppressed for the fan | not applicable: the thermostat blower is not a whole-house fan (`_is_whf_press`) | fan off -> restore writes the plain target, then a fresh step; a gate shorter than one check (a phantom press stood down within seconds) -> the restore writes back the setpoint held before, up to the cap |
@@ -4195,8 +4204,146 @@ the same interval as the read-back verify's setpoint retry) and the next remote-
 the interval when the remote sensor is no longer in use), so a refusing thermostat sees about 4 attempts an hour instead
 of 60, and the first write after recovery is one step. Any executed setpoint write, from any writer, ends the back-off.
 
-Context entry/exit transitions, the Status "clamped" display and the chart target/commanded split are the later
-increments (#1194 c, d); the simulation bedroom node and Tier A/B scenarios are (e). Cool mode is simulation-tested only.
+**Context entry and exit (Issue #1194 c).** A remote context is "the resolver names a remote sensor for the indoor
+reading" (`IndoorTempReading.remote_context`, key `"<context>:<entity>"`). Today that is the sleep window; the handling
+below carries no context name, so any future context (and a direct handover K1 -> K2) gets it unchanged.
+
+*Occupant outcome.* Going to bed, the bedroom offset is never stacked on the evening number: the night starts on the
+plain sleep band and the loop's first decision follows it. In the morning the thermostat comes back to the plain MORNING
+target: never the morning target plus the bedroom's extra degrees, and the wake routine and the loop never write two
+competing values in the same minute. If no wake write comes (the wake routine skipped, the sensor removed or gone
+dark), the loop's fallback writes the plain SLEEP target once after the exit grace, and the day band follows at the next
+classification cycle.
+
+Everything goes through ONE function, `AutomationEngine._sync_remote_context(ctx)`. It is called first by the single
+setpoint path (`_remote_offset_for_write`, so every band writer sees the new state before it composes a value) and by
+the check (`_remote_offset_check_locked`).
+
+| Transition | Where | What it does |
+|---|---|---|
+| **Entry** (none -> K; a stale reading that is fresh again counts as entry) | `_enter_remote_context` | offset 0, no pending step, no startup-wait clock or actuation feedback carried over (the measured thermostat latency is a property of the thermostat and is kept); the thermostat's applied value stays what CA last wrote (0 after a plain write) or, if unknown (restart, a gate), is resolved from the LIVE setpoint on the first decision by `_remote_live_matches`, the same helper that clears a stranded offset (#1194 a) |
+| First decision after entry | `_remote_awaiting_context_band` | the loop does NOT decide until a setpoint has been written INSIDE this context (`_remote_target_context == ctx.key`, stamped by every write), or the startup wait has passed (nothing wrote: decide on the target in force rather than stay silent all night). So a loop check that lands before the bedtime band can never raise the EVENING target; the band lands plain (offset 0) and the first decision follows it. Band first, then at most one fresh step: never two conflicting writes. A check that lands while another writer's setpoint is still in flight (`_temp_command_pending`, e.g. the bedtime band awaiting a cloud thermostat) does nothing; the next check decides on what that write landed |
+| **Exit** (K -> none, or K -> stale) | `_exit_remote_context` | the offset, step and clock are cleared right here, BEFORE any next band is applied, so the next band's writer computes target + 0. `ended` (the resolver names no remote context at all: the window closed, the sensor was unconfigured or went unavailable) also starts the exit grace |
+| Exit with no band write coming | `_remote_offset_check_locked` | if nothing else wrote the plain target, the loop writes it once, through the same single setpoint path (no new writer), after `REMOTE_OFFSET_EXIT_GRACE_S` (= the 120 s minimum startup wait, no new number). The grace is what lets a same-minute wake routine land first, so the wake band and the loop never race. A stale reading is a suspension, not an end: no grace, the plain target at once (#1194 a) |
+| Sensor removed from the configuration while an offset is in force | check prelude | `remote_offset_check` no longer returns early while a context or an offset is outstanding, so the exit above runs (before, the offset stayed on the thermostat until the next 30-minute cycle) |
+| Exit while a gate holds the thermostat | `_forget_remote_offset` | `CLOSED` (occupant, pause, fan, away): the owner keeps the thermostat, the offset is FORGOTTEN (applied value 0, no live-setpoint re-check later), nothing is written now or when the owner lets go (a stale sleep target must never overwrite the owner's value or the morning band). `FREEZE`: no loop write inside the debounce; the freeze ends in either outcome above |
+
+Edge cases (heat and cool, both fan modes):
+
+| Situation | What the occupant experiences |
+|---|---|
+| HA restarts inside the context | the thermostat may still hold target + 4 F with no memory of it, and CA writes nothing for the 300 s startup-coalescing window (the startup classification runs at its END, and the loop has no target before it). At about t+300 s the startup classification writes the plain sleep target (offset 0, a fresh entry stamped inside the context), and the loop's next check may raise one step right after it; it climbs to the cap again after the startup wait. So: about 5 minutes at the stale target + 4 F, a brief drop to the plain sleep target, then the bedroom is warmed again |
+| HA restarts exactly at the entry minute | the startup classification writes the plain sleep band; same as a normal entry |
+| HA restarts at / just before the exit minute | the startup (or wake) write is the plain morning/sleep target; the thermostat is never left at target + 4 F and never written target + offset |
+| The context ends while the occupant holds an override / the window is paused / the fan owns it / away | their value stays; the loop writes nothing that morning or later; their own restore writes the morning band |
+| The context ends inside a door/window debounce | no loop write in the debounce; the wake band is the plain morning target; a blip changes nothing |
+| The wake time is moved while inside the context | a changed time only takes effect after a reload (the options notice), i.e. a restart in the middle of the context, handled above. A live change of the configured time still works: the window ends, the loop clears the offset once (after the grace) and the wake routine writes the morning band at its own time |
+| The context ends while the loop is backing off after a refused write | if the wake write goes through it ends the back-off and the morning target is plain. If nothing else writes, the loop waits out the back-off (15 min after the failure; only the interval, since no remote report exists any more), then writes the plain target once: the thermostat is refusing writes, so CA does not hammer it |
+| The bedroom sensor goes unavailable mid-night | an exit: after the grace the plain sleep target is written once; when the sensor is back, a new entry starts from zero (the loop waits for a setpoint written inside the new context, or the startup wait) |
+
+Not covered by a code path, deliberately: moving the wake time LATER while a stale wake trigger is still pending cannot
+happen (the trigger is registered from the same configuration, so it is re-registered with the reload that applies the
+change).
+
+**Status, chart and diagnostics (Issue #1194 d).** On an offset night the hallway thermostat is deliberately above the
+bedroom's sleep target. The person in the bedroom used to see `70F (CA: 66F)` on the HVAC card (the #402 divergence
+check comparing the thermostat with the band edge), which reads like a disagreement, and the chart drew the commanded
+70 F as if the sleep band had moved. There is now ONE description of the loop and every surface reads it.
+
+* **One source of truth.** `AutomationEngine.remote_offset_state()` returns a `remote_offset.RemoteOffsetState`
+  (internal F). It is a pure read: the gate is asked (`_remote_offset_gate_and_reason()`, the same composition
+  `_remote_offset_gate()` returns the first element of), freshness comes from `_remote_context()`, and the decision
+  is the reason the loop STORED when it decided (`_remote_last_reason`: a `RemoteOffsetDecision.reason`, or `stale`;
+  cleared by `_reset_remote_offset`). Nothing is re-decided in the display layer.
+  `remote_offset.classify_loop_state()` names the state; `remote_offset_view()` converts to the display unit and
+  builds the sentence; `remote_offset_view_for(engine, unit)` is the tolerant entry point the consumers call.
+* **Loop states** (`RemoteLoopState`, first match wins): `clearing` (out of any context, no owner holds the thermostat,
+  and it still holds the offset CA wrote: the 120 s exit grace (`detail` `exit_grace`, read from `_remote_exit_at` +
+  `REMOTE_OFFSET_EXIT_GRACE_S`) or the failed-write back-off (`backing_off`), #1194 c), `inactive` (primary sensor in
+  use: no loop), `stale`
+  (remote reading older than 120 min), `gated` (an owner: `occupant_change`, `override`, `away`,
+  `door_window_pause`, `fan`, `window_open`), `frozen` (door/window open inside its debounce, `debounce`), `waiting` (the
+  context just began and the loop holds its first decision until the context's own band is written,
+  `_remote_awaiting_context_band`, `detail` `context_band`, #1194 c),
+  `clamped` (last stored reason `at_cap`; `ClampLimit.CAP` = the +4 F / +2 C cap, `ClampLimit.BAND_EDGE` = the
+  opposite band edge, named by `binding_limit()`, the same comparison `max_magnitude_f()` makes), `active`
+  (an offset in force and the last reason is `raised`, `awaiting_startup`, `equipment_running` or `stepped_down`),
+  `holding` (anything else, including no offset).
+* **Status payload** (`/api/climate_advisor/status`, key `remote_offset`, `null` when no remote sensor is configured
+  and no context or offset is outstanding, `_remote_offset_in_play()`, the same test the check's prelude uses, so a
+  sensor removed mid-night still shows `clearing` until the offset is off):
+  `state`, `detail`, `context`, `context_label`, `mode`, `comfort_target`, `commanded`, `offset_applied` (signed, display
+  unit delta) and `offset_applied_f` (signed, internal F), `offset_active`, `expected_setpoint`, `clamp_limit`,
+  `gate_reason`, `last_decision_reason`, `remote_reading`, `remote_reading_age_s`, `unit`, `text`. Absolute temperatures
+  use `display_temp`, the offset and cap use `display_delta` (a delta never takes the +32).
+* **#402 comparison.** The page compares the thermostat's setpoint with `remote_offset.expected_setpoint` (the
+  commanded value) while an offset is held, so a deliberate offset is never a "(CA: 66F)" disagreement; a thermostat
+  that reports something other than the commanded value still shows `(CA: <commanded>)`. `expected_setpoint` is set
+  only while CA intends the offset (`active`, `holding`, `clamped`, `frozen`) and the page uses it only while the
+  thermostat is in the offset's mode (`remote_offset.mode === hvac_mode`); with no offset, or while `gated` / `stale`
+  (CA no longer intends it, though the thermostat may still hold it until the next write goes through), it is `null`
+  and the band-edge comparison applies, so a stranded offset shows as `(CA: <band edge>)`. The offset gets its own line (`text`).
+* **Chart.** `chart_log.append(comfort_target=...)` records the room's target on rows where an offset is in force
+  (`AutomationEngine.remote_offset_state()` via `_read_chart_comfort_target()`; absent otherwise). The `Target`
+  line (`effective_target_history`) uses `comfort_target` when present, so it never moves; the commanded value is its
+  own series, `commanded_setpoint_history`, drawn as the dashed `Thermostat set` line (only on offset rows; it follows
+  the Target toggle). It has its own legend item, shown only while the series is in the range
+  (`#legend-thermostat-set`), and a hover value (`_commandedHoverItem`: the last commanded row at or before the cursor,
+  nothing across a gap or while the line is toggled off). Hourly/daily buckets (7d/30d/1y) carry `comfort_target` too
+  (`chart_log._bucket_comfort_target()`): when any row in a bucket has one, the bucket averages each row's comfort
+  target, or its `setpoint` when it has none (the extractor's own preference), so a long range never shows an offset
+  night as a band change; buckets without an offset row are unchanged.
+* **AI context and diagnostics.** The same view is the `remote_sensor_offset` block of the AI `HVAC ENTITY` section and
+  the `remote_offset` key of `build_diagnostic_snapshot()` (not repeated in the investigator's text footer, which
+  already follows the AI sections).
+
+**Status text, before / after** (heat, sleep window, target 66 F, hallway thermostat commanded to 70 F):
+
+| State | Before | After |
+|---|---|---|
+| clamped at the +4 F cap | `70°F (CA: 66°F)` | `Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)` |
+| clamped at the opposite band edge (ceiling 67) | `67°F (CA: 66°F)` or nothing | `Bedroom 66°F target - thermostat set 67°F (+1°F, clamped at the comfort band ceiling)` |
+| raising | `68°F (CA: 66°F)` or nothing | `Bedroom 66°F target - thermostat set 68°F (+2°F, raising)` |
+| waiting for the thermostat to start | same | `... (+2°F, waiting for the thermostat to start)` |
+| holding the offset, bedroom in band | same | `... (+2°F, holding)` |
+| door/window inside its debounce | same | `... (+4°F, held, window or door just opened)` |
+| gated (e.g. window pause) | `66°F` | `Bedroom offset off: paused for an open window or door` |
+| bedtime, before the sleep band lands (`waiting`) | `66°F` | `Bedroom offset starting: waiting for the bedtime setting` |
+| the night ended, exit grace (`clearing`) | `70°F (CA: 68°F)` | `Bedroom offset ending - thermostat still set 70°F (+4°F, clearing)` (the `(CA: X)` note stays: CA no longer intends the offset) |
+| the night ended during a write back-off (`clearing`) | same | `... (+4°F, clearing, retrying after a refused write)` |
+| remote reading stale | `66°F` | `Bedroom sensor not reporting - offset not in use` |
+| no offset in force | `66°F` | `66°F` (no extra line) |
+| thermostat reports 74 F while 70 F was commanded | `74°F (CA: 66°F)` | `74°F (CA: 70°F)` |
+**Simulation coverage (Issue #1194, increment e).** *Occupant outcome:* the claim "the bedroom reaches the sleep
+temperature through a hallway thermostat that cannot see it" is proven in simulation, in both fan modes, heat and
+cool, before it is trusted overnight. The harness bedroom (`tools/sim_harness/world.py` `BedroomNode`, optional and
+off by default; spec in `docs/sim-harness-spec.md` "Remote Bedroom Node and the #1194 Scenarios") lags behind the
+hallway, is cooled by outdoors, puts a register plume on its SENSOR while the furnace runs, and reports on change so
+`last_reported` can idle for an hour. The hallway thermostat cycles on its own asymmetric deadband (#1234).
+
+* **Tier A:** 17 pending scenarios (`tools/simulations/pending/remote_offset_1194e_*.json`) run the real coordinator
+  and engine: heat and cool nights, both +/-4 F caps, both opposite-band-edge caps, stale fallback, FREEZE inside the
+  debounce, pause past it with a clean exit, override, away, whole-house fan, natural ventilation, sleep-window
+  entry/exit, a 90 s late context-free thermostat echo (#1232) and two whole closed-loop nights. Each fails when the
+  offset is deleted; the finer mutations each scenario also fails on are recorded in its own `notes`.
+* **Tier B (real HA):** `tests_ha/test_remote_offset_sim_1194e.py`: the 1-minute timer, the 120-minute stale drop by
+  the timer alone, the loop's own steps echoing back 45 and 110 s late, an occupant's change in flight, and a restart
+  mid-night.
+* **Night comparison against POC v2** (the real engine through the harness bedroom, a synthetic 20:30-06:30 night with
+  the POC's measured hallway and plume parameters, 54 -> 45 F outdoors; not the recorded 2026-10-31 trace). Loop
+  writes exclude the entry (66 F) and wake (68 F) writes, as the POC's count did:
+
+| Learned swing H | Loop writes (POC v2) | Furnace starts (POC v2) | Max starts / hour (POC v2) | Shortest off time (POC v2) | Room minimum | F-min under 66 F |
+|---|---|---|---|---|---|---|
+| 0.59 | 22 (16) | 6 (4) | 2 (2) | 50 min (44-49) | 65.3 F | 211 |
+| 1.0 | 16 (12) | 4 (3) | 1 (2) | 58 min (43) | 65.0 F | 303 |
+| 1.5 | 10 (6) | 3 (2) | 1 (1) | 74 min (194) | 64.4 F | 415 |
+| loop deleted | 0 | 0 overnight (one at 06:30, the wake write) | 0 | n/a | 63.1 F | 560 |
+
+  The same shape as the POC: fewer writes and furnace starts as H grows, every cycle 5-9 minutes and cut by the plume
+  (about 4 loop writes per start, as in the POC), never more than 2 starts in an hour (the daytime rate is
+  0.7/h). The synthetic bedroom relaxes between cycles, so the counts run 1.3-1.7x the POC's; a coarser bedroom that
+  holds its heat longer cycles less. Reproduce: `python -m tools.sim_harness.remote_night 0.59 1.0 1.5`.
 
 **Before / after (heat, sleep window, bedroom 64.0 F, target 66 F, hallway at setpoint).**
 
@@ -4229,7 +4376,12 @@ increments (#1194 c, d); the simulation bedroom node and Tier A/B scenarios are 
 | Indoor sensor failure: resolver reasons, `next_fallback_episode`, funnel announcements, Settings suffix (Issue #1033) | `tests/test_indoor_temp_helper.py`, `tests/test_indoor_sensor_fallback.py`, `tests/test_fallback_episode.py`, `tests/test_api.py`, `tests/test_activity_renderers.py` (written by the implementing agents; names not verified at doc time) |
 | `issue_895_sleep_indoor_sensor_swap` (pending scenario) | `tools/simulations/pending/` |
 | Remote-sensor outer loop offset core (Issue #1194 a): pure decision, units, provenance, heat/cool, caps, swing source, freshness, startup wait, single-path callers, gates, coordinator wiring | `tests/test_remote_offset_1194a.py` |
+| Remote-sensor outer loop context entry and exit (Issue #1194 c): entry hold and plain band, exit clear, exit grace and the one fallback write, exit during every gate, restart at the boundaries, a moved wake time, the failed-write back-off, a second hypothetical context | `tests/test_remote_offset_context_1194c.py`, `tests_ha/test_remote_offset_context_1194c.py` (real HA: a whole night entry to exit, the sensor dropping out overnight; both fan modes) |
+| Remote-sensor outer loop Status / chart / diagnostics (Issue #1194 d): every loop state and its text, both clamp limits (heat and cool), the #402 comparison data, Celsius, chart series, diagnostics and AI fields | `tests/test_remote_offset_status_1194d.py`, `tests_ha/test_remote_offset_status_1194d.py` (real HA: Status payload and chart on an offset night, both fan modes), `tests/ui/remote-offset-status.spec.js` (Playwright; not run here) |
 | Remote-sensor outer loop gates (Issue #1194 b): every gate through the real coordinator and engine in both fan modes, heat and cool, enter / during / exit, the composed predicate's truth table, the startup-coalescing window | `tests/test_remote_offset_gates_1194b.py`, `tests_ha/test_remote_offset_gates_1194b.py` (real HA: door/window and manual override, both fan modes) |
+| Remote-sensor outer loop simulation (Issue #1194 e): the harness bedroom node (coupling, lag, plume, sensor), byte-identical plans, the new harness hooks and assertions, the closed-loop night with and without the loop | `tests/test_remote_sim_1194e.py` |
+| Remote-sensor outer loop Tier A scenarios (Issue #1194 e): 17 pending scenarios through the real coordinator, each failing when its behaviour is removed | `tools/simulations/pending/remote_offset_1194e_*.json`, run by `tests/test_production_harness.py` |
+| Remote-sensor outer loop real-HA tier (Issue #1194 e): 1-minute timer, stale drop, late echo, restart | `tests_ha/test_remote_offset_sim_1194e.py` |
 
 ---
 

@@ -1248,6 +1248,19 @@ Bedtime and wake-up clearing an active fan / RF-timer override (Issue #1027) is 
 
 Not changed: startup coalescing (changes in its first 5 minutes are not detected, Issue #1235). Tests: `tests/test_own_write_echo.py`, `tests/test_setpoint_echo_by_value_1232.py`, `tests/test_mode_echo_symmetry_1232.py`, real-HA `tests_ha/test_setpoint_echo_delayed_1232.py` (the dev thermostat sim gained `set_echo_delay()`).
 
+*The read-back verify waits for the same window (Issue #1194 e F1).* The 10 s setpoint read-back
+(`_check_single_setpoint_accepted` inside `_set_temperature_impl`) used to call a write "rejected" whenever the thermostat
+still reported its old value at 10 s: on a cloud thermostat that is simply the echo not having arrived, so the person saw
+"Setpoint validation FAILED", a `setpoint_rejected` entry, a 15-minute retry and, after a streak, a 1 F nudge, all for a
+write that had worked. Now, when the read-back disagrees, the thermostat still reports the value it had BEFORE the write,
+and that write is still outstanding in this memory (`own_write_echo.outstanding_own_write`: same entity and attribute,
+same value after step rounding, inside `OWN_WRITE_ECHO_WINDOW_S`; an arrived echo is consumed, so it no longer counts), the
+verify is not answered yet and re-checks when the window ends (`AutomationEngine._setpoint_echo_wait_s`). Only then -- no
+echo inside the window -- is it a rejection, exactly as before. A thermostat that answered with a different value (clamped
+to its own limit, refused) is a rejection at once, as before. A newer write supersedes the pending check as always (its
+own check then waits for its own echo). Tests: `tests/test_setpoint_verify_late_echo_1194e.py` (echo at 45 s and 110 s, no
+echo by 180 s, a different value, an instant echo; heat and cool, both fan modes).
+
 ### Note — Away/vacation setback and override detection (Issue #221)
 
 Away/vacation setback setpoint changes are guarded by `_is_recent_temp_command(30s)` in the coordinator's setpoint-change detection block (fix #221). When CA issues a setback setpoint command via `handle_occupancy_away()` or `handle_occupancy_vacation()`, `_set_temperature()` records a `_temp_command_time` timestamp. Any thermostat echo arriving within 30 s is suppressed and does not trigger a manual override detection. This prevents the automation's own setback from opening a spurious grace period. Since Issue #1232 a setback echo that arrives later than 30 s is recognised by value too (see [Setpoint echo recognition by value](#setpoint-echo-recognition-by-value-issue-1232)); the 30 s guard remains the backstop.

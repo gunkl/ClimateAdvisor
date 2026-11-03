@@ -1,0 +1,135 @@
+{
+  "description": "With the offset at the cap everyone leaves: the away setback (60 F) is written WITHOUT the offset and the loop writes nothing while the house is empty. On return the plain 66 F is restored, followed by ONE fresh step (68 F).",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:10:00",
+      "type": "occupancy_away",
+      "note": "Everyone leaves."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.0,
+      "note": "Bedroom cold while the house is empty: no offset on the setback."
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "occupancy_home",
+      "note": "Someone returns."
+    },
+    {
+      "time": "2026-11-02T21:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.0,
+      "note": "Still cold."
+    },
+    {
+      "time": "2026-11-02T22:05:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:40:30",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "Leaving: the away setback is written WITHOUT the +4 F (60, not 64); while the house is empty the loop writes nothing; coming home restores the plain 66 F.",
+      "values": [
+        60.0,
+        66.0
+      ],
+      "since": "2026-11-02T20:36:30"
+    },
+    {
+      "at": "2026-11-02T21:41:30",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "Right after the restore: ONE fresh step (68), never the old cap.",
+      "values": [
+        68.0
+      ],
+      "since": "2026-11-02T21:40:30"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M05: the whole gate predicate deleted (always PROCEED); M12: the away/vacation term removed from the gate. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' away/vacation row; docs/occupancy-dispatch-spec.md. Matches production.",
+    "(c) Occupant outcome if this regressed: An empty house must not be heated to a 64 F 'setback' because a stale offset was added to it."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "No offset on the away setback; a clean return.",
+    "observed_behavior": "Writes after the cap: 60 (away), 66 (home), 68 (one step).",
+    "expected_behavior": "Away/vacation closes the gate; the restore writes the plain target then at most one fresh step."
+  },
+  "name": "remote_offset_1194e_away_closes_the_gate_then_returns_plain_target_plus_one_step",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

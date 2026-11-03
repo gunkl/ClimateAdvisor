@@ -81,6 +81,10 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                             = True — the real continuity boundary an HA restart crosses
                             (Issue #263/#327 clean-slate + fresh coalescing window), not a
                             mirror of what restart does to engine state
+  remote_sensor_report    → (use_coordinator=True) states.async_set(entity, value_f) stamped with last_reported and
+                            last_updated = the virtual clock, so the real sleep-sensor listener fires and the outer
+                            loop's 120-minute freshness rule sees a real report (Issue #1194 e); silence is the
+                            absence of this event
 
 No clean production entry points (FINDINGS):
   fan_cycle_on   — _fan_cycle_on() is private; production triggers it via
@@ -372,6 +376,13 @@ class FakeHassSession:
         _quirk = merged_config.get("thermostat_quirk")
         if _quirk:
             fake_hass.set_entity_quirk(climate_entity, _quirk)
+
+        # --- Issue #1194 (e): opt-in cloud-thermostat echo delay (scenario config "thermostat_echo_delay_s") ---
+        # A set_temperature is reported back this many seconds later and without CA's Context (Nest/Ecobee-style).
+        # Absent by default, so all existing scenarios keep the instant, context-carrying echo.
+        _echo = merged_config.get("thermostat_echo_delay_s")
+        if _echo:
+            fake_hass.set_echo_delay(climate_entity, float(_echo))
 
         # --- Sensor tracker - drives engine._sensor_check_callback (engine-only mode) ---
         # Issue #476: when a coordinator is present, its real __init__ already wired
@@ -955,6 +966,23 @@ def _dispatch_event(
         attributes = event.get("attributes", {})
         if entity_id and coordinator is not None:
             fake_hass.states.async_set(entity_id, new_state, attributes)
+
+    elif etype == "remote_sensor_report":
+        # Issue #1194 (e), additive: the remote (sleep) sensor REPORTS a value, the way a real sensor does -- the state
+        # event reaches the coordinator's real sleep-sensor listener (``_on_sleep_indoor_temp_changed``) and the state
+        # carries ``last_reported`` / ``last_updated`` = the virtual clock, which the loop's 120-minute freshness rule
+        # reads.  ``external_entity_state_change`` cannot stand in: it never stamps ``last_reported``, and an
+        # unstamped state is treated as fresh forever, so a stale-sensor scenario could not exist.  Silence is modelled
+        # by the ABSENCE of this event (the last report ages with the virtual clock).  ``value_f`` is in the
+        # install's reporting unit (the entity's ``unit_of_measurement``, default F).
+        entity_id = event.get("entity")
+        if entity_id and event.get("value_f") is not None:
+            unit = event.get("unit", "\u00b0F")
+            fake_hass.states.async_set(entity_id, str(event["value_f"]), {"unit_of_measurement": unit})
+            stamped = fake_hass.states.get(entity_id)
+            stamp = scheduler.now()
+            stamped.last_updated = stamp
+            stamped.last_reported = stamp
 
     elif etype == "pre_cool":
         # Issue #258: Dispatch the pre-cool trigger to the production engine.

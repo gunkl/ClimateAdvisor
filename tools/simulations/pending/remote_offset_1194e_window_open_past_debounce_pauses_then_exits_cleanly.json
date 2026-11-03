@@ -1,0 +1,169 @@
+{
+  "description": "The window stays open past the 300 s debounce: the real pause takes over (HVAC off) and the loop writes nothing. On close the thermostat gets the PLAIN 66 F and then ONE fresh step (68 F), never the stranded 70 F cap.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120,
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
+    "sensor_debounce_seconds": 300
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:29:12",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Seed the door/window sensor as closed."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "The window opens and stays open."
+    },
+    {
+      "time": "2026-11-02T21:20:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.8,
+      "note": "Bedroom cold; window still open past the 300 s debounce: HVAC is paused, no extra degrees."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "The window closes: CA resumes."
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.8,
+      "note": "Still cold."
+    },
+    {
+      "time": "2026-11-02T21:55:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:09:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Precondition: the offset is at the cap.",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-02T21:15:30",
+      "expect": "event_emitted",
+      "track": "integration",
+      "reason": "Past the 300 s debounce the real pause takes over (HVAC off): no extra degrees into an open window.",
+      "event": "sensor_opened",
+      "payload_subset": {
+        "result": "paused"
+      }
+    },
+    {
+      "at": "2026-11-02T21:29:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "No loop write while the window is open and the house is paused.",
+      "values": [],
+      "since": "2026-11-02T20:36:30"
+    },
+    {
+      "at": "2026-11-02T21:34:59",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "On close the thermostat gets the PLAIN 66 F, then ONE fresh step (68 F) -- never the stranded 70 F cap and never 66 + 2 x offset.",
+      "values": [
+        66.0,
+        68.0
+      ],
+      "since": "2026-11-02T21:29:59"
+    },
+    {
+      "at": "2026-11-02T21:34:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "One step above plain, not the cap.",
+      "value": 68.0
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M05: the whole gate predicate deleted (always PROCEED). Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' table, door/window pause row and the 'Plain target / one fresh step' note. Matches production.",
+    "(c) Occupant outcome if this regressed: The sleeper must not come back to a thermostat parked at +4 F from before the window opened, nor to a doubled offset."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Pause, then a clean exit: plain target plus one fresh step.",
+    "observed_behavior": "No set_temperature while paused; on resume 66 then 68; 70 not before 21:35.",
+    "expected_behavior": "Offset forgotten while the gate is closed; one fresh step on exit."
+  },
+  "name": "remote_offset_1194e_window_open_past_debounce_pauses_then_exits_cleanly",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

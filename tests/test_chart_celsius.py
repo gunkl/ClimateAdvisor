@@ -42,6 +42,7 @@ _RAW_F_ALLOWLIST = {
     "outdoor",  # read pre-conversion into actual_outdoor, which is converted separately via _conv()
     "setpoint",  # fed to _extract_historical_effective_target() AFTER _conv_log_entry, then _conv()'d once
     "nat_vent_target",  # same as setpoint: converting in _conv_log_entry would double-convert
+    "comfort_target",  # Issue #1194 d: same as setpoint (extracted after _conv_log_entry, then _conv()'d once)
     # Daily-summary (1y) names for the same indoor/outdoor series, same reason as indoor/outdoor:
     "indoor_avg",
     "indoor_min",

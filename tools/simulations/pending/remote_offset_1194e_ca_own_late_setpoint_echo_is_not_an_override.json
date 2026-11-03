@@ -1,0 +1,135 @@
+{
+  "description": "A cloud thermostat reports each setpoint CA writes 90 s late and without CA's Context. CA's two loop steps are NOT read as the occupant: no override, no pause for the manual grace.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120,
+    "thermostat_echo_delay_s": 90
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:00:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "Still cold; the late echo of the first step has long since arrived."
+    },
+    {
+      "time": "2026-11-02T21:10:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:05:00",
+      "expect": "override_not_detected",
+      "track": "integration",
+      "reason": "The thermostat reported CA's two steps 90 s late and without CA's Context: neither was read as the occupant (#1232 by-value recognition)."
+    },
+    {
+      "at": "2026-11-02T20:50:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "CA's own steps are the only writes: no false-override pause, no back-off.",
+      "values": [
+        68.0,
+        70.0
+      ],
+      "since": "2026-11-02T20:30:10"
+    },
+    {
+      "at": "2026-11-02T21:05:00",
+      "expect": "field_equals",
+      "track": "integration",
+      "reason": "No manual override is active at the end.",
+      "field": "engine_state._manual_override_active",
+      "value": false
+    },
+    {
+      "at": "2026-11-02T21:09:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "No 15-minute setpoint retry after the late echoes (Issue #1194 e F1): the 10 s read-back waits out the 180 s echo window for a write still unanswered, so a 90 s echo is never a rejection.",
+      "values": [
+        68.0,
+        70.0
+      ],
+      "since": "2026-11-02T20:30:10"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M09: the #1232 by-value setpoint-echo recognition deleted. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/grace-periods-spec.md 'Occupant outcome' (#1232) and own_write_echo.decide_setpoint_echo; the read-back verify's echo wait is docs/08-COMPUTATION-REFERENCE.md 'Setpoint read-back and a late echo (Issue #1194 e F1)'. Matches production.",
+    "(c) Occupant outcome if this regressed: The sleeper would wake to a house that stopped following its plan for an hour after the loop's first nudge.",
+    "Changed at integration (#1194 c+d+e, 2026-11-02): the 10 s setpoint read-back used to fail on this 90 s echo and re-send 70 F at 20:51:09 (a 15-minute retry); with the echo-aware verify (#1194 e F1) that retry is gone, and the added 21:09 setpoint_writes assertion pins it (it fails with the fix reverted)."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "CA's own late echo is recognised by value (#1232), not misread as an override.",
+    "observed_behavior": "No override_detected; the only writes are the two steps; _manual_override_active is False.",
+    "expected_behavior": "An echo within the 180 s window matching a remembered write is CA's own."
+  },
+  "name": "remote_offset_1194e_ca_own_late_setpoint_echo_is_not_an_override",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

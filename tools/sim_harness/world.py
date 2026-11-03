@@ -21,6 +21,105 @@ from datetime import datetime
 
 TICK_MIN = 5  # one world step = one thermal sample tick (production's heartbeat)
 
+_F_PER_C = 1.8
+
+
+@dataclass(frozen=True)
+class BedroomParams:
+    """The bedroom: a second thermal node, the room a REMOTE (sleep) sensor measures (Issue #1194 e).
+
+    Physical plant only -- it knows nothing about Climate Advisor's offset loop.  The hallway thermostat
+    never sees this room, so the room can sit below the sleep temperature while the hallway is satisfied.
+
+    * Coupling: ``dB/dt = k_hall * (hallway - B) + k_env * (outdoor - B)`` (1/hr each).  The steady-state gap below
+      the hallway is ``k_env / (k_hall + k_env) * (hallway - outdoor)``; the time constant is ``1 / (k_hall + k_env)``
+      (the lag of the room behind the hallway).
+    * Plume: while the hallway equipment runs, and for ``fan_overrun_min`` after it stops, the bedroom register
+      blows conditioned air straight onto the sensor, so the READING (not the room) jumps by up to ``plume_f``
+      (heat: +, cool: -).  It starts after ``plume_dead_min`` of running, rises first-order with
+      ``plume_rise_tau_min`` toward the peak and decays with ``plume_decay_tau_min`` once the air stops.  Defaults are
+      the POC v2 fit to 12 measured cycles of the owner's home (max error 0.82 F, under the sensor quantum).
+    * Sensor: reports on change, in steps of ``sensor_step_c`` (0.1 C = 0.18 F), so ``last_reported`` can sit
+      still for an hour or more while the room is steady.
+    """
+
+    k_hall_per_hr: float = 1.7
+    k_env_per_hr: float = 0.28
+    plume_f: float = 7.0
+    plume_dead_min: float = 4.0
+    plume_rise_tau_min: float = 8.0
+    plume_decay_tau_min: float = 11.0
+    fan_overrun_min: float = 2.0
+    sensor_step_c: float = 0.1
+
+
+class BedroomNode:
+    """State of the bedroom: the room, the register plume, and what its sensor last REPORTED."""
+
+    def __init__(self, params: BedroomParams, start_f: float) -> None:
+        self.p = params
+        self.room_f = float(start_f)  # the room itself, without the register plume
+        self.plume_f = 0.0  # the register plume currently on the sensor (signed)
+        self.clock_min = 0.0  # minutes since the node was created
+        self.silent = False  # True: the sensor stopped reporting (battery, radio); its last report stays
+        self._blow_min = 0  # consecutive minutes the register has been blowing (equipment running or coasting)
+        self._overrun = 0  # blower-overrun minutes still to go after the equipment cut out
+        self._sign = 1.0
+        self.reported_f = self._quantise(self.room_f)
+        self.last_reported_min = 0.0
+
+    def _quantise(self, f: float) -> float:
+        step_c = self.p.sensor_step_c
+        if step_c <= 0:
+            return f
+        return round(round((f - 32.0) / _F_PER_C / step_c) * step_c * _F_PER_C + 32.0, 4)
+
+    @property
+    def age_min(self) -> float:
+        """Minutes since the sensor last reported (what ``last_reported`` ages by)."""
+        return self.clock_min - self.last_reported_min
+
+    def step(self, minutes: float, hall_f: float, outdoor_f: float, running: str | None) -> bool:
+        """Advance ``minutes`` (in sub-steps of at most a minute) under the hallway equipment state.
+
+        Returns True if the sensor made a new report during the interval (``reported_f`` / ``last_reported_min``).
+        """
+        p = self.p
+        reported = False
+        remaining = float(minutes)
+        while remaining > 1e-9:
+            dt = min(1.0, remaining)
+            remaining -= dt
+            self.room_f += (p.k_hall_per_hr * (hall_f - self.room_f) + p.k_env_per_hr * (outdoor_f - self.room_f)) * (
+                dt / 60.0
+            )
+            if running in ("heating", "cooling"):
+                self._sign = 1.0 if running == "heating" else -1.0
+                self._overrun = int(p.fan_overrun_min)
+                blowing = True
+            elif self._overrun > 0:
+                self._overrun -= 1  # the blower coasts on after the burner / compressor cut out
+                blowing = True
+            else:
+                blowing = False
+            if blowing:
+                self._blow_min += 1
+                if self._blow_min > p.plume_dead_min:  # before that the air has not reached the sensor yet
+                    self.plume_f += (self._sign * p.plume_f - self.plume_f) * (
+                        1.0 - math.exp(-dt / p.plume_rise_tau_min)
+                    )
+            else:
+                self._blow_min = 0
+                self.plume_f *= math.exp(-dt / p.plume_decay_tau_min)
+            self.clock_min += dt
+            if not self.silent:
+                new = self._quantise(self.room_f + self.plume_f)
+                if abs(new - self.reported_f) > 1e-6:
+                    self.reported_f = new
+                    self.last_reported_min = self.clock_min
+                    reported = True
+        return reported
+
 
 @dataclass(frozen=True)
 class HouseParams:
@@ -40,11 +139,20 @@ class HouseParams:
     # off_offset_f), so a real thermostat that starts at setpoint-1.4 and stops at setpoint-0.9 is
     # swing_f=1.4, off_offset_f=-0.9. None keeps the original symmetric deadband (stop at +swing_f).
     off_offset_f: float | None = None
+    # Issue #1194 (e): an optional second node, the bedroom a remote sensor reads.  None (the default, and what every
+    # drawn day uses) keeps the single-zone house and serialises exactly as before.
+    bedroom: BedroomParams | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.bedroom, dict):  # a plan / replay file round-trips the nested node as a plain dict
+            object.__setattr__(self, "bedroom", BedroomParams(**self.bedroom))
 
     def to_dict(self) -> dict:
         d = asdict(self)
         if d.get("off_offset_f") is None:  # the symmetric default serialises exactly as before Issue #1234
             d.pop("off_offset_f", None)
+        if d.get("bedroom") is None:  # ... and as before Issue #1194 (e)
+            d.pop("bedroom", None)
         return d
 
     @classmethod
@@ -118,10 +226,16 @@ class Weather:
 class ToyHouse:
     """Indoor temperature plus the thermostat's own on/off control."""
 
-    def __init__(self, params: HouseParams, indoor_f: float) -> None:
+    def __init__(self, params: HouseParams, indoor_f: float, bedroom_f: float | None = None) -> None:
         self.p = params
         self.indoor_f = float(indoor_f)
         self.running: str | None = None  # "heating" | "cooling" | None
+        # Issue #1194 (e): the bedroom node exists only when the house is given one (default: none, nothing changes).
+        self.bedroom: BedroomNode | None = (
+            BedroomNode(params.bedroom, float(indoor_f if bedroom_f is None else bedroom_f))
+            if params.bedroom is not None
+            else None
+        )
 
     def reported_f(self) -> float:
         """What the thermostat displays (whole degree or half degree)."""
@@ -167,6 +281,8 @@ class ToyHouse:
         elif self.running == "cooling":
             delta -= self.p.cool_gain_f_hr * dt
         self.indoor_f += delta
+        if self.bedroom is not None:  # the second node follows the hallway under the same equipment state
+            self.bedroom.step(minutes, self.indoor_f, outdoor_f, self.running)
         return self.indoor_f
 
     def coast(self, previous: str | None) -> None:

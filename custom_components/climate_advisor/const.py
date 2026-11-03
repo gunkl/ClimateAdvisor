@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.46"
+VERSION = "0.8.47"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -585,6 +585,11 @@ REMOTE_OFFSET_DEFAULT_WAIT_S: float = 300.0
 REMOTE_OFFSET_MIN_WAIT_S: float = 120.0
 REMOTE_OFFSET_WAIT_MARGIN_S: float = 60.0
 REMOTE_OFFSET_LATENCY_EWMA_ALPHA: float = 0.3
+# Issue #1194 (c): when a remote context ENDS (the morning wake, the sensor going away) the loop gives the next band's
+# own writer this long to land the plain target before it writes the plain target itself. Deliberately the minimum
+# startup wait (no new number): long enough for a same-minute wake routine, short enough that a stranded offset is gone
+# within a couple of minutes when no band write comes at all.
+REMOTE_OFFSET_EXIT_GRACE_S: float = REMOTE_OFFSET_MIN_WAIT_S
 # Delay before a setpoint write is retried: the read-back verify's retry after a rejected setpoint, and the outer
 # loop's back-off after one of its own writes was not executed (it also waits for a new remote report).
 SETPOINT_RETRY_DELAY_S: int = 900

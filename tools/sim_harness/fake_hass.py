@@ -127,6 +127,10 @@ class _FakeServices:
         self._handlers: dict[tuple[str, str], Any] = {}
         # Issue #1048: entity_id -> set of quirk names (opt-in; empty by default).
         self._quirks: dict[str, set[str]] = {}
+        # Issue #1194 (e): entity_id -> seconds a cloud thermostat takes to report a setpoint it was just told (opt-in;
+        # empty by default, so every existing scenario still sees the instant, context-carrying echo).
+        self._echo_delay_s: dict[str, float] = {}
+        self._defer: Any | None = None  # scheduler._schedule, wired by FakeHass.set_scheduler()
 
     def set_entity_quirk(self, entity_id: str, quirk: str) -> None:
         """Mark ``entity_id`` with an opt-in behavioural quirk (Issue #1048).
@@ -139,6 +143,18 @@ class _FakeServices:
         raises ``FakeHomeAssistantError``. ``climate.set_hvac_mode`` works normally.
         """
         self._quirks.setdefault(entity_id, set()).add(quirk)
+
+    def set_echo_delay(self, entity_id: str, seconds: float) -> None:
+        """A cloud thermostat reports the setpoint it was told ``seconds`` later, with none of CA's Context.
+
+        Issue #1194 (e) / #1232: Nest/Ecobee-style cloud integrations echo a ``set_temperature`` 30-120 s late and the
+        state event carries no Climate Advisor context.  The command is still recorded in ``action_log`` at once; only
+        the state (and the coordinator listener event it dispatches) is held back.  ``0`` restores the instant echo.
+        """
+        if seconds > 0:
+            self._echo_delay_s[entity_id] = float(seconds)
+        else:
+            self._echo_delay_s.pop(entity_id, None)
 
     def has_quirk(self, entity_id: Any, quirk: str) -> bool:
         if isinstance(entity_id, list):
@@ -238,7 +254,18 @@ class _FakeServices:
                         "Cannot set temperature while the thermostat is off (sensi_like quirk)"
                     )
                 return  # non-blocking: HA logs and swallows; state unchanged
+        delay = self._echo_delay_s.get(self._first_entity(data.get("entity_id")), 0.0)
+        if delay > 0 and domain == "climate" and service == "set_temperature" and self._defer is not None:
+            held = dict(data)
+            self._defer(delay, lambda _now: self._apply_state_feedback(domain, service, held, context=None))
+            return
         self._apply_state_feedback(domain, service, data, context=context)
+
+    @staticmethod
+    def _first_entity(entity_id: Any) -> str | None:
+        if isinstance(entity_id, list):
+            return entity_id[0] if entity_id else None
+        return entity_id
 
     def _apply_state_feedback(self, domain: str, service: str, data: dict, context: Any = None) -> None:
         """Reflect a command into the target entity's FakeState (real-HA behaviour).
@@ -596,9 +623,14 @@ class FakeHass:
         """Opt an entity into a thermostat quirk, e.g. ``QUIRK_SENSI_LIKE`` (Issue #1048)."""
         self.services.set_entity_quirk(entity_id, quirk)
 
+    def set_echo_delay(self, entity_id: str, seconds: float) -> None:
+        """Opt a thermostat into a late, context-free setpoint echo (Issue #1194 e / #1232)."""
+        self.services.set_echo_delay(entity_id, seconds)
+
     def set_scheduler(self, scheduler: Any) -> None:
         """Wire in the FakeScheduler so async_create_task coroutines are driven."""
         self._scheduler = scheduler
+        self.services._defer = getattr(scheduler, "_schedule", None)  # Issue #1194 (e): delayed thermostat echo
 
     # ------------------------------------------------------------------
     # State-change listener registry (real dispatch, coordinator-fidelity)

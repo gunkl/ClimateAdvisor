@@ -283,6 +283,7 @@ class TestProvenance:
             climate_entity=ENTITY,
             in_sleep_window=True,
             sleep_indoor_temp_entity=BEDROOM,
+            now=env.sched.now(),  # Issue #1278: judge freshness on the virtual clock, never the wall clock
         )
         assert reading.remote_context == "sleep" and reading.value == 64.0 and reading.primary_value == 67.0
 
@@ -882,6 +883,7 @@ class TestResolverLogsOnChange:
                 climate_entity=ENTITY,
                 in_sleep_window=in_window,
                 sleep_indoor_temp_entity=BEDROOM,
+                now=env.sched.now(),  # Issue #1278: virtual clock, never the wall clock
             )
 
         with caplog.at_level(logging.DEBUG, logger="custom_components.climate_advisor.indoor_temp"):

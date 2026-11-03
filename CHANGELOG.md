@@ -3,6 +3,16 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.49] — 2026-11-03
+
+- Fix #1278 (test tooling only, nothing changes at home): the nightly test of thousands of generated household days had failed every night since it was added. The GitHub runner ran out of memory and was killed, so no result was produced and nobody was told. The cause was the simulator's stand-in for Home Assistant's `@callback` decorator. It was a MagicMock, so it replaced three Climate Advisor methods with a do-nothing mock: the whole-house-fan sealed-house safety tick, the thermal sample tick and the post-grace fan check. It also recorded every call to them forever, about 25 MB per simulated day. It now behaves like Home Assistant's: the decorated methods really run in simulation, and memory stays flat at about 110 MB.
+  - **Prevention:** a new test fails if the stand-in swallows a method again, or if generated days start piling up recorded mock calls.
+  - **Visibility:** the nightly output shows the peak memory after each seed, and a failed nightly run now opens or updates a GitHub issue.
+  - **Test fixes:**
+    - The promise-evidence parity test now compares the newly running 5-minute heartbeat against what the simulator sees at that same moment.
+    - Two bedroom-sensor tests judged freshness against the real clock and had started failing as the date moved on; they now use the simulated clock.
+  - **Surfaced, not fixed:** the now-working nightly found days where the heating or AC still runs next to a spinning whole-house fan. That is tracked as #1279.
+
 ## [0.8.48] — 2026-11-02
 
 - Fix #1271: after the whole-house fan has been ventilating the house and you close the window, the heating or cooling now comes back. Since 0.8.29 the thermostat could stay Off for hours behind a fan that had already stopped: the house sat at 78°F against a 72°F ceiling with every thermostat write refused as "the whole-house fan still owns the thermostat". A cold house was left unheated the same way. Climate Advisor waits until the fan really reads off (and has stayed off for 6 seconds) before it gives the thermostat back, so the heat or AC never runs beside a fan that is still spinning; the wait was never completed when the fan was stopped by the window close (and by the same kind of stop from the other ventilation exits, such as the comfort-floor exit). It now is: the pre-fan mode (and the day's setpoints) return once the fan has stayed off, never beside a running fan, never into a window that was opened again in the meantime, and never over a thermostat change you made yourself in the meantime. A fan that really keeps running still keeps the heat and AC held off, exactly as before.

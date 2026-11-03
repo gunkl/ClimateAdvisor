@@ -100,12 +100,24 @@ def _run_both(scenario: dict) -> tuple[dict, dict]:
     """Run ``scenario`` through a real coordinator; return (production-hook evidence, adapter evidence)."""
     probe = PromiseProbe(scenario_name=str(scenario.get("name", "parity")))
     session = make_session(scenario, engine="fakehass", probe=probe, use_coordinator=True)
+    # Issue #1278: production's 5-minute heartbeat records a reading on the coordinator's own timer, not on a
+    # state change, so the adapter has no reading of its own at that instant. Ask the adapter for its live
+    # view at the very moment production records (pure: it only reads states), so the two are compared on
+    # the same house at the same instant -- including a silent sensor that ages from "open" to "closed".
+    views: dict[str, list[tuple]] = {}
+    journal = session.coordinator._promise_journal
+
+    def record_and_view(item):
+        views.setdefault(item.ts.isoformat(), []).append(_reading_key(probe._source._reading(item.ts)))
+        return PromiseJournal.record_reading(journal, item)
+
+    journal.record_reading = record_and_view
     try:
         patch_stub_gaps(session)
         drive_scenario(session, scenario)
     finally:
         session.close()
-    return _captured(session.coordinator._promise_journal), _captured(probe.journal)
+    return _captured(journal), {**_captured(probe.journal), "views": views}
 
 
 def compare(prod: dict, adap: dict, *, restarts: int = 0) -> list[str]:
@@ -138,8 +150,16 @@ def compare(prod: dict, adap: dict, *, restarts: int = 0) -> list[str]:
     for r in prod["readings"]:
         if first_adapter_ts is not None and r.ts < first_adapter_ts:
             continue  # recorded while the session was still being built: before the probe attached
-        if _reading_key(r) not in adapter_readings.get(r.ts.isoformat(), []):
-            unmatched.append((_reading_key(r), adapter_readings.get(r.ts.isoformat())))
+        same_instant = adapter_readings.get(r.ts.isoformat())
+        if same_instant is not None:
+            if _reading_key(r) not in same_instant:
+                unmatched.append((_reading_key(r), same_instant))
+            continue
+        # Issue #1278: no adapter reading at this instant (production's 5-minute heartbeat, which never ran
+        # under the old MagicMock ``@callback``): judge it against the adapter's live view at that instant.
+        view = adap.get("views", {}).get(r.ts.isoformat(), [])
+        if _reading_key(r) not in view:
+            unmatched.append((_reading_key(r), view or None))
     if unmatched:
         problems.append(f"{len(unmatched)} production readings have no equal adapter reading, e.g. {unmatched[:2]}")
     return problems

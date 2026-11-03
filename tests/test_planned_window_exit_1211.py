@@ -86,9 +86,9 @@ def _tick_coordinator(engine):
     import types
     from unittest.mock import MagicMock
 
-    from tests.test_promise_wiring import TestRealEntryPointsFeedThePromises
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator as cls
 
-    cls = TestRealEntryPointsFeedThePromises._callback_transparent_class()
+    # Issue #1278: the shared HA stub's @callback is the identity, so the real tick runs as is.
     coord = object.__new__(cls)
     coord.automation_engine = engine
     coord._refresh_outdoor_temp = MagicMock()

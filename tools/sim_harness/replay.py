@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import resource
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -138,6 +139,12 @@ def cli_generate_day(day_seed: int, profile: str, *, save: bool = False) -> int:
     return 1 if rec.report.hard else 0
 
 
+def _peak_rss_mb() -> int:
+    """Peak resident memory of this process (Issue #1278: a per-day leak killed the nightly runner
+    with no output; printing the peak after each master seed makes growth visible run to run)."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+
+
 def cli_generate(
     master_seeds: list[int],
     days: int,
@@ -163,7 +170,7 @@ def cli_generate(
         print(
             f"master_seed={ms}: {res.days} days in {res.seconds:.1f}s ({s['mean_seconds_per_day']}s/day), "
             f"hard={s['hits_by_promise'] or 'none'}, warnings={s['warnings_by_promise'] or 'none'}, "
-            f"excused={s['excused_by_promise'] or 'none'}"
+            f"excused={s['excused_by_promise'] or 'none'}, peak_rss={_peak_rss_mb()}MB"
         )
         for promise, rows in res.hits.items():
             for ds, h in rows[:3]:

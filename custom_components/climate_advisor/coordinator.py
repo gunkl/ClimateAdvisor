@@ -6633,6 +6633,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and new_state.state == _last_cmd_mode
             and (dt_util.now() - _last_cmd_time).total_seconds() < 120
         )
+        # Issue #1246: CA can send two mode writes inside the echo window (door-close restore, then a family flip);
+        # a slow cloud thermostat reports the FIRST after the second was sent. Membership in the recent own-write
+        # list, not equality with the last one. Only an actual mode change is an echo (and is consumed).
+        _is_own_mode_echo = (
+            old_state.state != new_state.state
+            and self.automation_engine.recognise_own_mode_echo(new_state.state) is True  # `is True`: stub-safe
+        )
+        _is_expected_confirmation = _is_expected_confirmation or _is_own_mode_echo
         # Issue #1049: the thermostat waking from unavailable/unknown (often reporting Off or
         # stale attributes) is a reconnect, never an occupant action. Computed once; gates all
         # four override-detection sites below. No early return — other bookkeeping must run.

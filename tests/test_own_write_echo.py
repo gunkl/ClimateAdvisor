@@ -10,10 +10,12 @@ import pytest
 
 from custom_components.climate_advisor import automation as automation_module
 from custom_components.climate_advisor.automation import AutomationEngine, ClimateCallOutcome
-from custom_components.climate_advisor.const import SETPOINT_ECHO_MEMORY_MAX, SETPOINT_ECHO_WINDOW_S
+from custom_components.climate_advisor.const import OWN_WRITE_ECHO_WINDOW_S, SETPOINT_ECHO_MEMORY_MAX
 from custom_components.climate_advisor.own_write_echo import (
+    OwnModeWrite,
     OwnSetpointWrite,
     context_id_matches,
+    decide_mode_echo,
     decide_setpoint_echo,
     default_step,
     prune_own_writes,
@@ -102,8 +104,8 @@ def test_value_inside_window_is_an_echo_and_consumed():
 
 
 def test_window_boundary_is_exclusive():
-    just_in = _w(age=SETPOINT_ECHO_WINDOW_S - 0.5)
-    at = _w(age=SETPOINT_ECHO_WINDOW_S)
+    just_in = _w(age=OWN_WRITE_ECHO_WINDOW_S - 0.5)
+    at = _w(age=OWN_WRITE_ECHO_WINDOW_S)
     assert _decide([just_in], {"temperature": 72.0}).recognised
     v = _decide([at], {"temperature": 72.0})
     assert not v.recognised and v.reason == "no_memory"
@@ -165,7 +167,7 @@ def test_duplicate_same_value_writes_are_one_echo():
 
 
 def test_prune_drops_expired_and_caps_newest():
-    old = _w(age=SETPOINT_ECHO_WINDOW_S + 1)
+    old = _w(age=OWN_WRITE_ECHO_WINDOW_S + 1)
     fresh = [_w(value=60.0 + i, age=1.0) for i in range(SETPOINT_ECHO_MEMORY_MAX + 5)]
     kept = prune_own_writes([old, *fresh], T0)
     assert old not in kept and len(kept) == SETPOINT_ECHO_MEMORY_MAX and kept[-1] is fresh[-1]
@@ -274,7 +276,7 @@ def test_recognise_consumes_the_echo_and_clears_on_window_end(clock):
     assert e._own_setpoint_writes == []  # cleared on echo arrival
     assert e.recognise_own_setpoint_echo({"temperature": 72.0}) is False  # nothing left to answer a second change
     asyncio.run(e._call_climate("set_temperature", {"entity_id": CE, "temperature": 73.0}, "l"))
-    clock["t"] += timedelta(seconds=SETPOINT_ECHO_WINDOW_S + 1)
+    clock["t"] += timedelta(seconds=OWN_WRITE_ECHO_WINDOW_S + 1)
     assert e.recognise_own_setpoint_echo({"temperature": 73.0}) is False
     assert e._own_setpoint_writes == []  # cleared at window end
 
@@ -339,3 +341,57 @@ def test_engine_forgets_superseded_writes(clock):
     assert e.recognise_own_setpoint_echo({"temperature": 74.0}) is True
     assert e._own_setpoint_writes == []
     assert e.recognise_own_setpoint_echo({"temperature": 72.0}) is False  # the occupant dialling back
+
+
+# --- mode writes (Issue #1246): same memory shape, same window, same pruning ------------------------------------
+
+
+def _m(mode, age=0.0):
+    return OwnModeWrite(mode, T0 - timedelta(seconds=age))
+
+
+def test_prune_is_generic_over_mode_writes():
+    old, fresh = _m("heat", OWN_WRITE_ECHO_WINDOW_S + 1), _m("cool", 5)
+    assert prune_own_writes([old, fresh], T0) == (fresh,)
+    many = [_m("heat", 1) for _ in range(SETPOINT_ECHO_MEMORY_MAX + 4)]
+    assert len(prune_own_writes(many, T0)) == SETPOINT_ECHO_MEMORY_MAX
+
+
+def test_mode_echo_of_an_earlier_write_is_recognised_and_consumed():
+    first, second = _m("heat", 60), _m("cool", 40)
+    v = decide_mode_echo(writes=[first, second], observed_mode="heat", now=T0)
+    assert v.recognised and v.consumed == (first,) and v.superseded == ()  # cool's echo is still coming
+
+
+def test_mode_echo_of_the_newest_write_supersedes_the_older_one():
+    first, second = _m("heat", 60), _m("cool", 40)
+    v = decide_mode_echo(writes=[first, second], observed_mode="cool", now=T0)
+    assert v.recognised and v.consumed == (second,) and v.superseded == (first,)
+
+
+def test_mode_not_written_recently_is_not_an_echo():
+    assert not decide_mode_echo(writes=[_m("heat", 60), _m("cool", 40)], observed_mode="off", now=T0).recognised
+    assert not decide_mode_echo(writes=[], observed_mode="heat", now=T0).recognised
+
+
+def test_mode_echo_outside_the_window_is_not_an_echo():
+    assert not decide_mode_echo(
+        writes=[_m("heat", OWN_WRITE_ECHO_WINDOW_S + 1)], observed_mode="heat", now=T0
+    ).recognised
+
+
+def test_engine_remembers_every_mode_write_and_consumes_on_echo(clock):
+    e = _engine()
+    e._record_commanded_mode("heat")
+    clock["t"] += timedelta(seconds=20)
+    e._record_commanded_mode("cool")
+    assert [w.mode for w in e._own_mode_writes] == ["heat", "cool"]
+    assert e._last_commanded_hvac_mode == "cool"  # the single-last-mode semantics are unchanged for every other reader
+    clock["t"] += timedelta(seconds=40)
+    assert e.recognise_own_mode_echo("heat") is True
+    assert [w.mode for w in e._own_mode_writes] == ["cool"]
+    assert e.recognise_own_mode_echo("heat") is False  # consumed
+    assert e.recognise_own_mode_echo("off") is False
+    clock["t"] += timedelta(seconds=OWN_WRITE_ECHO_WINDOW_S)
+    assert e.recognise_own_mode_echo("cool") is False  # window ended
+    assert e._own_mode_writes == []

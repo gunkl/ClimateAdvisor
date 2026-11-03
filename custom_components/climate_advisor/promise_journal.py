@@ -155,6 +155,7 @@ EVENT_MARK_MAP: dict[str, tuple[str, ...]] = {
     "stuck_grace_recovered": ("reason",),
     "occupancy_setback": ("mode",),
     "occupancy_comfort_restored": (),
+    "occupancy_comfort_restore_held": ("reason",),
     "nat_vent_activated": (),
     "nat_vent_comfort_floor_exit": (),
     "nat_vent_outdoor_rise_exit": (),

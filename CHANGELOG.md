@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.51] — 2026-11-03
+
+- Fix #1281: in a home that uses the thermostat's own blower as its fan, suppose you change the temperature, switch the blower on, then set it back to Auto before the blower's pause ends. Climate Advisor no longer records that as having ended your thermostat change early. Your change was never actually cut short: it stayed in force under the fan-off pause and Climate Advisor didn't touch the thermostat until that pause ended. But the household-promise check logged a false "ended your manual thermostat change 5 min early", which showed up in the AI Investigator and the diagnostics as a missed promise and kept the nightly test red. This is the mirror of #1204, which fixed the same false report for switching the blower on. Nothing Climate Advisor does at home changes. A real early end is still reported, and so is a Climate Advisor setpoint change in that time.
+
 ## [0.8.50] — 2026-11-03
 
 - #1279 (test tooling and docs only, nothing changes at home): the newly working nightly test failed on simulated days where the occupant switched the whole-house fan on and then pressed heat or AC again within 1 to 2 seconds. Climate Advisor reads a press that close to its own "HVAC off" as the thermostat echoing its command, so the heating or cooling ran beside the fan for 13 to 30 minutes. This is the case closed as #1203. The owner has confirmed it is not a supported occupant action: you would turn the fan on and the HVAC off, never back on within seconds. So the generated days no longer produce a press inside 3 seconds, and their fast case now presses 3 to 5 seconds after the fan, which Climate Advisor handles by stopping the fan at once. The #1203 test excuse and its expected-failure tests are removed. The 3-second boundary days stay as tests, so widening the echo window, or removing the newest-action-wins rule, still fails them. The computation reference now describes this as an unsupported action rather than a known limitation.

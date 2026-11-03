@@ -10983,7 +10983,13 @@ class AutomationEngine:
             # Issue #1204 (decision A2): the occupant's blower press replaces the setpoint's grace with the fan
             # override's grace, and the thermostat change stays protected until that grace ends (a whole-house-fan
             # press clears the thermostat change first, rule 2, so it never reaches here protected).
-            or (reason == "superseded" and replaced_by == "fan_manual_override" and self._manual_change_protected())
+            # Issue #1281 (the mirror): the occupant's blower OFF replaces that fan grace with the fan-off grace while
+            # the thermostat override stays live (it ends when that grace expires), so the change is still protected.
+            or (
+                reason == "superseded"
+                and replaced_by in ("fan_manual_override", "fan_off")
+                and self._manual_change_protected()
+            )
         )
         # Caller-supplied value wins: bedtime/wake-up clear the fan override (and its
         # RF-timer hours) before this runs, so they pass the pre-clear snapshot in.

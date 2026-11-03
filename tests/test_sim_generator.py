@@ -728,7 +728,12 @@ def test_an_hvac_press_seconds_after_climate_advisors_own_suppression_is_the_new
 _P4_FIXED_1204_SEEDS = (303000022, 102000023, 302000001, 302000008, 311000012, 311000015, 313000019)
 
 
-@pytest.mark.parametrize("day_seed", _P4_FIXED_1204_SEEDS)
+# Issue #1281 (the #1204 mirror, found by the first full nightly after #1278): setpoint change, blower On, then the
+# blower back to Auto before the blower's grace ends. The override stays live under the fan-off grace.
+_P4_FIXED_1281_SEEDS = (9003000097, 5008000215, 5010000029)
+
+
+@pytest.mark.parametrize("day_seed", _P4_FIXED_1204_SEEDS + _P4_FIXED_1281_SEEDS)
 def test_1204_fan_press_and_rule2_stop_days_keep_override_respected(day_seed) -> None:
     assert not [(h.ts, h.detail) for h in run_day(day_seed).report.hard if h.promise == "override_respected"]
 

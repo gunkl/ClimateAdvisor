@@ -865,6 +865,41 @@ class TestManualWhfOnSuppressesHvac:
         hvac_calls = _get_hvac_mode_calls(engine)
         assert "off" in hvac_calls, f"Expected HVAC to be set to 'off' for FAN_MODE_BOTH; got: {hvac_calls}"
 
+    @pytest.mark.parametrize("fan_mode", [FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH])
+    def test_observe_only_manual_whf_on_takes_no_ownership(self, fan_mode):
+        """Issue #1293: with automation off (observe-only) nothing is sent, so the heat keeps running. Climate Advisor
+        must not record that the fan session owns (suppressed) the thermostat, nor emit ``whf_hvac_suppressed``:
+        that stale ownership kept rule 2 silent after the re-enable while the heat ran beside the fan."""
+        engine = _make_engine(fan_mode=fan_mode, current_hvac_mode="heat")
+        engine.dry_run = True
+        engine._emit_event_callback = MagicMock()
+        captured = _run_scheduled_suppress(engine)
+
+        engine.handle_fan_manual_override(fan_before="off", fan_after="on")
+        assert len(captured) == 1
+        asyncio.run(captured[0])
+
+        assert _get_hvac_mode_calls(engine) == []
+        assert engine._pre_fan_hvac_mode is None
+        assert engine._whf_owns_hvac() is False
+        emitted = [c[0][0] for c in engine._emit_event_callback.call_args_list]
+        assert "whf_hvac_suppressed" not in emitted, emitted
+
+    def test_observe_only_then_enabled_suppression_takes_ownership(self):
+        """Issue #1293 positive control: the same call once automation is back on sends the off and owns HVAC."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="heat")
+        engine._emit_event_callback = MagicMock()
+        engine.dry_run = True
+        asyncio.run(engine._suppress_hvac_for_whf(reason="observe-only press"))
+        assert engine._pre_fan_hvac_mode is None
+
+        engine.dry_run = False
+        asyncio.run(engine._suppress_hvac_for_whf(reason="rule 2 after re-enable"))
+        assert _get_hvac_mode_calls(engine) == ["off"]
+        assert engine._pre_fan_hvac_mode == "heat" and engine._whf_owns_hvac() is True
+        emitted = [c[0][0] for c in engine._emit_event_callback.call_args_list]
+        assert emitted.count("whf_hvac_suppressed") == 1, emitted
+
     def test_manual_hvac_fan_on_does_not_suppress_hvac(self):
         """handle_fan_manual_override() with FAN_MODE_HVAC must NOT suppress HVAC —
         the thermostat's own blower coexists with the compressor by design."""

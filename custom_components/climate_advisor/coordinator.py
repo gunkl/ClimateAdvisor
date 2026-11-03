@@ -1120,6 +1120,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sensor_debounce_pending=self._sensor_debounce_pending,
             # Issue #1227: per-sensor "open and past its own delay" for every HVAC-changing decision.
             sensor_settled_open=self._any_sensor_settled_open,
+            # Issue #1289: per-sensor "reads open (not dark) and past its own delay" -- the nat-vent START read.
+            sensor_open_settled=self._any_sensor_open_and_settled,
             emit_event=self._emit_event,
             request_refresh=lambda: self.hass.async_create_task(self.async_request_refresh()),
             push_card_status=self._push_override_card_status,
@@ -1165,6 +1167,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1144: leaving observe-only is the moment a whole-house fan that ran on a sealed house in the
             # meantime (and was only reported) must now be stopped; do not wait for the next 15 s tick.
             self._request_whf_safety_check("automation_enabled")
+            # Issue #1293: observe-only recorded no door/window pause it never sent; pause now if one is due.
+            self._spawn(self.automation_engine.async_reconcile_after_automation_enabled())
         self._spawn(self._async_save_state())
 
     async def async_setup(self) -> None:
@@ -3051,6 +3055,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         inside its delay, and a door opened moments ago is not open yet even if another window is settled.
         """
         return any(self._sensor_holds_open(s) and not self._sensor_in_debounce(s) for s in self._resolved_sensors)
+
+    def _any_sensor_open_and_settled(self) -> bool:
+        """True when any monitored sensor READS open (not dark) AND is past its OWN delay (Issue #1289).
+
+        The START-side read for nat-vent reactivation: one sensor open past its delay is enough to say
+        "the house is open", whatever any other sensor is doing (a second door inside its delay does
+        not hide it). Unlike ``_any_sensor_settled_open`` (holding-based, for keeping a pause), a dark
+        sensor never counts here -- a dark sensor never STARTS anything (Issue #1181).
+        """
+        return any(self._is_sensor_open(s) and not self._sensor_in_debounce(s) for s in self._resolved_sensors)
 
     def _sensor_debounce_pending(self) -> bool:
         """True if any monitored sensor is open and still within its debounce window.

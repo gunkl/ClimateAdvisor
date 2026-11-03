@@ -79,6 +79,22 @@ def test_leaving_observe_only_asks_the_enforcer_to_check_at_once():
     coord._request_whf_safety_check.assert_not_called()
 
 
+def test_leaving_observe_only_reconciles_the_door_window_pause():
+    """Issue #1293: observe-only records no pause it never sent, so a window opened meanwhile is paused on re-enable."""
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    coord = object.__new__(mod.ClimateAdvisorCoordinator)
+    coord.automation_engine = MagicMock()
+    coord._async_save_state = MagicMock()
+    coord._spawn = MagicMock(side_effect=lambda coro: None)
+    coord._request_whf_safety_check = MagicMock()
+
+    coord.set_automation_enabled(True)
+    coord.automation_engine.async_reconcile_after_automation_enabled.assert_called_once_with()
+    coord.automation_engine.async_reconcile_after_automation_enabled.reset_mock()
+    coord.set_automation_enabled(False)
+    coord.automation_engine.async_reconcile_after_automation_enabled.assert_not_called()
+
+
 # ── the mirror: the occupant turns HVAC ON during startup coalescing ──────────────────────────────────────
 
 
@@ -185,13 +201,24 @@ def test_through_the_real_coordinator_a_newer_hvac_press_stops_the_older_fan_dur
         session = make_session(scenario, engine="fakehass", use_coordinator=True)
         try:
             drive_scenario(session, scenario)
-            acts = [(a["domain"], a["service"], a["data"].get("hvac_mode")) for a in session.fake_hass.action_log]
+            # Issue #1291: the harness now ends the restart's 300 s coalescing window at 14:07:00 as
+            # production does, and _do_startup_coalesce() re-applies the plan (the window is open, so
+            # HVAC is paused). Owner decision #1235: a change made inside the window is overwritten
+            # at its end -- that is not the older fan press winning, so judge rule 2 inside the window.
+            window_end = datetime(2026, 8, 20, 14, 7, tzinfo=UTC)
+            acts = [
+                (a["domain"], a["service"], a["data"].get("hvac_mode"))
+                for a in session.fake_hass.action_log
+                if a["ts"] is None or a["ts"] < window_end
+            ]
+            coalesced = [e for e in session.event_log if e[0] == "startup_coalesced"]
         finally:
             session.close()
     finally:
         logging.disable(logging.NOTSET)
     assert ("fan", "turn_off", None) in acts, f"the occupant's newer HVAC-on did not stop the fan: {acts}"
     assert ("climate", "set_hvac_mode", "off") not in acts, "the older fan press undid the occupant's HVAC-on"
+    assert coalesced, "the restart's start-up coalescing window never ended (Issue #1291)"
 
 
 class TestSafetyTickBody:

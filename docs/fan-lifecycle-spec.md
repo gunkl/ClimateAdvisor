@@ -173,6 +173,8 @@ The press-based rule 2 (`occupant_fan_on_at` / `occupant_hvac_on_at`) is unchang
 
 **Command-only fans.** These cannot be seen, so nothing changes for them.
 
+**Observe-only takes no HVAC ownership (Issue #1293).** `hvac_ownership` is `SUPPRESSING` only after Climate Advisor really sent the HVAC off. With automation switched off, `_suppress_hvac_for_whf()` sends nothing and now records nothing (no `_pre_fan_hvac_mode`, no `whf_hvac_suppressed`), so after the re-enable the press-based rule 2 decides normally instead of reading a stale "the fan session already owns the thermostat". The restore and release paths need no change: with no ownership recorded there is no pre-fan mode to restore. Details: [08 §9e-H](08-COMPUTATION-REFERENCE.md#h-sealed-house-guard--override-sessions-are-not-exempt-issue-882).
+
 The full logic is in [08 §9e-H](08-COMPUTATION-REFERENCE.md#h-sealed-house-guard--override-sessions-are-not-exempt-issue-882).
 
 ## Verification

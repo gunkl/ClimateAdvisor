@@ -10,6 +10,8 @@ Prove a test is not vacuous with ``scripts/revert_proof.py origin/main <test>``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 pytestmark = pytest.mark.house
@@ -493,3 +495,129 @@ async def test_rule2_backstop_observe_only_notifies_once_and_sends_no_command(ma
     rule2_notes = [n for n in house.notifications[notes_before:] if "at the same time" in n.data.get("message", "")]
     assert len(rule2_notes) == 1, house.notifications[notes_before:]
     assert [n for n, _ in events].count("whf_rule2_observe_notified") == 1, events
+
+
+# ── Issue #1293: observe-only records no HVAC ownership / pause it never sent ──────────────────────────────
+
+
+def _suppressed(events) -> list:
+    return [d for n, d in events if n == "whf_hvac_suppressed"]
+
+
+async def _observe_only_fan_press_beside_heat(house):
+    """Heat running, automation switched off, then the occupant switches the fan on."""
+    events = _tee_events(house)
+    await house.open("window")
+    await _advance_finely(house, 5)
+    await _heat_running(house)
+    await house.set_automation(False)
+    await house.advance(minutes=1)
+    calls_before = len(house.calls)
+    await _press_after_refresh(house, True)
+    await _advance_finely(house, 20)
+    return events, calls_before
+
+
+@pytest.mark.parametrize("fan", ["whf", "whf_dual"])
+async def test_observe_only_fan_press_takes_no_hvac_ownership_and_reenable_applies_rule2(make_house, fan) -> None:
+    """Issue #1293: automation is off and the occupant switches the whole-house fan on beside the running heat.
+    Climate Advisor sends nothing (the heat keeps running) and must not record that it suppressed the heat: no
+    ``whf_hvac_suppressed``, no fan-session ownership of the thermostat. When automation is switched back on, rule 2
+    is applied normally (the fan is the newer action, so the heat is turned off and the fan session owns it from
+    then on) within ~30 s, through the press-based rule, not the state backstop that only catches missed presses.
+    Before the fix the stale ownership made the press-based rule skip (it read "already owned"), so only the
+    backstop stopped the heat."""
+    house = await make_house(fan=fan, **_open_window_house())
+    ae = house.coordinator.automation_engine
+    events, calls_before = await _observe_only_fan_press_beside_heat(house)
+
+    assert house.fan.is_on and house.thermostat.mode == "heat", "observe-only: both keep running"
+    assert not _ca_hvac_off(house.calls[calls_before:]), "observe-only sent set_hvac_mode off"
+    assert ae._pre_fan_hvac_mode is None, "observe-only recorded a suppression it never sent"
+    assert not ae._whf_owns_hvac(), "observe-only: the fan session must not own the thermostat"
+    assert not _suppressed(events), f"observe-only emitted whf_hvac_suppressed with nothing sent: {events}"
+
+    calls_before = len(house.calls)
+    await house.set_automation(True)
+    start, end = await _watch_overlap(house, 60)
+
+    assert start is None or (end is not None and end - start <= 30), (start, end)
+    assert house.thermostat.mode == "off", "rule 2 was not applied after the re-enable"
+    assert house.fan.is_on, "the occupant's newer fan press must win"
+    assert _ca_hvac_off(house.calls[calls_before:]), "the heat was not turned off by Climate Advisor"
+    assert ae._pre_fan_hvac_mode == "heat" and ae._whf_owns_hvac(), "ownership must follow the real suppression"
+    assert len(_suppressed(events)) == 1, events
+    assert not _backstop(events), f"the press was seen: the backstop must not be the one acting: {events}"
+
+
+async def test_observe_only_blower_press_records_nothing_and_reenable_leaves_heat(make_house) -> None:
+    """Issue #1293 control, ``hvac_fan``: the thermostat's own blower coexists with the heat by design, so neither in
+    observe-only nor after the re-enable does Climate Advisor own or turn off the heat for it."""
+    house = await make_house(fan="hvac_fan", **_open_window_house())
+    ae = house.coordinator.automation_engine
+    events = _tee_events(house)
+    await house.open("window")
+    await _advance_finely(house, 5)
+    await _heat_running(house)
+    await house.set_automation(False)
+    await house.advance(minutes=1)
+    await house.occupant_sets_fan_mode("on")
+    await _advance_finely(house, 20)
+    assert ae._pre_fan_hvac_mode is None and not ae._whf_owns_hvac()
+    calls_before = len(house.calls)
+
+    await house.set_automation(True)
+    await _advance_finely(house, 60)
+
+    assert house.thermostat.mode == "heat", "the blower must not turn the occupant's heat off"
+    assert not _ca_hvac_off(house.calls[calls_before:])
+    assert ae._pre_fan_hvac_mode is None and not ae._whf_owns_hvac()
+    assert not _suppressed(events), events
+
+
+_DOOR_HOUSE = {
+    "fan": "whf",
+    "contacts": ["window"],
+    "startup": "settled",
+    "initial_indoor_f": 82.0,
+    # The #1132 house: warm morning, forecast peak inside the nat-vent look-ahead, so an open window means "pause".
+    "start": datetime(2026, 7, 15, 9, 0, tzinfo=UTC),
+    "outdoor_f": 73.5,
+    "high_f": 95.0,
+    "low_f": 52.0,
+    "initial_hvac_mode": "cool",
+    "ca_config": {"sensor_debounce_seconds": 30, "override_confirm_seconds": 60, "manual_grace_seconds": 0},
+}
+
+
+async def test_observe_only_window_records_no_pause_and_reenable_pauses_for_real(make_house) -> None:
+    """Issue #1293 door-pause analogue: automation is off and a window opens while Climate Advisor's cooling runs.
+    Nothing is sent (the cooling keeps running), so no pause may be recorded. Before the fix Climate Advisor
+    recorded a "cool→off" pause anyway; after the re-enable it believed the HVAC was already paused and the cooling
+    ran into the open window until it closed. Now the re-enable pauses it for real within ~30 s."""
+    house = await make_house(**_DOOR_HOUSE)
+    ae = house.coordinator.automation_engine
+    events = _tee_events(house)
+    await house.advance(minutes=6)  # past the 300 s start-up window
+    assert house.thermostat.mode == "cool", "precondition: Climate Advisor's cooling runs"
+    await house.set_automation(False)
+    await house.advance(minutes=1)
+    await house.open("window")
+    await house.advance(minutes=3)  # past the 30 s debounce
+
+    assert house.thermostat.mode == "cool", "observe-only: the cooling keeps running"
+    assert not ae._paused_by_door, "observe-only recorded a pause it never sent"
+    assert ae._pre_pause_mode is None
+    assert not [d for n, d in events if n == "sensor_opened" and d.get("hvac_mode_change")], events
+
+    calls_before = len(house.calls)
+    await house.set_automation(True)
+    await _advance_finely(house, 30)
+
+    assert house.thermostat.mode == "off", "the re-enable left the cooling running into the open window"
+    assert _ca_hvac_off(house.calls[calls_before:])
+    assert ae._paused_by_door and ae._pre_pause_mode == "cool"
+
+    await house.close_contact("window")
+    await house.advance(minutes=3)
+    assert house.thermostat.mode == "cool", "closing the window must restore the cooling"

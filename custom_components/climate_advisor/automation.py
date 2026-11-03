@@ -1220,6 +1220,8 @@ class AutomationEngineCallbacks:
     sensor_debounce_pending: Callable[[], bool] | None = None
     # Issue #1227: per-sensor "holds open and past its own delay". None falls back to the house-wide form.
     sensor_settled_open: Callable[[], bool] | None = None
+    # Issue #1289: per-sensor "reads open (not dark) and past its own delay". None falls back to house-wide.
+    sensor_open_settled: Callable[[], bool] | None = None
     emit_event: Callable[..., None] | None = None
     request_refresh: Callable[[], None] | None = None
     # Issue #1264: display-only push of the override/grace cards (no automation cycle).
@@ -2064,6 +2066,8 @@ class AutomationEngine:
         self._sensor_debounce_pending_callback: Any | None = None
         # Issue #1227: set by coordinator -- any monitored sensor holds open AND is past its own delay.
         self._sensor_settled_open_callback: Any | None = None
+        # Issue #1289: set by coordinator -- any monitored sensor reads open (not dark) AND is past its own delay.
+        self._sensor_open_settled_callback: Any | None = None
 
         # Issue #423: physical fan ground-truth callbacks — set by coordinator after
         # construction, mirroring _sensor_check_callback/_emit_event_callback above.
@@ -2121,6 +2125,7 @@ class AutomationEngine:
         self._sensor_hold_callback = callbacks.sensor_hold_check
         self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
         self._sensor_settled_open_callback = callbacks.sensor_settled_open
+        self._sensor_open_settled_callback = callbacks.sensor_open_settled
         self._emit_event_callback = callbacks.emit_event
         self._request_refresh_callback = callbacks.request_refresh
         self._push_card_status_callback = callbacks.push_card_status
@@ -2352,6 +2357,23 @@ class AutomationEngine:
         _LOGGER.info("Planned window period ended — reconciling door/window pause with live sensors")
         async with self._decision_pass("async_sync_after_planned_window_exit"):
             await self._sync_paused_by_door_with_live_sensors()
+
+    async def async_reconcile_after_automation_enabled(self) -> None:
+        """Leaving observe-only: pause for a door/window that opened while automation was off (Issue #1293).
+
+        Observe-only records no pause it did not send (``_pause_for_door_window_action``), so a window that opened
+        meanwhile with the heat or AC running is still unpaused here. Without this the heat ran into the open window
+        until the next 30-minute cycle. The reconcile is the existing debounce-aware one: it respects the
+        occupant's own change (manual override / pending confirmation), nat-vent and WHF ownership, and the planned
+        window period. The whole-house-fan rules are re-checked separately (``_request_whf_safety_check``).
+        """
+        if self.dry_run:
+            return  # switched off again before this ran
+        try:
+            async with self._decision_pass("async_reconcile_after_automation_enabled"):
+                await self._sync_paused_by_door_with_live_sensors()
+        except Exception:
+            _LOGGER.warning("Re-enable door/window reconcile failed; the next cycle retries", exc_info=True)
 
     def _record_action(self, action: str, reason: str) -> None:
         """Record an HVAC action with timestamp and reason, and schedule a revisit."""
@@ -7441,13 +7463,30 @@ class AutomationEngine:
         pause happens at all in that case (disambiguated from ``hvac_already_off``,
         which only makes sense once a pause is actually occurring; the original
         monolithic method's ``return False`` for this case conflated the two).
+        Also ``None`` in observe-only when the HVAC is running (Issue #1293): the off came
+        back ``DRY_RUN``, nothing was paused, so nothing is recorded.
         """
         state = self.hass.states.get(self.climate_entity)
         mode = state.state if state else None
         if mode and mode not in ("off", "unavailable", "unknown"):
+            _prev_pre_pause_mode = self._pre_pause_mode
             self._pre_pause_mode = mode
             with self._mode_change_context("pause"):
-                await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
+                _off_result = await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
+            if _off_result is HvacCommandResult.DRY_RUN:
+                # Issue #1293: observe-only sent nothing, so the HVAC keeps running and there is no pause to record.
+                # Recording one (``_paused_by_door`` + a "heat→off" ``sensor_opened``) left Climate Advisor believing
+                # the HVAC was paused: after the re-enable the pause guards skipped every write and the reconcile
+                # (``_sync_paused_by_door_with_live_sensors``) saw "already paused", so the heat ran into the open
+                # window until it closed. No pause now; the re-enable reconcile pauses for real.
+                self._pre_pause_mode = _prev_pre_pause_mode
+                _LOGGER.info(
+                    "[DRY RUN] Door/window pause (%s) not recorded: thermostat stays %s (observe-only) role=%s",
+                    entity_label,
+                    mode,
+                    self.role,
+                )
+                return None
             if not quiet:
                 await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
             if self._emit_event_callback:
@@ -8094,10 +8133,14 @@ class AutomationEngine:
                         self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
                     ),
                 )
+                # Issue #1289: "is the house open?" is asked PER SENSOR -- one sensor reading open (not dark,
+                # #1181) past its OWN delay suffices. The old house-wide ``not _sensor_debounce_pending`` let a
+                # second door inside its delay hide a window open for hours and postponed free cooling.
+                _settled_open_1289 = self._any_monitored_sensor_open_and_settled()
                 _idle_open = (
                     _sensor_open_244
+                    and _settled_open_1289
                     and _hvac_off_244
-                    and not self._sensor_debounce_pending
                     and not self._grace_active
                     and not _locked_out_244
                 )
@@ -8120,7 +8163,8 @@ class AutomationEngine:
                         for name, active in (
                             ("no_sensor_open", not _sensor_open_244),
                             ("hvac_calling", not _hvac_off_244),
-                            ("sensor_debounce_pending", self._sensor_debounce_pending),
+                            # Issue #1289: open, but no open sensor is past its own delay yet.
+                            ("sensor_debounce_pending", _sensor_open_244 and not _settled_open_1289),
                             ("grace_active", self._grace_active),
                             ("reactivation_lockout", _locked_out_244),
                         )
@@ -8682,6 +8726,17 @@ class AutomationEngine:
                     NAT_VENT_START_PAUSED_REACTIVATION, indoor=indoor, outdoor=outdoor
                 )
                 _to_state = _fsm_result.to_state
+
+                _starts = _to_state in (NatVentLifecycleState.ACTIVE_FULL_GATE, NatVentLifecycleState.ACTIVE_SOFT_START)
+                if _starts and self._no_live_open_sensor_for_start():
+                    # Issue #1181/#1289: the pause may be held by a dark sensor (last reading open), and this check
+                    # may run on a refresh caused by a door still inside its delay. Neither STARTS the fan: a start
+                    # needs a sensor that reads open past its own delay. The pause stays (rule 3).
+                    _LOGGER.info(
+                        "Nat-vent reactivation while paused skipped: no monitored door/window reads open past its"
+                        " delay (dark or still inside its delay) -- door/window pause kept"
+                    )
+                    return
 
                 if _to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT:
                     _lockout_check_now = dt_util.now()
@@ -10786,7 +10841,9 @@ class AutomationEngine:
             # Issue #1142: the prediction is the nat-vent FSM's own answer for the re-check that follows (same
             # profile, with the override and grace the handler is about to clear already read as cleared), not a
             # simplified copy of the gate that could not see the start guards or a soft start.
-            _will_start = self._nat_vent_start_decision(
+            # Issue #1181/#1289: the re-pause above uses the holding read (a dark sensor last open keeps HVAC off),
+            # but a START needs a sensor that READS open past its own delay -- a dark sensor never starts the fan.
+            _will_start = not self._no_live_open_sensor_for_start() and self._nat_vent_start_decision(
                 NAT_VENT_START_GRACE_RECHECK,
                 indoor=self._get_indoor_temp_f(),
                 outdoor=self._last_outdoor_temp,
@@ -11103,6 +11160,14 @@ class AutomationEngine:
                     threshold=nat_vent_threshold,
                     veto=_fsm_result.veto,
                 )
+            if _reactivates and self._no_live_open_sensor_for_start():
+                # Issue #1181/#1289: only a dark sensor (last reading open) holds this pause. It keeps HVAC off
+                # (re-pause below) but never STARTS the fan; agrees with _on_grace_expired()'s _will_start.
+                _LOGGER.info(
+                    "Grace-expiry nat-vent start skipped: no monitored door/window reads open past its delay"
+                    " (a dark sensor holds the pause but never starts the fan)"
+                )
+                _reactivates = False
 
             if _reactivates:
                 _soft = _reactivation_state == NatVentLifecycleState.ACTIVE_SOFT_START
@@ -11948,6 +12013,31 @@ class AutomationEngine:
         if settled_cb is not None:
             return bool(settled_cb())
         return self._any_monitored_sensor_holding_open() and not self._sensor_debounce_pending
+
+    def _any_monitored_sensor_open_and_settled(self) -> bool:
+        """A monitored sensor READS open (not dark) AND is past its own open delay (Issue #1289).
+
+        The nat-vent START read (the idle-open reactivation gate). "Is the house open?" needs only ONE
+        sensor open past its own delay; a second door still inside its delay is irrelevant. A dark sensor
+        never counts (Issue #1181: dark never starts the fan). Without a coordinator (bare engines, the
+        simulator) it falls back to raw-open AND nothing pending house-wide.
+        """
+        cb = getattr(self, "_sensor_open_settled_callback", None)  # partially built engines in tests
+        if cb is not None:
+            return bool(cb())
+        return self._any_monitored_sensor_open() and not self._sensor_debounce_pending
+
+    def _no_live_open_sensor_for_start(self) -> bool:
+        """True when a pause-held fan START must be refused: no sensor reads open past its own delay (Issue #1289).
+
+        For the start sites that act on an existing door/window pause (paused-by-door reactivation, grace-expiry
+        re-check): the pause may be held only by a dark sensor (last reading open,
+        Issue #1181) or the check may run on a refresh caused by a door still inside its delay -- neither may start
+        the fan. Without a coordinator (bare engines, the simulator) there is no per-sensor read: never refuses,
+        which keeps those paths' previous behavior.
+        """
+        cb = getattr(self, "_sensor_open_settled_callback", None)
+        return cb is not None and not cb()
 
     def _any_monitored_sensor_holding_open(self) -> bool:
         """Return True if any monitored sensor must keep a door/window pause alive (Issue #1181, owner decision D1).
@@ -16551,6 +16641,21 @@ class AutomationEngine:
             return
         _cs = self.hass.states.get(self.climate_entity)
         prior_mode = _cs.state if _cs else None
+        if self.dry_run:
+            # Issue #1293: observe-only sends nothing (``_set_hvac_mode`` returns DRY_RUN on exactly this flag, read
+            # before any await), so the thermostat keeps running. Taking ownership here recorded a suppression that
+            # never happened: ``_whf_owns_hvac()`` stayed True with the heat on, and after the re-enable rule 2 read
+            # "the fan session already owns the HVAC" and stayed silent. Ownership now means "Climate Advisor
+            # actually turned the HVAC off". Heat running beside the fan is reported by the observe-only rule-2
+            # notice (``whf_rule2_observe_notified``); on re-enable the safety check applies rule 2 from scratch.
+            _LOGGER.info(
+                "[DRY RUN] Would suppress HVAC for the whole-house fan (thermostat %s) -- %s; no ownership recorded"
+                " role=%s",
+                prior_mode,
+                reason,
+                self.role,
+            )
+            return
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
         #

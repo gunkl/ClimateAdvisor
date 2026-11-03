@@ -1,0 +1,169 @@
+{
+  "description": "whole_house_fan home. With the offset at the cap a window opens and the occupant presses the whole-house fan on. HVAC is suppressed for the fan and the loop writes nothing; when the fan and the window are done the HVAC restore writes the PLAIN 66 F then one fresh step.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "whole_house_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120,
+    "fan_entity": "fan.whf",
+    "fan_state_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
+    "sensor_debounce_seconds": 300
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 45.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 58.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:29:12",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Seed the door/window sensor as closed."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "today_high": 48.0,
+      "today_low": 38.0,
+      "tomorrow_high": 48.0,
+      "tomorrow_low": 38.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "A window is opened (the whole-house fan needs an opening)."
+    },
+    {
+      "time": "2026-11-02T21:05:30",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "The occupant presses the whole-house fan on."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.0,
+      "note": "Bedroom cold while the whole-house fan owns the house."
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "The fan is turned off."
+    },
+    {
+      "time": "2026-11-02T21:41:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "The window is closed."
+    },
+    {
+      "time": "2026-11-02T21:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 57.0,
+      "note": "Still cold."
+    },
+    {
+      "time": "2026-11-02T22:05:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:05:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Precondition: the offset is at the cap before the fan is pressed.",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-02T21:40:30",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "While the whole-house fan owns the house (HVAC suppressed) CA writes no setpoint at all.",
+      "values": [],
+      "since": "2026-11-02T20:36:30"
+    },
+    {
+      "at": "2026-11-02T21:45:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "When the fan stands down the HVAC restore writes the PLAIN 66 F, then ONE fresh step -- not the stranded 70 F.",
+      "values": [
+        66.0,
+        68.0
+      ],
+      "since": "2026-11-02T21:40:30"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed; M05: the whole gate predicate deleted (always PROCEED). Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' WHF row; docs/fan-lifecycle-spec.md. Matches production. LIMIT: the open window's pause also closes the gate here (a whole-house fan with no door/window sensor is unsupported, #1200, and the harness forbids it), so the fan term alone is isolated only in tests/test_remote_offset_gates_1194b.py.",
+    "(c) Occupant outcome if this regressed: The loop must never push heat against a running whole-house fan, nor restore a stranded +4 F afterwards."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "WHF ownership (with the window open) closes the gate and exits cleanly.",
+    "observed_behavior": "No set_temperature from the cap until the restore at 21:41: 66 then 68.",
+    "expected_behavior": "Offset forgotten while the fan owns the house; plain target + one step on exit."
+  },
+  "name": "remote_offset_1194e_whole_house_fan_ownership_closes_the_gate",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

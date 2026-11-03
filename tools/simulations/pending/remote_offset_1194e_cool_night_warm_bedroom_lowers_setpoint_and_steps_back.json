@@ -1,0 +1,178 @@
+{
+  "description": "Cool night, the mirror image. The bedroom is 78 F against a 72 F sleep ceiling while the hallway is satisfied. The loop LOWERS the cool setpoint by 2 F, the AC starts, the loop holds while it runs and steps the setpoint back up once the reading passes target - swing.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "cool",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 75.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 78.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 95.0,
+      "today_low": 72.0,
+      "tomorrow_high": 95.0,
+      "tomorrow_low": 72.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T20:31:03",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling",
+      "note": "The AC starts 3 s after the first step (72 -> 70)."
+    },
+    {
+      "time": "2026-11-02T20:40:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 76.0,
+      "note": "Bedroom still warm: hold at 70, NO second step to 68."
+    },
+    {
+      "time": "2026-11-02T20:45:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 72.5,
+      "note": "Bedroom cooling."
+    },
+    {
+      "time": "2026-11-02T20:49:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 70.2,
+      "note": "Reading passes target - swing (72 - 1.5 = 70.5): step down (raise the cool setpoint)."
+    },
+    {
+      "time": "2026-11-02T20:50:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 71.6,
+      "note": "Reading back in band."
+    },
+    {
+      "time": "2026-11-02T20:52:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "idle",
+      "note": "The thermostat stops."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 71.8,
+      "note": "In band: no more writes."
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T20:30:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "Entering the sleep window starts from no offset: the plain sleep ceiling, even though the bedroom is 6 F over it.",
+      "value": 72.0
+    },
+    {
+      "at": "2026-11-02T20:31:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "THE COMPENSATION (cool mirrors heat): the bedroom is warmer than target + swing, so the cool setpoint is LOWERED one 2 F step so the AC starts.",
+      "value": 70.0
+    },
+    {
+      "at": "2026-11-02T20:48:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "The AC started: hold at 70, no second step to 68 while it runs.",
+      "values": [
+        70.0
+      ],
+      "since": "2026-11-02T20:30:30"
+    },
+    {
+      "at": "2026-11-02T20:49:30",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "The reading passes target - swing (70.2 < 70.5): the cool setpoint steps back up to the plain 72.",
+      "value": 72.0
+    },
+    {
+      "at": "2026-11-02T21:39:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "In band afterwards: no more writes.",
+      "values": [],
+      "since": "2026-11-02T20:49:30"
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M07: 'fired -> hold' deleted (a further raise while the equipment runs); M08: the step-down deleted. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Heat and cool are mirror images'; the rule table with gap = remote - target. Matches production.",
+    "(c) Occupant outcome if this regressed: A person asleep in a bedroom 6 F over their sleep temperature lies awake hot with the AC never having run. COOL MODE SHIPS SIMULATION-TESTED ONLY: this scenario and the two cool caps are its evidence."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Warm bedroom gets the AC: the setpoint is lowered one step, held while it runs, restored at target - swing.",
+    "observed_behavior": "72 F at entry, 70 F one minute later, 70 F while the AC runs, 72 F once the reading is under 70.5 F, then silence.",
+    "expected_behavior": "Heat and cool are mirror images (the offset lowers the cool setpoint)."
+  },
+  "name": "remote_offset_1194e_cool_night_warm_bedroom_lowers_setpoint_and_steps_back",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

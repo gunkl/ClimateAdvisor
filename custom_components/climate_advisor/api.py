@@ -68,6 +68,7 @@ from .const import (
     TEMP_SOURCE_WEATHER_SERVICE,
     VERSION,
 )
+from .remote_offset import remote_offset_view_for
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
 _LOGGER = logging.getLogger(__name__)
@@ -360,6 +361,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             # the ca_target_heat/cool staleness Issue #466 fixed above, applied to the
             # coordinator's overall health rather than those two fields specifically.
             _coordinator_healthy = bool(coordinator.last_update_success)
+            # Issue #1194 (d): the remote-sensor outer loop, described once (comfort target vs the commanded setpoint,
+            # the signed offset, the loop state, the sentence). Read live from the engine, never re-decided here.
+            _remote_offset = remote_offset_view_for(ae, unit)
             _zones = zone_registry.list_zones(hass)
             _status_payload = {
                 "version": VERSION,
@@ -423,6 +427,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "pause_suppressed_classification_text": _pause_suppressed_classification_text,
                 "ca_target_heat": display_temp(_ca_target_heat, unit),
                 "ca_target_cool": display_temp(_ca_target_cool, unit),
+                "remote_offset": _remote_offset,
                 "nat_vent_active": _nat_vent_active,
                 "nat_vent_ac_assist": _nat_vent_ac_assist,
                 "nat_vent_target": _nat_vent_target_display,

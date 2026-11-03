@@ -175,6 +175,7 @@ def test_nudge_retry_after_automation_switched_off_sends_nothing_and_logs_no_nud
         patch.object(automation_module, "callback", side_effect=lambda fn: fn),
     ):
         asyncio.run(engine._set_temperature(72.0, reason="t", mode="heat"))
+        engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
         _run_scheduled(engine, captured, 10)  # verify -> REASSERT -> arms the 900 s retry
         assert any(d == 900 for d, _ in captured)
         # Automation switched off while the retry is pending.

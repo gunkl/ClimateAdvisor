@@ -288,7 +288,10 @@ indoor_temp_entity: sensor.indoor_temp (optional)
 sleep_indoor_temp_entity: sensor.bedroom_temp (optional — Issue #895; used for comfort/automation
   instead of the primary indoor sensor while the sleep schedule is active, never for thermal learning;
   since Issue #1194 (a) it is also the remote sensor of the setpoint outer loop, see
-  docs/08-COMPUTATION-REFERENCE.md "Remote-sensor outer loop")
+  docs/08-COMPUTATION-REFERENCE.md "Remote-sensor outer loop"; since (c) bedtime and wake are explicit context
+  entry and exit: the bedtime band is written at offset 0 BEFORE the loop's first decision of the night, the wake
+  band is written at offset 0 (the offset is cleared first), and if no wake write comes the loop itself writes the
+  plain target once after a 120 s grace -- see "Context entry and exit (Issue #1194 c)" there)
 comfort_heat: 70 (°F)
 comfort_cool: 75 (°F)
 setback_heat: 60 (°F)

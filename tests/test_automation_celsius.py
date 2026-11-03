@@ -289,6 +289,7 @@ class TestSetpointValidation:
             _, callback = _validation[0]
 
             # Fire the callback inside the patch context so _LOGGER is still mocked
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             callback(None)
 
         mock_logger.error.assert_called()
@@ -401,6 +402,7 @@ class TestSetpointRetry:
             coros.append(coro)
 
         engine.hass.async_create_task = MagicMock(side_effect=capture_task)
+        engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
         validation_cb(None)
         assert len(coros) == 1, "validation lambda must call async_create_task once"
         # Run the captured _check_single_setpoint_accepted coroutine
@@ -634,6 +636,7 @@ class TestSetpointNudgeStreak:
             coros.append(coro)
 
         engine.hass.async_create_task = MagicMock(side_effect=capture_task)
+        engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
         validation_cb(None)
         assert len(coros) == 1, "validation lambda must call async_create_task once"
         asyncio.run(coros[0])
@@ -950,6 +953,7 @@ class TestSetpointRetryActionLoadBearing:
 
             coros: list = []
             engine.hass.async_create_task = MagicMock(side_effect=lambda coro: coros.append(coro))
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             validation_cb(None)
             asyncio.run(coros[0])
 
@@ -1007,6 +1011,7 @@ class TestSetpointRetryActionLoadBearing:
 
             coros: list = []
             engine.hass.async_create_task = MagicMock(side_effect=lambda coro: coros.append(coro))
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             validation_cb(None)
             asyncio.run(coros[0])
 
@@ -1097,6 +1102,7 @@ class TestSetpointRetryCelsius:
             coros.append(coro)
 
         engine.hass.async_create_task = MagicMock(side_effect=capture_task)
+        engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
         validation_cb(None)
         assert len(coros) == 1, "validation lambda must call async_create_task once"
         asyncio.run(coros[0])

@@ -1,0 +1,122 @@
+{
+  "description": "Cool mirror of the +4 F cap: the AC never starts; the cool setpoint is lowered 72 -> 70 -> 68 and then held at target - 4 F.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "sleep_indoor_temp_entity": "sensor.bedroom_temp",
+    "initial_thermostat_mode": "cool",
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 75.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:05",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 84.0,
+      "note": "The bedroom sensor reports (state + last_reported)."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 95.0,
+      "today_low": 72.0,
+      "tomorrow_high": 95.0,
+      "tomorrow_low": 72.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 84.0,
+      "note": "Still hot; the AC never started."
+    },
+    {
+      "time": "2026-11-02T22:30:00",
+      "type": "remote_sensor_report",
+      "entity": "sensor.bedroom_temp",
+      "value_f": 83.8,
+      "note": "Still hot."
+    },
+    {
+      "time": "2026-11-02T22:45:00",
+      "type": "temp_update",
+      "note": "End of scenario."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T22:40:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "Two steps reach the -4 F cap (68) and then STOP.",
+      "values": [
+        70.0,
+        68.0
+      ],
+      "since": "2026-11-02T20:30:30"
+    },
+    {
+      "at": "2026-11-02T22:40:00",
+      "expect": "commanded_setpoint_at",
+      "track": "integration",
+      "reason": "The cool setpoint is held at target - 4 F, never lower.",
+      "value": 68.0
+    }
+  ],
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
+    "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed. Passes unmutated.",
+    "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Caps'. Matches production.",
+    "(c) Occupant outcome if this regressed: Without the cap a non-responding AC would be driven to its lowest setpoint and chill the whole house once it started."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The -4 F cap in cool mode.",
+    "observed_behavior": "Writes: 72, 70, 68, then none.",
+    "expected_behavior": "At most 4 F beyond the target in the gap direction."
+  },
+  "name": "remote_offset_1194e_cool_cap_minus_4_when_thermostat_never_starts",
+  "issue": 1194,
+  "source": "Issue #1194 increment (e): sim-harness remote bedroom node and Tier A scenarios (owner-approved design 2026-11-01, mob 2026-11-02)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

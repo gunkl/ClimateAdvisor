@@ -32,6 +32,7 @@ from typing import Any
 
 from .const import VERSION
 from .control_quality import build_control_quality, merge_chart_resolutions
+from .remote_offset import remote_offset_view_for
 from .temperature import from_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
@@ -317,6 +318,14 @@ def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_qu
         climate_state.state if climate_state is not None else None,
         config.get("temp_unit", "fahrenheit"),
     )
+
+    # Issue #1194 (d): the remote-sensor outer loop (comfort target vs commanded setpoint, signed offset, loop state and
+    # why, the remote reading and its age). The same view Status and the AI context read; the investigator's text footer
+    # does not repeat it (the AI's HVAC ENTITY section already carries it), so it appears once per surface.
+    engine = getattr(coordinator, "automation_engine", None)
+    remote_offset = remote_offset_view_for(engine, config.get("temp_unit", "fahrenheit"))
+    if remote_offset is not None:
+        snapshot["remote_offset"] = remote_offset
 
     fan_entity_id = config.get("fan_entity") or config.get("fan_state_entity")
     fan_state = hass.states.get(fan_entity_id) if fan_entity_id else None

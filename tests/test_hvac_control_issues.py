@@ -176,6 +176,7 @@ class TestCommandFailingBannerHold:
             patch.object(_am, "callback", side_effect=lambda fn: fn),
         ):
             asyncio.run(engine._set_temperature(72.0, reason="t", mode="heat"))
+            engine._own_setpoint_writes = []  # echo window over, unanswered (#1194 e F1)
             _run_scheduled(engine, captured, 10)  # setpoint check: rejected -> retry in 900 s
             engine._note_hvac_command_failed("heat", RuntimeError("cloud hiccup"))
             assert engine._hvac_cmd_fail_announced is not None

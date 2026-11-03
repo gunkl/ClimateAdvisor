@@ -165,6 +165,7 @@ def _window_held_open_no_pause(n: CtxNight) -> None:
     """A monitored sensor holds open past its debounce (the #1181 dark-sensor hold) and no pause started."""
     n.ae._sensor_hold_callback = lambda: True
     n.ae._sensor_debounce_pending_callback = lambda: False
+    n.ae._sensor_settled_open_callback = lambda: True  # the per-sensor read the open-window guards use (#1229)
 
 
 def _whf_owns(n: CtxNight) -> None:

@@ -35,7 +35,6 @@ def _inputs(**overrides) -> DoorWindowFsmInputs:
         aggressive_savings=False,
         within_planned_window=False,
         any_sensor_open=True,
-        sensor_debounce_pending=False,
         override_matches_current_decision=False,
         grace_source="manual",
         natural_vent_active=False,

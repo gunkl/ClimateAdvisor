@@ -16,6 +16,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
     - The generated days press 1-3 s after the fan again. That reverses #1279's "unsupported action", which the owner now supersedes.
     - The rule-2 promise check now counts its 30 s from the moment automation is switched back on, not from inside the observe-only time when Climate Advisor may not act.
     - A simulator restart bug found along the way is #1291.
+
 ## [0.8.53] — 2026-11-03
 
 - Fix #1229: suppose a window has been open long past its delay, so Climate Advisor has paused the heating or cooling, and someone opens a second door for a moment. While that door was still inside its own delay, Climate Advisor stopped seeing the open window. Your manual Cool or Heat could be "adopted" early, which ended its pause with no re-pause, or cancelling an override could re-arm cooling, so the AC or heat ran into the open window for up to about 30 minutes. A brief door open also changed the HVAC, which it never should. The open-window check now asks each sensor separately whether it has been open past its own delay, so the window stays seen whatever the door does. A sensor that went dark after reading open still counts, as before, and a dark sensor still never starts a pause.

@@ -18,23 +18,13 @@ on:
         default: "250"
 
 jobs:
-  generated-days:
+  # Issue #1278: the seeds are picked once and shared, so the P1-P7 and P8 jobs judge the same master seeds.
+  seeds:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      issues: read  # Issue #1153: the waiver ledger checks each waiver's issue is still open
-
+    outputs:
+      list: ${{ steps.seeds.outputs.list }}
+      days: ${{ steps.seeds.outputs.days }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7.0.1
-
-      - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.2.0
-
-      - name: Install test dependencies
-        run: uv sync --locked --only-group test
-
       - name: Pick fresh master seeds (printed so a failure is replayable)
         id: seeds
         env:
@@ -55,6 +45,27 @@ jobs:
           echo "days=$days" >> "$GITHUB_OUTPUT"
           echo "Master seeds: ${list# }"
 
+  # Issue #1278: 12 x 250 days took 76 min on a hosted runner (about 1.5 s/day). P8 used to run after it in the
+  # same job and would have pushed the job past its cap, so it is its own job now (run in parallel), and the cap
+  # leaves headroom. If a run nears it, read the per-seed timings and peak_rss in the log; do not just raise it.
+  generated-days:
+    needs: seeds
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: read  # Issue #1153: the waiver ledger checks each waiver's issue is still open
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Install test dependencies
+        run: uv sync --locked --only-group test
+
       # Issue #1153: a known hit is tolerated only through tools/sim_harness/nightly_waivers.json - issue-linked,
       # expiring, matched on mechanism (never seed). A closed issue, a passed expiry or a waiver whose hit no
       # longer occurs fails this step. GITHUB_SHA / GITHUB_REPOSITORY are set by Actions; the token reads issues.
@@ -63,16 +74,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           uv run --locked --only-group test python tools/simulate.py
-          --generate ${{ steps.seeds.outputs.days }}
-          --seeds ${{ steps.seeds.outputs.list }}
+          --generate ${{ needs.seeds.outputs.days }}
+          --seeds ${{ needs.seeds.outputs.list }}
           --waiver-ledger tools/sim_harness/nightly_waivers.json
           --issue-state github
-
-      - name: Generated days judged by surfaces_agree (P8, ratcheted)
-        run: >
-          uv run --locked --only-group test python tools/simulate.py
-          --surfaces --generate 50
-          --seeds ${{ steps.seeds.outputs.list }}
 
       - name: Upload failing scenarios
         if: failure()
@@ -82,6 +87,29 @@ jobs:
           path: tools/simulations/generated/failures/
           if-no-files-found: ignore
           retention-days: 30
+
+  surfaces:
+    needs: seeds
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Install test dependencies
+        run: uv sync --locked --only-group test
+
+      - name: Generated days judged by surfaces_agree (P8, ratcheted)
+        run: >
+          uv run --locked --only-group test python tools/simulate.py
+          --surfaces --generate 50
+          --seeds ${{ needs.seeds.outputs.list }}
 
   ha-lifecycle:
     runs-on: ubuntu-latest
@@ -104,7 +132,7 @@ jobs:
   # for every later one, until someone closes it. A runner killed for memory reports "failure" or
   # "cancelled", so both count.
   report-failure:
-    needs: [generated-days, ha-lifecycle]
+    needs: [seeds, generated-days, surfaces, ha-lifecycle]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     permissions:
@@ -116,10 +144,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GENERATED: ${{ needs.generated-days.result }}
+          SURFACES: ${{ needs.surfaces.result }}
           HA: ${{ needs.ha-lifecycle.result }}
         run: |
           title="Nightly generated-days / real-HA run failing"
-          body="Nightly run failed: $RUN_URL (commit $GITHUB_SHA). generated-days=$GENERATED, ha-lifecycle=$HA."
+          body="Nightly run failed: $RUN_URL (commit $GITHUB_SHA). generated-days=$GENERATED, surfaces=$SURFACES, ha-lifecycle=$HA."
           num=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
             --jq "map(select(.title == \"$title\")) | .[0].number // empty")
           if [ -n "$num" ]; then

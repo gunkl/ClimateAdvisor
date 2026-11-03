@@ -274,6 +274,15 @@ class _MockDataUpdateCoordinator:
             return
         await self.async_config_entry_first_refresh()
 
+    async def async_refresh(self):
+        """Real DataUpdateCoordinator.async_refresh: refresh now (ignored after async_shutdown, as in HA).
+
+        Missing before (not wrong): production awaits it at the end of the pre-cool trigger
+        (``coordinator._async_pre_cool_trigger``), so a coordinator scenario reaching pre-cool raised
+        AttributeError in the harness while real HA has the method.
+        """
+        await self.async_request_refresh()
+
     async def async_config_entry_first_refresh(self):
         """Run the first data fetch (Issue #474 — coordinator-level Tier A coverage).
 

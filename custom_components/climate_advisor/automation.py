@@ -12390,14 +12390,8 @@ class AutomationEngine:
         ):
             self._whf_stop_attempts = attempt
         if sealed and result in (FanCommandResult.EXECUTED, FanCommandResult.ALREADY_IN_STATE):
-            self._whf_restore_pending = True
             # Nothing was commanded when the fan was already off, so there is no verify window to wait for.
-            self._whf_restore_verify_passed = result is FanCommandResult.ALREADY_IN_STATE
-            if result is FanCommandResult.ALREADY_IN_STATE:
-                self._whf_off_seen_at = now - timedelta(seconds=WHF_RESTORE_QUIET_S)  # off already: no quiet to wait
-            else:
-                self._whf_off_seen_at = None
-            self._cancel_fan_thermo_backstop()  # the release this stop used to make also ended the backstop
+            self._arm_whf_restore_pending(fan_already_off=result is FanCommandResult.ALREADY_IN_STATE)
         if result is FanCommandResult.EXECUTED:
             self._after_whf_safety_stop(result, sealed=sealed, reason=reason_text, trigger=trigger)
         elif sealed and result is FanCommandResult.ALREADY_IN_STATE:
@@ -12408,6 +12402,26 @@ class AutomationEngine:
         if self._whf_restore_pending:
             await self._complete_whf_safety_release(trigger=trigger)
         return result
+
+    def _arm_whf_restore_pending(self, *, fan_already_off: bool, verify_timer: bool = False) -> None:
+        """Hand a fan stop's HVAC restore to the ONE gated release (``_complete_whf_safety_release``).
+
+        Issues #1176/#1215/#1271. Arms ``_whf_restore_pending`` so the release runs once the fan reads physically off
+        and has stayed off (rule 2). Called after a stop went out: by the sealed-house safety stop, and by
+        ``_deactivate_fan`` when it deferred its own restore because the fan still read on (#1271: a nat-vent exit
+        on a window close stopped the fan but nothing was left to release the thermostat). ``fan_already_off``: no
+        command was needed, so there is neither a verify window nor a quiet window to wait for. ``verify_timer``: also
+        schedule the stop's verify re-ask (``_after_whf_safety_stop`` does that itself for the enforcer's stop).
+        """
+        self._whf_restore_pending = True
+        self._whf_restore_verify_passed = fan_already_off
+        if fan_already_off:
+            self._whf_off_seen_at = dt_util.now() - timedelta(seconds=WHF_RESTORE_QUIET_S)
+        else:
+            self._whf_off_seen_at = None
+        self._cancel_fan_thermo_backstop()  # the release this stop used to make also ended the backstop
+        if verify_timer:
+            self._schedule_whf_safety_timer("_whf_safety_verify_cancel", WHF_STOP_VERIFY_S, "stop_verify")
 
     def _whf_control_state_name(self) -> str:
         entity = self.config.get(CONF_FAN_ENTITY)
@@ -18304,6 +18318,7 @@ class AutomationEngine:
         """
         if release_suppression is None:
             release_suppression = restore_hvac
+        _arm_release_after_stop = False
         if (restore_hvac or release_suppression) and self._whf_hvac_restore_deferred():
             # Issue #1215 (Rule 2): the one gated release owns this restore; it waits for the fan to read off.
             _LOGGER.info(
@@ -18312,6 +18327,11 @@ class AutomationEngine:
                 self._whf_restore_pending,
                 self._fan_physically_on_for_release(),
             )
+            # Issue #1271: that release only runs while ``_whf_restore_pending`` is set, and a stop that does not come
+            # from the sealed-house enforcer (a nat-vent exit on a window close, the reconcile, a comfort-floor
+            # exit...) never set it: the fan stopped and the thermostat stayed suppressed for hours. When THIS call
+            # goes on to stop the fan, it arms the release itself (below, once the stop is out).
+            _arm_release_after_stop = not self._whf_restore_pending and self._pre_fan_hvac_mode is not None
             restore_hvac = False
             release_suppression = False
         if restore_hvac and self._manual_change_protected():
@@ -18475,6 +18495,11 @@ class AutomationEngine:
             # deactivation reaches this line.
             if release_suppression:
                 self._cancel_fan_thermo_backstop()
+            elif _arm_release_after_stop:
+                # Issue #1271 mirror: no command is needed because the flag already reads off, yet the fan still reads
+                # physically on (a stop already in flight, or an off whose power reading lags). The restore deferred
+                # above would be stranded the same way once that reading flips: hand it to the gated release.
+                self._arm_whf_restore_pending(fan_already_off=False, verify_timer=True)
             return FanCommandResult.ALREADY_IN_STATE
 
         # Issue #1247: a record long past its applies_at is neither pending nor applied (before the FSM reads it).
@@ -18648,6 +18673,10 @@ class AutomationEngine:
             # circular).
             self._fan_active = False
             self._fan_on_since = None
+            if _arm_release_after_stop:
+                # Issue #1271: the restore deferred above now belongs to the gated release. Its verify timer (the
+                # sealed-house stop's own) re-asks it if the power reading never changes after this stop.
+                self._arm_whf_restore_pending(fan_already_off=False, verify_timer=True)
             # Issue #327 / Issue #996: only cancel the thermostatic backstop when this
             # deactivation actually ends WHF's ownership/session (release_suppression=True).
             # Mid-session nat-vent cycling-off (nat_vent_temperature_check(), restore_hvac=False,

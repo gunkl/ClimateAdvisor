@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.48] — 2026-11-02
+
+- Fix #1271: after the whole-house fan has been ventilating the house and you close the window, the heating or cooling now comes back. Since 0.8.29 the thermostat could stay Off for hours behind a fan that had already stopped: the house sat at 78°F against a 72°F ceiling with every thermostat write refused as "the whole-house fan still owns the thermostat". A cold house was left unheated the same way. Climate Advisor waits until the fan really reads off (and has stayed off for 6 seconds) before it gives the thermostat back, so the heat or AC never runs beside a fan that is still spinning; the wait was never completed when the fan was stopped by the window close (and by the same kind of stop from the other ventilation exits, such as the comfort-floor exit). It now is: the pre-fan mode (and the day's setpoints) return once the fan has stayed off, never beside a running fan, never into a window that was opened again in the meantime, and never over a thermostat change you made yourself in the meantime. A fan that really keeps running still keeps the heat and AC held off, exactly as before.
+
 ## [0.8.47] — 2026-11-02
 
 - Fix #1246: when you close a window after a pause, Climate Advisor may put the heat back on and then switch straight to cooling (or the other way round) because the house drifted while it was open. A cloud thermostat can report the first switch up to two minutes late, and Climate Advisor used to mistake that late report for you changing the mode, holding or pausing automation for up to an hour. It now remembers every mode it sent in the last 3 minutes, so its own late reports are recognised, after a window closes and after a fan session alike. A mode change you make yourself is still detected, including a switch to a mode Climate Advisor tried to send but that never reached the thermostat.

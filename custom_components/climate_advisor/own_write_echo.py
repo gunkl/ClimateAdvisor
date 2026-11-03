@@ -33,21 +33,24 @@ Rules (owner decisions 2026-11-02):
   ``user_id``, which Climate Advisor's and a cloud poll's never do -- the value fallback is not used and
   the change is the occupant's.
 
+Mode echoes (Issue #1246) use the same memory shape and window: ``OwnModeWrite`` / ``decide_mode_echo``.
+
 Pure: no Home Assistant imports, no I/O, no clock reads (``now`` is passed in).
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol
 
 from .const import (
+    OWN_WRITE_ECHO_WINDOW_S,
     SETPOINT_ECHO_DEFAULT_STEP_C,
     SETPOINT_ECHO_DEFAULT_STEP_F,
     SETPOINT_ECHO_MEMORY_MAX,
-    SETPOINT_ECHO_WINDOW_S,
 )
 
 #: The attributes a setpoint write can be recorded on.
@@ -64,6 +67,31 @@ class OwnSetpointWrite:
     value: float
     written_at: datetime
     context_id: str | None = None
+
+
+@dataclass(frozen=True)
+class OwnModeWrite:
+    """One HVAC mode write Climate Advisor sent (Issue #1246): the mode and when it was sent."""
+
+    mode: str
+    written_at: datetime
+
+
+class _Stamped(Protocol):
+    """Any remembered own write: all that pruning needs is when it was sent."""
+
+    @property
+    def written_at(self) -> datetime: ...
+
+
+@dataclass(frozen=True)
+class ModeEchoVerdict:
+    """Outcome of ``decide_mode_echo`` (Issue #1246)."""
+
+    recognised: bool
+    consumed: tuple[OwnModeWrite, ...] = ()
+    #: Older remembered mode writes sent BEFORE the newest write this echo answers (the thermostat moved past them).
+    superseded: tuple[OwnModeWrite, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -124,16 +152,42 @@ def values_match(recorded: float, observed: float, step: float) -> bool:
     return abs(observed - recorded) < step - tolerance
 
 
-def prune_own_writes(
-    writes: tuple[OwnSetpointWrite, ...] | list[OwnSetpointWrite],
+def prune_own_writes[W: _Stamped](
+    writes: Iterable[W],
     now: datetime,
     *,
-    window_s: float = SETPOINT_ECHO_WINDOW_S,
+    window_s: float = OWN_WRITE_ECHO_WINDOW_S,
     cap: int | None = SETPOINT_ECHO_MEMORY_MAX,
-) -> tuple[OwnSetpointWrite, ...]:
-    """Drop writes whose window has ended, and keep only the newest ``cap``. Order is preserved."""
+) -> tuple[W, ...]:
+    """Drop writes whose window has ended, and keep only the newest ``cap``. Order is preserved.
+
+    Shared by the setpoint memory (``OwnSetpointWrite``) and the mode memory (``OwnModeWrite``, Issue #1246).
+    """
     live = tuple(w for w in writes if (now - w.written_at).total_seconds() < window_s)
     return live if cap is None else live[-cap:]
+
+
+def decide_mode_echo(
+    *,
+    writes: Iterable[OwnModeWrite],
+    observed_mode: str,
+    now: datetime,
+    window_s: float = OWN_WRITE_ECHO_WINDOW_S,
+) -> ModeEchoVerdict:
+    """Is this thermostat mode change Climate Advisor's own mode write coming back? (Issue #1246)
+
+    Recognised when ``observed_mode`` equals any mode CA wrote inside ``window_s`` -- not only the last one: a
+    door-close restore followed at once by a family flip sends two writes, and a slow cloud thermostat reports
+    the FIRST after the second was sent. ``consumed`` are the matching writes (the caller forgets them);
+    ``superseded`` are older non-matching writes sent before the newest match (the thermostat moved past them,
+    same rule as the setpoint memory, #1232 D3). A mode CA did not write recently is NOT an echo.
+    """
+    live = prune_own_writes(writes, now, window_s=window_s, cap=None)
+    matches = tuple(w for w in live if w.mode == observed_mode)
+    if not matches:
+        return ModeEchoVerdict(False)
+    newest = max(i for i, w in enumerate(live) if w.mode == observed_mode)
+    return ModeEchoVerdict(True, matches, tuple(w for i, w in enumerate(live) if i < newest and w not in matches))
 
 
 def outstanding_own_write(
@@ -144,7 +198,7 @@ def outstanding_own_write(
     value: float,
     now: datetime,
     step: float,
-    window_s: float = SETPOINT_ECHO_WINDOW_S,
+    window_s: float = OWN_WRITE_ECHO_WINDOW_S,
 ) -> OwnSetpointWrite | None:
     """The newest remembered write of ``value`` to ``entity_id``.``attribute`` whose echo has not come back yet.
 
@@ -178,7 +232,7 @@ def decide_setpoint_echo(
     event_context_id: str | None = None,
     event_context_parent_id: str | None = None,
     event_context_user_id: str | None = None,
-    window_s: float = SETPOINT_ECHO_WINDOW_S,
+    window_s: float = OWN_WRITE_ECHO_WINDOW_S,
 ) -> EchoVerdict:
     """Is this thermostat setpoint change Climate Advisor's own write coming back?
 

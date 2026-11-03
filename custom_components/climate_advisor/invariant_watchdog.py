@@ -393,6 +393,9 @@ class Excused:
     excused_by: str
     minutes: float
     evidence: Evidence = ()
+    # Issue #1262: the excused spans themselves ((start, end), time-ordered, non-overlapping), so a consumer counts
+    # each minute once however far the evidence window slides. ``minutes`` is only what the window still shows.
+    intervals: tuple[tuple[datetime, datetime], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1108,7 +1111,13 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     occ_ts = sorted(o.ts for o in occupant_actions(inp))
     widen = NUMBERS.P7_AGGRESSIVE_WIDEN_F if cfg.aggressive_savings else 0.0
     excl = timedelta(minutes=NUMBERS.P7_EXCLUSION_MIN)
-    away_tl = _state_timeline(marks, frozenset({"occupancy_setback"}), frozenset({"occupancy_comfort_restored"}))
+    # Issue #1245: a HELD arrival restore (whf_session / blower_hold) also ends the away timeline: the occupant is
+    # home and the setback ended, only the write was withheld. The vent_tl exclusion below covers the held window.
+    away_tl = _state_timeline(
+        marks,
+        frozenset({"occupancy_setback"}),
+        frozenset({"occupancy_comfort_restored", "occupancy_comfort_restore_held"}),
+    )
     vent_tl = _state_timeline(marks, frozenset({"nat_vent_activated"}), NAT_VENT_END_KINDS)
     off_cmd_ts = sorted(c.ts for c in inp.commands if c.origin == "ca" and c.automation_enabled is False)
     restart_ts = sorted(m.ts for m in marks if m.kind in ("system_restarted", "startup_coalesced"))
@@ -1164,7 +1173,10 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     for idx, r in enumerate(rs):
         if pending is not None:
             run_p, ts_p = pending
-            run_p["excused_min"] += min(_mins(ts_p, r.ts), NUMBERS.P7_MAX_GAP_MIN)
+            span = min(_mins(ts_p, r.ts), NUMBERS.P7_MAX_GAP_MIN)
+            run_p["excused_min"] += span
+            if span > 0:
+                run_p["excused_iv"].append((ts_p, ts_p + timedelta(minutes=span)))
             pending = None
         o = outside(r)
         if o is None or not in_control(idx, r, o[0], o[1]):
@@ -1172,7 +1184,15 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
             continue
         side, dist = o
         if cur is None or side != cur["side"] or r.ts - cur["last"] > gap:
-            cur = {"start": r.ts, "side": side, "worst": 0.0, "cross": None, "last": r.ts, "excused_min": 0.0}
+            cur = {
+                "start": r.ts,
+                "side": side,
+                "worst": 0.0,
+                "cross": None,
+                "last": r.ts,
+                "excused_min": 0.0,
+                "excused_iv": [],
+            }
             runs.append(cur)
         cur["last"] = r.ts
         cur["worst"] = max(cur["worst"], dist)
@@ -1229,6 +1249,7 @@ def excused_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Excus
                 excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND,
                 minutes=run["excused_min"],
                 evidence=_ev(minutes=run["excused_min"], side=run["side"], excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND),
+                intervals=tuple(run["excused_iv"]),
             )
         )
     return out

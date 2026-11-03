@@ -694,7 +694,10 @@ def _generate_tldr_table(
         elif c.hvac_mode == "heat":
             hvac_val = f"Heat at {format_temp(_band.floor, temp_unit)}"
         else:
-            hvac_val = f"Off — {occupancy_mode}"
+            # Issue #1253 (mirror of #1211): hvac_mode "off" on a warm/mild day is NOT "nothing runs" -- the
+            # away/vacation band is armed (heat below its floor, cool above its ceiling). Name the held band.
+            _label = "Vacation" if occupancy_mode == "vacation" else "Away"
+            hvac_val = f"{_label} band {_band_text(_band.floor, _band.ceiling, temp_unit)}"
     elif c.hvac_mode == "cool":
         hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
     elif c.hvac_mode == "heat":

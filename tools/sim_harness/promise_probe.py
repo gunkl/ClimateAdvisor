@@ -238,7 +238,7 @@ class PromiseProbe:
                 self._mode_set_events = [*self._mode_set_events[-63:], (ts, payload)]
         inp = self._journal.window(now)
         for ex in run_promise_excused(inp, self._cfg, scope=SCOPE_TEST):
-            new_run, added = self._journal.excused_progress(ex.key, ex.minutes)
+            new_run, added = self._journal.excused_progress(ex.key, ex.intervals)
             row = self._excused.setdefault(ex.promise, {}).setdefault(ex.excused_by, {"runs": 0, "minutes": 0.0})
             row["runs"] += 1 if new_run else 0
             row["minutes"] = round(row["minutes"] + added, 1)

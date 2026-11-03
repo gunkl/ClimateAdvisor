@@ -184,6 +184,7 @@ _TIMING_AUTO_EVENT_TYPES: frozenset[str] = frozenset(
         "warm_day_comfort_gap",
         "occupancy_setback",
         "occupancy_comfort_restored",
+        "occupancy_comfort_restore_held",
         "morning_wakeup",
     }
 )
@@ -1573,6 +1574,7 @@ _AUTO_EVENT_TYPES = frozenset(
         "nat_vent_ac_assist_armed",
         "occupancy_setback",
         "occupancy_comfort_restored",
+        "occupancy_comfort_restore_held",
         "morning_wakeup",
     }
 )
@@ -1821,11 +1823,28 @@ def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[str, str]:
     mode = p.get("mode", "")
     target = p.get("target_f")
     label = f"Occupancy -- comfort restored ({mode})" if mode else "Occupancy -- comfort restored"
+    not_sent = _write_not_sent_suffix(p)  # Issue #1245: a failed / dry-run / superseded restore write
+    if not_sent:
+        shown = f" ({mode})" if mode else ""
+        label = f"Occupancy -- comfort restore NOT sent{shown} -- {not_sent}"
     settings = ""
     if target is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings = f"setpoint: {format_temp(float(target), unit)}"
     return label, settings
+
+
+def _render_occupancy_comfort_restore_held(p: dict, unit: str) -> tuple[str, str]:
+    # Issue #1245: arriving home, the restore wrote nothing because a ventilation session owns the thermostat.
+    why = {
+        "whf_session": "whole-house fan running",
+        "blower_hold": "window open, blower ventilating",
+        "occupancy_redirect": "away/vacation setback active",
+        "no_family": "no heat/cool edge resolved",
+    }.get(p.get("reason", ""), p.get("reason") or "hold")
+    mode = p.get("mode", "")
+    settings = f"thermostat unchanged ({mode})" if mode else "thermostat unchanged"
+    return f"Occupancy -- comfort restore held, nothing written ({why})", settings
 
 
 def _render_pre_cool_applied(p: dict, unit: str) -> tuple[str, str]:
@@ -3204,6 +3223,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "morning_wakeup": _render_morning_wakeup,
     "occupancy_setback": _render_occupancy_setback,
     "occupancy_comfort_restored": _render_occupancy_comfort_restored,
+    "occupancy_comfort_restore_held": _render_occupancy_comfort_restore_held,
     "pre_cool_applied": _render_pre_cool_applied,
     "override_detected": _render_override_detected,
     "ceiling_guard_fired": _render_ceiling_guard_fired,
@@ -3361,6 +3381,7 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "bedtime_setback",
         "morning_wakeup",
         "occupancy_comfort_restored",
+        "occupancy_comfort_restore_held",
         "pre_cool_applied",
         "classification_applied",
     }

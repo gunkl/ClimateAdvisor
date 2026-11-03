@@ -288,7 +288,10 @@ and it is called by: the door/window pause ending (`_paused_by_door` setter, "ac
 "deactivate": CA now wants the fan on) and `_deactivate_fan()` (clears "activate"), before any early return
 including ALREADY_IN_STATE (except the reconcile "no-fan" branch, `abandons_deferral=False`: bookkeeping, not a stop
 decision, and the deferred reactivation is still retried while paused); and the hvac_fan restriction refusal ("activate"). A same-direction retry that lands
-clears it inline ("applying deferred ..."). `_activate_fan()`/`_deactivate_fan()`
+clears it inline ("applying deferred ..."). A record more than `FAN_DEFERRAL_STALE_AFTER_S` (2100 s) past its `applies_at` is expired by
+`_expire_stale_fan_deferral_record()` (either direction, reason `stale_past_applies_at:<site>`) at the top of the FSM
+step of `_activate_fan()`/`_deactivate_fan()` -- including the reconcile "no-fan" call, since a stale record is no
+longer retried as the deferred start -- so an hour-late retry is logged as an ordinary start/stop (Issue #1247). `_activate_fan()`/`_deactivate_fan()`
 log an INFO "5-minute floor expired — applying deferred exit/activation" line when a
 previously-blocked command finally lands, ahead of the pre-existing (unchanged,
 WARNING) "Activated/Deactivated fan" line — deferred completion is normal operation,

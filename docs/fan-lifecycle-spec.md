@@ -52,7 +52,7 @@
 | `override` | `FanOverrideState` | `NONE`, `ACTIVE`, `ACTIVE_REMOTE_TIMER` | `_fan_override_active`, `_fan_remote_timer_hours` |
 | `cycling` | `FanCyclingState` | `IDLE`, `ACTIVE`, `SUSPENDED` | `_fan_min_runtime_active`, `_fan_override_active` (an active override suspends cycling) |
 | `hvac_ownership` | `WhfHvacOwnership` | `NONE`, `SUPPRESSING` | `fan_mode` (WHOLE_HOUSE/BOTH only) AND `_pre_fan_hvac_mode is not None` |
-| `rate_limit` | `FanRateLimitState` | `NOT_DEFERRED`, `DEFERRED_ACTIVATE`, `DEFERRED_DEACTIVATE` | `_fan_rate_limited_until`, `_fan_rate_limited_direction` (written on DEFER_NEW in `_activate_fan()`/`_deactivate_fan()`; cleared by a same-direction retry that lands, or when abandoned via `_clear_fan_deferral_record()`: pause end, all sensors closed, occupant fan on/off, an opposite-direction CA request (not the reconcile "no-fan" bookkeeping call), hvac_fan restriction refusal — Issue #1212) |
+| `rate_limit` | `FanRateLimitState` | `NOT_DEFERRED`, `DEFERRED_ACTIVATE`, `DEFERRED_DEACTIVATE` | `_fan_rate_limited_until`, `_fan_rate_limited_direction` (written on DEFER_NEW in `_activate_fan()`/`_deactivate_fan()`; cleared by a same-direction retry that lands, or when abandoned via `_clear_fan_deferral_record()`: pause end, all sensors closed, occupant fan on/off, an opposite-direction CA request (not the reconcile "no-fan" bookkeeping call), hvac_fan restriction refusal — Issue #1212; or expired by `_expire_stale_fan_deferral_record()` once `FAN_DEFERRAL_STALE_AFTER_S` (2100 s) past `applies_at` — Issue #1247) |
 
 The all-idle `FanLifecycleState.initial()` — `OFF`/`NONE`/`IDLE`/`NONE`/`NOT_DEFERRED` — matches every axis's default field value in a freshly-constructed `AutomationEngine`.
 

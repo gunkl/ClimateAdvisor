@@ -6636,6 +6636,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and new_state.state == _last_cmd_mode
             and (dt_util.now() - _last_cmd_time).total_seconds() < 120
         )
+        # Issue #1246: CA can send two mode writes inside the echo window (door-close restore, then a family flip);
+        # a slow cloud thermostat reports the FIRST after the second was sent. Membership in the recent own-write
+        # list, not equality with the last one. Only an actual mode change is an echo (and is consumed).
+        _is_own_mode_echo = (
+            old_state.state != new_state.state
+            and self.automation_engine.recognise_own_mode_echo(new_state.state) is True  # `is True`: stub-safe
+        )
+        _is_expected_confirmation = _is_expected_confirmation or _is_own_mode_echo
         # Issue #1049: the thermostat waking from unavailable/unknown (often reporting Off or
         # stale attributes) is a reconnect, never an occupant action. Computed once; gates all
         # four override-detection sites below. No early return — other bookkeeping must run.
@@ -8590,7 +8598,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         excused_changed = False
         try:  # bookkeeping only: a failure here must never stop the hits below (P9 alerts) from being reported
             for ex in run_promise_excused(window, cfg, scope=SCOPE_HOME):
-                new_run, added = journal.excused_progress(ex.key, ex.minutes)
+                new_run, added = journal.excused_progress(ex.key, ex.intervals)
                 if new_run or added > 0:
                     bump_promise_excused(self._promise_stats, ex.promise, ex.excused_by, ex.ts, added, new_run=new_run)
                     if new_run:

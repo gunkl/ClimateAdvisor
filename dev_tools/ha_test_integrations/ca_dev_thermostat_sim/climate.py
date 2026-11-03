@@ -375,7 +375,18 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._last_off_ts = None
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set a new HVAC mode."""
+        """Set a new HVAC mode (reported ``set_echo_delay()`` seconds later when a cloud echo delay is set, #1246)."""
+        if self._echo_delay_s > 0:
+
+            @callback
+            def _answer_mode(_now: datetime) -> None:  # @callback: runs in the event loop (it writes entity state)
+                self._apply_hvac_mode(hvac_mode)
+
+            self._cancel_echo.append(async_call_later(self.hass, self._echo_delay_s, _answer_mode))
+            return
+        self._apply_hvac_mode(hvac_mode)
+
+    def _apply_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode != self._hvac_mode:
             self._reset_compressor_state()
         self._hvac_mode = hvac_mode
@@ -426,7 +437,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._cancel_echo.clear()
 
     def set_echo_delay(self, seconds: float) -> None:
-        """Make the thermostat report a ``set_temperature`` ``seconds`` after the call (0 = instant, the default)."""
+        """Make the thermostat report a set_temperature or set_hvac_mode ``seconds`` after the call (0 = instant)."""
         self._echo_delay_s = float(seconds)
 
     def _apply_set_temperature(self, kwargs: dict[str, Any]) -> None:

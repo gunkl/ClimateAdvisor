@@ -88,7 +88,7 @@ A plan drawn from `random.Random(day_seed)` (config, weather, occupancy, doors, 
 
 Goldens are LOCKED; a divergence is recorded in a ledger, never by editing a scenario.
 
-**Excused time (Issue #1260).** Time a promise did not count under a named exception (today only P7's thermostat deadband, `excused_by=thermostat_deadband`) is not a hit and is in none of the ledgers above. It is reported beside hits: `PromiseReport.excused` per run and `excused_by_promise` (runs and minutes) in the nightly batch summary and the `replay` line, so a rise is visible.
+**Excused time (Issue #1260).** Time a promise did not count under a named exception (today only P7's thermostat deadband, `excused_by=thermostat_deadband`) is not a hit and is in none of the ledgers above. It is reported beside hits: `PromiseReport.excused` per run and `excused_by_promise` (runs and minutes) in the nightly batch summary and the `replay` line, so a rise is visible. Minutes are counted from the excused intervals past a per-series `counted_until` (Issue #1262), so a stretch longer than the 3 h journal window is reported in full.
 
 **Code reference:** `tools/sim_harness/session.py`, `tools/sim_harness/generator.py` (`run_batch`, `run_day`, `replay_scenario`), `tools/sim_harness/surfaces.py` (`cli_surfaces`).
 
@@ -438,6 +438,7 @@ These event types have no clean production entry point and are silently skipped 
 | `bedtime_setback_skipped` | — | `bedtime_setback_skipped` |
 | `occupancy_setback` | — | `setback_applied` |
 | `occupancy_comfort_restored` | — | `comfort_restored` |
+| `occupancy_comfort_restore_held` (Issue #1245) | — | none: registered in `UNMAPPED_PRODUCTION_EVENTS` (the absence of a write, same class as `occupancy_restore_deferred`; cannot shadow the outcome in force) |
 | `morning_wakeup` | — | `comfort_restored` |
 | `morning_wakeup_skipped` | — | `morning_wakeup_skipped` |
 | `grace_expired` | `re_paused=True` | `paused` |

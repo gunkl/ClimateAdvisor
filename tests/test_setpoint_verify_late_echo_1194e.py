@@ -4,7 +4,7 @@ answered yet.
 Occupant outcome: with a Nest/Ecobee-style cloud thermostat that reports CA's setpoint 30-120 s late, the person saw
 "Setpoint validation FAILED" in the log and the activity report, and 15 minutes later Climate Advisor re-sent the
 setpoint and, after a streak, nudged the thermostat 1 F the wrong way and back -- for a write that had worked. Now the
-verify waits for the echo window #1232 already uses (``SETPOINT_ECHO_WINDOW_S``, 180 s) while that write is still
+verify waits for the echo window #1232 already uses (``OWN_WRITE_ECHO_WINDOW_S``, 180 s) while that write is still
 outstanding in the echo memory and the thermostat still reports what it had before. A thermostat that never answers
 inside the window, or that answers with a different value (clamped / refused), is still a rejection, as before.
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from custom_components.climate_advisor.const import SETPOINT_ECHO_WINDOW_S
+from custom_components.climate_advisor.const import OWN_WRITE_ECHO_WINDOW_S
 from custom_components.climate_advisor.own_write_echo import OwnSetpointWrite, outstanding_own_write
 from tests.test_remote_offset_gates_1194b import DIRECTIONS, FAN_MODES, FakeState, Night
 
@@ -80,11 +80,11 @@ class TestLateEcho:
         n.fh.set_echo_delay(n.ce, 100_000)  # never answers
         start = n.sch.now()
         _write(n)
-        n.wait(int(SETPOINT_ECHO_WINDOW_S) - 30)
+        n.wait(int(OWN_WRITE_ECHO_WINDOW_S) - 30)
         assert n.rejected == [], "judged before the echo window ended"
         n.wait(250)  # (the periodic band re-assert at +30 s supersedes the first check; its own window ends ~+211 s)
         assert n.rejected and n.rejected[0][1] == "setpoint_rejected", n.rejected
-        assert (n.rejected[0][0] - start).total_seconds() >= SETPOINT_ECHO_WINDOW_S
+        assert (n.rejected[0][0] - start).total_seconds() >= OWN_WRITE_ECHO_WINDOW_S
         assert n.rejected[0][2]["reported"] == pytest.approx(n.before)
         assert n.ae._setpoint_reject_streak >= 1
 
@@ -114,7 +114,7 @@ def test_outstanding_own_write_is_the_echo_memory_rule():
     w = OwnSetpointWrite("climate.x", "temperature", 68.0, t0)
     kw = {"entity_id": "climate.x", "attribute": "temperature", "step": 1.0}
     assert outstanding_own_write([w], value=68.0, now=t0 + timedelta(seconds=100), **kw) is w
-    assert outstanding_own_write([w], value=68.0, now=t0 + timedelta(seconds=SETPOINT_ECHO_WINDOW_S), **kw) is None
+    assert outstanding_own_write([w], value=68.0, now=t0 + timedelta(seconds=OWN_WRITE_ECHO_WINDOW_S), **kw) is None
     assert outstanding_own_write([w], value=69.0, now=t0 + timedelta(seconds=10), **kw) is None
     assert (
         outstanding_own_write([w], value=68.0, now=t0, entity_id="climate.y", attribute="temperature", step=1.0) is None

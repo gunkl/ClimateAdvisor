@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import custom_components.climate_advisor.automation as _automation_mod
-from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.automation import AutomationEngine, ComfortModeWrite, HvacCommandResult
 from custom_components.climate_advisor.classification_fsm import (
     CeilingGuardEligibility,
     ClassificationDecision,
@@ -38,6 +38,7 @@ from custom_components.climate_advisor.ode_ceiling_guard import (
 )
 
 _NOW = datetime(2026, 7, 15, 14, 0, 0, tzinfo=UTC)
+_SENT_HEAT = ComfortModeWrite(result=HvacCommandResult.EXECUTED, family="heat", target_f=68.0)
 
 
 # ── Pure decision functions ──────────────────────────────────────────────────
@@ -233,6 +234,7 @@ class TestWelcomeHomeNearComfortUsesDecisionValue:
 
         async def _restore_then_blank(*_a, **_k):
             engine._get_indoor_temp_f = MagicMock(return_value=None)
+            engine._last_mode_write = _SENT_HEAT  # what the real method records after its write (Issue #1245)
 
         engine._set_temperature_for_mode = AsyncMock(side_effect=_restore_then_blank)
         events: list[tuple] = []
@@ -264,6 +266,7 @@ class TestHandleOccupancyHomeFullChainCelsius:
             # The thermostat drops out right after the restore write: any re-read is None.
             climate_state.attributes = {"current_temperature": None, "temperature": None}
             climate_state.state = "unavailable"
+            engine._last_mode_write = _SENT_HEAT  # what the real method records after its write (Issue #1245)
 
         engine._set_temperature_for_mode = _restore_then_blank
 

@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.47] — 2026-11-02
+
+- Fix #1246: when you close a window after a pause, Climate Advisor may put the heat back on and then switch straight to cooling (or the other way round) because the house drifted while it was open. A cloud thermostat can report the first switch up to two minutes late, and Climate Advisor used to mistake that late report for you changing the mode, holding or pausing automation for up to an hour. It now remembers every mode it sent in the last 3 minutes, so its own late reports are recognised, after a window closes and after a fan session alike. A mode change you make yourself is still detected, including a switch to a mode Climate Advisor tried to send but that never reached the thermostat.
+- Fix #1245: when you arrive home, the Activity Report and the AI explanations now show the temperature that was actually sent to the thermostat (for example the sleep-band edge), and say so when nothing was sent (test mode or a refused command). While a whole-house fan session or the blower ventilating through an open window keeps heating and cooling off, they no longer claim comfort was restored; they record that the restore is waiting, and the welcome-home notification says comfort will resume once ventilation ends.
+- Fix #1253: on a warm or mild day while you are away or on vacation, the briefing summary and its notification now name the band the thermostat is holding (for example "Away band 60–80°F") instead of "HVAC Mode: Off — away", which made it look as if nothing would protect the house while you were out.
+- Fix #1247: when the 5-minute fan toggle limit delays a fan start or stop and the retry only comes much later (up to an hour), the log and Activity no longer say the delayed command was applied. That line now appears only when the delayed command really goes through on time. Fan and heating/cooling behaviour is unchanged.
+- Fix #1262: long quiet stretches where your thermostat was only waiting inside its own deadband are now counted at their full length in the diagnostics and the nightly report (4 hours shows 240 minutes, 12 hours 720, instead of stopping at 180), and the last-seen time keeps updating.
+
 ## [0.8.46] — 2026-11-02
 
 - Fix #1194 (last part: bedtime and morning handover, what you see, and simulation proof). On nights you use a bedroom sensor, Climate Advisor sets the hallway thermostat a few degrees past your sleep temperature so the furnace (or AC) actually runs for the bedroom. This release finishes that feature:

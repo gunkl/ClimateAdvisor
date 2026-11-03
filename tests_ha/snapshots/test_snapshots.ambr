@@ -6,7 +6,7 @@
       ========================================
       
         Day Type: Warm (84°F)
-        HVAC Mode: Off — away
+        HVAC Mode: Away band 60–80°F
         Occupancy: Away — setback active
         Windows: Closed all day
         Bedtime Setback: away setback held
@@ -22,7 +22,7 @@
     ''',
     'briefing_tldr': '''
         Day Type: Warm (84°F)
-        HVAC Mode: Off — away
+        HVAC Mode: Away band 60–80°F
         Occupancy: Away — setback active
         Windows: Closed all day
         Bedtime Setback: away setback held
@@ -35,7 +35,7 @@
       dict({
         'message': '''
             Day Type: Warm (84°F)
-            HVAC Mode: Off — away
+            HVAC Mode: Away band 60–80°F
             Occupancy: Away — setback active
             Windows: Closed all day
             Bedtime Setback: away setback held

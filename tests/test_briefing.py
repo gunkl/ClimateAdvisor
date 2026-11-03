@@ -3292,3 +3292,41 @@ class TestWindowCloseIsDated1231:
         )
         assert "Close by 10:30 AM" in on_the_day
         assert "Close by 10:00 AM" in day_before
+
+
+class TestAwayHvacModeRowShowsHeldBand1253:
+    """Issue #1253: on a warm/mild day while away or on vacation the engine arms the away/vacation band (heat below
+    its floor, cool above its ceiling), so the HVAC Mode row says which band is held instead of "Off"."""
+
+    @pytest.mark.parametrize("day_type,high", [("warm", 84), ("mild", 66)])
+    @pytest.mark.parametrize(
+        "occupancy,expected",
+        [("away", "HVAC Mode: Away band 60–80°F"), ("vacation", "HVAC Mode: Vacation band 57–83°F")],
+    )
+    def test_warm_and_mild_day_shows_held_band(self, day_type, high, occupancy, expected):
+        c = _make_classification(day_type, today_high=high, today_low=60)
+        text = _ref(c, occupancy_mode=occupancy)
+        assert _row(text, "HVAC Mode") == expected
+        assert "Off" not in _row(text, "HVAC Mode")
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_hot_and_cold_day_still_say_cool_at_heat_at(self, occupancy):
+        hot = _make_classification("hot", today_high=92, today_low=65)
+        cold = _make_classification("cold", today_high=35, today_low=25)
+        assert _row(_ref(hot, occupancy_mode=occupancy), "HVAC Mode").startswith("HVAC Mode: Cool at ")
+        assert _row(_ref(cold, occupancy_mode=occupancy), "HVAC Mode").startswith("HVAC Mode: Heat at ")
+
+    def test_row_band_matches_the_body_band_and_the_armed_band(self):
+        from custom_components.climate_advisor.automation import select_comfort_band
+
+        c = _make_classification("warm", today_high=84, today_low=60)
+        text = _ref(c, occupancy_mode="away")
+        armed = select_comfort_band(
+            c,
+            {"setback_heat": 60.0, "setback_cool": 80.0},
+            occupancy_mode="away",
+            in_sleep_window=False,
+            aggressive_savings=False,
+        )
+        assert (armed.floor, armed.ceiling) == (60.0, 80.0)
+        assert "(60–80°F)" in text and "Away band 60–80°F" in _row(text, "HVAC Mode")

@@ -121,11 +121,11 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
+    OWN_WRITE_ECHO_WINDOW_S,
     PEAK_DECLINE_MARGIN_F,
     REMOTE_OFFSET_EXIT_GRACE_S,
     REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
     REVISIT_DELAY_SECONDS,
-    SETPOINT_ECHO_WINDOW_S,
     SETPOINT_RETRY_DELAY_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     THERMAL_SWING_DEFAULT_F,
@@ -153,8 +153,10 @@ from .override_confirm_split import (
 )
 from .override_match import decide_override_matches_decision
 from .own_write_echo import (
+    OwnModeWrite,
     OwnSetpointWrite,
     context_id_matches,
+    decide_mode_echo,
     decide_setpoint_echo,
     outstanding_own_write,
     prune_own_writes,
@@ -224,6 +226,7 @@ from .fan_thermostat_decision import (
 )
 from .fan_toggle_rate_limit import (
     FanToggleRateLimitOutcome,
+    deferral_record_is_stale,
 )
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
@@ -589,6 +592,26 @@ def hvac_outcome_label(result: HvacCommandResult | None) -> str:
         HvacCommandResult.FAILED: "failed",
         HvacCommandResult.SUPERSEDED: "superseded",
     }[result]
+
+
+@dataclass(frozen=True)
+class ComfortModeWrite:
+    """What the last ``_set_temperature_for_mode()`` call actually did (Issue #1245).
+
+    ``_set_temperature_for_mode()`` returns only the command result, which cannot say WHICH family/target it
+    wrote or WHY it wrote nothing. A restore event ("comfort restored to X") must report what the thermostat was
+    sent, so the call records it here -- the one source for every caller that announces a restore.
+
+    ``family``/``target_f`` are the resolved band edge for the family the write was attempted for (None when no
+    write was attempted). ``held_reason`` is non-None when nothing was written: ``whf_session`` (the whole-house
+    fan owns the thermostat), ``blower_hold`` (blower ventilation through an open window keeps it Off, Rule 3),
+    ``occupancy_redirect`` (away/vacation redirected to setback) or ``no_family`` (the resolver chose neither).
+    """
+
+    result: HvacCommandResult | None = None
+    family: str | None = None
+    target_f: float | None = None
+    held_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1684,6 +1707,9 @@ class AutomationEngine:
         # cloud thermostat echoing a write 30-120 s late is recognised by value/Context and not read as the occupant.
         # Transient (a 180 s memory is meaningless across a restart); see own_write_echo.py.
         self._own_setpoint_writes: list[OwnSetpointWrite] = []
+        # Issue #1246: the same memory for CA's own HVAC MODE writes (a door-close restore then a family flip is two
+        # writes inside the echo window; ``_last_commanded_hvac_mode`` keeps only the last). Transient too.
+        self._own_mode_writes: list[OwnModeWrite] = []
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
@@ -1742,6 +1768,7 @@ class AutomationEngine:
         # activates/deactivates — see _arm_comfort_family(). Not persisted across
         # restarts — a fresh process has no flapping history to guard against, same as
         # _nat_vent_outdoor_exit_time.
+        self._last_mode_write = ComfortModeWrite()  # Issue #1245: outcome of the last _set_temperature_for_mode()
         self._comfort_mode_family: str | None = None
         self._comfort_mode_family_entry_time: datetime | None = None
         # Same-tick guard (folded in from Issue #699's own finding): so a family
@@ -3487,6 +3514,20 @@ class AutomationEngine:
             self._log_fan_manual_origin_pending_discarded(reason, _pending[0], True)
         return True
 
+    def _expire_stale_fan_deferral_record(self, site: str) -> bool:
+        """Drop a toggle-floor deferral record that is well past its ``applies_at`` (Issue #1247).
+
+        Occupant view: the min-runtime cycle's refused-start retry (3600 s) or any unrelated start used to find an
+        hour-old "activate" record and log "5-minute floor expired -- applying deferred activation" long after the
+        fact. A record older than ``FAN_DEFERRAL_STALE_AFTER_S`` past its ``applies_at`` is not pending and not
+        applied: it goes through ``_clear_fan_deferral_record()`` (the ONE choke point), which drops the #1205
+        pending manual-origin fact bound to it in the same step and logs. No fan or HVAC decision changes; the
+        start/stop that follows runs as an ordinary one. Returns whether it cleared.
+        """
+        if not deferral_record_is_stale(self._fan_rate_limited_until, dt_util.now()):
+            return False
+        return self._clear_fan_deferral_record(None, f"stale_past_applies_at:{site}")
+
     @staticmethod
     def _log_fan_manual_origin_pending_discarded(reason: str, applies_at: datetime, record_cleared: bool) -> None:
         """The single wording of the #1205 pending-discard line (tests and the debugging guide key on it)."""
@@ -5081,6 +5122,56 @@ class AutomationEngine:
         """The mode Climate Advisor itself last commanded (None: never). The one read of it (Issue #1209)."""
         return getattr(self, "_last_commanded_hvac_mode", None)
 
+    def _remember_own_mode_write(self, mode: str) -> None:
+        """Remember a mode write for the echo window (Issue #1246); pruned like the setpoint memory."""
+        now = dt_util.now()
+        try:
+            kept = prune_own_writes(getattr(self, "_own_mode_writes", []), now)
+            self._own_mode_writes = list(prune_own_writes([*kept, OwnModeWrite(mode, now)], now))
+        except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
+            self._own_mode_writes = [OwnModeWrite(mode, now)]
+
+    def _forget_own_mode_write(self, mode: str, *, count: int = 1) -> None:
+        """Drop the newest ``count`` remembered writes of ``mode``: the call failed, so nothing will echo (Issue #1246).
+
+        Mirrors ``_settle_own_setpoint_write(sent=False)``. ``_set_temperature`` records its mode a second time via
+        ``_ensure_hvac_mode_for_write``, so a failed switch there forgets both entries of that call.
+        """
+        writes = list(getattr(self, "_own_mode_writes", None) or [])
+        left = count
+        for i in range(len(writes) - 1, -1, -1):
+            if left and writes[i].mode == mode:
+                del writes[i]
+                left -= 1
+        self._own_mode_writes = writes
+
+    def recognise_own_mode_echo(self, observed_mode: str) -> bool:
+        """True when this thermostat mode change is one of CA's own recent mode writes coming back (Issue #1246).
+
+        Membership in the recent-write list, not equality with the last write. An echo is consumed from the memory
+        (with the older writes it moved past); a mode CA did not write inside the window is left for the caller to
+        judge as a possible occupant change. The one rule is ``own_write_echo.decide_mode_echo``.
+        """
+        writes = getattr(self, "_own_mode_writes", None)
+        if not writes:
+            return False
+        now = dt_util.now()
+        try:
+            verdict = decide_mode_echo(writes=writes, observed_mode=observed_mode, now=now)
+            live = prune_own_writes(writes, now)
+        except TypeError:  # naive/aware (or stubbed) clock mix: no memory, so evaluate as before
+            return False
+        gone = set(verdict.consumed) | set(verdict.superseded)
+        self._own_mode_writes = [w for w in live if w not in gone]
+        if verdict.recognised:
+            _LOGGER.info(
+                "Mode change to %s recognised as Climate Advisor's own write echoing back: age_s=%s role=%s",
+                observed_mode,
+                [round((now - w.written_at).total_seconds()) for w in verdict.consumed],
+                self.role,
+            )
+        return verdict.recognised
+
     def _record_commanded_mode(self, mode: str, reason_text: str | None = None) -> None:
         """Single writer of ``_last_commanded_hvac_mode`` (Issue #1066).
 
@@ -5089,6 +5180,7 @@ class AutomationEngine:
         misarmed minutes and switch latency at minute resolution (the chart log is ~30 min).
         """
         prev = getattr(self, "_last_commanded_hvac_mode", None)
+        self._remember_own_mode_write(mode)
         # Issue #1073 (S3): a command that merely re-affirms the mode the thermostat is ALREADY in
         # is not a mode change and must not move the mode-change clock. A command issued moments
         # after the previous one (live state still lagging) is judged by ``prev`` alone.
@@ -5318,6 +5410,10 @@ class AutomationEngine:
             self._temp_command_time = _now
         self._last_commanded_hvac_time = _now
         self._hvac_command_time = _now
+        if getattr(
+            self, "_own_mode_writes", None
+        ):  # the echo window runs from when the (slow) call returned (Issue #1246)
+            self._own_mode_writes[-1] = replace(self._own_mode_writes[-1], written_at=_now)
 
     def _emit_engine_incident(self, incident_class: str, extra: dict[str, Any]) -> None:
         """Emit an engine-side ``incident_detected`` via the shared payload builder (Issue #1049)."""
@@ -5633,10 +5729,12 @@ class AutomationEngine:
                 return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- stop, no note
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 self._mode_switch_marker = None
+                self._forget_own_mode_write(mode)  # never reached the thermostat: nothing will echo
                 self._note_mode_rejected(mode, _call.error)
                 return HvacCommandResult.FAILED
             if _call.outcome is ClimateCallOutcome.FAILED:
                 self._mode_switch_marker = None
+                self._forget_own_mode_write(mode)
                 self._update_write_record(result=HvacCommandResult.FAILED)
                 # Issue #805: this is the single write point for hvac_mode (Fix 1b) -- an
                 # invalid/removed climate_entity must not raise uncaught here (it would abort
@@ -5758,12 +5856,14 @@ class AutomationEngine:
             return False  # Issue #1108: nothing sent -- stop the write, no note
         if _call.outcome is ClimateCallOutcome.FAILED:
             self._mode_switch_marker = None
+            self._forget_own_mode_write(mode)
             self._last_mode_switch_result = HvacCommandResult.FAILED
             self._update_write_record(result=HvacCommandResult.FAILED)
             self._note_hvac_command_failed(mode, _call.error)
             return False
         if _call.outcome is ClimateCallOutcome.REJECTED:
             self._mode_switch_marker = None
+            self._forget_own_mode_write(mode)
             self._last_mode_switch_result = HvacCommandResult.FAILED
             self._note_mode_rejected(mode, _call.error)
             return False
@@ -5942,7 +6042,10 @@ class AutomationEngine:
             # Issue #1049 change 1: make the mode real first (Sensi/ecobee ignore the hvac_mode
             # kwarg below). _my_seq was captured above, before this await.
             if not await self._ensure_hvac_mode_for_write(mode, _my_seq):
-                return HvacCommandResult.SUPERSEDED if self._write_seq != _my_seq else HvacCommandResult.FAILED
+                if self._write_seq != _my_seq:
+                    return HvacCommandResult.SUPERSEDED
+                self._forget_own_mode_write(mode)  # this call's own entry (the switch dropped its own)
+                return HvacCommandResult.FAILED
             # Issue #1049: awaited via _call_climate (blocking, non-cancelling wait) so a
             # rejection is visible instead of swallowed by a non-blocking call.
             _call = await self._call_climate(
@@ -5958,6 +6061,10 @@ class AutomationEngine:
             self._restamp_climate_command_times()
             if _call.outcome is ClimateCallOutcome.DRY_RUN:
                 return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- no verify/retry
+            if _call.outcome in (ClimateCallOutcome.REJECTED, ClimateCallOutcome.FAILED):
+                # Issue #1246: this call's embedded mode never reached the thermostat (a real switch above kept
+                # its own entry), so it will not echo -- the setpoint memory forgets a failed write the same way.
+                self._forget_own_mode_write(mode)
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 # Out-of-range / mode-not-offered: skipped quietly (no incident, no verify).
                 return HvacCommandResult.FAILED
@@ -6786,6 +6893,16 @@ class AutomationEngine:
             abs(edge - flat) > 1e-6,
         )
 
+    @staticmethod
+    def _mode_write_record(result: HvacCommandResult, family: str, target_f: float) -> ComfortModeWrite:
+        """Issue #1245: the record for a setpoint write attempt (``WHF_BLOCKED`` is the one 'wrote nothing' result)."""
+        return ComfortModeWrite(
+            result=result,
+            family=family,
+            target_f=target_f,
+            held_reason="whf_session" if result is HvacCommandResult.WHF_BLOCKED else None,
+        )
+
     async def _set_temperature_for_mode(
         self,
         c: DayClassification,
@@ -6825,6 +6942,7 @@ class AutomationEngine:
         call site. TOU's own gate is already the authority here; the resolver must not
         second-guess it.
         """
+        self._last_mode_write = ComfortModeWrite()  # Issue #1245: overwritten by whichever path returns below
         # Issue #85: redirect to setback when not home/guest. Gate unified via
         # should_defer_to_occupancy_setback() (Issue #460); which handler to redirect
         # to still depends on which of the two deferring modes this is.
@@ -6835,6 +6953,7 @@ class AutomationEngine:
             else:
                 _LOGGER.info("Vacation mode — redirecting to deep setback instead of comfort (%s)", reason)
                 await self.handle_occupancy_vacation()
+            self._last_mode_write = ComfortModeWrite(held_reason="occupancy_redirect")
             return None  # redirected to setback: this call wrote no comfort setpoint
 
         # Issue #827: route through the same comfort-family FSM _apply_comfort_band()
@@ -6872,6 +6991,7 @@ class AutomationEngine:
                 reason,
             )
             await self._apply_nat_vent_hvac_state()
+            self._last_mode_write = ComfortModeWrite(held_reason="blower_hold")
             return None
         _resolved_mode = (
             c.hvac_mode
@@ -6904,6 +7024,7 @@ class AutomationEngine:
             # every cycle doesn't continuously push the (informational-only, post-
             # #827) dwell-clock timestamp forward on mere reassertion.
             self._arm_comfort_family("heating", dt_util.now(), only_if_changed=True)
+            self._last_mode_write = self._mode_write_record(_write_result, "heat", floor_target)
             return _write_result
         elif _resolved_mode == "cool":
             ceiling_target = (
@@ -6915,8 +7036,10 @@ class AutomationEngine:
                 ceiling_target, reason=reason, mode="cool", skip_setpoint_sanity_check=skip_setpoint_sanity_check
             )
             self._arm_comfort_family("cooling", dt_util.now(), only_if_changed=True)
+            self._last_mode_write = self._mode_write_record(_write_result, "cool", ceiling_target)
             return _write_result
         else:
+            self._last_mode_write = ComfortModeWrite(held_reason="no_family")
             return None
 
     async def apply_tou_precondition(self, classification: DayClassification, target: float, schedule_id: str) -> None:
@@ -15917,13 +16040,31 @@ class AutomationEngine:
                 await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
-            written = {"heating": "heat", "cooling": "cool"}.get(self._comfort_mode_family or "", family)
-            comfort = self.config["comfort_heat"] if written == "heat" else self.config["comfort_cool"]
+            # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
+            # family it wrote (sleep band, aggressive savings, TOU-expanded band), not the flat comfort setting -- and
+            # say so when it wrote nothing (WHF session / blower hold) instead of claiming a restore.
+            # ``outcome`` (Issue #1049 change 5 pattern): a restore CA decided and attempted stays a restore (the
+            # occupant is home, CA is back in control), but a write that failed / was dry-run / was superseded is
+            # rendered "NOT sent" instead of reading as a setpoint the thermostat received.
+            _w = self._last_mode_write
             if self._emit_event_callback:
-                self._emit_event_callback(
-                    "occupancy_comfort_restored",
-                    {"mode": written, "target_f": comfort, "indoor_f": decision.indoor_temp_f},
-                )
+                if _w.held_reason is None and _w.target_f is not None:
+                    self._emit_event_callback(
+                        "occupancy_comfort_restored",
+                        {
+                            "mode": _w.family,
+                            "target_f": _w.target_f,
+                            "indoor_f": decision.indoor_temp_f,
+                            "outcome": hvac_outcome_label(_w.result),
+                        },
+                    )
+                elif not self._recent_duplicate(
+                    "occupancy_comfort_restore_held", (_w.held_reason,), window_seconds=600
+                ):
+                    self._emit_event_callback(
+                        "occupancy_comfort_restore_held",
+                        {"mode": family, "reason": _w.held_reason, "indoor_f": decision.indoor_temp_f},
+                    )
 
         if decision.notify is HomeNotifyOutcome.SUPPRESSED_NEAR_COMFORT:
             # Issue #1036: the value the decision used (non-None by construction on this
@@ -15963,6 +16104,9 @@ class AutomationEngine:
                     "🏠 Welcome home! Comfort temperature will resume once "
                     f"{_RESTORE_DEFERRED_TEXT.get(decision.restore_deferred_reason, 'the hold')} clears."
                 )
+            elif decision.restore and self._last_mode_write.held_reason is not None:
+                # Issue #1245: the restore wrote nothing (WHF session / blower hold) -- don't promise a restore.
+                _msg = "🏠 Welcome home! Comfort temperature will resume once ventilation ends."
             else:
                 _msg = "🏠 Welcome home! Restoring comfort temperature. Should feel normal in about 20–30 minutes."
             await self._notify(_msg, "Climate Advisor", notification_type="occupancy_home")
@@ -16824,7 +16968,7 @@ class AutomationEngine:
             )
             if write is None:
                 return None
-            return max(1.0, SETPOINT_ECHO_WINDOW_S - (now - write.written_at).total_seconds() + 1.0)
+            return max(1.0, OWN_WRITE_ECHO_WINDOW_S - (now - write.written_at).total_seconds() + 1.0)
         except TypeError, ValueError:
             return None
 
@@ -17120,6 +17264,9 @@ class AutomationEngine:
                 # clear it as the normal path does so the FSM stops reporting DEFERRED_ACTIVATE.
                 self._clear_fan_deferral_record("activate", "hvac_fan_restriction")
                 return FanCommandResult.SUPPRESSED
+
+        # Issue #1247: a record long past its applies_at is neither pending nor applied (before the FSM reads it).
+        self._expire_stale_fan_deferral_record("activate")
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
         from .fan_fsm import FanFsmEventKind
@@ -18329,6 +18476,9 @@ class AutomationEngine:
             if release_suppression:
                 self._cancel_fan_thermo_backstop()
             return FanCommandResult.ALREADY_IN_STATE
+
+        # Issue #1247: a record long past its applies_at is neither pending nor applied (before the FSM reads it).
+        self._expire_stale_fan_deferral_record("deactivate")
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
         from .fan_fsm import FanFsmEventKind

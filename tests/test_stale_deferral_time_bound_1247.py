@@ -133,23 +133,38 @@ def test_on_time_deferred_stop_is_still_reported_as_applied(clock, caplog, fan_m
     assert _EXIT in caplog.text
 
 
-def test_dup_comparison_ignores_a_stale_record():
-    """The DUP match needs a record equal to the fresh applies_at, so a stale one can only be reached by a forged
-    clock; the comparison still must not call it a duplicate (pure decision)."""
+def test_dup_comparison_ignores_a_stale_record(monkeypatch):
+    """The DUP match needs a record equal to the fresh applies_at, and the DUP branch is only reached while
+    ``now < applies_at`` -- so a stale record there can only come from a forged clock. Forge it (``instant_after``
+    returns the hour-old record) to exercise the guard itself: it must not call that record a duplicate."""
     from datetime import UTC, datetime
 
-    last = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
-    applies = last + timedelta(seconds=300)
+    from custom_components.climate_advisor import fan_toggle_rate_limit as frl
+
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    stale = now - timedelta(seconds=FAN_DEFERRAL_STALE_AFTER_S + 60)
+    monkeypatch.setattr(frl, "instant_after", lambda _s, *, now=None: stale)
     inputs = FanToggleRateLimitInputs(
-        last_toggle_command_time=last,
+        last_toggle_command_time=now - timedelta(seconds=30),
         action="activate",
-        rate_limited_until=applies,
+        rate_limited_until=stale,
         rate_limited_direction="activate",
-        min_interval_s=FAN_DEFERRAL_STALE_AFTER_S * 3,  # floor longer than the staleness bound
-        now=applies + timedelta(seconds=FAN_DEFERRAL_STALE_AFTER_S + 60),
+        min_interval_s=300.0,
+        now=now,
     )
-    outcome, _ = decide_fan_toggle_rate_limit(inputs)
-    assert outcome is FanToggleRateLimitOutcome.DEFER_NEW
+    assert decide_fan_toggle_rate_limit(inputs) == (FanToggleRateLimitOutcome.DEFER_NEW, stale)
+    # Control: the same forged record, not yet stale, is still a duplicate.
+    fresh = now + timedelta(seconds=270)
+    monkeypatch.setattr(frl, "instant_after", lambda _s, *, now=None: fresh)
+    inputs = FanToggleRateLimitInputs(
+        last_toggle_command_time=now - timedelta(seconds=30),
+        action="activate",
+        rate_limited_until=fresh,
+        rate_limited_direction="activate",
+        min_interval_s=300.0,
+        now=now,
+    )
+    assert decide_fan_toggle_rate_limit(inputs) == (FanToggleRateLimitOutcome.DEFER_DUPLICATE, fresh)
 
 
 def test_staleness_bound_separates_on_time_retries_from_the_hourly_retry():

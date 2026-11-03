@@ -763,7 +763,7 @@ the `_paused_by_door` property setter; a same-handler save-and-restore of the fl
 `_clear_fan_deferral_record()` is the one choke point (called by the pause-end setter, `handle_all_doors_windows_closed()`,
 the occupant's fan on/off, and by `_activate_fan()`/`_deactivate_fan()` for the opposite direction, except the reconcile "no-fan" bookkeeping call, which
 passes `abandons_deferral=False` because the paused-reactivation retry still applies that start); when it clears an
-"activate" record a pending fact bound to it is dropped in the same step, so the two never disagree. Pending fact, marker, run, kind and start time are not persisted.
+"activate" record a pending fact bound to it is dropped in the same step, so the two never disagree. A record more than 2100 s past its `applies_at` is expired the same way before the next `_activate_fan()`/`_deactivate_fan()` reads it (Issue #1247), so a start that lands that late does not promote the pending fact (label only). Pending fact, marker, run, kind and start time are not persisted.
 
 Logging (INFO, outcome first): `marker armed (label only)`, `marker not armed, no live run to bind it to`,
 `pending raised`, `pending promoted`, `pending discarded: reason=...`, `marker consumed, run matched (label

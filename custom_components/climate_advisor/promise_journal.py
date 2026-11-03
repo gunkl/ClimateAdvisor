@@ -15,6 +15,7 @@ window of at most ``JOURNAL_MAX_AGE`` and never a false alarm).
 from __future__ import annotations
 
 from collections import OrderedDict, deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -444,8 +445,9 @@ class PromiseJournal:
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._notices: deque[list] = deque(maxlen=MAX_NOTICES)  # [opened, closed|None]
         self._runs: dict[str, datetime] = {}  # run series -> end of the last reported span
-        # Issue #1260: excused-time series -> (end of the last counted span, minutes already counted for that run)
-        self._excused_runs: dict[str, tuple[datetime, float]] = {}
+        # Issues #1260/#1262: excused-time series -> (end of the open run, ``counted_until``: everything up to this
+        # instant is already counted). Like the readings it is derived from, it is not persisted.
+        self._excused_runs: dict[str, tuple[datetime, datetime]] = {}
 
     # ── recording ────────────────────────────────────────────────────────────
     def record_reading(self, reading: Reading) -> bool:
@@ -563,20 +565,25 @@ class PromiseJournal:
             self._seen.popitem(last=False)
         return True
 
-    def excused_progress(self, key: RunKey, minutes: float) -> tuple[bool, float]:
-        """``(new_run, added_minutes)`` for an excused-time record (Issue #1260), counting each minute once.
+    def excused_progress(self, key: RunKey, intervals: Sequence[tuple[datetime, datetime]]) -> tuple[bool, float]:
+        """``(new_run, added_minutes)`` for an excused-time record (Issues #1260, #1262), counting each minute once.
 
-        Same run semantics as ``is_new``: a span starting at or before the last counted span's end is the same,
-        still-open run and only its growth is added; otherwise a new run opens and all its minutes are added. The
-        window slides, so the minutes seen may shrink; they are never counted down.
+        Same run semantics as ``is_new``: a span starting at or before the open run's end is the same, still-open
+        run; otherwise a new run opens. Only the part of ``intervals`` after the series' ``counted_until`` is added,
+        then ``counted_until`` advances, so a stretch longer than the sliding window is counted in full.
         """
         prev = self._excused_runs.get(key.series)
-        if prev is not None and key.start <= prev[0]:
-            counted = max(prev[1], minutes)
-            self._excused_runs[key.series] = (max(prev[0], key.end), counted)
-            return False, counted - prev[1]
-        self._excused_runs[key.series] = (key.end, minutes)
-        return True, minutes
+        new_run = prev is None or key.start > prev[0]
+        counted_until = None if prev is None or new_run else prev[1]
+        added = 0.0
+        for start, end in intervals:
+            lo = start if counted_until is None else max(start, counted_until)
+            if end > lo:
+                added += (end - lo).total_seconds() / 60.0
+                counted_until = end
+        run_end = key.end if prev is None or new_run else max(prev[0], key.end)
+        self._excused_runs[key.series] = (run_end, counted_until if counted_until is not None else key.start)
+        return new_run, added
 
     # ── introspection (tests, diagnostics) ───────────────────────────────────
     def sizes(self) -> dict[str, int]:

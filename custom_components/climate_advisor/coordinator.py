@@ -8585,7 +8585,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         excused_changed = False
         try:  # bookkeeping only: a failure here must never stop the hits below (P9 alerts) from being reported
             for ex in run_promise_excused(window, cfg, scope=SCOPE_HOME):
-                new_run, added = journal.excused_progress(ex.key, ex.minutes)
+                new_run, added = journal.excused_progress(ex.key, ex.intervals)
                 if new_run or added > 0:
                     bump_promise_excused(self._promise_stats, ex.promise, ex.excused_by, ex.ts, added, new_run=new_run)
                     if new_run:

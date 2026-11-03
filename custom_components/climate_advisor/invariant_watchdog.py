@@ -393,6 +393,9 @@ class Excused:
     excused_by: str
     minutes: float
     evidence: Evidence = ()
+    # Issue #1262: the excused spans themselves ((start, end), time-ordered, non-overlapping), so a consumer counts
+    # each minute once however far the evidence window slides. ``minutes`` is only what the window still shows.
+    intervals: tuple[tuple[datetime, datetime], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1164,7 +1167,10 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     for idx, r in enumerate(rs):
         if pending is not None:
             run_p, ts_p = pending
-            run_p["excused_min"] += min(_mins(ts_p, r.ts), NUMBERS.P7_MAX_GAP_MIN)
+            span = min(_mins(ts_p, r.ts), NUMBERS.P7_MAX_GAP_MIN)
+            run_p["excused_min"] += span
+            if span > 0:
+                run_p["excused_iv"].append((ts_p, ts_p + timedelta(minutes=span)))
             pending = None
         o = outside(r)
         if o is None or not in_control(idx, r, o[0], o[1]):
@@ -1172,7 +1178,15 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
             continue
         side, dist = o
         if cur is None or side != cur["side"] or r.ts - cur["last"] > gap:
-            cur = {"start": r.ts, "side": side, "worst": 0.0, "cross": None, "last": r.ts, "excused_min": 0.0}
+            cur = {
+                "start": r.ts,
+                "side": side,
+                "worst": 0.0,
+                "cross": None,
+                "last": r.ts,
+                "excused_min": 0.0,
+                "excused_iv": [],
+            }
             runs.append(cur)
         cur["last"] = r.ts
         cur["worst"] = max(cur["worst"], dist)
@@ -1229,6 +1243,7 @@ def excused_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Excus
                 excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND,
                 minutes=run["excused_min"],
                 evidence=_ev(minutes=run["excused_min"], side=run["side"], excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND),
+                intervals=tuple(run["excused_iv"]),
             )
         )
     return out

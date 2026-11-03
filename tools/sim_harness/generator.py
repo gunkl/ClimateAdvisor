@@ -120,7 +120,7 @@ WHF_ORDERS = (
 # Drawn from SEPARATE rolls after the original ones, so a seed that does not fire one keeps its original order.
 OCCUPANT_ORDERS = (
     "fan_on_then_occupant_hvac_on",  # WHF: fan on, then the occupant turns the AC/heat on 1-25 min later
-    "fan_on_then_occupant_hvac_on_fast",  # WHF: AC running, fan on, the occupant presses HVAC 1-3 s after CA's stop
+    "fan_on_then_occupant_hvac_on_fast",  # WHF: AC running, fan on, the occupant presses HVAC 3-5 s after CA's stop
     "hvac_on_then_fan_on",  # WHF: the AC is already running, then the occupant switches the fan on
     "blower_press_hvac_fan",  # hvac_fan: the occupant presses the thermostat blower (tracked as a fan override)
     "blower_press_whf_mode",  # whole_house_fan: the same press is NOT tracked (no override, no grace, no stop)
@@ -233,7 +233,10 @@ def _apply_whf_hazard(
         elif occupant_order == "fan_on_then_occupant_hvac_on_fast":
             put(t0 - 2.0, "occupant_hvac_on", {"hvac_mode": hvac_mode})  # the AC runs when the fan starts
             put(t0, "external_fan_state_change", dict(fan_on))
-            lag_s = 1.0 + float(int(occupant_lag_roll * 3))  # 1 .. 3 s after CA's own suppression
+            # Owner decision 2026-11-03 (#1279, #1203): pressing heat/AC again within 3 s of switching the fan on is not
+            # a supported occupant action (production reads it as Climate Advisor's own echo), so the generator never
+            # draws it. 3 s is the boundary production handles; same draw, so no other generated day changes.
+            lag_s = 3.0 + float(int(occupant_lag_roll * 3))  # 3 .. 5 s after CA's own suppression
             put(t0 + lag_s / 60.0, "occupant_hvac_on", {"hvac_mode": hvac_mode})
             record["occupant_after_s"] = lag_s
         elif occupant_order == "hvac_on_then_fan_on":

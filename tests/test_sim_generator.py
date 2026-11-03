@@ -250,41 +250,9 @@ def test_run_plan_is_the_same_as_run_day() -> None:
 _UNTRIAGED_ON_HEAD: set[str] = set()
 
 
+# Owner decision 2026-11-03 (#1279, reaffirming closed #1203): pressing heat/AC again within 3 s of switching
+# the whole-house fan on is not a supported occupant action, so the generator never draws it and nothing is excused.
 _FAST_ORDER = "fan_on_then_occupant_hvac_on_fast"
-# Real #1203 hits (seeds 21000027, 21000052, 102000001, 102000030, 102000039) all read command_age_s == 44.0;
-# 60 s leaves one reporting interval of headroom and still excludes a slow-order or stale-command regression.
-_ECHO_MAX_COMMAND_AGE_S = 60.0
-
-
-def _excused(hit, plan, events) -> str | None:
-    """Issue #1179 calibration: the production finding the new generated orders surfaced (#1203).
-
-    Matched on the MECHANISM the hit carries plus the day's own order, never on a seed; every other hit still fails
-    the smoke run.  #1203 is a documented limitation (closed, accepted).  The two #1204 branches were removed when
-    #1204 was fixed (0.8.33): a fixed defect must not stay tolerated.
-    """
-    m = hit.mechanism or {}
-    whf = plan.whf or {}
-    if (
-        hit.promise == "ac_whf_mutex"
-        and whf.get("order") == _FAST_ORDER
-        and m.get("command_reason") == "natural ventilation"
-        and m.get("command_origin") == "ca"
-        and m.get("command_age_s") is not None
-        and m["command_age_s"] <= _ECHO_MAX_COMMAND_AGE_S
-        # production's echo guard is ``_is_recent_hvac_command(3.0)``: only a press strictly inside it is the echo
-        and (whf.get("occupant_after_s") or 99.0) < 3.0
-    ):
-        return (
-            "Documented limitation (closed #1203), rule 2: a press within ~3 s of CA's own suppression reads as an echo"
-        )
-    return None
-
-
-def _open_defect(day_seed: int, hit) -> str | None:
-    if hit.promise != "ac_whf_mutex":
-        return None
-    return _excused(hit, build_plan(day_seed), ())
 
 
 # Nightly / epic-#1125 seeds that each broke ``override_respected`` before the "protect the occupant's manual
@@ -324,11 +292,7 @@ def test_smoke_generated_days_keep_the_household_promises(master_seed: int) -> N
     """
     res = run_batch(master_seed, CI_SMOKE_DAYS)
     assert res.errors == [] and res.callback_error_days == []
-    broken = {
-        k: [(d, h.detail) for d, h in v if _open_defect(d, h) is None][:2]
-        for k, v in res.hits.items()
-        if k not in _UNTRIAGED_ON_HEAD
-    }
+    broken = {k: [(d, h.detail) for d, h in v][:2] for k, v in res.hits.items() if k not in _UNTRIAGED_ON_HEAD}
     broken = {k: v for k, v in broken.items() if v}
     assert not broken, f"a hard household promise broke on generated days (replay: --generate-day <seed>): {broken}"
 
@@ -700,7 +664,7 @@ def test_the_new_orders_are_timed_as_named() -> None:
                 assert len(fan_on) == 1 and len(presses) == 1 and 1.0 <= presses[0] - fan_on[0] <= 25.0
             elif order == "fan_on_then_occupant_hvac_on_fast":
                 assert len(presses) == 2 and presses[0] < fan_on[0] < presses[1]
-                assert 0.0 < (presses[1] - fan_on[0]) * 60 <= 3.0 + 1e-6
+                assert 3.0 - 1e-6 <= (presses[1] - fan_on[0]) * 60 <= 5.0 + 1e-6  # never inside the 3 s echo guard
             elif order == "hvac_on_then_fan_on":
                 assert presses == [fan_on[0] - 2.0]
             elif order == "blower_press_hvac_fan":
@@ -738,8 +702,10 @@ def test_a_fan_pressed_while_the_ac_runs_suppresses_the_hvac() -> None:
     assert _acts(rec, "climate", "set_hvac_mode", hvac_mode="off")
 
 
-_FAST_PRESS_CLEAN_SEEDS = (21000038, 21000152)
-_FAST_PRESS_RACE_SEEDS = (21000027, 21000052, 21000080, 21000087)  # 4 of the first 6 drawn days break rule 2
+# Every fast-order day presses 3-5 s after the fan (owner decision #1279). The 3.0 s seeds sit exactly on the
+# boundary of production's 3 s echo guard; 21000027/52/80/87 were the #1203 race seeds when presses came at 1-2 s.
+_FAST_PRESS_BOUNDARY_SEEDS = (21000027, 21000052, 21000080)  # press at 3.0 s
+_FAST_PRESS_SEEDS = (*_FAST_PRESS_BOUNDARY_SEEDS, 21000087, 21000038, 21000152)  # 4.0 s, 5.0 s, 5.0 s
 
 
 def _fast_press_day(day_seed: int):
@@ -748,25 +714,12 @@ def _fast_press_day(day_seed: int):
     return p
 
 
-@pytest.mark.parametrize("day_seed", _FAST_PRESS_CLEAN_SEEDS)
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_SEEDS)
 def test_an_hvac_press_seconds_after_climate_advisors_own_suppression_is_the_newest_action(day_seed) -> None:
     rec = run_plan(_fast_press_day(day_seed))
     assert rec.callback_errors == 0
     assert any(e[0] == "whf_hvac_suppressed" for e in rec.event_log)  # CA suppressed the AC when the fan started
     assert not [h for h in rec.report.hard if h.promise == "ac_whf_mutex"], [h.detail for h in rec.report.hard]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "accepted limitation #1203; if this starts passing, the limitation is gone, so update the docs "
-        "(08-COMPUTATION-REFERENCE.md known-limitation note) and remove the excuse"
-    ),
-)
-@pytest.mark.parametrize("day_seed", _FAST_PRESS_RACE_SEEDS)
-def test_known_limitation_hvac_press_seconds_after_suppression_leaves_ac_and_fan_running_together(day_seed) -> None:
-    rec = run_plan(_fast_press_day(day_seed))
-    assert not [h for h in rec.report.hard if h.promise == "ac_whf_mutex"]
 
 
 # Issue #1204 (found by the #1179 calibration): days that used to report a false P4 miss. 303000022: rule 2's newer
@@ -784,44 +737,10 @@ def _hits_of(day_seed: int, promise: str) -> list:
     return [h for h in run_day(day_seed).report.hard if h.promise == promise]
 
 
-@pytest.mark.parametrize("day_seed", (21000027, 21000052))
-def test_the_1203_excuse_still_covers_the_real_hits(day_seed) -> None:
-    hits = _hits_of(day_seed, "ac_whf_mutex")
-    assert hits and all(_open_defect(day_seed, h) for h in hits)
-
-
-def test_the_1203_excuse_does_not_cover_a_slow_order_or_a_stale_command(mutex_enforcement_removed) -> None:
-
-    # a slow-order regression (rule 2 removed) must hit ac_whf_mutex and stay unexcused
-    plans = _plans_for("fan_on_then_occupant_hvac_on", window_open=True, command_only=False)[:3]
-    hits = [(p, h) for p in plans for h in run_plan(p).report.hard if h.promise == "ac_whf_mutex"]
-    assert hits
-    assert all(_excused(h, p, ()) is None for p, h in hits)
-
-
-def test_the_1203_excuse_needs_the_fast_order_and_a_fresh_command() -> None:
-    from types import SimpleNamespace
-
-    # the real fast-order mechanism with an old command, or under a slow order, is a different defect shape
-    plan = build_plan(21000027)
-    real = next(h for h in _hits_of(21000027, "ac_whf_mutex") if _excused(h, plan, ()) is not None)
-    assert _excused(real, plan, ()) is not None
-    assert (
-        _excused(
-            SimpleNamespace(promise=real.promise, ts=real.ts, mechanism={**real.mechanism, "command_age_s": 300.0}),
-            plan,
-            (),
-        )
-        is None
-    )
-    slow_plan = SimpleNamespace(whf={**plan.whf, "order": "fan_on_then_occupant_hvac_on"})
-    assert _excused(real, slow_plan, ()) is None
-
-
-@pytest.mark.parametrize("day_seed", _FAST_PRESS_CLEAN_SEEDS)
-def test_the_1203_excuse_does_not_follow_a_widened_echo_guard(day_seed, monkeypatch) -> None:
-    """The clean seeds press at 3.0 s.  If production's echo guard (3 s) is widened to 5 s they start to break
-    rule 2; that regression must fail loudly, not be excused as the documented limitation."""
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_BOUNDARY_SEEDS)
+def test_a_widened_echo_guard_breaks_rule_2_on_the_boundary_days(day_seed, monkeypatch) -> None:
+    """The boundary seeds press at 3.0 s.  If production's echo guard (3 s) is widened to 5 s they break rule 2;
+    the generated days must catch that regression (nothing excuses it)."""
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
 
     real = ClimateAdvisorCoordinator._is_recent_hvac_command
@@ -830,8 +749,7 @@ def test_the_1203_excuse_does_not_follow_a_widened_echo_guard(day_seed, monkeypa
     )
     plan = _fast_press_day(day_seed)
     hits = [h for h in run_plan(plan).report.hard if h.promise == "ac_whf_mutex"]
-    assert hits, "a 5 s echo guard no longer breaks rule 2 on this seed; pick another clean seed"
-    assert all(_excused(h, plan, ()) is None for h in hits)
+    assert hits, "a 5 s echo guard no longer breaks rule 2 on this seed; pick another 3.0 s seed"
 
 
 def test_a_blower_press_under_whole_house_fan_is_not_a_fan_override_and_does_not_suppress_the_hvac() -> None:
@@ -894,8 +812,8 @@ def mutex_enforcement_removed(monkeypatch):
 )
 def test_the_rule_2_orders_catch_a_broken_newest_action_wins(order, mutex_enforcement_removed) -> None:
     """Exercise (a): delete the behaviour from production and the day must fail ac_whf_mutex."""
-    if order == _FAST_ORDER:  # clean seeds: they do not already break the rule unmutated (see the race seeds)
-        plans = [_fast_press_day(s) for s in _FAST_PRESS_CLEAN_SEEDS]
+    if order == _FAST_ORDER:
+        plans = [_fast_press_day(s) for s in _FAST_PRESS_BOUNDARY_SEEDS]
     else:
         plans = _plans_for(order, window_open=True, command_only=False)[:3]
     hits = []

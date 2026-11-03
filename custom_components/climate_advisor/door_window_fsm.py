@@ -218,7 +218,6 @@ class DoorWindowFsmInputs:
       within_planned_window               -> self._is_within_planned_window_period()
       any_sensor_open                     -> self._any_monitored_sensor_settled_open() (Issue #1181;
                                              Issue #1227: a sensor still inside its delay is not open)
-      sensor_debounce_pending             -> self._sensor_debounce_pending
       override_matches_current_decision   -> self._override_matches_current_decision(
                                               self._current_classification)
       grace_source                        -> self._last_resume_source ("manual" | "automation")
@@ -308,7 +307,6 @@ class DoorWindowFsmInputs:
     aggressive_savings: bool
     within_planned_window: bool
     any_sensor_open: bool
-    sensor_debounce_pending: bool
     override_matches_current_decision: bool
     grace_source: str
     natural_vent_active: bool
@@ -466,8 +464,7 @@ def _sync_reconcile_next_state(
     if not decide_open_sensor_hold(
         natural_vent_active=inputs.natural_vent_active,
         whf_owns_hvac=inputs.whf_owns_hvac,
-        debounce_pending=inputs.sensor_debounce_pending,
-        any_sensor_open=inputs.any_sensor_open,
+        any_sensor_settled_open=inputs.any_sensor_open,
     ):
         return current_state
 

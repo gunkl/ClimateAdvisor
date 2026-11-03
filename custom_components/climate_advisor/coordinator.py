@@ -364,7 +364,6 @@ from .temperature import (
     find_temperature_crossing,
     format_temp,
     format_temp_delta,
-    free_cooling_direction_ok,
     ha_system_unit,
     is_sensor_stale,
     next_fallback_episode,
@@ -6586,6 +6585,134 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         await self.automation_engine.remote_offset_check()
 
+    async def _track_hvac_runtime_edges(self, old_state: Any, new_state: Any) -> None:
+        """HVAC runtime tracking via hvac_action (preferred) or mode: on/off/glide edges of the session.
+
+        Starts/flushes the runtime timer and opens/ends the heat/cool thermal observation at the thermostat's
+        real edges. Called by ``_async_thermostat_changed`` ahead of the startup-coalescing return (Issue #1286).
+        """
+        new_action = new_state.attributes.get("hvac_action", "").lower()
+        old_action = old_state.attributes.get("hvac_action", "").lower()
+
+        if is_hvac_compressor_active(old_action) or is_hvac_compressor_active(new_action):
+            # At least one side shows active heating/cooling — hvac_action is providing a
+            # meaningful signal, prefer it for precise on/off edge detection.
+            was_running = is_hvac_compressor_active(old_action)
+            is_running = is_hvac_compressor_active(new_action)
+        else:
+            # hvac_action gives no heating/cooling signal (both are "fan", "idle", or absent).
+            # Some thermostats report hvac_action="fan" persistently (even when off/idle),
+            # which would trap this branch indefinitely if we used the old `new_action and
+            # old_action` guard.  Fall back to hvac_mode state for reliable edge detection.
+            # Issue #1240: the fallback is for thermostats whose hvac_action carries no signal
+            # (missing, or "fan" persistently — #93). A side that positively reports "idle"/"off"
+            # IS a signal: the equipment is not running, whatever hvac_mode is selected. Before,
+            # off->heat while idle armed the runtime timer and heat->off (or the day rollover)
+            # credited the whole idle window as runtime; and a "fan" heat session kept counting
+            # after the thermostat turned idle until the mode was switched off. Applied to both
+            # sides so the start, stop and glide edges agree.
+            was_running = is_mode_fallback_running(old_state.state, old_action)
+            is_running = is_mode_fallback_running(new_state.state, new_action)
+            # Issue #986: this state-based fallback can't tell "hvac_mode is cool/heat and
+            # the compressor just hasn't confirmed yet" apart from "CA's own fan-only
+            # ventilation is running while hvac_mode happens to read cool/heat" — the
+            # thermostat's mode selection alone doesn't mean the compressor ever ran. CA
+            # already knows with certainty when IT turned the fan on (via _fan_active /
+            # _natural_vent_active — the same ground-truth flags the passive_decay/
+            # solar_gain observation guards already key off, coordinator.py ~7203) — no
+            # heuristic detection is needed for CA's own commanded fan activity. Don't let
+            # this fallback treat it as a real heat/cool session starting (it would
+            # otherwise open a fake OBS_TYPE_HVAC_COOL/HEAT observation and start the
+            # runtime timer for ventilation CA itself knows isn't compressor activity).
+            if is_running and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active):
+                is_running = False
+
+        _LOGGER.info(
+            "_async_thermostat_changed: hvac action=%s was_running=%s is_running=%s",
+            new_action,
+            was_running,
+            is_running,
+        )
+
+        if not was_running and is_running:
+            # HVAC just turned on — determine session_mode from hvac_action or hvac_mode
+            action = new_action
+            if action == "heating":
+                session_mode = "heat"
+            elif action == "cooling":
+                session_mode = "cool"
+            elif new_state.state == "heat":
+                # Fallback: some thermostats report hvac_action="fan" (or nothing) at
+                # compressor startup before transitioning to "heating". An "idle" startup no
+                # longer reaches here (Issue #1240): it starts at the real "heating" edge.
+                session_mode = "heat"
+            elif new_state.state == "cool":
+                session_mode = "cool"
+            elif new_state.state == "fan_only":
+                session_mode = "fan_only"
+            else:
+                session_mode = None
+            # Issue #912: store the resolved mode and start the correctly-scoped timer
+            # via _RUNTIME_TRACKING, instead of unconditionally setting _hvac_on_since
+            # (which blended fan_only runtime into hvac_runtime_minutes). Only heat/cool
+            # start a thermal observation — a fan_only session is not compressor/burner
+            # activity and must never be recorded as an OBS_TYPE_HVAC_COOL observation.
+            self._hvac_session_mode = session_mode
+            if session_mode in self._RUNTIME_TRACKING:
+                self._start_runtime_timer(session_mode)
+            # Issue #1234: a phantom session (mode change while hvac_action reads idle/off) never reaches
+            # here since #1240 gates is_running on is_hvac_action_reported_idle, so it opens no observation
+            # and no swing sample; the real hvac_action edge starts the observation.
+            if session_mode in ("heat", "cool"):
+                await self._start_hvac_observation(session_mode)
+        elif was_running and not is_running:
+            # HVAC just turned off — flush runtime (whichever mode was active) and end
+            # active phase
+            self._flush_runtime_for_mode(self._hvac_session_mode)
+            for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
+                self._end_hvac_active_phase(_hvac_ot)
+            self._hvac_on_since = None
+            self._thermostat_fan_only_on_since = None
+            self._hvac_session_mode = None
+            self._spawn(self._async_save_state())
+        elif was_running and is_running and old_action != new_action:
+            # heat_cool mode: hvac_action switched heating↔cooling mid-session
+            if is_hvac_compressor_active(old_action) and is_hvac_compressor_active(new_action):
+                _LOGGER.info(
+                    "heat_cool mid-session switch %s → %s: abandoning current event",
+                    old_action,
+                    new_action,
+                )
+                for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
+                    self._abandon_observation(_hvac_ot, "heat_cool mode switch mid-session")
+                new_session_mode = "heat" if new_action == "heating" else "cool"
+                self._glide_hvac_session_mode(new_session_mode)
+                await self._start_hvac_observation(new_session_mode)
+            elif (
+                old_state.state != new_state.state
+                and old_state.state in self._RUNTIME_TRACKING
+                and new_state.state in self._RUNTIME_TRACKING
+            ):
+                # Issue #912: hvac_action distinguished old vs. new (e.g. "" vs. "fan")
+                # but neither side is a running heat/cool action, so the inner branch
+                # above didn't apply — this is a heat/cool <-> fan_only glide instead.
+                self._glide_hvac_session_mode(new_state.state)
+        elif (
+            was_running
+            and is_running
+            and old_action == new_action
+            and old_state.state != new_state.state
+            and old_state.state in self._RUNTIME_TRACKING
+            and new_state.state in self._RUNTIME_TRACKING
+        ):
+            # Issue #912: in-place mode change among tracked modes (heat/cool/fan_only)
+            # where hvac_action gave no distinguishing signal at all on either side (both
+            # sides fell back to state-based was_running/is_running detection above), so
+            # no on/off edge was ever detected for this transition. Most common case: a
+            # thermostat whose hvac_action doesn't reliably report during a post-heat-
+            # cycle fan_only purge.
+            self._glide_hvac_session_mode(new_state.state)
+
     @_whf_safety_after_event(_whf_after_thermostat_event)
     async def _async_thermostat_changed(self, event: Event) -> None:
         """Track thermostat changes for learning (detect manual overrides)."""
@@ -6630,6 +6757,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1234: sample the thermostat's own hysteresis at each REAL hvac_action edge. Before any
         # early return (like the equipment-activity stamp) so a short cycle is never missed; never raises.
         await self._track_swing_edges(old_state, new_state)
+
+        # Issue #1286: HVAC runtime/session edges are equipment facts, not occupant changes, so they are tracked
+        # before the startup-coalescing return (which exists to suppress override detection only, #321). A
+        # restart mid-run used to miss a stop inside the ~300 s window and kept counting runtime (and sampling
+        # the heat/cool observation) for idle equipment; a start inside it was not counted until coalescing ended.
+        await self._track_hvac_runtime_edges(old_state, new_state)
 
         # Bug 1 (Issue #321): Suppress override detection during startup coalescing window
         if self._suppress_during_startup_coalescing(f"thermostat override detection for {new_state.state}"):
@@ -6867,128 +7000,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             _mode_override_detected = True
 
-        # HVAC runtime tracking via hvac_action (preferred) or mode
         new_action = new_state.attributes.get("hvac_action", "").lower()
         old_action = old_state.attributes.get("hvac_action", "").lower()
-
-        if is_hvac_compressor_active(old_action) or is_hvac_compressor_active(new_action):
-            # At least one side shows active heating/cooling — hvac_action is providing a
-            # meaningful signal, prefer it for precise on/off edge detection.
-            was_running = is_hvac_compressor_active(old_action)
-            is_running = is_hvac_compressor_active(new_action)
-        else:
-            # hvac_action gives no heating/cooling signal (both are "fan", "idle", or absent).
-            # Some thermostats report hvac_action="fan" persistently (even when off/idle),
-            # which would trap this branch indefinitely if we used the old `new_action and
-            # old_action` guard.  Fall back to hvac_mode state for reliable edge detection.
-            # Issue #1240: the fallback is for thermostats whose hvac_action carries no signal
-            # (missing, or "fan" persistently — #93). A side that positively reports "idle"/"off"
-            # IS a signal: the equipment is not running, whatever hvac_mode is selected. Before,
-            # off->heat while idle armed the runtime timer and heat->off (or the day rollover)
-            # credited the whole idle window as runtime; and a "fan" heat session kept counting
-            # after the thermostat turned idle until the mode was switched off. Applied to both
-            # sides so the start, stop and glide edges agree.
-            was_running = is_mode_fallback_running(old_state.state, old_action)
-            is_running = is_mode_fallback_running(new_state.state, new_action)
-            # Issue #986: this state-based fallback can't tell "hvac_mode is cool/heat and
-            # the compressor just hasn't confirmed yet" apart from "CA's own fan-only
-            # ventilation is running while hvac_mode happens to read cool/heat" — the
-            # thermostat's mode selection alone doesn't mean the compressor ever ran. CA
-            # already knows with certainty when IT turned the fan on (via _fan_active /
-            # _natural_vent_active — the same ground-truth flags the passive_decay/
-            # solar_gain observation guards already key off, coordinator.py ~7203) — no
-            # heuristic detection is needed for CA's own commanded fan activity. Don't let
-            # this fallback treat it as a real heat/cool session starting (it would
-            # otherwise open a fake OBS_TYPE_HVAC_COOL/HEAT observation and start the
-            # runtime timer for ventilation CA itself knows isn't compressor activity).
-            if is_running and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active):
-                is_running = False
-
-        _LOGGER.info(
-            "_async_thermostat_changed: hvac action=%s was_running=%s is_running=%s",
-            new_action,
-            was_running,
-            is_running,
-        )
-
-        if not was_running and is_running:
-            # HVAC just turned on — determine session_mode from hvac_action or hvac_mode
-            action = new_action
-            if action == "heating":
-                session_mode = "heat"
-            elif action == "cooling":
-                session_mode = "cool"
-            elif new_state.state == "heat":
-                # Fallback: some thermostats report hvac_action="fan" (or nothing) at
-                # compressor startup before transitioning to "heating". An "idle" startup no
-                # longer reaches here (Issue #1240): it starts at the real "heating" edge.
-                session_mode = "heat"
-            elif new_state.state == "cool":
-                session_mode = "cool"
-            elif new_state.state == "fan_only":
-                session_mode = "fan_only"
-            else:
-                session_mode = None
-            # Issue #912: store the resolved mode and start the correctly-scoped timer
-            # via _RUNTIME_TRACKING, instead of unconditionally setting _hvac_on_since
-            # (which blended fan_only runtime into hvac_runtime_minutes). Only heat/cool
-            # start a thermal observation — a fan_only session is not compressor/burner
-            # activity and must never be recorded as an OBS_TYPE_HVAC_COOL observation.
-            self._hvac_session_mode = session_mode
-            if session_mode in self._RUNTIME_TRACKING:
-                self._start_runtime_timer(session_mode)
-            # Issue #1234: a phantom session (mode change while hvac_action reads idle/off) never reaches
-            # here since #1240 gates is_running on is_hvac_action_reported_idle, so it opens no observation
-            # and no swing sample; the real hvac_action edge starts the observation.
-            if session_mode in ("heat", "cool"):
-                await self._start_hvac_observation(session_mode)
-        elif was_running and not is_running:
-            # HVAC just turned off — flush runtime (whichever mode was active) and end
-            # active phase
-            self._flush_runtime_for_mode(self._hvac_session_mode)
-            for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                self._end_hvac_active_phase(_hvac_ot)
-            self._hvac_on_since = None
-            self._thermostat_fan_only_on_since = None
-            self._hvac_session_mode = None
-            self._spawn(self._async_save_state())
-        elif was_running and is_running and old_action != new_action:
-            # heat_cool mode: hvac_action switched heating↔cooling mid-session
-            if is_hvac_compressor_active(old_action) and is_hvac_compressor_active(new_action):
-                _LOGGER.info(
-                    "heat_cool mid-session switch %s → %s: abandoning current event",
-                    old_action,
-                    new_action,
-                )
-                for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                    self._abandon_observation(_hvac_ot, "heat_cool mode switch mid-session")
-                new_session_mode = "heat" if new_action == "heating" else "cool"
-                self._glide_hvac_session_mode(new_session_mode)
-                await self._start_hvac_observation(new_session_mode)
-            elif (
-                old_state.state != new_state.state
-                and old_state.state in self._RUNTIME_TRACKING
-                and new_state.state in self._RUNTIME_TRACKING
-            ):
-                # Issue #912: hvac_action distinguished old vs. new (e.g. "" vs. "fan")
-                # but neither side is a running heat/cool action, so the inner branch
-                # above didn't apply — this is a heat/cool <-> fan_only glide instead.
-                self._glide_hvac_session_mode(new_state.state)
-        elif (
-            was_running
-            and is_running
-            and old_action == new_action
-            and old_state.state != new_state.state
-            and old_state.state in self._RUNTIME_TRACKING
-            and new_state.state in self._RUNTIME_TRACKING
-        ):
-            # Issue #912: in-place mode change among tracked modes (heat/cool/fan_only)
-            # where hvac_action gave no distinguishing signal at all on either side (both
-            # sides fell back to state-based was_running/is_running detection above), so
-            # no on/off edge was ever detected for this transition. Most common case: a
-            # thermostat whose hvac_action doesn't reliably report during a post-heat-
-            # cycle fan_only purge.
-            self._glide_hvac_session_mode(new_state.state)
 
         # Issue #347: Post-startup reconcile for thermostat-autonomous fan-on.
         # When hvac_action transitions to "fan" (e.g. thermostat fan-circulation between
@@ -11142,11 +11155,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     ) -> str:
         """Compute the next recommended human action for display.
 
-        Every window/fan cooling (or heating) suggestion is gated on
-        free_cooling_direction_ok() — the same live outdoor-vs-indoor direction
-        guard already enforced in automation.py's economizer/nat-vent gates
-        (Issue #327) — so this display text can never recommend an action that
-        would work against the occupant's actual comfort goal (Issue #428).
+        Every window/fan cooling (or heating) suggestion is gated on ONE live direction
+        rule, ``_outdoor_direction_ok()`` against the band the thermostat is armed with
+        (Issues #428, #1211, #1276) -- the same rule the live windows gate uses -- so this
+        display text can never recommend an action that would work against the occupant's
+        actual comfort goal (e.g. "open windows" into a house at its floor with the heat on).
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         comfort_cool = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
@@ -11200,7 +11213,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # instance of this exact duplication class, and CLAUDE.md's card-ontology table.
 
         now = dt_util.now().time()
-        direction_ok = free_cooling_direction_ok(outdoor_temp, indoor_temp)
+        # Issue #1136: judge "too warm / too cold" against the band the thermostat is armed
+        # with right now (sleep at night, setback away -- the engine's one resolver), not the
+        # flat daytime comfort_heat/comfort_cool config values. Issue #1094: the resolver's awake
+        # edges are awake_comfort_edges(), so the Prefer savings margin is already included.
+        # With an engine the read goes through its _resolved_comfort_band() -- the same call (and the TOU
+        # away/vacation expansion the thermostat is armed with, Issue #1080) the restore, override matching
+        # and the status API use; without one, the bare resolver.
+        if ae is not None:
+            _armed = ae._resolved_comfort_band(c)
+        else:
+            _armed = resolve_active_band(
+                c,
+                self.config,
+                occupancy_mode=self._occupancy_mode,
+                now=dt_util.now(),
+            )
+        _armed_heat, _armed_cool = _armed.floor, _armed.ceiling
+        # Issues #1211/#1276: ONE direction rule for every branch of this card (the windows-day evening branch
+        # used the raw "outdoor cooler than indoor" test and told a house at its floor with the heat on to open
+        # up). Stage B of the shared outside-air rule plus the thermostat's swing at a held edge, applied to the
+        # band the thermostat is ARMED with (the gate uses the configured band and no held-edge margin, so the two
+        # can differ when Prefer savings widens the band or the house sits within a swing of a held edge). The card
+        # follows this live direction; the briefing follows the classifier's forecast answer, so the two can
+        # legitimately differ for part of a day.
+        direction_ok = self._outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool)
+        # Air going the wrong way: cooler air into a house the heat is holding (or warmer air into one the AC is).
+        heat_side_veto = outdoor_temp is not None and indoor_temp is not None and outdoor_temp < indoor_temp
 
         # Issue #817: prefer the ODE-adjusted cutoff (self._nat_vent_plan, the same
         # value the briefing/TLDR table and the Next Automation card read) over the
@@ -11221,6 +11260,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 if windows_physically_open:
                     if outdoor_temp is not None and indoor_temp is not None and not direction_ok:
+                        if heat_side_veto:
+                            return _decide(
+                                f"Close windows to hold heat — outdoor's cooler ({format_temp(outdoor_temp, unit)}"
+                                f" vs {format_temp(indoor_temp, unit)}).",
+                                outdoor=outdoor_temp,
+                                indoor=indoor_temp,
+                            )
                         return _decide(
                             _close_windows_msg(outdoor_temp, indoor_temp),
                             outdoor=outdoor_temp,
@@ -11228,10 +11274,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         )
                     return _decide("Windows open — you're all set.")
                 if outdoor_temp is not None and indoor_temp is not None:
-                    if direction_ok:
+                    if direction_ok and outdoor_temp < indoor_temp:
                         return _decide(
                             f"Open windows — outdoor's cooler now ({format_temp(outdoor_temp, unit)} vs"
                             f" {format_temp(indoor_temp, unit)}).",
+                            outdoor=outdoor_temp,
+                            indoor=indoor_temp,
+                        )
+                    if heat_side_veto:
+                        return _decide(
+                            f"Keep windows closed to hold heat — outdoor ({format_temp(outdoor_temp, unit)}) would"
+                            f" cool the house below its {format_temp(_armed_heat, unit)} floor.",
                             outdoor=outdoor_temp,
                             indoor=indoor_temp,
                         )
@@ -11291,32 +11344,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return _decide("Keep doors closed.")
 
         # WARM/MILD/COOL fallback: symmetric cooling-direction and heating-direction
-        # checks, both gated on live outdoor-vs-indoor direction (Issue #428).
-        # Issue #1136: judge "too warm / too cold" against the band the thermostat is armed
-        # with right now (sleep at night, setback away -- the engine's one resolver), not the
-        # flat daytime comfort_heat/comfort_cool config values. Issue #1094: the resolver's awake
-        # edges are awake_comfort_edges(), so the Prefer savings margin is already included.
-        # With an engine the read goes through its _resolved_comfort_band() -- the same call (and the TOU
-        # away/vacation expansion the thermostat is armed with, Issue #1080) the restore, override matching
-        # and the status API use; without one, the bare resolver.
-        if ae is not None:
-            _armed = ae._resolved_comfort_band(c)
-        else:
-            _armed = resolve_active_band(
-                c,
-                self.config,
-                occupancy_mode=self._occupancy_mode,
-                now=dt_util.now(),
-            )
-        _armed_heat, _armed_cool = _armed.floor, _armed.ceiling
+        # checks, both gated on the one live direction rule above (Issues #428, #1211, #1276).
         cooling_needed = indoor_temp is not None and indoor_temp > _armed_cool
         heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
-        # Issue #1211: ONE direction rule for both directions (stage B of the shared outside-air rule): above the
-        # armed ceiling outdoor must be cooler, below the armed floor warmer. The same function the live windows
-        # gate uses, applied here to the band the thermostat is ARMED with (the gate uses the configured band, so
-        # the two can differ when Prefer savings widens it). The card follows this live direction; the briefing
-        # follows the classifier's forecast answer, so the two can legitimately differ for part of a day.
-        direction_ok = outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool)
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
@@ -11820,6 +11850,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         state = self.hass.states.get(ae.climate_entity)
         mode = getattr(state, "state", None)
         return mode if isinstance(mode, str) else None
+
+    def _outdoor_direction_ok(
+        self, outdoor: float | None, indoor: float | None, comfort_heat: float, comfort_cool: float
+    ) -> bool:
+        """The ONE live "does outside air move the house the right way?" rule for advice (Issue #1276).
+
+        ``temperature.outdoor_direction_ok`` plus the thermostat's own swing at a band edge it holds: a house at
+        (or within one heat swing above) its floor with the heat side held is treated like a house below it, so
+        cooler air is not "helping" -- it would only start the heat (mirror: warmer air near the ceiling with
+        the cool side held). A door/window pause holds the thermostat Off on Climate Advisor's behalf, so the
+        mode the pause interrupted stands in for the live Off. Used by every branch of the Next User Action card,
+        so its advice cannot disagree with itself. The live windows gate (``_apply_outdoor_windows_gate``) keeps
+        the plain band rule: clearing ``windows_recommended`` also ends the planned-window period and drops the
+        morning "Open windows at" plan, a control change that is the owner's call (Issue #1276).
+        """
+        ae = getattr(self, "automation_engine", None)  # partially built coordinators in tests
+        mode = self._thermostat_hvac_mode() if ae is not None and getattr(self, "hass", None) is not None else None
+        if mode == "off" and ae is not None and ae._paused_by_door and ae._pre_pause_mode:
+            mode = ae._pre_pause_mode
+        swing_heat, swing_cool = self._learned_swings()
+        heat_margin = swing_tolerance(swing_heat)[0] if thermostat_holds_direction("heat", mode) else 0.0
+        cool_margin = swing_tolerance(swing_cool)[0] if thermostat_holds_direction("cool", mode) else 0.0
+        return outdoor_direction_ok(
+            outdoor, indoor, comfort_heat, comfort_cool, heat_margin=heat_margin, cool_margin=cool_margin
+        )
 
     def _is_within_thermostat_hysteresis(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
         """True if indoor is out of band only by the thermostat's own learned swing (Issue #1258).

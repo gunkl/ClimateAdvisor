@@ -165,3 +165,78 @@ class TestHouseIsSealed:
 
         assert house_is_sealed((SensorReading(is_open=False, unknown_for_s=30.0),)) is False
         assert house_is_sealed((SensorReading(is_open=False, unknown_for_s=61.0),)) is True
+
+
+def _overlap(**kw) -> WhfSafetyInputs:
+    """Issue #1288: the fan reads on with a window open and the thermostat heats beside it; no press stamps at all."""
+    base = {
+        "sensors": (OPEN,),
+        "thermostat_mode": "heat",
+        "hvac_action": "heating",
+        "overlap_for_s": 12.0,
+        "fan_on_for_s": 120.0,
+        "thermostat_mode_for_s": 30.0,
+        "whf_owns_hvac": True,
+    }
+    base.update(kw)
+    return _inputs(**base)
+
+
+class TestRule2StateBackstop:
+    """Issue #1288: a missed heat/AC press must not leave the fan and the heating/cooling running together."""
+
+    def test_below_the_overlap_threshold_it_waits_and_asks_again_in_time(self):
+        d = decide_whf_safety(_overlap(overlap_for_s=4.0))
+        assert d.action is WhfSafetyAction.DEFER and d.backstop
+        assert d.retry_in_s == 6.0
+
+    def test_heating_pressed_after_the_fan_stops_the_fan(self):
+        d = decide_whf_safety(_overlap(thermostat_mode_for_s=30.0, fan_on_for_s=120.0))
+        assert d.action is WhfSafetyAction.STOP_MUTEX_FAN and d.backstop
+
+    def test_a_fan_that_came_on_after_the_heating_suppresses_the_heating_even_when_already_owned(self):
+        d = decide_whf_safety(_overlap(thermostat_mode_for_s=600.0, fan_on_for_s=120.0, whf_owns_hvac=True))
+        assert d.action is WhfSafetyAction.SUPPRESS_HVAC and d.backstop
+
+    def test_unknown_ages_suppress_the_hvac(self):
+        d = decide_whf_safety(_overlap(thermostat_mode_for_s=None, fan_on_for_s=None))
+        assert d.action is WhfSafetyAction.SUPPRESS_HVAC
+
+    def test_cooling_counts_too(self):
+        d = decide_whf_safety(_overlap(thermostat_mode="cool", hvac_action="cooling"))
+        assert d.action is WhfSafetyAction.STOP_MUTEX_FAN
+
+    def test_a_stop_in_flight_is_not_decided_again(self):
+        d = decide_whf_safety(_overlap(stop_in_flight_for_s=5.0))
+        assert d.action is WhfSafetyAction.NONE and d.in_flight
+
+    def test_climate_advisors_own_recent_off_is_given_time_to_land(self):
+        d = decide_whf_safety(_overlap(own_hvac_off_for_s=3.0))
+        assert d.action is WhfSafetyAction.DEFER and d.retry_in_s == 7.0
+        assert decide_whf_safety(_overlap(own_hvac_off_for_s=10.0)).action is WhfSafetyAction.STOP_MUTEX_FAN
+
+    def test_a_command_only_fan_is_blind_by_design(self):
+        d = decide_whf_safety(_overlap(fan_on=None, fan_believed_on=True))
+        assert d.action is WhfSafetyAction.NONE
+
+    def test_idle_or_blower_only_is_no_overlap(self):
+        for action in ("idle", "fan", "off", None):
+            assert decide_whf_safety(_overlap(hvac_action=action)).action is WhfSafetyAction.NONE, action
+
+    def test_a_thermostat_in_off_or_fan_only_is_no_overlap_even_if_it_reports_heating(self):
+        for mode in ("off", "fan_only"):
+            assert decide_whf_safety(_overlap(thermostat_mode=mode)).action is WhfSafetyAction.NONE, mode
+
+    def test_no_overlap_clock_is_no_overlap(self):
+        assert decide_whf_safety(_overlap(overlap_for_s=None)).action is WhfSafetyAction.NONE
+
+    def test_the_sealed_house_rule_still_comes_first(self):
+        assert decide_whf_safety(_overlap(sensors=(CLOSED,))).action is WhfSafetyAction.STOP_SEALED
+
+    def test_a_press_stamp_still_decides_first(self):
+        # The occupant's own fan press is newer than heat: the press-based rule suppresses, not the backstop.
+        d = decide_whf_safety(_overlap(whf_owns_hvac=False, occupant_fan_on_at=T0))
+        assert d.action is WhfSafetyAction.SUPPRESS_HVAC and not d.backstop
+
+    def test_both_mode_is_covered(self):
+        assert decide_whf_safety(_overlap(fan_mode="both")).action is WhfSafetyAction.STOP_MUTEX_FAN

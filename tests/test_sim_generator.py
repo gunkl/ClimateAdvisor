@@ -250,8 +250,8 @@ def test_run_plan_is_the_same_as_run_day() -> None:
 _UNTRIAGED_ON_HEAD: set[str] = set()
 
 
-# Owner decision 2026-11-03 (#1279, reaffirming closed #1203): pressing heat/AC again within 3 s of switching
-# the whole-house fan on is not a supported occupant action, so the generator never draws it and nothing is excused.
+# Owner decision 2026-11-03 (#1288, superseding #1279): a heat/AC press within 3 s of switching the whole-house fan
+# on is missed as a press, and the rule-2 state backstop stops one device within ~30 s; nothing is excused.
 _FAST_ORDER = "fan_on_then_occupant_hvac_on_fast"
 
 
@@ -664,7 +664,7 @@ def test_the_new_orders_are_timed_as_named() -> None:
                 assert len(fan_on) == 1 and len(presses) == 1 and 1.0 <= presses[0] - fan_on[0] <= 25.0
             elif order == "fan_on_then_occupant_hvac_on_fast":
                 assert len(presses) == 2 and presses[0] < fan_on[0] < presses[1]
-                assert 3.0 - 1e-6 <= (presses[1] - fan_on[0]) * 60 <= 5.0 + 1e-6  # never inside the 3 s echo guard
+                assert 1.0 - 1e-6 <= (presses[1] - fan_on[0]) * 60 <= 3.0 + 1e-6  # inside the 3 s echo guard (#1288)
             elif order == "hvac_on_then_fan_on":
                 assert presses == [fan_on[0] - 2.0]
             elif order == "blower_press_hvac_fan":
@@ -702,10 +702,25 @@ def test_a_fan_pressed_while_the_ac_runs_suppresses_the_hvac() -> None:
     assert _acts(rec, "climate", "set_hvac_mode", hvac_mode="off")
 
 
-# Every fast-order day presses 3-5 s after the fan (owner decision #1279). The 3.0 s seeds sit exactly on the
-# boundary of production's 3 s echo guard; 21000027/52/80/87 were the #1203 race seeds when presses came at 1-2 s.
-_FAST_PRESS_BOUNDARY_SEEDS = (21000027, 21000052, 21000080)  # press at 3.0 s
-_FAST_PRESS_SEEDS = (*_FAST_PRESS_BOUNDARY_SEEDS, 21000087, 21000038, 21000152)  # 4.0 s, 5.0 s, 5.0 s
+# Every fast-order day presses 1-3 s after the fan again (owner decision #1288). The 1-2 s seeds are the #1203 race
+# seeds: production's 3 s echo guard reads the press as its own echo, so no press stamp exists and only the rule-2
+# state backstop (fan physically on + thermostat heating/cooling for 10 s) stops a device -- remove it and they fail.
+_FAST_PRESS_BACKSTOP_SEEDS = (21000027, 21000052, 21000080, 21000087)  # press at 1.0, 1.0, 1.0, 2.0 s
+_FAST_PRESS_SEEDS = (*_FAST_PRESS_BACKSTOP_SEEDS, 21000038, 21000152)  # 3.0 s, 3.0 s (the echo guard's boundary)
+
+
+# Issue #1288: the first full nightly with every fix in place (0.8.51). All three are fan-feedback days (the issue first
+# called them command-only). 050/156: a cool press 4-5 s after the fan inside an after-restart coalescing window, read
+# as Climate Advisor's own echo -- the rule-2 state backstop stops a device. 139: heating ran beside the fan through
+# observe-only and P2 used to count those minutes against the 30 s tolerance at the automation re-enable.
+_NIGHTLY_1288_SEEDS = (7006000050, 7010000156, 7010000139)
+
+
+@pytest.mark.parametrize("day_seed", _NIGHTLY_1288_SEEDS)
+def test_1288_nightly_days_keep_the_fan_and_the_hvac_apart(day_seed) -> None:
+    rec = run_day(day_seed, "coordinator")
+    assert rec.callback_errors == 0
+    assert not [(h.ts, h.detail) for h in rec.report.hard if h.promise == "ac_whf_mutex"]
 
 
 def _fast_press_day(day_seed: int):
@@ -742,19 +757,16 @@ def _hits_of(day_seed: int, promise: str) -> list:
     return [h for h in run_day(day_seed).report.hard if h.promise == promise]
 
 
-@pytest.mark.parametrize("day_seed", _FAST_PRESS_BOUNDARY_SEEDS)
-def test_a_widened_echo_guard_breaks_rule_2_on_the_boundary_days(day_seed, monkeypatch) -> None:
-    """The boundary seeds press at 3.0 s.  If production's echo guard (3 s) is widened to 5 s they break rule 2;
-    the generated days must catch that regression (nothing excuses it)."""
-    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_BACKSTOP_SEEDS)
+def test_without_the_rule_2_state_backstop_the_fast_press_days_break_rule_2(day_seed, monkeypatch) -> None:
+    """Revert check (Issue #1288): the backstop seeds press inside the 3 s echo guard, so no press stamp exists.
+    Remove the state backstop and the fan and the AC run together past the 30 s tolerance; nothing excuses it."""
+    import custom_components.climate_advisor.whf_safety_decision as wsd
 
-    real = ClimateAdvisorCoordinator._is_recent_hvac_command
-    monkeypatch.setattr(
-        ClimateAdvisorCoordinator, "_is_recent_hvac_command", lambda self, threshold_seconds=3.0: real(self, 5.0)
-    )
+    monkeypatch.setattr(wsd, "_rule2_state_backstop", lambda inputs, stale: None)
     plan = _fast_press_day(day_seed)
     hits = [h for h in run_plan(plan).report.hard if h.promise == "ac_whf_mutex"]
-    assert hits, "a 5 s echo guard no longer breaks rule 2 on this seed; pick another 3.0 s seed"
+    assert hits, "removing the rule-2 state backstop no longer breaks rule 2 on this seed; pick another 1-2 s seed"
 
 
 def test_a_blower_press_under_whole_house_fan_is_not_a_fan_override_and_does_not_suppress_the_hvac() -> None:
@@ -818,7 +830,7 @@ def mutex_enforcement_removed(monkeypatch):
 def test_the_rule_2_orders_catch_a_broken_newest_action_wins(order, mutex_enforcement_removed) -> None:
     """Exercise (a): delete the behaviour from production and the day must fail ac_whf_mutex."""
     if order == _FAST_ORDER:
-        plans = [_fast_press_day(s) for s in _FAST_PRESS_BOUNDARY_SEEDS]
+        plans = [_fast_press_day(s) for s in _FAST_PRESS_BACKSTOP_SEEDS]
     else:
         plans = _plans_for(order, window_open=True, command_only=False)[:3]
     hits = []

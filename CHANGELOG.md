@@ -3,6 +3,20 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.54] — 2026-11-03
+
+- Fix #1288: when you switch the whole-house fan on and press heat or AC within a second or two, Climate Advisor now stops one of them within about 30 seconds. The same goes for a press in the first 5 minutes after a restart, or while a door pause is running. Before, Climate Advisor read that press as its own command echoing back and never saw it, so the fan and the heating or cooling ran together: typically 15 to 18 minutes, at worst 45. Now Climate Advisor also watches the devices themselves. If the fan is physically running and the thermostat reports heating or cooling for 10 seconds, it acts:
+  - If you changed the thermostat after the fan came on, it stops the fan (your newer action wins).
+  - Otherwise it turns the heating or cooling off.
+
+  Either way you get a notification and an Activity Record entry. With automation switched off it only tells you, and sends nothing.
+  - **Unchanged:** fans that report no state, the sealed-house rule, and Climate Advisor's own restores (they wait for the fan to read off first).
+  - **Measured on 90 simulated fan days at press delays of 1 s to 2 minutes:** every case with a window open now ends within 30 s. Before, presses 1-2 s after the fan overlapped for up to 45 minutes, and presses 3-45 s after it for up to 6 minutes on door-pause days.
+  - **Test tooling:**
+    - The generated days press 1-3 s after the fan again. That reverses #1279's "unsupported action", which the owner now supersedes.
+    - The rule-2 promise check now counts its 30 s from the moment automation is switched back on, not from inside the observe-only time when Climate Advisor may not act.
+    - A simulator restart bug found along the way is #1291.
+
 ## [0.8.52] — 2026-11-03
 
 - Fix #1241: when the heat, the AC or the thermostat's fan-only mode is running at midnight and keeps running, the minutes after midnight now count in the next day's HVAC runtime. Before, a furnace run from 23:00 to 01:00 showed 59 minutes on the first day and 0 on the next, instead of about 61, and the live "HVAC runtime today" read 0 for the rest of that run. Every overnight cycle that crossed the rollover was undercounted, and so were the compliance average, the high-runtime suggestions and the AI context built on those minutes. The end-of-day step already split the run at 23:59; it then threw the running session away. It now keeps it, but only while the thermostat still reports it running (by the same rule that starts and ends sessions). So a session whose "off" was missed, for example during the first minutes after a restart, is still ended once a day as before. This is the opposite direction of #1240, which stopped counting idle time as runtime.

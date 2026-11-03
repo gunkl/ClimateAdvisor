@@ -6,6 +6,7 @@
 
 | Question | Short answer | → Full answer |
 |---|---|---|
+| What stops the fan and the heating/cooling running together when Climate Advisor missed the press (Issue #1288)? | The rule-2 state backstop: fan physically on + thermostat heating/cooling for 10 s stops one device within ~30 s (the fan if the thermostat changed mode after it came on, else the HVAC). Command-only fans unchanged. | [Rule-2 State Backstop](#rule-2-state-backstop-the-fan-and-the-heatingcooling-never-run-together-issue-1288) |
 | Is a whole-house fan with no door/window sensor supported (Issue #1200)? | No. Rules 1 and 3 need window state; a fan that ignores CA's stop can be misread as an occupant fan-on, which rule 2 then obeys. Documented only, no code change. | [Supported Configuration](#supported-configuration-a-whole-house-fan-needs-a-doorwindow-sensor-issue-1200) |
 | Why 5 composed axes instead of one flat enum, unlike nat-vent's 4-state enum? | A WHF session can occupy several axes at once (on, overridden, HVAC-suppressing, rate-limited) simultaneously. Flattening to one enum would combinatorially explode or drop states a status card needs. | [State Model](#state-model) |
 | What are the 16 event kinds and where does each one's real call site live? | One per real production entry point in `automation.py` — see the table in [Event Kinds](#event-kinds). | [Event Kinds](#event-kinds) |
@@ -150,6 +151,29 @@ Rule 2 (the whole-house fan and heating/cooling never run together) used to be b
 **A deferred stop arms the same release (Issue #1271, regression of #1215).** The deferral is decided at the top of `_deactivate_fan`, before the fan's own `turn_off` has taken effect, so a nat-vent exit on a window close (and every other `restore_hvac`/`release_suppression` caller: comfort-floor exit, away ceiling exit, min-runtime cycle, bedtime/wake-up resets, the reconcile) asked "is the house sealed and does the fan read on?" while the fan it was about to stop still read on. The restore was forced off, nothing armed `_whf_restore_pending` (only the sealed-house safety stop did), and the fan then stopped with `_pre_fan_hvac_mode` still set: the thermostat stayed Off for hours. Now a call that defers its own restore (`_whf_restore_pending` not yet set, a pre-fan mode held) arms the gated release through `_arm_whf_restore_pending()` (the same helper the safety stop uses) once its stop is out, and also when the fan flag already reads off while the power reading still reads on (a stop in flight). It does not arm if no stop happens (override, rate limit: the caller retries, or the sealed-house enforcer stops the fan and arms it). The release is then the same as above: it waits for physical off plus the quiet window, writes nothing into a window held open again (rule 3), and `_deactivate_fan` still skips the write over the occupant's own thermostat change (rule 2, newest action). A fan that never reads off keeps the thermostat held and the #1215 give-up alert unchanged. Tests: `tests/test_whf_nat_vent_close_restore_1271.py`, `tests_ha/test_whf_nat_vent_close_restore_1271.py`, pending scenario `issue_1271_whf_window_close_restores_cool`.
 
 When the release runs it writes the pre-fan mode back only if `_any_monitored_sensor_holding_open()` is False (Issue #1181, D1): a sensor dark for over 60 s counts closed for the fan (so the stop happens), but if it last read open it still holds the door/window pause, so the release only drops the suppression and the reclassify pauses. The fan-off branch of `reconcile_fan_on_startup()` applies the same check before its stranded-suppression restore.
+
+## Rule-2 State Backstop: the Fan and the Heating/Cooling Never Run Together (Issue #1288)
+
+**Occupant first:** someone switches the whole-house fan on with a window open and presses heat or AC within a second or two. Or they press it during the 300 s after a restart. Climate Advisor reads that press as its own echo and never sees it. Before this fix, the fan and the heating/cooling then ran together for 15 to 45 minutes. Now one of them is stopped within about 30 s.
+
+The press-based rule 2 (`occupant_fan_on_at` / `occupant_hvac_on_at`) is unchanged. After it, `whf_safety_decision._rule2_state_backstop` decides from device state.
+
+**When it fires.** All of these must hold:
+- the fan reads physically on;
+- the thermostat is in an active mode and reports heating/cooling;
+- both have been true for 10 s (`overlap_for_s`, the coordinator's `_whf_rule2_overlap_for_s`);
+- no stop is in flight;
+- no Climate Advisor HVAC-off was sent in the last 10 s.
+
+**Which device stops.** If the thermostat's mode changed after the fan came on, the fan stops (`STOP_MUTEX_FAN`). Otherwise the off is re-sent to the thermostat (`SUPPRESS_HVAC`, `_suppress_hvac_for_whf(resend=True)`). This happens even when the fan session already owns HVAC, which is exactly the missed-press shape.
+
+**It never fights Climate Advisor's own restores.** A restore waits until the fan has read off (#1215/#1271).
+
+**Mirror (fan on after HVAC on).** When the press stamp exists, it still suppresses HVAC. When it was missed, the backstop picks the same device (mode older than the fan → suppress).
+
+**Command-only fans.** These cannot be seen, so nothing changes for them.
+
+The full logic is in [08 §9e-H](08-COMPUTATION-REFERENCE.md#h-sealed-house-guard--override-sessions-are-not-exempt-issue-882).
 
 ## Verification
 

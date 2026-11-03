@@ -676,6 +676,15 @@ def check_p2_ac_whf_mutex(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
             for r in span
         ):
             return []
+        # Issue #1288 (rule-8 justification): the same observe-only excuse, applied to the tolerance window. An overlap
+        # that began while automation was off used to count its observe-only minutes toward the 30 s, so the hit
+        # fired on the very first reading after the occupant switched automation back on and Climate Advisor was
+        # given 0 s to act (seed 7010000139: it did act at that same second). The previous semantics were wrong
+        # because they judged Climate Advisor for time in which it is forbidden to command (P3). The clock now starts
+        # at the first reading with automation on. Could a real failure pass silently? No: an overlap still running
+        # 30 s after automation is back on breaks the promise exactly as any other overlap does.
+        if cfg.p2_excuse_observe_only and any(r.automation_enabled is False for r in span):
+            return []
     return [
         Hit(
             promise="ac_whf_mutex",

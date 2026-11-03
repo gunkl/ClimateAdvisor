@@ -671,6 +671,9 @@ def _whf_after_thermostat_event(coordinator: Any, event: Any) -> None:
     old, new = event.data.get("old_state"), event.data.get("new_state")
     if old is not None and new is not None and old.state != new.state:
         _whf_request_check(coordinator, "thermostat_mode")
+    elif old is not None and new is not None and old.attributes.get("hvac_action") != new.attributes.get("hvac_action"):
+        # Issue #1288: the rule-2 state backstop is about the compressor really running, which is an attribute.
+        _whf_request_check(coordinator, "thermostat_action")
 
 
 def _whf_after_sensor_event(coordinator: Any, event: Any) -> None:
@@ -1005,6 +1008,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
         self._whf_release_reclassify_cancel: Callable[[], None] | None = None  # Issue #1215
         self._whf_safety_started_at: datetime | None = None
+        # Issue #1288: when the fan (physically on) and the compressor (heating/cooling) were first seen on together.
+        self._whf_overlap_since: datetime | None = None
         # Issue #1178: when the whole-house-fan entity last woke from unavailable/unknown (a reconnect, not a press).
         self._whf_reconnect_changed_at: datetime | None = None
         # Issue #805: transient (not persisted) entity-health transition tracker, keyed by
@@ -1509,9 +1514,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if engine is None:
             return
         try:
+            self._whf_rule2_overlap_for_s()  # Issue #1288: every trigger moves the overlap clock, checked or not
+        except Exception:
+            _LOGGER.debug("WHF rule-2 overlap tracking failed", exc_info=True)
+        try:
             engine.request_whf_safety_check(trigger)
         except Exception:
             _LOGGER.warning("WHF safety check request failed: trigger=%s", trigger, exc_info=True)
+
+    def _whf_rule2_overlap_for_s(self) -> float | None:
+        """Seconds the fan has read physically on beside a heating/cooling thermostat, continuously (Issue #1288).
+
+        Ground truth only: the fan's physical reading (a command-only fan never overlaps here) and the thermostat's
+        live mode plus ``hvac_action``. The clock starts at the first observation of both together -- every WHF
+        trigger (fan and thermostat state changes, including an ``hvac_action``-only change, and the 15 s tick)
+        passes through here -- and resets the moment either reads off. Feeds the rule-2 state backstop.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        state = self.hass.states.get(self.config.get("climate_entity", ""))
+        both = (
+            fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+            and state is not None
+            and state.state in WHF_ACTIVE_HVAC_MODES
+            and is_hvac_compressor_active(state.attributes.get("hvac_action"))
+            and self._get_fan_physical_state() is True
+        )
+        if not both:
+            self._whf_overlap_since = None
+            return None
+        now = dt_util.utcnow()
+        since = getattr(self, "_whf_overlap_since", None)
+        if not isinstance(since, datetime):
+            since = self._whf_overlap_since = now
+        return max(0.0, (now - since).total_seconds())
 
     def _whf_sensor_readings(self) -> tuple[tuple[SensorReading, ...], list[str]]:
         """The one reading of the door/window sensors for every "is the house sealed" judge (Issue #1177).
@@ -1572,6 +1607,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             stale_names=tuple(stale),
             occupant_fan_on_at=self._occupant_fan_on_at_from_ground_truth(fan_on, fan_on_for_s),
             occupant_hvac_on_at=self._occupant_hvac_on_at_from_ground_truth(),
+            overlap_for_s=self._whf_rule2_overlap_for_s(),
         )
 
     def _occupant_fan_on_at_from_ground_truth(self, fan_on: bool | None, fan_on_for_s: float | None) -> datetime | None:

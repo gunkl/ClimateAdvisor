@@ -28,10 +28,10 @@ from tools.sim_harness.world import BedroomNode, BedroomParams, HouseParams, Toy
 # sha256 of json.dumps(build_plan(seed, profile).to_dict(), sort_keys=True) for seeds 0..59 x 3 profiles, taken on
 # main (0.8.44) BEFORE the bedroom node existed.  The node is optional and draws nothing from the day's random
 # stream, so every generated day must stay exactly what it was.
-# Re-taken for Issue #1279 (0.8.50): the fast fan-then-HVAC press moved from 1-3 s to 3-5 s after the fan (owner
-# decision: a press inside 3 s is unsupported). Only that press time changed, on 4 of the 180 plans (6, 10, 12
-# coordinator; 23 mixed), with the same random draws; every other plan is byte-identical to the 0.8.44 digest.
-_PLANS_DIGEST_BEFORE_BEDROOM = "2ff73dac0dc9ca58fbf4d9610ddb2d64684bd051ada39998444860890f5060b9"
+# Issue #1279 (0.8.50) moved the fast fan-then-HVAC press from 1-3 s to 3-5 s after the fan and re-took this digest;
+# Issue #1288 moves it back to 1-3 s (owner decision: the rule-2 state backstop makes the press timing irrelevant).
+# Same random draws, press time only, so the digest is again exactly the 0.8.44 value taken before the bedroom node.
+_PLANS_DIGEST_BEFORE_BEDROOM = "7d35f57cef398e711dbdbdf4cc5699f54cf711edeb5095eb7ef8f0dc7c1ac3d0"
 
 
 def test_every_generated_plan_is_byte_identical_without_the_bedroom_node() -> None:

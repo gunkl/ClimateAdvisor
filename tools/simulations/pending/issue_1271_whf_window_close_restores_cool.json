@@ -1,0 +1,132 @@
+{
+  "description": "Warm evening: the occupant opens the bedroom window and the whole-house fan ventilates the 78 F house. She closes the window and the fan stops. The AC must come back within the release quiet time instead of staying Off for hours.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "20:30",
+    "wake_time": "06:30",
+    "initial_thermostat_mode": "cool",
+    "fan_mode": "whole_house_fan",
+    "fan_min_runtime_per_hour": 0,
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool"
+    ],
+    "manual_grace_seconds": 900,
+    "override_confirm_seconds": 120,
+    "fan_entity": "fan.whf",
+    "fan_state_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ],
+    "sensor_debounce_seconds": 60,
+    "natural_vent_delta": 3.0
+  },
+  "thermal_model": {
+    "swing_heat_f": 1.5,
+    "swing_cool_f": 1.5
+  },
+  "events": [
+    {
+      "time": "2026-11-02T20:28:30",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off"
+    },
+    {
+      "time": "2026-11-02T20:29:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 66.0,
+      "note": "The hallway thermostat's own sensor: satisfied, so it will not start by itself."
+    },
+    {
+      "time": "2026-11-02T20:29:10",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "idle",
+      "note": "The thermostat reports idle."
+    },
+    {
+      "time": "2026-11-02T20:29:12",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Seed the door/window sensor as closed."
+    },
+    {
+      "time": "2026-11-02T20:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 95.0,
+      "today_low": 72.0,
+      "tomorrow_high": 95.0,
+      "tomorrow_low": 72.0,
+      "note": "Day classification (cold: heat all night / hot: cool all night)."
+    },
+    {
+      "time": "2026-11-02T20:30:05",
+      "type": "bedtime",
+      "note": "Bedtime: the sleep band is written and the sleep window (remote sensor in use) begins."
+    },
+    {
+      "time": "2026-11-02T21:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "The occupant opens the window; outdoor air is cooler: natural ventilation."
+    },
+    {
+      "time": "2026-11-02T21:20:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 66.0
+    },
+    {
+      "time": "2026-11-02T21:40:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window closed."
+    },
+    {
+      "time": "2026-11-02T21:42:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 66.0,
+      "note": "The hallway reading moves: the comfort check runs against the bedroom reading (78 F, above the sleep ceiling)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T21:50:00",
+      "expect": "last_hvac_mode",
+      "mode": "cool",
+      "track": "integration",
+      "simulator_support": true,
+      "reason": "After the window closes and the fan reads off, the pre-fan cool mode is given back (not left Off behind a stranded whole-house-fan suppression)."
+    }
+  ],
+  "notes": [
+    "Tier A coordinator mode (use_coordinator=true): the fan's physical state is read through the coordinator's fan-state feedback, which is what makes the stale 'fan still on' reading at the nat-vent exit reproduce; the engine-only run has no physical reading and never meets the deferral.",
+    "Occupant impact: the house sat at 78 F against a 72 F ceiling for 2+ hours after the fan stopped; the thermostat stayed Off because the whole-house fan still 'owned' it (v0.8.41-0.8.45).",
+    "Three-exercise protocol (CLAUDE.md section 10):",
+    "(a) Effectiveness: with the Issue #1271 arming deleted from _deactivate_fan the cool restore never happens (the strict-xfail reproduction in tests/test_whf_nat_vent_close_restore_1271.py failed the same way), so last_hvac_mode stays off and this assertion fails.",
+    "(b) Docs vs production: docs/fan-lifecycle-spec.md (restore after a deferred stop) and docs/08-COMPUTATION-REFERENCE.md WHF safety table: a fan stop whose restore was deferred hands it to the one gated release.",
+    "(c) Occupant outcome if a regression is missed: a warm house with no cooling for hours after closing the window."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Closing the window ends ventilation and the AC comes back once the fan has stayed off.",
+    "observed_behavior": "fan.turn_off at 21:40:00, climate.set_hvac_mode cool at 21:40:06.",
+    "expected_behavior": "The pre-fan mode is restored after the quiet window; the thermostat is never left Off behind a fan that has stopped."
+  },
+  "name": "issue_1271_whf_window_close_restores_cool",
+  "issue": 1271,
+  "source": "Issue #1271: cool WHF nat-vent ended by a window close; the AC must come back once the fan reads off (regression of #1215)",
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

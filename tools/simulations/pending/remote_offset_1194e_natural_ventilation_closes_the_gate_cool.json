@@ -134,19 +134,33 @@
       "value": 68.0
     },
     {
-      "at": "2026-11-02T22:04:00",
+      "at": "2026-11-02T21:39:00",
       "expect": "setpoint_writes",
       "track": "integration",
-      "reason": "While ventilating (thermostat Off) and after the window closes, no loop write: the offset is never pushed into the ventilating house.",
+      "reason": "While ventilating (thermostat Off) no setpoint write: the offset is never pushed into the ventilating house.",
       "values": [],
       "since": "2026-11-02T20:36:30"
+    },
+    {
+      "at": "2026-11-02T21:46:00",
+      "expect": "setpoint_writes",
+      "track": "integration",
+      "reason": "Issue #1271: after the window closes and the fan reads off, cool comes back at the plain sleep ceiling (72 F); the bedroom (78 F) is still hot, so the loop resumes its cool offset one step at a time (70, bedtime re-applies 70, then 68). Before #1271 nothing was written and the AC stayed off.",
+      "values": [
+        72.0,
+        70.0,
+        70.0,
+        68.0
+      ],
+      "since": "2026-11-02T21:39:30"
     }
   ],
   "notes": [
     "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
     "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed. Passes unmutated.",
     "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' natural-ventilation row. Matches production. LIMIT: the thermostat is Off during ventilation, so the loop is inert there anyway (it never changes the mode); deleting the nat-vent term does not change this scenario's writes (M11). The gate term is proven in tests/test_remote_offset_gates_1194b.py.",
-    "(c) Occupant outcome if this regressed: The loop must not fight a ventilating house by pushing the AC setpoint."
+    "(c) Occupant outcome if this regressed: The loop must not fight a ventilating house by pushing the AC setpoint.",
+    "Updated for Issue #1271 (2026-11-02): the original single assertion expected no setpoint write from 20:36:30 to 22:04, which pinned the #1271 bug (AC never restored after ventilation ended on a window close). Split into: no write while ventilating, and cool restored at the plain 72 F after the window closes, then the loop resuming its offset (72, 70, 70, 68)."
   ],
   "verdict": {
     "type": "positive",

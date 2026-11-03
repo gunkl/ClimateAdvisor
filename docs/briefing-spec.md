@@ -162,6 +162,7 @@ at-home (#1211 had fixed only warm/mild):
 | Day-plan lead | `"A <day> day, and the house is empty, so the away settings below are what apply."` (hot/cool/cold: that line only) |
 | TLDR Windows row | `Closed all day` |
 | TLDR Bedtime row | `away setback held` |
+| TLDR HVAC Mode row, warm/mild (Issue #1253) | `Away band 60–80°F` / `Vacation band 57–83°F` — the band `select_comfort_band()` arms (`_band_text()` of `facts.band`), never `Off — away`: hvac_mode "off" on a warm/mild day still arms heat below the floor and cool above the ceiling, the same reasoning as #1211's at-home `Comfort band`. Hot/cold days keep `Cool at`/`Heat at`. TOU away/vacation widening only moves the edge matching hvac_mode cool/heat, so it never changes an off-mode band. |
 | Pre-cool, bedtime-tuning, "set back more aggressively tonight", awake-target quotes | omitted |
 
 **At home — one bedtime number.** `bedtime_target` is the adaptive value when the coordinator passes one

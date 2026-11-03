@@ -1191,3 +1191,22 @@ class TestP2ObserveOnly:
 
     def test_negative_control_automation_on_overlap_is_still_a_miss(self):
         assert len(hits_for("ac_whf_mutex", self._inp(automation_enabled=True), self.WHF)) == 1
+
+    TOL = PromiseConfig(fan_mode=FAN_MODE_WHOLE_HOUSE, p2_min_overlap_s=30.0)
+
+    def test_the_tolerance_clock_starts_when_automation_comes_back_on(self):
+        """Issue #1288 (seed 7010000139): an overlap from observe-only gets the full 30 s after automation is on."""
+        rs = [
+            rd(0, hvac_action="heating", hvac_mode="heat", fan_on=True, automation_enabled=False),
+            rd(100, hvac_action="heating", hvac_mode="heat", fan_on=True, automation_enabled=False),
+            rd(106, hvac_action="heating", hvac_mode="heat", fan_on=True, automation_enabled=True),
+        ]
+        assert hits_for("ac_whf_mutex", make_input(rs), self.TOL) == []
+
+    def test_an_overlap_still_running_30_s_after_automation_is_back_on_is_a_miss(self):
+        rs = [
+            rd(0, hvac_action="heating", hvac_mode="heat", fan_on=True, automation_enabled=False),
+            rd(106, hvac_action="heating", hvac_mode="heat", fan_on=True, automation_enabled=True),
+            rd(107, hvac_action="heating", hvac_mode="heat", fan_on=True, automation_enabled=True),
+        ]
+        assert len(hits_for("ac_whf_mutex", make_input(rs), self.TOL)) == 1

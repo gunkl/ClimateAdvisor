@@ -3,6 +3,20 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.54] — 2026-11-03
+
+- Fix #1288: when you switch the whole-house fan on and press heat or AC within a second or two, Climate Advisor now stops one of them within about 30 seconds. The same goes for a press in the first 5 minutes after a restart, or while a door pause is running. Before, Climate Advisor read that press as its own command echoing back and never saw it, so the fan and the heating or cooling ran together: typically 15 to 18 minutes, at worst 45. Now Climate Advisor also watches the devices themselves. If the fan is physically running and the thermostat reports heating or cooling for 10 seconds, it acts:
+  - If you changed the thermostat after the fan came on, it stops the fan (your newer action wins).
+  - Otherwise it turns the heating or cooling off.
+
+  Either way you get a notification and an Activity Record entry. With automation switched off it only tells you, and sends nothing.
+  - **Unchanged:** fans that report no state, the sealed-house rule, and Climate Advisor's own restores (they wait for the fan to read off first).
+  - **Measured on 90 simulated fan days at press delays of 1 s to 2 minutes:** every case with a window open now ends within 30 s. Before, presses 1-2 s after the fan overlapped for up to 45 minutes, and presses 3-45 s after it for up to 6 minutes on door-pause days.
+  - **Test tooling:**
+    - The generated days press 1-3 s after the fan again. That reverses #1279's "unsupported action", which the owner now supersedes.
+    - The rule-2 promise check now counts its 30 s from the moment automation is switched back on, not from inside the observe-only time when Climate Advisor may not act.
+    - A simulator restart bug found along the way is #1291.
+
 ## [0.8.53] — 2026-11-03
 
 - Fix #1229: suppose a window has been open long past its delay, so Climate Advisor has paused the heating or cooling, and someone opens a second door for a moment. While that door was still inside its own delay, Climate Advisor stopped seeing the open window. Your manual Cool or Heat could be "adopted" early, which ended its pause with no re-pause, or cancelling an override could re-arm cooling, so the AC or heat ran into the open window for up to about 30 minutes. A brief door open also changed the HVAC, which it never should. The open-window check now asks each sensor separately whether it has been open past its own delay, so the window stays seen whatever the door does. A sensor that went dark after reading open still counts, as before, and a dark sensor still never starts a pause.

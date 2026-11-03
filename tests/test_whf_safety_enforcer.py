@@ -91,6 +91,7 @@ def _engine(*, thermostat_mode: str = "off") -> tuple[AutomationEngine, dict]:
         fan_on_for_s=world["fan_on_for_s"],
         sensors=world["sensors"],
         stale_names=world["stale_names"],
+        overlap_for_s=world.get("overlap_for_s"),
     )
     return engine, world
 
@@ -585,6 +586,79 @@ class TestObserveOnly:
         _run(engine)
         assert len(_fan_off(engine)) == 1
         assert "whf_sealed_observe_notified" not in events
+
+
+class TestRule2StateBackstop:
+    """Issue #1288: heat/AC pressed 1-2 s after the fan is read as Climate Advisor's own echo, so no press stamp
+    exists; the fan and the heating then ran together for 15-45 minutes. The backstop acts on device state alone."""
+
+    def _overlap_engine(self, clock, *, mode_age_s: float, owned: bool = True):
+        engine, world = _engine(thermostat_mode="heat")
+        state = engine.hass.states.get("climate.thermostat")
+        state.attributes = {"fan_modes": ["auto", "on"], "hvac_action": "heating"}
+        state.last_changed = clock.now() - timedelta(seconds=mode_age_s)
+        world["sensors"] = (OPEN,)
+        world["fan_on_for_s"] = 120.0
+        world["overlap_for_s"] = 12.0
+        if owned:
+            engine._pre_fan_hvac_mode = "heat"  # a WHF session already owns (suppressed) the thermostat
+        events: list = []
+        engine._emit_event_callback = lambda t, p: events.append((t, p))
+        return engine, world, events
+
+    @staticmethod
+    def _hvac_off(engine):
+        return [
+            c
+            for c in engine.hass.services.async_call.call_args_list
+            if c.args[:2] == ("climate", "set_hvac_mode") and c.args[2].get("hvac_mode") == "off"
+        ]
+
+    def test_heat_pressed_after_the_fan_stops_the_fan(self, clock):
+        engine, world, events = self._overlap_engine(clock, mode_age_s=30.0)
+        assert _run(engine, "thermostat_action") is FanCommandResult.EXECUTED
+        assert len(_fan_off(engine)) == 1
+        assert (
+            "whf_rule2_backstop",
+            {"stopped": "fan", "trigger": "thermostat_action", "thermostat_mode": "heat"},
+        ) in (events)
+
+    def test_an_older_heat_is_turned_off_again_even_though_the_session_already_owns_it(self, clock):
+        engine, world, events = self._overlap_engine(clock, mode_age_s=600.0)
+        assert _run(engine) is None
+        assert len(self._hvac_off(engine)) == 1, "the off must be re-sent although a session owns the thermostat"
+        assert engine._pre_fan_hvac_mode == "heat", "the captured pre-fan mode is kept"
+        assert not _fan_off(engine)
+        assert [p["stopped"] for t, p in events if t == "whf_rule2_backstop"] == ["hvac"]
+
+    def test_the_suppression_notice_is_sent_once_per_episode(self, clock):
+        engine, world, events = self._overlap_engine(clock, mode_age_s=600.0)
+        sent: list[str] = []
+        engine._notify_whf_safety = lambda title, message: sent.append(message)
+        _run(engine)
+        engine._last_commanded_hvac_time = None  # the toy thermostat ignored the off; the next tick acts again
+        clock.advance(15)
+        _run(engine)
+        assert len(self._hvac_off(engine)) == 2
+        assert len(sent) == 1, sent
+        assert "whole-house fan was running" in sent[0]
+
+    def test_below_the_overlap_threshold_nothing_is_sent_yet(self, clock):
+        engine, world, events = self._overlap_engine(clock, mode_age_s=30.0)
+        world["overlap_for_s"] = 3.0
+        with patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()):
+            assert _run(engine) is None
+        assert not _fan_off(engine) and not self._hvac_off(engine)
+
+    def test_observe_only_notifies_once_and_commands_nothing(self, clock):
+        engine, world, events = self._overlap_engine(clock, mode_age_s=30.0)
+        engine.dry_run = True
+        for _ in range(3):
+            _run(engine)
+        assert not _fan_off(engine) and not self._hvac_off(engine)
+        pushes = [c for c in _notifications(engine) if c.args[1] != "send_email"]
+        assert len(pushes) == 1
+        assert [t for t, _ in events] == ["whf_rule2_observe_notified"]
 
 
 class TestOnlyAWholeHouseFanPressIsAnOccupantWhfAction:

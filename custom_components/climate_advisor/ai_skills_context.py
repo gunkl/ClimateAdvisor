@@ -2391,6 +2391,23 @@ def _render_whf_sealed_observe_notified(p: dict, unit: str) -> tuple[str, str]:
     return "Whole-house fan running on a closed-up house -- automation is off, occupant notified, fan not touched", ""
 
 
+def _render_whf_rule2_backstop(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1288: the whole-house fan and the heating/cooling were both running (a press Climate Advisor missed);
+    the rule-2 state backstop stopped one of them."""
+    mode = str(p.get("thermostat_mode") or "").strip()
+    if p.get("stopped") == "fan":
+        return "Whole-house fan stopped -- heating/cooling was running beside it (newest action wins)", ""
+    return (
+        "Heating/cooling turned off -- the whole-house fan was running beside it",
+        f"hvac: {mode}->off" if mode else "hvac: ->off",
+    )
+
+
+def _render_whf_rule2_observe_notified(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1288: observe-only, the fan and the heating/cooling run together; the occupant was told, nothing sent."""
+    return "Whole-house fan and heating/cooling both on -- automation is off, occupant notified, nothing changed", ""
+
+
 def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
     """Issue #495: a manual/remote WHF session ended — HVAC suppression released and CA's
     current classification reasserted (not a blind restore of the mode captured at activation,
@@ -3268,6 +3285,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "whf_hvac_suppressed": _render_whf_hvac_suppressed,
     "whf_hvac_released": _render_whf_hvac_released,
     "whf_sealed_observe_notified": _render_whf_sealed_observe_notified,
+    "whf_rule2_backstop": _render_whf_rule2_backstop,
+    "whf_rule2_observe_notified": _render_whf_rule2_observe_notified,
     "stranded_hvac_suppression_restored": _render_stranded_hvac_suppression_restored,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,

@@ -2565,6 +2565,9 @@ Called from three sites so no WHF-activation path can bypass it:
 | Same, but the fan came on < 10 s ago or the sensors closed < 10 s ago | Enforcer, `DEFER` | Re-check after the remaining settle; a person who opens a window and presses the fan in one motion is not fought | `tests/test_whf_safety_decision.py` |
 | WHF on and HVAC mode heat/cool/heat_cool/auto, occupant turned HVAC on after the fan | Enforcer, `STOP_MUTEX_FAN` | Fan stopped (newest occupant action wins) | `tests/test_whf_safety_enforcer.py::TestRule2Mutex` |
 | WHF on and HVAC armed, occupant turned the fan on after HVAC | Enforcer, `SUPPRESS_HVAC` | HVAC suppressed (set off) | `tests/test_whf_safety_enforcer.py::TestRule2Mutex` |
+| WHF physically on, thermostat heat/cool/heat_cool/auto reporting heating/cooling for >= 10 s, no press stamp decided it (a press missed by the echo guard or start-up coalescing, Issue #1288) | Enforcer, rule-2 state backstop | Thermostat mode newer than the fan's on-time: fan stopped (`STOP_MUTEX_FAN`); else HVAC off re-sent (`SUPPRESS_HVAC`, even when already owned). WARNING + Activity row + `whf_rule2_backstop` + one notice per episode; observe-only notifies only. Within ~30 s | `tests/test_whf_safety_decision.py::TestRule2StateBackstop`, `tests/test_whf_safety_enforcer.py::TestRule2StateBackstop`, `tests/test_sim_generator.py` (fast-press and #1288 nightly seeds), `tests_ha/test_whf_safety.py` |
+| Same, but overlapping < 10 s, or Climate Advisor sent HVAC off < 10 s ago | Enforcer, `DEFER` | Re-check when the remaining time is up | `TestRule2StateBackstop` |
+| Same, command-only fan (`fan_on` unreadable) | none | Unchanged: blind by design | `test_a_command_only_fan_is_blind_by_design` |
 | CA wants to START the WHF (nat-vent, economizer, min-runtime cycle, reconcile adopt, cycling-on) with the house sealed, `FAN_MODE_WHOLE_HOUSE` | Entry gate in `_activate_fan()` | `FanCommandResult.SUPPRESSED`, no `fan.turn_on`, no flags set | `tests/test_whf_safety_enforcer.py::TestEntryGate` |
 | Same with `FAN_MODE_BOTH` | Entry gate | WHF leg skipped (no `turn_on`, no HVAC suppression); the HVAC blower leg still runs | `TestEntryGate::test_both_mode_sealed_skips_only_the_whf_leg_and_keeps_the_blower` |
 | Same with `FAN_MODE_HVAC` or zero sensors | none | Unchanged | `TestEntryGate` |
@@ -2578,7 +2581,32 @@ Called from three sites so no WHF-activation path can bypass it:
 
 Stops go through `_enforce_whf_safety_locked` / `_deactivate_fan(safety=True)` only; an override is never an exemption from rules 1 and 2.
 
-**Unsupported occupant action (owner decision, Issues #1203 and #1279):** do not switch the whole-house fan on and then press heat or AC again within about 3 seconds. Climate Advisor turns the HVAC off when the fan starts, and a mode change inside its 3 s echo guard (`_is_recent_hvac_command`) is read as the thermostat echoing that command, not as you. The HVAC then runs beside the fan until the grace period ends, the next 30-minute cycle re-pauses it, every door and window closes, or the fan is stopped. In measured replays that was 13 to 30 minutes. A press 3 s or more after the fan starts is your newer action: the fan stops at once (rule 2). The expected sequence is the reverse, fan on and HVAC off, which needs nothing from you. The generated days never draw a press inside 3 s (`generator.py`, `fan_on_then_occupant_hvac_on_fast` presses 3-5 s after the fan). `tests/test_sim_generator.py` holds the 3.0 s boundary seeds, and widening the guard to 5 s must fail them.
+**Rule-2 state backstop (Issue #1288, owner decision 2026-11-03, supersedes the #1279 "unsupported occupant action").** If you switch the whole-house fan on and press heat or AC again within about 3 s, Climate Advisor still misses the press. Its 3 s echo guard (`_is_recent_hvac_command`) reads the mode change as the thermostat echoing Climate Advisor's own off. The same happens to a press inside the 300 s start-up coalescing window, within 45 s of Climate Advisor's own HVAC command. Before, the HVAC then ran beside the fan for 15 to 45 minutes. Now **one of the two devices is stopped within ~30 s** of the overlap beginning, from device state alone. `decide_whf_safety` runs `_rule2_state_backstop` after rule 1 and the press-based rule 2. It fires when all of these hold:
+- the fan reads **physically** on (`fan_on is True`; a command-only fan is blind by design);
+- the thermostat is in heat, cool, heat_cool or auto **and** reports `hvac_action` heating/cooling;
+- both have been true together for `WHF_RULE2_OVERLAP_CONFIRM_S` (10 s). The coordinator's `_whf_rule2_overlap_for_s()` clock starts at the first observation and resets when either reads off;
+- no Climate Advisor fan stop is converging (`stop_in_flight_for_s`);
+- no Climate Advisor HVAC-off went out in the last `WHF_RULE2_OWN_OFF_QUIET_S` (10 s).
+
+Below either threshold it returns `DEFER` with the remaining time, through the ordinary settle retry. The device is chosen by state:
+- **Thermostat mode changed after the fan physically came on** (mode `last_changed` age < `fan_on_for_s`): the HVAC is the newer action, so the fan stops (`STOP_MUTEX_FAN`, the ordinary rule-2 stop and its notice).
+- **Otherwise:** the heating/cooling is suppressed (`SUPPRESS_HVAC`, `_suppress_hvac_for_whf(resend=True)`). That sends `set_hvac_mode off` again even when a WHF session already owns the thermostat, and keeps the captured pre-fan mode.
+
+Either way you get:
+- a WARNING `WHF safety: rule-2 state backstop: ...`;
+- an Activity Record row;
+- the event `whf_rule2_backstop` (`stopped`: `fan`|`hvac`);
+- one notification per 10-minute episode.
+
+With automation switched off (observe-only) nothing is commanded. You are told once per overlap (`_observe_only_rule2_notice`, event `whf_rule2_observe_notified`).
+
+**Triggers.** The fan entity's state changes, the thermostat's mode changes and its `hvac_action`-only changes (trigger `thermostat_action`, new), and the 15 s tick. Worst case: 10 s confirm + 15 s tick + the command, inside 30 s.
+
+**It never fights Climate Advisor's own restores.** These wait until the fan has read off for `WHF_RESTORE_QUIET_S` (#1215/#1271), so the fan is off before any heat/cool comes back, and there is no overlap.
+
+**Evidence.** On 90 feedback days × 14 press lags (1–120 s), every unsealed case now ends within 30 s. Before, the maximum was 2699 s at 1–2 s and 357 s at 3–45 s.
+
+**Generated days.** They draw the 1–3 s press again (`fan_on_then_occupant_hvac_on_fast`). In `tests/test_sim_generator.py`, seeds 21000027/52/80/87 press inside the echo guard, and they fail when the backstop is removed.
 
 #### I. Nat-Vent Mid-Session Cycle-Off Missing the OFF-Direction Guard (Issue #955)
 

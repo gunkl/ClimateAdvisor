@@ -324,6 +324,7 @@ from .whf_safety_decision import (
     WHF_STOP_VERIFY_S,
     SensorReading,
     WhfSafetyAction,
+    WhfSafetyDecision,
     WhfSafetyInputs,
     WhfSafetySnapshot,
     decide_whf_safety,
@@ -1313,6 +1314,7 @@ class AutomationEngine:
     # When the occupant last pressed the WHOLE-HOUSE fan (not the thermostat blower); None = no WHF press.
     _whf_press_time: str | None = None
     _whf_observe_notified: bool = False
+    _whf_observe_rule2_notified: bool = False  # Issue #1288: observe-only rule-2 notice sent for this overlap
 
     # Issue #1049: class-level defaults for attributes first read by the climate-command
     # helpers below, so engines built via object.__new__ (skipping __init__) still work.
@@ -12299,6 +12301,7 @@ class AutomationEngine:
                 occupant_hvac_on_at=self._occupant_hvac_on_at or snap.occupant_hvac_on_at,
                 whf_owns_hvac=self._whf_owns_hvac(),
                 stop_in_flight_for_s=self._whf_stop_in_flight(),
+                **self._whf_rule2_state_inputs(climate_state, snap),
             )
         )
 
@@ -12331,12 +12334,19 @@ class AutomationEngine:
             return None
 
         if decision.action is WhfSafetyAction.SUPPRESS_HVAC:
-            _LOGGER.warning(
-                "WHF safety: suppressing HVAC: reason=%s trigger=%s thermostat_mode=%s",
-                decision.reason,
-                trigger,
-                thermostat_mode,
-            )
+            if decision.backstop:
+                self._announce_whf_rule2_backstop(decision, trigger=trigger, snap=snap, climate_state=climate_state)
+                await self._suppress_hvac_for_whf(
+                    reason="whole-house fan running — heating/cooling turned off (rule-2 backstop)", resend=True
+                )
+                return None
+            else:
+                _LOGGER.warning(
+                    "WHF safety: suppressing HVAC: reason=%s trigger=%s thermostat_mode=%s",
+                    decision.reason,
+                    trigger,
+                    thermostat_mode,
+                )
             await self._suppress_hvac_for_whf(
                 reason="whole-house fan turned on after HVAC — suppressing HVAC (newest action wins)"
             )
@@ -12344,6 +12354,8 @@ class AutomationEngine:
 
         # STOP_SEALED / STOP_MUTEX_FAN
         sealed = decision.action is WhfSafetyAction.STOP_SEALED
+        if decision.backstop:
+            self._announce_whf_rule2_backstop(decision, trigger=trigger, snap=snap, climate_state=climate_state)
         reason_text = (
             "sealed house — stopping whole-house fan" if sealed else "HVAC turned on — stopping whole-house fan"
         )
@@ -12405,6 +12417,74 @@ class AutomationEngine:
         if self._whf_restore_pending:
             await self._complete_whf_safety_release(trigger=trigger)
         return result
+
+    def _whf_rule2_state_inputs(self, climate_state: Any, snap: WhfSafetySnapshot) -> dict[str, Any]:
+        """The device-state inputs of the rule-2 state backstop (Issue #1288), read from ground truth.
+
+        ``hvac_action`` and the mode's age come from the live thermostat state (``last_changed`` moves with the mode,
+        not with ``hvac_action``); the overlap clock is the coordinator's; the own-off age is Climate Advisor's last
+        HVAC-off command, so the backstop never re-decides an off that is still landing.
+        """
+        now = dt_util.now()
+        mode_for: float | None = None
+        changed = getattr(climate_state, "last_changed", None) if climate_state is not None else None
+        if isinstance(changed, datetime):
+            try:
+                mode_for = max(0.0, (now - changed).total_seconds())
+            except TypeError:
+                mode_for = None
+        own_off_for: float | None = None
+        own_at = getattr(self, "_last_commanded_hvac_time", None)
+        if getattr(self, "_last_commanded_hvac_mode", None) == "off" and isinstance(own_at, datetime):
+            try:
+                own_off_for = max(0.0, (now - own_at).total_seconds())
+            except TypeError:
+                own_off_for = None
+        attrs = getattr(climate_state, "attributes", None) or {}
+        return {
+            "hvac_action": attrs.get("hvac_action") if hasattr(attrs, "get") else None,
+            "overlap_for_s": snap.overlap_for_s,
+            "thermostat_mode_for_s": mode_for,
+            "own_hvac_off_for_s": own_off_for,
+        }
+
+    def _announce_whf_rule2_backstop(
+        self, decision: WhfSafetyDecision, *, trigger: str, snap: WhfSafetySnapshot, climate_state: Any
+    ) -> None:
+        """WARNING + Activity Record row + event for a rule-2 state-backstop action (Issue #1288).
+
+        The backstop only acts when a press was missed, so it is always worth a WARNING. The occupant notification
+        for a fan stop is the ordinary rule-2 stop notice (``_after_whf_safety_stop``, once per episode); a
+        suppression gets its own notice here, once per 10-minute episode.
+        """
+        stops_fan = decision.action is WhfSafetyAction.STOP_MUTEX_FAN
+        mode = climate_state.state if climate_state is not None else None
+        _LOGGER.warning(
+            "WHF safety: %s -- stopping the %s: trigger=%s thermostat_mode=%s fan_on_for_s=%s role=%s",
+            decision.reason,
+            "whole-house fan" if stops_fan else "heating/cooling",
+            trigger,
+            mode,
+            snap.fan_on_for_s,
+            self.role,
+        )
+        self._record_action(
+            "Whole-house fan stopped (fan and heating/cooling were both running)"
+            if stops_fan
+            else "Heating/cooling turned off (whole-house fan running)",
+            decision.reason,
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "whf_rule2_backstop",
+                {"stopped": "fan" if stops_fan else "hvac", "trigger": trigger, "thermostat_mode": mode},
+            )
+        if not stops_fan and not self._recent_duplicate("whf_rule2_backstop_hvac", (True,), window_seconds=600):
+            self._notify_whf_safety(
+                "Climate Advisor — heating/cooling turned off",
+                "Climate Advisor turned off the heating/cooling because the whole-house fan was running beside it."
+                " The fan and the heating/cooling are never run together, and the most recent change wins.",
+            )
 
     def _arm_whf_restore_pending(self, *, fan_already_off: bool, verify_timer: bool = False) -> None:
         """Hand a fan stop's HVAC restore to the ONE gated release (``_complete_whf_safety_release``).
@@ -12511,8 +12591,13 @@ class AutomationEngine:
                 occupant_fan_on_at=None,
                 occupant_hvac_on_at=None,
                 whf_owns_hvac=False,
+                **self._whf_rule2_state_inputs(climate_state, snap),
             )
         )
+        if decision.backstop:
+            await self._observe_only_rule2_notice(decision, trigger=trigger)
+            return
+        self._whf_observe_rule2_notified = False
         if not decision.sealed:
             if self._whf_observe_notified:
                 _LOGGER.info(
@@ -12546,6 +12631,40 @@ class AutomationEngine:
             return
         if self._emit_event_callback:
             self._emit_event_callback("whf_sealed_observe_notified", {"trigger": trigger})
+
+    async def _observe_only_rule2_notice(self, decision: WhfSafetyDecision, *, trigger: str) -> None:
+        """Observe-only: the fan and heating/cooling run together -- tell the occupant once, command nothing (#1288).
+
+        The mirror of the sealed-house notice above for the rule-2 state backstop. The episode re-arms when either
+        device stops. The ``whf_rule2_observe_notified`` event lets the rule-2 promise (P2) accept this overlap as
+        "observe-only and the occupant was told".
+        """
+        if decision.action is WhfSafetyAction.DEFER:
+            self._schedule_whf_safety_timer("_whf_safety_retry_cancel", (decision.retry_in_s or 0.0) + 0.5, "settle")
+            return
+        if self._whf_observe_rule2_notified:
+            return
+        self._whf_observe_rule2_notified = True
+        _LOGGER.warning(
+            "WHF safety: %s -- automation is off (observe-only): notifying, not stopping trigger=%s role=%s",
+            decision.reason,
+            trigger,
+            self.role,
+        )
+        try:
+            await self._notify(
+                "The whole-house fan and the heating/cooling are running at the same time, and automation is switched"
+                " off, so Climate Advisor will not turn either off. Turn one of them off.",
+                "Climate Advisor — whole-house fan and heating/cooling both on",
+                "invariant_violation",
+                observe_only_ok=True,
+            )
+        except Exception:
+            _LOGGER.warning("WHF observe-only rule-2 notification failed", exc_info=True)
+            self._whf_observe_rule2_notified = False
+            return
+        if self._emit_event_callback:
+            self._emit_event_callback("whf_rule2_observe_notified", {"trigger": trigger})
 
     def _after_whf_safety_stop(self, result: FanCommandResult, *, sealed: bool, reason: str, trigger: str) -> None:
         """Bookkeeping after a safety stop command went out (owner decisions 4 and 5)."""
@@ -16403,7 +16522,7 @@ class AutomationEngine:
         )
         return result
 
-    async def _suppress_hvac_for_whf(self, *, reason: str) -> None:
+    async def _suppress_hvac_for_whf(self, *, reason: str, resend: bool = False) -> None:
         """Capture current HVAC mode and turn it off for a whole-house-fan session (Issue #495).
 
         Scoped to WHOLE_HOUSE/BOTH only — FAN_MODE_HVAC coexists with the compressor by
@@ -16417,11 +16536,18 @@ class AutomationEngine:
         (manual/remote-detected) so the WHF/HVAC mutual-exclusion rule has exactly one
         suppression path — see the #400/#402/#417/#456/#458 "sibling threshold drift" history
         for why a second copy of this rule is the wrong move.
+
+        ``resend`` (Issue #1288, the rule-2 state backstop): the thermostat is heating/cooling beside the running fan
+        right now although a session may already own it (a press Climate Advisor never saw). Then the off is sent
+        again; the captured pre-fan mode is kept as it is.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return
         if self._pre_fan_hvac_mode is not None:
+            if resend:
+                with self._mode_change_context("nat_vent"):
+                    await self._set_hvac_mode("off", reason=reason)
             return
         _cs = self.hass.states.get(self.climate_entity)
         prior_mode = _cs.state if _cs else None

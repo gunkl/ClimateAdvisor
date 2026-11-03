@@ -10,6 +10,15 @@ Two owner rules, both about the fan's physical state, both enforced from ground 
    stops the fan, a newer fan-on suppresses HVAC. Climate Advisor's own commands are never
    occupant actions (the caller passes ``None`` for them).
 
+   **Rule-2 state backstop (Issue #1288).** The press-based half above needs a stamp for the
+   occupant's action, and a press can be missed (heat pressed 1-2 s after the fan, a door pause
+   running). The backstop decides from device state alone: the fan reads physically on, the
+   thermostat is in an active mode and reports heating/cooling, and both have been true together
+   for ``WHF_RULE2_OVERLAP_CONFIRM_S``. Then one device is stopped: the fan when the thermostat
+   entered its mode after the fan came on (the HVAC is the newer action), else the HVAC. It never
+   fires while Climate Advisor's own stop or HVAC-off is still landing, and never for a fan whose
+   state cannot be read.
+
 Templated on ``fan_toggle_rate_limit.py``: a leaf module with no logging, no HA imports and no
 state. Every field on ``WhfSafetyInputs`` corresponds to a value the shell reads; the shell
 (``AutomationEngine._enforce_whf_safety_locked``) owns commands, logging, timers and alerts.
@@ -41,6 +50,15 @@ _WHF_FAN_MODES = frozenset({"whole_house_fan", "both"})
 WHF_ACTIVE_HVAC_MODES = frozenset({"heat", "cool", "heat_cool", "auto"})
 
 WHF_SETTLE_AFTER_ON_S = 10.0
+# Issue #1288: the rule-2 state backstop waits until the fan and the compressor have read on together this long (a
+# person switching one off as they switch the other on is not fought), and stays silent this long after Climate
+# Advisor's own HVAC-off command (the thermostat's hvac_action lags the mode write). 10 s + the 15 s tick at worst
+# + the command itself keeps the overlap under 30 s.
+WHF_RULE2_OVERLAP_CONFIRM_S = 10.0
+WHF_RULE2_OWN_OFF_QUIET_S = 10.0
+# hvac_action values that mean the compressor/burner is running (mirrors hvac_action.HVAC_ACTION_COMPRESSOR_ACTIVE;
+# kept literal so this leaf has no package imports).
+_COMPRESSOR_ACTIVE_ACTIONS = frozenset({"heating", "cooling"})
 WHF_SEALED_CONFIRM_S = 10.0
 WHF_SENSOR_UNKNOWN_GRACE_S = 60.0
 # Issue #1215: how long after Climate Advisor's own WHF stop command the physical reading is still ALLOWED to read
@@ -112,6 +130,8 @@ class WhfSafetySnapshot:
                     own fan commands never produce it (owner decision 7).
     occupant_hvac_on_at -> the mirror: when the OCCUPANT turned HVAC on, from the thermostat mode's age, under the
                     same suppression and the same exclusion of Climate Advisor's own commands.
+    overlap_for_s -> Issue #1288: seconds the fan has read physically on while the thermostat (in an active mode)
+                    reported heating/cooling, continuously, as the coordinator observed it; None when not overlapping.
     """
 
     fan_on: bool | None
@@ -120,6 +140,7 @@ class WhfSafetySnapshot:
     stale_names: tuple[str, ...] = ()
     occupant_fan_on_at: datetime | None = None
     occupant_hvac_on_at: datetime | None = None
+    overlap_for_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +165,11 @@ class WhfSafetyInputs:
                            inside its convergence window and the fan has not yet read off; None otherwise. The power
                            reading lags the command, so "running" inside the window is the stop working, not a fresh
                            violation.
+    hvac_action         -> Issue #1288: the thermostat's live ``hvac_action`` (heating/cooling/idle/...), None unknown
+    overlap_for_s       -> Issue #1288: seconds the fan has read physically on while the thermostat reported
+                           heating/cooling, continuously (None: not overlapping)
+    thermostat_mode_for_s -> Issue #1288: seconds since the thermostat's mode last changed (None when unknown)
+    own_hvac_off_for_s  -> Issue #1288: seconds since Climate Advisor's own last HVAC-off command (None: none known)
     """
 
     fan_mode: str
@@ -157,6 +183,10 @@ class WhfSafetyInputs:
     occupant_hvac_on_at: datetime | None
     whf_owns_hvac: bool
     stop_in_flight_for_s: float | None = None
+    hvac_action: str | None = None
+    overlap_for_s: float | None = None
+    thermostat_mode_for_s: float | None = None
+    own_hvac_off_for_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +199,7 @@ class WhfSafetyDecision:
     stale_sensor_count: int = 0  # sensors counted closed because they were unknown for > 60 s
     sealed: bool = False
     in_flight: bool = False  # Issue #1215: NONE because Climate Advisor's own stop is still converging
+    backstop: bool = False  # Issue #1288: decided by the rule-2 state backstop (device state, no press stamp)
 
 
 def sensor_reading(
@@ -212,7 +243,7 @@ def decide_whf_safety(inputs: WhfSafetyInputs) -> WhfSafetyDecision:
     """Decide whether the running whole-house fan must be stopped, HVAC suppressed, or nothing.
 
     Precedence: not-a-WHF-install and fan-not-running exit first; then rule 1 (sealed house);
-    then rule 2 (WHF vs HVAC, newest occupant action wins).
+    then rule 2 (WHF vs HVAC, newest occupant action wins), then the rule-2 state backstop.
     """
     if inputs.fan_mode not in _WHF_FAN_MODES:
         return WhfSafetyDecision(WhfSafetyAction.NONE, "not a whole-house-fan install")
@@ -278,4 +309,55 @@ def decide_whf_safety(inputs: WhfSafetyInputs) -> WhfSafetyDecision:
                 stale_sensor_count=stale,
             )
 
+    backstop = _rule2_state_backstop(inputs, stale)
+    if backstop is not None:
+        return backstop
     return WhfSafetyDecision(WhfSafetyAction.NONE, "no conflict", stale_sensor_count=stale)
+
+
+def _rule2_state_backstop(inputs: WhfSafetyInputs, stale: int) -> WhfSafetyDecision | None:
+    """Issue #1288: the fan reads on and the thermostat is heating/cooling, whatever the press stamps say.
+
+    Ground truth only: ``fan_on`` must be a real physical reading (a command-only fan is blind by design) and the
+    thermostat must be in an active mode AND report the compressor running. Below the overlap threshold, or while
+    Climate Advisor's own HVAC-off is still landing, it waits (DEFER re-asks in time). Which device stops is chosen
+    by state: a thermostat mode that changed after the fan physically came on is the newer action, so the fan
+    stops; otherwise the heating/cooling is suppressed. Either way one device stops within ~30 s.
+    """
+    if inputs.fan_on is not True:
+        return None
+    if inputs.thermostat_mode not in WHF_ACTIVE_HVAC_MODES:
+        return None
+    if str(inputs.hvac_action).lower() not in _COMPRESSOR_ACTIVE_ACTIONS:
+        return None
+    if inputs.overlap_for_s is None:
+        return None
+    retry = 0.0
+    if inputs.overlap_for_s < WHF_RULE2_OVERLAP_CONFIRM_S:
+        retry = WHF_RULE2_OVERLAP_CONFIRM_S - inputs.overlap_for_s
+    if inputs.own_hvac_off_for_s is not None and inputs.own_hvac_off_for_s < WHF_RULE2_OWN_OFF_QUIET_S:
+        retry = max(retry, WHF_RULE2_OWN_OFF_QUIET_S - inputs.own_hvac_off_for_s)
+    if retry > 0.0:
+        return WhfSafetyDecision(
+            WhfSafetyAction.DEFER,
+            "rule-2 state backstop: fan and heating/cooling both on — confirming before acting",
+            retry_in_s=retry,
+            stale_sensor_count=stale,
+            backstop=True,
+        )
+    fan_for, mode_for = inputs.fan_on_for_s, inputs.thermostat_mode_for_s
+    if fan_for is not None and mode_for is not None and mode_for < fan_for:
+        return WhfSafetyDecision(
+            WhfSafetyAction.STOP_MUTEX_FAN,
+            f"rule-2 state backstop: thermostat switched to {inputs.thermostat_mode} after the fan came on and is"
+            f" {inputs.hvac_action} beside it ({inputs.overlap_for_s:.0f}s) — stopping the fan (newest action wins)",
+            stale_sensor_count=stale,
+            backstop=True,
+        )
+    return WhfSafetyDecision(
+        WhfSafetyAction.SUPPRESS_HVAC,
+        f"rule-2 state backstop: thermostat {inputs.hvac_action} ({inputs.thermostat_mode}) beside the running fan"
+        f" ({inputs.overlap_for_s:.0f}s) — suppressing heating/cooling (the fan is the newer action)",
+        stale_sensor_count=stale,
+        backstop=True,
+    )

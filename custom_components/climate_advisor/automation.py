@@ -1190,6 +1190,8 @@ class AutomationEngineCallbacks:
     sensor_settled_open: Callable[[], bool] | None = None
     emit_event: Callable[..., None] | None = None
     request_refresh: Callable[[], None] | None = None
+    # Issue #1264: display-only push of the override/grace cards (no automation cycle).
+    push_card_status: Callable[[], None] | None = None
     post_grace_fan_check: Callable[[], None] | None = None
     get_fan_physical_state: Callable[[], Any] | None = None
     is_recent_fan_command: Callable[[], bool] | None = None
@@ -1288,6 +1290,7 @@ class AutomationEngine:
     _hvac_cmd_fail_since: datetime | None = None
     _hvac_cmd_fail_mode: str | None = None  # last attempted mode of the open failure episode
     _request_refresh_callback: Any | None = None
+    _push_card_status_callback: Any | None = None  # Issue #1264
     # Issue #1181: class-level default for engines built via object.__new__ in tests.
     _sensor_hold_callback: Any | None = None
     # Issue #1120: the pre-cool band the thermostat is holding, and when it was armed (see
@@ -2074,6 +2077,7 @@ class AutomationEngine:
         self._sensor_settled_open_callback = callbacks.sensor_settled_open
         self._emit_event_callback = callbacks.emit_event
         self._request_refresh_callback = callbacks.request_refresh
+        self._push_card_status_callback = callbacks.push_card_status
         self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
         self._get_fan_physical_state_callback = callbacks.get_fan_physical_state
         self._is_recent_fan_command_callback = callbacks.is_recent_fan_command
@@ -11988,6 +11992,11 @@ class AutomationEngine:
             self._cancel_fan_thermo_backstop()  # the release this stop used to make also ended the backstop
         if result is FanCommandResult.EXECUTED:
             self._after_whf_safety_stop(result, sealed=sealed, reason=reason_text, trigger=trigger)
+        elif sealed and result is FanCommandResult.ALREADY_IN_STATE:
+            # Issue #1264: the sealed decision says the fan must stop and it already reads off -- the occupant's
+            # fan-on is over either way, so end its override and grace as an executed stop does (no stop is counted:
+            # nothing was commanded). Left alone they ran on for the rest of the timer over a fan that was off.
+            self._end_fan_override_and_grace(reason="whf_safety_stop")
         if self._whf_restore_pending:
             await self._complete_whf_safety_release(trigger=trigger)
         return result
@@ -12288,6 +12297,21 @@ class AutomationEngine:
             return
         self._cancel_grace_intentionally(reason, remote_timer_hours=remote_timer_hours)
         self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
+        self._refresh_cards_after_ending("grace")
+
+    def _refresh_cards_after_ending(self, what: str) -> None:
+        """Push the override/grace cards once an override/grace ending is complete (Issue #1264).
+
+        The Status/Fan cards read ``coordinator.data``. An ending made off the listener path (a WHF safety stop from its
+        settle/tick/verify timer, leaving home, bedtime) otherwise showed the ended grace until some unrelated refresh
+        (15-26 s after a sealed stop on a dual-entity install). Called after every flag is cleared, so the cards never
+        read a half-ended state. Display only, deliberately not a coordinator refresh: a refresh runs the automation
+        cycle, and pulling it forward here would decide over an occupant change that is not protected yet (start-up
+        coalescing). ``cancel_override()`` and the grace expiry run their full refresh on their own.
+        """
+        _LOGGER.debug("Pushing card status after %s ended role=%s", what, self.role)
+        if self._push_card_status_callback:
+            self._push_card_status_callback()
 
     def _end_fan_override_for_rule2_stop(self, result: FanCommandResult) -> None:
         """End the occupant's older fan override once rule 2's stop for their newer HVAC change has gone out.
@@ -12329,6 +12353,7 @@ class AutomationEngine:
         occupant's HVAC change). ``keep_grace`` leaves it alone (the mutex case: the occupant's HVAC
         action has its own grace running).
         """
+        had_grace = bool(self._grace_active)
         if (
             not keep_grace
             and self._grace_active
@@ -12352,8 +12377,13 @@ class AutomationEngine:
             _LOGGER.debug(
                 "WHF safety stop: fan override left to expire with its grace (shared grace) role=%s", self.role
             )
+            if had_grace and not self._grace_active:
+                self._refresh_cards_after_ending("grace")
             return
+        had_fan_override = bool(self._fan_override_active)
         self.clear_fan_override(reason=reason)
+        if (had_grace and not self._grace_active) or had_fan_override:
+            self._refresh_cards_after_ending("fan override")
 
     def _alert_whf_stale_sensors(self, snap: WhfSafetySnapshot, count: int) -> None:
         """Alert (once per 6 h per sensor set) that an unavailable sensor is being counted as closed."""

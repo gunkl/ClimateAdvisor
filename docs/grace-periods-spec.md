@@ -528,6 +528,24 @@ protects nothing; PATH B ends it on purpose (`_end_grace_left_protecting_nothing
 `override_self_resolved`, the `decide_orphaned_grace` predicate) instead of the orphaned-grace watchdog's ERROR.
 Tests: `tests/test_p4_fan_override_end_1204.py`, `tests_ha/test_p4_fan_override_end_1204.py`.
 
+**The cards show the ending at once (Issue #1264).** Occupant impact: after the sealed-house stop the Status card
+kept reading "grace period (manual) — WHF override — 3h (ends …)" for another 15-26 s, although the grace had ended.
+The cards read `coordinator.data`. The stop runs from the enforcer's settle/tick/verify timers, and on a dual-entity
+install the transmitter's off reading returns before the listener's refresh, so the card waited for the power entity's
+lagging off reading. `_end_fan_override_and_grace()` (the sealed and rule-2 stops) and
+`_end_grace_left_protecting_nothing()` (leaving home, bedtime, wake-up, PATH B) now push the cards
+(`_refresh_cards_after_ending()` → the coordinator's `_push_override_card_status()`) once their ending is complete, after
+every flag is cleared. The push is display only: it re-renders the Status, Fan, WHF and HVAC-fan card fields in
+`coordinator.data` and notifies the entities, without a coordinator refresh. A refresh runs the automation cycle, and
+pulling one forward here decided over an occupant heat/cool that start-up coalescing had left unprotected (it forced the
+heat off for an open window seconds after the rule-2 stop). `cancel_override()` and the grace expiry keep their full
+refresh.
+**A sealed stop that finds the fan already off** (`_deactivate_fan()` returns `ALREADY_IN_STATE`: the snapshot saw the
+fan on, the physical read is off by the command) ends the fan override and grace the same way
+(`_end_fan_override_and_grace(reason="whf_safety_stop")`); before #1264 they ran on for the rest of the timer. Nothing
+was commanded, so it is not counted as a stop for the anti-oscillation alert.
+Tests: `tests/test_whf_stop_grace_cards_1264.py`, `tests_ha/test_whf_stop_grace_card_1264.py`.
+
 ---
 
 ## Orphaned Grace Self-Heal (Issue #508)

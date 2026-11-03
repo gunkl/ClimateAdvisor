@@ -192,3 +192,39 @@ def test_successful_mode_write_late_echo_is_still_suppressed_after_a_failed_one(
         house.wait(100)
         house.thermostat_reports(state="cool")  # CA's successful write, echoing late
     assert not _mode_overrides(house)
+
+
+def _fail_next_setpoint_write(house: _House) -> None:
+    """The next ``set_temperature`` service call raises (the thermostat never receives it); later ones succeed."""
+    real = house.fh.services.async_call
+    state = {"armed": True}
+
+    async def _call(domain, service, data=None, *a, **kw):
+        if service == "set_temperature" and state["armed"]:
+            state["armed"] = False
+            raise RuntimeError("thermostat unreachable")
+        return await real(domain, service, data, *a, **kw)
+
+    house.fh.services.async_call = _call
+
+
+@pytest.mark.parametrize("fan_mode", FAN_MODES)
+def test_failed_setpoint_write_with_no_mode_switch_leaves_no_mode_echo(fan_mode):
+    """Occupant: the thermostat is already in heat and CA's setpoint call fails. That call's embedded heat never
+    reached the thermostat, so it must not linger as an expected echo: a person who leaves heat and comes back to it
+    within the window (or a thermostat returning from unavailable) would otherwise be read as CA's own echo."""
+    house = _House(fan_mode, state="heat")
+    _fail_next_setpoint_write(house)
+    with house.sch.installed():
+        house.ca_writes(70.0, mode="heat")
+    assert "heat" not in [w.mode for w in house.ae._own_mode_writes]
+
+
+@pytest.mark.parametrize("fan_mode", FAN_MODES)
+def test_failed_setpoint_write_after_a_real_mode_switch_keeps_the_switch_echo(fan_mode):
+    """Control: the switch to heat landed, only the setpoint call failed, so the switch's late echo is still CA's."""
+    house = _House(fan_mode, state="off")
+    _fail_next_setpoint_write(house)
+    with house.sch.installed():
+        house.ca_writes(70.0, mode="heat")
+    assert [w.mode for w in house.ae._own_mode_writes] == ["heat"]

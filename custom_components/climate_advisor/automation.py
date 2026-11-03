@@ -6041,6 +6041,10 @@ class AutomationEngine:
             self._restamp_climate_command_times()
             if _call.outcome is ClimateCallOutcome.DRY_RUN:
                 return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- no verify/retry
+            if _call.outcome in (ClimateCallOutcome.REJECTED, ClimateCallOutcome.FAILED):
+                # Issue #1246: this call's embedded mode never reached the thermostat (a real switch above kept
+                # its own entry), so it will not echo -- the setpoint memory forgets a failed write the same way.
+                self._forget_own_mode_write(mode)
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 # Out-of-range / mode-not-offered: skipped quietly (no incident, no verify).
                 return HvacCommandResult.FAILED

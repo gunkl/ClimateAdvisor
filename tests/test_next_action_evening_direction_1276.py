@@ -70,6 +70,7 @@ def _coord(fan_mode: str, *, mode: str | None = "heat", paused: bool = False, pr
     coord.config = {**_CFG, "fan_mode": fan_mode}
     coord._occupancy_mode = "home"
     coord.automation_engine = MagicMock(_paused_by_door=paused, _pre_pause_mode=pre_pause)
+    coord.hass = MagicMock()
     coord._thermostat_hvac_mode = lambda: mode
     coord._learned_swings = lambda: (None, None)  # default 1.5F tolerance
     return coord_cls, coord

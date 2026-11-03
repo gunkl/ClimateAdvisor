@@ -15672,12 +15672,20 @@ class AutomationEngine:
             # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
             # family it wrote (sleep band, aggressive savings, TOU-expanded band), not the flat comfort setting -- and
             # say so when it wrote nothing (WHF session / blower hold) instead of claiming a restore.
+            # ``outcome`` (Issue #1049 change 5 pattern): a restore CA decided and attempted stays a restore (the
+            # occupant is home, CA is back in control), but a write that failed / was dry-run / was superseded is
+            # rendered "NOT sent" instead of reading as a setpoint the thermostat received.
             _w = self._last_mode_write
             if self._emit_event_callback:
                 if _w.held_reason is None and _w.target_f is not None:
                     self._emit_event_callback(
                         "occupancy_comfort_restored",
-                        {"mode": _w.family, "target_f": _w.target_f, "indoor_f": decision.indoor_temp_f},
+                        {
+                            "mode": _w.family,
+                            "target_f": _w.target_f,
+                            "indoor_f": decision.indoor_temp_f,
+                            "outcome": hvac_outcome_label(_w.result),
+                        },
                     )
                 elif not self._recent_duplicate(
                     "occupancy_comfort_restore_held", (_w.held_reason,), window_seconds=600

@@ -1814,6 +1814,10 @@ def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[str, str]:
     mode = p.get("mode", "")
     target = p.get("target_f")
     label = f"Occupancy -- comfort restored ({mode})" if mode else "Occupancy -- comfort restored"
+    not_sent = _write_not_sent_suffix(p)  # Issue #1245: a failed / dry-run / superseded restore write
+    if not_sent:
+        shown = f" ({mode})" if mode else ""
+        label = f"Occupancy -- comfort restore NOT sent{shown} -- {not_sent}"
     settings = ""
     if target is not None:
         with contextlib.suppress(TypeError, ValueError):

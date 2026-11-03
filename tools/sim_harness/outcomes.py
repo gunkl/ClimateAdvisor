@@ -207,6 +207,16 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         "hvac_output_stall",
         "hvac_output_stall_recovered",
         "occupancy_restore_deferred",
+        # Issue #1245: occupancy_comfort_restore_held records that an arrival-home restore RAN but wrote
+        # nothing (a whole-house-fan session blocked the write, or blower ventilation through an open window
+        # keeps the thermostat Off, Rule 3). Same class as occupancy_restore_deferred above: the absence of a
+        # write, never an HVAC decision. The previous semantics (unmapped -> 'unknown:<type>' decision) were
+        # wrong: a held arrival during ventilation would be reported as a decision of its own and, under
+        # last-decision-wins, shadow the outcome actually in force (natural_ventilation). Cannot hide a real
+        # failure: a scenario expecting the restore asserts comfort_restored (occupancy_comfort_restored),
+        # which is not emitted while held, so it still fails; the hold itself is asserted through the live
+        # engine attributes (_natural_vent_active / fan state) and tests/test_restore_event_1245.py.
+        "occupancy_comfort_restore_held",
         # Issue #1066 (nearest-edge arming): comfort_family_switch / comfort_family_switch_locked_out
         # record WHICH comfort edge the selector armed (or wanted to). They are emitted from inside the
         # same cycle as the deciding event (classification_applied, setback_applied, resumed, ...) and

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.45] — 2026-11-02
+
+- Fix #1264: when Climate Advisor stops the whole-house fan because every door and window is closed, the Status card no longer keeps saying "grace period (manual) — WHF override — 3h" (and the fan card "running (manual override)") for another 15 to 26 seconds after the fan has stopped. The grace period really had ended at the stop, so automation was not held back; only the cards lagged, until the fan's power reading caught up. The cards now update the moment the stop ends the grace. The same now happens when leaving home, bedtime or wake-up ends a grace period. The cards update without running a full automation cycle, so the update cannot act early on a heat or cool change you just made. Also fixed: if the closed-house stop found the fan already reading off, the fan override and its grace were left running for the rest of the timer; they now end exactly as they do after a normal stop.
+
 ## [0.8.44] — 2026-11-02
 
 - Fix #1260: the Activity log no longer says the house stayed outside your comfort range while your thermostat was only waiting inside its own deadband; it still does when the thermostat is off, set wrong, or the room is more than 2.5°F past your comfort range or more than 2.5°F from the thermostat's own setpoint (so a thermostat sitting idle while the room is far below what it is set to is still reported). Owner-approved rule: the exception applies only while the thermostat itself is in the matching mode, idle, set at or inside the band edge, and the room is within 2.5°F of both that edge and the thermostat's own setpoint (the thermostat's own deadband). The time the thermostat's deadband excused is counted separately (excused_by=thermostat_deadband) in the diagnostics and the nightly report, never as a missed promise, and a stretch that later leaves the deadband is still timed from when the room first left your comfort range.

@@ -98,3 +98,34 @@ jobs:
 
       - name: Run real-HA lifecycle tests
         run: python3 scripts/test.py ha  # uv run --locked --only-group test-ha (own venv)
+
+  # Issue #1278: the nightly failed four nights running and nobody noticed, because a failed scheduled
+  # run only shows in the Actions tab. Open one tracking issue on the first failure and comment on it
+  # for every later one, until someone closes it. A runner killed for memory reports "failure" or
+  # "cancelled", so both count.
+  report-failure:
+    needs: [generated-days, ha-lifecycle]
+    if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the nightly-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GENERATED: ${{ needs.generated-days.result }}
+          HA: ${{ needs.ha-lifecycle.result }}
+        run: |
+          title="Nightly generated-days / real-HA run failing"
+          body="Nightly run failed: $RUN_URL (commit $GITHUB_SHA). generated-days=$GENERATED, ha-lifecycle=$HA."
+          num=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body
+
+          Close this issue once the nightly is green again; the next failure opens a new one."
+          fi

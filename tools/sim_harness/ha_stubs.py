@@ -439,6 +439,18 @@ class _MockOptionsFlow:
 REDACTED = "**REDACTED**"
 
 
+def _callback(func: Any) -> Any:
+    """Real ``homeassistant.core.callback``: mark the function and return it unchanged (Issue #1278).
+
+    A MagicMock ``callback`` replaced every decorated method with one shared mock: the method
+    never ran (the sealed-house WHF safety tick, the thermal sample tick and the post-grace fan
+    check were all no-ops in simulation) and every call was recorded on that mock forever,
+    leaking ~25 MB per generated day until the nightly runner ran out of memory.
+    """
+    func._hass_callback = True
+    return func
+
+
 def _redact_data(data, to_redact):
     """Real (non-mocked) equivalent of homeassistant.components.diagnostics.async_redact_data.
 
@@ -669,6 +681,7 @@ def install_ha_stubs() -> None:
 
     core = sys.modules["homeassistant.core"]
     core.Context = _MockContext
+    core.callback = _callback
 
     exceptions_mod = sys.modules["homeassistant.exceptions"]
     exceptions_mod.HomeAssistantError = _MockHomeAssistantError

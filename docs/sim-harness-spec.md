@@ -202,6 +202,12 @@ HeadlessTarry is not in this repository; the tier that exercises what Tier A's v
 
 **Why real base classes for these?** Production modules subclass `DataUpdateCoordinator`, `SensorEntity`, etc. A subclass whose `__bases__` contains a `MagicMock` instance raises `TypeError: metaclass conflict`. Real (plain Python) base classes avoid this. The MagicMock layer is sufficient for all attributes the engine reads at runtime, but cannot serve as a base class.
 
+**`@callback` is the identity (Issue #1278).** `homeassistant.core.callback` is replaced by `_callback`, which marks the function and returns it unchanged, as real HA does. A MagicMock decorator replaced each decorated method with one shared mock. That had two effects:
+- `ClimateAdvisorCoordinator._async_whf_safety_tick`, `_async_thermal_sample_tick` and `_on_post_grace_fan_check` never ran in simulation.
+- Every call was recorded forever, about 25 MB per generated day, which got the nightly runner killed.
+
+`tests/test_ha_stub_callback_1278.py` guards the identity, checks that no production class attribute is a mock, and checks that generated days do not pile up recorded mock calls. `--generate` prints `peak_rss=…MB` after each master seed.
+
 **`voluptuous` handling:** If the real `voluptuous` package is importable it is used; otherwise a MagicMock is injected. This prevents schema-validation code from failing at import time in environments without `voluptuous`.
 
 **Code reference:** `tools/sim_harness/ha_stubs.py#L124` (`install_ha_stubs`)

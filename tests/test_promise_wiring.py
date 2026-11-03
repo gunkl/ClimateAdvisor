@@ -512,39 +512,13 @@ class TestRealEntryPointsFeedThePromises:
     Otherwise every promise except the mutex would silently stop evaluating at home with CI green.
     """
 
-    @staticmethod
-    def _callback_transparent_class():
-        """A private copy of the coordinator class where ``@callback`` is the identity.
-
-        In the lightweight HA stub ``callback`` is a MagicMock that swallows the decorated
-        function (CLAUDE.md), so the real 5-minute tick callback is otherwise unreachable.
-        Loaded under a private module name so the shared coordinator module is untouched.
-        """
-        import importlib.util
-
-        real = importlib.import_module(COORD_MOD)
-        core = sys.modules["homeassistant.core"]
-        saved = core.callback
-        core.callback = lambda fn: fn
-        try:
-            name = f"{COORD_MOD}_callback_probe"
-            spec = importlib.util.spec_from_file_location(name, real.__file__)
-            probe = importlib.util.module_from_spec(spec)
-            probe.__package__ = "custom_components.climate_advisor"
-            sys.modules[name] = probe
-            try:
-                spec.loader.exec_module(probe)
-            finally:
-                sys.modules.pop(name, None)
-        finally:
-            core.callback = saved
-        return probe.ClimateAdvisorCoordinator
-
     def _entry_coord(self):
+        # Issue #1278: the shared HA stub's ``callback`` is now the identity, as in real HA, so the
+        # real 5-minute tick callback is reachable without loading a private copy of the module.
         c = _make_coord(hvac_action="heating")
-        probe_cls = self._callback_transparent_class()
+        cls = _coordinator_class()
         for name in ("_async_thermal_sample_tick", "_async_thermostat_changed", "_emit_event"):
-            setattr(c, name, types.MethodType(getattr(probe_cls, name), c))
+            setattr(c, name, types.MethodType(getattr(cls, name), c))
         return c
 
     def test_the_real_five_minute_tick_records_and_evaluates(self):

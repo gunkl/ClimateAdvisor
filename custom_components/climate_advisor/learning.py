@@ -24,7 +24,6 @@ from .const import (
     COMPLIANCE_THRESHOLD_LOW,
     LEARNING_DB_FILE,
     MIN_DATA_POINTS_FOR_SUGGESTION,
-    MIN_THERMAL_OBSERVATIONS,
     MIN_WEATHER_BIAS_OBSERVATIONS,
     OBS_TYPE_HVAC_HEAT,
     REJECT_NO_K_PASSIVE,
@@ -48,9 +47,6 @@ from .const import (
     THERMAL_MIN_POST_HEAT_SAMPLES,
     THERMAL_MIN_R_SQUARED,
     THERMAL_OBS_CAP,
-    THERMAL_PASSIVE_CONF_HIGH,
-    THERMAL_PASSIVE_CONF_LOW,
-    THERMAL_PASSIVE_CONF_MEDIUM,
     THERMAL_SOLAR_FACTOR_MIN_RANGE,
     THERMAL_SWING_CONF_HIGH,
     THERMAL_SWING_CONF_LOW,
@@ -69,6 +65,13 @@ from .swing import (
     swing_debug_summary,
 )
 from .temperature import format_temp_delta
+from .thermal_confidence import (
+    drop_stored_grades,
+    explain_physics_eligibility,
+    grade_hvac_confidence,
+    grade_passive_confidence,
+    grade_solar_confidence,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -172,18 +175,7 @@ def _grade_passive_confidence(cache: dict) -> str:
     slightly lower confidence_k_passive after upgrade — called out explicitly in the
     CHANGELOG as deliberate, not a silent regression.
     """
-    count = (
-        cache.get("observation_count_passive", 0)
-        + cache.get("observation_count_heat", 0)
-        + cache.get("observation_count_cool", 0)
-    )
-    if count < THERMAL_PASSIVE_CONF_LOW:
-        return "none"
-    if count < THERMAL_PASSIVE_CONF_MEDIUM:
-        return "low"
-    if count < THERMAL_PASSIVE_CONF_HIGH:
-        return "medium"
-    return "high"
+    return grade_passive_confidence(cache)
 
 
 def _ewma_update_field(cache: dict, field_name: str, value: float, alpha: float) -> None:
@@ -241,8 +233,6 @@ def _new_thermal_cache() -> dict:
         "swing_definition_version": THERMAL_SWING_DEFINITION_VERSION,
         "last_observation_date": None,
         "avg_r_squared_passive": None,
-        "confidence_k_passive": "none",
-        "confidence_k_hvac": "none",
     }
 
 
@@ -1062,6 +1052,10 @@ class LearningEngine:
                         "Thermal model cache: swing values from the retired definition reset (Issue #1234); "
                         "they re-learn from real heat/cool start points"
                     )
+                # Issue #1277: confidence grades are computed live from the counts; the stored copies were
+                # never refreshed and misled the diagnostic tools, so drop them.
+                if isinstance(_cache_mig, dict) and drop_stored_grades(_cache_mig):
+                    _LOGGER.debug("Thermal model cache: dropped stale stored confidence grades (Issue #1277)")
                 # Validate pending_observations is a dict
                 if not isinstance(self._state.pending_observations, dict):
                     self._state.pending_observations = {}
@@ -1362,22 +1356,9 @@ class LearningEngine:
         conf_k_passive = _grade_passive_confidence(cache)
 
         _solar_obs = cache.get("observation_count_solar", 0)
-        _conf_solar = "none"
-        if _solar_obs >= 100:
-            _conf_solar = "high"
-        elif _solar_obs >= 50:
-            _conf_solar = "medium"
-        elif _solar_obs >= 20:
-            _conf_solar = "low"
+        _conf_solar = grade_solar_confidence(_solar_obs)
 
-        _hvac_total = cache.get("observation_count_heat", 0) + cache.get("observation_count_cool", 0)
-        _conf_hvac = "none"
-        if _hvac_total >= 20:
-            _conf_hvac = "high"
-        elif _hvac_total >= 10:
-            _conf_hvac = "medium"
-        elif _hvac_total >= 5:
-            _conf_hvac = "low"
+        _conf_hvac = grade_hvac_confidence(cache)
 
         status: dict = {
             "k_passive": {
@@ -1415,16 +1396,12 @@ class LearningEngine:
         has_solar = k_solar_val is not None or k_vent_window_val is not None or k_vent_fan_val is not None
         status["ode_version"] = "v3" if has_solar else "basic"
 
-        physics_eligible = k_passive_val is not None and k_passive_val < 0 and conf_k_passive != "none"
+        # Issue #1277: the same rule _build_predicted_indoor_future applies (either grade, or the gate bridge).
+        physics_eligible, eligible_reason = explain_physics_eligibility(
+            _conf_hvac, conf_k_passive, k_passive_val, k_vent_window_val
+        )
         status["physics_eligible"] = physics_eligible
-        if physics_eligible:
-            status["physics_eligible_reason"] = f"k_passive + confidence={conf_k_passive}"
-        elif k_passive_val is None:
-            status["physics_eligible_reason"] = "k_passive not yet learned"
-        elif k_passive_val >= 0:
-            status["physics_eligible_reason"] = "k_passive has wrong sign"
-        else:
-            status["physics_eligible_reason"] = "confidence insufficient (none)"
+        status["physics_eligible_reason"] = eligible_reason
 
         return status
 
@@ -1456,16 +1433,7 @@ class LearningEngine:
         count_cool = cache.get("observation_count_cool", 0)
         total = count_heat + count_cool
 
-        # TODO: replace magic numbers 10/20 with named constants (e.g. THERMAL_HVAC_CONF_LOW/MEDIUM)
-        #       to mirror the THERMAL_PASSIVE_CONF_* pattern in const.py.
-        if total < MIN_THERMAL_OBSERVATIONS:
-            confidence = "none"
-        elif total < 10:
-            confidence = "low"
-        elif total < 20:
-            confidence = "medium"
-        else:
-            confidence = "high"
+        confidence = grade_hvac_confidence(cache)
 
         cache["confidence"] = confidence
 
@@ -1484,13 +1452,7 @@ class LearningEngine:
                 thermal_equilibrium_f += (k_solar / abs(k_passive)) * solar_factor
 
         _solar_obs = cache.get("observation_count_solar", 0)
-        _conf_solar = "none"
-        if _solar_obs >= 100:
-            _conf_solar = "high"
-        elif _solar_obs >= 50:
-            _conf_solar = "medium"
-        elif _solar_obs >= 20:
-            _conf_solar = "low"
+        _conf_solar = grade_solar_confidence(_solar_obs)
 
         return {
             "k_active_heat": k_active_heat,

@@ -949,14 +949,17 @@ A chart_log window is eligible for a phase observation only when all six conditi
 }
 ```
 
-**`physics_eligible_reason` values** (returned by `get_engine_status()`; bridge-home state is not reflected here — bridge activation is determined in `_build_predicted_indoor_future`):
+**`physics_eligible_reason` values** (returned by `get_engine_status()` and printed by `tools/engine_status.py`). Since Issue #1277 both use `thermal_confidence.explain_physics_eligibility()`, the same rule `_build_predicted_indoor_future` applies (`thermal_confidence.physics_eligibility()`), so the gate bridge is reflected here too. Checked in this order:
 
-| Condition | Reason string |
-|---|---|
-| `k_passive is None` | `"k_passive not yet learned"` |
-| `k_passive >= 0` (wrong sign) | `"k_passive has wrong sign"` |
-| `confidence_k_passive == "none"` | `"confidence insufficient (none)"` |
-| `k_passive < 0` and `confidence != "none"` | `f"k_passive + confidence={conf_k_passive}"` (e.g. `"k_passive + confidence=low"`) |
+| Condition | `physics_eligible` | Reason string |
+|---|---|---|
+| gate bridge active (`k_passive is None` or `confidence_k_passive == "none"`, and `k_vent_window <= 0`) | true | `"gate bridge: k_vent_window stands in for k_passive"` |
+| `k_passive < 0` and either grade above `"none"` | true | `f"k_passive + confidence (passive={p}, hvac={h})"` |
+| `k_passive is None` | false | `"k_passive not yet learned"` |
+| `k_passive >= 0` (wrong sign) | false | `"k_passive has wrong sign"` |
+| both grades `"none"` | false | `"confidence insufficient (none)"` |
+
+All grades are computed live from the observation counts (`thermal_confidence.grade_passive_confidence` / `grade_hvac_confidence` / `grade_solar_confidence`). They are **not** stored: `thermal_model_cache` no longer carries `confidence_k_passive` / `confidence_k_hvac` (seeded `"none"` and never refreshed before Issue #1277; dropped on load). The plain `confidence` key is still written back by `get_thermal_model()`.
 
 ### Exposure Points
 

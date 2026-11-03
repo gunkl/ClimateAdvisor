@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.51"
+VERSION = "0.8.52"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1607,6 +1607,10 @@ THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S: int = 300  # 5 min — post-heat is pa
 THERMAL_PASSIVE_CONF_LOW = 5
 THERMAL_PASSIVE_CONF_MEDIUM = 15
 THERMAL_PASSIVE_CONF_HIGH = 30
+
+# HVAC (heat + cool) confidence count thresholds; "low" starts at MIN_THERMAL_OBSERVATIONS (Issue #1277)
+THERMAL_HVAC_CONF_MEDIUM = 10
+THERMAL_HVAC_CONF_HIGH = 20
 
 # Sleep temperature config keys (Issue #101)
 CONF_SLEEP_HEAT = "sleep_heat"

@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _zone_storage import LEARNING_DB_FILE  # noqa: E402
 from ha_logs import load_config  # noqa: E402
-from learning_db import fetch_learning_db  # noqa: E402
+from learning_db import _load_confidence_module, fetch_learning_db  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -57,18 +57,23 @@ def build_engine_status(cache: dict) -> dict:
     tool falls back to inferring 'active' from whether the value is non-None.
     """
 
-    def _engine(key: str, conf_key: str | None) -> dict:
+    # Issue #1277: grades and eligibility come from the engine's own pure rules, computed live from the
+    # observation counts. The stored confidence_k_* fields were never refreshed and read "none" forever.
+    conf = _load_confidence_module()
+    conf_passive = conf.grade_passive_confidence(cache)
+    conf_hvac = conf.grade_hvac_confidence(cache)
+    conf_solar = conf.grade_solar_confidence(cache.get("observation_count_solar", 0))
+
+    def _engine(key: str, confidence: str | None) -> dict:
         value = cache.get(key)
-        active = value is not None
-        confidence = cache.get(conf_key) if conf_key else None
         return {
-            "active": active,
+            "active": value is not None,
             "value": value,
             "confidence": confidence,
         }
 
-    k_passive = _engine("k_passive", "confidence_k_passive")
-    k_solar = _engine("k_solar", None)
+    k_passive = _engine("k_passive", conf_passive)
+    k_solar = _engine("k_solar", conf_solar)
     solar_phase = _engine("solar_phase_offset_h", None)
     k_vent_window = _engine("k_vent_window", None)
     # Keep in sync with learning.py::LearningEngine.get_engine_status() — this CLI tool
@@ -84,7 +89,7 @@ def build_engine_status(cache: dict) -> dict:
         "active": hvac_active,
         "k_active_heat": k_heat,
         "k_active_cool": k_cool,
-        "confidence": cache.get("confidence_k_hvac"),
+        "confidence": conf_hvac,
     }
 
     # ODE version: v3 if any extended params are present
@@ -93,15 +98,10 @@ def build_engine_status(cache: dict) -> dict:
     )
     ode_version = "v3" if has_v3 else "basic"
 
-    # Physics eligible: k_passive present and confidence > "none"
-    conf_passive = cache.get("confidence_k_passive", cache.get("confidence", "none"))
-    physics_eligible = k_passive["active"] and conf_passive not in (None, "none", "?")
-    if physics_eligible:
-        eligible_reason = "k_passive + confidence sufficient"
-    elif not k_passive["active"]:
-        eligible_reason = "k_passive not yet learned"
-    else:
-        eligible_reason = f"confidence too low ({conf_passive})"
+    # Physics eligible: the rule _build_predicted_indoor_future applies (either grade, or the gate bridge)
+    physics_eligible, eligible_reason = conf.explain_physics_eligibility(
+        conf_hvac, conf_passive, cache.get("k_passive"), cache.get("k_vent_window")
+    )
 
     return {
         "k_passive": k_passive,

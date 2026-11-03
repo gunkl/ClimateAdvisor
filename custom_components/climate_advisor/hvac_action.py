@@ -70,3 +70,28 @@ def is_hvac_action_active(hvac_action: str | None) -> bool:
 def is_hvac_action_reported_idle(hvac_action: str | None) -> bool:
     """True if `hvac_action` positively reports the equipment is not running (``idle``/``off``)."""
     return str(hvac_action).lower() in HVAC_ACTION_REPORTS_NOT_RUNNING
+
+
+# hvac_mode values under which the state-based fallback never counts the equipment as running.
+HVAC_MODES_NOT_RUNNING: frozenset[str] = frozenset({"off", "unavailable", "unknown", ""})
+
+
+def is_mode_fallback_running(hvac_mode: str | None, hvac_action: str | None) -> bool:
+    """The hvac_mode fallback for one side of a thermostat state change (Issues #93, #1240).
+
+    Used when hvac_action carries no heating/cooling signal: the equipment counts as running when a
+    mode is selected AND hvac_action does not positively report idle/off.
+    """
+    return str(hvac_mode) not in HVAC_MODES_NOT_RUNNING and not is_hvac_action_reported_idle(hvac_action)
+
+
+def thermostat_reports_running(hvac_mode: str | None, hvac_action: str | None, *, ca_ventilating: bool) -> bool:
+    """Whether ONE thermostat snapshot shows a running session, by the session-edge rule (Issue #1241).
+
+    The same rule ``_async_thermostat_changed`` applies to each side of an edge: hvac_action
+    heating/cooling decides on its own; otherwise the mode fallback, which never counts CA's own fan
+    or natural ventilation (``ca_ventilating``, Issue #986) as a session.
+    """
+    if is_hvac_compressor_active(hvac_action):
+        return True
+    return is_mode_fallback_running(hvac_mode, hvac_action) and not ca_ventilating

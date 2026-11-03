@@ -378,6 +378,7 @@ These event types have no clean production entry point and are silently skipped 
 | `bedtime_setback_skipped` | — | `bedtime_setback_skipped` |
 | `occupancy_setback` | — | `setback_applied` |
 | `occupancy_comfort_restored` | — | `comfort_restored` |
+| `occupancy_comfort_restore_held` (Issue #1245) | — | none: registered in `UNMAPPED_PRODUCTION_EVENTS` (the absence of a write, same class as `occupancy_restore_deferred`; cannot shadow the outcome in force) |
 | `morning_wakeup` | — | `comfort_restored` |
 | `morning_wakeup_skipped` | — | `morning_wakeup_skipped` |
 | `grace_expired` | `re_paused=True` | `paused` |

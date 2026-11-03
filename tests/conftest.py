@@ -86,6 +86,7 @@ LEGITIMATELY_REPEATING_EVENT_TYPES = frozenset(
         "hvac_write_blocked_whf_active",
         "morning_wakeup",
         "occupancy_comfort_restored",
+        "occupancy_comfort_restore_held",
         # Issue #1050: windowed (_recent_duplicate, 600 s) at the emit site; hours-apart arrivals
         # held for the same reason legitimately repeat identical payloads.
         "occupancy_restore_deferred",

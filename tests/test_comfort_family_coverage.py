@@ -63,11 +63,6 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "_exit_nat_vent() and its bypass branches, the away-ceiling exit branches) "
         "left untouched by Issue #827 per that issue's own explicit scope note"
     ),
-    "_apply_occupancy_home_decision": (
-        "exempted: read-only (Issue #1208) — after the arrival restore it reads the family the comfort-edge "
-        "selector actually armed, to report it as occupancy_comfort_restored.mode (a mild day next to its "
-        "floor arms heat while the band's active edge is the ceiling); it never writes the field"
-    ),
 }
 
 

@@ -1111,7 +1111,13 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     occ_ts = sorted(o.ts for o in occupant_actions(inp))
     widen = NUMBERS.P7_AGGRESSIVE_WIDEN_F if cfg.aggressive_savings else 0.0
     excl = timedelta(minutes=NUMBERS.P7_EXCLUSION_MIN)
-    away_tl = _state_timeline(marks, frozenset({"occupancy_setback"}), frozenset({"occupancy_comfort_restored"}))
+    # Issue #1245: a HELD arrival restore (whf_session / blower_hold) also ends the away timeline: the occupant is
+    # home and the setback ended, only the write was withheld. The vent_tl exclusion below covers the held window.
+    away_tl = _state_timeline(
+        marks,
+        frozenset({"occupancy_setback"}),
+        frozenset({"occupancy_comfort_restored", "occupancy_comfort_restore_held"}),
+    )
     vent_tl = _state_timeline(marks, frozenset({"nat_vent_activated"}), NAT_VENT_END_KINDS)
     off_cmd_ts = sorted(c.ts for c in inp.commands if c.origin == "ca" and c.automation_enabled is False)
     restart_ts = sorted(m.ts for m in marks if m.kind in ("system_restarted", "startup_coalesced"))

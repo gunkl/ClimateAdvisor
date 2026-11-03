@@ -585,6 +585,26 @@ def hvac_outcome_label(result: HvacCommandResult | None) -> str:
 
 
 @dataclass(frozen=True)
+class ComfortModeWrite:
+    """What the last ``_set_temperature_for_mode()`` call actually did (Issue #1245).
+
+    ``_set_temperature_for_mode()`` returns only the command result, which cannot say WHICH family/target it
+    wrote or WHY it wrote nothing. A restore event ("comfort restored to X") must report what the thermostat was
+    sent, so the call records it here -- the one source for every caller that announces a restore.
+
+    ``family``/``target_f`` are the resolved band edge for the family the write was attempted for (None when no
+    write was attempted). ``held_reason`` is non-None when nothing was written: ``whf_session`` (the whole-house
+    fan owns the thermostat), ``blower_hold`` (blower ventilation through an open window keeps it Off, Rule 3),
+    ``occupancy_redirect`` (away/vacation redirected to setback) or ``no_family`` (the resolver chose neither).
+    """
+
+    result: HvacCommandResult | None = None
+    family: str | None = None
+    target_f: float | None = None
+    held_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class HvacWriteRecord:
     """New facts about the last climate write that no other field carries (Issue #1049).
 
@@ -1726,6 +1746,7 @@ class AutomationEngine:
         # activates/deactivates — see _arm_comfort_family(). Not persisted across
         # restarts — a fresh process has no flapping history to guard against, same as
         # _nat_vent_outdoor_exit_time.
+        self._last_mode_write = ComfortModeWrite()  # Issue #1245: outcome of the last _set_temperature_for_mode()
         self._comfort_mode_family: str | None = None
         self._comfort_mode_family_entry_time: datetime | None = None
         # Same-tick guard (folded in from Issue #699's own finding): so a family
@@ -6516,6 +6537,16 @@ class AutomationEngine:
             abs(edge - flat) > 1e-6,
         )
 
+    @staticmethod
+    def _mode_write_record(result: HvacCommandResult, family: str, target_f: float) -> ComfortModeWrite:
+        """Issue #1245: the record for a setpoint write attempt (``WHF_BLOCKED`` is the one 'wrote nothing' result)."""
+        return ComfortModeWrite(
+            result=result,
+            family=family,
+            target_f=target_f,
+            held_reason="whf_session" if result is HvacCommandResult.WHF_BLOCKED else None,
+        )
+
     async def _set_temperature_for_mode(
         self,
         c: DayClassification,
@@ -6555,6 +6586,7 @@ class AutomationEngine:
         call site. TOU's own gate is already the authority here; the resolver must not
         second-guess it.
         """
+        self._last_mode_write = ComfortModeWrite()  # Issue #1245: overwritten by whichever path returns below
         # Issue #85: redirect to setback when not home/guest. Gate unified via
         # should_defer_to_occupancy_setback() (Issue #460); which handler to redirect
         # to still depends on which of the two deferring modes this is.
@@ -6565,6 +6597,7 @@ class AutomationEngine:
             else:
                 _LOGGER.info("Vacation mode — redirecting to deep setback instead of comfort (%s)", reason)
                 await self.handle_occupancy_vacation()
+            self._last_mode_write = ComfortModeWrite(held_reason="occupancy_redirect")
             return None  # redirected to setback: this call wrote no comfort setpoint
 
         # Issue #827: route through the same comfort-family FSM _apply_comfort_band()
@@ -6602,6 +6635,7 @@ class AutomationEngine:
                 reason,
             )
             await self._apply_nat_vent_hvac_state()
+            self._last_mode_write = ComfortModeWrite(held_reason="blower_hold")
             return None
         _resolved_mode = (
             c.hvac_mode
@@ -6634,6 +6668,7 @@ class AutomationEngine:
             # every cycle doesn't continuously push the (informational-only, post-
             # #827) dwell-clock timestamp forward on mere reassertion.
             self._arm_comfort_family("heating", dt_util.now(), only_if_changed=True)
+            self._last_mode_write = self._mode_write_record(_write_result, "heat", floor_target)
             return _write_result
         elif _resolved_mode == "cool":
             ceiling_target = (
@@ -6645,8 +6680,10 @@ class AutomationEngine:
                 ceiling_target, reason=reason, mode="cool", skip_setpoint_sanity_check=skip_setpoint_sanity_check
             )
             self._arm_comfort_family("cooling", dt_util.now(), only_if_changed=True)
+            self._last_mode_write = self._mode_write_record(_write_result, "cool", ceiling_target)
             return _write_result
         else:
+            self._last_mode_write = ComfortModeWrite(held_reason="no_family")
             return None
 
     async def apply_tou_precondition(self, classification: DayClassification, target: float, schedule_id: str) -> None:
@@ -15647,13 +15684,31 @@ class AutomationEngine:
                 await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
-            written = {"heating": "heat", "cooling": "cool"}.get(self._comfort_mode_family or "", family)
-            comfort = self.config["comfort_heat"] if written == "heat" else self.config["comfort_cool"]
+            # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
+            # family it wrote (sleep band, aggressive savings, TOU-expanded band), not the flat comfort setting -- and
+            # say so when it wrote nothing (WHF session / blower hold) instead of claiming a restore.
+            # ``outcome`` (Issue #1049 change 5 pattern): a restore CA decided and attempted stays a restore (the
+            # occupant is home, CA is back in control), but a write that failed / was dry-run / was superseded is
+            # rendered "NOT sent" instead of reading as a setpoint the thermostat received.
+            _w = self._last_mode_write
             if self._emit_event_callback:
-                self._emit_event_callback(
-                    "occupancy_comfort_restored",
-                    {"mode": written, "target_f": comfort, "indoor_f": decision.indoor_temp_f},
-                )
+                if _w.held_reason is None and _w.target_f is not None:
+                    self._emit_event_callback(
+                        "occupancy_comfort_restored",
+                        {
+                            "mode": _w.family,
+                            "target_f": _w.target_f,
+                            "indoor_f": decision.indoor_temp_f,
+                            "outcome": hvac_outcome_label(_w.result),
+                        },
+                    )
+                elif not self._recent_duplicate(
+                    "occupancy_comfort_restore_held", (_w.held_reason,), window_seconds=600
+                ):
+                    self._emit_event_callback(
+                        "occupancy_comfort_restore_held",
+                        {"mode": family, "reason": _w.held_reason, "indoor_f": decision.indoor_temp_f},
+                    )
 
         if decision.notify is HomeNotifyOutcome.SUPPRESSED_NEAR_COMFORT:
             # Issue #1036: the value the decision used (non-None by construction on this
@@ -15693,6 +15748,9 @@ class AutomationEngine:
                     "🏠 Welcome home! Comfort temperature will resume once "
                     f"{_RESTORE_DEFERRED_TEXT.get(decision.restore_deferred_reason, 'the hold')} clears."
                 )
+            elif decision.restore and self._last_mode_write.held_reason is not None:
+                # Issue #1245: the restore wrote nothing (WHF session / blower hold) -- don't promise a restore.
+                _msg = "🏠 Welcome home! Comfort temperature will resume once ventilation ends."
             else:
                 _msg = "🏠 Welcome home! Restoring comfort temperature. Should feel normal in about 20–30 minutes."
             await self._notify(_msg, "Climate Advisor", notification_type="occupancy_home")

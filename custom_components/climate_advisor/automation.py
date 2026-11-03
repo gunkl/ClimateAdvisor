@@ -221,6 +221,7 @@ from .fan_thermostat_decision import (
 )
 from .fan_toggle_rate_limit import (
     FanToggleRateLimitOutcome,
+    deferral_record_is_stale,
 )
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
@@ -3469,6 +3470,20 @@ class AutomationEngine:
         if _pending_dropped:
             self._log_fan_manual_origin_pending_discarded(reason, _pending[0], True)
         return True
+
+    def _expire_stale_fan_deferral_record(self, site: str) -> bool:
+        """Drop a toggle-floor deferral record that is well past its ``applies_at`` (Issue #1247).
+
+        Occupant view: the min-runtime cycle's refused-start retry (3600 s) or any unrelated start used to find an
+        hour-old "activate" record and log "5-minute floor expired -- applying deferred activation" long after the
+        fact. A record older than ``FAN_DEFERRAL_STALE_AFTER_S`` past its ``applies_at`` is not pending and not
+        applied: it goes through ``_clear_fan_deferral_record()`` (the ONE choke point), which drops the #1205
+        pending manual-origin fact bound to it in the same step and logs. No fan or HVAC decision changes; the
+        start/stop that follows runs as an ordinary one. Returns whether it cleared.
+        """
+        if not deferral_record_is_stale(self._fan_rate_limited_until, dt_util.now()):
+            return False
+        return self._clear_fan_deferral_record(None, f"stale_past_applies_at:{site}")
 
     @staticmethod
     def _log_fan_manual_origin_pending_discarded(reason: str, applies_at: datetime, record_cleared: bool) -> None:
@@ -16800,6 +16815,9 @@ class AutomationEngine:
                 self._clear_fan_deferral_record("activate", "hvac_fan_restriction")
                 return FanCommandResult.SUPPRESSED
 
+        # Issue #1247: a record long past its applies_at is neither pending nor applied (before the FSM reads it).
+        self._expire_stale_fan_deferral_record("activate")
+
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
         from .fan_fsm import FanFsmEventKind
 
@@ -18008,6 +18026,9 @@ class AutomationEngine:
             if release_suppression:
                 self._cancel_fan_thermo_backstop()
             return FanCommandResult.ALREADY_IN_STATE
+
+        # Issue #1247: a record long past its applies_at is neither pending nor applied (before the FSM reads it).
+        self._expire_stale_fan_deferral_record("deactivate")
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state().
         from .fan_fsm import FanFsmEventKind

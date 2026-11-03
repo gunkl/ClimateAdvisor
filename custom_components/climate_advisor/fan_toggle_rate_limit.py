@@ -22,7 +22,30 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from homeassistant.util import dt as dt_util
+
 from .time_utils import instant_after
+
+# Issue #1247: how long past its ``applies_at`` a recorded deferral still counts as pending. The deferred start/stop
+# is retried by (a) short timers due at ``applies_at`` + 1 s and (b) the 30-minute coordinator cycle (the paused-
+# reactivation retry in ``check_natural_vent_conditions()``), so a real retry lands at most one cycle after
+# ``applies_at``; 300 s of scheduling slack (one floor) is added on top. The min-runtime cycle's refused-start retry
+# (``_MIN_RUNTIME_REFUSED_RETRY_S``, 3600 s) lands >= 3300 s after ``applies_at`` and must NOT count as the deferred
+# one, which is why the bound sits well below 3300 s.
+FAN_DEFERRAL_STALE_AFTER_S = 2100.0
+
+
+def deferral_record_is_stale(until: datetime | None, now: datetime) -> bool:
+    """Whether a recorded deferral is so far past its ``applies_at`` that it no longer counts (Issue #1247).
+
+    Occupant view: an hour-old record made a later, unrelated fan start log "5-minute floor expired -- applying
+    deferred activation" long after the fact. False for a missing/non-datetime record and for any record still
+    pending or within ``FAN_DEFERRAL_STALE_AFTER_S`` past its ``applies_at``.
+    """
+    if not isinstance(until, datetime):
+        return False
+    # as_utc reads a naive value in the HA timezone, like instant_after() (the record is UTC, ``now`` may be naive).
+    return (dt_util.as_utc(now) - dt_util.as_utc(until)).total_seconds() > FAN_DEFERRAL_STALE_AFTER_S
 
 
 class FanToggleRateLimitOutcome(Enum):
@@ -88,7 +111,12 @@ def decide_fan_toggle_rate_limit(
         return FanToggleRateLimitOutcome.ALLOW, None
 
     applies_at = instant_after(inputs.min_interval_s, now=inputs.last_toggle_command_time)
-    if inputs.rate_limited_until == applies_at and inputs.rate_limited_direction == inputs.action:
+    # Issue #1247: a record well past its applies_at is not "already deferred" (the shell also clears it).
+    if (
+        inputs.rate_limited_until == applies_at
+        and inputs.rate_limited_direction == inputs.action
+        and not deferral_record_is_stale(inputs.rate_limited_until, inputs.now)
+    ):
         return FanToggleRateLimitOutcome.DEFER_DUPLICATE, applies_at
 
     return FanToggleRateLimitOutcome.DEFER_NEW, applies_at

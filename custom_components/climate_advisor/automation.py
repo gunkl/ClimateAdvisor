@@ -5114,6 +5114,20 @@ class AutomationEngine:
         except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
             self._own_mode_writes = [OwnModeWrite(mode, now)]
 
+    def _forget_own_mode_write(self, mode: str, *, count: int = 1) -> None:
+        """Drop the newest ``count`` remembered writes of ``mode``: the call failed, so nothing will echo (Issue #1246).
+
+        Mirrors ``_settle_own_setpoint_write(sent=False)``. ``_set_temperature`` records its mode a second time via
+        ``_ensure_hvac_mode_for_write``, so a failed switch there forgets both entries of that call.
+        """
+        writes = list(getattr(self, "_own_mode_writes", None) or [])
+        left = count
+        for i in range(len(writes) - 1, -1, -1):
+            if left and writes[i].mode == mode:
+                del writes[i]
+                left -= 1
+        self._own_mode_writes = writes
+
     def recognise_own_mode_echo(self, observed_mode: str) -> bool:
         """True when this thermostat mode change is one of CA's own recent mode writes coming back (Issue #1246).
 
@@ -5698,10 +5712,12 @@ class AutomationEngine:
                 return HvacCommandResult.DRY_RUN  # Issue #1108: nothing sent -- stop, no note
             if _call.outcome is ClimateCallOutcome.REJECTED:
                 self._mode_switch_marker = None
+                self._forget_own_mode_write(mode)  # never reached the thermostat: nothing will echo
                 self._note_mode_rejected(mode, _call.error)
                 return HvacCommandResult.FAILED
             if _call.outcome is ClimateCallOutcome.FAILED:
                 self._mode_switch_marker = None
+                self._forget_own_mode_write(mode)
                 self._update_write_record(result=HvacCommandResult.FAILED)
                 # Issue #805: this is the single write point for hvac_mode (Fix 1b) -- an
                 # invalid/removed climate_entity must not raise uncaught here (it would abort
@@ -5823,12 +5839,14 @@ class AutomationEngine:
             return False  # Issue #1108: nothing sent -- stop the write, no note
         if _call.outcome is ClimateCallOutcome.FAILED:
             self._mode_switch_marker = None
+            self._forget_own_mode_write(mode)
             self._last_mode_switch_result = HvacCommandResult.FAILED
             self._update_write_record(result=HvacCommandResult.FAILED)
             self._note_hvac_command_failed(mode, _call.error)
             return False
         if _call.outcome is ClimateCallOutcome.REJECTED:
             self._mode_switch_marker = None
+            self._forget_own_mode_write(mode)
             self._last_mode_switch_result = HvacCommandResult.FAILED
             self._note_mode_rejected(mode, _call.error)
             return False
@@ -6004,7 +6022,10 @@ class AutomationEngine:
             # Issue #1049 change 1: make the mode real first (Sensi/ecobee ignore the hvac_mode
             # kwarg below). _my_seq was captured above, before this await.
             if not await self._ensure_hvac_mode_for_write(mode, _my_seq):
-                return HvacCommandResult.SUPERSEDED if self._write_seq != _my_seq else HvacCommandResult.FAILED
+                if self._write_seq != _my_seq:
+                    return HvacCommandResult.SUPERSEDED
+                self._forget_own_mode_write(mode)  # this call's own entry (the switch dropped its own)
+                return HvacCommandResult.FAILED
             # Issue #1049: awaited via _call_climate (blocking, non-cancelling wait) so a
             # rejection is visible instead of swallowed by a non-blocking call.
             _call = await self._call_climate(

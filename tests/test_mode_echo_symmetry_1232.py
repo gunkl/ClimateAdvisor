@@ -138,3 +138,57 @@ def test_post_fan_restore_then_family_flip_late_first_echo_is_not_an_override(fa
         house.wait(30)
         house.thermostat_reports(state="cool")
     assert not _mode_overrides(house)
+
+
+# --- a FAILED mode write is forgotten (symmetry with the setpoint memory, Issue #1246) -----------------------------
+
+
+def _fail_next_mode_write(house: _House) -> None:
+    """The next ``set_hvac_mode`` service call raises (the thermostat never receives it); later ones succeed."""
+    real = house.fh.services.async_call
+    state = {"armed": True}
+
+    async def _call(domain, service, data=None, *a, **kw):
+        if service == "set_hvac_mode" and state["armed"]:
+            state["armed"] = False
+            raise RuntimeError("thermostat unreachable")
+        return await real(domain, service, data, *a, **kw)
+
+    house.fh.services.async_call = _call
+
+
+def _ca_writes_heat(house: _House, via: str) -> None:
+    if via == "set_hvac_mode":
+        run_coro(house.ae._set_hvac_mode("heat", reason="test"))
+    else:  # _set_temperature switches the mode first (recording it twice) via _ensure_hvac_mode_for_write
+        house.ca_writes(70.0, mode="heat")
+
+
+@pytest.mark.parametrize("fan_mode", FAN_MODES)
+@pytest.mark.parametrize("via", ["set_hvac_mode", "set_temperature"])
+def test_failed_mode_write_is_forgotten_so_occupant_choosing_it_is_detected(fan_mode, via):
+    """Occupant: CA's heat write fails, its cool write lands; the person then picks heat and is not ignored."""
+    house = _House(fan_mode, state="off")
+    _fail_next_mode_write(house)
+    with house.sch.installed():
+        _ca_writes_heat(house, via)
+        house.wait(20)
+        run_coro(house.ae._set_hvac_mode("cool", reason="test"))
+        house.wait(60)
+        house.thermostat_reports(state="heat")  # the occupant: CA's heat never reached the thermostat
+    assert _mode_overrides(house)
+    assert [w.mode for w in house.ae._own_mode_writes] == ["cool"]
+
+
+@pytest.mark.parametrize("fan_mode", FAN_MODES)
+@pytest.mark.parametrize("via", ["set_hvac_mode", "set_temperature"])
+def test_successful_mode_write_late_echo_is_still_suppressed_after_a_failed_one(fan_mode, via):
+    house = _House(fan_mode, state="off")
+    _fail_next_mode_write(house)
+    with house.sch.installed():
+        _ca_writes_heat(house, via)
+        house.wait(20)
+        run_coro(house.ae._set_hvac_mode("cool", reason="test"))
+        house.wait(100)
+        house.thermostat_reports(state="cool")  # CA's successful write, echoing late
+    assert not _mode_overrides(house)

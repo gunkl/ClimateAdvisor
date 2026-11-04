@@ -20,6 +20,7 @@ to the classifier and briefing.
 | What is the fix history for this function? | [§ Known History](#known-history) |
 | What happens when observed outdoor history overrides the provider's high/low by a lot? | [§ Observed-Extreme Override Warning](#observed-extreme-override-warning) |
 | What if the provider's temperature unit differs from Climate Advisor's? | [§ Provider Unit Assumption](#provider-unit-assumption) |
+| What happens while the weather entity is unavailable, and how is it retried? | [§ Weather Source Outage](#weather-source-outage) |
 
 ## Datetime Format
 
@@ -106,6 +107,19 @@ It names the offending history sample (`observed_ts`, `observed_value`), the pro
 ## Provider Unit Assumption
 
 `_get_forecast()` converts provider values using the *configured* `temp_unit`; it never reads the provider's unit for conversion. Right after reading the weather attributes it performs a one-shot check of the entity's `temperature_unit` attribute and logs `Weather unit mismatch: provider_unit=… configured_unit=…` on disagreement. See [temperature-conversion.md](temperature-conversion.md#provider-unit-must-equal-the-configured-unit-issue-1015).
+
+## Weather Source Outage
+
+`_get_forecast()` returns `None` while the weather entity is missing or `unavailable`/`unknown`. The 30-minute cycle then skips classification and everything that needs a forecast, and the thermostat holds its last setting.
+
+**Retries.** The first failed cycle starts a backoff: 30 s, 60 s, 120 s, 240 s, 480 s (about 15 min), then the normal 30-minute cycle. Any successful cycle resets it, so every outage gets a fresh series. Issue #1329: only the scheduled retry consumes a retry. While a retry timer is pending (`_weather_retry_pending`), a refresh from anything else, such as a door/window event, neither uses one up nor schedules another timer. Before, a door opening 10 s into an outage turned "retry 5 in 30 s" into "retry 4 in 60 s", and the whole series collapsed into about 40 s.
+
+**What stays live (Issue #1329).** Readings that do not come from the weather service are not blanked:
+- **Dedicated outdoor sensor:** the dashboard's outdoor temperature and the chart log come from it (`outdoor_temp_source` sensor / input_number, `_live_dedicated_outdoor_temp()`), using a successful read only. They are never taken from the weather fallback or its placeholder.
+- **Indoor:** the chart log's indoor value is the live thermostat/indoor reading.
+- **Weather-service installs:** no honest outdoor value exists while the service is down, so outdoor is unknown.
+
+Entity health announces the outage and its recovery: [entity-health-brief](entity-health-brief.md).
 
 ## Timezone Strategy
 

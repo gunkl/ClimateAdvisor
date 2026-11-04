@@ -7,7 +7,7 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What is the single-engine harness and why does it replace the old simulator? | Issue #236 eliminated the standalone `ClimateSimulator` (~1,500 lines that re-implemented `automation.py`). There is now one engine: `tools/sim_harness/` drives the real production `AutomationEngine` headless. Goldens pass or fail against production code itself. | [Scope](#scope) |
-| What are Tier A and Tier B, and what falls into each? | Tier A = fast unit harness; runs every commit; exercises every `automation.py` decision path. Tier B = HeadlessTarry Docker harness (CI-gated); covers coordinator state-listener timing, restart recovery, and thermostat hardware — behavior the engine cannot model headlessly. | [Tier A and Tier B](#tier-a-and-tier-b) |
+| What are Tier A and Tier B, and what falls into each? | Tier A = fast unit harness; runs every commit; exercises every `automation.py` decision path. Tier B = the real-Home-Assistant tier (`tests_ha/`, `python scripts/test.py ha`, CI job `ha-real`); runs the real coordinator inside a real HA core and covers state-listener timing, restart recovery and persistence, timers, unit handling and load/unload cleanup. (HeadlessTarry, a Docker harness for real thermostat hardware, is a proposal and is not in this repository.) | [Tier A and Tier B](#tier-a-and-tier-b) |
 | What does `tools/simulate.py` do now? | It is a thin CLI/report/MANIFEST shell (726 lines). All engine work is delegated to `tools/sim_harness/run_production.py::run_production_scenario()`. There is no `--engine` flag and no `ClimateSimulator`. | [Scope](#scope) |
 | Where do assertions land — event_log, action_log, or engine state? | All three. `event_log` carries decisions (`ceiling_guard_fired`, `nat_vent_comfort_floor_exit`, etc.). `action_log` carries service calls (`climate.set_temperature`). `engine_state` is a snapshot of live engine flags after all events process. | [sim-harness-spec.md — Assertion Surface](sim-harness-spec.md#assertion-surface) |
 | What does `simulator_support: false` mean now? | The real engine CAN evaluate these once the scenario supplies the needed inputs (e.g. `predicted_indoor`). Not skipped in Tier A. Previously marked phantom because the legacy simulator had no ODE. | [Scope](#scope) |
@@ -29,7 +29,7 @@
 
 **Explicitly does NOT own:**
 - `automation.py` production logic (owned by `automation.py`)
-- Coordinator state-listener timing, HA restart recovery (Tier B — future HeadlessTarry)
+- Coordinator state-listener timing, HA restart recovery (Tier B — the real-HA tier, `tests_ha/`)
 - Scenario authoring (scenario JSON files live in `tools/simulations/`)
 - The simulation feedback loop (owned by `tools/simulation_loop.py`; see [simulation-feedback-loop.md](simulation-feedback-loop.md))
 
@@ -74,14 +74,18 @@ Key guarantees: the virtual clock never moves backwards; coroutines are never dr
 **Tier A — production harness (this package):**
 Runs on every commit via `tests/test_production_harness.py`. Drives the real `AutomationEngine` headless. Covers every decision path in `automation.py`: natural vent, grace periods, override confirmation, occupancy setback, ceiling guard ODE, fan cycles. All `track: "logic"` assertions run here.
 
-**Tier B — HeadlessTarry (future, CI-gated):**
-Exercises behavior that requires the coordinator's state-listener layer:
-- `_async_thermostat_changed` (HA state change timing)
-- Coordinator restart recovery (timer state lost on restart)
-- Periodic re-classification cycle driven by `_async_update_data`
-- Thermostat hardware response latency
+**Tier B — real Home Assistant (`tests_ha/`, CI-gated):**
+Runs the real coordinator and config entry inside a real HA core (pytest-homeassistant-custom-component) with a small simulated home: the dev thermostat simulator (`ca_dev_thermostat_sim`), a real weather entity, contact sensors, a whole-house fan and a frozen clock. Built by `tests_ha/house/` (`make_house`); goldens replay through `tests_ha/realha_session.py` (`RealHASession`) and are judged by the same `outcomes.py`. Exercises:
+- `_async_thermostat_changed` and the other state listeners (HA state change timing)
+- Coordinator restart recovery and persistence (`house.restart()`; HA boot ordering is not modeled)
+- Timers, the periodic `_async_update_data` cycle, unload and reload cleanup (HA's leak checker)
+- Unit system, service validation, snapshots of the briefing and cards
 
-Assertions tagged `track: "integration"` are deferred to Tier B. They are skipped in Tier A without causing a failure.
+Goldens that fail on real HA are recorded in `tools/sim_harness/realha_ledger.json` (a two-way ratchet; see the spec). CI runs it as the `ha-real` job in `validate.yml` (8-minute cap) and the nightly `ha-lifecycle` job; `ha-compare-weekly.yml` diffs every golden between FakeHass and real HA.
+
+**HeadlessTarry (proposal, not built):** a Docker harness that would drive real thermostat hardware latency. Nothing in this repository implements it; the plan in `plans/test-automation/04-retirement-waves.md` treats it as frozen.
+
+Assertions tagged `track: "integration"` are skipped in Tier A without causing a failure; they need the coordinator's listener layer, which Tier B provides.
 
 ---
 

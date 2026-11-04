@@ -5,7 +5,7 @@
 ## Standing decisions
 
 - **U1:** FakeHass stays as the fast default engine for `tools/simulate.py` and Tier A. It is not retired in any wave.
-- **Tier B (HeadlessTarry) stays frozen.** No wave touches it.
+- **HeadlessTarry (a proposed Docker harness, never built) stays frozen; the real-HA tier (`tests_ha/`) is in scope.** No wave touches it.
 - Goldens in `tools/simulations/golden/` are LOCKED; no wave edits or removes them.
 - A test is only a candidate when a real-HA test makes the same occupant claim AND `scripts/revert_proof.py` shows that real-HA test fails on the pre-fix commit. Without that, the unit test is the only guard and stays.
 

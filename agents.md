@@ -19,59 +19,47 @@ This repository expects any automation agent (Codex CLI, LLM assistants, scripte
 
 ```
 ClimateAdvisor/
-├── custom_components/
-│   └── climate_advisor/
-│       ├── __init__.py          # Integration entry point and service registration
-│       ├── automation.py        # HVAC automation engine
-│       ├── briefing.py          # Daily briefing generator
-│       ├── classifier.py        # Day classification and trend analysis
-│       ├── config_flow.py       # 3-step setup wizard and options flow
-│       ├── const.py             # All tunable constants
-│       ├── coordinator.py       # Central coordinator (the "brain")
-│       ├── learning.py          # Adaptive learning engine
-│       ├── sensor.py            # 6 sensor entity definitions
-│       ├── manifest.json        # Integration metadata
-│       └── strings.json         # UI translation strings
-├── docs/
-│   ├── 00-PROJECT-INSTRUCTIONS.md   # Foundational project briefing
-│   ├── 01-STRATEGY-AND-DESIGN.md    # System strategy and 5-layer approach
-│   ├── 02-ARCHITECTURE-REFERENCE.md # Technical blueprint and data flow
-│   ├── 03-HA-AUTOMATION-UI-GUIDE.md # Manual HA automation fallback guide
-│   ├── 04-BRIEFING-EXAMPLES.md      # Example daily briefings by scenario
-│   ├── 05-LEARNING-ENGINE-DESIGN.md # Learning engine specification
-│   └── SSH-SETUP.md                 # SSH deployment setup guide
-├── tools/
-│   ├── validate.py              # Pre-deploy validation script
-│   └── deploy.py                # Deployment script (Python)
-├── README.md                    # User-facing documentation
-├── agents.md                    # This file — agent guidance
-├── claude.md                    # Claude-specific workflow guidelines
-├── hacs.json                    # HACS repository metadata
-└── .gitignore                   # Git ignore rules
+├── custom_components/climate_advisor/   # The integration (~80 Python modules)
+│   ├── __init__.py          # Entry point and service registration
+│   ├── coordinator.py       # Central coordinator (the "brain")
+│   ├── automation.py        # HVAC automation engine (AutomationEngine)
+│   ├── classifier.py        # Day classification and trend analysis
+│   ├── briefing.py          # Daily briefing generator
+│   ├── learning.py          # Adaptive learning and thermal model
+│   ├── config_flow.py       # Multi-step setup wizard and options flow
+│   ├── const.py             # Tunable constants and VERSION
+│   ├── api.py               # REST API views for the dashboard
+│   ├── sensor.py, switch.py # Entities
+│   ├── *_fsm.py, *_decision.py, *_lifecycle.py   # Extracted state machines and pure decisions
+│   ├── frontend/index.html  # Dashboard panel
+│   ├── fix_history.jsonl    # Per-issue fix records (written by tools/add_fix_entry.py)
+│   └── manifest.json, strings.json, translations/en.json
+├── docs/                    # Entry point: 00-PROJECT-INSTRUCTIONS.md (its Anchors table routes to every brief/spec)
+├── tests/                   # Stub tier (~400 test files)
+├── tests_ha/                # Real Home Assistant tier
+├── scripts/test.py          # Single test entry point
+├── tools/                   # validate.py, deploy.py, simulate.py + sim_harness/, ha_logs.py, learning_db.py, ...
+├── brand/icon.png           # HACS store icon
+├── README.md, CHANGELOG.md  # User-facing docs and release history
+├── agents.md                # This file — agent guidance
+├── claude.md                # Claude-specific workflow guidelines
+└── hacs.json, pyproject.toml, uv.lock
 ```
+
+The full module map is in [docs/02-ARCHITECTURE-REFERENCE.md](docs/02-ARCHITECTURE-REFERENCE.md).
 
 ## Development Workflow
 
 ### Running and Testing
 
-**Home Assistant Development:**
 ```bash
-# Run tests (uv-managed; deps in pyproject.toml + uv.lock)
-python scripts/test.py unit      # stub tier
-python scripts/test.py ha        # real Home Assistant tier (WSL on Windows)
-
-# Run a specific test module
-python scripts/test.py unit tests/test_classifier.py -v
-
-# Run with coverage
-python scripts/test.py unit --cov=custom_components/climate_advisor
-
-# Lint and type check
-ruff check .
-mypy custom_components/climate_advisor/
+python scripts/test.py unit      # stub tier (tests/); CA_UNIT_WORKERS=N runs it under xdist
+python scripts/test.py ha        # real Home Assistant tier (tests_ha/, WSL on Windows); CA_HA_WORKERS=N
+python scripts/test.py unit tests/test_classifier.py -v   # extra args go to pytest
+ruff check . && ruff format --check .
 ```
 
-**Note:** The integration depends on `weather` and `climate` HA platforms. Testing requires either a running HA instance or proper mocking of HA core APIs.
+Setup, coverage, the real-HA house fixture and troubleshooting: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ### Deploying to Home Assistant
 
@@ -96,14 +84,9 @@ See [docs/SSH-SETUP.md](docs/SSH-SETUP.md) for initial SSH configuration.
 
 ### Development Roadmap
 
-The project follows a phased development plan:
+The original v0.1–v0.4 roadmap is historical; the project is at 0.8.5x (`VERSION` in `const.py`, history in `CHANGELOG.md`). Planned work is tracked in GitHub issues and epics.
 
-1. **v0.1**: Foundation — Core modules complete ✅ (Current)
-2. **v0.2**: Learning suggestions live in briefing
-3. **v0.3**: Multi-zone support, energy cost tracking
-4. **v0.4**: Seasonal learning, anomaly detection
-
-When implementing features, always check which version they belong to and ensure prerequisites are met.
+When implementing features, always check which issue or epic they belong to and ensure prerequisites are met.
 
 ## Core Development Principles
 
@@ -135,24 +118,7 @@ When implementing features, always check which version they belong to and ensure
 
 ### Testing Strategy
 
-Tests do not exist yet but should be built following this strategy:
-
-**Unit Tests** (per module):
-- `test_classifier.py` — Day classification for all 5 types, trend computation, edge cases at thresholds
-- `test_briefing.py` — Briefing generation for each day type, trend modifiers, learning suggestion inclusion
-- `test_learning.py` — Pattern detection (all 6 suggestion types), suggestion lifecycle, compliance scoring, rolling window
-- `test_automation.py` — HVAC mode changes, door/window pause/resume, occupancy setback/restore, bedtime/morning, pre-conditioning
-- `test_config_flow.py` — All 3 setup steps, options flow, validation
-
-**Integration Tests**:
-- `test_coordinator.py` — Forecast fetch → classify → automate → brief → learn pipeline
-- `test_init.py` — Setup/teardown, service registration, suggestion response handling
-
-**Mocking Approach**:
-- Mock `hass` object and its services (`climate.set_temperature`, `notify.*`)
-- Mock weather entity state and attributes for forecast data
-- Mock `async_track_time_change` and other HA event helpers
-- Use `pytest-homeassistant-custom-component` if available, otherwise build lightweight mocks
+The suite exists in two tiers: `tests/` (stub tier; Home Assistant is stubbed by `tools/sim_harness/ha_stubs.py`, installed from `tests/conftest.py`) and `tests_ha/` (a real Home Assistant core via `pytest-homeassistant-custom-component`). Test files are named by feature or issue, not one per module. Mocking rules and test patterns: claude.md "Testing Requirements". Setup and tiers: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 **Coverage Goals**:
 - Classifier: 100% (pure logic, no HA dependencies)

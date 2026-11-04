@@ -2,95 +2,183 @@
 
 # Climate Advisor — Home Assistant Automation UI Guide
 
-This document captures the manual automation approach discussed before the integration was built. It's useful as a reference for understanding the logic, for testing individual behaviors, and as a fallback if someone wants to implement pieces without the full integration.
+This guide shows the manual Home Assistant automations that came before the integration. Use it to understand the logic, to test one behaviour on its own, or to build pieces without the full integration. It also shows how to use Climate Advisor's own entities and services in your automations.
+
+For what the integration does, how to install it, its entities and its services, see the [README](../README.md).
+
+> **Don't run both on one thermostat.** These manual automations and Climate Advisor would fight over the same thermostat. If you keep any of them, point them at a different thermostat, or turn the zone's **Automation** switch off. With the switch off, Climate Advisor still plans and reports but sends no commands.
 
 ## Anchors
 | Question | Short answer | → Full answer |
 |---|---|---|
-| What is this document's purpose — is it the live implementation? | No. This guide documents the manual HA automation approach explored before the integration was built. Use it for understanding the logic, testing individual behaviors, or implementing pieces without the full integration. | [§Building Automations in the HA UI](03-HA-AUTOMATION-UI-GUIDE.md#building-automations-in-the-ha-ui) |
-| How do you implement a door/window pause automation in the HA UI? | Trigger: contact sensor open "For" 2–3 min. Condition: thermostat in heat mode. Action: set hvac_mode to "off". Companion: trigger on closed (For 30s) with "all sensors closed" condition before resuming. | [§Automation 3: Door/Window Open — Pause Heating](03-HA-AUTOMATION-UI-GUIDE.md#automation-3-doorwindow-open--pause-heating) |
-| How do you implement forecast-based conditions in the HA UI? | Use the Template condition type with expressions against `state_attr('weather.your_entity', 'forecast')[0]` — e.g., tomorrow_high vs today temp. Test expressions first in Developer Tools → Template. | [§Forecast-Based Automations (Template Conditions)](03-HA-AUTOMATION-UI-GUIDE.md#forecast-based-automations-template-conditions) |
-| How do you debug why an automation did or did not trigger? | Use the Traces tab on the automation's page after each run. For template conditions, test the expression in Developer Tools → Template before wiring it into the automation. | [§UI Tips](03-HA-AUTOMATION-UI-GUIDE.md#ui-tips) |
+| Is this the live implementation? | No. It documents the manual approach used before the integration existed. | [§Building automations in the HA UI](#building-automations-in-the-ha-ui) |
+| How do I pause heating when a door or window opens? | State trigger on the contact sensor, open, with a "For" delay. Then set the HVAC mode to off. Resume when every sensor is closed. | [§Automation 3](#automation-3-doorwindow-open--pause-heating) |
+| How do I use the forecast in a condition? | Run the `weather.get_forecasts` action with a response variable, then add a Template condition. The old `forecast` attribute no longer exists. | [§Forecast-based automations](#forecast-based-automations) |
+| How do I react to Climate Advisor in my own automations? | Use the zone's entities, for example `sensor.living_room_day_type`, and call its services with the zone's `entry_id`. | [§Using Climate Advisor in your automations](#using-climate-advisor-in-your-automations) |
+| Why did an automation run, or not run? | Open the automation, then **⋮ → Traces**. | [§UI tips](#ui-tips) |
 
-## Building Automations in the HA UI
+## Building automations in the HA UI
 
-Every automation in the UI has three sections:
-- **Triggers**: What starts the automation
-- **Conditions**: What must be true for it to proceed
-- **Actions**: What it does
+Every automation has three parts:
+- **Triggers:** what starts it. Any one trigger is enough.
+- **Conditions:** what must be true for it to continue.
+- **Actions:** what it does. The UI calls running a service **Perform action**.
 
-Found under: **Settings → Automations & Scenes → Create Automation → Create new automation**
+Go to **Settings → Automations & scenes → + Create automation → Create new automation**.
 
-## Automation 1: Outdoor Temp Rising — Shut Off Heater
+The YAML examples below use current syntax (`triggers:` / `trigger:`, `conditions:` / `condition:`, `actions:` / `action:`). The old `service:` key is replaced by `action:`. To use an example, open the automation editor, choose **⋮ → Edit in YAML**, and paste it in. Replace the entity IDs with your own.
 
-**Trigger:** Numeric state → outdoor temp sensor → "Above" → 65°F (5° below comfort setpoint)
-**Condition:** State → thermostat is in "heat" mode
-**Action:** Call service → `climate.set_hvac_mode` → set to "off". Optional: send notification.
+## Automation 1: Outdoor temp rising — turn off the heat
 
-**Companion (evening restart):** Trigger when outdoor temp drops below threshold after 5pm → set thermostat back to "heat" mode.
+- **Trigger:** Numeric state → outdoor temperature sensor → above 65°F (5° below the comfort setpoint).
+- **Condition:** State → thermostat is `heat`.
+- **Action:** Perform action → `climate.set_hvac_mode` → `off`. Optionally send a notification.
+- **Companion (evening restart):** when the outdoor temperature drops below the threshold after 5 pm, set the thermostat back to `heat`.
 
-## Automation 2: Nobody Home — Setback
+## Automation 2: Nobody home — setback
 
-**Trigger:** State → presence entity → changes to "not_home" → **"For" duration: 15-30 minutes**
-**Condition:** (Optional) Numeric state → setpoint is above setback temp
-**Action:** Call service → `climate.set_temperature` → setback temp (e.g., 60°F)
+- **Trigger:** State → presence entity → to `not_home`, **For** 15–30 minutes.
+- **Condition (optional):** the setpoint is above the setback temperature.
+- **Action:** Perform action → `climate.set_temperature` → setback temperature (for example 60°F).
+- **Companion (return):** State → `home`, with no delay → restore the comfort setpoint.
 
-**Companion (return):** Trigger on state → "home" → Action: restore comfort setpoint. No delay.
+## Automation 3: Door/window open — pause heating
 
-## Automation 3: Door/Window Open — Pause Heating
+- **Trigger:** State → contact sensor(s) → to `on` (shown as "Open"), with a **For** delay. One State trigger can list several sensors; any of them starts the automation. Climate Advisor waits 10 minutes by default (its **Sensor Debounce Delay** option).
+- **Condition:** State → thermostat is `heat`.
+- **Action:** Perform action → `climate.set_hvac_mode` → `off`, then send a notification.
+- **Companion (resume):** trigger when a sensor goes back to `off` ("Closed") for 30 seconds. Add a State condition listing **every** sensor as `off`; a State condition with several entities passes only when all of them match.
 
-**Trigger:** State → contact sensor → "open" → **"For" duration: 2-3 minutes**
-Multiple sensors: Click "Add trigger" for each, trigger mode "any".
+```yaml
+alias: Heat — pause on open door or window
+triggers:
+  - trigger: state
+    entity_id:
+      - binary_sensor.front_door
+      - binary_sensor.kitchen_window
+    to: "on"
+    for:
+      minutes: 10
+conditions:
+  - condition: state
+    entity_id: climate.thermostat
+    state: heat
+actions:
+  - action: climate.set_hvac_mode
+    target:
+      entity_id: climate.thermostat
+    data:
+      hvac_mode: "off"
+  - action: notify.notify
+    data:
+      message: Heating paused, a door or window is open.
+mode: single
+```
 
-**Condition:** State → thermostat is in "heat" mode
-**Action:** Call service → `climate.set_hvac_mode` → "off". Send notification.
+## Automation 4: Runaway runtime protection
 
-**Companion (resume):** Trigger when sensors return to "closed" (For: 30 seconds).
-**Important:** Add "And" condition checking ALL sensors are "closed" before resuming.
+- **Trigger:** State → thermostat → attribute `hvac_action` → to `heating`, **For** 2–3 hours.
+- **Condition:** outdoor temperature above 40°F. In extreme cold, a long run can be normal.
+- **Action:** Perform action → `climate.set_temperature` → 3–4°F lower, then send a notification.
 
-## Automation 4: Runaway Runtime Protection
+## Automation 5: Bedtime setback
 
-**Trigger:** State → thermostat `hvac_action` attribute → equals "heating" → **"For": 2-3 hours**
-**Condition:** Outdoor temp above 40°F (long runtime may be legitimate in extreme cold)
-**Action:** Call service → `climate.set_temperature` → drop 3-4°F. Send notification.
+- **Trigger:** Time → 22:30.
+- **Condition:** State → thermostat is `heat`.
+- **Action:** Perform action → `climate.set_temperature` → 3–5°F lower.
+- **Companion (morning warm-up):** Time → 30–60 minutes before waking. Skip it if the forecast high is above the setpoint.
 
-## Automation 5: Bedtime Setback
+## Forecast-based automations
 
-**Trigger:** Time → 10:30pm
-**Condition:** State → thermostat in "heat" mode
-**Action:** Call service → `climate.set_temperature` → drop 3-5°F
+Weather entities no longer have a `forecast` attribute, so `state_attr('weather.x', 'forecast')` returns nothing. Instead, run the `weather.get_forecasts` action with a response variable as the first action. Then add a Template condition as the next action. In a daily forecast, `forecast[0]` is today and `forecast[1]` is tomorrow.
 
-**Companion (morning warm-up):** Trigger on Time → 30-60 min before wake. Add condition checking outdoor temp (skip if forecast high exceeds setpoint).
+### Warming trend — deeper setback tonight
 
-## Forecast-Based Automations (Template Conditions)
+- **Trigger:** Time → 21:00.
+- **Condition:** tomorrow's high is more than 10°F above today's.
+- **Action:** lower the setpoint 5–8°F instead of the usual 3–5°F.
 
-These use **Template conditions** in the UI, which require a small expression.
+```yaml
+alias: Heat — deeper setback before a warm day
+triggers:
+  - trigger: time
+    at: "21:00:00"
+actions:
+  - action: weather.get_forecasts
+    target:
+      entity_id: weather.home
+    data:
+      type: daily
+    response_variable: fc
+  - condition: template
+    value_template: >
+      {% set f = fc['weather.home'].forecast %}
+      {{ f[1].temperature - f[0].temperature > 10 }}
+  - action: climate.set_temperature
+    target:
+      entity_id: climate.thermostat
+    data:
+      temperature: 62
+mode: single
+```
 
-### Warming Trend — Aggressive Setback Tonight
+### Cooling trend — pre-heat
 
-**Trigger:** Time → 9pm
-**Condition:** Template → `{{ state_attr('weather.your_entity', 'forecast')[0].temperature - state_attr('weather.your_entity', 'temperature') > 10 }}`
-**Action:** Lower setpoint 5-8°F instead of the usual 3-5°F.
+- **Trigger:** Time → early evening.
+- **Condition:** tomorrow's low (`f[1].templow`) is well below today's (`f[0].templow`).
+- **Action:** raise the setpoint 2–3°F above comfort to store heat in the house.
 
-### Cooling Trend — Pre-Heat
+### Master mode selector
 
-**Trigger:** Time → early evening
-**Condition:** Template → tomorrow's low significantly colder than today's
-**Action:** Bump setpoint 2-3°F above comfort to bank thermal energy.
+- **Trigger:** Time → 06:00 and 15:00.
+- **Action:** run `weather.get_forecasts`, then a **Choose** block:
+  - if tomorrow's high is above 80°F and warming → `cool` and pre-cool;
+  - else if tomorrow's low is below 40°F and cooling → `heat` and pre-heat;
+  - else if tomorrow's high is 65–78°F → `off` and an "open windows" notification;
+  - otherwise → leave the mode alone.
 
-### Master Mode Selector
+## Using Climate Advisor in your automations
 
-**Trigger:** Time → 6am and 3pm
-**Action:** Use "Choose" (If-then branches):
-- If tomorrow's high > 80°F and trending warmer → cool mode + pre-cool
-- Else if tomorrow's low < 40°F and trending colder → heat mode + pre-heat
-- Else if tomorrow's high 65-78°F → off + "open windows" notification
-- Else → maintain current mode
+Each zone's entity IDs start with the zone name, for example `sensor.living_room_day_type` and `switch.living_room_automation`. Check yours under **Settings → Devices & services → Climate Advisor → (zone device)**. The README lists [every entity](../README.md#entities) and [every service](../README.md#services).
 
-## UI Tips
+Useful states:
+- **Day Type:** `hot`, `warm`, `mild`, `cool` or `cold`.
+- **Occupancy Mode:** `home`, `away`, `vacation` or `guest`.
+- **Status** is descriptive text that can change between releases, so avoid exact matches on it.
 
-**Naming:** Use clear names like "Heat — Pause on open door"
-**Traces:** Check the Traces tab after each run to debug
-**Helpers:** Create Input Number helpers for setpoints and thresholds (Settings → Helpers). Reference in automations instead of hard-coding.
-**Testing:** Manually trigger any automation from its three-dot menu.
-**Template testing:** Use Developer Tools → Template (flask icon) to test forecast expressions before using them.
+Every Climate Advisor service needs the zone's `entry_id`. In the UI, pick the zone from the **Zone** dropdown and the editor fills it in.
+
+```yaml
+alias: Climate Advisor — hot day heads-up
+triggers:
+  - trigger: state
+    entity_id: sensor.living_room_day_type
+    to: hot
+actions:
+  - action: notify.notify
+    data:
+      message: >
+        Hot day ahead. {{ states('sensor.living_room_your_next_action') }}
+mode: single
+```
+
+```yaml
+alias: Climate Advisor — reclassify after a weather alert
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.weather_alert
+    to: "on"
+actions:
+  - action: climate_advisor.force_reclassify
+    data:
+      entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's entry ID
+mode: single
+```
+
+## UI tips
+
+- **Names:** use clear names, for example "Heat — pause on open door".
+- **Traces:** open the automation and choose **⋮ → Traces** to see why it ran or stopped.
+- **Helpers:** create Number helpers for setpoints and thresholds under **Settings → Devices & services → Helpers**, and use them instead of fixed values.
+- **Testing:** **⋮ → Run actions** runs the actions now and skips the triggers and conditions.
+- **Templates:** test a template in **Developer tools → Template**. To test `weather.get_forecasts`, run it in **Developer tools → Actions** and check the response.

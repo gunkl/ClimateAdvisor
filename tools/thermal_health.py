@@ -9,7 +9,7 @@ Usage:
     export HA_TOKEN=<your-long-lived-access-token>
     python3 tools/thermal_health.py
 
-    # Or create tools/.env (see tools/.env.example):
+    # Or create .env at the repo root (template: tools/.env.example):
     # HA_URL=http://homeassistant.local:8123
     # HA_TOKEN=<your-long-lived-access-token>
 

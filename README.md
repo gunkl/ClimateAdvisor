@@ -1,537 +1,178 @@
 # Climate Advisor for Home Assistant
 
-An intelligent HVAC management integration that uses weather forecasts, occupancy, and door/window sensors to minimize energy waste while keeping your home comfortable — and learns from your household's behavior over time.
+A Home Assistant integration that runs your thermostat from the weather forecast, your schedule, occupancy and your door/window sensors, so the house stays comfortable without wasted heating or cooling. It learns how your home and thermostat behave over time.
 
 [![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=released&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
 [![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=gunkl&repository=ClimateAdvisor&category=integration)
 
-Climate Advisor is available in the [HACS](https://hacs.xyz) default store — search for "Climate Advisor" directly in HACS, no custom repository needed.
-
-## Dashboard
+**Requires Home Assistant 2026.3 or newer.** Available in the [HACS](https://hacs.xyz) default store.
 
 | Temperature Forecast | Current Status |
 |---|---|
-| ![Temperature Forecast — 3-day view showing predicted vs actual indoor/outdoor temperatures with HVAC and window activity bars](docs/screenshots/forecast_3d.png) | ![Status tab showing current day type, HVAC mode, compliance score, and today's strategy briefing](docs/screenshots/status.png) |
+| ![3-day view of predicted vs actual indoor/outdoor temperature with HVAC and window activity](docs/screenshots/forecast_3d.png) | ![Status tab with day type, HVAC mode, comfort score and today's strategy](docs/screenshots/status.png) |
 
-| 24-hour View (prediction accuracy) | AI Investigative Analysis |
+| 24-hour View | Analysis |
 |---|---|
-| ![24-hour forecast showing overnight prediction vs actual with target band](docs/screenshots/forecast_24h.png) | ![AI tab showing status, learning suggestions, and report generation controls](docs/screenshots/ai.png) |
+| ![24-hour forecast with the target band and prediction vs actual](docs/screenshots/forecast_24h.png) | ![Analysis tab with the Activity Record and AI Investigator](docs/screenshots/ai.png) |
 
-## Architecture Overview
+## What it does
 
-```mermaid
-flowchart TD
-    Classifier["Classifier<br/>Day type · Trend · Forecast analysis"] --> Coordinator
-    Learning["Learning Engine<br/>Tracking · Patterns · Suggestions"] --> Coordinator
-    Coordinator["Coordinator (brain)<br/>Scheduling · Briefings · Events"] --> Automation
-    Coordinator --> Briefing
-    Coordinator --> API
-    Coordinator --> Sensors
-    Coordinator --> State
+- **Plans each day from the forecast.** Each morning it classifies the day (hot / warm / mild / cool / cold) and the trend into tomorrow, then sends a short briefing with what it will do and what you can do (open or close windows).
+- **Holds a comfort band, not a schedule of writes.** It sets one heat or cool setpoint at the edge of your comfort range and lets the thermostat hold it. It switches between heat and cool as the house moves, and adjusts at wake-up, bedtime and when you leave or return.
+- **Respects your changes.** A change you make at the thermostat is kept for a grace period (30 min by default) before Climate Advisor resumes its plan.
+- **Handles doors and windows.** Once a door or window has been open past its delay (10 min by default), heating and cooling pause (or ventilation starts, see below). They resume when it closes. A sensor that stops reporting holds the pause rather than counting as closed.
+- **Uses outside air.** When outdoor air helps, it runs natural ventilation through a whole-house fan or the thermostat's blower instead of the AC.
+- **Optional extras:**
+  - a bedroom sensor at night (see below);
+  - away / vacation / guest occupancy toggles;
+  - time-of-use pre-conditioning ahead of high-cost periods;
+  - an optional Claude-powered AI Investigator.
+- **Learns.** A physics-based thermal model learns your home's heating, cooling, insulation, ventilation and solar response. It also learns your thermostat's own swing, and after two weeks of data it starts offering suggestions.
+- **Watches itself.** It warns you when the thermostat, weather source or a sensor stops responding. It also checks its own behaviour against a set of household promises (for example, "never undo your manual change early"); any misses show in the Analysis tab and in the diagnostics.
+- **Observe-only mode.** Turn the automation switch off and Climate Advisor keeps planning and reporting but sends no commands.
 
-    Automation["Automation Engine<br/>HVAC · Door/window · Occupancy · Fan control · Economizer"] --> HAClimate["HA Climate Entity"]
-    Briefing["Briefing Gen<br/>Daily email · TLDR · Tips"] --> HANotify["HA Notify Service"]
-    API["API<br/>21 REST endpoints"] --> Dashboard["Dashboard Panel"]
-    Sensors["Sensors<br/>18 sensors + 1 switch<br/>Status · Learning · Fan"] --> HADashboard["HA Dashboard Lovelace Cards"]
-    State["State Persist<br/>Save/restore across restart"]
-```
+### Household rules
 
-## How It Works
+Rules 1 and 2 apply only with a whole-house fan. Rule 3 applies to every home with door/window sensors.
 
-### Daily Cycle
+1. The whole-house fan never runs in a sealed house. With every door and window closed, it is stopped within 30 seconds, however it was turned on.
+2. The whole-house fan and the heat/AC never run together, and your newest action wins. If both are ever found running, one of them is stopped within about 10 seconds, whatever the button timing.
+3. No heating or cooling into a window open past its delay, unless you turned it on yourself.
 
-1. **6:00 AM** — Coordinator pulls forecast, classifies the day, and sends the daily briefing email/notification
-2. **6:30 AM** — Morning warm-up restores comfort setpoint
-3. **Throughout the day** — Automation engine responds to doors, windows, occupancy, and temperature changes. CA sets a single heat or cool setpoint; the thermostat's deadband keeps it steady.
-4. **10:30 PM** — Bedtime setback kicks in
-5. **11:59 PM** — Day's data is saved to the learning engine
+A whole-house fan therefore **needs at least one door/window sensor**. Without one, setup warns you, and that configuration is not supported.
 
-### Day Types
+### Day types
 
-| Type | Today's High | HVAC Strategy | Human Actions |
-|------|-------------|---------------|---------------|
-| Hot  | 85°F+       | AC pre-cool, maintain all day | Keep sealed, close blinds |
-| Warm | 75–84°F     | Off, AC standby | Open windows morning, close evening |
-| Mild | 60–74°F     | Off (heat in AM) | Open windows mid-morning |
-| Cool | 45–59°F     | Heat with midday break | Keep closed |
-| Cold | Below 45°F  | Heat all day, pre-heat | Keep sealed, help insulate |
+| Day | Today's high (default) | Climate Advisor | You |
+|---|---|---|---|
+| Hot | 85°F+ | Cools, pre-cools overnight when it helps | Keep the house sealed, close blinds |
+| Warm | 75–84°F | Holds the comfort band; ventilates when outside air helps | Open windows in the morning, close them when it warms |
+| Mild | 60–74°F | Holds the comfort band | Open windows when the briefing says they help |
+| Cool | 45–59°F | Heats | Keep closed |
+| Cold | below 45°F | Heats, pre-heats ahead of colder days | Keep sealed |
 
-### Trend Modifiers
+The thresholds are adjustable. A trend of 5°F or more into tomorrow adjusts the overnight setback and pre-heating; 10°F or more adjusts them further.
 
-The forecast trend (tomorrow vs. today) adjusts behavior:
+### Fans
 
-- **Warming 10°F+**: More aggressive overnight setback (tomorrow's warmth will help)
-- **Warming 5-10°F**: Moderate setback increase
-- **Cooling 5-10°F**: Pre-heat in evening, gentler setback
-- **Cooling 10°F+**: Significant pre-heat, conservative setback, bank thermal energy
+- **Fan mode:** disabled, whole-house fan, or HVAC fan (the thermostat's blower).
+- **Whole-house fan:**
+  - A separate state entity (`fan_state_entity`) can report the fan's real on/off state. With `fan_state_feedback` off (the default), Climate Advisor can't see the fan.
+  - The optional QuietCool RF remote integration honours the wall remote's timer presses. It needs the [`gunkl/quietcool-house-fan`](https://github.com/gunkl/quietcool-house-fan) firmware; see [fan-remote-spec](docs/fan-remote-spec.md).
 
-### Occupancy Awareness
+### Bedroom sensor at night
 
-Climate Advisor tracks occupancy state via configurable toggle entities:
-
-| Mode | Behavior |
-|------|----------|
-| Home | Normal operation — full comfort management |
-| Away | Setback temperatures applied, notifications reduced |
-| Vacation | Extended setback, minimal HVAC activity |
-| Guest | Comfort mode — more conservative setbacks |
-
-### Fan Control
-
-Supports whole-house fan and/or HVAC fan mode integration:
-
-- **Whole-house fan**: Controls a dedicated fan entity (switch or fan domain) during economizer maintain phase. While the whole-house fan is active, CA sets the thermostat off so AC and the fan do not run simultaneously; prior mode is restored when the fan stops.
-- **HVAC fan mode**: Activates your thermostat's fan-only mode for ventilation
-- **Both**: Coordinates both fan types together
-- **Dual-entity WHF support**: An optional separate `fan_state_entity` provides independent physical state feedback; useful for installations where the command and status entities differ
-- **Command-only mode** (`fan_state_feedback` off, default): CA sends commands and assumes they succeed; turn on `fan_state_feedback` if you have a dedicated state sensor
-- Integrated with the economizer two-phase cooling strategy (cool-down with AC, maintain with ventilation)
-- **QuietCool RF remote timer support** (optional, `fan_remote_entity`): CA can hear physical wall-remote timer presses (1/2/4/8/12 hours) and honor them as the fan's manual-override grace duration — see [docs/fan-remote-spec.md](docs/fan-remote-spec.md) for details (Issue #486). Requires the [`gunkl/quietcool-house-fan`](https://github.com/gunkl/quietcool-house-fan) firmware; leave blank if you don't use this hardware.
-
-### Learning Engine
-
-After 14+ days of data, the learning engine starts analyzing patterns:
-
-- **Window compliance**: If you rarely open windows when recommended, it offers to switch to HVAC-only strategies
-- **Manual overrides**: Frequent thermostat adjustments suggest setpoints don't match preferences
-- **Runtime anomalies**: High HVAC runtime on mild days may indicate sensor gaps
-- **Short departures**: Adapts setback timing if you frequently leave for 30-45 minutes
-- **Comfort violations**: Suggests less aggressive setbacks if the house is uncomfortable too often
-- **Door pauses**: Identifies problem doors and offers to adjust monitoring
-
-### AI Features
-
-Climate Advisor includes optional Claude-powered analysis features. See [docs/ai-integration.md](docs/ai-integration.md) for full details on the AI Investigator, Activity Record, and configuration.
-
-### Sleep Temperature Configuration
-
-Separate `sleep_heat` and `sleep_cool` setpoints define your bedtime comfort independently from away setback — they can be warmer than your away mode but cooler than daytime comfort.
-
-### Natural Ventilation Directional Guard
-
-The natural ventilation directional guard prevents counterproductive ventilation by blocking nat vent when outdoor air would warm instead of cool the home. The guard prevents rapid cycling and can extend nat vent past bedtime to reach the sleep temperature before handing off to the compressor. Fan and HVAC modes are managed independently to avoid false override detection.
-
-### Thermal Observation Architecture (v3)
-
-The thermal model uses a physics-based ODE to predict future indoor temperature by measuring how the home's envelope, ventilation, solar gain, and HVAC systems affect temperature change. Six concurrent observation types track each parameter from real HVAC operations and natural decay periods, allowing prediction even without HVAC cycles. See [Thermal Model v3 Spec](docs/thermal-model-v3-spec.md) for the full technical details.
+Set a **Sleep Indoor Temp Sensor** to keep the bedroom, not the hallway, on target while the sleep schedule is active. Climate Advisor raises the hallway setpoint a step at a time, at most 4°F (2°C) past your sleep temperature, so the furnace or AC actually runs for the bedroom. It steps back down once the bedroom is on target. The Status card and the chart show the extra degrees. Cooling works the same way but has only been tested in simulation.
 
 ## Installation
 
-### HACS (Recommended)
+**HACS (recommended):** search for "Climate Advisor" in HACS, install it, and restart Home Assistant. Then go to **Settings → Devices & Services → Add Integration → Climate Advisor**.
 
-1. Open HACS in Home Assistant
-2. Search for "Climate Advisor" and install
-3. Restart Home Assistant
-4. Go to Settings → Integrations → Add Integration → Climate Advisor
+**Manual:** copy `custom_components/climate_advisor` into `config/custom_components/`, restart, then add the integration as above.
 
-### Manual
+## Setup
 
-1. Copy the `custom_components/climate_advisor` folder to your HA `config/custom_components/` directory
-2. Restart Home Assistant
-3. Go to Settings → Integrations → Add Integration → Climate Advisor
+The setup wizard asks for:
 
-## Configuration
+1. **Core:** weather entity, climate entity and notification service.
+2. **Unit:** °F or °C. This applies to every displayed value and input.
+3. **Setpoints:** comfort and setback for heat and cool, plus optional sleep heat and sleep cool.
+4. **Temperature sources:** indoor and outdoor, from the weather service, a sensor, an input number or the thermostat (indoor only).
+5. **Doors/windows and fan:**
+   - door/window sensors, their polarity and the open delay;
+   - fan mode and fan entities.
+6. **Occupancy:** optional home/away, vacation and guest toggles, each with a polarity setting.
+7. **Schedule:**
+   - zone name;
+   - wake time (default 06:30), bedtime (22:30) and briefing time (06:00).
 
-The setup wizard walks you through these steps:
+Everything is editable afterwards under **Configure**. The options there also cover:
+- time-of-use schedules;
+- notifications;
+- advanced options, such as **Prefer Savings Over Comfort** and the natural-ventilation soft start;
+- day-type thresholds;
+- AI settings (needs a Claude API key);
+- GitHub settings, for submitting reports as issues.
 
-### Step 1: Core Entities
-- **Weather Entity**: Your forecast provider (e.g., `weather.home`)
-- **Climate Entity**: Your thermostat (e.g., `climate.living_room`)
-- **Notification Service**: Where to send briefings (e.g., `notify.mobile_app_phone`)
+### Thermostat requirements
 
-### Step 2: Temperature Unit
-Choose Fahrenheit or Celsius. This setting controls all displayed values and setpoint inputs throughout the integration.
+Climate Advisor is the scheduler and the thermostat is the executor. Set the thermostat so it keeps Climate Advisor's commands:
 
-### Step 3: Setpoints
-Separate comfort and setback temperatures for heating and cooling, plus optional `sleep_heat` / `sleep_cool` bedtime setpoints.
+- **Turn off built-in schedules and "smart" home/away features.** On an Ecobee, for example, turn off Smart Recovery.
+- **Set holds to last until changed.** On an Ecobee: Hold Action → Until I change it.
+- **Single-mode systems:** heat-only and cool-only thermostats work, with Climate Advisor using the one mode the device has. These setups are less tested than heat-and-cool systems.
 
-### Step 4: Temperature Sources
-Choose where indoor and outdoor temperature readings come from:
-- Weather service (recommended for outdoor)
-- Dedicated sensor entity
-- Input number helper
-- Climate entity fallback (indoor only)
+### Multiple zones
 
-### Step 5: Door/Window Sensors
-- Select any binary sensors to monitor (HVAC pauses when open)
-- Configure sensor polarity (for inverted sensors)
-- Set debounce time (default 5 minutes) and grace periods
-- **Fan control**: Choose fan mode (disabled, whole-house fan, HVAC fan, or both) and select fan entity
-- **Whole-house fan needs at least one door/window sensor.** Without one Climate Advisor cannot tell an open house from a sealed one, so it cannot keep the fan off in a closed-up house or keep heating/cooling off while a window is open. Setup warns but lets you continue; that configuration is not supported (#1200)
+Each thermostat is its own zone: a separate config entry with its own learning, thermal model, dashboard data and settings. Nothing is shared between zones.
 
-### Step 6: Occupancy
-- Home/away toggle entity (optional)
-- Vacation toggle entity (optional)
-- Guest toggle entity (optional)
-- Polarity inversion for each toggle
+To add a zone, run **Add Integration → Climate Advisor** again for the next thermostat. With two or more zones:
+- the dashboard shows a zone selector;
+- every service asks which zone it applies to.
 
-### Step 7: Schedule
-Set your wake time, bedtime, and when you want the daily briefing. This step also collects the **zone name** (pre-filled with a suggestion derived from your thermostat's friendly name, fully editable) — see [Adding a Second Zone](#adding-a-second-zone) below for what this name is used for.
+See [multi-zone-spec](docs/multi-zone-spec.md).
 
-### Adding a Second Zone
+## Entities
 
-A **zone** is one Climate Advisor config entry: one thermostat, with its own independent learning history, thermal model, dashboard data, and settings. Nothing is shared between zones — this is standard multi-instance Home Assistant integration behavior, the same way you'd run two independent instances of any other integration against two different devices.
+Each zone creates **19 sensors** and **1 switch**, grouped under a device named after the zone. Entity IDs come from the zone name, for example `sensor.living_room_day_type`. Existing entities keep the IDs they were created with.
 
-**To add a second zone**, repeat the same setup flow you used for the first: **Settings → Devices & Services → Add Integration → Climate Advisor**, this time pointing the Climate Entity field at your second thermostat. There is no separate "add zone" flow — it's the ordinary Add Integration flow, run again.
-
-- **Naming**: Step 7 (Schedule) collects a **zone name**, pre-filled with a suggestion derived from the selected thermostat's HA friendly name (e.g. `climate.bedroom_thermostat` → "Bedroom"), fully editable, up to 50 characters. This becomes the zone's config entry title — how you'll tell zones apart in Settings → Devices & Services, in the dashboard's zone selector, and when picking a zone for a service call. Names aren't required to be unique.
-- **Dashboard**: once 2 or more zones are configured, the dashboard shows a zone selector (a row of tabs/pills, one per zone) above the existing tab layout. Switching zones re-fetches all data for the newly selected zone — Status, Briefing, Learning, Analysis, everything — independently per zone.
-- **Services**: with more than one zone configured, every one of the 5 Climate Advisor services (see [Services](#services) below) **requires** you to pick which zone the call applies to, via a Zone field in HA's service-call UI. This isn't optional — Home Assistant's service registry has no other way to know which zone's `reset_learning_data` call you meant, for example, so specifying the zone became mandatory the moment multi-zone support shipped (Issue #796).
-
-### Thermostat Setup Requirements
-
-Climate Advisor acts as the scheduler — the thermostat is the executor. For reliable operation, configure your thermostat so CA's commands persist:
-
-1. **Disable built-in schedules** — Disable any manufacturer-defined schedules and "Smart Home/Away" features so the thermostat doesn't revert after CA sets a value. *Example: Ecobee → Settings → Preferences → Smart Recovery → Off*
-
-2. **Set hold type to "Hold until I change"** — Configure the thermostat to hold CA's commands until explicitly changed, not until the next scheduled event. *Example: Ecobee → Settings → Preferences → Hold Action → Until I change it*
-
-3. **Both heating and cooling required** — CA issues separate heat and cool commands; the HVAC system must support both modes. *Heat-only or cool-only systems are not supported.*
-
-### Options Flow (Edit After Setup)
-All settings are editable after setup, plus advanced options:
-- **Learning enabled**: Toggle the learning engine on/off
-- **Aggressive savings**: More aggressive energy-saving strategies
-- **AI Investigator**: Enable Claude-powered activity analysis; requires a Claude API key
-- **GitHub Integration**: Configure a GitHub personal access token and repository for submitting investigation reports as GitHub issues directly from the dashboard
-- **Day-Type Thresholds**: Customize the Hot/Warm/Mild/Cool temperature cutoffs (default 85/75/60/45°F); displayed in your configured unit
-
-## Entities Created
-
-### Sensors (18)
-
-| Sensor | Description |
-|--------|-------------|
-| `sensor.climate_advisor_day_type` | Today's classification (hot/warm/mild/cool/cold) |
-| `sensor.climate_advisor_trend` | Temperature trend direction and magnitude |
-| `sensor.climate_advisor_next_action` | Next recommended human action |
-| `sensor.climate_advisor_daily_briefing` | Today's briefing TLDR (full text in attributes) |
-| `sensor.climate_advisor_comfort_score` | Comfort compliance percentage |
-| `sensor.climate_advisor_status` | Integration status (active/grace/override/paused) |
-| `sensor.climate_advisor_next_automation` | Next scheduled automation action |
-| `sensor.climate_advisor_next_automation_time` | When the next automation runs |
-| `sensor.climate_advisor_occupancy` | Current occupancy mode (home/away/vacation/guest) |
-| `sensor.climate_advisor_last_action_time` | Timestamp of last HVAC action |
-| `sensor.climate_advisor_last_action_reason` | Why the last HVAC action was taken |
-| `sensor.climate_advisor_fan_status` | Fan status: `active`, `active (unconfirmed)`, `running (manual override)`, `running (untracked)`, `inactive`, `off (manual override)`, `disabled`; attributes include `fan_override_since` and `fan_running` |
-| `sensor.climate_advisor_contact_status` | Door/window sensor summary with per-sensor details |
-| `sensor.climate_advisor_ai_status` | AI feature status (enabled/disabled, model, request counts, monthly cost) |
-| `sensor.climate_advisor_indoor_temperature` | Current indoor temperature (mirrors climate entity) |
-| `sensor.climate_advisor_outdoor_temperature` | Current outdoor temperature from configured source |
-| `sensor.climate_advisor_forecast_high` | Today's forecast high temperature |
-| `sensor.climate_advisor_forecast_low` | Today's forecast low temperature |
-
-### Switches (1)
-
-| Switch | Description |
-|--------|-------------|
-| `switch.climate_advisor_automation` | Enable/disable automation (observe-only mode when off) |
+| Entity | What it shows |
+|---|---|
+| Day Type, Trend | Today's classification and the trend into tomorrow |
+| Daily Briefing | Today's briefing summary; the full text is in the attributes |
+| Your Next Action | What you can do next, such as opening or closing windows |
+| Next Automation Action, Next Automation Time | What Climate Advisor does next, and when |
+| Status | Active, grace, override or paused |
+| Target Temperature | The temperature the house is aiming for right now |
+| Comfort Score | How much of the time the house stayed in range |
+| Occupancy Mode | Home, away, vacation or guest |
+| Last Action Time, Last Action Reason | The last thermostat change and why |
+| Fan Status | Fan state, such as active, manual override or inactive |
+| Contact Sensors | Door/window summary, with per-sensor detail |
+| Indoor Temperature, Outdoor Temperature, Forecast High, Forecast Low | Current readings and today's forecast |
+| AI Status | AI feature state, usage and cost |
+| **Automation** (switch) | Off means observe-only: no commands are sent |
 
 ## Services
 
-Every service below requires an `entry_id` field (labeled **Zone** in HA's service-call UI, backed by a `config_entry` selector) identifying which Climate Advisor zone the call applies to — pick it from the dropdown in Developer Tools → Services, or the visual service-call editor. It's shown below as a raw YAML value for reference; you don't need to type it by hand.
+Every service takes a **Zone** (`entry_id`), which you pick from the dropdown in the service-call UI.
 
-### `climate_advisor.respond_to_suggestion`
-
-Accept or dismiss a learning suggestion.
-
-```yaml
-service: climate_advisor.respond_to_suggestion
-data:
-  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
-  action: accept  # or "dismiss"
-  suggestion_key: low_window_compliance
-```
-
-### `climate_advisor.force_reclassify`
-
-Force re-fetch of forecast data and reclassify the day. Useful for debugging.
-
-```yaml
-service: climate_advisor.force_reclassify
-data:
-  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
-```
-
-### `climate_advisor.resend_briefing`
-
-Re-generate and resend the daily briefing notification.
-
-```yaml
-service: climate_advisor.resend_briefing
-data:
-  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
-```
-
-### `climate_advisor.dump_diagnostics`
-
-Log a comprehensive diagnostic snapshot to HA logs at INFO level for troubleshooting.
-
-```yaml
-service: climate_advisor.dump_diagnostics
-data:
-  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
-```
-
-### `climate_advisor.reset_learning_data`
-
-Reset some or all learned data — useful after changing HVAC equipment or moving to a new location. **Destructive** — double-check you've selected the right zone before calling.
-
-```yaml
-service: climate_advisor.reset_learning_data
-data:
-  entry_id: 01JABCDEFGHJKMNPQRSTVWXYZ  # your zone's config entry ID, or pick from the UI dropdown
-  scope: all  # or "thermal_model", "weather_bias", "suggestions"
-```
+| Service | Purpose |
+|---|---|
+| `climate_advisor.respond_to_suggestion` | Accept or dismiss a learning suggestion (`action`, `suggestion_key`) |
+| `climate_advisor.force_reclassify` | Fetch the forecast again and reclassify today |
+| `climate_advisor.resend_briefing` | Rebuild and resend today's briefing |
+| `climate_advisor.dump_diagnostics` | Write a diagnostic snapshot to the HA log |
+| `climate_advisor.reset_learning_data` | Reset learned data (`scope`: `all`, `thermal_model`, `weather_bias` or `suggestions`). This can't be undone |
 
 ## Dashboard
 
-Climate Advisor includes a built-in dashboard panel accessible from the HA sidebar. The panel provides:
+A sidebar panel with four tabs:
 
-- **Current Status** — Conditions card (day type, trend, outdoor temp), HVAC mode with inline indoor temp, setpoint, automation status, contact sensor states, separate WHF/HVAC fan status
-- **Daily Briefing** — Full briefing with TLDR summary table, verbosity control (tldr_only/normal/verbose)
-- **Classification Details** — Forecast data, window schedules, trend analysis
-- **Learning** — Today's record, suggestions, compliance tracking
-- **Analysis** (renamed from "AI") — Single report-type dropdown covering the deterministic Activity Record and the AI Investigator's deep analysis; both support Copy, Download .md, and Submit GitHub Issue
-- **Settings** — Read-only view of all configuration grouped by category
-- **Debug** — Automation state, force reclassify, resend briefing, diagnostics dump, prediction engine confidence levels
+- **Status:** today's strategy, the temperature forecast chart, current conditions, HVAC, fan and door/window state, and quick actions.
+- **Analysis:** the Activity Record (deterministic, no AI), the optional AI Investigator, classification details, the compliance summary and learning suggestions. You can copy a report, download it or submit it as a GitHub issue.
+- **Settings:** a read-only view of the configuration.
+- **Debug:** automation state, the prediction engines, tomorrow's plan, the daily record and manual actions (reclassify, resend the briefing, diagnostics).
 
-### REST API Endpoints
+The panel is backed by a REST API; see [rest-api](docs/rest-api.md).
 
-See [docs/rest-api.md](docs/rest-api.md) for the full endpoint reference (21 endpoints).
+## Documentation
 
-### Lovelace Card Example
-
-```yaml
-type: entities
-title: Climate Advisor
-entities:
-  - entity: sensor.climate_advisor_day_type
-    name: Today's Plan
-  - entity: sensor.climate_advisor_trend
-    name: Trend
-  - entity: sensor.climate_advisor_next_action
-    name: Your Next Action
-  - entity: sensor.climate_advisor_next_automation
-    name: Next Automation
-  - entity: sensor.climate_advisor_comfort_score
-    name: Comfort Score
-  - entity: sensor.climate_advisor_contact_status
-    name: Doors/Windows
-  - entity: sensor.climate_advisor_fan_status
-    name: Fan
-  - entity: sensor.climate_advisor_occupancy
-    name: Occupancy
-  - entity: switch.climate_advisor_automation
-    name: Automation Enabled
-  - entity: sensor.climate_advisor_status
-    name: System Status
-```
-
-## Development Roadmap
-
-See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full tracking.
-
-### Phase 1: Core (v0.1.0) — Complete
-- [x] 5-level day type classification with trend analysis
-- [x] Daily briefing as primary UI (email/notification)
-- [x] Door/window pause automation with grace periods
-- [x] Occupancy-based setback with configurable delay
-- [x] Bedtime/morning scheduling with forecast-aware adjustments
-- [x] Runaway protection (runtime alerts, daily budgets)
-- [x] Learning engine foundation (90-day rolling window, 6 pattern detectors)
-- [x] Config flow wizard, HA sensor entities, dashboard API
-- [x] Flexible temperature source configuration
-- [x] Separate comfort/setback temps for heat and cool modes
-
-### Phase 2: Enhanced Learning & Adaptation (v0.2.x) — Complete
-- [x] Persist operational state across restarts (#10)
-- [x] Populate DailyRecord fields (runtime, avg temp, comfort violations, window compliance)
-- [x] Per-sensor pause tracking and granular daily records (#12)
-- [x] Override direction/timing/magnitude analysis (#12)
-- [x] Built-in dashboard panel with status, briefing, classification, learning, settings, and debug tabs
-- [x] REST API endpoints powering the dashboard (now 21)
-- [x] Sensor entities + 1 automation switch (now 18 sensors)
-- [x] Observe-only mode (disable automation without uninstalling) (#19)
-- [x] Economizer two-phase cooling strategy (AC cool-down, ventilation maintain) (#27)
-- [x] Whole-house fan and HVAC fan mode support (#25)
-- [x] Occupancy awareness with home/away/vacation/guest modes
-- [x] Briefing TLDR summary table with verbosity control (#24)
-- [x] Contact sensor status surfaced in dashboard and as HA entity (#46)
-- [x] Resume from pause control with grace expiry re-check (#47)
-- [x] Cancel manual override from dashboard
-- [x] Reason logging on all thermostat adjustments (#16)
-- [x] Repairs flow for missing weather entity
-- [x] 4 HA services (respond to suggestion, force reclassify, resend briefing, dump diagnostics)
-- [x] 250-char notification limit for short notifications (#21)
-- [x] Startup race condition handling for weather entity (#36)
-
-### Phase 2.5: Thermal Learning & AI Investigator (v0.3.24–v0.3.54) — Shipped
-- [x] Thermal model v2: two-parameter physics ODE (`k_passive` + `k_active_heat`/`k_active_cool`) replacing scalar rate model (#114)
-- [x] `PendingThermalEvent` state machine with post-heat decay curve OLS regression
-- [x] Pending thermal event persisted across HA restarts
-- [x] Optimized pre-heat/pre-cool timing and setback depth based on thermal performance
-- [x] Claude API client with circuit breaker, retry, rate limiting, and budget tracking (`claude_api.py`)
-- [x] AI skills framework — pluggable registry for AI analysis capabilities (`ai_skills.py`)
-- [x] AI Activity Report: timeline, HVAC decisions, anomalies, diagnostics (merged into the AI Investigator as one skill, Issue #563 — see `ai_skills_investigator.py` + `ai_skills_context.py`)
-- [x] Persistent 1-year chart log ring buffer for temperature/HVAC/fan/event data (`chart_log.py`)
-- [x] Sleep temperature setpoints (`sleep_heat` / `sleep_cool`) distinct from away setback
-- [x] Natural ventilation directional guard with hysteresis and reactivation lockout (#115)
-- [x] Dynamic Target Band: chart shows actual system targets (comfort/sleep/setback/vacation) (#119)
-- [x] Thermal model v3: six parallel observation types (`hvac_heat`, `hvac_cool`, `passive_decay`, `fan_only_decay`, `ventilated_decay`, `solar_gain`); extended ODE with k_vent and k_solar terms; `k_passive` collectable without HVAC cycles (#121)
-- [x] Dual-estimator framework for `k_passive` and `k_vent_window` (block-OLS + chart_log endpoint) (#146)
-- [x] Solar phase offset learning via chart_log daytime passive windows (#147)
-- [x] Chart historical navigation with before_ts anchor parameter (#160)
-- [x] Chart forward navigation into physics-simulated predicted future (#164)
-- [x] AI Investigation Analysis: unified view, report history, feedback buttons (#166)
-- [x] AI Investigator: deep cross-source analysis with KNOWN_FIXES registry, hypothesis generation (#177 noise reduction)
-- [x] GitHub issue submission from investigation panel with config flow GitHub Integration step (#180)
-- [x] Setpoint-only manual overrides enter manual grace period immediately (#170)
-- [x] DailyRecord accumulated counters survive HA restart (#176)
-- [x] Predicted indoor evening drop fixed: ODE mode uses classification for today (#172)
-
-### Phase 3: Thermostat-as-Controller & Compatibility (v0.4.x–v0.5.x) — Complete
-- [x] Comfort band model — CA programs `[comfort_heat / comfort_cool]` and the thermostat holds it; HVAC is no longer micromanaged every 30 min (#249)
-- [x] Single-setpoint commands — every thermostat write is `climate.set_temperature` with mode + setpoint; `heat_cool` dual-setpoint mode dropped for compatibility (#301)
-- [x] Whole-house fan suppresses HVAC while active (#277)
-- [x] Override detection overhaul — clean-slate on restart, grace expiry notification, transient override detection (#282, #290)
-- [x] Ecobee deduplication bypass — double-write ensures commands reach the physical thermostat (#299)
-- [x] Pre-cool gate — ceiling reverts after target achieved, no overcooling (#295)
-- [x] `k_solar` confidence ladder (`none` / `low` / `medium` / `high`, graded by observation count) (#308)
-- [x] Solar phase offset daily re-fit from chart_log passive windows (#310)
-- [x] AC duty solar phase estimator — secondary EWMA for homes with summer-only AC (#312)
-- [x] Fan command suppression of false overrides; 30s post-fan setpoint verify (#313)
-- [x] Sleep setpoint ordering fix — sleep temps independent of daytime comfort bounds (#318)
-- [x] Pause state not persisted across restarts — clean-slate after HA restart (#263)
-- [x] Startup coalescing, stuck grace self-heal, nat-vent thermostatic cycling (#321)
-- [x] Nat-vent debounce step logging and next_automation surfacing (#320)
-- [x] Trend-aware overnight pre-cool banks cold thermal mass on warming-trend nights (#258)
-- [x] Automation Time card shows local HH:MM; Next User Action rename (#323, #326)
-- [x] Thread-safety fix — @callback on all async_call_later handlers (#325)
-- [x] Thermostatic fan fast loop — fan stops on temp change, not next 30-min cycle (#327)
-- [x] Deterministic Activity Report table; merged Vent bar (fan + nat-vent) in chart (#330, #331)
-- [x] Fan activity with trigger source visible in Activity Report (#332)
-- [x] Bedtime setback display fix — Next Automation and chart now show configured sleep temp, not trend-adjusted (#333)
-- [x] HA time-selector `HH:MM:SS` parse fix for sleep window — sleep setback no longer reverted every 30 min (#335)
-- [x] `apply_classification` enforces HVAC off whenever paused by an open door/window, hot or cold day (#337)
-- [x] Nat-vent + AC assist band re-arm and `aggressive_savings` gate against compressor use through open windows (#338)
-- [x] Occupancy away/vacation no longer arms setback while windows/doors are open — setback deferred until resume (#339)
-- [x] One thermostat write per sleep-band cycle instead of two conflicting setpoints; grace-started context visible in Activity Report (#341)
-- [x] Prediction Engines debug panel: stale "since" dates removed, k_solar/k_active_hvac confidence display fixed (#343, #345)
-- [x] Reconcile fan running (untracked) after thermostat starts it autonomously between AC cycles (#347)
-- [x] Analysis tab redesign — Activity Record (deterministic, non-AI) with indoor/outdoor temp columns; unified report-type dropdown (#352)
-- [x] Activity Record shows indoor/outdoor temp at thermostat decision events (#354)
-- [x] Fan ON/OFF state machine — nat-vent adoption, setpoint-echo suppression, post-grace reconciliation, WHF dual-entity support (#359, #360)
-- [x] WHF command-only mode (`fan_state_feedback` flag) to prevent false overrides from command-echo entities (#361)
-- [x] WHF ground-truth physical-state fallback and correct "running (manual override)" status (#363, #365)
-- [x] Status pane Conditions card (day type + trend + outdoor temp); HVAC card shows indoor temp inline (#367)
-- [x] Nat-vent bedtime continuation — fan runs to sleep target past bedtime, stops at `sleep_cool`; dual WHF/HVAC fan status rows (#370, #374)
-- [x] Day-type classification thresholds configurable in Settings, config entry migrated v15→v16 (#376)
-- [x] `_build_predicted_indoor_future` and chart data ODE computation offloaded to executor — eliminates event-loop blocking (#376)
-- [x] AI Investigator redesign — context registry of 11 independently-testable providers, focus-aware selection (~40% token reduction), 24h/30d GitHub issue cache, SSE streaming (#377)
-- [x] AI Investigator and Activity Report streaming UX — live text as chunks arrive instead of buffered-to-EOF (#380, #382)
-- [x] HACS compliance — dynamic README version badge, state file permissions hardened (0o600) (#384)
-- [x] HACS compliance fix — `integration_type` corrected from `helper` back to `service`, restoring visibility in Settings → Devices & Services (#388)
-- [x] Whole-house fan "stuck unconfirmed" self-heals within ~10 min instead of requiring a restart (#423)
-- [x] "Your Next Action" no longer advises a window/fan that would make things worse when outdoor is already unfavorable, in either direction (#428)
-- [x] Nat-vent's sleep-aware floor/ceiling made consistent across every check that reads it (proactive floor exit, reactivation gate, tick-level stop, dashboard status) — root cause of six related overnight flapping/status incidents (#400, #402, #415, #417, #427)
-- [x] Overnight pre-cool banking fixed — the AC-ceiling clamp anchored to the wrong (daytime) temperature range and could silently no-op; chart and real setpoint can no longer disagree on the pre-cool target (#436, #437)
-- [x] Default comfort/setback/sleep temperatures reformatted to match a real tuned household, including the initial setup wizard (previously stuck on stale pre-reformat defaults) (#438, #439)
-- [x] Pre-cool's AC trigger now reacts when natural ventilation ends ahead of its scheduled window, instead of waiting out a stale schedule (#440)
-- [x] Nat-vent decision surface (reactivation gate, fan-thermostat stop check, drift reconciliation, reactivation lockout, grace, retry/verify, pre-cool) extracted into independently unit-tested pure functions with differential and positive-control validation, closing the repeated-drift bug class behind #400/#402/#417/#427/#429 (#429)
-- [x] Duplicate "Comfort band applied" Activity Report entries at restart and grace-expiry eliminated with a short-window announcement dedup — the thermostat command itself was always correct, only the notification repeated (#444)
-- [x] Automated fan physical-drift self-corrections no longer mislabeled as a manual grace period in the Activity Report; repeated "fan running without CA warrant" reconcile attempts rate-limited to once per 5 minutes (#446)
-- [x] Dual-entity whole-house-fan setups (separate control + power-detection sensor) no longer silently drop reactivation commands — a plain command can be absorbed once the control entity's HA state already agrees with what's being commanded, so CA now forces a real transition when a real incident's device history proved the control entity was stuck "on" for hours (#449)
-- [x] AI Activity Report no longer misreports the whole-house fan as a contradiction during the brief window CA self-corrects a stale on/off flag; a matching gap in the dashboard's own internal state-consistency check fixed too (#458)
-- [x] Dashboard's setpoint-divergence indicator now accounts for away/vacation occupancy and uses the correct default sleep temperatures, instead of silently showing the wrong intended target overnight or while away (#462)
-- [x] AI Activity Report and Investigator's thermal-model sections no longer show an empty learning-health summary when the dashboard's Comfort Score sensor has real data for the same moment (#468)
-- [x] Chart's predicted-indoor curve can no longer silently disagree with its own displayed target band overnight when sleep temperatures aren't explicitly configured (#470)
-- [x] Continued consolidating the natural-ventilation decision surface (#429) into the rest of the codebase — a nat-vent floor formula, a fan-status suppression check, an occupancy-defer gate, and the dashboard's target-band resolver each converged from 2-4 independent copies down to one tested implementation, plus supporting test-infrastructure and coordinator-data cleanup (#452, #454, #456, #460, #464, #466)
-- [x] QuietCool RF wall-remote timer selections (1/2/4/8/12 hours) can now set the fan manual-override grace duration, so a physical remote timer press is honored instead of being overridden by CA's own automation partway through — optional, requires the `gunkl/quietcool-house-fan` firmware and a configured `fan_remote_entity` (#486)
-- [x] Outdoor temperature for weather-service-only installs (no dedicated sensor) is now interpolated between hourly forecast points and refreshed every 5 minutes instead of lagging/leading true conditions by up to an hour on a temperature ramp (#511)
-- [x] QuietCool remote speed changes (low/medium/high) are detected and shown on the dashboard as a comfort preference, without arming manual override/HVAC suppression the way a timer press does; a plain speed selection while the fan was off still counts as an override (#519)
-- [x] WHF status card now always trusts confirmed physical fan state over CA's internal session flags and refreshes on every real transition, fixing a stale "nat-vent active, fan idle" display that could persist for hours while the fan was genuinely running (#510)
-- [x] Warm/windows-day briefing text (header, body, AC-safety-net note, bedtime-setback note) now comes from one shared computation so the pieces can no longer contradict each other (#518)
-- [x] Dashboard WHF status card now shows the QuietCool remote's reported speed promptly after a remote press; Activity Report distinguishes remote-armed overrides from generic detected toggles (#524)
-- [x] Startup no longer arms the AC against an already-open window after an HA restart — startup now defers to the same door/window pause logic used the rest of the day (#523)
-- [x] Status, Next User Action, and Next Automation cards no longer restate the same "automation paused" narration in different words — each card sticks to its own job, and away/vacation mode gets rotating personality text in Next User Action (#527)
-- [x] Warm/mild-day window-close and reopen times fixed (a data-alignment bug could tell users to close windows hours too early); Next Automation card now predicts WHF/nat-vent start, warm-day window/AC events, and hot-day window-cooling opportunities using the same logic the automation itself uses (#528)
-- [x] Whole-house-fan-off grace period reliably sticks for its full protection window — a watchdog meant for a rare stuck-automation case was misfiring on ordinary fan-off almost every time; 8-hour RF remote timer sessions no longer produce a burst of contradictory decisions when the timer runs out (#530)
-- [x] Next Automation's "outdoor no longer helping" message now states when that's expected to happen instead of reading like a claim about right now; mild-day briefings use the same forecast-based window-close time warm days already got instead of a fixed 5:00 PM (#534)
-- [x] Whole-house fan can now soft-start for air movement and attic/thermal-mass purge as soon as outdoor reaches parity with indoor in the evening, once the day is confirmed past its peak — instead of waiting for outdoor to be measurably cooler; on by default, disable in settings for the old strict-delta behavior (#540)
-
-### Phase 3.5: FSM Migration, Multi-Zone & Reliability (v0.6.x–v0.7.x) — Shipped
-- [x] Strangler-fig FSM completion program — economizer, classification, occupancy, fan/WHF, door/window, override/grace, and nat-vent decision surfaces each extracted into a differentially-validated lifecycle FSM, run shadow-diagnostic against the legacy path for weeks with zero corpus divergence, then graduated to sole authoritative implementation and the legacy path deleted (Phase 6 graduation, Issue #757; see [FSM Decision Layer](docs/02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer))
-- [x] **Multi-zone HVAC support** — Climate Advisor can run 2+ independent zones (thermostats) at once, each with its own learning history, thermal model, dashboard data, and settings, plus a dashboard zone selector once more than one zone is configured (Issue #796, shipped v0.7.0, 2026-09-01; see [Multi-Zone Spec](docs/multi-zone-spec.md) and [Adding a Second Zone](#adding-a-second-zone) above) — this was originally scoped under Phase 5 below; moved here to reflect when and where it actually shipped
-- [x] Time-of-use (TOU) scheduler — up to 5 cost-period schedules pre-condition toward the home's existing comfort-band edge ahead of a scheduled high-cost period, using the learned thermal rate (Issue #786)
-- [x] Entity health monitoring — missing/unresponsive thermostat, weather source, sensor, or configured entity now triggers a notification instead of Climate Advisor silently running on stale data (Issue #805)
-- [x] Comfort-family (heat/cool) floor/ceiling switches now react within seconds of a temperature reading instead of waiting up to 30 minutes for the next scheduled check (Issue #858)
-
-### Phase 4: Seasonal & Cost Intelligence (v0.7+) — Future
-- [ ] Seasonal performance baselines (after 1 year of data)
-- [ ] Anomaly detection (e.g., "heating 30% higher than last November")
-- [ ] Energy cost integration (utility rates → estimated cost)
-- [ ] Savings tracking vs. "no automation" baseline
-
-### Phase 5: Advanced Zone & Comfort Intelligence (v0.7+) — Future
-- [x] ~~Multi-zone HVAC support (multiple thermostats)~~ — shipped v0.7.0; see Phase 3.5 above
-- [ ] Room-level occupancy detection
-- [ ] Humidity-based decisions
-- [ ] Energy source cost optimization
-- [ ] Advanced thermal model with per-zone coefficients (e.g. zones influencing each other thermally — sketched, deliberately deferred, see [Multi-Zone Spec: Future — Zone Influence](docs/multi-zone-spec.md#future-zone-influence-deferred-not-in-scope-for-implementation))
+| Topic | Doc |
+|---|---|
+| Start here (index of every spec) | [00-PROJECT-INSTRUCTIONS](docs/00-PROJECT-INSTRUCTIONS.md) |
+| Strategy and design | [01-STRATEGY-AND-DESIGN](docs/01-STRATEGY-AND-DESIGN.md) |
+| Architecture | [02-ARCHITECTURE-REFERENCE](docs/02-ARCHITECTURE-REFERENCE.md) |
+| How decisions are computed | [08-COMPUTATION-REFERENCE](docs/08-COMPUTATION-REFERENCE.md) |
+| Troubleshooting | [09-DEBUGGING-GUIDE](docs/09-DEBUGGING-GUIDE.md) |
+| Thermal model | [thermal-model-v3-spec](docs/thermal-model-v3-spec.md) |
+| AI features | [ai-integration](docs/ai-integration.md) |
+| Release history | [CHANGELOG](CHANGELOG.md) |
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test with a Home Assistant dev environment
-5. Submit a pull request
-
-## File Structure
-
-```
-custom_components/climate_advisor/
-├── __init__.py          # Integration setup, service registration
-├── manifest.json        # HA integration metadata
-├── const.py             # Constants, thresholds, defaults
-├── config_flow.py       # Setup wizard UI (7-step flow + options)
-├── strings.json         # UI text for config flow
-├── translations/
-│   └── en.json          # English translations
-├── coordinator.py       # Central brain — scheduling, events, data flow
-├── classifier.py        # Day type and trend classification
-├── briefing.py          # Daily briefing text generation
-├── automation.py        # HVAC control logic (incl. economizer, fan)
-├── learning.py          # Pattern tracking and suggestion engine
-├── sensor.py            # 18 HA sensor entities for dashboards
-├── switch.py            # Automation enable/disable switch
-├── api.py               # 21 REST API endpoints for dashboard panel
-├── state.py             # State persistence across restarts
-├── repairs.py           # HA repairs flow for config issues
-├── zone_registry.py     # Multi-zone coordinator lookup/listing (Issue #796)
-├── storage_paths.py     # Entry-scoped persistence file paths for multi-zone (Issue #796)
-├── diagnostics.py       # Native HA diagnostics download hook
-├── claude_api.py        # Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking
-├── ai_skills.py         # Lightweight skill registry framework for pluggable AI capabilities
-├── ai_skills_investigator.py  # The sole registered AI skill ("investigator"): deep cross-source analysis on demand, plus silent/scheduled activity narration — merged from two separate skills, Issue #563
-├── ai_skills_context.py # Context providers for AI skills — focus-aware, independently testable (16 providers, incl. the event-timeline renderers ported from the retired activity skill)
-├── temperature.py       # Fahrenheit/Celsius conversion and formatting helpers
-├── chart_log.py         # Persistent 1-year ring buffer of HVAC/fan/temperature data + event markers
-├── nat_vent_gate.py     # Pure decision: nat-vent reactivation gate (direction/floor/ceiling)
-├── fan_thermostat_decision.py  # Pure decision: tick-level fan stop check (free-cooling reversal, cooled-to-floor)
-├── fan_drift_reconciliation.py # Pure decision: physical fan-state drift self-healing
-├── nat_vent_reactivation_lockout.py  # Pure decision: post-exit reactivation lockout window
-├── setpoint_verify_decision.py # Pure decision: post-fan-on/off setpoint verify outcome
-├── desired_state.py     # Temporal-intention schema (grace, retry, revisit, notifications) + wired decisions
-├── services.yaml        # Service definitions
-├── frontend/
-│   └── index.html       # Built-in dashboard panel
-├── brand/               # Integration branding assets
-├── icon.png             # Integration icon
-└── icon@2x.png          # Retina integration icon
-```
+Fork the repository, create a branch and open a pull request. [DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the environment, the unit and real-Home-Assistant test tiers (`python scripts/test.py unit` / `ha`) and the simulator. The roadmap is tracked in [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11).
 
 ## License
 

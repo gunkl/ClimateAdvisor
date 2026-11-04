@@ -200,5 +200,5 @@ class TestStatusPathWiring:
     def test_frontend_reads_exact_key_with_single_renderer(self):
         html = (_PKG / "frontend" / "index.html").read_text(encoding="utf-8")
         assert html.count("data.hvac_control_issues") == 1
-        assert '(data.hvac_control_issues || []).map(v => `<div class="value"' in html
+        assert '(data.hvac_control_issues || []).map(v => `<div class="status-alert"' in html  # Issue #1326 style
         assert "escapeHtml(v.detail)" in html

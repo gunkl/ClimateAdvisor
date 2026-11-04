@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gc
 import inspect
+import logging
 from unittest import mock
 
 import tools.sim_harness.ha_stubs  # noqa: F401  (installs the stubs via tests/conftest.py)
@@ -46,14 +47,18 @@ def test_generated_days_do_not_accumulate_recorded_mock_calls():
     from tools.sim_harness import replay
     from tools.sim_harness.generator import day_seed_of, run_day
 
-    replay._quiet()
-    run_day(day_seed_of(1278, 0), "coordinator")  # warm-up: imports and one-time caches
-
     def calls() -> int:
         gc.collect()
         return sum(1 for o in gc.get_objects() if type(o) is mock._Call)
 
-    before = calls()
-    for i in range(1, 3):
-        run_day(day_seed_of(1278, i), "coordinator")
+    # ``_quiet()`` disables logging process-wide; restore it, or every later test on this xdist worker that captures
+    # log records (tests/test_log_capture.py) sees none and fails, depending only on how the tests are distributed.
+    replay._quiet()
+    try:
+        run_day(day_seed_of(1278, 0), "coordinator")  # warm-up: imports and one-time caches
+        before = calls()
+        for i in range(1, 3):
+            run_day(day_seed_of(1278, i), "coordinator")
+    finally:
+        logging.disable(logging.NOTSET)
     assert calls() - before < 1000

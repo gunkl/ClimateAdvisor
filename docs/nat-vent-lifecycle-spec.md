@@ -109,6 +109,7 @@ The reverse edge (grace/pause → nat-vent reactivation) is documented from `gra
 2. The soft-start → full-gate upgrade (`~L3125`) never restarts the fan or HVAC band — only the `_nat_vent_soft_start` label flips; the session (fan running, HVAC suppressed) is untouched.
 3. `_nat_vent_outdoor_exit_time` is set by exactly one exit reason (outdoor-warm-rise, via `_exit_nat_vent(set_outdoor_exit_time=True)`) — no other exit path arms the reactivation lockout.
 4. `derive_nat_vent_lifecycle_state()` is purely a function of its 4 explicit inputs — it has no dependency on which of the (currently uncataloged-in-full) real call sites produced those flag values, so its correctness does not depend on the exit-path enumeration above being complete.
+5. Observe-only (automation off) never starts or ends a session on paper (Issue #1304): a fan command there returns `FanCommandResult.DRY_RUN`, applied as INACTIVE on entry and as "session kept" on exit, with no start/exit/escalation row. See [08 §17](08-COMPUTATION-REFERENCE.md#observe-only-fan-commands-record-nothing-issue-1304).
 
 ## Verification
 

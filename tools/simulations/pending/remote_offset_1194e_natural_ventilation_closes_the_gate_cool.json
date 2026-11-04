@@ -1,6 +1,7 @@
 {
   "description": "Cool night, whole_house_fan home, outdoor air cooler than the 78 F bedroom: the window opens and natural ventilation starts (HVAC off, fan on). The cool offset is at its cap before the window opens; during and after ventilation the loop writes nothing.",
   "config": {
+    "thermostat_action": "scripted",
     "comfort_heat": 68,
     "comfort_cool": 74,
     "sleep_heat": 66,
@@ -156,6 +157,7 @@
     }
   ],
   "notes": [
+    "Issue #1310 (2026-11-03): this world's AC never starts (the scripted hvac_action idle; the -4 F cap at 21:10 is only reachable because a 74 F hallway never starts cooling at a 68 F setpoint). Since #1310 the FakeHass thermostat derives its own hvac_action on CA's mode changes, so the 21:40 off->cool restore would start cooling (74 F >= 72 + 1.5) and the loop would rightly hold at 72; \"thermostat_action\": \"scripted\" keeps this scenario's never-starting AC through that mode change. Outcome unchanged from before #1310.",
     "Three-exercise protocol (CLAUDE.md section 10), Issue #1194 increment (e). Tier A: the real ClimateAdvisorCoordinator + AutomationEngine under FakeHass/FakeScheduler (use_coordinator=true, so the sleep-sensor listener and the 1-minute timer are real); every assertion is track=integration for that reason and is evaluated, not skipped.",
     "(a) Effectiveness: scratch-copy mutation run of this scenario against the production code (worktree untouched). It FAILS when M01: the whole offset deleted (the write path adds 0 and the check is a no-op); M02: the +4 F cap removed. Passes unmutated.",
     "(b) Docs <-> production alignment: docs/08-COMPUTATION-REFERENCE.md 'Remote-sensor outer loop on the thermostat setpoint (Issue #1194, increment a)': 'Gates' natural-ventilation row. Matches production. LIMIT: the thermostat is Off during ventilation, so the loop is inert there anyway (it never changes the mode); deleting the nat-vent term does not change this scenario's writes (M11). The gate term is proven in tests/test_remote_offset_gates_1194b.py.",

@@ -4,6 +4,7 @@
   "source": "production-symptom",
   "issue": 952,
   "notes": [
+    "Issue #1297: skip_startup_coalesce is true because this scenario tests the steady-state #952 recency guard, not start-up. Its 14:01 reconcile is hand-fed with a stale thermostat_fan_running=True read; when the harness started ending the start-up window at +300 s as production does, the real _do_startup_coalesce() at 14:04:59 read the actual fan entity (off) and turned the adopted session off, so the 14:30 cycling-off decision the guard depends on never happened. Before #1297 the window never ended, so the run was unaffected either way.",
     "Occupant impact (three-exercise protocol, point (c), stated first per CLAUDE.md occupant-first framing): the person living in the home sees the WHF dashboard card and Activity Report flap between active/inactive every reconcile tick for a single continuous nat-vent duty-cycle-off, even though the physical fan genuinely turned off once and stayed off -- misleading status display and a noisy, duplicated Activity Report entry for what was one real event, not two.",
     "This is the mirror-image guard of Issue #733 (733_restart_reconcile_clobbers_fresh_nat_vent.json): #733 covers the thermostat_fan_running=False branch wrongly clobbering a just-issued fan-ON command (adopt-on -> stale-off-read -> forced off); #952 covers the thermostat_fan_running=True branch wrongly clobbering a just-issued fan-OFF command (cycling-off -> stale-on-read -> forced back on/re-adopted). Same underlying race (a state-change listener re-invoking reconcile before a dual-entity WHF's physical read has caught up to CA's own command), same fix mechanism (_is_recent_fan_command_callback(threshold_seconds=30.0)), opposite direction. Confirms the symmetry/mirror check (CLAUDE.md) was already applied when #952 was scoped -- the Craftsman's fix reuses the exact #733 guard rather than reimplementing it, per the fix's own inline comment at automation.py ~line 6125.",
     "(a) Scenario effectiveness: if the Issue #952 guard block (automation.py, the 'Issue #952' comment at ~line 6117, specifically the self._is_recent_fan_command_callback(threshold_seconds=30.0) check and early return) were removed, the second reconcile_fan_on_startup event below would fall through to the adopt-on branch and re-arm _fan_active=True/_natural_vent_active would remain True via an adoption rather than via untouched session continuity -- the fan_not_active final assertion would FAIL (engine._fan_active would read True again, re-adopted 15s after CA's own cycling-off). Verified by reading the guarded code path directly (not assumed): the adopt-on branch below the guard unconditionally sets self._fan_active = True when nat_vent_eligible, with no check of whether a very-recent CA command already decided otherwise.",
@@ -24,6 +25,7 @@
     "fan_entity": "fan.whole_house"
   },
   "use_coordinator": true,
+  "skip_startup_coalesce": true,
   "events": [
     {
       "time": "2026-09-10T14:00:00",

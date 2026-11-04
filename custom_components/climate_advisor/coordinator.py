@@ -1168,8 +1168,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # meantime (and was only reported) must now be stopped; do not wait for the next 15 s tick.
             self._request_whf_safety_check("automation_enabled")
             # Issue #1293: observe-only recorded no door/window pause it never sent; pause now if one is due.
-            self._spawn(self.automation_engine.async_reconcile_after_automation_enabled())
+            # Issue #1296: then re-apply the current plan at once instead of at the next 30-minute cycle.
+            self._spawn(self._async_resume_after_automation_enabled())
         self._spawn(self._async_save_state())
+
+    async def _async_resume_after_automation_enabled(self) -> None:
+        """Leaving observe-only: door/window reconcile, then the plan re-applied now (Issues #1293, #1296).
+
+        Observe-only sends nothing, so the thermostat can be left where an un-restored action put it (a whole-house
+        fan that stopped while automation was off leaves it Off: its restore came back ``DRY_RUN``). The plan is
+        re-applied through the ordinary refresh, the same path the post-action revisit uses: a full classification
+        cycle that reads live state and whose ``apply_classification()`` already defers to everything that owns the
+        thermostat (the occupant's override / pending confirmation, away/vacation, a door/window pause, nat-vent and
+        whole-house-fan ownership). Ordering: the WHF safety check queued just before and this door/window reconcile
+        both take the decision lock first, so the plan is applied to the state they leave. Repeated toggles coalesce
+        in the refresh debouncer; switched off again meanwhile, nothing is re-applied (or the cycle runs observe-only).
+        """
+        await self.automation_engine.async_reconcile_after_automation_enabled()
+        if not self._automation_enabled:
+            return  # switched off again before the reconcile finished
+        await self.async_request_refresh()
 
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
@@ -13022,7 +13040,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
             and not ae._natural_vent_active
             and _nv_grace_known
-            and (ae.is_paused_by_door or self._any_sensor_open())
+            # Issue #1299: a sensor must READ open (not dark). A pause held only by a dark sensor (last reading
+            # open, #1181) keeps HVAC off but never starts a fan (_no_live_open_sensor_for_start(), #1289), so
+            # ``is_paused_by_door`` alone no longer qualifies. A window still inside its delay does: it starts at
+            # the delay's end, before any forecast-grid time this scan can return.
+            and self._any_sensor_open()
             and _predicted_indoor
         ):
 

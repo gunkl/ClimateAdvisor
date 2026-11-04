@@ -1935,6 +1935,12 @@ def _render_hvac_mode_not_applied(p: dict, unit: str) -> tuple[str, str]:
     actual = p.get("actual_mode")
     if p.get("kind") == "rejected":
         label = f"Thermostat rejected HVAC mode {requested} -- mode not changed"
+    elif p.get("kind") == "open_window_retry":
+        # Issue #1302: the Off for an open window failed or went unconfirmed; Climate Advisor is re-sending it.
+        label = f"Thermostat still {actual or '?'} with a window open -- re-sending {requested}"
+    elif p.get("kind") == "restore_retry":
+        # Issue #1308: the restore after the window closed (or a whole-house fan release) did not land; re-sending it.
+        label = f"Thermostat still {actual or '?'} after Climate Advisor restored {requested} -- re-sending"
     else:
         label = f"Thermostat did not switch to {requested} -- it may be ignoring mode commands"
     settings = f"requested {requested}, thermostat reports {actual}" if actual else f"requested {requested}"

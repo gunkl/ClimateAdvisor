@@ -19,6 +19,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
+from tools.sim_harness.world import thermostat_running
+
 
 class FakeHomeAssistantError(Exception):
     """Stand-in for ``homeassistant.exceptions.HomeAssistantError`` (Issue #1048).
@@ -32,6 +34,10 @@ class FakeHomeAssistantError(Exception):
 # Opt-in per-entity thermostat quirks (Issue #1048). Default entities obey every
 # kwarg exactly as before; only entities explicitly marked here deviate.
 QUIRK_SENSI_LIKE = "sensi_like"
+
+# Issue #1310: the FakeHass thermostat's own start/stop deadband (F), the real-HA sim thermostat's default
+# (``ca_dev_thermostat_sim`` DEFAULT_DEADBAND_HEAT_F / DEFAULT_DEADBAND_COOL_F).
+THERMOSTAT_ACTION_DEADBAND_F = 1.5
 
 
 @dataclass
@@ -130,7 +136,115 @@ class _FakeServices:
         # Issue #1194 (e): entity_id -> seconds a cloud thermostat takes to report a setpoint it was just told (opt-in;
         # empty by default, so every existing scenario still sees the instant, context-carrying echo).
         self._echo_delay_s: dict[str, float] = {}
+        # Issue #1310: entity_id -> the thermostat's own start/stop deadband (entity units) used to derive the
+        # hvac_action it reports after one of CA's commands; ``None`` = this entity's action is never derived
+        # (the generator's ToyHouse owns it). Absent = THERMOSTAT_ACTION_DEADBAND_F.
+        self._action_deadband: dict[str, float | None] = {}
+        self._derived_action: dict[str, str] = {}  # entity_id -> the hvac_action this thermostat last derived
         self._defer: Any | None = None  # scheduler._schedule, wired by FakeHass.set_scheduler()
+
+    def set_action_deadband(self, entity_id: str, deadband: float | None) -> None:
+        """Set the deadband the thermostat derives its ``hvac_action`` with (Issue #1310); ``None`` disables it."""
+        self._action_deadband[entity_id] = None if deadband is None else float(deadband)
+
+    def _derive_hvac_action(self, entity_id: str, old_mode: str | None, new_mode: str, attrs: dict) -> None:
+        """Issue #1310: after one of CA's climate commands, report what a real thermostat would be doing.
+
+        Before, CA's ``set_hvac_mode``/``set_temperature`` left ``hvac_action`` as whatever the scenario last
+        injected, so after CA switched the thermostat into cool it kept reporting e.g. ``"fan"`` with the house
+        below the setpoint -- production's runtime tracker then counted that idle time as AC runtime.
+
+        Ownership: a mode change is a discontinuity no scenario can script (a real thermostat restarts its own
+        loop), so on CA's mode change the thermostat takes over: heat/cool run only once the reading is the
+        deadband past the setpoint (``world.thermostat_running``, the real-HA sim thermostat's rule), and a
+        heating/cooling session stops when CA switches to off (``"off"``) or fan_only (``"fan"``). Once derived,
+        later setpoint commands in the same mode keep the loop going (hysteresis). A value the scenario injected
+        stays scripted until CA's next mode change (e.g. a thermostat that never starts, Issue #1194 e).
+
+        Only for a thermostat that reports an ``hvac_action`` at all: an entity without one models a thermostat
+        with no such attribute, where production's documented mode fallback is the real behavior.
+        """
+        deadband = self._action_deadband.get(entity_id, THERMOSTAT_ACTION_DEADBAND_F)
+        if deadband is None or "hvac_action" not in attrs:
+            return
+        current = str(attrs.get("hvac_action") or "").lower()
+        if old_mode == new_mode:
+            if self._derived_action.get(entity_id) != current:
+                return  # scripted by the scenario: the thermostat's own loop is not running this value
+            prior: str | None = current
+        else:
+            prior = None
+        if new_mode in ("heat", "cool"):
+            try:
+                indoor = float(attrs["current_temperature"])
+                setpoint = float(attrs["temperature"])
+            except KeyError, TypeError, ValueError:
+                # No reading or setpoint yet: the thermostat still owns its action, so CA's next command derives it.
+                self._derived_action[entity_id] = current
+                return
+            derived = thermostat_running(new_mode, indoor, setpoint, prior, start_f=deadband) or "idle"
+        elif new_mode in ("off", "fan_only") and current in ("heating", "cooling"):
+            derived = "off" if new_mode == "off" else "fan"
+        else:
+            return  # heat_cool/auto/...: left exactly as before
+        attrs["hvac_action"] = derived
+        self._derived_action[entity_id] = derived
+
+    def rederive_on_reading(self, entity_id: str, mode: str | None, attrs: dict) -> None:
+        """Issue #1316 (mirror of #1310): a new indoor reading runs the thermostat's own loop again.
+
+        Before, a derived ``idle`` stayed idle however far the house drifted past the setpoint (and a derived
+        ``cooling``/``heating`` never stopped), so simulated runtime was undercounted. Re-derived only while the
+        thermostat owns the action (the value it last derived is still there): a scenario-injected action, a
+        thermostat with no ``hvac_action`` and a disabled entity are untouched. ``attrs`` already carries the new
+        ``current_temperature``; heat/cool only, with hysteresis from the current action.
+        """
+        if self._action_deadband.get(entity_id, THERMOSTAT_ACTION_DEADBAND_F) is None or "hvac_action" not in attrs:
+            return
+        current = str(attrs.get("hvac_action") or "").lower()
+        if self._derived_action.get(entity_id) != current or mode not in ("heat", "cool"):
+            return
+        try:
+            indoor = float(attrs["current_temperature"])
+            setpoint = float(attrs["temperature"])
+        except KeyError, TypeError, ValueError:
+            return
+        deadband = self._action_deadband.get(entity_id, THERMOSTAT_ACTION_DEADBAND_F)
+        derived = thermostat_running(mode, indoor, setpoint, current, start_f=deadband) or "idle"
+        attrs["hvac_action"] = derived
+        self._derived_action[entity_id] = derived
+
+    def rederive_on_occupant_mode(self, entity_id: str, old_mode: str | None, new_mode: str, attrs: dict) -> None:
+        """Issue #1318 (occupant mirror of #1310/#1316): a scenario-injected mode change without an ``hvac_action``.
+
+        Before, the action the thermostat derived earlier survived the occupant's change (``"cooling"`` after they
+        turned the thermostat off), so simulated runtime kept counting equipment that was off. Only while the
+        thermostat owns the action (the value it last derived is still there): off -> ``off``, fan_only -> ``fan``,
+        heat/cool -> ``world.thermostat_running`` (hysteresis in the same mode, a fresh start on a mode change).
+        Scripted actions, thermostats with no ``hvac_action``, disabled entities and other modes are untouched.
+        """
+        deadband = self._action_deadband.get(entity_id, THERMOSTAT_ACTION_DEADBAND_F)
+        if deadband is None or "hvac_action" not in attrs:
+            return
+        current = str(attrs.get("hvac_action") or "").lower()
+        if self._derived_action.get(entity_id) != current:
+            return
+        if new_mode == "off":
+            derived = "off"
+        elif new_mode == "fan_only":
+            derived = "fan"
+        elif new_mode in ("heat", "cool"):
+            try:
+                indoor = float(attrs["current_temperature"])
+                setpoint = float(attrs["temperature"])
+            except KeyError, TypeError, ValueError:
+                return
+            prior = current if old_mode == new_mode else None
+            derived = thermostat_running(new_mode, indoor, setpoint, prior, start_f=deadband) or "idle"
+        else:
+            return
+        attrs["hvac_action"] = derived
+        self._derived_action[entity_id] = derived
 
     def set_entity_quirk(self, entity_id: str, quirk: str) -> None:
         """Mark ``entity_id`` with an opt-in behavioural quirk (Issue #1048).
@@ -290,6 +404,7 @@ class _FakeServices:
             return
 
         existing = self._states.get(entity_id)
+        old_mode = existing.state if existing is not None else None
         state_str = existing.state if existing is not None else "off"
         attrs = dict(existing.attributes) if existing is not None else {}
 
@@ -307,6 +422,8 @@ class _FakeServices:
                     attrs["target_temp_high"] = data["target_temp_high"]
             elif service == "set_fan_mode" and "fan_mode" in data:
                 attrs["fan_mode"] = data["fan_mode"]
+            if service in ("set_hvac_mode", "set_temperature"):
+                self._derive_hvac_action(entity_id, old_mode, state_str, attrs)
         elif domain in ("fan", "switch"):
             if service == "turn_on":
                 state_str = "on"
@@ -626,6 +743,10 @@ class FakeHass:
     def set_echo_delay(self, entity_id: str, seconds: float) -> None:
         """Opt a thermostat into a late, context-free setpoint echo (Issue #1194 e / #1232)."""
         self.services.set_echo_delay(entity_id, seconds)
+
+    def set_action_deadband(self, entity_id: str, deadband: float | None) -> None:
+        """The thermostat's own start/stop deadband for its ``hvac_action`` (Issue #1310); ``None`` turns it off."""
+        self.services.set_action_deadband(entity_id, deadband)
 
     def set_scheduler(self, scheduler: Any) -> None:
         """Wire in the FakeScheduler so async_create_task coroutines are driven."""

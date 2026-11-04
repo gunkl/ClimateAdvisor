@@ -79,7 +79,10 @@ def build_headless_coordinator(
             (`away_setpoint_change_not_override`). Scenarios that are
             specifically ABOUT startup/restart/coalescing behavior (e.g. a
             future migration of `grace_timer_expired_on_restart`) must leave
-            this False to exercise the real suppression window.
+            this False to exercise the real suppression window. With False,
+            the window also ENDS as in production: 300 s after the start the
+            real ``_do_startup_coalesce()`` runs behind production's gate
+            (``arm_startup_coalesce_end``, Issue #1297).
 
     Returns:
         ``(coordinator, fake_hass, scheduler, event_log)``
@@ -248,8 +251,75 @@ def build_headless_coordinator(
 
     if skip_startup_coalesce:
         coordinator._startup_coalesce_active = False
+    else:
+        # Issue #1297: the window this start-up opened must also END at +300 s, as in production
+        # (the same helper simulate_restart uses, Issue #1291). Before, nothing ended it unless a
+        # scenario dispatched an explicit startup_coalesce event, so every later occupant
+        # thermostat change was ignored as start-up noise for the whole run.
+        arm_startup_coalesce_end(coordinator, scheduler)
 
     return coordinator, fake_hass, scheduler, event_log
+
+
+def arm_startup_coalesce_end(coordinator: Any, scheduler: FakeScheduler) -> None:
+    """Arm the end of a start-up coalescing window (Issue #1291 restart, Issue #1297 initial start).
+
+    Production (``coordinator.async_setup``) sets ``_startup_coalesce_expiry`` to now + 300 s and
+    arms ``async_call_later(300)``. That timer sets ``_startup_timer_fired`` and requests a
+    refresh; the refresh runs ``_do_startup_coalesce()`` when
+    ``_startup_timer_fired and _startup_coalesce_active and _current_classification``, and that
+    method clears ``_startup_coalesce_active`` ("Startup coalescing complete"). It also
+    re-applies the plan, so a thermostat change made inside the window is overwritten (owner
+    decision #1235). The harness has no weather forecast, and that gate sits inside the
+    refresh's ``if forecast:`` block, so a harness refresh never reaches it. The timer
+    callback below does what the timer does, then evaluates the same gate and calls the REAL
+    ``_do_startup_coalesce()``. If no classification exists yet, production waits for the
+    next periodic refresh (every 30 min, ``update_interval``) and so does this: it re-checks
+    1800 s later.
+
+    Coalescing runs at most once per window, as in production. A scenario's explicit
+    ``startup_coalesce`` event that already ended the window makes the gate false, and once
+    this timer has run it, ``_sim_startup_coalesce_done_by_timer`` makes the explicit event a
+    no-op (``run_production._dispatch_event``). That covers the tie: an explicit event at
+    exactly +300 s is dispatched after the scheduler fired every timer due by then, so the
+    timer's coalesce is the one that runs, and the event is the same production refresh.
+
+    Used for the coordinator's initial start (``build_headless_coordinator`` with
+    ``skip_startup_coalesce=False``) and for every ``simulate_restart``. A second start cancels
+    the previous start's pending timer, as unloading the old instance does in production
+    (Issue #1102).
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    from custom_components.climate_advisor.const import STARTUP_COALESCE_SECONDS  # noqa: PLC0415
+
+    previous = getattr(coordinator, "_sim_restart_coalesce_cancel", None)
+    if previous is not None:
+        previous()
+    # Real __init__ defaults for a fresh instance, then async_setup's expiry stamp.
+    coordinator._startup_timer_fired = False
+    coordinator._sim_startup_coalesce_done_by_timer = False
+    coordinator._startup_coalesce_expiry = (scheduler.now() + timedelta(seconds=STARTUP_COALESCE_SECONDS)).isoformat()
+
+    async def _refresh_cycle_gate() -> None:
+        if getattr(coordinator, "_shut_down", False) is True:
+            return  # Issue #1317: an unloaded instance never coalesces (production cancels its timer on unload)
+        if not coordinator._startup_coalesce_active:
+            return
+        if coordinator._current_classification:
+            coordinator._sim_startup_coalesce_done_by_timer = True
+            await coordinator._do_startup_coalesce()
+            return
+        coordinator._sim_restart_coalesce_cancel = scheduler._schedule(1800, _on_refresh_cycle)
+
+    def _on_refresh_cycle(_now: Any) -> Any:
+        return _refresh_cycle_gate()
+
+    def _on_startup_coalesce_timer(_now: Any) -> Any:
+        coordinator._startup_timer_fired = True
+        return _refresh_cycle_gate()
+
+    coordinator._sim_restart_coalesce_cancel = scheduler._schedule(STARTUP_COALESCE_SECONDS, _on_startup_coalesce_timer)
 
 
 def build_headless_multi_zone(
@@ -399,11 +469,28 @@ def setup_entry_like_ha(fake_hass: FakeHass, scheduler: FakeScheduler, entry: An
         run_coro(async_setup_entry(fake_hass, entry))
     finally:
         _current_entry.reset(token)
+    coordinator = fake_hass.data[DOMAIN][entry.entry_id]
+    # Issue #1317: the start-up window this set-up opened must also END at +300 s, as in production
+    # (the multi-zone/reload mirror of #1291/#1297/#1309). The real 300 s timer fires, but its refresh
+    # finds no forecast, so the gate inside ``if forecast:`` was never reached and every later occupant
+    # thermostat change in this zone was ignored as start-up noise. Its cancel joins the instance's own
+    # _unsub_listeners, where production keeps its 300 s timer handle, so shutdown/unload releases both
+    # (Issue #1102).
+    arm_startup_coalesce_end(coordinator, scheduler)
+    coordinator._unsub_listeners.append(lambda: _cancel_startup_coalesce_end(coordinator))
     # Settle any fire-and-forget hass.async_create_task() calls / scheduled callbacks
     # queued during setup — same reasoning as build_headless_coordinator's
     # post-startup scheduler.advance_to.
     scheduler.advance_to(scheduler.now())
-    return fake_hass.data[DOMAIN][entry.entry_id]
+    return coordinator
+
+
+def _cancel_startup_coalesce_end(coordinator: Any) -> None:
+    """Cancel a pending ``arm_startup_coalesce_end`` timer (entry unload, Issue #1317)."""
+    cancel = getattr(coordinator, "_sim_restart_coalesce_cancel", None)
+    if cancel is not None:
+        cancel()
+        coordinator._sim_restart_coalesce_cancel = None
 
 
 async def async_unload_entry_like_ha(fake_hass: FakeHass, entry: Any) -> bool:

@@ -129,6 +129,9 @@ class Night:
         self.fh.states.set(WINDOW, FakeState(state="off"))
         if fan_mode == "whole_house_fan":
             self.fh.states.set(FAN, FakeState(state="off"))
+        # Issue #1310: this world scripts the equipment (hvac_action "idle", the hallway held fixed); keep it through
+        # CA's pause/restore mode changes instead of letting the FakeHass thermostat derive its own action.
+        self.fh.set_action_deadband(self.ce, None)
         self.state = self.fh.states.get(self.ce)
         # Real thermostats answer later than the call; here the test delivers the occupant's changes by hand.
         self.set_bedroom(bedroom_f if bedroom_f is not None else self.d["off_target"])

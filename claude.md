@@ -41,10 +41,11 @@ Skipping to code without completing steps 1–3 is a process violation. The Coor
 
 Every investigation brief (including every subagent prompt) must carry these, because the code alone suggests otherwise:
 
-1. **Supported fan modes are `whole_house_fan` or `hvac_fan` — never `both`.** `FAN_MODE_BOTH` still exists in the code (~78 references) but is hidden from the config flow and **not supported** (owner decision, #1175). A defect that only occurs under `both` is out of scope: note it, don't file or fix it. Under `whole_house_fan` the thermostat's own blower is the occupant's equipment, not CA's fan: a blower press is ignored (no override, no grace; owner decision 2026-11-01, #1197). Only under `hvac_fan` is a blower press a tracked fan override (#1103/#1180). So a "blower override plus whole-house fan" scenario cannot occur in a supported mode.
+1. **Supported fan modes are `whole_house_fan` or `hvac_fan` — never `both`.** `FAN_MODE_BOTH` still exists in the code (~80 references in the integration) but is hidden from the config flow and **not supported** (owner decision, #1175). A defect that only occurs under `both` is out of scope: note it, don't file or fix it. Under `whole_house_fan` the thermostat's own blower is the occupant's equipment, not CA's fan: a blower press is ignored (no override, no grace; owner decision 2026-11-01, #1197). Only under `hvac_fan` is a blower press a tracked fan override (#1103/#1180). So a "blower override plus whole-house fan" scenario cannot occur in a supported mode.
 2. **A door/window opening never pauses HVAC instantly.** Each sensor is debounced (`DEFAULT_SENSOR_DEBOUNCE_SECONDS` = 600 s, configurable); the pause happens only if the sensor is still open when its debounce expires (`docs/08-COMPUTATION-REFERENCE.md` §10). An immediate pause would thrash the HVAC on every brief door opening. HVAC running during the debounce is correct, not a rule-3 violation; never propose "pause immediately".
+3. **Occupant changes during startup coalescing are not supported.** For the ~5 minutes after a restart (`_startup_coalesce_active`) override detection is suppressed and the day's plan is applied when the window ends (owner decision, #1235; `docs/08-COMPUTATION-REFERENCE.md` §11 "Startup Coalescing Window"). A thermostat or fan change the occupant makes inside it is not detected, by design; do not propose tracking or replaying it.
 
-**Root cause of this block:** both facts were repeatedly forgotten by investigations (2026-11-01 audit of #1134+). The `both` decision lived only in a private assistant memory that subagents never see, while CLAUDE.md described `FAN_MODE_BOTH` behaviour as if live; #1168–#1170 were filed as `both` bugs 30 minutes before #1175 ruled `both` out, and nobody swept them. Owner rule 3 was written as "HVAC stays off while a window is open" with no debounce, so it read as "pause instantly".
+**Root cause of this block:** facts 1 and 2 were repeatedly forgotten by investigations (2026-11-01 audit of #1134+). The `both` decision lived only in a private assistant memory that subagents never see, while CLAUDE.md described `FAN_MODE_BOTH` behaviour as if live; #1168–#1170 were filed as `both` bugs 30 minutes before #1175 ruled `both` out, and nobody swept them. Owner rule 3 was written as "HVAC stays off while a window is open" with no debounce, so it read as "pause instantly".
 
 **Root cause of this rule:** Explore agents went directly to source code (Issue #149) without reading the Tier 3 spec or fetching live data first. The spec at `docs/ai-skills-spec.md` and `docs/thermal-model-v3-spec.md` answers most structure questions without opening a `.py` file. Live data (ha_logs, learning_db) provides ground-truth values that make hypotheses falsifiable before code is read.
 
@@ -71,6 +72,8 @@ Before any change to `automation.py` automation logic, run `python3 tools/simula
 to confirm all golden scenarios still pass. After implementing a behavior change:
 1. Run `python3 tools/simulate.py --pending -v` — new scenarios should pass
 2. After the user validates in production: `mv tools/simulations/pending/<name>.json tools/simulations/golden/<name>.json`
+
+`tools/simulate.py` drives the real production `AutomationEngine` headless through `tools/sim_harness/` (single engine, Issue #236; there is no separate simulator to keep in sync). See `docs/sim-harness-brief.md`.
 
 Every closed automation-behavior issue should have a corresponding golden scenario.
 Scenarios flow: `pending/` → review → `golden/` or `pending-fix/` or `unsupported/`.
@@ -177,7 +180,7 @@ Before adding a branch to any of these three functions that reads an automation-
 
 **Issue #860 follow-up — the #625 duration line duplicated the Fan card's number too, after a restart re-arm:** `_start_grace_period()` derives Status's "Xh (ends HH:MM)" from `_grace_duration_seconds`, while the Fan (WHF) card derives its "remote timer: Xh (ends HH:MM)" from `AutomationEngine._fan_remote_timer_hours`. On a fresh remote press these are always equal (both set from the same `burst.timer_hours`), so #625's fix never surfaced a mismatch. Issue #677's HA-restart timer re-arm (`_reconcile_fan_on_startup_locked()`) legitimately sets them differently: `_grace_duration_seconds` gets the *remaining* time (correct — it drives real timer scheduling), while `_fan_remote_timer_hours` keeps the *original* token (correct — Issue #530's `_timer_boundary_settle_until` session-identity matching needs the original value). Both fields are individually right for their own backend purpose; Status's display never accounted for the two being allowed to diverge. Fix: `_compute_automation_status()`'s grace branch now omits its own duration/end-time clause entirely whenever `ae._fan_remote_timer_hours is not None` — the Fan (WHF)/(HVAC) card becomes the sole source for "original setting + expiry" in that case, and Status shows only the cause label (e.g. `"grace period (manual) — WHF override"`).
 
-This is a **data-driven condition** — checking whether the field is populated — not a hardcoded trigger-name allowlist, and deliberately so: `fan_manual_override` is the common/tested case, and `fan_off` reliably clears `_fan_remote_timer_hours` to `None` before starting its own grace period (`on_fan_turned_off()`'s fall-through, `automation.py` ~line 1794), so Status remains the sole duration owner there, unchanged. `physical_drift_correction` (`_reconcile_fan_physical_drift()`'s CORRECT branch) does **not** itself clear `_fan_remote_timer_hours` — `_clear_fan_flags_and_start_grace()` (automation.py:1824) only touches `_fan_active`/`_fan_on_since`/`_natural_vent_active`/`_nat_vent_soft_start` — so a fan that physically drifts while an RF-remote timer override is still active in principle reaches this trigger with `_fan_remote_timer_hours` still set. That is not a gap in this fix: because the condition checks the field itself rather than which trigger fired, that case is handled correctly automatically (duration omitted, Fan card deferred to) with no extra code needed. This is exactly why the condition is data-driven rather than a trigger-name allowlist — a maintained list would have had to enumerate this case explicitly and could have gotten it wrong; checking the field can't.
+This is a **data-driven condition** — checking whether the field is populated — not a hardcoded trigger-name allowlist, and deliberately so: `fan_manual_override` is the common/tested case, and `fan_off` reliably clears `_fan_remote_timer_hours` to `None` before starting its own grace period (`on_fan_turned_off()`'s fall-through in `automation.py`), so Status remains the sole duration owner there, unchanged. `physical_drift_correction` (`_reconcile_fan_physical_drift()`'s CORRECT branch) does **not** itself clear `_fan_remote_timer_hours` — `_clear_fan_flags_and_start_grace()` (`automation.py`) only touches `_fan_active`/`_fan_on_since`/`_natural_vent_active`/`_nat_vent_soft_start` — so a fan that physically drifts while an RF-remote timer override is still active in principle reaches this trigger with `_fan_remote_timer_hours` still set. That is not a gap in this fix: because the condition checks the field itself rather than which trigger fired, that case is handled correctly automatically (duration omitted, Fan card deferred to) with no extra code needed. This is exactly why the condition is data-driven rather than a trigger-name allowlist — a maintained list would have had to enumerate this case explicitly and could have gotten it wrong; checking the field can't.
 
 The same audit turned up a third surface of the identical defect class: the Debug tab's "Manual Override (active, X min remaining)" row in `index.html` was computing its countdown from the static configured default grace duration instead of the real active grace's `grace_end_time` — silently wrong for any RF-remote-timer override, since those run far longer than the configured default. Fixed to read `grace_end_time` directly. Three independent surfaces of "duplicate a number instead of reading the one authoritative field" in three related issues (#625, #677, #860) is this codebase's recurring failure mode for grace/timer display — when adding any new duration display, prefer pointing at the field the owning card already reads over recomputing an equivalent value.
 
@@ -332,9 +335,9 @@ replace the README badge with a hardcoded string, or skip a GitHub Release on a 
 
   hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
   ```
-  Reference implementations: `test_door_window.py:255`, `test_resume_from_pause.py:44`
+  Reference implementations: `_consume_coroutine` in `test_door_window.py` and `test_resume_from_pause.py`
 
-- **`coordinator._async_save_state`** — Stub as `AsyncMock()` directly on the coordinator instance, not by mocking `hass.async_add_executor_job`. Reference: `test_coordinator.py:262`
+- **`coordinator._async_save_state`** — Stub as `AsyncMock()` directly on the coordinator instance, not by mocking `hass.async_add_executor_job`. Reference: `test_coordinator.py` (`coord._async_save_state = AsyncMock()`)
 
 - **`coordinator.automation_engine`** — Use `MagicMock()` (NOT `AsyncMock()`) for the engine object. `AsyncMock` causes sync methods like `get_serializable_state()` to return coroutines instead of values. Only set individual async handler methods to `AsyncMock()` in tests that `await` them.
 
@@ -349,12 +352,12 @@ replace the README badge with a hardcoded string, or skip a GitHub Release on a 
 
 #### Testing `_build_predicted_indoor_future` directly
 
-When calling `_build_predicted_indoor_future` in tests using the lightweight HA stub environment, `dt_util.as_local()` returns a `MagicMock` — breaking `<=` comparisons against real `datetime` objects. Always wrap the call with:
+Since Issue #1186 the stub's `dt_util` is a real module (`_make_dt_module()` in `tools/sim_harness/ha_stubs.py`): `as_local()` returns an aware datetime (a naive input is treated as local, local zone = UTC). A test that feeds `_build_predicted_indoor_future` naive timestamps would then compare aware with naive, so either pass aware datetimes or keep the identity patch the existing tests use:
 ```python
 with patch("custom_components.climate_advisor.coordinator.dt_util.as_local", side_effect=lambda x: x):
     result = _build_predicted_indoor_future(...)
 ```
-Reference: `TestPredIndoorIntegration::test_ode_cache_diverges_after_model_refresh`
+Freeze the clock with the `frozen_now` fixture (`tests/conftest.py`), never by assigning `dt_util` attributes. Reference: `tests/test_coordinator_chart.py::TestPredIndoorIntegration::test_ode_cache_diverges_after_model_refresh`
 
 #### Testing Sensor Attributes and API Views
 
@@ -370,11 +373,11 @@ Reference: `TestPredIndoorIntegration::test_ode_cache_diverges_after_model_refre
 
 **Coordinator methods** (not sensor/view classes) still use the pre-existing `object.__new__(ClimateAdvisorCoordinator)` + `types.MethodType(RealMethod, instance)` partial-instantiation pattern (never metaclass-blocked — see below) — bind only the method(s) under test and set the specific `self.*` attributes that method reads. Reference: `test_contact_status.py` (`_make_real_coordinator`), `test_status_sensors.py` (`_compute_automation_status`/`_compute_next_automation_action`).
 
-#### Coordinator Class After test_occupancy.py Module Deletion
+#### Never Re-import the Coordinator Module
 
-**`test_occupancy.py` deletes `custom_components.climate_advisor.coordinator` from `sys.modules` and re-imports it.** If another test file holds a module-level reference to `ClimateAdvisorCoordinator` (e.g., `coord = ClimateAdvisorCoordinator`), any methods bound via `types.MethodType` will have stale `__globals__` pointing to the old module. Patches applied to the new module (e.g., `patch("...coordinator.async_call_later")`) won't be visible to those bound methods, causing `call_count == 0` failures that only appear in the full suite.
+`test_occupancy.py` used to delete `custom_components.climate_advisor.coordinator` from `sys.modules` and re-import it; that swap was removed in a96c966 (#1102) once `ha_stubs` gained a real `_MockDataUpdateCoordinator` base. Do not reintroduce a `sys.modules` swap of a production module: methods bound via `types.MethodType` from a module-level class reference keep stale `__globals__` pointing to the old module, so patches applied to the new module (e.g. `patch("...coordinator.async_call_later")`) are invisible to them, causing `call_count == 0` failures that only appear in the full suite (and #1102 showed it can make a harness test pass vacuously).
 
-**Pattern**: Use a `_get_coordinator_class()` helper that calls `importlib.import_module()` each time rather than holding a module-level reference:
+**Pattern** (still used by older tests and harmless): a `_get_coordinator_class()` helper that calls `importlib.import_module()` each time rather than holding a module-level reference:
 ```python
 def _get_coordinator_class():
     mod = importlib.import_module("custom_components.climate_advisor.coordinator")
@@ -404,7 +407,7 @@ The runner already applies `-W error::pytest.PytestUnraisableExceptionWarning -W
 
 #### Test Environment and Tiers (Issue #1125)
 
-uv is the environment manager; the single dependency source is `pyproject.toml` + `uv.lock` (no requirements files, Python pinned in `.python-version`). `python scripts/test.py unit|ha|all` is the one entry point: `unit` is the stubbed `tests/` tier, `ha` runs `tests_ha/` inside a real Home Assistant core (via WSL on Windows). A skip caused by a missing dependency now fails the test instead of passing silently. The household promises (`PROMISES` in `invariant_watchdog.py`, spec `docs/household-promises-spec.md`) are the checks shared by tests and production: log-only at home, hard/warning in tests. Generated days: `python tools/simulate.py --generate N` runs N random households against the real engine and judges them with the same promises.
+`python scripts/test.py unit|ha|all` is the one entry point (uv-managed, `pyproject.toml` + `uv.lock`): `unit` is the stubbed `tests/` tier, `ha` runs `tests_ha/` inside a real Home Assistant core (via WSL on Windows). `CA_UNIT_WORKERS` / `CA_HA_WORKERS` set the xdist worker count for each tier (unset or `0` = serial). A skip caused by a missing dependency fails the test. Setup and the real-HA house fixture: `docs/DEVELOPMENT.md`. Required checks on `main`: `validate-and-test` and `ha-real` (`validate.yml`) and `validate` (hassfest, `hassfest.yml`). The nightly workflow (`nightly.yml`) runs `seeds`, `generated-days`, `surfaces`, `ha-lifecycle` and `report-failure`. The household promises (`PROMISES` in `invariant_watchdog.py`, spec `docs/household-promises-spec.md`) are the checks shared by tests and production: log-only at home, hard/warning in tests. Generated days: `python tools/simulate.py --generate N` runs N random households against the real engine and judges them with the same promises.
 
 ### Golden Simulation Test Policy
 
@@ -424,7 +427,7 @@ Golden scenarios in `tools/simulations/golden/` are **LOCKED**. The AI MUST NOT 
 - Are all assertion `reason` fields specific enough to explain the HVAC logic, not just restate the outcome?
 - Does a hand-set field on a `classification` event (`hvac_mode`, `windows_recommended`, etc.)
   match what `classifier.py` would actually derive for the given `day_type`? Never override a
-  field just to make an assertion pass — `run_production.py` lets a scenario force `hvac_mode`
+  field just to make an assertion pass — `tools/sim_harness/run_production.py` lets a scenario force `hvac_mode`
   directly onto the classification object, bypassing the real day-type-driven derivation, and a
   divergence there validates a state production can never produce. This exact gap let a real
   defect in `comfort_family_temperature_check()`'s guard ship undetected (Issue #858's own test
@@ -435,7 +438,7 @@ Golden scenarios in `tools/simulations/golden/` are **LOCKED**. The AI MUST NOT 
 
 ### Pre-commit Hooks
 
-This project uses `pre-commit` with ruff, ruff-format, check-yaml, check-json, end-of-file-fixer, and trailing-whitespace hooks. The ruff hook runs with `--fix`, which can modify files during commit.
+This project uses `pre-commit` (`.pre-commit-config.yaml`) with check-yaml, check-json, end-of-file-fixer, trailing-whitespace, mixed-line-ending (scenario JSON), ruff, ruff-format, `tools/validate.py`, `tools/simulate.py --check-integrity` (golden scenarios) and a pre-push `pytest tests/` hook. The ruff hook runs with `--fix`, which can modify files during commit.
 
 **After running `ruff check --fix` or `ruff format`**, always re-stage modified files before committing. Otherwise pre-commit will fail because the staged content differs from the working copy.
 
@@ -446,8 +449,6 @@ python -m ruff format custom_components/climate_advisor/ tests/
 python -m ruff check custom_components/climate_advisor/ tests/  # confirm clean
 ```
 Re-stage any files ruff modified, then run tests. Never run pytest on unlinted code — long f-strings and `format_temp` calls frequently exceed the 120-character limit and will fail at commit instead.
-
-A `tools/validate.py` hook also runs on `custom_components/climate_advisor/` files.
 
 ### CONFIG_METADATA Category Sync
 
@@ -497,7 +498,7 @@ calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERE
 
 ### Warm-Day Classification Behavior
 
-**Decision (P3, Issue #249 — supersedes the pre-P3 "off + comfort-floor guard" design below)**: On a warm day, the automation engine unconditionally arms a **persistent comfort band** `[comfort_heat, comfort_cool]` via `select_comfort_band()`/`_apply_comfort_band()` — there is no `hvac_mode = "off"` branch left for the occupied/awake case, and no separate comfort-floor pre-check runs before it. `_apply_comfort_band()` issues one `set_temperature` call per cycle with the day's active edge (ceiling on a warm/hot day); a real thermostat only acts once indoor crosses that edge, so the floor setpoint (`comfort_heat`) provides the cold-floor backstop **implicitly**, without a dedicated guard branch. See `test_warm_day_comfort_gap.py`'s module docstring and `docs/scheduler-spec.md`'s [Coast Phase](scheduler-spec.md#coast-phase--confirmed-not-assumed) section (Issue #786) for the same threshold-command mechanism verified independently for a different feature.
+**Decision (P3, Issue #249 — supersedes the pre-P3 "off + comfort-floor guard" design below)**: On a warm day, the automation engine unconditionally arms a **persistent comfort band** `[comfort_heat, comfort_cool]` via `select_comfort_band()`/`_apply_comfort_band()` — there is no `hvac_mode = "off"` branch left for the occupied/awake case, and no separate comfort-floor pre-check runs before it. `_apply_comfort_band()` issues one `set_temperature` call per cycle with the day's active edge (ceiling on a warm/hot day); a real thermostat only acts once indoor crosses that edge, so the floor setpoint (`comfort_heat`) provides the cold-floor backstop **implicitly**, without a dedicated guard branch. See `test_warm_day_comfort_gap.py`'s module docstring and `docs/scheduler-spec.md`'s [Coast Phase](docs/scheduler-spec.md#coast-phase--confirmed-not-assumed) section (Issue #786) for the same threshold-command mechanism verified independently for a different feature.
 
 **Stale — do not follow (pre-P3, kept only so this correction is legible against what it replaces)**: an older design had the classifier set `hvac_mode = "off"` directly, guarded by "if `current_indoor_temp < comfort_heat`: heat to `comfort_heat` first, emit `warm_day_comfort_gap`, don't set off yet." **Neither the `hvac_mode = "off"` branch nor the `warm_day_comfort_gap` event exist in current code** — confirmed via source read and grep (zero emit sites) during Issue #786's design work, 2026-08-30. `warm_day_comfort_gap` survives only as a legacy log-classification entry in `ai_skills_context.py` for interpreting old persisted event logs, not as something production ever emits today. If you find yourself about to write code that checks for a `warm_day_comfort_gap` event or an `hvac_mode == "off"` warm-day branch, stop — you are working from this stale description, not current behavior.
 
@@ -509,7 +510,7 @@ calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERE
 
 ### Fan Status Values
 
-`_compute_fan_status()` returns one of seven string values. All non-inactive values must be accounted for in cross-validation suppression logic in `ai_skills_activity.py`:
+`_compute_fan_status()` returns one of nine string values. The "CA can account for this fan" values are listed once, in `fan_status.py::FAN_STATUS_ACTIVE_VALUES`, and every suppression check (coordinator, `ai_skills_context.py`) goes through `fan_status.is_ca_fan_running()`:
 
 | Value | Meaning |
 |---|---|
@@ -517,11 +518,13 @@ calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERE
 | `"active (unconfirmed)"` | CA flag `_fan_active=True` but WHF physical state reads off — stale flag after manual stop; WARNING logged (added Issue #374). Since Issue #423, `_reconcile_fan_physical_drift()` (the 5-min backstop) self-corrects the underlying `_fan_active` flag within 2 ticks (~10 min). Since Issue #510, the *displayed* value additionally resolves faster than that: only shown within the transient ~30s post-command window (`_is_recent_fan_command()`); past that window the display returns `"inactive"` directly (ground truth wins), independent of whether the 5-min backstop has ticked yet. |
 | `"running (manual override)"` | Fan is running; CA's `_fan_override_active` flag is set |
 | `"running (untracked)"` | Thermostat reports fan running (`fan_mode=on` or `hvac_action=fan`) but CA's `_fan_active=False` — typical after HA restart or when user ran fan from thermostat app. Since Issue #510, also returned (instead of a stale `"nat-vent (session active, fan idle)"`) when `_natural_vent_active` disagrees with physical ground truth that confirms the fan is running — ground truth wins over the session flag. |
+| `"running (thermostat)"` | (`FAN_STATUS_THERMOSTAT`) Under `hvac_fan`, the thermostat's own schedule is running the blower; observed, not CA-controlled (Issue #1103/#1104) |
+| `"nat-vent (session active, fan idle)"` | Nat-vent session armed but the fan is between cycles (not physically running) |
 | `"inactive"` | Fan is off and CA has no record of activating it |
 | `"off (manual override)"` | User turned fan on at the thermostat (setting `_fan_override_active=True`), then turned fan off before the grace period expired. Override still in effect, physical fan is off. Condition: `_fan_override_active=True AND _fan_active=False`. |
 | `"disabled"` | Fan control feature is turned off in configuration |
 
-`"running (untracked)"` was added in Issue #91. `"active (unconfirmed)"` was added in Issue #374 to distinguish WHF state disagreements from the confirmed-active case. Any code that checks `ca_fan_running` for suppression purposes must include all four non-inactive, non-disabled active values (`"active"`, `"active (unconfirmed)"`, `"running (manual override)"`, `"running (untracked)"`). Issue #510 made the display-layer priority for both `"active (unconfirmed)"` and the nat-vent/`"running (untracked)"` boundary ground-truth-first rather than session-flag-first — see `docs/08-COMPUTATION-REFERENCE.md` §9e-F for the full investigation and fix. Issue #571 added the symmetric OFF-direction guard: within 30s of CA's own most recent fan command, the ground-truth fallbacks in `_compute_fan_status()`/`_compute_whf_status()`/`_compute_hvac_fan_status()` return `"inactive"` instead of `"running (untracked)"` (shared via `fan_status.py::resolve_untracked_fan_status()`), and `_compute_hvac_fan_status()` gained the ON-direction `"active (unconfirmed)"` guard its siblings already had — see §9e-G.
+`"running (untracked)"` was added in Issue #91. `"active (unconfirmed)"` was added in Issue #374 to distinguish WHF state disagreements from the confirmed-active case. `"running (thermostat)"` was added in Issue #1103/#1104. Any code that checks `ca_fan_running` for suppression purposes must use `is_ca_fan_running()` (currently `"active"`, `"active (unconfirmed)"`, `"running (manual override)"`, `"running (untracked)"`, `"running (thermostat)"`), never a hand-rolled list. Issue #510 made the display-layer priority for both `"active (unconfirmed)"` and the nat-vent/`"running (untracked)"` boundary ground-truth-first rather than session-flag-first — see `docs/08-COMPUTATION-REFERENCE.md` §9e-F for the full investigation and fix. Issue #571 added the symmetric OFF-direction guard: within 30s of CA's own most recent fan command, the ground-truth fallbacks in `_compute_fan_status()`/`_compute_whf_status()`/`_compute_hvac_fan_status()` return `"inactive"` instead of `"running (untracked)"` (shared via `fan_status.py::resolve_untracked_fan_status()`), and `_compute_hvac_fan_status()` gained the ON-direction `"active (unconfirmed)"` guard its siblings already had — see §9e-G.
 
 The three feeding flags this table's conditions read (`_fan_active`, `_fan_override_active`, and `_pre_fan_hvac_mode`-derived ownership) are FSM-derived rather than legacy-derived whenever the owning `AutomationEngine`'s `_fan_fsm_authoritative` flag is set (Issue #731, `fan_fsm.py`) — same as `_paused_by_door`/`_grace_active`/`_natural_vent_active` becoming FSM-derived under the nat-vent/door-window/override-grace flags this table's status computations already tolerate as an equivalent alternate source, per §"FSM Decision Layer" in `docs/02-ARCHITECTURE-REFERENCE.md`; this table's values and conditions are unchanged either way.
 
@@ -529,13 +532,11 @@ The three feeding flags this table's conditions read (`_fan_active`, `_fan_overr
 
 Claude Code's built-in memory system stores project context, tooling locations, and hard-won facts so they don't have to be re-discovered every session. Claude reads memory automatically at session start.
 
-**Thermal learning — v2 physics model (Issue #114)**: The thermal model uses two parameters: `k_passive` (hr⁻¹, always negative — envelope decay rate) and `k_active_heat`/`k_active_cool` (°F/hr — HVAC contribution). Parameters are extracted from the full post-heat decay curve via OLS regression, not from a single start/end delta. This fixes the root cause of the old model's zero-rate observations (thermostat sensor lag). The coordinator runs a `PendingThermalEvent` state machine (`active → post_heat → stabilized/abandoned`) tracked by 7 methods (`_start_thermal_event`, `_sample_thermal_event`, `_end_active_phase`, `_check_stabilization`, `_commit_thermal_event`, `_abandon_thermal_event`, `_update_pre_heat_buffer`). The pending event is persisted in `LearningState.pending_thermal_event` so post-heat observation windows survive HA restarts. If an observation is abandoned, a WARNING is logged with the reason. `get_thermal_model()` returns the v2 fields (`k_passive`, `k_active_heat`, `k_active_cool`) plus legacy aliases (`heating_rate_f_per_hour`, `cooling_rate_f_per_hour`) for backward compatibility with `compute_bedtime_setback()`. Physics-based prediction activates when `confidence != "none"` and `k_passive < 0`; falls back to ramp interpolation otherwise.
+**Thermal learning — model summary (Issues #114, #121, #587)**: `k_passive` (hr⁻¹, always negative — envelope decay rate) and `k_active_heat`/`k_active_cool` (°F/hr — HVAC contribution) are fitted from whole decay curves by OLS, not from a single start/end delta (v2, Issue #114). The v2 `PendingThermalEvent` state machine is gone (its persisted field was dropped in Issue #133): the coordinator keeps concurrent observations in `_pending_observations` (v3, Issue #121), persisted as `LearningState.pending_observations` so windows survive restarts. Observation types are `hvac_heat`, `hvac_cool`, `passive_decay`, `vent_window_decay`, `vent_fan_decay` and `solar_gain` (`OBS_TYPE_*` in `const.py`); `fan_only_decay`/`k_vent` were retired and `ventilated_decay` renamed to `vent_window_decay` in Issue #587. `THERMAL_HVAC_MIN_DECAY_F` = 0.3°F (was 1.0°F, which rejected every observation on short-cycling thermostats). `get_thermal_model()` returns `k_passive`, `k_active_heat`/`k_active_cool`, `k_vent_window`, `k_vent_fan`, `k_solar`, `confidence_k_passive` (graded independently of `confidence_k_hvac`) and the legacy aliases `heating_rate_f_per_hour`/`cooling_rate_f_per_hour`. Observation types, OLS functions, commit routing and the ODE: `docs/thermal-model-v3-spec.md`.
 
-**Thermal learning — CA Chart Log**: `/config/climate_advisor_chart_log.json` (read via SSH like the learning DB) contains up to 365 days of coordinator snapshots at ~30min resolution. Fields per entry: `ts`, `hvac`, `fan`, `indoor`, `outdoor`, `windows_open`. This is the correct data source for `python tools/thermal_replay.py --chart-log`. The HA state history API is NOT a substitute — the outdoor temp sensor (`sensor.climate_advisor_outdoor_temperature`) is excluded from the HA recorder and returns zero entries. `sensor.santa_maria_hallway_current_temperature` has 0.18°F resolution (vs 1°F for `climate.santa_maria_hallway`) — prefer it as `--climate-entity` if re-running replay in entity mode.
+**Thermal learning — CA Chart Log**: `/config/climate_advisor_chart_log_<entry_id>.json` (entry-scoped since multi-zone, `storage_paths.py`; the unscoped name only when there is no entry id; read via SSH like the learning DB — `tools/thermal_replay.py` discovers the path) contains up to 365 days of coordinator snapshots at ~30min resolution. Fields per entry include `ts`, `hvac`, `fan`, `fan_running`, `indoor`, `outdoor`, `windows_open` (`chart_log.py`; full schema in `docs/chart-log-spec.md`). It is the preferred data source for `python tools/thermal_replay.py --chart-log` because it holds all of these together at a consistent resolution. `sensor.climate_advisor_outdoor_temperature` does appear in the HA recorder (an earlier "excluded, zero entries" note here was wrong), but recorder retention and resolution vary by install; if outdoor looks frozen while indoor moves in HA history, check live recorder data before blaming the model. `sensor.santa_maria_hallway_current_temperature` has 0.18°F resolution (vs 1°F for `climate.santa_maria_hallway`) — prefer it as `--climate-entity` if re-running replay in entity mode.
 
 **Thermal learning — Scientific Process Gate**: When investigating thermal model behavior (replay, OLS failures, rejection codes), do NOT update the thermal-learning skill's active state section or post GitHub issue comments until all hypotheses have been properly falsified. The skill file's active state section is a summary of CONFIRMED findings, not an investigation scratchpad.
-
-**Thermal learning — v3 parallel observations (Issue #121)**: v3 replaces the single `PendingThermalEvent` state machine with a `_pending_observations: dict[str, PendingObservation]` dict, enabling six observation types to run concurrently: `hvac_heat`, `hvac_cool`, `passive_decay` (HVAC off, fan off, windows closed, |ΔT| ≥ 3°F), `fan_only_decay` (fan active, HVAC off), `ventilated_decay` (window open, HVAC off), and `solar_gain` (HVAC off, fan off, T_in > T_out, daytime). Each type targets a different thermal parameter: `k_passive`, `k_vent`, `k_vent_window`, or `k_solar`. The HVAC plateau guard was reduced from 1.0°F to 0.3°F via `THERMAL_HVAC_MIN_DECAY_F` — the prior 1.0°F threshold rejected all observations on short-cycling thermostats. `get_thermal_model()` adds `k_vent`, `k_vent_window`, `k_solar`, `confidence_k_passive`, `confidence_k_hvac`, and per-type observation counts. `confidence_k_passive` is graded independently of `confidence_k_hvac`; physics prediction activates when either is > "none", so homes with zero HVAC cycles still get physics-based prediction from passive decay observations. The v3 ODE adds `k_vent` and `k_solar` terms: `dT/dt = (k_passive + k_vent_eff)*(T_out - T_in) + k_solar*solar_factor + Q_hvac`.
 
 ---
 
@@ -725,8 +726,8 @@ git tag -f deployed/current HEAD
 git branch -d deploy/staging
 ```
 
-**Conflict resolution**: coordinator.py conflicts between ODE section (~4700+) and
-briefing/daily-record section (~1800–2300) are independent — accept all changes from both.
+**Conflict resolution**: coordinator.py conflicts between the ODE section (`_build_predicted_indoor_future()`,
+module-level near the end of the file) and the briefing/daily-record section (class methods) are independent — accept all changes from both.
 
 **Choosing the staging base**: if two branches touch the same file, use the one whose
 changes on that file are logically "first" as the base; merge the other on top.
@@ -747,7 +748,7 @@ git merge origin/release/<version>   # or other pending branches
 #### Inline version bump rule (MANDATORY for every PR)
 
 **Every PR must include its own version bump.** Do NOT create a PR without first updating:
-- `const.py`: bump `VERSION` to the next patch (e.g. 0.4.14 → 0.4.15)
+- `const.py`: bump `VERSION` to the next patch (e.g. 0.8.56 → 0.8.57)
 - `manifest.json`: `"version"` to match
 - `fix_history.jsonl`: one entry per fixed/added issue (see below; Issue #702 — this
   replaced `RELEASE_NOTES`/`KNOWN_FIXES` in `const.py`, which had grown to 91% of that
@@ -759,7 +760,7 @@ git merge origin/release/<version>   # or other pending branches
 
 This replaces the old pattern of separate `release/X.Y.Z` branches for patch fixes. Release branches are now only used when preparing a GitHub Release tag for distribution.
 
-**Version conflict on merge**: When two concurrent PRs both target the same next version, the one that merges second must increment again (e.g. both claim 0.4.15 → second becomes 0.4.16). Resolve this during conflict resolution: keep HEAD's version for the earlier-merged PR, bump the incoming branch's entry to the next number.
+**Version conflict on merge**: When two concurrent PRs both target the same next version, the one that merges second must increment again (e.g. both claim 0.8.57 → second becomes 0.8.58). Resolve this during conflict resolution: keep HEAD's version for the earlier-merged PR, bump the incoming branch's entry to the next number.
 
 **What goes in fix_history.jsonl**: One record per closed issue, appended via
 `python tools/add_fix_entry.py --issue N --version X.Y.Z --title "..." --scope "..." [--user-summary "..."]`
@@ -888,7 +889,7 @@ What modules need changes and what's the best approach?"
 For plans touching 4+ files, structure execution as:
 - **Parallel Sonnet executor agents** — one per independent phase or file group, run in a single message with multiple Agent tool calls
 - **Coordinator** — the main Claude instance sequences phases, handles dependencies, and passes results between agents
-- **Verification agent (Opus 4.6)** — runs `ruff check` then the full test suite after each phase; reports failures back to the coordinator for fixing before the next phase begins
+- **Verification agent (Opus)** — runs `ruff check` then the full test suite after each phase; reports failures back to the coordinator for fixing before the next phase begins
 
 Phases that modify different files with no shared dependencies can run in parallel. Phases with dependencies must be sequential.
 
@@ -910,7 +911,7 @@ agent). The Coordinator is already Opus by virtue of being the main thread.
 
 **The plan file MUST include an "Execution Structure" section before `ExitPlanMode` is called.** This section defines: which agents run in parallel (grouped by file independence), which files each agent owns, and what verification steps run between groups. Without this section, the parallel execution pattern cannot be validated — the user will push back. Use the table format: `Agent | Phases | Files` with a `→ Verification agent` row between groups.
 
-After the final test phase passes, always run an Opus 4.6 verification agent to review all modified files for correctness, completeness, security, and logging coverage before handing off to the user. Do not skip this step or wait to be asked.
+After the final test phase passes, always run an Opus verification agent to review all modified files for correctness, completeness, security, and logging coverage before handing off to the user. Do not skip this step or wait to be asked.
 
 **Ask Claude to:**
 - Write implementations following HA conventions
@@ -1049,17 +1050,18 @@ Never: `async_call_later(self.hass, delay, lambda _now: self.hass.async_create_t
 
 #### coordinator.config vs coordinator.config_entry
 
-`ClimateAdvisorCoordinator` never passes `config_entry` to its parent class, so
-`coordinator.config_entry` is always `None`. Use `coordinator.config` (the runtime dict
-set in `__init__` from `dict(entry.data)`) for all config reads. This affects any code
-that builds context from the coordinator — `api.py`, `ai_skills_activity.py`, briefing
-helpers, etc. Never access `coordinator.config_entry.options`.
+`ClimateAdvisorCoordinator` never passes `config_entry` to its parent class. HA's
+`DataUpdateCoordinator` still sets it from a ContextVar during `async_setup_entry()`, but it
+is `None` in tests and the simulation harness (Issue #563/#1102, comment in `__init__`).
+Use `coordinator.config` (the runtime dict, `dict(entry.data)` passed from `__init__.py`) for all
+config reads. This affects any code that builds context from the coordinator — `api.py`,
+`ai_skills_context.py`, briefing helpers, etc. Never access `coordinator.config_entry.options`.
 
 #### Adding new data to the coordinator
 
 New runtime values (thermostat attributes, computed state) belong in the
 `_async_update_data()` return dict in `coordinator.py`. Secondary consumers (`api.py`,
-`ai_skills_activity.py`) should read from `coordinator.data`, not call
+`ai_skills_context.py`) should read from `coordinator.data`, not call
 `hass.states.get()` themselves. This keeps the single-update-cycle guarantee and avoids
 stale reads.
 
@@ -1193,12 +1195,6 @@ When creating PRs:
 - Ignore security implications
 - Let AI make architectural decisions alone
 
----
-
-**Last Updated**: 2026-04-25
-**For**: Climate Advisor — Home Assistant Integration
-**AI**: Claude Opus 4.6
-
 ### WHF/HVAC Safety Invariants (Issue #1144)
 
 Owner rules, authoritative:
@@ -1209,4 +1205,9 @@ Owner rules, authoritative:
 
 Supported fan modes are `whole_house_fan` or `hvac_fan` only; `both` is unsupported and hidden (#1175), see Scope Facts above.
 
-An override is never an exemption from rules 1-2; stops go through `_enforce_whf_safety`/`_deactivate_fan(safety=True)` only. Never copy-paste a stop or stand-down. Climate Advisor also never *starts* the whole-house fan on a sealed house (entry gate in `_activate_fan()`; that gate still leaves the HVAC-blower leg of the unsupported `FAN_MODE_BOTH` code path allowed). Zero configured sensors means rule 1 does not apply (setup warns), and a whole-house fan with zero door/window sensors is unsupported (Issue #1200: rules 1 and 3 need window state, and a fan that ignores CA's stop can be misread as an occupant fan-on that rule 2 then obeys); command-only installs (`fan_state_feedback` off) cannot be enforced (setup warns); a WHF entity shared across zones is refused in setup.
+An override is never an exemption from rules 1-2; stops go through `enforce_whf_safety()`/`_enforce_whf_safety_locked()`/`_deactivate_fan(safety=True)` only. When Climate Advisor missed the press, the rule-2 state backstop (Issue #1288, `whf_safety_decision.py::_rule2_state_backstop`) acts on device state alone: fan physically on + thermostat heating/cooling for 10 s stops one device (`docs/fan-lifecycle-spec.md` "Rule-2 State Backstop"). Never copy-paste a stop or stand-down. Climate Advisor also never *starts* the whole-house fan on a sealed house (entry gate in `_activate_fan()`; that gate still leaves the HVAC-blower leg of the unsupported `FAN_MODE_BOTH` code path allowed). Zero configured sensors means rule 1 does not apply (setup warns), and a whole-house fan with zero door/window sensors is unsupported (Issue #1200: rules 1 and 3 need window state, and a fan that ignores CA's stop can be misread as an occupant fan-on that rule 2 then obeys); command-only installs (`fan_state_feedback` off) cannot be enforced (setup warns); a WHF entity shared across zones is refused in setup.
+
+---
+
+**Last Updated**: 2026-11-03
+**For**: Climate Advisor — Home Assistant Integration

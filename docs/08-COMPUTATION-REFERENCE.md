@@ -3237,10 +3237,10 @@ Only one pending revisit is active at a time. If `_schedule_revisit()` is called
 
 **Issue #585 superseded the original #37 rationale below.** Issue #37 promoted routine HVAC-action log statements to `_LOGGER.warning()` purely so they'd survive HA's default (unconfigured) log level for custom components — a visibility hack, not a statement about severity. That conflated "needs to be visible" with "something is wrong." `WARNING` is reserved for an actual anomaly, a value clamped or overridden by a guard, or a safety guard firing that would otherwise leave the HVAC in an unexpected state (see `docs/06-LOGGING-GUIDELINES.md` §Level Semantics, and CLAUDE.md's Observability Requirements). A routine, correctly-executed mode change, setpoint write, classification application, override acceptance, or fan activation is not a malfunction, regardless of how visible operators want it — so as of #585 these all log at `_LOGGER.info()`:
 
-- `_set_hvac_mode()` — successful mode writes (line ~2807); the guard-blocked branch when WHF owns the thermostat (line ~2772) is a genuine guard override and stays `WARNING`
-- `_set_temperature()` — successful setpoint writes (line ~3090); its guard-blocked branch (line ~2845) likewise stays `WARNING`
+- `_set_hvac_mode()` — successful mode writes. The guard-blocked branch when the whole-house fan owns the thermostat (`_log_whf_write_blocked()`) also logs at `INFO` since Issue #874: the block is the mutex working, not an anomaly (see "Structural WHF/AC Mutual Exclusion" above)
+- `_set_temperature()` — successful setpoint writes; its WHF guard-blocked branch goes through the same `_log_whf_write_blocked()` at `INFO` (Issue #874)
 - `_record_action()` — action history bookkeeping
-- `apply_classification()` — day classification application announcement; its door/window-pause `DEFER_PAUSED` branch (a guard suppressing the band) stays `WARNING`
+- `apply_classification()` — day classification application announcement, and its door/window-pause `DEFER_PAUSED` branch (the pause holding HVAC off as designed)
 - `start_override_confirmation()` / `_confirm_override_action()` — override detected/confirmed/activated (the system correctly deferring to the user, not an error)
 - Nat-vent/WHF manual-override conflict stand-downs (3 call sites) — correct conflict resolution
 - Bedtime/morning-wakeup pending-override clearing — routine lifecycle transitions

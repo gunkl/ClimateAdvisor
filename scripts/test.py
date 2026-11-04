@@ -15,7 +15,7 @@ Environment knobs for the unit tier:
 Environment knobs for the ha tier:
 
 * ``CA_HA_WORKERS``: number of pytest-xdist workers (``auto`` for all cores). Unset or ``0``
-  runs serially (the local default; CI sets ``auto``).
+  runs serially (the local default; CI sets ``4``).
 * ``CA_COMPONENT_ROOT``: directory holding an alternate ``custom_components/climate_advisor``
   tree. Used by ``scripts/revert_proof.py`` to run the tests against an old commit; a Windows
   path is translated for WSL.

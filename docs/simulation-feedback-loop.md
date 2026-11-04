@@ -51,7 +51,7 @@ Every BSpec assertion is tagged `"track": "logic"` or `"track": "integration"`.
 
 **Logic track (Tier A):** Verifiable by running the real production `AutomationEngine` headless via `tools/sim_harness/` (Issue #236). Covers all `automation.py` decision paths: setpoint selection, day classification application, natural vent escalation, ceiling guard ODE projection. Runs offline; no HA connection required. `tests/test_production_harness.py` enforces all goldens on every commit.
 
-**Integration track (Tier B):** Requires coordinator behavior, HA state events, and async flag timing. Covers: `_async_thermostat_changed` timing, `_temp_command_pending` flag, `_last_commanded_hvac_mode` state, whether an automation-driven setpoint change is falsely detected as manual, occupancy handler setpoint selection from coordinator.py (not automation.py). Deferred to the HeadlessTarry Docker harness (future, CI-gated).
+**Integration track (Tier B):** Requires coordinator behavior, HA state events, and async flag timing. Covers: `_async_thermostat_changed` timing, `_temp_command_pending` flag, `_last_commanded_hvac_mode` state, whether an automation-driven setpoint change is falsely detected as manual, occupancy handler setpoint selection from coordinator.py (not automation.py). Deferred to Tier B, the real-HA tier (`tests_ha/`, CI `ha-real`).
 
 A BSpec can contain both track types. The Dashboard shows logic pass rate and integration pass rate separately. A BSpec with 3 logic passes and 0 integration passes surfaces as partially validated — human judgment determines whether to promote.
 

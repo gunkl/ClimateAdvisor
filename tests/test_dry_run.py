@@ -229,9 +229,13 @@ class TestDryRunHighLevelLogic:
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        # State tracking happens
-        assert engine._paused_by_door is True
-        assert engine._pre_pause_mode == "cool"
+        # Issue #1293 (supersedes the #19 expectation that the pause is "tracked" in observe-only): nothing was sent,
+        # the cooling keeps running, so no pause is recorded. A recorded pause made Climate Advisor believe the HVAC
+        # was off after the re-enable: the pause guards skipped every write and the cooling ran into the open door
+        # until it closed. The re-enable reconcile (``async_reconcile_after_automation_enabled``) pauses for real.
+        assert engine._paused_by_door is False
+        assert engine._pre_pause_mode is None
+        assert any("Door/window pause" in r.message and "[DRY RUN]" in r.message for r in caplog.records)
 
         # No actual HA service calls
         engine.hass.services.async_call.assert_not_called()

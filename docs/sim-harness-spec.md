@@ -363,6 +363,8 @@ The virtual clock `start` must be timezone-aware (`FakeScheduler.__init__` raise
 | `wakeup` | `engine.handle_morning_wakeup()` |
 | `economizer_check` | `engine.check_window_cooling_opportunity(...)` |
 | `thermostat_state_changed` | Injects thermostat state + `engine.handle_manual_override(...)` if conditions met |
+| `simulate_restart` (coordinator mode) | `engine.restore_state(engine.get_serializable_state())`, fresh-instance defaults, `coordinator._startup_coalesce_active = True`, and a 300 s virtual timer that runs the real `coordinator._do_startup_coalesce()` behind production's gate, so the window ends as in production (Issue #1291; docs/08 §11) |
+| `startup_coalesce` (coordinator mode) | `coordinator._do_startup_coalesce()` directly, at the scenario's time; once it has run, the restart timer's gate is false and it does not run again |
 | `remote_sensor_report` (Issue #1194 e, coordinator mode) | `states.async_set(entity, value_f)` stamped with `last_reported` / `last_updated` = the virtual clock: the real sleep-sensor listener and the outer loop's 120-minute freshness rule see a real report |
 
 `_build_classification_from_event()` uses `object.__new__(DayClassification)` to bypass `__post_init__` (which would overwrite scenario-specified fields like `hvac_mode` by re-deriving them from `day_type`).

@@ -80,7 +80,9 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                             get_serializable_state()) + coordinator._startup_coalesce_active
                             = True — the real continuity boundary an HA restart crosses
                             (Issue #263/#327 clean-slate + fresh coalescing window), not a
-                            mirror of what restart does to engine state
+                            mirror of what restart does to engine state.  The window ENDS as in
+                            production (Issue #1291): a 300 s virtual timer runs the real
+                            coordinator._do_startup_coalesce() behind production's own gate
   remote_sensor_report    → (use_coordinator=True) states.async_set(entity, value_f) stamped with last_reported and
                             last_updated = the virtual clock, so the real sleep-sensor listener fires and the outer
                             loop's 120-minute freshness rule sees a real report (Issue #1194 e); silence is the
@@ -591,6 +593,53 @@ def run_production_scenario(
 # ---------------------------------------------------------------------------
 
 
+def _arm_restart_coalesce_end(coordinator: Any, scheduler: FakeScheduler) -> None:
+    """Arm the end of the start-up coalescing window a simulated restart opens (Issue #1291).
+
+    Production (``coordinator.async_setup``) sets ``_startup_coalesce_expiry`` to now + 300 s and
+    arms ``async_call_later(300)``. That timer sets ``_startup_timer_fired`` and requests a
+    refresh; the refresh runs ``_do_startup_coalesce()`` when
+    ``_startup_timer_fired and _startup_coalesce_active and _current_classification``, and that
+    method clears ``_startup_coalesce_active`` ("Startup coalescing complete"). It also
+    re-applies the plan, so a thermostat change made inside the window is overwritten (owner
+    decision #1235). The harness has no weather forecast, and that gate sits inside the
+    refresh's ``if forecast:`` block, so a harness refresh never reaches it. The timer
+    callback below does what the timer does, then evaluates the same gate and calls the REAL
+    ``_do_startup_coalesce()``. If no classification exists yet, production waits for the
+    next periodic refresh (every 30 min, ``update_interval``) and so does this: it re-checks
+    1800 s later. A scenario's explicit ``startup_coalesce`` event that already ended the
+    window makes the gate false, so coalescing never runs twice.
+
+    A second restart cancels the first restart's pending timer, as unloading the old
+    instance does in production (Issue #1102).
+    """
+    from custom_components.climate_advisor.const import STARTUP_COALESCE_SECONDS  # noqa: PLC0415
+
+    previous = getattr(coordinator, "_sim_restart_coalesce_cancel", None)
+    if previous is not None:
+        previous()
+    # Real __init__ defaults for a fresh instance, then async_setup's expiry stamp.
+    coordinator._startup_timer_fired = False
+    coordinator._startup_coalesce_expiry = (scheduler.now() + timedelta(seconds=STARTUP_COALESCE_SECONDS)).isoformat()
+
+    async def _refresh_cycle_gate() -> None:
+        if not coordinator._startup_coalesce_active:
+            return
+        if coordinator._current_classification:
+            await coordinator._do_startup_coalesce()
+            return
+        coordinator._sim_restart_coalesce_cancel = scheduler._schedule(1800, _on_refresh_cycle)
+
+    def _on_refresh_cycle(_now: Any) -> Any:
+        return _refresh_cycle_gate()
+
+    def _on_startup_coalesce_timer(_now: Any) -> Any:
+        coordinator._startup_timer_fired = True
+        return _refresh_cycle_gate()
+
+    coordinator._sim_restart_coalesce_cancel = scheduler._schedule(STARTUP_COALESCE_SECONDS, _on_startup_coalesce_timer)
+
+
 def _dispatch_event(
     event: dict,
     etype: str,
@@ -1024,6 +1073,10 @@ def _dispatch_event(
         # backstop_30min misfire) without spinning up a second full coordinator.
         engine.restore_state(engine.get_serializable_state())
         coordinator._startup_coalesce_active = True
+        # Issue #1291: the window must also END, as in production. Before, nothing ever
+        # cleared the flag, so for the rest of the scenario _async_thermostat_changed
+        # returned early and no occupant thermostat change was ever seen as the occupant's.
+        _arm_restart_coalesce_end(coordinator, scheduler)
         # Issue #645: restore_state() intentionally does NOT reset _paused_by_door/
         # _pre_pause_mode/_paused_with_hvac_already_off/_paused_entity/_paused_since or
         # _natural_vent_active — per its own docstring, it relies on AutomationEngine.

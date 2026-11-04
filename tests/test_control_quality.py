@@ -155,25 +155,30 @@ class TestMisarmedAccuracy:
         assert m["minutes"] == 0.0
 
     def test_five_thousand_samples_is_fast_and_linear(self):
-        # Issue #1083: an absolute 0.1 s wall-clock limit flaked on loaded CI runners
-        # (181 ms, 325 ms). Linearity is what matters: doubling the samples must roughly
-        # double the time (a quadratic build would be ~4x), best-of-3 to ride out noise,
-        # with a generous absolute ceiling that only a real blow-up can reach.
-        def best_time(n: int) -> float:
+        # Issue #1083: an absolute 0.1 s wall-clock limit flaked on loaded CI runners. What matters is that the
+        # build stays linear. The sizes differ 4x, so linear code is ~4x slower and quadratic code ~16x; the 8x limit
+        # sits a factor of two from each, so noise cannot fail linear code and a quadratic build cannot pass.
+        # The previous 2x sizes with a 3.5x limit did both: suite load (other xdist workers and sessions) gave
+        # 4-7x on linear code (15->102 ms, 20->78 ms, 26->104 ms), while an injected quadratic loop gave 2.6-3.3x.
+        # Measured 2026-11-04: linear 3.2-6.0x under load, quadratic 15.6-17.4x. Runs are interleaved so a load burst
+        # cannot land on one size only, and the best of 7 per size rides out spikes longer than a single run.
+        def sample(n: int):
             rows = [row(m, indoor=69 if (m // 30) % 2 else 72) for m in range(n, 0, -1)]
-            changes = [change(n, "cool", 69)]
-            best = float("inf")
-            for _ in range(3):
+            return [change(n, "cool", 69)], rows
+
+        small, large = sample(1250), sample(5000)
+        times: dict[int, list[float]] = {1250: [], 5000: []}
+        for _ in range(7):
+            for n, (changes, rows) in ((1250, small), (5000, large)):
                 t0 = time.perf_counter()
                 report = build(changes, rows, now=NOW)
-                best = min(best, time.perf_counter() - t0)
-            assert report["windows"]["7d"]["misarmed"]["minutes"] is not None
-            return best
-
-        t_half = best_time(2500)
-        t_full = best_time(5000)
-        assert t_full < 3.0, f"build took {t_full * 1000:.0f} ms"
-        assert t_full < max(3.5 * t_half, 0.05), f"not linear: {t_half * 1000:.0f} ms -> {t_full * 1000:.0f} ms"
+                times[n].append(time.perf_counter() - t0)
+                assert report["windows"]["7d"]["misarmed"]["minutes"] is not None
+        t_small, t_large = min(times[1250]), min(times[5000])
+        assert t_large < 3.0, f"build took {t_large * 1000:.0f} ms"
+        assert t_large < max(8.0 * t_small, 0.05), (
+            f"not linear: 1250 samples {t_small * 1000:.0f} ms -> 5000 samples {t_large * 1000:.0f} ms"
+        )
 
 
 class TestModeChanges:

@@ -280,8 +280,16 @@ def derive_episodes(
 
     ``readings`` is only used to read the occupant's setpoint at the start of a thermostat
     override (first reading at or after the start).
+
+    Issue #1325 (cancel attribution): a ``grace_cancelled`` with ``reason=superseded`` (and not ``continues``) closes
+    only a thermostat override episode that was open when the cancelled grace started (the last occupant-override
+    ``grace_started`` before the cancel). It never closes an episode opened after that grace began: the old rule
+    attributed a cancel to an episode the cancelled grace never protected. The engine emits the supersede cancel at
+    the NEW change's confirm delay, i.e. after the new ``override_detected``, so without this the newer change was
+    closed ``superseded_unreplaced`` with no grace end and went unprotected.
     """
     eps: list[_Ep] = []
+    last_manual_grace_ts: datetime | None = None
     marks = sorted(marks, key=lambda m: m.ts)
 
     def open_eps(target: str | None = None, kind: str | None = None) -> list[_Ep]:
@@ -332,6 +340,7 @@ def derive_episodes(
                 e.grace_end_ts = end
                 eps.append(e)
             elif mark_attr(m, "source") == "manual":
+                last_manual_grace_ts = m.ts
                 # Only the occupant-override grace sets an override's protected window; door/window
                 # resume, nat-vent exit etc. graces say nothing about it.
                 target = "fan" if "fan" in trigger else "thermostat"
@@ -408,6 +417,19 @@ def derive_episodes(
                     # Issue #1204 (decision A2): the occupant's fan press replaced the setpoint's grace, and the engine
                     # says the setpoint stays protected (hvac_fan blower press): it is protected until the later end.
                     e.carried = True
+                    continue
+                if (
+                    reason == "superseded"
+                    and not continues
+                    and e.target == "thermostat"
+                    and last_manual_grace_ts is not None
+                    and e.start_ts > last_manual_grace_ts
+                ):
+                    # Issue #1325: the cancelled grace is the one that started at ``last_manual_grace_ts``. An episode
+                    # opened AFTER it (the occupant's newer change, whose own grace has not started yet: the cancel
+                    # lands at the confirm delay, after the new ``override_detected``) was never protected by that
+                    # grace, so its cancel says nothing about it. It stays open; the next ``grace_started`` gives it
+                    # its own grace end.
                     continue
                 r = reason
                 if reason == "superseded" and not replaced_soon(i, e.target):

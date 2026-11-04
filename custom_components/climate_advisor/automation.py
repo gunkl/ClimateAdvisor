@@ -2105,6 +2105,9 @@ class AutomationEngine:
         self._last_classification_applied: tuple[str, str] | None = None
         # Issue #96: override event dedup — track last emission time
         self._last_override_detected_time: datetime | None = None
+        # Issue #1325: the dedup suppresses only an IDENTICAL repeat -- this is the (source, detected_mode,
+        # new_mode, new_setpoint_f) of the last emitted override_detected. Runtime-only, never persisted.
+        self._last_override_detected_key: tuple[Any, ...] | None = None
         # Issue #446: unwarranted-fan reconcile-correction dedup — track last correction time
         self._last_unwarranted_fan_correction_at: datetime | None = None
 
@@ -2602,65 +2605,14 @@ class AutomationEngine:
             mode = self._override_confirm_mode
         return mode
 
-    def _protected_change_source(self) -> str | None:
-        """How the occupant's protected change was made ("normal" / "pause" / "setpoint"), else None (Issue #1165)."""
-        if self._manual_override_active:
-            return self._manual_override_source
-        return self._override_confirm_source if self._override_confirm_pending else None
-
     def _protected_change_is_occupant_off(self) -> bool:
         """Whether the occupant's protected change is their own Off (Issue #1165).
 
         A mode change to Off is the occupant's choice, and the newest occupant action wins (an Off is protected by
-        NOT writing). A SETPOINT-only change recorded as ``off`` is not a choice of Off: the thermostat reads Off
-        because Climate Advisor's pause put it there, and the occupant only moved the number (Issues #1131, #1157).
+        NOT writing). A setpoint-only change while the thermostat is Off is never recorded (Issue #1325: it is not
+        an override), so a protected ``off`` is always the occupant's own mode change.
         """
-        return self._protected_change_mode() == "off" and self._protected_change_source() != "setpoint"
-
-    def _occupant_mode_when_ca_holds_off(self, live_mode: str, detected_mode: str | None = None) -> str:
-        """The mode an occupant change means when the thermostat's live Off is Climate Advisor's door pause.
-
-        While a door/window pause holds the thermostat Off the live ``off`` is CA's, not the occupant's, so a
-        setpoint-only change is judged against what the occupant actually asked for (Issue #1131): at detection
-        (live Off, nothing detected yet) the mode the pause interrupted (``_pre_pause_mode``); at confirm time the
-        mode detected when the change was made. Anything else (a live mode that is not Off, no pause, HVAC
-        already Off before the pause) is returned unchanged. Every substitution is logged at WARNING.
-
-        Callers apply it to SETPOINT-only changes only (Issue #1165): a mode change to Off is the occupant's own Off,
-        never Climate Advisor's. When the pause is a nat-vent exit with the window still open there is no
-        ``_pre_pause_mode`` (the thermostat was Off), so the comfort family the selector would arm now stands in for
-        it (Issue #1157; a side-effect-free preview, mild days included).
-        """
-        if live_mode != "off" or not self._paused_by_door:
-            return live_mode
-        if detected_mode not in (None, "off", "unavailable", "unknown"):
-            substitute = detected_mode
-        elif self._pre_pause_mode:
-            substitute = self._pre_pause_mode
-        elif self._paused_entity == "nat-vent-exit" and self._current_classification is not None:
-            # Issue #1157: a nat-vent exit with the window still open records NO pre-pause mode (the thermostat
-            # was Off), so there is nothing to judge the occupant's setpoint change against. Judge it against the
-            # comfort family the selector would arm now, so the close resumes HVAC at the occupant's setpoint
-            # instead of leaving it Off until their override ends. Same gate as #1068: only this pause; a
-            # thermostat the occupant left Off before an ordinary pause stays Off. Pure preview: this runs when the
-            # occupant speaks, no HVAC write follows, so it must not commit selector state or emit a family switch.
-            # Away/vacation: unchanged (the live Off stays; the unprotected close redirects to the setback instead).
-            if should_defer_to_occupancy_setback(self._occupancy_mode):
-                return live_mode
-            _family = self._preview_comfort_family(self._current_classification)[0]
-            if _family is None:
-                return live_mode
-            substitute = _family
-        else:
-            return live_mode
-        _LOGGER.warning(
-            "Override mode substituted: live Off belongs to Climate Advisor (door/window pause), judging the "
-            "occupant's change against their mode live_mode=%s mode=%s detected_mode=%s",
-            live_mode,
-            substitute,
-            detected_mode,
-        )
-        return str(substitute)
+        return self._protected_change_mode() == "off"
 
     def clear_manual_override(self, reason: str = "grace_expired") -> None:
         """Clear the manual override flag (called at transition points).
@@ -4111,8 +4063,6 @@ class AutomationEngine:
         self._close_mode_episode_quietly("manual override detected")
         state = self.hass.states.get(self.climate_entity)
         detected_mode = state.state if state else "unknown"
-        if source == "setpoint":
-            detected_mode = self._occupant_mode_when_ca_holds_off(detected_mode)  # Issue #1131
         # Issue #1073 (S3): a user-initiated MODE change is a mode change like any other -- it
         # must move the one mode-change clock (the ring buffer), so a selector switch moments
         # later is dwell-locked instead of undoing the occupant's action. Setpoint-only
@@ -4204,10 +4154,19 @@ class AutomationEngine:
             confirm_seconds // 60,
         )
 
+        # Issue #1325: only an IDENTICAL repeat (same source, detected mode, new mode and setpoint) within 5 minutes
+        # is suppressed (cloud echoes, flapping). A genuinely different change always emits override_detected, so the
+        # Activity record and the household-promise journal (which opens an episode per override_detected) see it.
         _dedup_window = timedelta(minutes=5)
         _now = dt_util.now()
-        if self._last_override_detected_time is None or (_now - self._last_override_detected_time) >= _dedup_window:
+        _dedup_key = (source, detected_mode, new_mode, new_setpoint_f)
+        if (
+            self._last_override_detected_time is None
+            or self._last_override_detected_key != _dedup_key
+            or (_now - self._last_override_detected_time) >= _dedup_window
+        ):
             self._last_override_detected_time = _now
+            self._last_override_detected_key = _dedup_key
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "override_detected",
@@ -4225,7 +4184,7 @@ class AutomationEngine:
                 )
         else:
             _LOGGER.debug(
-                "override_detected suppressed — within 5-minute dedup window (last=%s)",
+                "override_detected suppressed — identical repeat within 5-minute dedup window (last=%s)",
                 self._last_override_detected_time.isoformat(),
             )
 
@@ -4238,10 +4197,6 @@ class AutomationEngine:
                 return
             current_state = self.hass.states.get(self.climate_entity)
             current_mode = current_state.state if current_state else "unknown"
-            if source == "setpoint":
-                # #1131 / #1133 M1. Only a SETPOINT change reads the live Off as Climate Advisor's pause; a mode change
-                # to Off is the occupant's own Off and is kept as Off (Issue #1165).
-                current_mode = self._occupant_mode_when_ca_holds_off(current_mode, detected_mode)
             cls_mode = self._current_classification.hvac_mode if self._current_classification else None
             # For setpoint overrides: mode may still match classification, but
             # the user deliberately moved the setpoint — always take PATH A.
@@ -4449,8 +4404,7 @@ class AutomationEngine:
     def _preview_comfort_family(self, classification: DayClassification) -> tuple[str | None, ComfortBand | None]:
         """The comfort family ("heat" / "cool") the selector would arm now, and the band, WITHOUT mutating anything.
 
-        The ONE pure preview shared by override adoption (``_override_decision_mode_and_target()``) and the mode an
-        occupant's setpoint change means after a nat-vent exit (``_occupant_mode_when_ca_holds_off()``, Issue #1157).
+        The ONE pure preview used by override adoption (``_override_decision_mode_and_target()``).
         The day's default family comes from the band's active edge, so a warm/mild day (classification mode "off")
         still resolves. Reads through ``_comfort_family_would_switch()``, never ``_resolve_comfort_family_via_fsm()``
         (which commits dwell state, emits ``comfort_family_switch`` and arms the family). ``(None, None)`` when the
@@ -8107,30 +8061,16 @@ class AutomationEngine:
         """
         if self._manual_change_protected():
             self._note_deferred_to_protected_change()
-            # Issue #1131: the occupant changed the SETPOINT while the thermostat sat Off for the
-            # door/window pause (a mode change would have cleared the pause instead, see
-            # handle_manual_override_during_pause()). That change is theirs and it is still live
-            # (confirmed, or inside its confirmation window), so the door closing must not
-            # replace it with Climate Advisor's own setpoint, and a 5-minute automation grace must
-            # not replace their manual grace. Rule 1 (HVAC off while a window is open, unless the
-            # occupant turns it on) kept HVAC off while the window was open -- a setpoint tweak on
-            # an Off thermostat does not turn it on -- so the window closing is the moment HVAC
-            # resumes: the pre-pause mode comes back and the thermostat keeps the OCCUPANT's
-            # setpoint. Mode only; no comfort write, no automation grace. (Assumes a thermostat
-            # keeps its target temperature across a mode change, which the integration cannot
-            # verify; if one resets it, the override_respected promise exposes it.)
+            # The occupant's change is live (confirmed, or inside its confirmation window), so the door closing must
+            # not replace it with Climate Advisor's own setpoint, and a 5-minute automation grace must not replace
+            # their manual grace. Mode only; no comfort write, no automation grace.
             #
             # Issue #1165: the occupant's OWN Off (a mode change to Off, pending or confirmed) is the newest word and
             # is kept: no mode comes back (the write used to turn heat/cool on over it, minutes before their manual
-            # pause ended). Issue #1157: a nat-vent exit recorded no pre-pause mode (restore_mode None); the
-            # occupant's setpoint change was judged against the comfort family at the time they made it
-            # (``_occupant_mode_when_ca_holds_off()``), and that recorded mode is what resumes here.
+            # pause ended). (A setpoint change while the thermostat is Off is no override at all, Issue #1325, so it
+            # never reaches here.)
             occupant_off = self._protected_change_is_occupant_off()
-            target_mode = None
-            if not occupant_off:
-                target_mode = restore_mode or (
-                    self._protected_active_mode() if self._protected_change_source() == "setpoint" else None
-                )
+            target_mode = None if occupant_off else restore_mode
             if target_mode:
                 with self._mode_change_context("restore"):
                     _occ_result = await self._set_hvac_mode(

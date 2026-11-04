@@ -522,8 +522,8 @@ class TestCascadingSideEffectsNotCountedAsOverride:
         initial_overrides = coord._today_record.manual_overrides
 
         event = _make_state_event(
-            old_hvac_mode="off",
-            new_hvac_mode="off",
+            old_hvac_mode="heat",  # a setpoint change on a thermostat that is Off is ignored (Issue #1325)
+            new_hvac_mode="heat",
             old_temp=70.0,
             new_temp=72.0,  # temperature changed
         )
@@ -545,8 +545,8 @@ class TestCascadingSideEffectsNotCountedAsOverride:
         initial_overrides = coord._today_record.manual_overrides
 
         event = _make_state_event(
-            old_hvac_mode="off",
-            new_hvac_mode="off",
+            old_hvac_mode="heat",  # a setpoint change on a thermostat that is Off is ignored (Issue #1325)
+            new_hvac_mode="heat",
             old_temp=70.0,
             new_temp=72.0,
         )
@@ -625,8 +625,8 @@ class TestCascadingSideEffectsNotCountedAsOverride:
         initial_overrides = coord._today_record.manual_overrides
 
         event = _make_state_event(
-            old_hvac_mode="off",
-            new_hvac_mode="off",
+            old_hvac_mode="heat",  # a setpoint change on a thermostat that is Off is ignored (Issue #1325)
+            new_hvac_mode="heat",
             old_temp=70.0,
             new_temp=72.0,
         )
@@ -645,3 +645,90 @@ class TestCascadingSideEffectsNotCountedAsOverride:
 def _freeze_module_now(frozen_now):
     """Issue #1186: this file's intended clock, applied per test (was an import-time assignment)."""
     frozen_now(_frozen_now_value())
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Issue #1325 — the dedup suppresses only an IDENTICAL repeat; a distinct change always emits
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("fan_mode", ["whole_house_fan", "hvac_fan"])
+class TestDedupSuppressesOnlyIdenticalRepeats1325:
+    """Occupant: sets Cool 74, then Cool 72 two minutes later. Both are real changes and both belong in the Activity
+    record and the household-promise journal (which opens an episode per ``override_detected``). Before the fix the
+    second was swallowed, so the first was reported 'ended 13 min early' and the second was never protected."""
+
+    def _engine(self, fan_mode):
+        engine = _make_engine(config_overrides={"fan_mode": fan_mode, "override_confirm_period": 30})
+        emitted: list = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+        return engine, emitted
+
+    def _normal(self, engine, t, setpoint, mode="cool"):
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later"),
+            patch("custom_components.climate_advisor.automation.dt_util") as mock_dt,
+        ):
+            mock_dt.now.return_value = t
+            engine.hass.states.get.return_value.state = mode
+            engine.handle_manual_override(
+                source="setpoint", old_mode=mode, new_mode=mode, new_setpoint_f=setpoint, old_setpoint_f=76.0
+            )
+
+    def _pause(self, engine, t, new_mode):
+        engine._paused_by_door = True
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later"),
+            patch("custom_components.climate_advisor.automation.dt_util") as mock_dt,
+        ):
+            mock_dt.now.return_value = t
+            asyncio.run(
+                engine.handle_manual_override_during_pause(old_mode="off", new_mode=new_mode, classification_mode="off")
+            )
+
+    @staticmethod
+    def _detected(emitted):
+        return [p for n, p in emitted if n == "override_detected"]
+
+    def test_normal_path_two_different_setpoints_two_minutes_apart_emit_twice(self, fan_mode):
+        engine, emitted = self._engine(fan_mode)
+        self._normal(engine, _NOW_BASE, 74.0)
+        self._normal(engine, _NOW_BASE + timedelta(minutes=2), 72.0)
+        assert [p["new_setpoint_f"] for p in self._detected(emitted)] == [74.0, 72.0]
+
+    def test_normal_path_heat_variant(self, fan_mode):
+        engine, emitted = self._engine(fan_mode)
+        self._normal(engine, _NOW_BASE, 70.0, mode="heat")
+        self._normal(engine, _NOW_BASE + timedelta(minutes=2), 72.0, mode="heat")
+        assert [p["new_setpoint_f"] for p in self._detected(emitted)] == [70.0, 72.0]
+
+    def test_normal_path_identical_repeat_within_five_minutes_emits_once(self, fan_mode):
+        engine, emitted = self._engine(fan_mode)
+        self._normal(engine, _NOW_BASE, 74.0)
+        self._normal(engine, _NOW_BASE + timedelta(minutes=2), 74.0)
+        assert len(self._detected(emitted)) == 1
+
+    def test_normal_path_identical_repeat_after_five_minutes_emits_again(self, fan_mode):
+        engine, emitted = self._engine(fan_mode)
+        self._normal(engine, _NOW_BASE, 74.0)
+        self._normal(engine, _NOW_BASE + timedelta(minutes=5, seconds=1), 74.0)
+        assert len(self._detected(emitted)) == 2
+
+    def test_a_different_source_or_mode_is_a_distinct_change(self, fan_mode):
+        engine, emitted = self._engine(fan_mode)
+        self._normal(engine, _NOW_BASE, 74.0, mode="cool")
+        self._normal(engine, _NOW_BASE + timedelta(minutes=1), 74.0, mode="heat")  # same number, other mode
+        assert len(self._detected(emitted)) == 2
+
+    def test_pause_path_two_different_mode_changes_two_minutes_apart_emit_twice(self, fan_mode):
+        engine, emitted = self._engine(fan_mode)
+        self._pause(engine, _NOW_BASE, "heat")
+        self._pause(engine, _NOW_BASE + timedelta(minutes=2), "cool")
+        got = self._detected(emitted)
+        assert [(p["source"], p["new_mode"]) for p in got] == [("pause", "heat"), ("pause", "cool")]
+
+    def test_pause_path_identical_repeat_within_five_minutes_emits_once(self, fan_mode):
+        engine, emitted = self._engine(fan_mode)
+        self._pause(engine, _NOW_BASE, "cool")
+        self._pause(engine, _NOW_BASE + timedelta(minutes=2), "cool")
+        assert len(self._detected(emitted)) == 1

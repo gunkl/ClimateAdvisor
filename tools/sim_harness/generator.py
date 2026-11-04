@@ -692,15 +692,18 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                     feed({"time": _iso(et), "type": kind, "entity": args["entity"], "state": args["state"]})
                 elif kind == "thermostat_state_changed":
                     if plan.use_coordinator:
-                        feed(
-                            {
-                                "time": _iso(et),
-                                "type": kind,
-                                "hvac_mode": args["hvac_mode"],
-                                "temperature": _to_unit(args["setpoint_f"], unit, fine=fine),
-                                "hvac_action": house.decide_action(args["hvac_mode"], args["setpoint_f"]) or "idle",
-                            }
-                        )
+                        poke = {
+                            "time": _iso(et),
+                            "type": kind,
+                            "hvac_mode": args["hvac_mode"],
+                            "temperature": _to_unit(args["setpoint_f"], unit, fine=fine),
+                            "hvac_action": house.decide_action(args["hvac_mode"], args["setpoint_f"]) or "idle",
+                        }
+                        if args["hvac_mode"] == "off":
+                            # Owner ruling (Issue #1325): a thermostat that is Off takes no setpoint, so an occupant
+                            # Off is a mode change only. The setpoint is still drawn (RNG unchanged), just not sent.
+                            del poke["temperature"]
+                        feed(poke)
                         last_action = None  # re-report the equipment state after the poke
                 elif kind == "occupant_hvac_on":
                     # the occupant asks for a setpoint past the current reading, so the equipment runs (Issue #1179)

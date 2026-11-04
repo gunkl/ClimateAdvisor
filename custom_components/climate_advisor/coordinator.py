@@ -8858,7 +8858,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
         current_keys = set()
         to_notify: list = []
-        activity: list[tuple[str, dict]] = []  # Issue #1322: recorded after the notification, see below
+        activity: list[tuple[str, Any]] = []  # Issue #1322: (entity_id, recorder), run after the notification
 
         for issue in issues:
             key = issue.state_key
@@ -8883,19 +8883,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 }
                 to_notify.append(issue)
                 # Issue #1322: the Activity log records the outage (once per outage, never per reminder).
-                activity.append(
-                    (
-                        "entity_unavailable",
-                        {
-                            "entity_id": issue.entity_id,
-                            "friendly_name": issue.friendly_name,
-                            "status": issue.status,
-                            "criticality": issue.criticality,
-                            "detail": issue.detail,
-                            "down_since": down_since.isoformat(),
-                        },
-                    )
-                )
+                outage = {
+                    "entity_id": issue.entity_id,
+                    "friendly_name": issue.friendly_name,
+                    "status": issue.status,
+                    "criticality": issue.criticality,
+                    "detail": issue.detail,
+                    "down_since": down_since.isoformat(),
+                }
+                activity.append((issue.entity_id, lambda data=outage: self._emit_event("entity_unavailable", data)))
             else:
                 # "none"/"changed" (missing <-> unavailable): same outage, only the reminder rule applies.
                 tracked["status"] = issue.status
@@ -8914,27 +8910,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     outage_minutes,
                 )
                 # Issue #1322: the Activity log records the recovery and how long the entity was out.
-                activity.append(
-                    (
-                        "entity_recovered",
-                        {
-                            "entity_id": tracked.get("entity_id", key),
-                            "friendly_name": tracked.get("friendly_name", key),
-                            "outage_minutes": outage_minutes,
-                            "down_since": down_since.isoformat(),
-                        },
-                    )
-                )
+                recovered = {
+                    "entity_id": tracked.get("entity_id", key),
+                    "friendly_name": tracked.get("friendly_name", key),
+                    "outage_minutes": outage_minutes,
+                    "down_since": down_since.isoformat(),
+                }
+                activity.append((key, lambda data=recovered: self._emit_event("entity_recovered", data)))
 
         if to_notify:
             self._notify_entity_health_issues(to_notify)
         # Issue #1322: the Activity rows come after the notification and are isolated, so a failure recording them
         # can never cost the occupant the outage notification (this detector exists to catch silent failures).
-        for event_type, data in activity:
+        for entity_id, record in activity:
             try:
-                self._emit_event(event_type, data)
+                record()
             except Exception:
-                _LOGGER.warning("Entity health: could not record %s for %s", event_type, data.get("entity_id"))
+                _LOGGER.warning("Entity health: could not record the Activity row for %s", entity_id)
 
     def _entity_health_down_since(self, issue: EntityHealthIssue, now: datetime) -> datetime:
         """When the entity actually went down: its state's ``last_changed`` (the sweep only runs every cycle).

@@ -282,11 +282,13 @@ def derive_episodes(
     override (first reading at or after the start).
 
     Issue #1325 (cancel attribution): a ``grace_cancelled`` with ``reason=superseded`` (and not ``continues``) closes
-    only a thermostat override episode that was open when the cancelled grace started (the last occupant-override
-    ``grace_started`` before the cancel). It never closes an episode opened after that grace began: the old rule
-    attributed a cancel to an episode the cancelled grace never protected. The engine emits the supersede cancel at
-    the NEW change's confirm delay, i.e. after the new ``override_detected``, so without this the newer change was
-    closed ``superseded_unreplaced`` with no grace end and went unprotected.
+    only an override episode (thermostat or fan) that was open when the cancelled grace started (the last
+    occupant-override ``grace_started`` before the cancel). It never closes an episode opened after that grace began:
+    the old rule attributed a cancel to an episode the cancelled grace never protected. The engine emits the supersede
+    cancel at the NEW change's confirm delay, i.e. after the new ``override_detected``, so without this the newer
+    change was closed ``superseded_unreplaced`` with no grace end and went unprotected. The fan mirror: a newer fan
+    press (RF remote timer/speed change while the fan runs) emits ``fan_manual_override`` before the cancel of the old
+    press's grace, and was closed ``superseded`` the instant it started, leaving a CA fan-off during it unchecked.
     """
     eps: list[_Ep] = []
     last_manual_grace_ts: datetime | None = None
@@ -421,7 +423,7 @@ def derive_episodes(
                 if (
                     reason == "superseded"
                     and not continues
-                    and e.target == "thermostat"
+                    and e.kind == "override"
                     and last_manual_grace_ts is not None
                     and e.start_ts > last_manual_grace_ts
                 ):
@@ -429,7 +431,9 @@ def derive_episodes(
                     # opened AFTER it (the occupant's newer change, whose own grace has not started yet: the cancel
                     # lands at the confirm delay, after the new ``override_detected``) was never protected by that
                     # grace, so its cancel says nothing about it. It stays open; the next ``grace_started`` gives it
-                    # its own grace end.
+                    # its own grace end. The fan mirror: a newer fan press (an RF remote timer/speed change while the
+                    # fan runs) emits ``fan_manual_override`` BEFORE the cancel of the old press's grace, so the same
+                    # rule keeps the newer press open instead of closing it the instant it started.
                     continue
                 r = reason
                 if reason == "superseded" and not replaced_soon(i, e.target):

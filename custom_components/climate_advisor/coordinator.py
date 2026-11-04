@@ -4784,18 +4784,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         continue
                 normalised.append(new_entry)
             _LOGGER.debug("Hourly forecast normalised: entries=%d unit=%s", len(normalised), unit)
+            if getattr(self, "_hourly_forecast_confirmed_unsupported", False) is True:
+                # Issue #1322: the outage is over; the next failure starts a new one and is announced again.
+                self._hourly_forecast_confirmed_unsupported = False
+                _LOGGER.info(
+                    "Hourly forecast available again for %s — cosine model no longer used entries=%d",
+                    weather_entity,
+                    len(normalised),
+                )
             return normalised
         except Exception:  # noqa: BLE001
-            # Issue #874: this is the stronger, more definitive signal (the underlying
-            # service call itself failed/is unsupported) vs. _get_outdoor_temp()'s
-            # interpolation-unavailable streak escalation above — log a one-time ERROR
-            # the first time this is confirmed for this session, then stay DEBUG-only
-            # for every subsequent occurrence (no need to re-alert every cycle once
-            # the cause is already known and confirmed unrecoverable this session).
+            # Issue #874 / #1322: the service call itself failed (weather source unavailable or unsupported). Announce
+            # it once per outage at ERROR (#874's level) and stay DEBUG while it lasts; the fetch is retried on every
+            # cycle, and the success path above logs the return and re-arms this for the next outage.
             if getattr(self, "_hourly_forecast_confirmed_unsupported", False) is not True:
                 self._hourly_forecast_confirmed_unsupported = True
                 _LOGGER.error(
-                    "Hourly forecast unavailable for %s — falling back to cosine model for the rest of this session",
+                    "Hourly forecast unavailable for %s — using the cosine model until it returns",
                     weather_entity,
                 )
             _LOGGER.debug(
@@ -8853,6 +8858,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
         current_keys = set()
         to_notify: list = []
+        activity: list[tuple[str, dict]] = []  # Issue #1322: recorded after the notification, see below
 
         for issue in issues:
             key = issue.state_key
@@ -8866,12 +8872,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             if step.kind == "fallback":
                 # ok -> missing/unavailable transition — a brand new outage.
+                down_since = self._entity_health_down_since(issue, now)
                 self._entity_health_state[key] = {
                     "status": issue.status,
                     "first_seen": now,
                     "last_notified": now,
+                    "entity_id": issue.entity_id,
+                    "friendly_name": issue.friendly_name,
+                    "down_since": down_since,
                 }
                 to_notify.append(issue)
+                # Issue #1322: the Activity log records the outage (once per outage, never per reminder).
+                activity.append(
+                    (
+                        "entity_unavailable",
+                        {
+                            "entity_id": issue.entity_id,
+                            "friendly_name": issue.friendly_name,
+                            "status": issue.status,
+                            "criticality": issue.criticality,
+                            "detail": issue.detail,
+                            "down_since": down_since.isoformat(),
+                        },
+                    )
+                )
             else:
                 # "none"/"changed" (missing <-> unavailable): same outage, only the reminder rule applies.
                 tracked["status"] = issue.status
@@ -8881,11 +8905,48 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         for key in list(self._entity_health_state.keys()):
             if key not in current_keys:
-                _LOGGER.info("Entity health: %s is available again", key)
-                del self._entity_health_state[key]
+                tracked = self._entity_health_state.pop(key)
+                down_since = tracked.get("down_since") or tracked.get("first_seen") or now
+                outage_minutes = max(0, int((now - down_since).total_seconds() // 60))
+                _LOGGER.info(
+                    "Entity health: %s is available again outage_minutes=%d",
+                    key,
+                    outage_minutes,
+                )
+                # Issue #1322: the Activity log records the recovery and how long the entity was out.
+                activity.append(
+                    (
+                        "entity_recovered",
+                        {
+                            "entity_id": tracked.get("entity_id", key),
+                            "friendly_name": tracked.get("friendly_name", key),
+                            "outage_minutes": outage_minutes,
+                            "down_since": down_since.isoformat(),
+                        },
+                    )
+                )
 
         if to_notify:
             self._notify_entity_health_issues(to_notify)
+        # Issue #1322: the Activity rows come after the notification and are isolated, so a failure recording them
+        # can never cost the occupant the outage notification (this detector exists to catch silent failures).
+        for event_type, data in activity:
+            try:
+                self._emit_event(event_type, data)
+            except Exception:
+                _LOGGER.warning("Entity health: could not record %s for %s", event_type, data.get("entity_id"))
+
+    def _entity_health_down_since(self, issue: EntityHealthIssue, now: datetime) -> datetime:
+        """When the entity actually went down: its state's ``last_changed`` (the sweep only runs every cycle).
+
+        A missing entity has no state, and a ``last_changed`` in the future (clock skew) is not trusted: both fall
+        back to when Climate Advisor noticed (Issue #1322).
+        """
+        state = self.hass.states.get(issue.entity_id) if issue.entity_id else None
+        changed = getattr(state, "last_changed", None)
+        if isinstance(changed, datetime) and changed.tzinfo is not None and changed <= now:
+            return changed
+        return now
 
     def _notify_entity_health_issues(self, issues: list) -> None:
         """Log every issue unconditionally, then send one batched user notification.
@@ -8923,7 +8984,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 f"{details or generic.format("they're fixed")} Check Settings > Devices & Services."
             )
 
-        self._notify_in_background("Climate Advisor — entity not found", message, "entity_health")
+        # Issue #1322: the title says what happened. "not found" only when every listed entity is really missing; an
+        # entity that exists but reports unavailable (a weather service outage) is "unavailable".
+        if all(i.status == "missing" for i in issues):
+            title = "Climate Advisor — entity not found"
+        elif all(i.status != "missing" for i in issues):
+            title = "Climate Advisor — entity unavailable"
+        else:
+            title = "Climate Advisor — entities unavailable or not found"
+        self._notify_in_background(title, message, "entity_health")
 
     def _should_run_untracked_fan_backstop(self, is_untracked: bool) -> bool:
         """Whether the periodic ``backstop_30min`` untracked-fan reconcile should fire now.

@@ -65,6 +65,9 @@ def _make_coordinator(config: dict, states: dict[str, str | None] | None = None,
     coord.hass = hass
 
     coord.automation_engine = MagicMock()
+    # Issue #1322: outages and recoveries are emitted to the Activity log; record them instead of the event ring.
+    coord.emitted = []
+    coord._emit_event = lambda event_type, data: coord.emitted.append((event_type, dict(data)))
 
     coord._run_entity_health_check = types.MethodType(ClimateAdvisorCoordinator._run_entity_health_check, coord)
     coord._process_entity_health_transitions = types.MethodType(

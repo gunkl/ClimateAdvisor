@@ -168,6 +168,9 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # skipped, the deciding event (or its absence) is still what the assertion checks.
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        # Issue #1322: entity outage / recovery rows are observational (Activity log only; no decision to judge).
+        "entity_unavailable",
+        "entity_recovered",
         # Issue #1037: fan_blind_started / fan_blind_stopped / fan_blind_recovered report a
         # blind-fan safety episode (indoor unreadable while a fan session runs). They are
         # registered unmapped so the 'unknown:<type>' catch-all cannot shadow a real outcome

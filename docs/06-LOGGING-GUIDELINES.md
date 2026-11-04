@@ -106,6 +106,10 @@ A log line is for whoever reads the HA log and never reaches the dashboard. Anyt
 - **An event**: `coordinator._emit_event(type, data)`, which the engine reaches through `_emit_event_callback`. Events feed the Activity Report and the investigator's event log. Vocabulary: [Activity Report Table](activity-report-table.md).
 - **An incident**, for a detected problem: an `incident_detected` event built by `build_incident_payload()` (coordinator.py:11577, automation.py:5564). See [Incident Payload Brief](incident-payload-brief.md) and [Incident Classes](incident-classes.md).
 
+**Outages of a source Climate Advisor depends on**, such as the weather source or a configured entity (Issue #1322):
+- **Log the start of each outage once.** The hourly forecast logs one ERROR per outage, worded for what is happening (for example "using the cosine model until it returns"), then stays at DEBUG while the outage lasts, and logs INFO when the source returns. Never phrase it as permanent ("for the rest of this session") when the source is retried every cycle.
+- **Give each outage and recovery an event.** An entity outage and its recovery each also get an event (`entity_unavailable` / `entity_recovered`), so the Activity log shows when the outage started and how long it lasted.
+
 ## Reading the Logs
 
 `tools/ha_logs.py` pulls `ha core logs` over SSH and keeps lines containing `climate_advisor` (the logger name), so every module is included. `--thermal` narrows to thermal-learning lines, and `--history` reads the REST recorder instead. Usage and retention notes: [Debugging Guide §3](09-DEBUGGING-GUIDE.md#3-container-logs-real-time). DEBUG lines appear only with a `logger:` override for `custom_components.climate_advisor` in `configuration.yaml`.

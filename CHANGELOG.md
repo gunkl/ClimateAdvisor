@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.57] — 2026-11-04
+
+- Fix #1322: when a source Climate Advisor depends on stops responding (the weather service, the thermostat, a door or window sensor, a fan or a toggle), you can now see it afterwards in the Activity log. An "… unavailable" row (or "… not found" when the entity is really gone) records when it went down, and an "… available again" row records when it came back and how long it was out. Before, only the dashboard warning and a notification showed it, and both left no record once it was over. The notification title now says "entity unavailable" when the entity exists but isn't responding, and keeps "entity not found" for a missing one. The hourly-forecast log line no longer claims Climate Advisor falls back to its estimated curve "for the rest of this session": the forecast is retried every cycle, so each outage is logged once with accurate wording and its return is logged too. Retry timing and control are unchanged.
+
 ## [0.8.56] — 2026-11-03
 
 **With automation switched off (observe-only), Climate Advisor now records only what it actually sent.** Switching automation back on then acts on the real state of the house.

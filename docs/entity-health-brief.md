@@ -11,7 +11,7 @@
 | How does the coordinator turn a raw sweep result into a user notification? | `_run_entity_health_check()` calls the sweep every update cycle, then `_process_entity_health_transitions()` diffs the result against `self._entity_health_state` (transient, in-memory) to detect ok->missing transitions, batches everything that needs notifying that cycle, and `_notify_entity_health_issues()` sends one notification via the existing `AutomationEngine._notify()`. | [Coordinator Interface](#coordinator-interface) |
 | How often does a still-missing entity re-notify? | Once on the ok->missing transition, then at most once per `_ENTITY_HEALTH_REMINDER_SECONDS` (24h) while it stays missing — never every 30-min cycle, which is the exact failure mode Issue #805 was filed over (a different bug's log showed hours of unrelated per-cycle incidents with no entity-health signal at all, motivating this debounce shape here). | [Debounce](#debounce) |
 | Why is nothing notified during the startup-coalesce window? | `_run_entity_health_check()` returns `[]` immediately while `self._startup_coalesce_active` is `True`, so entities that simply haven't loaded yet at HA boot never false-positive — the same window `_compute_automation_status()` already uses to suppress alarm-shaped states for the same race condition. | [Startup Suppression](#startup-suppression) |
-| Where does this show up to the user? | One batched push/email notification (`notification_type="entity_health"`, gated by `push_entity_health`/`email_entity_health` config toggles) plus a line on the existing Status card (`coordinator.data["entity_health_issues"]` -> `api.py` -> `index.html`'s `loadStatus()`) — no new card, no HA Repairs issue. | [User-Visible Surface](#user-visible-surface) |
+| Where does this show up to the user? | Three places, with no new card and no HA Repairs issue:<br>- **Notification:** one batched push/email (`notification_type="entity_health"`, gated by `push_entity_health`/`email_entity_health`). Its title follows the status (Issue #1322): "entity unavailable" when the entity exists but reports unavailable, "entity not found" only when it is really missing, and "entities unavailable or not found" for a mix.<br>- **Status card:** a line on the existing card (`coordinator.data["entity_health_issues"]` -> `api.py` -> `index.html`'s `loadStatus()`). It clears on the first successful cycle after recovery.<br>- **Activity log:** one `entity_unavailable` row per outage, and one `entity_recovered` row with the outage length (Issue #1322). See [activity-report-table](activity-report-table.md). | [User-Visible Surface](#user-visible-surface) |
 
 ## Scope
 
@@ -22,7 +22,11 @@
 
 **Owns (`coordinator.py`):**
 - `_run_entity_health_check()` — the per-cycle entry point, isolated in its own try/except so a bug in the sweep can never abort the update cycle it runs inside
-- `_process_entity_health_transitions()` — the ok/missing/recovered state machine and 24h reminder timer
+- `_process_entity_health_transitions()` — the ok/missing/recovered state machine and 24h reminder timer. It also emits the Activity events (Issue #1322):
+  - `entity_unavailable` once per outage, never per reminder; a missing↔unavailable change inside one outage is the same outage;
+  - `entity_recovered` when the entity resolves again.
+
+  The outage start is the entity state's `last_changed` (`_entity_health_down_since()`), falling back to when Climate Advisor noticed.
 - `_notify_entity_health_issues()` — unconditional per-issue logging (ERROR for critical, WARNING otherwise) plus one batched `_notify_in_background()` call
 
 **Explicitly does NOT own:**

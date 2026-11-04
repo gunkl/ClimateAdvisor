@@ -1597,7 +1597,7 @@ _UNKNOWN_EVENT_TYPES = frozenset(
     }
 )
 
-_SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({"system_restarted"})
+_SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({"system_restarted", "entity_unavailable", "entity_recovered"})
 
 
 def _event_source_label(event_type: str, data: dict) -> str | None:
@@ -2193,6 +2193,42 @@ def _render_outdoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
 
 def _sensor_reason_label(reason: Any) -> str:
     return SENSOR_REASON_LABELS.get(reason, str(reason).replace("_", " ")) if reason else "unspecified"
+
+
+def _local_hhmm(iso: Any) -> str:
+    """``HH:MM`` in the occupant's local time for an ISO instant, or "" when it cannot be read."""
+    try:
+        t = dt_util.parse_datetime(iso) if isinstance(iso, str) and iso else None
+        return dt_util.as_local(t).strftime("%H:%M") if isinstance(t, datetime.datetime) else ""
+    except TypeError, ValueError, AttributeError:
+        return ""
+
+
+def _render_entity_unavailable(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1322: a configured entity (thermostat, weather source, sensor, fan) stopped responding."""
+    name = p.get("friendly_name") or p.get("entity_id") or "An entity"
+    state = "not found" if p.get("status") == "missing" else "unavailable"
+    label = f"{name} {state}"
+    parts: list[str] = []
+    since = _local_hhmm(p.get("down_since"))
+    if since:
+        parts.append(f"since {since}")
+    if p.get("detail"):
+        parts.append(str(p["detail"]))
+    return label, ", ".join(parts)
+
+
+def _render_entity_recovered(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1322: a configured entity is responding again after an announced outage."""
+    name = p.get("friendly_name") or p.get("entity_id") or "An entity"
+    parts: list[str] = []
+    minutes = p.get("outage_minutes")
+    if isinstance(minutes, int):
+        parts.append(f"out {minutes} min")
+    since = _local_hhmm(p.get("down_since"))
+    if since:
+        parts.append(f"since {since}")
+    return f"{name} available again", ", ".join(parts)
 
 
 def _render_indoor_sensor_unavailable(p: dict, unit: str) -> tuple[str, str]:
@@ -3275,6 +3311,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "fan_override_cleared": _render_fan_override_cleared,
     "outdoor_sensor_fallback": _render_outdoor_sensor_fallback,
     "outdoor_sensor_recovered": _render_outdoor_sensor_recovered,
+    "entity_unavailable": _render_entity_unavailable,
+    "entity_recovered": _render_entity_recovered,
     "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
     "indoor_sensor_recovered": _render_indoor_sensor_recovered,
     "fan_blind_started": _render_fan_blind_started,
@@ -3390,6 +3428,8 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "outdoor_sensor_recovered",
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        "entity_unavailable",
+        "entity_recovered",
         "fan_blind_started",
         "fan_blind_stopped",
         "fan_blind_recovered",

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.58] — 2026-11-04
+
+- Fix #1326: when a source Climate Advisor depends on stops responding (for example the weather service), the warning on the dashboard's Status card now fits inside the card on desktop and mobile. It used the same large bold font as the card's status, and the entity id (e.g. `weather.forecast_home`) has no spaces, so it ran past the card's edge. Warnings now use a smaller line that wraps, and the entity id sits on its own muted line under the message. The same applies to the card's other warnings (control issues, household-promise alerts, Climate Advisor unavailable).
+
 ## [0.8.57] — 2026-11-04
 
 - Fix #1322: when a source Climate Advisor depends on stops responding (the weather service, the thermostat, a door or window sensor, a fan or a toggle), you can now see it afterwards in the Activity log. An "… unavailable" row (or "… not found" when the entity is really gone) records when it went down, and an "… available again" row records when it came back and how long it was out. Before, only the dashboard warning and a notification showed it, and both left no record once it was over. The notification title now says "entity unavailable" when the entity exists but isn't responding, and keeps "entity not found" for a missing one. The hourly-forecast log line no longer claims Climate Advisor falls back to its estimated curve "for the rest of this session": the forecast is retried every cycle, so each outage is logged once with accurate wording and its return is logged too. Retry timing and control are unchanged.

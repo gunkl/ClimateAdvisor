@@ -930,6 +930,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Startup retry state — gentle backoff when weather entity isn't ready
         self._startup_retries_remaining: int = 5
         self._startup_retry_delay: int = 30  # seconds; doubles each attempt
+        # Issue #1329: a weather retry timer is scheduled and has not fired yet. Only that timer's refresh consumes a
+        # retry; refreshes from door/window or other events in between leave the backoff alone.
+        self._weather_retry_pending: bool = False
 
         # Temperature history for dashboard chart (cleared at end of day)
         self._outdoor_temp_history: list[tuple[str, float]] = []
@@ -3876,6 +3879,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 self._startup_retries_remaining = 5
                 self._startup_retry_delay = 30
+                self._weather_retry_pending = False
 
             # Outdoor temp history + automation-engine mirror now handled by
             # _apply_outdoor_temp() above (Issue #511 consolidation).
@@ -3927,7 +3931,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Weather entity not ready yet (common after HA restart).
             # Retry with gentle backoff: 30s → 60s → 120s → 240s → 480s
             # Total wait ≈ 15 min before falling back to normal 30-min poll.
-            if self._startup_retries_remaining > 0:
+            if getattr(self, "_weather_retry_pending", False) is True:
+                # Issue #1329: an unrelated refresh (a door/window event, a fan change ...) while a retry is already
+                # scheduled. It must not consume a retry or stack another timer: the backoff stays as designed.
+                _LOGGER.debug("Weather entity not ready; a retry is already scheduled")
+            elif self._startup_retries_remaining > 0:
                 delay = self._startup_retry_delay
                 self._startup_retries_remaining -= 1
                 self._startup_retry_delay = min(delay * 2, 480)
@@ -3937,8 +3945,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     delay,
                 )
 
+                self._weather_retry_pending = True
+
                 @callback
                 def _schedule_retry(_now: Any) -> None:
+                    self._weather_retry_pending = False
                     self.hass.async_create_task(self.async_request_refresh())
 
                 # Issue #1102 (F2): keep the handle so unload cancels it (at most 5 retries).
@@ -4281,7 +4292,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _indoor_reading.source_entity is not None
             and _indoor_reading.source_entity == self.config.get("sleep_indoor_temp_entity")
         )
-        _outdoor_temp = forecast.current_outdoor_temp if forecast else None
+        # Issue #1329: with the weather service down there is no forecast, but a dedicated outdoor sensor still has
+        # a live reading. Show it rather than "unknown"; a weather-service install stays unknown (no honest value).
+        _outdoor_temp = forecast.current_outdoor_temp if forecast else self._live_dedicated_outdoor_temp()
 
         # Schedule overnight pre-cool if a warming trend is active (idempotent — runs once per day)
         self._maybe_schedule_pre_cool()
@@ -4379,8 +4392,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Append chart log entry (every coordinator tick — 30-min cadence)
         with contextlib.suppress(Exception):
-            indoor_temp = forecast.current_indoor_temp if forecast else None
-            outdoor_temp = forecast.current_outdoor_temp if forecast else None
+            # Issue #1329: the thermostat and a dedicated outdoor sensor do not depend on the weather service, so a
+            # weather outage must not blank them in the chart log (the live readings used for the dashboard above).
+            indoor_temp = forecast.current_indoor_temp if forecast else _indoor_temp
+            outdoor_temp = forecast.current_outdoor_temp if forecast else _outdoor_temp
             # Extract current-hour prediction to persist alongside actual reading
             _pred_outdoor_val: float | None = None
             if indoor_temp is None:
@@ -4404,36 +4419,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _chart_hvac_poll,
                 self._fan_is_running(_fan_status_poll),
             )
-            _band_lower_poll, _band_upper_poll = self._target_band_lower_upper_now()
-            self._chart_log.append(
-                hvac=_chart_hvac_poll,
-                fan=self._fan_is_running(_fan_status_poll),
-                indoor=indoor_temp,
-                outdoor=outdoor_temp,
-                windows_open=self._any_sensor_open(),
-                windows_recommended=bool(self._current_classification.windows_recommended)
-                if self._current_classification
-                else False,
-                pred_outdoor=_pred_outdoor_val,
-                pred_indoor=_pred_indoor_val,
-                setpoint=_setpoint_f,
-                comfort_target=self._read_chart_comfort_target(),
-                fan_running=self._fan_physically_running(_fan_status_poll),
-                nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
-                lower=_band_lower_poll,
-                upper=_band_upper_poll,
-                nat_vent_target=self._nat_vent_target_now(),
-            )
-            await self._executor_job(self._chart_log.save)
-            _LOGGER.debug(
-                "chart_log pred_indoor=%.1f indoor=%.1f delta=%+.1f (%s)",
-                _pred_indoor_val if _pred_indoor_val is not None else float("nan"),
-                indoor_temp if indoor_temp is not None else float("nan"),
-                (_pred_indoor_val - indoor_temp)
-                if (_pred_indoor_val is not None and indoor_temp is not None)
-                else float("nan"),
-                _pred_indoor_source,
-            )
+            if self._chart_poll_waits_for_startup(indoor_temp):
+                # Issue #1329: right after a restart the thermostat may not have reported yet (no indoor reading, no
+                # HVAC state) and a dedicated outdoor sensor may still be falling back to the forecast. An entry made
+                # now would chart that half-loaded moment as a real reading; the next poll records the real one.
+                _LOGGER.debug("chart_log: thermostat not reporting yet during start-up — poll entry skipped")
+            else:
+                _band_lower_poll, _band_upper_poll = self._target_band_lower_upper_now()
+                self._chart_log.append(
+                    hvac=_chart_hvac_poll,
+                    fan=self._fan_is_running(_fan_status_poll),
+                    indoor=indoor_temp,
+                    outdoor=outdoor_temp,
+                    windows_open=self._any_sensor_open(),
+                    windows_recommended=bool(self._current_classification.windows_recommended)
+                    if self._current_classification
+                    else False,
+                    pred_outdoor=_pred_outdoor_val,
+                    pred_indoor=_pred_indoor_val,
+                    setpoint=_setpoint_f,
+                    comfort_target=self._read_chart_comfort_target(),
+                    fan_running=self._fan_physically_running(_fan_status_poll),
+                    nat_vent_active=bool(
+                        self.automation_engine._natural_vent_active if self.automation_engine else False
+                    ),
+                    lower=_band_lower_poll,
+                    upper=_band_upper_poll,
+                    nat_vent_target=self._nat_vent_target_now(),
+                )
+                await self._executor_job(self._chart_log.save)
+                _LOGGER.debug(
+                    "chart_log pred_indoor=%.1f indoor=%.1f delta=%+.1f (%s)",
+                    _pred_indoor_val if _pred_indoor_val is not None else float("nan"),
+                    indoor_temp if indoor_temp is not None else float("nan"),
+                    (_pred_indoor_val - indoor_temp)
+                    if (_pred_indoor_val is not None and indoor_temp is not None)
+                    else float("nan"),
+                    _pred_indoor_source,
+                )
 
         with contextlib.suppress(Exception):
             self._thermal_factors = _compute_thermal_factors(self._chart_log.get_entries("7d"))
@@ -4453,6 +4476,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result.update(self._compute_fan_remote_status_fields())
 
         return result
+
+    def _chart_poll_waits_for_startup(self, indoor_temp: float | None) -> bool:
+        """True while start-up coalescing runs and the thermostat has not reported yet (Issue #1329).
+
+        Only the start-up window: a thermostat that drops out later is still charted with an empty indoor reading
+        (Issue #1039), because that is a real outage the occupant should see.
+        """
+        if getattr(self, "_startup_coalesce_active", False) is not True:
+            return False
+        state = self.hass.states.get(self.config.get("climate_entity", ""))
+        return state is None or is_unavailable_state(state.state) or indoor_temp is None
+
+    def _live_dedicated_outdoor_temp(self) -> float | None:
+        """The configured dedicated outdoor sensor's live reading in °F, or None (Issue #1329).
+
+        Only for the sensor / input_number sources, and only a successful read: this never falls back to the
+        weather service (it is the weather-outage path) and never to ``_get_weather_outdoor_temp()``'s placeholder.
+        """
+        if self.config.get("outdoor_temp_source") not in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            return None
+        value, reason = self._read_outdoor_sensor()
+        return value if reason is None else None
 
     def _read_outdoor_sensor(self) -> tuple[float | None, str | None]:
         """Read the configured dedicated outdoor sensor as °F (Issue #1032).

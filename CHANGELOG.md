@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.60] — 2026-11-04
+
+- Fix #1329: when the weather service goes down, Climate Advisor no longer loses readings that don't come from it.
+  - **Dashboard:** with a dedicated outdoor sensor, the outdoor temperature stays on the sensor's reading. Before, every 30-minute cycle blanked it to "unknown" until the next 5-minute refresh, and displays reading it saw "unknown".
+  - **Chart log:** it keeps recording indoor and outdoor. Before, the chart showed gaps and flat stretches through every outage.
+  - **Weather-service installs:** outdoor stays unknown while the service is down, because there is no honest value to show.
+- Fix #1329: a door or window opening during the weather service's quick retries no longer uses one up, so the designed 30 s to 8 min backoff (about 15 minutes) holds instead of collapsing into about 40 seconds.
+- Fix #1329: right after a restart, the chart no longer records a half-loaded moment, with no indoor reading and the outdoor value taken from the forecast before the sensor reported. The next poll records the real readings.
+
 ## [0.8.59] — 2026-11-04
 
 - Fix #1325: when you change the thermostat twice within 5 minutes (say Cool, then Off), both changes are now recorded in the Activity log, and the newer one is checked as protected. Before, the second change wasn't logged, and the household-promise check wrongly reported that Climate Advisor had ended your first change early.

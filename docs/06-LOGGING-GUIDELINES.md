@@ -60,7 +60,7 @@ async def _set_temperature_for_mode(self, c: DayClassification, *, reason: str, 
 Each successful write logs one INFO line and records the action (`_record_action` logs `Action recorded: <action> — <reason>`, automation.py:2459):
 
 ```
-INFO  Set HVAC mode to heat — door/window closed — restoring heat mode (occupant's setpoint kept) role=production
+INFO  Set HVAC mode to heat — door/window closed — restoring heat mode role=production
 INFO  Set temperature to 68°F (mode=heat) — zone=climate.thermostat bedtime — sleep band [66/74] role=production
 INFO  HVAC write blocked — whole-house fan owns thermostat (zone=climate.thermostat, door/window open — binary_sensor.kitchen_window)
 ```
@@ -75,7 +75,7 @@ Reasons follow `trigger — context`, with temperatures in the user's unit:
 |---|---|
 | `daily classification` | `<day_type> day, trend <direction> <delta>` (automation.py:4925) |
 | `door/window open` | `<entity_id>` (automation.py:7985) |
-| `door/window closed` | `restoring <mode> mode (occupant's setpoint kept)` / `ending natural ventilation mode` (automation.py:8138, 8050) |
+| `door/window closed` | `restoring <mode> mode` / `ending natural ventilation mode` (automation.py:8138, 8050) |
 | `occupancy away` / `occupancy vacation` | `setback band` (automation.py:16849) |
 | `occupancy home` | `restoring <heat\|cool> comfort` (automation.py:16970) |
 | `bedtime` | `sleep band [<floor>/<ceiling>]` (automation.py:11870) |

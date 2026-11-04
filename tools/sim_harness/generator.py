@@ -561,6 +561,17 @@ def patch_stub_gaps(session: Any) -> None:
         coord.async_refresh = coord.async_request_refresh
 
 
+def own_thermostat(session: Any) -> None:
+    """The toy house is this day's thermostat: FakeHass must not derive ``hvac_action`` on its own (Issue #1310).
+
+    ``report_action`` feeds the ToyHouse's ``hvac_action`` (``world.thermostat_running``, the generated house's
+    own swing); a second, FakeHass-side derivation with a different deadband would disagree with it.
+    """
+    fake_hass = getattr(session, "fake_hass", None)
+    if fake_hass is not None:
+        fake_hass.set_action_deadband(session.climate_entity, None)
+
+
 def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
     """Drive one planned day closed-loop against the production engine; return the record."""
     t_wall = time.perf_counter()
@@ -588,6 +599,7 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
     session = make_session(construct, engine="fakehass", probe=pr, use_coordinator=plan.use_coordinator)
     try:
         patch_stub_gaps(session)
+        own_thermostat(session)
         view = session.thermostat()
         open_sensors: set[str] = set()
         last_action: str | None = None
@@ -907,6 +919,7 @@ def replay_scenario(scenario: dict) -> PromiseReport:
     )
     try:
         patch_stub_gaps(session)
+        own_thermostat(session)
         result = drive_scenario(session, scenario)
     finally:
         session.close()

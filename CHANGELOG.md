@@ -3,6 +3,35 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.56] — 2026-11-03
+
+**With automation switched off (observe-only), Climate Advisor now records only what it actually sent.** Switching automation back on then acts on the real state of the house.
+- Fix #1295: ventilation ending with a window open no longer records a door/window pause that was never sent. Before, after re-enable the heat or AC could keep running into the open window, because Climate Advisor believed it was already paused.
+- Fix #1296: switching automation back on brings your heat/cool plan back within about 30 seconds. Before, the thermostat could stay Off for up to 30 minutes after a whole-house-fan session ended while automation was off. Your own thermostat change, a running fan, an open window and away mode are still respected.
+- Fix #1300: closing a window or ending ventilation no longer starts Climate Advisor's own 5-minute grace for a restore it never sent.
+- Fix #1301: the Activity Report no longer shows "ceiling guard switched to cool" when nothing was sent.
+- Fix #1304: no more ventilation sessions "on paper". Before, Climate Advisor started and ended sessions it never sent and wrote "Nat-vent escalated to AC" entries. A session that really started while automation was on is still tracked until it really ends.
+- Fix #1305: a whole-house fan stopping while automation was off no longer writes a false "HVAC restored" entry.
+- Fix #1306: pressing Resume while automation is off clears the pause without starting a grace or claiming the heat/AC was restored.
+- Fix #1311: a fan that stops by itself is recorded as stopped, so free cooling is not skipped as "already running" after re-enable.
+
+**When the thermostat refuses or doesn't confirm a command, Climate Advisor now re-sends it.** It checks the thermostat's actual state and re-sends after 15 s, 60 s and 5 min, then stops; each attempt logs a WARNING and the chain adds one Activity entry.
+- Fix #1302: a refused Off for an open window. Before, the heat or AC could run into the open window for up to 30 minutes.
+- Fix #1307: a refused Off during blower ventilation with a window open.
+- Fix #1308: a refused restore after you close the window. Climate Advisor's grace now starts only once the heat/AC is actually back. This also covers the restore after a whole-house-fan session.
+- Fix #1312: a refused restore after you press Resume. Your grace starts once the restore lands.
+- Fix #1313: a refused restore of your own thermostat choice after a window closes. A newer change of yours stops the re-send.
+
+**Doors, windows and dark sensors**
+- Fix #1314: pressing Resume with a window open keeps the heat/AC on for your whole grace. Before, it paused again about 5 minutes later. If the window is still open when the grace ends, it pauses then, as before.
+- Fix #1298: a pause held only by a window sensor that has gone unavailable is now announced. Before, Climate Advisor stayed quiet, expecting ventilation to take over, and ventilation can never start from an unavailable sensor.
+- Fix #1299: the Next Automation card no longer promises "Natural ventilation at …" when only an unavailable window sensor holds the pause.
+
+**Test tooling only (nothing changes at home):**
+- Fixes #1297, #1309, #1317: the simulator's first start-up, the real-HA test tier, and multi-zone simulated houses now end the 5-minute post-restart window as production does. Before, your thermostat changes were ignored for the whole simulated run.
+- Fixes #1310, #1316, #1318: the simulator's thermostat now reports heating or cooling only when a real one would, so simulated runtime is no longer inflated or undercounted.
+- No golden outcome changed. One golden's actions now land 1 s earlier, at production's real timer (owner-accepted). Pending scenarios 912 and 952 were re-scoped with owner approval.
+
 ## [0.8.55] — 2026-11-03
 
 - Fix #1289: suppose a window has been open long past its delay on a cool evening, and someone opens a second door for a moment. While that door was still inside its own delay, Climate Advisor held off restarting free cooling (the whole-house fan or the blower), for up to one delay (10 minutes by default), so the house stayed warmer than it needed to. Now one window open past its own delay is enough to say "the house is open"; what other doors are doing doesn't matter. Only the "is the house sealed?" checks still need every sensor closed. On the same start paths, a window that has gone dark (unavailable, last reading open) could start the blower when your manual grace ended, or start either fan when a second door opened briefly. A dark sensor still keeps the heating or cooling paused, but it never starts a fan.

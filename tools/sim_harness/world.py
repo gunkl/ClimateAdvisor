@@ -223,6 +223,37 @@ class Weather:
         return sun * (1.0 - self.cloud)
 
 
+def thermostat_running(
+    mode: str,
+    shown_f: float,
+    setpoint_f: float,
+    running: str | None,
+    *,
+    start_f: float,
+    stop_f: float | None = None,
+) -> str | None:
+    """A single-setpoint thermostat's own control loop: ``"heating"``, ``"cooling"`` or ``None`` (idle).
+
+    The equipment STARTS once the reading is ``start_f`` past the setpoint (heat: ``<= setpoint - start_f``;
+    cool: ``>= setpoint + start_f``) and, once running, STOPS ``stop_f`` past it in the direction of travel
+    (heat: ``>= setpoint + stop_f``; cool: ``<= setpoint - stop_f``; ``None`` = symmetric, ``start_f``).
+    ``running`` is the equipment state before this decision; a value that does not belong to ``mode`` (e.g.
+    ``"heating"`` after a switch to cool) is a fresh start, as a mode change resets a real thermostat.
+    Same rule as the real-HA simulated thermostat (``ca_dev_thermostat_sim``'s ``_decide_compressor_state``,
+    without its dwell timers). Shared by ``ToyHouse`` and the FakeHass thermostat (Issue #1310).
+    """
+    stop = start_f if stop_f is None else stop_f
+    if mode == "heat":
+        if running == "heating":
+            return None if shown_f >= setpoint_f + stop else "heating"
+        return "heating" if shown_f <= setpoint_f - start_f else None
+    if mode == "cool":
+        if running == "cooling":
+            return None if shown_f <= setpoint_f - stop else "cooling"
+        return "cooling" if shown_f >= setpoint_f + start_f else None
+    return None
+
+
 class ToyHouse:
     """Indoor temperature plus the thermostat's own on/off control."""
 
@@ -248,27 +279,17 @@ class ToyHouse:
         the stop point is ``off_offset_f`` when set, else the same ``swing_f`` on the far side);
         any other mode (off, fan_only, unavailable, ...) runs nothing.
         """
-        shown = self.reported_f()
-        stop_f = self.p.swing_f if self.p.off_offset_f is None else self.p.off_offset_f
         if mode not in ("heat", "cool") or setpoint_f is None:
             self.running = None
             return "off" if mode == "off" else "idle"
-        if mode == "heat":
-            if self.running == "heating":
-                if shown >= setpoint_f + stop_f:
-                    self.running = None
-            elif shown <= setpoint_f - self.p.swing_f:
-                self.running = "heating"
-            else:
-                self.running = None
-        else:
-            if self.running == "cooling":
-                if shown <= setpoint_f - stop_f:
-                    self.running = None
-            elif shown >= setpoint_f + self.p.swing_f:
-                self.running = "cooling"
-            else:
-                self.running = None
+        self.running = thermostat_running(
+            mode,
+            self.reported_f(),
+            setpoint_f,
+            self.running,
+            start_f=self.p.swing_f,
+            stop_f=self.p.off_offset_f,
+        )
         return self.running or "idle"
 
     def step(self, minutes: float, outdoor_f: float, solar_factor: float, windows_open: bool) -> float:

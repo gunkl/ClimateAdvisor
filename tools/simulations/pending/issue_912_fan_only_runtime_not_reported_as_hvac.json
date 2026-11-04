@@ -1,9 +1,10 @@
 {
   "name": "issue_912_fan_only_runtime_not_reported_as_hvac",
-  "description": "A ~400-minute overnight thermostat fan_only (whole-house-fan-driven) run, with the compressor/burner never turning on, must never be commanded or reported as real heat/cool activity (Issue #912).",
+  "description": "An occupant's overnight switch of the thermostat to fan_only (whole-house-fan-driven) is honoured as their override: no cool/heat is commanded while its grace runs, and the fan_only minutes are reported under their own runtime field, never blended into heat/cool runtime (Issue #912).",
   "source": "issue-report",
   "issue": 912,
   "use_coordinator": true,
+  "skip_startup_coalesce": true,
   "notes": [
     "Occupant impact: a Climate Advisor activity report told the occupant that heat or AC ran for",
     "402 minutes overnight, when in fact only the whole-house fan / thermostat fan_only mode ran --",
@@ -23,38 +24,23 @@
     "_glide_hvac_session_mode() helper so the old mode's timer cannot silently keep accumulating",
     "under the wrong field.",
     "",
-    "Three-exercise protocol (CLAUDE.md Sec 10) -- HONEST SCOPING, verified not assumed:",
-    "(a) Scenario effectiveness: VERIFIED (by code read, not a revert-test) that this specific",
-    "    scenario's assertion does NOT distinguish pre-fix from post-fix behavior, and this is",
-    "    disclosed deliberately rather than glossed over. _async_thermostat_changed() -- the method",
-    "    both the pre-fix bug and the Issue #912 fix live inside -- never issues a climate.set_hvac_mode",
-    "    or set_temperature call itself, pre-fix or post-fix (confirmed via grep: zero",
-    "    services.async_call/set_hvac_mode/set_temperature occurrences in that method's body); it is",
-    "    purely observational bookkeeping (event emission, runtime-timer tracking, thermal-observation",
-    "    start/end). The actual Issue #912 bug and fix are entirely inside DailyRecord numeric fields",
-    "    (hvac_runtime_minutes vs. thermostat_fan_only_runtime_minutes) and the end-of-day watchdog's",
-    "    thermal_learning_no_observations event -- and this harness's ProductionRunResult has no",
-    "    field-resolution path to coordinator._today_record (engine_state only snapshots",
-    "    AutomationEngine flags, never the coordinator) and no event type that drives",
-    "    _async_end_of_day(). A golden scenario that claimed to prove the numeric split or the",
-    "    watchdog's silence through THIS harness would be asserting something it cannot actually",
-    "    observe -- so this scenario does not make that claim. Direct, effective proof (a revert of",
-    "    the fix DOES fail these) lives in",
-    "    tests/test_hvac_session_detection.py::TestIssue912FanOnlyRuntimeTracking (mixed-day glide",
-    "    split, fan_only-never-starts-observation) and",
-    "    tests/test_coordinator.py::TestBriefingRegeneration::test_end_of_day_watchdog_not_triggered_by_fan_only_only_night",
-    "    (direct regression test for the reported false-positive watchdog firing).",
-    "    What THIS scenario legitimately does exercise, end-to-end through the real running",
-    "    coordinator (not a mock): the fan_only turn-on/turn-off edges dispatched via real HA state",
-    "    changes reach _async_thermostat_changed() without raising, without corrupting the routine",
-    "    comfort-band classification cycle, and without ever routing into a live HVAC-commanding code",
-    "    path (comfort-band re-arm, thermal-observation start) during the fan_only session itself --",
-    "    a real (if narrower) regression guard for 'does fan_only session tracking have any command-",
-    "    level side effect', even though it cannot observe the bookkeeping-level bug this issue was",
-    "    actually filed for.",
-    "    The same honest-scoping pattern (naming exactly what a harness limitation prevents proving,",
-    "    rather than silently claiming broader coverage) is used by",
-    "    issue_895_sleep_indoor_sensor_swap.json for its own harness-snapshot limitation.",
+    "Three-exercise protocol (CLAUDE.md Sec 10), re-done for Issue #1297 (2026-11-03, owner-approved re-scope):",
+    "(a) Scenario effectiveness: the earlier note claimed the fan_only edges reached _async_thermostat_changed() and that",
+    "    the harness could not observe the runtime split. Both were wrong. The scenario ran inside the harness's start-up",
+    "    coalescing window, which never ended (Issue #1297), so _async_thermostat_changed() returned early for BOTH",
+    "    thermostat changes and the old 'zero cool/heat commands until 04:45' assertion passed vacuously. And the real",
+    "    end-of-day path does run here: thermal_learning_no_observations at 23:59 carries hvac_runtime_minutes and",
+    "    thermostat_fan_only_runtime_minutes. The scenario is now steady-state (skip_startup_coalesce: true) and asserts",
+    "    what production does: 22:05 fan_only is detected and confirmed as the occupant's override; no cool/heat is",
+    "    commanded until its 15-minute grace ends at 22:20:30 (no set_temperature in (22:00:30, 22:20:29], and the plan's",
+    "    first mode command at 22:20:30 still finds the thermostat in fan_only); the grace then ends and the plan resumes",
+    "    (documented manual-override grace lifetime, docs/grace-periods-spec.md); the 15.5 fan_only minutes",
+    "    (22:05:00-22:20:30) are reported as thermostat_fan_only_runtime_minutes; the 04:45 'off' is the occupant's",
+    "    override. Verified by breaking it (Issue #1297 agent, test-only monkeypatches): with override detection disabled",
+    "    the override assertions fail and CA re-commands cool at 22:05; with fan_only sessions counted as cool runtime",
+    "    the runtime assertion fails.",
+    "    The original '400 minutes with no commands' premise does not match production: a manual override's grace ends",
+    "    after 15 minutes and the plan resumes.",
     "(b) Docs<->production alignment: this scenario's premise (fan_only must never be tracked as",
     "    heat/cool runtime, and must never start a thermal observation) matches",
     "    docs/thermal-model-v3-spec.md's HVAC observation-type table and the DailyRecord field",
@@ -64,9 +50,11 @@
     "    number that implies the heater or AC ran, and never triggers a false 'thermal learning",
     "    found no observations despite N minutes of HVAC runtime' warning for a night when the",
     "    compressor/burner never engaged at all.",
+    "Issue #1310 (2026-11-03): the 23:59 thermal_learning_no_observations assertion is replaced by two field_equals checks on the day record production finalizes at 23:59 (engine_state._finalized_days, a passive harness copy of learning.record_day): thermostat_fan_only_runtime_minutes 15.5 and hvac_runtime_minutes 0.0. That watchdog only fires above 30 min of heat/cool runtime, and it fired here only because the harness thermostat kept reporting the stale 'fan' action after CA's 22:20:30 fan_only->cool (and had no hvac_action at all for the 22:00:30 cool), so production's mode fallback counted 103.5 min of AC runtime with the house at 70 F under a 72 F cool setpoint, where a real AC is idle. With the thermostat deriving its own action (#1310; config thermostat_reports_hvac_action seeds it from the first moment, as a thermostat that reports 'fan' at 22:05 always reports one) heat/cool runtime is 0 and the watchdog correctly stays silent -- the occupant outcome (c) below. The fan_only/heat-cool runtime split and the watchdog's silence are proven against the real coordinator by tests/test_hvac_session_detection.py; the #1310 thermostat by tests/test_fake_thermostat_action_1310.py.",
     "Issue #1200 (2026-11-01): a whole-house fan install requires at least one door/window sensor; a sensorless WHF is unsupported. The scenario now configures binary_sensor.window, seeded closed at the first event (the real coordinator listener now sees its sensor events). Assertions unchanged; the event log gains sensor bookkeeping only."
   ],
   "config": {
+    "thermostat_reports_hvac_action": true,
     "comfort_heat": 68,
     "comfort_cool": 76,
     "setback_heat": 60,
@@ -125,22 +113,83 @@
       "reason": "Normal evening classification cycle runs as always."
     },
     {
+      "at": "2026-06-10T22:05:00",
+      "expect": "event_emitted",
+      "event": "override_detected",
+      "payload_subset": {
+        "detected_mode": "fan_only",
+        "old_mode": "cool",
+        "source": "normal"
+      },
+      "reason": "The occupant switches the thermostat to fan_only at 22:05: production reads it as the occupant's change (not start-up noise, not CA's own echo)."
+    },
+    {
+      "at": "2026-06-10T22:05:30",
+      "expect": "event_emitted",
+      "event": "override_confirmed",
+      "payload_subset": {
+        "mode": "fan_only",
+        "source": "normal"
+      },
+      "reason": "After the 30 s confirm delay the fan_only override is confirmed and a manual grace (900 s) protects it."
+    },
+    {
+      "at": "2026-06-10T22:20:29",
+      "expect": "setpoint_writes",
+      "values": [],
+      "since": "2026-06-10T22:00:30",
+      "reason": "While the occupant's fan_only override is protected, Climate Advisor writes no setpoint (every CA set_temperature bundles cool/heat, Issue #301)."
+    },
+    {
+      "at": "2026-06-10T22:20:30",
+      "expect": "event_emitted",
+      "event": "thermostat_mode_set",
+      "payload_subset": {
+        "from_mode": "fan_only",
+        "to_mode": "cool",
+        "source": "selector"
+      },
+      "reason": "Climate Advisor's first mode command after 22:05 comes when the grace ends, and it still finds the thermostat in fan_only: no cool/heat was commanded in between (a set_hvac_mode cool during the grace would make from_mode 'cool')."
+    },
+    {
+      "at": "2026-06-10T22:20:30",
+      "expect": "event_emitted",
+      "event": "override_cleared",
+      "payload_subset": {
+        "was_mode": "fan_only",
+        "reason": "grace_expired"
+      },
+      "reason": "Production's documented override lifetime: the 15-minute manual grace ends and the plan resumes."
+    },
+    {
+      "at": "2026-06-10T23:59:00",
+      "expect": "field_equals",
+      "field": "engine_state._finalized_days.2026-06-10.thermostat_fan_only_runtime_minutes",
+      "value": 15.5,
+      "reason": "Issue #912: the day record production finalizes at 23:59 reports the 15.5 fan_only minutes (22:05:00-22:20:30) in their own field. Blended into heat/cool runtime this field would read 0."
+    },
+    {
+      "at": "2026-06-10T23:59:00",
+      "expect": "field_equals",
+      "field": "engine_state._finalized_days.2026-06-10.hvac_runtime_minutes",
+      "value": 0.0,
+      "reason": "Issue #912 / #1310: no heat/cool runtime on a night the compressor never ran -- not the fan_only minutes, and not CA's cool mode at 70 F under the 72 F ceiling (the AC is idle there)."
+    },
+    {
       "at": "2026-06-11T04:45:00",
-      "expect": "hvac_mode_never_commanded",
-      "forbidden_modes": [
-        "cool",
-        "heat"
-      ],
-      "since": "2026-06-10T22:05:00",
-      "track": "logic",
-      "simulator_support": true,
-      "reason": "Issue #912: 'since' is scoped to the moment the fan_only session starts (22:05), deliberately excluding the routine 22:00 classification cycle's own comfort-band threshold command (which legitimately bundles hvac_mode='cool' into a set_temperature call on ANY warm-day cycle per the documented single-setpoint-threshold architecture -- see CLAUDE.md's Warm-Day Classification Behavior section -- and is unrelated to this issue). From the fan_only turn-on edge through the turn-off edge ~400 minutes later, with no further classification cycles firing, production must issue zero additional set_hvac_mode/set_temperature commands into 'cool' or 'heat' -- proving the coordinator's fan_only session-mode tracking (_glide_hvac_session_mode/_start_runtime_timer/_flush_runtime_for_mode) is purely observational bookkeeping with no HVAC-commanding side effect, and that the fan_only turn-on/turn-off edges are never misrouted into the comfort-band re-arm or thermal-observation-start code paths that DO carry live commands."
+      "expect": "event_emitted",
+      "event": "override_detected",
+      "payload_subset": {
+        "detected_mode": "off",
+        "old_mode": "cool"
+      },
+      "reason": "The occupant's 04:45 'off' is seen as their own change."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "A long overnight thermostat fan_only run, driven through the real coordinator's state-change listener, produces zero HVAC-commanding side effects during the session (Issue #912) -- this scenario's scope is deliberately narrower than the full bug fix (see note (a)): it confirms the fan_only session-tracking code path never routes into a live command, but the actual reported defect (hvac_runtime_minutes miscounting fan_only time, and the resulting false thermal_learning_no_observations watchdog) is proven directly by this issue's unit tests, not by this harness scenario.",
-    "observed_behavior": "classification_applied at 22:00 (routine comfort-band threshold command, unrelated to this issue) -> thermostat enters fan_only at 22:05 (hvac_action='fan' throughout) -> thermostat returns to off at 04:45 the next morning, 400 minutes later -> zero additional climate.set_hvac_mode/set_temperature calls into 'cool' or 'heat' occur from the fan_only turn-on edge onward.",
+    "summary": "The occupant's overnight thermostat fan_only is honoured as their override (detected, confirmed, no cool/heat commanded during its grace), the plan resumes when the grace ends (Issue #912).",
+    "observed_behavior": "22:00 classification (cool armed at the sleep ceiling 72) -> 22:05 occupant sets fan_only: override_detected, whole-house-fan reconcile turns fan.whf off (no cool/heat) -> 22:05:30 override_confirmed, grace 900 s -> no setpoint/mode command until 22:20:30 -> grace expires, plan resumes cool (thermostat_mode_set fan_only->cool) -> the AC stays idle (house 70 F under the 72 F ceiling), so no heat/cool runtime and no 23:59 runtime watchdog -> 04:45 occupant 'off' detected as override.",
     "expected_behavior": "The occupant's activity report shows 0 minutes of heat/cool runtime and the fan-only runtime separately and correctly labeled for this night -- never a false claim that the heater or AC ran, and never a false 'thermal learning found no observations' warning for a night when the compressor/burner never engaged at all. This scenario proves the fan_only session-tracking code path is command-inert; the numeric DailyRecord split and the watchdog's silence are proven directly against the real coordinator by tests/test_hvac_session_detection.py and tests/test_coordinator.py (see note (a))."
   }
 }

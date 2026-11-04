@@ -33,6 +33,11 @@ Deliberate environment choices (reported, never hidden):
   premise.  ``coordinator_refresh`` events still run a real refresh.
 * No weather entity exists (as in FakeHass), so Climate Advisor finds no forecast and never classifies the day
   on its own; scenarios hand-feed the classification.
+* Because there is no forecast, a refresh never reaches production's start-up coalescing gate (it sits inside the
+  refresh's ``if forecast:`` block).  The adapter completes that gate after every real refresh (Issue #1309, the
+  real-HA mirror of Tier A's #1291/#1297): the real 300 s timer fires and requests a real refresh, and the
+  refresh then runs the real ``_do_startup_coalesce()`` when ``_startup_timer_fired and _startup_coalesce_active
+  and _current_classification``.  So a start-up window (initial start, every ``simulate_restart``) ENDS at +300 s.
 * The sim thermostat reports tenths of a degree (HA's default is whole degrees in F; FakeHass passes every reading
   through unrounded).
 * Outdoor temperature reaches Climate Advisor through a real entity read by its real listener
@@ -52,6 +57,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 from homeassistant.util.async_ import get_scheduled_timer_handles
 from pytest_homeassistant_custom_component.common import async_fire_time_changed, async_mock_service
@@ -196,6 +202,8 @@ class RealHASession:
         self._closed = False
         self._events = sorted_events(scenario)
         self.leaked_timers: list[str] = []
+        self._coalesced_by_timer = False  # Issue #1309: the +300 s timer's refresh already coalesced this window
+        self._cancel_coalesce_recheck: Any = None
 
     # ------------------------------------------------------------------ build
     @property
@@ -303,6 +311,62 @@ class RealHASession:
         if not self._want_window:
             # what FakeHass does for skip_startup_coalesce: the window closes by flag, not by running a coalesce
             self.coordinator._startup_coalesce_active = False
+        self._arm_startup_coalesce_end()
+
+    def _arm_startup_coalesce_end(self) -> None:
+        """Let the start-up window this set-up opened END at +300 s, as in production (Issue #1309).
+
+        Production (``coordinator.async_setup``) arms ``async_call_later(300)``; its callback sets
+        ``_startup_timer_fired`` and requests a refresh, and that refresh runs ``_do_startup_coalesce()`` when
+        ``_startup_timer_fired and _startup_coalesce_active and _current_classification``.  That method clears
+        ``_startup_coalesce_active`` and re-applies the plan, so a thermostat change made inside the window is
+        overwritten (owner decision #1235).  Here the real timer fires and the real refresh runs, but with no
+        weather entity the refresh finds no forecast and the gate, inside its ``if forecast:`` block, is never
+        reached: the window never ended and every later occupant change was ignored as start-up noise.
+
+        So after every real refresh of this coordinator instance the adapter evaluates the same gate and awaits the
+        REAL ``_do_startup_coalesce()``.  It is a no-op whenever production's own gate could already have run (the
+        flag is then clear), and it adds no trigger of its own: the refresh that reaches it is the one production's
+        timer (or a weather retry / ``coordinator_refresh`` event) requested.  If the timer fired before any
+        classification existed, production waits for the next periodic refresh; this adapter cancels that periodic
+        timer (``periodic_refresh=False``), so it re-checks the gate every 30 min (``update_interval``) instead,
+        exactly as Tier A's ``arm_startup_coalesce_end`` does.  A second start (``simulate_restart``) re-arms this
+        for the new coordinator instance and drops the previous re-check, as unloading the old instance does.
+        """
+        self._drop_coalesce_recheck()
+        self._coalesced_by_timer = False
+        coordinator = self.coordinator
+        original = coordinator._async_update_data_impl
+
+        async def _refresh_then_gate() -> Any:
+            result = await original()
+            await self._startup_coalesce_gate(coordinator)
+            return result
+
+        coordinator._async_update_data_impl = _refresh_then_gate
+
+    async def _startup_coalesce_gate(self, coordinator: Any) -> None:
+        """Production's refresh-cycle coalescing gate (see ``_arm_startup_coalesce_end``)."""
+        if coordinator is not self.coordinator or self._closed:
+            return  # an unloaded instance (after a restart) never coalesces again
+        if not (coordinator._startup_timer_fired and coordinator._startup_coalesce_active):
+            return
+        if coordinator._current_classification:
+            self._coalesced_by_timer = True
+            await coordinator._do_startup_coalesce()
+            return
+        if not self.periodic_refresh and self._cancel_coalesce_recheck is None:
+
+            async def _recheck(_now: Any) -> None:
+                self._cancel_coalesce_recheck = None
+                await self._startup_coalesce_gate(coordinator)
+
+            self._cancel_coalesce_recheck = async_call_later(self.hass, 1800, _recheck)
+
+    def _drop_coalesce_recheck(self) -> None:
+        if self._cancel_coalesce_recheck is not None:
+            self._cancel_coalesce_recheck()
+            self._cancel_coalesce_recheck = None
 
     async def _add_devices(self, house: House) -> None:
         """Called by build_house between the sim and Climate Advisor set-up: the scenario's fan and notify service."""
@@ -575,7 +639,10 @@ class RealHASession:
             return "direct-callback"
 
         if etype == "startup_coalesce":
-            await coordinator._do_startup_coalesce()
+            # Issue #1309: production coalesces once per window.  If the +300 s timer's refresh already ran it,
+            # this event is that same refresh (as in Tier A, Issue #1297) and does nothing.
+            if not self._coalesced_by_timer:
+                await coordinator._do_startup_coalesce()
             return "direct-callback"
 
         if etype == "fan_backstop_tick":
@@ -611,6 +678,7 @@ class RealHASession:
             await house.restart(settle=False)
             self._quiesce()
             self._apply_injected_inputs()
+            self._arm_startup_coalesce_end()  # Issue #1309: the restart's window ends at +300 s
             return "real-lifecycle"
 
         if etype in _NOOP_EVENTS:
@@ -717,6 +785,7 @@ class RealHASession:
         if self._closed:
             return
         self._closed = True
+        self._drop_coalesce_recheck()
         logging.getLogger("custom_components.climate_advisor").removeHandler(self._errors)
         if self.house is not None:
             await self.house.close()

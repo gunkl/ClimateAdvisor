@@ -915,6 +915,28 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
                 return self.json({"status": "ok", "message": "Not currently paused"})
 
             restored_mode = await ae.resume_from_pause()
+            if ae.dry_run:
+                # Issue #1306: observe-only -- the pause is cleared, but no restore was sent (and no grace started).
+                return self.json(
+                    {
+                        "status": "ok",
+                        "message": "Pause cleared. Automation is off (observe-only): no thermostat command was sent.",
+                        "restored_mode": None,
+                    }
+                )
+            if ae.resume_restore_pending:
+                # Issue #1312: the restore did not land; it is being re-sent and the grace starts once it lands.
+                return self.json(
+                    {
+                        "status": "ok",
+                        "message": (
+                            f"Pause cleared. The thermostat did not take {restored_mode or 'the restore'} yet; "
+                            "Climate Advisor is re-sending it. The grace period starts once it lands."
+                        ),
+                        "restored_mode": restored_mode,
+                        "restore_pending": True,
+                    }
+                )
             return self.json(
                 {
                     "status": "ok",

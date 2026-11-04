@@ -481,6 +481,11 @@ class FanCommandResult(Enum):
     OVERRIDDEN = "overridden"
     DISABLED = "disabled"
     SUPPRESSED = "suppressed"  # Issue #835: hvac_fan_restrict_mode blocked activation
+    # Issue #1304 (owner decision 2026-11-03, "no paper sessions"): automation is switched off (observe-only), so
+    # nothing was sent and the fan is exactly where it was. Callers treat it as "nothing happened": no nat-vent /
+    # economizer / min-runtime session starts or ends, no session or escalation Activity row (mirror of
+    # ``HvacCommandResult.DRY_RUN``, #1293/#1295/#1301). Before, dry-run reported EXECUTED.
+    DRY_RUN = "dry_run"
 
 
 # Issue #1132: the FanCommandResult values meaning "the fan-ON command did NOT take effect, so the
@@ -497,11 +502,20 @@ _NAT_VENT_NO_WORKING_FAN_RESULTS = frozenset({FanCommandResult.DISABLED, FanComm
 # min-runtime cycle sets its "running" flag only when the start applied (EXECUTED, ALREADY_IN_STATE and the
 # rate-limiter's deferred results all count as applied).
 _FAN_START_NOT_APPLIED_RESULTS = frozenset(
-    {FanCommandResult.DISABLED, FanCommandResult.OVERRIDDEN, FanCommandResult.SUPPRESSED}
+    {FanCommandResult.DISABLED, FanCommandResult.OVERRIDDEN, FanCommandResult.SUPPRESSED, FanCommandResult.DRY_RUN}
 )
 _MIN_RUNTIME_REFUSED_RETRY_S = 3600.0
+# Issue #1304: DRY_RUN (observe-only, nothing sent) records no session either -- the idle-open / grace re-checks simply
+# ask again next tick, and a door/window pause recorded with automation on is kept (the thermostat is still Off).
 _NAT_VENT_ACTIVATION_NOT_APPLIED = (
-    frozenset({FanCommandResult.OVERRIDDEN, FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP})
+    frozenset(
+        {
+            FanCommandResult.OVERRIDDEN,
+            FanCommandResult.RATE_LIMITED_NEW,
+            FanCommandResult.RATE_LIMITED_DUP,
+            FanCommandResult.DRY_RUN,
+        }
+    )
     | _NAT_VENT_NO_WORKING_FAN_RESULTS
 )
 
@@ -616,6 +630,30 @@ class ComfortModeWrite:
 
 
 @dataclass(frozen=True)
+class PendingRestore:
+    """A restore that has not landed yet (Issue #1308, owner decision 2026-11-03 "retry, no grace").
+
+    Written when the restore after the last window closed, or a whole-house fan release's restore, comes back
+    ``FAILED`` or ``UNCONFIRMED`` with the thermostat not reading the restored mode. ``target`` is the mode the restore
+    asked for (``_restore_landed()`` prefers the newest commanded mode); ``trigger`` is the automation grace to start
+    once it lands (None: the site starts none); ``reason`` labels the logs and the Activity row. In memory only: a
+    restart re-applies the plan, which is the same restore.
+    """
+
+    target: str | None
+    trigger: str | None
+    reason: str
+    # Issues #1312/#1313: whose restore this is. "automation" (window close / fan release: automation grace on
+    # landing), "dashboard_resume" (the occupant's Resume: the MANUAL dashboard_resume grace on landing) or
+    # "occupant_mode" (the occupant's own protected mode restored as the window closes: mode only, no grace).
+    kind: str = "automation"
+    # "occupant_mode": ``_override_confirm_time`` when armed (a different, non-None value later = a NEWER occupant
+    # change) and the thermostat mode the failed restore left (anything else but the target = changed meanwhile).
+    occupant_mark: str | None = None
+    from_mode: str | None = None
+
+
+@dataclass(frozen=True)
 class HvacWriteRecord:
     """New facts about the last climate write that no other field carries (Issue #1049).
 
@@ -667,6 +705,12 @@ CLIMATE_CALL_TIMEOUT_S = 10
 
 # Seconds after a write before the second read-back mode check (cloud echo lag is 30-120 s).
 MODE_ALIGNMENT_RECHECK_S = 130
+
+# Issue #1302: re-send schedule for an open-window Off (door/window pause, nat-vent exit hold) that came back FAILED
+# or UNCONFIRMED. Each delay is counted from the previous attempt; the first keeps rule 3 within ~30 s (G1). After the
+# last one the 30-minute cycle's DEFER_PAUSED force-off keeps trying (bounded, G2).
+OPEN_WINDOW_OFF_RETRY_DELAYS_S: tuple[float, ...] = (15.0, 60.0, 300.0)
+# Issues #1307/#1308: the same schedule re-sends a blower-ventilation Off and a restore that did not land.
 
 
 # Issue #664: moved to const.py (GRACE_TRIGGERS_PROTECTING_OVERRIDE) as the single source of
@@ -1297,6 +1341,8 @@ class AutomationEngine:
     _whf_safety_seen_off_since_stop: bool = True
     # Issue #1176: a sealed-house stop's HVAC restore waits for the fan to read physically off.
     _whf_restore_pending: bool = False
+    _pending_restore: PendingRestore | None = None  # Issue #1308 (set in __init__; default for bare test engines)
+    _restore_resend_cancel: Any | None = None
     _whf_restore_verify_passed: bool = False
     # Issue #1215: the stop memory. Climate Advisor's last command to the whole-house fan control entity
     # (direction "on"/"off", when, and whether the entity read "on" just before), and whether the physical reading
@@ -1462,6 +1508,9 @@ class AutomationEngine:
 
         # Dry-run mode: when True, all service calls are logged but skipped
         self.dry_run: bool = False
+        # Issue #1304: (direction, caller) -> when the "[DRY RUN] Would activate/deactivate fan" line last logged at
+        # INFO. With no paper session recorded, observe-only re-asks every tick; repeats within 30 min log at DEBUG.
+        self._fan_dry_run_logged: dict[tuple[str, str], datetime] = {}
         # Issue #1102: set by the coordinator first thing in async_shutdown() and by
         # cleanup(); once set, this engine refuses every command, notification and arm.
         self._shut_down: bool = False
@@ -1997,6 +2046,11 @@ class AutomationEngine:
         self._fan_on_verify_cancel: Any | None = None
         # Issue #1195: timer that finishes a closed-window nat-vent exit the 5-minute fan-toggle floor deferred.
         self._nat_vent_closed_exit_retry_cancel: Any | None = None
+        # Issue #1302: re-sends an open-window Off (pause / nat-vent exit hold) that failed or went unconfirmed.
+        self._open_window_off_retry_cancel: Any | None = None
+        # Issue #1308: a restore (window closed / whole-house fan release) that did not land, and its re-send timer.
+        self._pending_restore: PendingRestore | None = None
+        self._restore_resend_cancel: Any | None = None
         # Issue #1195: bumped on every nat-vent session start/end (_decision_pass); the retry only acts on the
         # session that was live when it was scheduled.
         self._nat_vent_session_seq: int = 0
@@ -2231,6 +2285,29 @@ class AutomationEngine:
     def is_paused_by_door(self) -> bool:
         """Whether HVAC is currently paused due to an open door/window."""
         return self._paused_by_door
+
+    def _dashboard_resume_holds_open_window(self) -> bool:
+        """Whether the occupant's dashboard Resume holds an open window un-paused (Issues #1312, #1314).
+
+        A Resume is a recognised manual action: rule 3 lets it run HVAC with the window open, and grace-periods-spec's
+        state table says a manual / dashboard-resume grace is not re-paused (a NEW window open is suppressed too, in
+        ``handle_door_window_open()``). True while that ``dashboard_resume`` manual grace runs, or while the Resume's
+        restore is still in flight / being re-sent before its grace starts (#1312). The grace expiry ends it and
+        ``_re_pause_for_open_sensor()`` re-pauses a window still open.
+        """
+        if self.resume_restore_pending:
+            return True
+        return bool(
+            self._grace_active is True
+            and self._last_resume_source == "manual"
+            and self._last_grace_trigger == "dashboard_resume"
+        )
+
+    @property
+    def resume_restore_pending(self) -> bool:
+        """Whether a dashboard Resume's restore is still being re-sent, its manual grace not started (Issue #1312)."""
+        pending = self._pending_restore
+        return pending is not None and pending.kind == "dashboard_resume"
 
     @property
     def natural_vent_active(self) -> bool:
@@ -3887,7 +3964,9 @@ class AutomationEngine:
 
         if should_deactivate:
             self._fan_min_runtime_active = False
-            await self._deactivate_fan(reason="min_runtime_cycle_complete")
+            if await self._deactivate_fan(reason="min_runtime_cycle_complete") is FanCommandResult.DRY_RUN:
+                # Issue #1304: observe-only sent no stop, so the cycle's run is still going.
+                self._fan_min_runtime_active = True
 
         @callback
         def _turn_on(_now: Any) -> None:
@@ -3981,6 +4060,14 @@ class AutomationEngine:
         # is no longer guaranteed there).
         self._end_nat_vent_session(result)
         self._end_fan_override_for_rule2_stop(result)
+        if result is FanCommandResult.DRY_RUN:
+            # Issue #1304: observe-only sent no stop; the session continues and no exit row is written.
+            _LOGGER.info(
+                "[DRY RUN] Nat-vent would end for the manual override to %s — nothing sent, session kept role=%s",
+                mode,
+                self.role,
+            )
+            return
         if self._emit_event_callback:
             payload = {
                 "indoor_temp": indoor_temp,
@@ -4666,6 +4753,14 @@ class AutomationEngine:
                 self._release_comfort_hold(dt_util.now())
                 return
 
+            if self.resume_restore_pending:
+                # Issue #1312: the occupant's dashboard Resume restore is in flight or being re-sent (bounded, at most
+                # ~6 min). One writer: a cycle write racing it would supersede it (``SUPERSEDED``), and the Resume's
+                # grace would start before anything landed. Not re-pausing is #1314's rule
+                # (``_dashboard_resume_holds_open_window()``); the chain ending hands the cycle back.
+                _LOGGER.info("apply_classification: dashboard Resume restore pending -- skipping this cycle")
+                return
+
             # Issue #498: occupancy/paused/nat-vent checks below now route through the single
             # shared gate (desired_state.decide_scheduled_band_gate()) also used by
             # handle_bedtime()/handle_morning_wakeup()/handle_pre_cool() — pure extraction of
@@ -4923,7 +5018,21 @@ class AutomationEngine:
         *not* own HVAC yet the window is still open.
         """
         self._last_comfort_band = band
-        if decide_open_sensor_hold(
+        if (
+            decide_open_sensor_hold(
+                natural_vent_active=self._natural_vent_active,
+                whf_owns_hvac=self._whf_owns_hvac(),
+                any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
+            )
+            and self._dashboard_resume_holds_open_window()
+        ):
+            # Issue #1314: the occupant's dashboard Resume is a recognised manual action -- rule 3 lets it run HVAC
+            # with the window open until its grace expires (then the grace-expiry re-pause applies).
+            _LOGGER.info(
+                "_apply_comfort_band: door/window open but the occupant's dashboard Resume holds it -- arming %s",
+                band.active,
+            )
+        elif decide_open_sensor_hold(
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
             any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
@@ -7406,6 +7515,11 @@ class AutomationEngine:
             return  # the occupant owns the thermostat; grace expiry / the gate decide, not this
         if self._paused_by_door:
             return  # already paused
+        if self._dashboard_resume_holds_open_window():
+            # Issues #1312/#1314: the occupant's dashboard Resume is in effect (its manual grace, or its restore still
+            # being re-sent before that grace starts). grace-periods-spec: no re-pause during a dashboard-resume
+            # grace; grace expiry re-pauses a window still open.
+            return
         if self._is_within_planned_window_period():
             return  # this lazy reconcile only: the event handlers decide (gate / pause) inside the period
         if not decide_open_sensor_hold(
@@ -7487,6 +7601,9 @@ class AutomationEngine:
                     self.role,
                 )
                 return None
+            # Issue #1302: a FAILED / UNCONFIRMED Off keeps the pause (the window IS open and ``_pre_pause_mode`` is
+            # what closing it restores) and re-sends the Off soon while the thermostat still reads an active mode.
+            self._arm_open_window_off_retry(_off_result, reason=f"door/window pause ({entity_label})")
             if not quiet:
                 await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
             if self._emit_event_callback:
@@ -7761,6 +7878,20 @@ class AutomationEngine:
                 # this pre-await decision directly — a manual override arriving
                 # during the await above must not be silently overwritten.
                 _keep_live_session = _session_was_live and _activation_result in _NAT_VENT_ACTIVATION_NOT_APPLIED
+                if _activation_result is FanCommandResult.DRY_RUN and not _session_was_live:
+                    # Issue #1304 ("no paper sessions"): observe-only sent no fan-on, so no session starts and no
+                    # "natural_ventilation" row is written. No pause either: the pause path would come back DRY_RUN
+                    # too (#1293), and Climate Advisor would have ventilated, not paused.
+                    self._apply_nat_vent_fsm_state_after_activation(_fsm_result.to_state, _activation_result)
+                    _LOGGER.info(
+                        "[DRY RUN] Nat vent would start (%s): outdoor %.1f°F < indoor %.1f°F — no fan command sent,"
+                        " no session recorded (observe-only) role=%s",
+                        entity_id,
+                        outdoor,
+                        indoor,
+                        self.role,
+                    )
+                    return
                 if _keep_live_session:
                     _LOGGER.info(
                         "Nat vent session kept on second window open (%s): fan command %s did not apply — "
@@ -8002,10 +8133,20 @@ class AutomationEngine:
                 )
             if target_mode:
                 with self._mode_change_context("restore"):
-                    await self._set_hvac_mode(
+                    _occ_result = await self._set_hvac_mode(
                         target_mode,
                         reason=f"door/window closed — restoring {target_mode} mode (occupant's setpoint kept)",
                     )
+                # Issue #1313: a FAILED / UNCONFIRMED restore of the occupant's own mode is re-sent (mode only, no
+                # grace -- their manual grace already runs). The chain stops on a NEWER occupant change, not because
+                # this one is protected: re-sending their own choice does not override them (G3).
+                self._hold_restore_until_landed(
+                    None,
+                    _occ_result,
+                    target=target_mode,
+                    reason="door/window closed, occupant's mode",
+                    kind="occupant_mode",
+                )
             _LOGGER.info(
                 "Comfort restore skipped: occupant's manual change protected (mode restored only, no setpoint "
                 "or automation grace) restore_mode=%s target_mode=%s occupant_off=%s override_active=%s "
@@ -8025,8 +8166,9 @@ class AutomationEngine:
         # hysteresis gap. If indoor moved across a margin during the pause, the selector's
         # follow-up write in _set_temperature_for_mode() corrects the mode in the same call.
         with self._mode_change_context("restore"):
+            mode_result = None
             if restore_mode:
-                await self._set_hvac_mode(
+                mode_result = await self._set_hvac_mode(
                     restore_mode,
                     reason=f"door/window closed — restoring {restore_mode} mode",
                 )
@@ -8036,7 +8178,7 @@ class AutomationEngine:
                     self._current_classification,
                     reason="door/window closed — restoring comfort",
                 )
-        self._start_grace_period("automation", trigger=trigger)
+        self._start_automation_grace_unless_restore_unsent(trigger, mode_result, write_result)
         _LOGGER.info(
             "Door/window closed: comfort restore dispatched "
             "(restore_mode=%s, rearmed_from_off=%s, write_result=%s, indoor=%s)",
@@ -8269,7 +8411,8 @@ class AutomationEngine:
                         self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                     # Issue #1140: no working fan -> no session and nothing to report. (Deferred and
                     # overridden commands keep their pre-#1140 reporting; see handle_door_window_open().)
-                    if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS:
+                    # Issue #1304: observe-only (DRY_RUN) sent nothing and recorded no session -> no row either.
+                    if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS | {FanCommandResult.DRY_RUN}:
                         await self._apply_nat_vent_hvac_state()
                         # Issue #244: emit so the re-evaluation activation is visible in the
                         # event log / timeline / AI report (previously this path was silent).
@@ -8305,7 +8448,7 @@ class AutomationEngine:
                     # Issue #1205: a same-handler restore is not the pause ending.
                     with self._holding_door_pause():
                         self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
-                    if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS:
+                    if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS | {FanCommandResult.DRY_RUN}:
                         await self._apply_nat_vent_hvac_state()
                         if self._emit_event_callback:
                             self._emit_event_callback(
@@ -8531,6 +8674,16 @@ class AutomationEngine:
                     # ordering relative to the deactivate call, and the result check,
                     # changed.
                     self._end_nat_vent_session(_comfort_floor_result)
+                    if _comfort_floor_result is FanCommandResult.DRY_RUN:
+                        # Issue #1304: observe-only sent no stop -- the session continues, no exit row, no restore.
+                        _LOGGER.info(
+                            "[DRY RUN] Natural vent would exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F —"
+                            " nothing sent, session kept role=%s",
+                            indoor,
+                            _vent_floor,
+                            self.role,
+                        )
+                        return
                     _LOGGER.info(
                         "Natural vent exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F — restoring %s",
                         indoor,
@@ -8570,11 +8723,11 @@ class AutomationEngine:
                         # selector call below writes mode + setpoint in one explicit switch.
                         # Issue #1208: no label gate -- the family comes from the armed band.
                         with self._mode_change_context("nat_vent"):
-                            await self._set_temperature_for_mode(
+                            _floor_write = await self._set_temperature_for_mode(
                                 c,
                                 reason="natural vent comfort-floor exit — restoring comfort",
                             )
-                        self._start_grace_period("automation", trigger="nat_vent_exit_resume")
+                        self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _floor_write)
                     return
 
                 if exit_decision.reason == NatVentExitReason.AWAY_CEILING:
@@ -8618,6 +8771,8 @@ class AutomationEngine:
                     # Issue #931: flags clear only once the result above is known — see
                     # _end_nat_vent_session().
                     self._end_nat_vent_session(_away_ceiling_result)
+                    if _away_ceiling_result is FanCommandResult.DRY_RUN:
+                        return  # Issue #1304: observe-only sent no stop; the session continues, no exit row
                     # Do NOT pause -- just let away setback handle HVAC
                     # Issue #649: skip emitting a duplicate report for a repeat block within
                     # an already-reported deferral window (same reasoning as _exit_nat_vent()'s
@@ -9009,6 +9164,8 @@ class AutomationEngine:
                     # its event-emission check below, but previously never used it to gate
                     # the flag clear itself).
                     self._end_nat_vent_session(_away_result)
+                    if _away_result is FanCommandResult.DRY_RUN:
+                        return  # Issue #1304: observe-only sent no stop; the session continues, no exit row
                     if self._emit_event_callback and _away_result is not FanCommandResult.RATE_LIMITED_DUP:
                         _away_temp_check_payload = {
                             "indoor": current_temp,
@@ -9149,6 +9306,7 @@ class AutomationEngine:
                     self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
                     and self._emit_event_callback
                     and _cycling_off_result is not FanCommandResult.RATE_LIMITED_DUP
+                    and _cycling_off_result is not FanCommandResult.DRY_RUN  # Issue #1304: nothing sent
                 ):
                     _cycling_off_payload = {
                         "indoor_temp": current_temp,
@@ -9178,6 +9336,7 @@ class AutomationEngine:
                     self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
                     and self._emit_event_callback
                     and _cycling_on_result is not FanCommandResult.RATE_LIMITED_DUP
+                    and _cycling_on_result is not FanCommandResult.DRY_RUN  # Issue #1304: nothing sent
                 ):
                     _cycling_on_payload = {
                         "indoor_temp": current_temp,
@@ -10117,6 +10276,21 @@ class AutomationEngine:
             # off because of that transition. The 2026-08-10 incident: this exact branch force-
             # set HVAC to "off" 5 minutes after the AC had legitimately started cooling, because
             # it misread the blower phase as "the WHF stopped."
+            if self.dry_run and self._fan_active:
+                # Issue #1311: observe-only. The fan is OBSERVED off (it stopped by itself, its off event was missed),
+                # so recording that is bookkeeping, not a command: without it _deactivate_fan() returns DRY_RUN before
+                # clearing _fan_active (#1304), the fan stays "running" on paper and the next start after re-enable
+                # reads ALREADY_IN_STATE with the fan off. Clearing it here sends the call below down the
+                # already-inactive branch, which releases the fan's HVAC ownership as #1305 decided (released, the
+                # restore comes back DRY_RUN: nothing sent, no Activity row). With automation on _fan_active is left
+                # as it is, so the normal path still emits fan_deactivated (#949).
+                _LOGGER.info(
+                    "[DRY RUN] Fan reconcile: fan observed off while recorded running -- recording it off and"
+                    " releasing its HVAC ownership, nothing sent (trigger=%s) role=%s",
+                    trigger,
+                    self.role,
+                )
+                self._fan_active = False
             await self._deactivate_fan(
                 reason=f"{trigger} reconcile — fan confirmed off, releasing any stranded HVAC suppression",
                 # Issue #1181: nor into a door/window that reads open or went dark after last reading open.
@@ -10479,6 +10653,9 @@ class AutomationEngine:
         (not pre_pause_mode, since classification may have changed), and
         starts a manual override grace period to prevent immediate re-pause.
 
+        Issue #1306: in observe-only (the restore came back ``DRY_RUN``) the pause is still
+        cleared but no grace starts -- see the comment at the grace start below.
+
         Returns the restored mode string, or None if not currently paused.
         """
         # Issue #721: see handle_manual_override_during_pause()'s matching comment —
@@ -10499,9 +10676,19 @@ class AutomationEngine:
         self._paused_entity = None
         self._paused_since = None
         self._pre_pause_mode = None
+        _resumed_from_pause_before = self._resumed_from_pause
         self._resumed_from_pause = True
 
         restore_mode = None
+        _mode_result: HvacCommandResult | None = None
+        _temp_result: HvacCommandResult | None = None
+        if not self.dry_run:
+            # Issue #1312: the Resume is in effect while its restore is in flight (no timer yet). A refresh that runs
+            # during the await (a failed write requests one) must not re-pause the open window the occupant resumed.
+            self._end_pending_restore()
+            self._pending_restore = PendingRestore(
+                target=None, trigger="dashboard_resume", reason="dashboard resume", kind="dashboard_resume"
+            )
         if self._current_classification:
             restore_mode = self._current_classification.hvac_mode
             if restore_mode:
@@ -10514,19 +10701,52 @@ class AutomationEngine:
                 # must restore it. What the guard rightly prevented -- a BLIND ``set_hvac_mode("off")`` -- stays
                 # prevented: "off" is excluded from the blind write below, the selector write resolves the family.
                 if restore_mode not in ("heat", "cool", "off"):
-                    await self._set_hvac_mode(
+                    _mode_result = await self._set_hvac_mode(
                         restore_mode,
                         reason="user resumed from door/window pause",
                     )
                 with self._mode_change_context("restore"):
-                    await self._set_temperature_for_mode(
+                    _temp_result = await self._set_temperature_for_mode(
                         self._current_classification,
                         reason="user resumed from door/window pause",
                     )
 
+        # Issue #1306 (owner decision 2026-11-03, "clear pause, no grace"): in observe-only the restore above comes
+        # back DRY_RUN -- nothing reached the thermostat. The occupant's Resume still ends the pause belief (they said
+        # they no longer want it), but no manual grace starts for a restore that was never sent, and the "resumed --
+        # door/window override" Status wording (``_resumed_from_pause``) is not claimed. Re-enabling automation
+        # re-applies the plan (#1296) and re-pauses for a window still open (#1293 reconcile). With automation on this
+        # is unchanged. Results other than DRY_RUN keep the existing semantics (#1302).
+        if self.dry_run is True and all(
+            r is None or r is HvacCommandResult.DRY_RUN for r in (_mode_result, _temp_result)
+        ):
+            self._resumed_from_pause = _resumed_from_pause_before
+            _LOGGER.info(
+                "[DRY RUN] Dashboard resume: door/window pause cleared, restore to %s not sent and no manual grace "
+                "started (observe-only) role=%s",
+                restore_mode,
+                self.role,
+            )
+            return restore_mode
+
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         _trigger = "dashboard_resume"
+        # Issue #1312 (owner decision 2026-11-03, "same as #1308"): the pause stays cleared (the occupant asked for
+        # that), but a restore that came back FAILED, or UNCONFIRMED with the thermostat not reading it, is re-sent on
+        # the bounded 15/60/300 s chain and the MANUAL grace starts only once it lands (an UNCONFIRMED that landed
+        # starts it now). ``resume_restore_pending`` tells the API not to claim a grace while it waits.
+        _decisive = next((r for r in (_temp_result, _mode_result) if r is not None), None)
+        if self._hold_restore_until_landed(
+            _trigger,
+            _decisive,
+            target=getattr(self, "_last_commanded_hvac_mode", None),
+            reason="dashboard resume",
+            kind="dashboard_resume",
+        ):
+            _LOGGER.info("Dashboard resume: the restore did not land -- re-sending it; manual grace waits for it")
+            return restore_mode
+        self._end_pending_restore()
         if self._start_grace_period_action("manual", trigger=_trigger):
             self._resolve_override_grace_fsm_state(kind=_OGFEventKind.DASHBOARD_RESUME)
         return restore_mode
@@ -10669,6 +10889,43 @@ class AutomationEngine:
                 {"source": source, "duration_seconds": duration, "trigger": trigger},
             )
         return True
+
+    def _start_automation_grace_unless_restore_unsent(self, trigger: str, *results: HvacCommandResult | None) -> None:
+        """Start the post-restore automation grace, unless observe-only sent none of the restore (Issue #1300).
+
+        ``results`` are the restore's own command results (None = that command was not attempted). The automation
+        grace says "Climate Advisor just changed the thermostat"; in observe-only every restore write comes back
+        ``DRY_RUN`` (nothing reached the thermostat), so there is no change of ours for a grace to cover and an
+        occupant change in the next minutes must not be read against one (same family as #1293/#1295: record only
+        what was sent). With automation on (``dry_run`` False) this is exactly ``_start_grace_period("automation")``.
+
+        Issue #1308 (owner decision 2026-11-03, "retry, no grace"): the grace also waits for a restore that did not
+        land. The decisive result is the restore's LAST command (the comfort write after a blind mode restore). When it
+        is ``FAILED``, or ``UNCONFIRMED`` with the thermostat not reading the restored mode, the restore is kept pending
+        and re-sent (``_hold_restore_until_landed``); the grace starts once it lands. With no command of its own here
+        (``None``) an earlier step of the same restore still pending (a whole-house fan release's blind mode write)
+        keeps holding the grace. A restore that landed ends any pending re-send.
+        """
+        if self.dry_run is True and all(r is None or r is HvacCommandResult.DRY_RUN for r in results):
+            _LOGGER.info(
+                "[DRY RUN] Automation grace (%s) not started: the restore was not sent (observe-only) role=%s",
+                trigger,
+                self.role,
+            )
+            return
+        decisive = next((r for r in reversed(results) if r is not None), None)
+        pending = self._pending_restore
+        if decisive is None and pending is not None and not self._restore_landed(pending.target):
+            self._pending_restore = replace(pending, trigger=trigger)
+            _LOGGER.info("Automation grace (%s) waits for the pending restore (%s)", trigger, pending.reason)
+            return
+        if self._hold_restore_until_landed(
+            trigger, decisive, target=getattr(self, "_last_commanded_hvac_mode", None), reason=trigger
+        ):
+            _LOGGER.info("Automation grace (%s) not started: the restore did not land, re-sending it", trigger)
+            return
+        self._end_pending_restore()
+        self._start_grace_period("automation", trigger=trigger)
 
     def _start_grace_period(self, source: str, trigger: str = "", duration_override: float | None = None) -> None:
         """Start a grace period after HVAC is resumed.
@@ -12965,13 +13222,13 @@ class AutomationEngine:
         ``_end_grace_left_protecting_nothing()`` ends the grace. A stop that did not go out (rate-limited, never
         for a safety stop today) keeps the override, mirroring ``_end_nat_vent_session()`` (Issue #931).
 
-        Two guards keep the clear to the case it is for. Observe-only (``dry_run``): ``_deactivate_fan()`` reports
-        EXECUTED without sending, so the occupant's fan is still running and its override stays (same as the WHF
+        Two guards keep the clear to the case it is for. Observe-only (``dry_run``): ``_deactivate_fan()`` sends nothing
+        (``DRY_RUN``, Issue #1304), so the occupant's fan is still running and its override stays (same as the WHF
         safety enforcer, which does nothing in observe-only). And only a WHOLE-HOUSE fan override is ended
         (``_is_whf_press()``, the one fan-identity predicate): the thermostat's blower never conflicts with
         heating/cooling, so a stand-down must never end an occupant's newer blower override.
         """
-        if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+        if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP, FanCommandResult.DRY_RUN):
             return
         if self.dry_run:
             return
@@ -13042,11 +13299,32 @@ class AutomationEngine:
 
         self._spawn_whf_task(_send())
 
+    def _log_fan_dry_run(self, direction: str, reason: str) -> None:
+        """INFO the observe-only "[DRY RUN] Would activate/deactivate fan" line, DEBUG on repeats (Issue #1304).
+
+        With no paper session recorded, the nat-vent / economizer re-checks ask again on every tick while the
+        conditions hold; the first ask per caller (and one every 30 min) stays visible at INFO.
+        """
+        _caller = reason.split(" — ")[0].split(":")[0].strip()
+        _key = (direction, _caller)
+        _now = dt_util.now()
+        _last = self._fan_dry_run_logged.get(_key)
+        _fresh = not isinstance(_last, datetime) or (_now - _last).total_seconds() >= 1800
+        if _fresh:
+            self._fan_dry_run_logged[_key] = _now
+        (_LOGGER.info if _fresh else _LOGGER.debug)(
+            "[DRY RUN] Would %s fan — %s; nothing sent, no session change recorded role=%s",
+            direction,
+            reason,
+            self.role,
+        )
+
     def _end_nat_vent_session(self, result: FanCommandResult) -> bool:
         """Clear nat-vent session bookkeeping only once the paired fan command actually ran.
 
         Returns True when the session was ended, False when it was preserved because the fan
-        command was deferred (Issue #1141: ``_exit_nat_vent()`` records the window pause only on
+        command was deferred or, in observe-only, not sent (``DRY_RUN``, Issue #1304).
+        (Issue #1141: ``_exit_nat_vent()`` records the window pause only on
         True -- a pause and a live session must never both be recorded).
 
         The sole place ``_natural_vent_active``/``_nat_vent_soft_start`` are cleared in
@@ -13063,6 +13341,11 @@ class AutomationEngine:
         with nothing left to retry stopping it, since ``nat_vent_temperature_check()``
         opens with ``if not self._natural_vent_active: return``.
         """
+        if result is FanCommandResult.DRY_RUN:
+            # Issue #1304: observe-only sent no stop, so the fan is still running and the session is still real. The
+            # caller emits no exit/escalation row; re-enabling automation lets the next check end it for real.
+            _LOGGER.debug("Nat-vent session kept — fan stop not sent (observe-only) role=%s", self.role)
+            return False
         if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
             # Issue #931: this is the one diagnostic line that would confirm or refute a
             # recurrence of the exact incident this fixes — must not be filtered out of
@@ -13106,7 +13389,8 @@ class AutomationEngine:
             delay = max((applies_at - dt_util.now()).total_seconds(), 0.0) + 1.0
         else:
             delay = float(FAN_MIN_TOGGLE_INTERVAL_S)
-        _LOGGER.info(
+        # Issue #1304: in observe-only this re-arms every 5 min while the session runs on; keep that quiet.
+        (_LOGGER.debug if self.dry_run else _LOGGER.info)(
             "Nat-vent closed-window exit retry scheduled: delay=%.0fs reason=%s",
             delay,
             reason,
@@ -13152,7 +13436,7 @@ class AutomationEngine:
                     # exit chain owns it. The next close schedules a fresh retry if one is needed.
                     _LOGGER.info("Nat-vent closed-window exit retry skipped: a monitored door/window is open again")
                     return
-                _LOGGER.info(
+                (_LOGGER.debug if self.dry_run else _LOGGER.info)(  # Issue #1304: observe-only re-asks quietly
                     "Nat-vent closed-window exit retry running: all monitored sensors still closed original_reason=%s",
                     reason,
                 )
@@ -13255,7 +13539,12 @@ class AutomationEngine:
                 reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
             )
             self._end_nat_vent_session(result)
-            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+            # Issue #1304: a DRY_RUN stop ended nothing (logged by _deactivate_fan()), so this line is DEBUG then.
+            _log = (
+                _LOGGER.debug
+                if result in (FanCommandResult.RATE_LIMITED_DUP, FanCommandResult.DRY_RUN)
+                else _LOGGER.info
+            )
             _log(
                 "Nat-vent exit left HVAC alone: occupant's manual change protected reason=%s "
                 "sensor_open=%s override_active=%s confirm_pending=%s",
@@ -13299,7 +13588,19 @@ class AutomationEngine:
                 _held_off = await self._hold_thermostat_off_for_open_window(reason)
                 # Issue #1225 item 5: when the hold wrote Off there is nothing to restore -- do not read the mode back
                 # (a cloud thermostat's state lags the service call and could still read cool/heat, replayed on close).
-                if _held_off:
+                if _held_off is None:
+                    # Issue #1295 (mirror of #1293's ``_pause_for_door_window_action``): observe-only sent nothing,
+                    # so the heat/AC keeps running and there is no pause to record. Recording one left Climate Advisor
+                    # believing the HVAC was paused (``_paused_by_door`` with nothing to restore). The session has
+                    # still ended (#1141: session first, then pause -- here no pause, never both); leaving
+                    # observe-only pauses for real (``async_reconcile_after_automation_enabled``).
+                    _LOGGER.info(
+                        "[DRY RUN] Nat-vent exit (%s): window still open -- pause not recorded, thermostat stays"
+                        " running (observe-only) role=%s",
+                        reason,
+                        self.role,
+                    )
+                elif _held_off:
                     self._pre_pause_mode = None
                 else:
                     state = self.hass.states.get(self.climate_entity)
@@ -13318,16 +13619,20 @@ class AutomationEngine:
                 # _paused_entity/_paused_since aren't part of that derivation (see
                 # _apply_door_window_fsm_state()'s own docstring), so they stay direct
                 # writes below.
-                from .door_window_fsm import DoorWindowFsmEventKind
+                if _held_off is not None:
+                    from .door_window_fsm import DoorWindowFsmEventKind
 
-                self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN)
-                self._paused_entity = "nat-vent-exit"
-                self._paused_since = dt_util.now()
-                _LOGGER.info(
-                    "Nat-vent exit (%s): monitored sensor still open — pausing HVAC (pre_pause_mode=%s)",
-                    reason,
-                    self._pre_pause_mode,
-                )
+                    self._resolve_door_window_pause_flags(kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN)
+                    self._paused_entity = "nat-vent-exit"
+                    self._paused_since = dt_util.now()
+                    _LOGGER.info(
+                        "Nat-vent exit (%s): monitored sensor still open — pausing HVAC (pre_pause_mode=%s)",
+                        reason,
+                        self._pre_pause_mode,
+                    )
+            elif result is FanCommandResult.DRY_RUN:
+                # Issue #1304: observe-only sent no stop -- the fan runs on, the session continues, no pause.
+                _LOGGER.debug("Nat-vent exit (%s): fan stop not sent (observe-only) -- session kept", reason)
             else:
                 # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
                 # one retry tick after another while still blocked.
@@ -13367,15 +13672,23 @@ class AutomationEngine:
                 # (already done, above, by _deactivate_fan()), then call
                 # _set_temperature_for_mode() so the resolver can correct it if conditions
                 # (e.g. indoor now below comfort_heat) call for a different family.
+                _resume_write = None
                 if self._current_classification:
                     with self._mode_change_context("nat_vent"):
-                        await self._set_temperature_for_mode(
+                        _resume_write = await self._set_temperature_for_mode(
                             self._current_classification,
                             reason=f"nat-vent exit resume — {reason}",
                         )
-                self._start_grace_period("automation", trigger="nat_vent_exit_resume")
+                self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _resume_write)
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
+            elif result is FanCommandResult.DRY_RUN:
+                # Issue #1304: observe-only sent no stop -- the fan really runs on, so the session is kept: no restore,
+                # no grace, no exit row. With every window closed nothing else re-runs this exit for a blower (#1195),
+                # so the same closed-exit retry is armed: it re-asks every 5 min (DRY_RUN again while observe-only)
+                # and ends the session for real within 5 min of automation being switched back on.
+                _LOGGER.debug("Nat-vent exit (%s): fan stop not sent (observe-only) -- session kept", reason)
+                self._schedule_deferred_closed_exit_retry(reason, event_type, event_payload)
             else:
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log(
@@ -13384,7 +13697,12 @@ class AutomationEngine:
                 )
                 self._schedule_deferred_closed_exit_retry(reason, event_type, event_payload)
 
-        if event_type and self._emit_event_callback and result is not FanCommandResult.RATE_LIMITED_DUP:
+        if (
+            event_type
+            and self._emit_event_callback
+            and result is not FanCommandResult.RATE_LIMITED_DUP
+            and result is not FanCommandResult.DRY_RUN  # Issue #1304: no exit row for a stop that was never sent
+        ):
             payload = dict(event_payload or {})
             if result is FanCommandResult.RATE_LIMITED_NEW:
                 payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
@@ -13395,10 +13713,13 @@ class AutomationEngine:
 
         return result
 
-    async def _hold_thermostat_off_for_open_window(self, reason: str) -> bool:
+    async def _hold_thermostat_off_for_open_window(self, reason: str) -> bool | None:
         """Switch an armed thermostat Off because a nat-vent exit left a window open (Issue #1142 D4/D8).
 
-        Returns True when the hold wrote Off (Issue #1225 item 5: the caller then records no restore mode).
+        Returns True when the hold wrote Off (Issue #1225 item 5: the caller then records no restore mode), False when
+        no write was needed (already Off / unavailable) or the occupant's change is protected, and None in observe-only
+        when the thermostat is running: the Off came back ``DRY_RUN``, nothing was sent, so the caller records no pause
+        (Issue #1295, mirror of #1293).
 
         Rule 3: no heat/cool with a window open after the debounce unless the occupant overrides it. Every exit that
         records the window pause goes through here so the thermostat is Off at that moment. A whole-house-fan
@@ -13413,8 +13734,356 @@ class AutomationEngine:
             return False
         _LOGGER.info("Nat-vent exit (%s): window still open -- thermostat %s -> off", reason, mode)
         with self._mode_change_context("pause"):
-            await self._set_hvac_mode("off", reason=f"nat-vent exit with a window open ({reason}), was {mode}")
+            _off_result = await self._set_hvac_mode(
+                "off", reason=f"nat-vent exit with a window open ({reason}), was {mode}"
+            )
+        if _off_result is HvacCommandResult.DRY_RUN:
+            return None  # Issue #1295: observe-only -- nothing sent, the thermostat keeps running
+        # Issue #1302: FAILED / UNCONFIRMED still records the pause (the window is open; nothing to restore either way)
+        # and re-sends the Off soon while the thermostat still reads an active mode.
+        self._arm_open_window_off_retry(_off_result, reason=f"nat-vent exit with a window open ({reason})")
         return True
+
+    def _schedule_hvac_resend(
+        self,
+        *,
+        slot: str,
+        what: str,
+        result: HvacCommandResult | None,
+        reason: str,
+        attempt: int,
+        run: Callable[[int], Any],
+    ) -> bool:
+        """Arm one bounded device-state re-check of a mode write that did not land (Issues #1302, #1307, #1308).
+
+        The one schedule shared by the open-window Off (door/window pause, nat-vent exit hold, blower ventilation) and
+        the restore once the last window closes or a whole-house fan releases the thermostat. ``attempt`` indexes
+        ``OPEN_WINDOW_OFF_RETRY_DELAYS_S`` (15 s, then 60 s, then 300 s, each from the previous attempt), so the first
+        re-check lands within ~30 s (G1) and a chain ends after three re-sends (G2); the 30-minute cycle is the long
+        backstop. ``FAILED`` = the thermostat refused or errored; ``UNCONFIRMED`` = no answer in 10 s (probably
+        applied: ``run`` acts only if the thermostat still reads the wrong mode). Any other result needs nothing.
+        ``run(attempt)`` is spawned into cancel slot ``slot`` (re-arming replaces the previous timer; ``cleanup()``
+        cancels it). Returns True when a re-check was armed, False when none is needed or the chain is exhausted.
+        """
+        if result not in (HvacCommandResult.FAILED, HvacCommandResult.UNCONFIRMED):
+            return False
+        if _refuse_if_shut_down(self, f"schedule {what} re-send"):
+            return False
+        if attempt >= len(OPEN_WINDOW_OFF_RETRY_DELAYS_S):
+            _LOGGER.warning(
+                "%s still not applied after %d re-sends (%s) -- the 30-minute cycle keeps trying (entity=%s)",
+                what,
+                attempt,
+                reason,
+                self.climate_entity,
+            )
+            return False
+        delay = OPEN_WINDOW_OFF_RETRY_DELAYS_S[attempt]
+        _LOGGER.warning(
+            "%s came back %s (%s) -- re-checking the thermostat in %.0fs (attempt %d/%d)",
+            what,
+            result.value,
+            reason,
+            delay,
+            attempt + 1,
+            len(OPEN_WINDOW_OFF_RETRY_DELAYS_S),
+        )
+
+        @callback
+        def _retry_due(_now: Any) -> None:
+            setattr(self, slot, None)
+            self._spawn_whf_task(run(attempt))
+
+        self._rearm_timer(slot, delay, _retry_due)
+        return True
+
+    def _arm_open_window_off_retry(
+        self, result: HvacCommandResult | None, *, reason: str, attempt: int = 0, session: str = "pause"
+    ) -> None:
+        """Re-send an open-window Off that did not land (Issue #1302; blower ventilation, Issue #1307).
+
+        Keeps the recorded belief and re-asks the DEVICE on the shared bounded schedule (``_schedule_hvac_resend``).
+        ``session`` names what holds the thermostat Off and so what the re-send checks before acting: ``"pause"`` (the
+        door/window pause or the nat-vent exit hold) or ``"blower"`` (an ``hvac_fan`` ventilation session with a window
+        open, ``_apply_nat_vent_hvac_state()``). ``WHF_BLOCKED`` is never returned for an Off.
+        """
+        self._schedule_hvac_resend(
+            slot="_open_window_off_retry_cancel",
+            what="Open-window Off",
+            result=result,
+            reason=reason,
+            attempt=attempt,
+            run=lambda a: self._retry_open_window_off(reason, a, session=session),
+        )
+
+    async def _retry_open_window_off(self, reason: str, attempt: int, *, session: str = "pause") -> None:
+        """Run one open-window Off re-send if the device still needs it (Issues #1302, #1307).
+
+        ``session="pause"``: acts only while the pause is still recorded and no fan session owns the HVAC (the #1288
+        rule-2 backstop covers a whole-house fan). ``session="blower"`` (Issue #1307): acts only while the blower
+        ventilation session is still active (``hvac_fan``), a window is still open past its delay and no whole-house
+        fan owns the HVAC; the session ending (its own restore or the exit hold takes over) ends the chain. Both: the
+        occupant must not own the thermostat and it must still read an active mode. The first re-send of a chain
+        writes one ``hvac_mode_not_applied`` (kind ``open_window_retry``) Activity row (G5).
+        """
+        if _latched(self):
+            return
+        try:
+            async with self._decision_pass("retry_open_window_off"):
+                if _latched(self) or self.dry_run:
+                    return
+                if session == "blower":
+                    if not self._natural_vent_active or self.config.get(CONF_FAN_MODE) != FAN_MODE_HVAC:
+                        _LOGGER.debug("Open-window Off retry skipped (%s): the blower ventilation has ended", reason)
+                        return
+                    if not self._any_monitored_sensor_settled_open():
+                        _LOGGER.debug("Open-window Off retry skipped (%s): no window open past its delay", reason)
+                        return
+                elif not self._paused_by_door:
+                    _LOGGER.debug("Open-window Off retry skipped (%s): the pause has ended", reason)
+                    return
+                if self._manual_change_protected():
+                    _LOGGER.info("Open-window Off retry skipped (%s): the occupant owns the thermostat", reason)
+                    return
+                if self._whf_owns_hvac() or (session != "blower" and self._natural_vent_active):
+                    _LOGGER.debug("Open-window Off retry skipped (%s): a fan session owns the HVAC", reason)
+                    return
+                state = self.hass.states.get(self.climate_entity)
+                live = getattr(state, "state", None) if state is not None else None
+                if live in (None, "off", "unavailable", "unknown"):
+                    _LOGGER.info("Open-window Off retry not needed (%s): thermostat reads %r", reason, live)
+                    return
+                _LOGGER.warning(
+                    "Thermostat still %s with a window open (%s) -- re-sending Off (attempt %d/%d)",
+                    live,
+                    reason,
+                    attempt + 1,
+                    len(OPEN_WINDOW_OFF_RETRY_DELAYS_S),
+                )
+                if attempt == 0 and self._emit_event_callback:
+                    self._emit_event_callback(
+                        "hvac_mode_not_applied",
+                        {
+                            "kind": "open_window_retry",
+                            "requested_mode": "off",
+                            "actual_mode": live,
+                            "climate_entity": self.climate_entity,
+                            "reason": reason,
+                        },
+                    )
+                with self._mode_change_context("nat_vent" if session == "blower" else "pause"):
+                    _result = await self._set_hvac_mode(
+                        "off", reason=f"re-send: {reason}, thermostat still {live} (attempt {attempt + 1})"
+                    )
+                self._arm_open_window_off_retry(_result, reason=reason, attempt=attempt + 1, session=session)
+        except Exception:
+            _LOGGER.warning("Open-window Off retry failed: reason=%s", reason, exc_info=True)
+
+    def _restore_landed(self, target: str | None, *, exact: bool = False) -> bool:
+        """True when the thermostat reads the mode the restore asked for (Issue #1308).
+
+        The newest mode Climate Advisor commanded (``_last_commanded_hvac_mode``: a selector write after the blind
+        mode restore may have chosen the other family) is the target; ``target`` is the fallback.
+        """
+        state = self.hass.states.get(self.climate_entity)
+        live = getattr(state, "state", None) if state is not None else None
+        want = target if exact else (getattr(self, "_last_commanded_hvac_mode", None) or target)
+        return isinstance(live, str) and want is not None and live == want
+
+    def _pending_restore_want(self, pending: PendingRestore) -> str | None:
+        """The mode a pending restore is waiting for: the occupant's own mode for "occupant_mode" (Issue #1313), else
+        the newest mode Climate Advisor commanded (Issue #1308)."""
+        if pending.kind == "occupant_mode":
+            return pending.target
+        return getattr(self, "_last_commanded_hvac_mode", None) or pending.target
+
+    def _hold_restore_until_landed(
+        self,
+        trigger: str | None,
+        result: HvacCommandResult | None,
+        *,
+        target: str | None,
+        reason: str,
+        kind: str = "automation",
+    ) -> bool:
+        """Keep a restore that did not land pending and re-send it from device state (Issue #1308).
+
+        Owner decision 2026-11-03 ("retry, no grace"): when the restore after the last window closed (or a whole-house
+        fan release's restore) comes back ``FAILED``, or ``UNCONFIRMED`` and the thermostat does not read the restored
+        mode, the restore is kept in ``_pending_restore`` and re-sent on the shared bounded schedule
+        (``_schedule_hvac_resend``); the automation grace ``trigger`` (None: the site starts none) starts only once
+        it lands. ``UNCONFIRMED`` that already landed is a landed restore. Returns True when the restore is held (the
+        caller starts no grace now), False when it landed or needs no re-send.
+
+        ``kind`` (``PendingRestore.kind``): Issue #1312 holds the dashboard Resume's MANUAL grace the same way; Issue
+        #1313 re-sends the occupant's own protected mode (``target``) with no grace.
+        """
+        exact = kind == "occupant_mode"
+        if result not in (HvacCommandResult.FAILED, HvacCommandResult.UNCONFIRMED) or self._restore_landed(
+            target, exact=exact
+        ):
+            return False
+        state = self.hass.states.get(self.climate_entity)
+        self._pending_restore = PendingRestore(
+            target=target,
+            trigger=trigger,
+            reason=reason,
+            kind=kind,
+            occupant_mark=self._override_confirm_time if exact else None,
+            from_mode=getattr(state, "state", None) if state is not None else None,
+        )
+        if self._schedule_hvac_resend(
+            slot="_restore_resend_cancel",
+            what="Restore",
+            result=result,
+            reason=reason,
+            attempt=0,
+            run=self._retry_restore,
+        ):
+            return True
+        self._pending_restore = None
+        return False
+
+    def _end_pending_restore(self) -> PendingRestore | None:
+        """Drop the pending restore and its re-send timer (Issue #1308). Returns what was pending."""
+        pending = self._pending_restore
+        self._pending_restore = None
+        if self._restore_resend_cancel:
+            self._restore_resend_cancel()
+            self._restore_resend_cancel = None
+        return pending
+
+    def _restore_resend_stop_reason(self, pending: PendingRestore) -> str | None:
+        """Why a pending restore must not be re-sent now (Issues #1308/#1312/#1313), or None.
+
+        The occupant's recognised change wins (G3); a window open again belongs to the pause (rule 3); a fan session
+        that took over owns the HVAC. Per kind:
+
+        * ``automation``: any protected occupant change stops it; so does a window settled open.
+        * ``dashboard_resume`` (#1312): the occupant resumed WITH the window open (their override of rule 3), so an open
+          window does not stop it; a pause recorded again, or a protected (newer) occupant change, does.
+        * ``occupant_mode`` (#1313): the re-sent mode IS the occupant's protected choice, so protection does not stop
+          it. A NEWER occupant change does (a new confirmation window, or the thermostat moved to anything but the
+          target or the state the failed restore left), and so does the protection ending (the plan owns it again).
+        """
+        if pending.kind == "occupant_mode":
+            if not self._manual_change_protected():
+                return "the occupant's change has ended"
+            confirm_time = self._override_confirm_time
+            if confirm_time is not None and confirm_time != pending.occupant_mark:
+                return "the occupant made a newer change"
+            state = self.hass.states.get(self.climate_entity)
+            live = getattr(state, "state", None) if state is not None else None
+            if live not in (None, "unavailable", "unknown", pending.target, pending.from_mode):
+                return f"the thermostat was changed to {live}"
+        elif self._manual_change_protected():
+            return "the occupant owns the thermostat"
+        if self._paused_by_door:
+            return "the door/window pause is recorded again"
+        if pending.kind != "dashboard_resume" and self._any_monitored_sensor_settled_open():
+            return "a window is open again"
+        if self._natural_vent_active or self._whf_owns_hvac():
+            return "a fan session owns the HVAC"
+        return None
+
+    def _finish_pending_restore(self) -> None:
+        """The pending restore landed: end the chain and start the grace it was holding (Issue #1308)."""
+        pending = self._end_pending_restore()
+        if pending is None:
+            return
+        _LOGGER.info(
+            "Restore landed (%s): thermostat reads %s%s",
+            pending.reason,
+            getattr(self, "_last_commanded_hvac_mode", None) or pending.target,
+            f" -- starting the {pending.trigger} grace" if pending.trigger else "",
+        )
+        if not pending.trigger:
+            return
+        if pending.kind == "dashboard_resume":
+            # Issue #1312: the occupant's Resume grace, started the way resume_from_pause() starts it.
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            if self._start_grace_period_action("manual", trigger=pending.trigger):
+                self._resolve_override_grace_fsm_state(kind=_OGFEventKind.DASHBOARD_RESUME)
+        else:
+            self._start_grace_period("automation", trigger=pending.trigger)
+
+    async def _retry_restore(self, attempt: int) -> None:
+        """Run one re-send of a pending restore if the device still needs it (Issue #1308).
+
+        Stops (nothing sent, no grace) when the occupant owns the thermostat, a window is open again, or a fan session
+        took over; finishes (grace starts) when the thermostat already reads the restored mode. Otherwise re-sends the
+        restore -- the comfort write through the selector (mode + setpoint) when a classification is known, else the
+        blind mode -- and the first re-send of a chain writes one ``hvac_mode_not_applied`` (kind ``restore_retry``)
+        Activity row (G5). After the last re-send the restore is dropped (G2): the 30-minute cycle re-applies the plan.
+        """
+        if _latched(self):
+            return
+        try:
+            async with self._decision_pass("retry_restore"):
+                pending = self._pending_restore
+                if _latched(self) or pending is None:
+                    return
+                if self.dry_run:
+                    self._end_pending_restore()
+                    _LOGGER.info("Restore re-send dropped (%s): automation is off (observe-only)", pending.reason)
+                    return
+                stop = self._restore_resend_stop_reason(pending)
+                if stop:
+                    self._end_pending_restore()
+                    _LOGGER.info("Restore re-send stopped (%s): %s -- no grace started", pending.reason, stop)
+                    return
+                exact = pending.kind == "occupant_mode"
+                if self._restore_landed(pending.target, exact=exact):
+                    self._finish_pending_restore()
+                    return
+                state = self.hass.states.get(self.climate_entity)
+                live = getattr(state, "state", None) if state is not None else None
+                want = self._pending_restore_want(pending)
+                _LOGGER.warning(
+                    "Thermostat still %s after the restore to %s (%s) -- re-sending the restore (attempt %d/%d)",
+                    live,
+                    want,
+                    pending.reason,
+                    attempt + 1,
+                    len(OPEN_WINDOW_OFF_RETRY_DELAYS_S),
+                )
+                if attempt == 0 and self._emit_event_callback:
+                    self._emit_event_callback(
+                        "hvac_mode_not_applied",
+                        {
+                            "kind": "restore_retry",
+                            "requested_mode": want,
+                            "actual_mode": live,
+                            "climate_entity": self.climate_entity,
+                            "reason": pending.reason,
+                        },
+                    )
+                _why = f"re-send: restore after {pending.reason}, thermostat still {live} (attempt {attempt + 1})"
+                _result: HvacCommandResult | None = None
+                with self._mode_change_context("restore"):
+                    if pending.kind != "occupant_mode" and self._current_classification is not None:
+                        _result = await self._set_temperature_for_mode(self._current_classification, reason=_why)
+                    elif want:
+                        # Issue #1313: the occupant's own mode only -- their setpoint is kept, nothing of ours added.
+                        _result = await self._set_hvac_mode(want, reason=_why)
+                if self._pending_restore is not pending:
+                    return  # a newer restore replaced this one while the write was in flight
+                if _result is HvacCommandResult.EXECUTED or self._restore_landed(pending.target, exact=exact):
+                    self._finish_pending_restore()
+                    return
+                if not self._schedule_hvac_resend(
+                    slot="_restore_resend_cancel",
+                    what="Restore",
+                    result=_result,
+                    reason=pending.reason,
+                    attempt=attempt + 1,
+                    run=self._retry_restore,
+                ):
+                    # Exhausted, or the plan took another path (away redirect, blower hold, superseded): settle (G2).
+                    self._end_pending_restore()
+        except Exception:
+            _LOGGER.warning("Restore re-send failed", exc_info=True)
 
     def _nat_vent_reactivation_floor(self) -> float:
         """Sleep-aware comfort floor for nat-vent reactivation/eligibility gates (Issue #417).
@@ -13656,6 +14325,10 @@ class AutomationEngine:
             # the start at runtime the fan never takes over, and a pause kept quiet on that promise would never be
             # announced -- the house sits unconditioned in silence. Say so loudly instead.
             refusal = self._fan_start_runtime_refusal()
+            if refusal is None and self._no_live_open_sensor_for_start():
+                # Issue #1298: the pause may be held only by a dark sensor (last reading open, #1181). Every start
+                # site refuses then (#1289), so the fan never takes over -- the same predicate keeps this loud.
+                refusal = "no monitored door/window reads open past its delay (dark or still inside its delay)"
             if refusal is not None:
                 _LOGGER.info(
                     "%s: door/window pause stays loud -- the fan session cannot start right now (%s)", caller, refusal
@@ -13943,7 +14616,10 @@ class AutomationEngine:
         # RATE_LIMITED_DUP can repeat every tick for up to 5 minutes (same split as
         # _apply_nat_vent_fsm_state_after_activation()), so it logs at DEBUG.
         _LOGGER.log(
-            logging.DEBUG if activation_result == FanCommandResult.RATE_LIMITED_DUP else logging.INFO,
+            # Issue #1304: DRY_RUN repeats every tick in observe-only; _activate_fan() already logged it.
+            logging.DEBUG
+            if activation_result in (FanCommandResult.RATE_LIMITED_DUP, FanCommandResult.DRY_RUN)
+            else logging.INFO,
             "Nat-vent reactivation while paused not applied: fan command %s -- door/window pause kept "
             "(outdoor=%s indoor=%s paused_entity=%s)",
             activation_result.name,
@@ -14007,8 +14683,9 @@ class AutomationEngine:
         retry on its own next cycle — the two directions need opposite fallback
         states, do not copy #931's "preserve active" pattern onto this method.
 
-        ``DISABLED``/``SUPPRESSED`` (Issue #1140: no working fan, so no session either) are
-        applied as INACTIVE like the three results above. ``EXECUTED`` and
+        ``DISABLED``/``SUPPRESSED`` (Issue #1140: no working fan, so no session either) and ``DRY_RUN``
+        (Issue #1304: observe-only sent nothing -- "no paper sessions") are applied as INACTIVE like the
+        three results above. ``EXECUTED`` and
         ``ALREADY_IN_STATE`` mean no override intervened mid-await and no command was
         deferred, so the pre-await ``to_state`` is still correct to apply.
         """
@@ -15951,7 +16628,19 @@ class AutomationEngine:
             # never actually executed (already reported once by the deferral
             # itself), so don't also emit a ceiling-escalation event claiming
             # it happened.
-            if self._emit_event_callback and _ceiling_escalation_result is not FanCommandResult.RATE_LIMITED_DUP:
+            # Issue #1304: observe-only writes no "Nat-vent escalated to AC -- nat-vent ended, AC armed" row. The AC is
+            # never armed there (the cool write below comes back DRY_RUN on this same flag, #1301), and a DRY_RUN fan
+            # stop also keeps the session (the fan runs on). A session with no fan to stop (DISABLED) still ends: that
+            # is bookkeeping, not a command.
+            if self.dry_run or _ceiling_escalation_result is FanCommandResult.DRY_RUN:
+                _LOGGER.info(
+                    "[DRY RUN] ODE ceiling guard would end nat-vent and escalate to AC — nothing sent"
+                    " (fan stop result=%s, session_active=%s) role=%s",
+                    _ceiling_escalation_result.name,
+                    self._natural_vent_active,
+                    self.role,
+                )
+            elif self._emit_event_callback and _ceiling_escalation_result is not FanCommandResult.RATE_LIMITED_DUP:
                 _ceiling_escalation_payload = {
                     "indoor": _indoor_cg,
                     "outdoor": _outdoor,
@@ -15974,17 +16663,18 @@ class AutomationEngine:
         # Issue #1049: the comfort-band write earlier in this cycle already switched the
         # thermostat to cool (explicit mode switch, change 1) -- do not send a second
         # identical set_hvac_mode moments later.
+        _mode_result_cg: HvacCommandResult | None = None  # None: mode call skipped (already cool this cycle)
         with self._mode_change_context("ode_guard"):
             if self._mode_switch_marker_recent("cool"):
                 _LOGGER.debug(
                     "ODE ceiling guard: mode already switched to cool this cycle -- skipping duplicate mode call"
                 )
             else:
-                await self._set_hvac_mode(
+                _mode_result_cg = await self._set_hvac_mode(
                     "cool",
                     reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
                 )
-            await self._set_temperature(
+            _temp_result_cg = await self._set_temperature(
                 _ceiling_cg,
                 reason="ODE ceiling guard — target comfort ceiling",
                 mode="cool",
@@ -15995,6 +16685,22 @@ class AutomationEngine:
         # relative to what the thermostat is actually doing (the same gap the ODE
         # floor guard's equivalent call sites already avoid).
         self._arm_comfort_family("cooling", dt_util.now())
+        # Issue #1301: observe-only records only what was sent. With automation off the mode and
+        # setpoint writes come back DRY_RUN (nothing reached the thermostat), so no Activity row may
+        # claim "mode: off->cool"; the decision is logged at INFO with the [DRY RUN] prefix instead.
+        # The family arming above is unchanged: it is the compatibility attribute the selector also
+        # writes in observe-only, read by no production decision (see 08 §6c "Observe-only").
+        if HvacCommandResult.DRY_RUN in (_mode_result_cg, _temp_result_cg):
+            _LOGGER.info(
+                "[DRY RUN] ODE ceiling guard would switch to cool at %.1f (breach predicted at %s, %.1fh,"
+                " lead=%.0fmin) — nothing sent, no ceiling_guard_fired recorded role=%s",
+                _ceiling_cg,
+                _breach_ts.strftime("%H:%M"),
+                _hours_to_breach,
+                _lead_min,
+                self.role,
+            )
+            return
         if self._emit_event_callback:
             self._emit_event_callback(
                 "ceiling_guard_fired",
@@ -16832,7 +17538,12 @@ class AutomationEngine:
                 mode,
             )
             with self._mode_change_context("nat_vent"):
-                await self._set_hvac_mode("off", reason=f"blower ventilation, window open (was {mode})")
+                _off_result = await self._set_hvac_mode("off", reason=f"blower ventilation, window open (was {mode})")
+            # Issue #1307 (mirror of #1302): a FAILED / UNCONFIRMED Off is re-sent while this blower session is still
+            # ventilating with a window open and the thermostat still reads an active mode.
+            self._arm_open_window_off_retry(
+                _off_result, reason=f"blower ventilation, window open (was {mode})", session="blower"
+            )
         await self._advise_close_windows_if_too_warm()
 
     async def _advise_close_windows_if_too_warm(self) -> None:
@@ -17563,8 +18274,8 @@ class AutomationEngine:
         if _refuse_if_shut_down(self, f"activate fan ({reason})"):
             return FanCommandResult.DISABLED  # existing no-op result; before verify timers
         if self.dry_run:
-            _LOGGER.info("[DRY RUN] Would activate fan — %s role=%s", reason, self.role)
-            return FanCommandResult.EXECUTED
+            self._log_fan_dry_run("activate", reason)
+            return FanCommandResult.DRY_RUN  # Issue #1304: nothing sent, so nothing may be recorded as started
 
         _was_deferred = (
             isinstance(self._fan_rate_limited_until, datetime) and self._fan_rate_limited_direction == "activate"
@@ -18093,6 +18804,12 @@ class AutomationEngine:
                 "fan_mode_change": _fan_transition_text(self.config, activating=False),
             },
         )
+        if result is FanCommandResult.DRY_RUN:
+            # Issue #1304: observe-only sent no stop -- the fan runs on and the session is kept; not "stopped".
+            _log = _LOGGER.debug if self._indoor_blind_stop_deferred_logged else _LOGGER.info
+            _log("[DRY RUN] Fan stop for the indoor blind timeout not sent (observe-only) — session kept")
+            self._indoor_blind_stop_deferred_logged = True
+            return
         if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
             # Session preserved by _end_nat_vent_session(); retried on the next backstop tick.
             _log = _LOGGER.debug if self._indoor_blind_stop_deferred_logged else _LOGGER.warning
@@ -18680,9 +19397,23 @@ class AutomationEngine:
                         "_deactivate_fan: fan already inactive but restoring stranded HVAC suppression (%s)", reason
                     )
                     with self._mode_change_context("nat_vent"):
-                        await self._set_hvac_mode(
+                        _stranded_restore_result = await self._set_hvac_mode(
                             _restore_mode,
                             reason=f"whole-house fan already stopped — restoring HVAC mode ({_restore_mode})",
+                        )
+                    if _stranded_restore_result is HvacCommandResult.DRY_RUN:
+                        # Issue #1305: observe-only records only what was sent. Nothing reached the thermostat
+                        # (it stays where the fan session left it), so no "restored" action/Activity row. The
+                        # fan's ownership is still released above: the session is over, and keeping
+                        # _pre_fan_hvac_mode would make _whf_owns_hvac() block the plan after re-enable with
+                        # nothing left to release it (the #618 stranding). The re-enable refresh (#1296)
+                        # re-applies the plan, which restores heating/cooling for real.
+                        _LOGGER.info(
+                            "[DRY RUN] Would restore HVAC mode %s after the whole-house fan stopped — %s;"
+                            " fan ownership released, nothing sent role=%s",
+                            _restore_mode,
+                            reason,
+                            self.role,
                         )
                     # Issue #618: this is the "physical fan was already off, but a snapshot
                     # from an earlier session was still stranded" path — the exact case that
@@ -18692,14 +19423,23 @@ class AutomationEngine:
                     # lines below already emits fan_deactivated when emit_event=True; this is
                     # the one sibling branch that historically emitted nothing at all, so it's
                     # the only new event added anywhere in this function.
-                    self._record_action(
-                        "Restored HVAC mode from stranded fan suppression", f"{reason} (restored={_restore_mode})"
+                    # Issue #1308: a release restore that did not land stays pending and is re-sent (the fan's
+                    # ownership is released above either way; it starts no grace of its own).
+                    self._hold_restore_until_landed(
+                        None,
+                        _stranded_restore_result,
+                        target=_restore_mode,
+                        reason=f"whole-house fan release ({reason})",
                     )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "stranded_hvac_suppression_restored",
-                            {"reason": reason, "restore_mode": _restore_mode},
+                    if _stranded_restore_result is not HvacCommandResult.DRY_RUN:
+                        self._record_action(
+                            "Restored HVAC mode from stranded fan suppression", f"{reason} (restored={_restore_mode})"
                         )
+                        if self._emit_event_callback:
+                            self._emit_event_callback(
+                                "stranded_hvac_suppression_restored",
+                                {"reason": reason, "restore_mode": _restore_mode},
+                            )
                 else:
                     _LOGGER.debug(
                         "_deactivate_fan: fan already inactive — releasing stranded HVAC suppression"
@@ -18782,8 +19522,8 @@ class AutomationEngine:
         if _refuse_if_shut_down(self, f"deactivate fan ({reason})"):
             return FanCommandResult.DISABLED  # existing no-op result; before verify timers
         if self.dry_run:
-            _LOGGER.info("[DRY RUN] Would deactivate fan — %s role=%s", reason, self.role)
-            return FanCommandResult.EXECUTED
+            self._log_fan_dry_run("deactivate", reason)
+            return FanCommandResult.DRY_RUN  # Issue #1304: nothing sent, the fan keeps running, the session stays
 
         _was_deferred = (
             isinstance(self._fan_rate_limited_until, datetime) and self._fan_rate_limited_direction == "deactivate"
@@ -18865,10 +19605,18 @@ class AutomationEngine:
                         # follow with _set_temperature_for_mode() (nat-vent comfort-floor exit)
                         # pass restore_hvac=False so the selector picks the mode.
                         with self._mode_change_context("nat_vent"):
-                            await self._set_hvac_mode(
+                            _whf_restore_result = await self._set_hvac_mode(
                                 _restore_mode,
                                 reason=f"whole-house fan stopped — restoring HVAC mode ({_restore_mode})",
                             )
+                        # Issue #1308: a release restore that did not land stays pending and is re-sent once the fan
+                        # session is over (a caller's follow-up comfort write that lands ends it).
+                        self._hold_restore_until_landed(
+                            None,
+                            _whf_restore_result,
+                            target=_restore_mode,
+                            reason=f"whole-house fan release ({reason})",
+                        )
                     else:
                         _LOGGER.debug(
                             "_deactivate_fan: releasing stranded HVAC suppression without"
@@ -19083,6 +19831,7 @@ class AutomationEngine:
             FanCommandResult.RATE_LIMITED_NEW,
             FanCommandResult.RATE_LIMITED_DUP,
             FanCommandResult.SUPPRESSED,
+            FanCommandResult.DRY_RUN,  # Issue #1304: observe-only sent nothing, so no economizer session
         ):
             # Same WARNING(anomaly)/INFO(fresh)/DEBUG(repeat) split as
             # _apply_nat_vent_fsm_state_after_activation() (#935) and
@@ -19094,8 +19843,9 @@ class AutomationEngine:
             elif activation_result is FanCommandResult.RATE_LIMITED_NEW:
                 _log = _LOGGER.info
             else:
-                # RATE_LIMITED_DUP, and SUPPRESSED (Issue #1205): the refusal itself was already logged by
-                # _activate_fan() (once per hold per caller for the fan-off hold), so a per-tick retry stays quiet.
+                # RATE_LIMITED_DUP, DRY_RUN (Issue #1304), and SUPPRESSED (Issue #1205): the refusal itself was
+                # already logged by _activate_fan() (once per hold per caller for the fan-off hold), so a per-tick
+                # retry stays quiet.
                 _log = _LOGGER.debug
             _log(
                 "Economizer stays inactive: fan start not applied, retrying next tick result=%s skipped_state=%s",
@@ -19248,7 +19998,10 @@ class AutomationEngine:
         unit = self._temp_unit
         c = self._current_classification
         result = await self._deactivate_fan(reason="economizer off — fan no longer needed")
-        if result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+        if result is FanCommandResult.DRY_RUN:
+            # Issue #1304: observe-only sent no stop -- the fan runs on, so its economizer session stays recorded.
+            _LOGGER.debug("Economizer session kept — fan-off not sent (observe-only)")
+        elif result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
             # Same INFO(fresh)/DEBUG(repeat) split as _end_nat_vent_session() (#931)
             # and _apply_nat_vent_fsm_state_after_activation() (#935) — this can repeat
             # every tick for up to 5 minutes and must not be per-tick log noise.
@@ -19761,6 +20514,10 @@ class AutomationEngine:
         if self._nat_vent_closed_exit_retry_cancel:  # Issue #1195
             self._nat_vent_closed_exit_retry_cancel()
             self._nat_vent_closed_exit_retry_cancel = None
+        if self._open_window_off_retry_cancel:  # Issue #1302
+            self._open_window_off_retry_cancel()
+            self._open_window_off_retry_cancel = None
+        self._end_pending_restore()  # Issue #1308
         if self._fan_off_verify_cancel:
             self._fan_off_verify_cancel()
             self._fan_off_verify_cancel = None

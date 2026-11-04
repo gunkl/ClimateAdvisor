@@ -83,6 +83,11 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                             mirror of what restart does to engine state.  The window ENDS as in
                             production (Issue #1291): a 300 s virtual timer runs the real
                             coordinator._do_startup_coalesce() behind production's own gate
+                            (build_coordinator.arm_startup_coalesce_end, shared with the
+                            coordinator's initial start, Issue #1297)
+  startup_coalesce        → (use_coordinator=True) coordinator._do_startup_coalesce(), unless the
+                            start-up/restart timer already ran it (production coalesces once
+                            per window, Issue #1297)
   remote_sensor_report    → (use_coordinator=True) states.async_set(entity, value_f) stamped with last_reported and
                             last_updated = the virtual clock, so the real sleep-sensor listener fires and the outer
                             loop's 120-minute freshness rule sees a real report (Issue #1194 e); silence is the
@@ -108,6 +113,7 @@ No clean production entry points (FINDINGS):
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import sys
 from datetime import datetime, timedelta
@@ -120,9 +126,9 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from tools.sim_harness._loop import run_coro  # noqa: E402
-from tools.sim_harness.build_coordinator import build_headless_coordinator  # noqa: E402
+from tools.sim_harness.build_coordinator import arm_startup_coalesce_end, build_headless_coordinator  # noqa: E402
 from tools.sim_harness.build_engine import build_headless_engine  # noqa: E402
-from tools.sim_harness.fake_hass import FakeHass, FakeState  # noqa: E402
+from tools.sim_harness.fake_hass import THERMOSTAT_ACTION_DEADBAND_F, FakeHass, FakeState  # noqa: E402
 from tools.sim_harness.fake_scheduler import FakeScheduler  # noqa: E402
 from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
 from tools.sim_harness.scenario_model import (  # noqa: E402
@@ -176,6 +182,8 @@ def _inject_indoor_temp(
         attrs = dict(existing.attributes)
         attrs["current_temperature"] = indoor_f
         state_str = existing.state
+        # Issue #1316: the thermostat's own loop sees the new reading (only an action it derived itself).
+        fake_hass.services.rederive_on_reading(climate_entity, state_str, attrs)
     else:
         # No existing entity yet — create with "off" state to match SimState default
         # Issue #968: fan_modes default matches build_engine.py's rationale.
@@ -225,6 +233,10 @@ def _inject_thermostat_mode(
         attrs["temperature"] = temperature
     if hvac_action is not None:
         attrs["hvac_action"] = hvac_action
+    else:  # Issue #1318: no action injected -- the thermostat answers the occupant's change (a derived action only)
+        fake_hass.services.rederive_on_occupant_mode(
+            climate_entity, existing.state if existing is not None else None, hvac_mode, attrs
+        )
     if fan_mode_attr is not None:
         attrs["fan_mode"] = fan_mode_attr
     if dispatch:
@@ -386,6 +398,21 @@ class FakeHassSession:
         if _echo:
             fake_hass.set_echo_delay(climate_entity, float(_echo))
 
+        # --- Issue #1310: the thermostat derives the hvac_action it reports after CA's commands ---
+        # Only for a thermostat that reports one (scenario-injected hvac_action, or config
+        # "thermostat_reports_hvac_action": true, which seeds it from the first moment); the deadband is the
+        # real-HA sim thermostat's 1.5 F, converted for a Celsius install.
+        # "thermostat_action": "scripted" keeps the scenario's injected hvac_action through CA's mode changes too
+        # (a world whose equipment never starts, e.g. the Issue #1194 e cap scenarios).
+        if merged_config.get("thermostat_action") == "scripted":
+            fake_hass.set_action_deadband(climate_entity, None)
+        elif merged_config.get("temp_unit") == "celsius":
+            fake_hass.set_action_deadband(climate_entity, THERMOSTAT_ACTION_DEADBAND_F / 1.8)
+        if merged_config.get("thermostat_reports_hvac_action"):
+            _seed_cs = fake_hass.states.get(climate_entity)
+            if _seed_cs is not None and "hvac_action" not in _seed_cs.attributes:
+                _seed_cs.attributes["hvac_action"] = "off" if _seed_cs.state == "off" else "idle"
+
         # --- Sensor tracker - drives engine._sensor_check_callback (engine-only mode) ---
         # Issue #476: when a coordinator is present, its real __init__ already wired
         # engine._sensor_check_callback = coordinator._any_sensor_open (production
@@ -421,6 +448,21 @@ class FakeHassSession:
                 # Production's coordinator owns the forecast and pushes it to the engine
                 # (_refresh_hourly_forecast); keep both copies identical.
                 coordinator._hourly_forecast_temps = scenario["hourly_forecast"]
+
+        # Issue #1310: a passive copy of each day record production finalizes (_async_end_of_day ->
+        # learning.record_day), keyed by date, so a scenario can assert the day's runtime split with
+        # field_equals on engine_state._finalized_days.<date>.<field>. Calls through unchanged; the learning
+        # store itself trims by the real wall-clock date, so it cannot be read back for a past sim date.
+        self.finalized_days: dict[str, dict] = {}
+        if coordinator is not None and getattr(coordinator, "learning", None) is not None:
+            _record_day = coordinator.learning.record_day
+
+            def _observe_record_day(record: Any, _orig: Any = _record_day) -> Any:
+                with contextlib.suppress(Exception):
+                    self.finalized_days[str(record.date)] = dataclasses.asdict(record)
+                return _orig(record)
+
+            coordinator.learning.record_day = _observe_record_day
 
         self.coordinator = coordinator
         self.engine = engine
@@ -515,6 +557,8 @@ class FakeHassSession:
         # simulated end time, not real wall-clock time.
         try:
             engine_state = snapshot_engine_state(self.engine)
+            if self.finalized_days:  # Issue #1310 (absent when no day was finalized: snapshots unchanged)
+                engine_state["_finalized_days"] = dict(self.finalized_days)
         finally:
             self.close()
         result = ProductionRunResult(
@@ -591,53 +635,6 @@ def run_production_scenario(
 # ---------------------------------------------------------------------------
 # Event dispatcher
 # ---------------------------------------------------------------------------
-
-
-def _arm_restart_coalesce_end(coordinator: Any, scheduler: FakeScheduler) -> None:
-    """Arm the end of the start-up coalescing window a simulated restart opens (Issue #1291).
-
-    Production (``coordinator.async_setup``) sets ``_startup_coalesce_expiry`` to now + 300 s and
-    arms ``async_call_later(300)``. That timer sets ``_startup_timer_fired`` and requests a
-    refresh; the refresh runs ``_do_startup_coalesce()`` when
-    ``_startup_timer_fired and _startup_coalesce_active and _current_classification``, and that
-    method clears ``_startup_coalesce_active`` ("Startup coalescing complete"). It also
-    re-applies the plan, so a thermostat change made inside the window is overwritten (owner
-    decision #1235). The harness has no weather forecast, and that gate sits inside the
-    refresh's ``if forecast:`` block, so a harness refresh never reaches it. The timer
-    callback below does what the timer does, then evaluates the same gate and calls the REAL
-    ``_do_startup_coalesce()``. If no classification exists yet, production waits for the
-    next periodic refresh (every 30 min, ``update_interval``) and so does this: it re-checks
-    1800 s later. A scenario's explicit ``startup_coalesce`` event that already ended the
-    window makes the gate false, so coalescing never runs twice.
-
-    A second restart cancels the first restart's pending timer, as unloading the old
-    instance does in production (Issue #1102).
-    """
-    from custom_components.climate_advisor.const import STARTUP_COALESCE_SECONDS  # noqa: PLC0415
-
-    previous = getattr(coordinator, "_sim_restart_coalesce_cancel", None)
-    if previous is not None:
-        previous()
-    # Real __init__ defaults for a fresh instance, then async_setup's expiry stamp.
-    coordinator._startup_timer_fired = False
-    coordinator._startup_coalesce_expiry = (scheduler.now() + timedelta(seconds=STARTUP_COALESCE_SECONDS)).isoformat()
-
-    async def _refresh_cycle_gate() -> None:
-        if not coordinator._startup_coalesce_active:
-            return
-        if coordinator._current_classification:
-            await coordinator._do_startup_coalesce()
-            return
-        coordinator._sim_restart_coalesce_cancel = scheduler._schedule(1800, _on_refresh_cycle)
-
-    def _on_refresh_cycle(_now: Any) -> Any:
-        return _refresh_cycle_gate()
-
-    def _on_startup_coalesce_timer(_now: Any) -> Any:
-        coordinator._startup_timer_fired = True
-        return _refresh_cycle_gate()
-
-    coordinator._sim_restart_coalesce_cancel = scheduler._schedule(STARTUP_COALESCE_SECONDS, _on_startup_coalesce_timer)
 
 
 def _dispatch_event(
@@ -853,7 +850,10 @@ def _dispatch_event(
         # scenario can assert its real, current behavior (sensor pause vs.
         # nat-vent vs. classification) against real sensor/temp/classification
         # state, exactly as it runs in production once reached.
-        if coordinator is not None:
+        # Issue #1297: production coalesces once per window. If the harness's own +300 s timer
+        # (arm_startup_coalesce_end) already ran it, this event is that same refresh (e.g. a tie
+        # at exactly +300 s: the scheduler fires due timers before the event) and does nothing.
+        if coordinator is not None and not getattr(coordinator, "_sim_startup_coalesce_done_by_timer", False):
             run_coro(coordinator._do_startup_coalesce())
 
     elif etype == "fan_backstop_tick":
@@ -1076,7 +1076,7 @@ def _dispatch_event(
         # Issue #1291: the window must also END, as in production. Before, nothing ever
         # cleared the flag, so for the rest of the scenario _async_thermostat_changed
         # returned early and no occupant thermostat change was ever seen as the occupant's.
-        _arm_restart_coalesce_end(coordinator, scheduler)
+        arm_startup_coalesce_end(coordinator, scheduler)
         # Issue #645: restore_state() intentionally does NOT reset _paused_by_door/
         # _pre_pause_mode/_paused_with_hvac_already_off/_paused_entity/_paused_since or
         # _natural_vent_active — per its own docstring, it relies on AutomationEngine.

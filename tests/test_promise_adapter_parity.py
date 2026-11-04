@@ -147,12 +147,24 @@ def compare(prod: dict, adap: dict, *, restarts: int = 0) -> list[str]:
         adapter_readings.setdefault(r.ts.isoformat(), []).append(_reading_key(r))
     first_adapter_ts = min((r.ts for r in adap["readings"]), default=None)
     unmatched = []
+    seen_at: dict[str, int] = {}
+    per_instant: dict[str, int] = {}
     for r in prod["readings"]:
+        per_instant[r.ts.isoformat()] = per_instant.get(r.ts.isoformat(), 0) + 1
+    for r in prod["readings"]:
+        nth = seen_at[r.ts.isoformat()] = seen_at.get(r.ts.isoformat(), -1) + 1
         if first_adapter_ts is not None and r.ts < first_adapter_ts:
             continue  # recorded while the session was still being built: before the probe attached
         same_instant = adapter_readings.get(r.ts.isoformat())
         if same_instant is not None:
-            if _reading_key(r) not in same_instant:
+            # Issue #1297: production's heartbeat can record at the same instant as, but before, a state change
+            # (e.g. the start-up coalesce at +300 s re-commanding the thermostat): the adapter's own readings at
+            # that instant all come after the change. A reading that production itself follows with another one
+            # at the same instant is judged against the adapter's live view taken at the very moment production
+            # recorded it; the instant's LAST production reading must still equal an adapter reading.
+            superseded = nth < per_instant[r.ts.isoformat()] - 1
+            at_record = adap.get("views", {}).get(r.ts.isoformat(), [])[nth : nth + 1] if superseded else []
+            if _reading_key(r) not in same_instant and _reading_key(r) not in at_record:
                 unmatched.append((_reading_key(r), same_instant))
             continue
         # Issue #1278: no adapter reading at this instant (production's 5-minute heartbeat, which never ran

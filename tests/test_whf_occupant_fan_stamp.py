@@ -8,10 +8,11 @@ fan's physical on-time -- but never for a fan Climate Advisor started itself (ow
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import types
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 NOW = datetime(2026, 10, 31, 13, 35, 0, tzinfo=UTC)
 
@@ -69,7 +70,7 @@ def test_leaving_observe_only_asks_the_enforcer_to_check_at_once():
     coord = object.__new__(mod.ClimateAdvisorCoordinator)
     coord.automation_engine = MagicMock()
     coord._async_save_state = MagicMock()
-    coord._spawn = MagicMock(side_effect=lambda coro: None)
+    coord._spawn = MagicMock(side_effect=lambda coro: coro.close() if asyncio.iscoroutine(coro) else None)
     coord._request_whf_safety_check = MagicMock()
 
     coord.set_automation_enabled(True)
@@ -85,14 +86,49 @@ def test_leaving_observe_only_reconciles_the_door_window_pause():
     coord = object.__new__(mod.ClimateAdvisorCoordinator)
     coord.automation_engine = MagicMock()
     coord._async_save_state = MagicMock()
-    coord._spawn = MagicMock(side_effect=lambda coro: None)
+    coord.automation_engine.async_reconcile_after_automation_enabled = AsyncMock()
+    coord.async_request_refresh = AsyncMock()
+    spawned: list = []
+    coord._spawn = MagicMock(side_effect=spawned.append)
+    coord._request_whf_safety_check = MagicMock()
+
+    def _run_spawned() -> None:
+        for coro in spawned:
+            if asyncio.iscoroutine(coro):
+                asyncio.run(coro)
+        spawned.clear()
+
+    coord.set_automation_enabled(True)
+    _run_spawned()
+    coord.automation_engine.async_reconcile_after_automation_enabled.assert_awaited_once_with()
+    # Issue #1296: the plan is re-applied right after the reconcile, not at the next 30-minute cycle.
+    coord.async_request_refresh.assert_awaited_once_with()
+    coord.automation_engine.async_reconcile_after_automation_enabled.reset_mock()
+    coord.async_request_refresh.reset_mock()
+    coord.set_automation_enabled(False)
+    _run_spawned()
+    coord.automation_engine.async_reconcile_after_automation_enabled.assert_not_called()
+    coord.async_request_refresh.assert_not_called()
+
+
+def test_switched_off_again_before_the_reconcile_finished_reapplies_nothing():
+    """Issue #1296 thrash: off -> on -> off before the re-enable task ran sends no plan re-apply."""
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    coord = object.__new__(mod.ClimateAdvisorCoordinator)
+    coord.automation_engine = MagicMock()
+    coord.automation_engine.async_reconcile_after_automation_enabled = AsyncMock()
+    coord.async_request_refresh = AsyncMock()
+    coord._async_save_state = MagicMock()
+    spawned: list = []
+    coord._spawn = MagicMock(side_effect=spawned.append)
     coord._request_whf_safety_check = MagicMock()
 
     coord.set_automation_enabled(True)
-    coord.automation_engine.async_reconcile_after_automation_enabled.assert_called_once_with()
-    coord.automation_engine.async_reconcile_after_automation_enabled.reset_mock()
     coord.set_automation_enabled(False)
-    coord.automation_engine.async_reconcile_after_automation_enabled.assert_not_called()
+    for coro in spawned:
+        if asyncio.iscoroutine(coro):
+            asyncio.run(coro)
+    coord.async_request_refresh.assert_not_called()
 
 
 # ── the mirror: the occupant turns HVAC ON during startup coalescing ──────────────────────────────────────

@@ -882,6 +882,8 @@ def _compute_next_automation_action_with_forecast(
     now_time: time,
     predicted_indoor: list[dict] | None,
     hourly_forecast_temps: list[dict] | None,
+    *,
+    window_reads_open: bool | None = None,
 ):
     """Like _compute_next_automation_action(), but also wires forecast-curve state
     (self._last_predicted_indoor / self._hourly_forecast_temps) needed by the
@@ -902,6 +904,10 @@ def _compute_next_automation_action_with_forecast(
     coord._current_classification = c
     coord._last_predicted_indoor = predicted_indoor
     coord._hourly_forecast_temps = hourly_forecast_temps or []
+    # Issue #1299: the candidate needs a sensor that READS open (not dark). By default a door/window pause here
+    # means a window that reads open; ``window_reads_open=False`` models a pause held only by a dark sensor.
+    _reads_open = bool(automation_engine.is_paused_by_door) if window_reads_open is None else window_reads_open
+    coord._any_sensor_open = lambda: _reads_open
     # Issue #1142 (step 7): the prediction asks the engine's own start helper. The engine here is a MagicMock, so
     # back that one method with a REAL AutomationEngine carrying the same config and the mock's session/pause state
     # (nothing re-implemented: it is production's _nat_vent_start_decision on production's FSM).
@@ -1253,6 +1259,20 @@ class TestNatVentStartCandidate:
         action, t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
         assert action == "Natural ventilation"
         assert t == "3:00 PM"  # hour 15: outdoor 70 < indoor 80 - 1 = 79, indoor > comfort_heat, outdoor < 77
+
+    def test_absent_when_only_a_dark_window_holds_the_pause(self):
+        """Issue #1299: a dark window (last reading open) holds the pause but never starts a fan (#1181/#1289), so
+        the card must not promise free cooling. Same inputs as the 3:00 PM promise above, window dark."""
+        ae = _make_automation_engine(is_paused_by_door=True)
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        config = {"fan_mode": "whole_house_fan"}
+        indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
+        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, _t = _compute_next_automation_action_with_forecast(
+            c, ae, config, time(12, 0), indoor, outdoor, window_reads_open=False
+        )
+        assert action != "Natural ventilation"
 
     def test_not_promised_when_the_engine_would_veto_the_start(self):
         """Issue #1142 (step 7): the prediction asks the engine's own start helper, so a start the forecast-peak

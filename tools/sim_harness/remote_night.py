@@ -165,6 +165,8 @@ def run_night(spec: NightSpec) -> NightResult:
     construct = dict(scenario)
     construct["events"] = [{"time": _iso(t0), "type": "temp_update", "indoor_f": round(house.reported_f(), 1)}]
     session = make_session(construct, engine="fakehass", use_coordinator=True)
+    # Issue #1310: the toy house is this night's thermostat (report_action); FakeHass must not derive its own.
+    session.fake_hass.set_action_deadband(session.climate_entity, None)
     writes: list[tuple[datetime, float]] = []
     runs: list[tuple[datetime, datetime]] = []
     trace: list[tuple[datetime, float, float, float, float]] = []

@@ -14,8 +14,8 @@ Occupant framing, one line per issue:
   make a nat-vent session viable: CA paused their heat 4.5 minutes before the grace ended.
 * #1147  The occupant sets the thermostat Off during natural ventilation and closes the window: CA turns the
   AC back on about 14 minutes into the Off grace.
-* #1131  The occupant raises the SETPOINT while a door pause has the thermostat Off. When the door closes CA
-  restores its own mode AND its own setpoint, and the occupant's number is gone.
+* #1131  (retired by Issue #1325: a setpoint change while the thermostat is Off is no override at all; see
+  ``TestSetpointChangeWhileTheThermostatIsOffIsIgnored``.)
 * #1146  The occupant changes only the temperature (mode already matches the day): the change was never
   protected -- a window opening turned HVAC off over it and the status card showed no grace.
 * #1152  The dead coordinator copy of the override/grace FSM that carried the #1146 defect is gone.
@@ -319,12 +319,8 @@ def _no_hvac_writes(engine: AutomationEngine) -> list:
 
 
 def _occupant_changes(engine: AutomationEngine, source: str) -> None:
-    """The occupant's change during the session: Off (a mode change) or a setpoint nudge on the Off thermostat."""
-    if source == "setpoint":
-        engine._test_state.attributes["temperature"] = 79.0
-        _occupant_overrides(engine, source="setpoint", new_mode="off", old_setpoint_f=76.0, new_setpoint_f=79.0)
-    else:
-        _occupant_overrides(engine, new_mode="off")
+    """The occupant's change during the session: Off (a mode change; a setpoint nudge on Off is ignored, #1325)."""
+    _occupant_overrides(engine, new_mode="off")
 
 
 def _slow_loop(engine: AutomationEngine, *, indoor: float) -> None:
@@ -336,7 +332,7 @@ def _slow_loop(engine: AutomationEngine, *, indoor: float) -> None:
         _run(engine.check_natural_vent_conditions())
 
 
-@pytest.mark.parametrize("source", ["off", "setpoint"])
+@pytest.mark.parametrize("source", ["off"])
 @pytest.mark.parametrize("confirm_s", [0, 600], ids=["confirmed", "pending"])
 class TestNatVentExitsThatBypassTheChokePointKeepTheOccupantsChange:
     """Mirror of #1147: the slow-loop comfort-floor and away-ceiling exits never went through _exit_nat_vent().
@@ -467,7 +463,7 @@ class TestPendingChangeThatSelfResolvesAppliesTheWindowPauseNow:
 
 
 # ---------------------------------------------------------------------------
-# #1131: a setpoint change made while a door pause has the thermostat Off is the occupant's
+# A door pause has the thermostat Off (#1131 retired by Issue #1325: a setpoint change while Off is ignored)
 # ---------------------------------------------------------------------------
 
 
@@ -479,63 +475,7 @@ def _paused_engine(**cfg) -> AutomationEngine:
     return engine
 
 
-def _occupant_raises_setpoint(engine: AutomationEngine, to_f: float) -> None:
-    engine._test_state.attributes["temperature"] = to_f
-    _occupant_overrides(engine, source="setpoint", new_mode="off", old_setpoint_f=68.0, new_setpoint_f=to_f)
-
-
-class TestSetpointChangeDuringAPauseSurvivesTheDoorClosing:
-    @pytest.mark.parametrize("confirm_s", [0, 600], ids=["confirmed", "pending"])
-    def test_hvac_resumes_in_the_pre_pause_mode_at_the_occupants_setpoint(self, timers, confirm_s):
-        engine = _paused_engine(manual_grace_seconds=1800, override_confirm_seconds=confirm_s)
-        _occupant_raises_setpoint(engine, 75.0)
-        assert engine._manual_change_protected()
-        engine.hass.services.async_call.reset_mock()
-        grace_end_before = engine._grace_end_time
-
-        _close_window(engine)
-
-        assert engine._test_state.state == "heat", "HVAC resumes in the pre-pause mode"
-        assert engine._test_state.attributes["temperature"] == 75.0, "...at the OCCUPANT's setpoint, not CA's"
-        assert [w for w in _climate_writes(engine) if w[0] == "set_temperature"] == []
-        assert engine._paused_by_door is False
-        assert engine._grace_end_time == grace_end_before, "a 5-minute automation grace must not replace theirs"
-
-    def test_the_override_is_recorded_as_the_pre_pause_mode_not_the_pause_off(self, timers):
-        """The thermostat reads Off only because CA paused it. Recorded as 'off', the door-close restore looked
-        like CA reversing the occupant's value (the override_respected hit on seeds 3000032 / 1000016) and a
-        later REAL change to Off would be swallowed as 'the override's own mode'."""
-        engine = _paused_engine(manual_grace_seconds=1800, override_confirm_seconds=0)
-        emitted = []
-        engine._emit_event_callback = lambda name, data: emitted.append((name, data))
-        _occupant_raises_setpoint(engine, 75.0)
-
-        assert engine._manual_override_mode == "heat"
-        detected = [d for n, d in emitted if n == "override_detected"] or [
-            d for n, d in emitted if n == "override_confirmed"
-        ]
-        assert all(d.get("detected_mode", d.get("mode")) == "heat" for d in detected)
-        _close_window(engine)
-        assert engine._manual_override_mode == "heat"
-
-    def test_hvac_that_was_already_off_before_the_pause_keeps_off_as_the_mode(self, timers):
-        engine = _engine("off", manual_grace_seconds=1800, override_confirm_seconds=0)
-        _open_window(engine)
-        assert engine._paused_by_door and engine._pre_pause_mode is None
-        _occupant_raises_setpoint(engine, 75.0)
-        assert engine._manual_override_mode == "off"
-
-    def test_pending_confirmation_confirms_in_the_restored_mode(self, timers):
-        engine = _paused_engine(manual_grace_seconds=1800, override_confirm_seconds=600)
-        _occupant_raises_setpoint(engine, 75.0)
-        _close_window(engine)
-        assert engine._override_confirm_pending and engine._override_confirm_mode == "heat"
-
-        timers.fire(600)
-
-        assert engine._manual_override_active and engine._manual_override_mode == "heat"
-        assert engine._test_state.attributes["temperature"] == 75.0
-
+class TestDoorCloseRestoreWithoutAnOverride:
     def test_control_without_an_override_the_close_restores_comfort_and_starts_the_automation_grace(self, timers):
         engine = _paused_engine(manual_grace_seconds=1800)
         assert not engine._manual_change_protected()
@@ -781,8 +721,8 @@ def test_mode_change_during_a_fan_session_is_unchanged_714(timers):
     assert [w for w in _climate_writes(engine) if w[0] == "set_hvac_mode"] == []
 
 
-def _coordinator_setpoint_event(*, whf_owns: bool, new_temp):
-    """The REAL coordinator ``_async_thermostat_changed`` fed a temperature-only change on an Off thermostat."""
+def _coordinator_setpoint_event(*, whf_owns: bool, new_temp, mode: str = "off", fan_mode: str | None = None):
+    """The REAL coordinator ``_async_thermostat_changed`` fed a temperature-only change (default: thermostat Off)."""
     import asyncio
 
     from tests.test_heat_cool_override import (
@@ -793,9 +733,11 @@ def _coordinator_setpoint_event(*, whf_owns: bool, new_temp):
         _make_event,
     )
 
-    coord = _make_coordinator_stub(last_commanded_hvac_mode="off")
+    coord = _make_coordinator_stub(last_commanded_hvac_mode=mode)
+    if fan_mode is not None:
+        coord.config["fan_mode"] = fan_mode
     coord.automation_engine._whf_owns_hvac = MagicMock(return_value=whf_owns)
-    event = _make_event(old_hvac_mode="off", new_hvac_mode="off", old_temp=68.0, new_temp=new_temp)
+    event = _make_event(old_hvac_mode=mode, new_hvac_mode=mode, old_temp=68.0, new_temp=new_temp)
     mock_dt = MagicMock()
     mock_dt.now.return_value = _NOW_BASE
     with patch(_PATCH_CALLBACK, side_effect=lambda fn: fn), patch(_PATCH_DT_UTIL, mock_dt):
@@ -819,16 +761,40 @@ class TestSetpointChangeWhileWhfOwnsHvacIsIgnored:
         assert any("Setpoint change ignored: whole-house fan owns HVAC" in r.getMessage() for r in caplog.records)
 
     def test_control_without_the_fan_the_same_change_is_an_override(self):
-        coord = _coordinator_setpoint_event(whf_owns=False, new_temp=74.0)
+        coord = _coordinator_setpoint_event(whf_owns=False, new_temp=74.0, mode="cool")
         assert coord.automation_engine.handle_manual_override.call_count == 1
         assert coord._today_record.manual_overrides == 1
+
+
+@pytest.mark.parametrize("fan_mode", ["whole_house_fan", "hvac_fan"])
+@pytest.mark.parametrize("new_temp", [74.0, 62.0])
+class TestSetpointChangeWhileTheThermostatIsOffIsIgnored:
+    """Owner ruling 2026-11-04 (Issue #1325): a thermostat that is Off takes no setpoint, so a setpoint-only change
+    while Off (including while CA's door/window pause holds it Off) is not an override: no detection, no
+    confirmation, no grace. Occupant first: nothing happens to the household, because nothing was changed."""
+
+    def test_no_override_no_count_no_grace(self, caplog, fan_mode, new_temp):
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            coord = _coordinator_setpoint_event(whf_owns=False, new_temp=new_temp, fan_mode=fan_mode)
+        ae = coord.automation_engine
+        assert ae.handle_manual_override.call_count == 0
+        assert ae.handle_manual_override_during_pause.call_count == 0
+        assert ae.start_override_confirmation.call_count == 0
+        assert coord._today_record.manual_overrides == 0
+        assert any("a setpoint change while Off is not an override" in r.getMessage() for r in caplog.records)
+
+    def test_control_the_same_change_on_a_running_thermostat_is_an_override(self, fan_mode, new_temp):
+        coord = _coordinator_setpoint_event(whf_owns=False, new_temp=new_temp, mode="cool", fan_mode=fan_mode)
+        assert coord.automation_engine.handle_manual_override.call_count == 1
 
 
 class TestNonNumericSetpointRegistersNothing:
     """#583: a non-numeric setpoint pair is not an override (it used to still call handle_manual_override)."""
 
     def test_non_numeric_reading_is_not_registered(self):
-        coord = _coordinator_setpoint_event(whf_owns=False, new_temp="n/a")
+        coord = _coordinator_setpoint_event(whf_owns=False, new_temp="n/a", mode="cool")
         assert coord.automation_engine.handle_manual_override.call_count == 0
         assert coord._today_record.manual_overrides == 0
 
@@ -853,7 +819,7 @@ class TestNonNumericSetpointRegistersNothing:
         assert coord.automation_engine.handle_manual_override.call_count == 1
 
     def test_control_numeric_reading_is_registered(self):
-        coord = _coordinator_setpoint_event(whf_owns=False, new_temp=72.0)
+        coord = _coordinator_setpoint_event(whf_owns=False, new_temp=72.0, mode="cool")
         assert coord.automation_engine.handle_manual_override.call_count == 1
 
 
@@ -1125,7 +1091,7 @@ class TestDeferralFlagLifecycle:
 
     def test_set_by_the_protected_door_close_restore(self, timers):
         engine = _paused_engine(manual_grace_seconds=1800, override_confirm_seconds=600)
-        _occupant_raises_setpoint(engine, 75.0)
+        _occupant_overrides(engine, new_mode="off")
         assert engine._override_confirm_pending
         _close_window(engine)
         assert engine._deferred_while_pending is True

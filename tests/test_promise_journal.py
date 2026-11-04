@@ -464,3 +464,182 @@ class TestObserveOnlySealedNotices:
         j.on_event(at(1), "whf_sealed_observe_notified", {})
         later = at(1) + timedelta(hours=5)
         assert j.window(later).observe_notices == ((at(1), None),)
+
+
+class TestIssue1325TwoChangesInsideFiveMinutes:
+    """Occupant: Cool 74, then Cool 72 two minutes later (or Heat 70 then Heat 72), on a normal day (Issue #1325).
+
+    Real event order (30 s confirm, 900 s grace): the supersede ``grace_cancelled`` of the FIRST change's grace lands
+    at the second change's confirm delay, after the second ``override_detected``. Both changes emit
+    ``override_detected`` (the engine's dedup suppresses only an identical repeat). The first episode ends
+    ``superseded``; the second stays open and is protected to its own grace end.
+    """
+
+    @staticmethod
+    def _events(mode: str, first: float, second: float, source: str = "setpoint", *, second_detected: bool = True):
+        ev = [
+            (0, "override_detected", {"detected_mode": mode, "source": source, "new_setpoint_f": first}),
+            (0.5, "grace_started", {"source": "manual", "duration_seconds": 900, "trigger": "override_confirmed"}),
+            (0.5, "override_confirmed", {"mode": mode, "source": source}),
+        ]
+        if second_detected:
+            ev.append((2, "override_detected", {"detected_mode": mode, "source": source, "new_setpoint_f": second}))
+        ev += [
+            (
+                2.5,
+                "grace_cancelled",
+                {"reason": "superseded", "trigger": "override_confirmed", "protects_override": True},
+            ),
+            (2.5, "grace_started", {"source": "manual", "duration_seconds": 900, "trigger": "override_confirmed"}),
+            (2.5, "override_confirmed", {"mode": mode, "source": source}),
+        ]
+        return ev
+
+    @staticmethod
+    def _journal(events, first: float, second: float) -> PromiseJournal:
+        j = PromiseJournal()
+        for m, t, p in events:
+            j.on_event(at(m), t, p)
+        j.record_reading(rd(0.1, hvac_mode="cool", setpoint_f=first))
+        j.record_reading(rd(2.1, hvac_mode="cool", setpoint_f=second))
+        return j
+
+    @staticmethod
+    def _p4(j: PromiseJournal, now_min: float = 10):
+        from custom_components.climate_advisor.invariant_watchdog import PromiseConfig, check_p4_override_respected
+
+        return check_p4_override_respected(j.window(at(now_min)), PromiseConfig())
+
+    @pytest.mark.parametrize(
+        "mode,first,second,source",
+        [("cool", 74.0, 72.0, "setpoint"), ("heat", 70.0, 72.0, "setpoint"), ("cool", 74.0, 72.0, "pause")],
+    )
+    def test_first_superseded_second_protected_to_its_own_grace_end_no_p4_hit(self, mode, first, second, source):
+        ev = self._events(mode, first, second, source)
+        first_ep, second_ep = derive_episodes([mark_from_event(at(m), t, p) for m, t, p in ev])
+        assert first_ep.end_reason == "superseded" and first_ep.end_ts == at(2)
+        assert second_ep.start_ts == at(2) and second_ep.end_ts is None
+        assert second_ep.grace_end_ts == at(2.5) + timedelta(seconds=900)
+        assert self._p4(self._journal(ev, first, second)) == []
+
+    def test_the_second_change_is_protected_a_ca_write_inside_its_grace_is_a_p4_hit(self):
+        """Protection is real: CA reversing the second change inside ITS grace (after the first one's end) is caught."""
+        ev = self._events("cool", 74.0, 72.0)
+        j = self._journal(ev, 74.0, 72.0)
+        j.record_command(Command(ts=at(14), target="thermostat", service="set_temperature", setpoint_f=76.0))
+        assert [h.promise for h in self._p4(j, 15)] == ["override_respected"]
+
+    def test_without_the_second_override_detected_the_false_early_end_hit_appears(self):
+        """What the swallowed event produced (pins why the second emit is needed): 'ended ... min early'."""
+        ev = self._events("cool", 74.0, 72.0, second_detected=False)
+        hits = self._p4(self._journal(ev, 74.0, 72.0))
+        assert [h.promise for h in hits] == ["override_respected"] and "min early" in hits[0].detail
+
+    def test_control_a_ca_cancel_of_the_new_changes_own_grace_still_closes_it_and_p4_fires(self):
+        ev = self._events("cool", 74.0, 72.0)
+        ev.append((6, "grace_cancelled", {"reason": "superseded", "protects_override": True}))
+        eps = derive_episodes([mark_from_event(at(m), t, p) for m, t, p in ev])
+        assert eps[1].end_ts == at(6) and eps[1].end_reason == "superseded_unreplaced"
+        hits = self._p4(self._journal(ev, 74.0, 72.0))
+        assert [h.promise for h in hits] == ["override_respected"] and "min early" in hits[0].detail
+
+    def test_control_b_old_grace_cancelled_new_grace_never_starts_ca_write_is_still_caught(self):
+        ev = [e for e in self._events("cool", 74.0, 72.0) if not (e[0] == 2.5 and e[1] != "grace_cancelled")]
+        eps = derive_episodes([mark_from_event(at(m), t, p) for m, t, p in ev])
+        assert eps[1].end_ts is None, "the newer change stays open; the old grace's cancel was never about it"
+        j = self._journal(ev, 74.0, 72.0)
+        j.record_command(Command(ts=at(8), target="thermostat", service="set_temperature", setpoint_f=76.0))
+        assert [h.promise for h in self._p4(j, 9)] == ["override_respected"]
+
+
+class TestIssue1325FanMirrorRemoteTimerChange:
+    """Occupant (whole-house fan with the RF remote): presses the fan on with a 1 h timer, then two minutes later picks
+    a 4 h timer on the remote. The fan keeps running on the occupant's 4 h request.
+
+    Real engine order (traced through the HA tier, ``tests_ha/test_second_change_p4_1325.py``): the NEW
+    ``fan_manual_override`` is emitted first, then the ``grace_cancelled`` (``superseded``, ``continues`` False) of
+    the OLD press's grace, then the new ``grace_started``. Mirror of the #1325 thermostat rule: that cancel is about
+    the old grace, which never protected the newer press, so the newer press stays open with its own grace end
+    instead of being closed ``superseded`` at the instant it started (which left a CA fan-off during the 4 h run
+    unchecked).
+    """
+
+    @staticmethod
+    def _events():
+        return [
+            (0, "fan_manual_override", {"fan_after": "on", "remote_timer_hours": 1.0}),
+            (0, "grace_started", {"source": "manual", "duration_seconds": 3600, "trigger": "fan_manual_override"}),
+            (2, "fan_manual_override", {"fan_after": "on", "remote_timer_hours": 4.0}),
+            (
+                2,
+                "grace_cancelled",
+                {
+                    "reason": "superseded",
+                    "trigger": "fan_manual_override",
+                    "protects_override": True,
+                    "continues": False,
+                },
+            ),
+            (2, "grace_started", {"source": "manual", "duration_seconds": 14400, "trigger": "fan_manual_override"}),
+        ]
+
+    @staticmethod
+    def _p4(events, *commands, now_min: float = 30):
+        from custom_components.climate_advisor.invariant_watchdog import PromiseConfig, check_p4_override_respected
+
+        j = PromiseJournal()
+        for m, t, p in events:
+            j.on_event(at(m), t, p)
+        for c in commands:
+            j.record_command(c)
+        return check_p4_override_respected(j.window(at(now_min)), PromiseConfig())
+
+    def test_newer_press_stays_open_with_its_own_grace_end(self):
+        first, second = derive_episodes([mark_from_event(at(m), t, p) for m, t, p in self._events()])
+        assert first.end_reason == "superseded" and first.end_ts == at(2)
+        assert second.start_ts == at(2) and second.end_ts is None
+        assert second.grace_end_ts == at(2) + timedelta(seconds=14400)
+
+    def test_a_ca_fan_off_during_the_newer_press_is_a_p4_hit(self):
+        off = Command(ts=at(20), target="fan", service="turn_off", fan_on=False)
+        assert [h.promise for h in self._p4(self._events(), off)] == ["override_respected"]
+
+    def test_no_ca_write_no_p4_hit(self):
+        assert self._p4(self._events()) == []
+
+    def test_control_a_cancel_of_the_newer_presss_own_grace_still_closes_it(self):
+        ev = self._events() + [(10, "grace_cancelled", {"reason": "superseded", "protects_override": True})]
+        eps = derive_episodes([mark_from_event(at(m), t, p) for m, t, p in ev])
+        assert eps[1].end_ts == at(10) and eps[1].end_reason == "superseded_unreplaced"
+
+    def test_regression_on_off_on_real_order_keeps_the_newer_press_open(self):
+        """Real order traced in both fan modes (wall switch / thermostat blower): on, off a minute later, on again."""
+        ev = [
+            (0, "fan_manual_override", {"fan_after": "on"}),
+            (0, "grace_started", {"source": "manual", "duration_seconds": 1800, "trigger": "fan_manual_override"}),
+            (
+                1,
+                "grace_cancelled",
+                {
+                    "reason": "superseded",
+                    "trigger": "fan_manual_override",
+                    "protects_override": True,
+                    "continues": False,
+                },
+            ),
+            (1, "grace_started", {"source": "manual", "duration_seconds": 1800, "trigger": "fan_off"}),
+            (2, "fan_manual_override", {"fan_after": "on"}),
+            (
+                2,
+                "grace_cancelled",
+                {"reason": "superseded", "trigger": "fan_off", "protects_override": False, "continues": False},
+            ),
+            (2, "grace_started", {"source": "manual", "duration_seconds": 1800, "trigger": "fan_manual_override"}),
+        ]
+        eps = derive_episodes([mark_from_event(at(m), t, p) for m, t, p in ev])
+        assert [(e.kind, e.end_reason) for e in eps] == [
+            ("override", "superseded"),
+            ("fan_off", "superseded"),
+            ("override", None),
+        ]
+        assert eps[2].grace_end_ts == at(2) + timedelta(seconds=1800)

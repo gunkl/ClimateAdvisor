@@ -851,3 +851,38 @@ def test_the_toy_thermostat_reports_within_seconds_so_the_30_second_tolerance_is
     assert run_day(21000228).found == []
     monkeypatch.setattr(gen, "REPORT_LAG_S", 120.0)
     assert "ac_whf_mutex" in run_day(21000228).found
+
+
+# Issue #1325 (nightly 41848171886): Off, then Cool 75 two minutes later during a door/window pause. The second change
+# used to be swallowed by the 5-minute override_detected dedup, so P4 closed the first episode early and never
+# protected the second ("ended your manual thermostat change 13 min early").
+_P4_FIXED_1325_SEEDS = (8002000056,)
+
+
+@pytest.mark.parametrize("day_seed", _P4_FIXED_1325_SEEDS)
+def test_1325_distinct_change_within_5_min_keeps_override_respected(day_seed) -> None:
+    assert not [(h.ts, h.detail) for h in run_day(day_seed).report.hard if h.promise == "override_respected"]
+
+
+def test_1325_no_generated_thermostat_event_sets_a_setpoint_while_off() -> None:
+    """Owner ruling (Issue #1325): a thermostat that is Off takes no setpoint, so an occupant Off carries none.
+
+    Scans the days whose plan has an occupant Off (all three profiles: only the coordinator ones feed it) and asserts
+    that no fed ``thermostat_state_changed`` pairs ``hvac_mode == "off"`` with a ``temperature``.
+    """
+    seeds = []
+    for s in range(1, 3000):
+        plan = build_plan(s, "coordinator")
+        if any(k == "thermostat_state_changed" and a["hvac_mode"] == "off" for _, k, a in plan.timed):
+            seeds.append(s)
+        if len(seeds) >= 8:
+            break
+    assert len(seeds) >= 3, "precondition: found days with an occupant Off"
+    for profile in ("coordinator", "mixed", "engine"):
+        for s in seeds:
+            plan = build_plan(s, profile)
+            if not plan.use_coordinator:
+                continue
+            for ev in run_plan(plan, probe=False).scenario["events"]:
+                if ev.get("type") == "thermostat_state_changed" and ev.get("hvac_mode") == "off":
+                    assert "temperature" not in ev, (profile, s, ev)

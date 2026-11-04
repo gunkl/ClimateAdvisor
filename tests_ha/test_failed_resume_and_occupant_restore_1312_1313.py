@@ -6,11 +6,9 @@ reply "Manual grace period started", so the AC stayed off for the whole grace wh
 been restored. Owner decision 2026-11-03 ("same as #1308"): the pause stays cleared (the occupant asked for that), the
 restore is re-sent on the bounded 15/60/300 s chain, and the manual grace starts only once the restore lands.
 
-#1313 occupant story: during a door/window pause the occupant raises the setpoint at the thermostat (a protected
-manual change). Closing the window restores the occupant's own mode. If that restore failed, nothing re-sent it,
-because #1308's chain stops whenever the occupant's change is protected. Now it is re-sent (mode only; their
-setpoint is kept and no automation grace starts). It stops on a NEWER occupant change (G3). Re-sending the
-occupant's own choice does not override them.
+#1313 (retired by Issue #1325): the occupant raising the setpoint on a door-paused (Off) thermostat is no override at
+all (a thermostat that is Off takes no setpoint), so there is no occupant mode to restore and re-send; see
+tests_ha/test_second_change_p4_1325.py.
 
 The failure is made at the device: the simulated thermostat raises for a while (a cloud blip).
 """
@@ -46,21 +44,6 @@ _HOT = {
     "initial_hvac_mode": "cool",
     "ca_config": {"fan_min_runtime_per_hour": 0, "sensor_debounce_seconds": _DEBOUNCE_S},
 }
-
-# #1133's cold morning: an open window means "pause"; the occupant's setpoint change is protected.
-_COLD = {
-    "fan": "whf",
-    "contacts": ["window"],
-    "startup": "settled",
-    "initial_indoor_f": 62.0,
-    "start": datetime(2026, 1, 15, 7, 0, tzinfo=UTC),
-    "outdoor_f": 38.0,
-    "high_f": 44.0,
-    "low_f": 28.0,
-    "initial_hvac_mode": "heat",
-    "ca_config": {"sensor_debounce_seconds": 30, "override_confirm_seconds": 60, "manual_grace_seconds": 0},
-}
-_OCCUPANT_SETPOINT_F = 75.0
 
 
 def _refuse_mode(house, monkeypatch, mode: str, *, for_s: float | None) -> list[int]:
@@ -151,20 +134,6 @@ async def _hot_paused(make_house):
     return house, engine
 
 
-async def _cold_paused_with_occupant_setpoint(make_house):
-    house = await make_house(**_COLD)
-    engine = house.coordinator.automation_engine
-    await house.advance(minutes=6)
-    await house.open("window")
-    await house.advance(minutes=3)
-    assert engine._paused_by_door and house.thermostat.mode == "off", "precondition: the window paused the heat"
-    await house.occupant_sets_thermostat(setpoint_f=_OCCUPANT_SETPOINT_F)
-    await house.advance(minutes=3)
-    assert engine._manual_change_protected(), "precondition: the occupant's setpoint change is protected"
-    assert engine._paused_by_door, "precondition: a setpoint change on an Off thermostat keeps the pause"
-    return house, engine
-
-
 # --- #1312: dashboard Resume -----------------------------------------------------------------------------------
 
 
@@ -203,61 +172,3 @@ async def test_control_resume_without_failure_starts_the_grace_at_once(make_hous
     assert len(_graces(events, "dashboard_resume")) == 1 and engine._grace_active
     assert "Manual grace period started" in body["message"]
     assert engine._pending_restore is None and not _rows(events)
-
-
-# --- #1313: the occupant's own mode restored as the window closes ------------------------------------------------
-
-
-async def test_failed_occupant_mode_restore_is_resent_keeping_their_setpoint(make_house, monkeypatch) -> None:
-    house, engine = await _cold_paused_with_occupant_setpoint(make_house)
-    events = _tee_events(house)
-    refused = _refuse_mode(house, monkeypatch, "heat", for_s=13)
-
-    await house.close_contact("window")
-    for _ in range(120):
-        if refused[0]:
-            break
-        await house.advance(seconds=1)
-    assert refused[0] >= 1, "precondition: the restore of the occupant's heat was refused"
-    took = await _seconds_until_mode(house, "heat", 30)
-    assert took is not None, "the occupant's heat did not come back within ~30 s of a failed restore"
-    await house.advance(minutes=8)
-    assert house.thermostat.mode == "heat"
-    assert house.thermostat.setpoint_f == _OCCUPANT_SETPOINT_F, "their setpoint is kept"
-    assert engine._manual_change_protected(), "their change still owns the thermostat"
-    assert not _graces(events, "sensor_closed_resume"), "no automation grace over the occupant's change"
-    assert engine._pending_restore is None and engine._restore_resend_cancel is None, "nothing pending (G2)"
-    assert len(_rows(events)) == 1, "G5: one Activity row"
-
-
-async def test_newer_occupant_change_stops_the_occupant_mode_chain(make_house, monkeypatch, caplog) -> None:
-    house, engine = await _cold_paused_with_occupant_setpoint(make_house)
-    refused = _refuse_mode(house, monkeypatch, "heat", for_s=None)
-
-    await house.close_contact("window")
-    for _ in range(120):
-        if refused[0]:
-            break
-        await house.advance(seconds=1)
-    assert engine._pending_restore is not None, "precondition: the occupant's mode restore is pending"
-    await house.advance(seconds=3)
-    await house.occupant_sets_thermostat(mode="cool")  # a NEWER occupant change (heat is still refused)
-    marker = len(house.calls)
-    await house.advance(minutes=8)
-    assert not _ca_mode_writes(house, marker, "heat"), "re-sent over the occupant's newer change"
-    assert engine._pending_restore is None and engine._restore_resend_cancel is None, "nothing pending (G2)"
-    assert "Restore re-send stopped" in caplog.text
-    assert house.thermostat.mode == "cool", "the occupant's newer choice stands (G3)"
-
-
-async def test_control_occupant_mode_restore_without_failure_sends_once(make_house) -> None:
-    house, engine = await _cold_paused_with_occupant_setpoint(make_house)
-    events = _tee_events(house)
-    marker = len(house.calls)
-    await house.close_contact("window")
-    await house.advance(minutes=8)
-    assert house.thermostat.mode == "heat"
-    assert house.thermostat.setpoint_f == _OCCUPANT_SETPOINT_F
-    assert len(_ca_mode_writes(house, marker, "heat")) == 1, "one restore, no re-send"
-    assert engine._pending_restore is None and not _rows(events)
-    assert not _graces(events, "sensor_closed_resume")

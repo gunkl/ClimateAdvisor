@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.59] — 2026-11-04
+
+- Fix #1325: when you change the thermostat twice within 5 minutes (say Cool, then Off), both changes are now recorded in the Activity log, and the newer one is checked as protected. Before, the second change wasn't logged, and the household-promise check wrongly reported that Climate Advisor had ended your first change early.
+  - **Fan timer changes:** a new whole-house-fan timer chosen while the fan is running (1 h, then 4 h) is now checked as protected too. Before, a Climate Advisor stop during that run would not have been flagged.
+  - **Setpoint while Off:** moving the setpoint while the thermostat is Off, including while Climate Advisor has it Off for an open window, is no longer treated as a manual change. Thermostats don't allow this, and nothing changes while the system is Off. The handling built for that impossible case is removed, including the door-close restore at that setpoint (#1131, #1157, #1313 occupant-mode chain).
+  - **Unchanged:** your own mode changes during a window pause, and your own Off, are protected as before.
+
 ## [0.8.58] — 2026-11-04
 
 - Fix #1326: when a source Climate Advisor depends on stops responding (for example the weather service), the warning on the dashboard's Status card now fits inside the card on desktop and mobile. It used the same large bold font as the card's status, and the entity id (e.g. `weather.forecast_home`) has no spaces, so it ran past the card's edge. Warnings now use a smaller line that wraps, and the entity id sits on its own muted line under the message. The same applies to the card's other warnings (control issues, household-promise alerts, Climate Advisor unavailable).

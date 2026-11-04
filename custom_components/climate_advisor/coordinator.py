@@ -7356,7 +7356,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_temp,
                 new_state.state,
             )
-        if _setpoint_candidate and not _setpoint_ignored_for_whf:
+        # Owner ruling (2026-11-04, Issue #1325): a thermostat that is Off takes no setpoint, so a setpoint-only change
+        # while its live mode is Off is not a change at all -- no override, no confirmation, no grace. (An occupant's
+        # own change TO Off is a mode change and is handled by the mode block, not here.)
+        _setpoint_ignored_while_off = _setpoint_candidate and new_state.state == "off"
+        if _setpoint_ignored_while_off:
+            _LOGGER.debug(
+                "Setpoint change ignored: thermostat is Off, a setpoint change while Off is not an override "
+                "old_temp=%s new_temp=%s",
+                old_temp,
+                new_temp,
+            )
+        if _setpoint_candidate and not _setpoint_ignored_for_whf and not _setpoint_ignored_while_off:
             # Mark setpoint detection as fired so Block 3 (fan_mode) is suppressed for this event.
             # A single event that changes both setpoint and fan_mode has one root cause; two
             # simultaneous grace periods from one event would confuse the automation engine.

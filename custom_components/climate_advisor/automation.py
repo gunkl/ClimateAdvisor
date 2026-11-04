@@ -643,14 +643,9 @@ class PendingRestore:
     target: str | None
     trigger: str | None
     reason: str
-    # Issues #1312/#1313: whose restore this is. "automation" (window close / fan release: automation grace on
-    # landing), "dashboard_resume" (the occupant's Resume: the MANUAL dashboard_resume grace on landing) or
-    # "occupant_mode" (the occupant's own protected mode restored as the window closes: mode only, no grace).
+    # Issue #1312: whose restore this is. "automation" (window close / fan release: automation grace on landing) or
+    # "dashboard_resume" (the occupant's Resume: the MANUAL dashboard_resume grace on landing).
     kind: str = "automation"
-    # "occupant_mode": ``_override_confirm_time`` when armed (a different, non-None value later = a NEWER occupant
-    # change) and the thermostat mode the failed restore left (anything else but the target = changed meanwhile).
-    occupant_mark: str | None = None
-    from_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2105,6 +2100,9 @@ class AutomationEngine:
         self._last_classification_applied: tuple[str, str] | None = None
         # Issue #96: override event dedup — track last emission time
         self._last_override_detected_time: datetime | None = None
+        # Issue #1325: the dedup suppresses only an IDENTICAL repeat -- this is the (source, detected_mode,
+        # new_mode, new_setpoint_f) of the last emitted override_detected. Runtime-only, never persisted.
+        self._last_override_detected_key: tuple[Any, ...] | None = None
         # Issue #446: unwarranted-fan reconcile-correction dedup — track last correction time
         self._last_unwarranted_fan_correction_at: datetime | None = None
 
@@ -2602,65 +2600,14 @@ class AutomationEngine:
             mode = self._override_confirm_mode
         return mode
 
-    def _protected_change_source(self) -> str | None:
-        """How the occupant's protected change was made ("normal" / "pause" / "setpoint"), else None (Issue #1165)."""
-        if self._manual_override_active:
-            return self._manual_override_source
-        return self._override_confirm_source if self._override_confirm_pending else None
-
     def _protected_change_is_occupant_off(self) -> bool:
         """Whether the occupant's protected change is their own Off (Issue #1165).
 
         A mode change to Off is the occupant's choice, and the newest occupant action wins (an Off is protected by
-        NOT writing). A SETPOINT-only change recorded as ``off`` is not a choice of Off: the thermostat reads Off
-        because Climate Advisor's pause put it there, and the occupant only moved the number (Issues #1131, #1157).
+        NOT writing). A setpoint-only change while the thermostat is Off is never recorded (Issue #1325: it is not
+        an override), so a protected ``off`` is always the occupant's own mode change.
         """
-        return self._protected_change_mode() == "off" and self._protected_change_source() != "setpoint"
-
-    def _occupant_mode_when_ca_holds_off(self, live_mode: str, detected_mode: str | None = None) -> str:
-        """The mode an occupant change means when the thermostat's live Off is Climate Advisor's door pause.
-
-        While a door/window pause holds the thermostat Off the live ``off`` is CA's, not the occupant's, so a
-        setpoint-only change is judged against what the occupant actually asked for (Issue #1131): at detection
-        (live Off, nothing detected yet) the mode the pause interrupted (``_pre_pause_mode``); at confirm time the
-        mode detected when the change was made. Anything else (a live mode that is not Off, no pause, HVAC
-        already Off before the pause) is returned unchanged. Every substitution is logged at WARNING.
-
-        Callers apply it to SETPOINT-only changes only (Issue #1165): a mode change to Off is the occupant's own Off,
-        never Climate Advisor's. When the pause is a nat-vent exit with the window still open there is no
-        ``_pre_pause_mode`` (the thermostat was Off), so the comfort family the selector would arm now stands in for
-        it (Issue #1157; a side-effect-free preview, mild days included).
-        """
-        if live_mode != "off" or not self._paused_by_door:
-            return live_mode
-        if detected_mode not in (None, "off", "unavailable", "unknown"):
-            substitute = detected_mode
-        elif self._pre_pause_mode:
-            substitute = self._pre_pause_mode
-        elif self._paused_entity == "nat-vent-exit" and self._current_classification is not None:
-            # Issue #1157: a nat-vent exit with the window still open records NO pre-pause mode (the thermostat
-            # was Off), so there is nothing to judge the occupant's setpoint change against. Judge it against the
-            # comfort family the selector would arm now, so the close resumes HVAC at the occupant's setpoint
-            # instead of leaving it Off until their override ends. Same gate as #1068: only this pause; a
-            # thermostat the occupant left Off before an ordinary pause stays Off. Pure preview: this runs when the
-            # occupant speaks, no HVAC write follows, so it must not commit selector state or emit a family switch.
-            # Away/vacation: unchanged (the live Off stays; the unprotected close redirects to the setback instead).
-            if should_defer_to_occupancy_setback(self._occupancy_mode):
-                return live_mode
-            _family = self._preview_comfort_family(self._current_classification)[0]
-            if _family is None:
-                return live_mode
-            substitute = _family
-        else:
-            return live_mode
-        _LOGGER.warning(
-            "Override mode substituted: live Off belongs to Climate Advisor (door/window pause), judging the "
-            "occupant's change against their mode live_mode=%s mode=%s detected_mode=%s",
-            live_mode,
-            substitute,
-            detected_mode,
-        )
-        return str(substitute)
+        return self._protected_change_mode() == "off"
 
     def clear_manual_override(self, reason: str = "grace_expired") -> None:
         """Clear the manual override flag (called at transition points).
@@ -4111,8 +4058,6 @@ class AutomationEngine:
         self._close_mode_episode_quietly("manual override detected")
         state = self.hass.states.get(self.climate_entity)
         detected_mode = state.state if state else "unknown"
-        if source == "setpoint":
-            detected_mode = self._occupant_mode_when_ca_holds_off(detected_mode)  # Issue #1131
         # Issue #1073 (S3): a user-initiated MODE change is a mode change like any other -- it
         # must move the one mode-change clock (the ring buffer), so a selector switch moments
         # later is dwell-locked instead of undoing the occupant's action. Setpoint-only
@@ -4204,10 +4149,19 @@ class AutomationEngine:
             confirm_seconds // 60,
         )
 
+        # Issue #1325: only an IDENTICAL repeat (same source, detected mode, new mode and setpoint) within 5 minutes
+        # is suppressed (cloud echoes, flapping). A genuinely different change always emits override_detected, so the
+        # Activity record and the household-promise journal (which opens an episode per override_detected) see it.
         _dedup_window = timedelta(minutes=5)
         _now = dt_util.now()
-        if self._last_override_detected_time is None or (_now - self._last_override_detected_time) >= _dedup_window:
+        _dedup_key = (source, detected_mode, new_mode, new_setpoint_f)
+        if (
+            self._last_override_detected_time is None
+            or self._last_override_detected_key != _dedup_key
+            or (_now - self._last_override_detected_time) >= _dedup_window
+        ):
             self._last_override_detected_time = _now
+            self._last_override_detected_key = _dedup_key
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "override_detected",
@@ -4225,7 +4179,7 @@ class AutomationEngine:
                 )
         else:
             _LOGGER.debug(
-                "override_detected suppressed — within 5-minute dedup window (last=%s)",
+                "override_detected suppressed — identical repeat within 5-minute dedup window (last=%s)",
                 self._last_override_detected_time.isoformat(),
             )
 
@@ -4238,10 +4192,6 @@ class AutomationEngine:
                 return
             current_state = self.hass.states.get(self.climate_entity)
             current_mode = current_state.state if current_state else "unknown"
-            if source == "setpoint":
-                # #1131 / #1133 M1. Only a SETPOINT change reads the live Off as Climate Advisor's pause; a mode change
-                # to Off is the occupant's own Off and is kept as Off (Issue #1165).
-                current_mode = self._occupant_mode_when_ca_holds_off(current_mode, detected_mode)
             cls_mode = self._current_classification.hvac_mode if self._current_classification else None
             # For setpoint overrides: mode may still match classification, but
             # the user deliberately moved the setpoint — always take PATH A.
@@ -4449,8 +4399,7 @@ class AutomationEngine:
     def _preview_comfort_family(self, classification: DayClassification) -> tuple[str | None, ComfortBand | None]:
         """The comfort family ("heat" / "cool") the selector would arm now, and the band, WITHOUT mutating anything.
 
-        The ONE pure preview shared by override adoption (``_override_decision_mode_and_target()``) and the mode an
-        occupant's setpoint change means after a nat-vent exit (``_occupant_mode_when_ca_holds_off()``, Issue #1157).
+        The ONE pure preview used by override adoption (``_override_decision_mode_and_target()``).
         The day's default family comes from the band's active edge, so a warm/mild day (classification mode "off")
         still resolves. Reads through ``_comfort_family_would_switch()``, never ``_resolve_comfort_family_via_fsm()``
         (which commits dwell state, emits ``comfort_family_switch`` and arms the family). ``(None, None)`` when the
@@ -8107,53 +8056,24 @@ class AutomationEngine:
         """
         if self._manual_change_protected():
             self._note_deferred_to_protected_change()
-            # Issue #1131: the occupant changed the SETPOINT while the thermostat sat Off for the
-            # door/window pause (a mode change would have cleared the pause instead, see
-            # handle_manual_override_during_pause()). That change is theirs and it is still live
-            # (confirmed, or inside its confirmation window), so the door closing must not
-            # replace it with Climate Advisor's own setpoint, and a 5-minute automation grace must
-            # not replace their manual grace. Rule 1 (HVAC off while a window is open, unless the
-            # occupant turns it on) kept HVAC off while the window was open -- a setpoint tweak on
-            # an Off thermostat does not turn it on -- so the window closing is the moment HVAC
-            # resumes: the pre-pause mode comes back and the thermostat keeps the OCCUPANT's
-            # setpoint. Mode only; no comfort write, no automation grace. (Assumes a thermostat
-            # keeps its target temperature across a mode change, which the integration cannot
-            # verify; if one resets it, the override_respected promise exposes it.)
+            # The occupant's change is live (confirmed, or inside its confirmation window), so the door closing must
+            # not replace it with Climate Advisor's own setpoint, and a 5-minute automation grace must not replace
+            # their manual grace. Nothing is written (see below).
             #
             # Issue #1165: the occupant's OWN Off (a mode change to Off, pending or confirmed) is the newest word and
             # is kept: no mode comes back (the write used to turn heat/cool on over it, minutes before their manual
-            # pause ended). Issue #1157: a nat-vent exit recorded no pre-pause mode (restore_mode None); the
-            # occupant's setpoint change was judged against the comfort family at the time they made it
-            # (``_occupant_mode_when_ca_holds_off()``), and that recorded mode is what resumes here.
-            occupant_off = self._protected_change_is_occupant_off()
-            target_mode = None
-            if not occupant_off:
-                target_mode = restore_mode or (
-                    self._protected_active_mode() if self._protected_change_source() == "setpoint" else None
-                )
-            if target_mode:
-                with self._mode_change_context("restore"):
-                    _occ_result = await self._set_hvac_mode(
-                        target_mode,
-                        reason=f"door/window closed — restoring {target_mode} mode (occupant's setpoint kept)",
-                    )
-                # Issue #1313: a FAILED / UNCONFIRMED restore of the occupant's own mode is re-sent (mode only, no
-                # grace -- their manual grace already runs). The chain stops on a NEWER occupant change, not because
-                # this one is protected: re-sending their own choice does not override them (G3).
-                self._hold_restore_until_landed(
-                    None,
-                    _occ_result,
-                    target=target_mode,
-                    reason="door/window closed, occupant's mode",
-                    kind="occupant_mode",
-                )
+            # pause ended). (A setpoint change while the thermostat is Off is no override at all, Issue #1325, so it
+            # never reaches here.)
+            # Issue #1325: nothing is written here. The only protected change that can meet a recorded pause is the
+            # occupant's own Off (a mode change to heat/cool during a pause discards the pause record in
+            # ``handle_manual_override_during_pause()``; a setpoint-only change on the Off thermostat is ignored). The
+            # old "restore the pre-pause mode at the occupant's setpoint" write (#1131) and its re-send chain (#1313)
+            # served only that ignored setpoint change and are gone.
             _LOGGER.info(
-                "Comfort restore skipped: occupant's manual change protected (mode restored only, no setpoint "
-                "or automation grace) restore_mode=%s target_mode=%s occupant_off=%s override_active=%s "
-                "confirm_pending=%s grace_active=%s",
+                "Comfort restore skipped: occupant's manual change protected (nothing written, no automation grace) "
+                "restore_mode=%s occupant_off=%s override_active=%s confirm_pending=%s grace_active=%s",
                 restore_mode,
-                target_mode,
-                occupant_off,
+                self._protected_change_is_occupant_off(),
                 self._manual_override_active,
                 self._override_confirm_pending,
                 self._grace_active,
@@ -13879,7 +13799,7 @@ class AutomationEngine:
         except Exception:
             _LOGGER.warning("Open-window Off retry failed: reason=%s", reason, exc_info=True)
 
-    def _restore_landed(self, target: str | None, *, exact: bool = False) -> bool:
+    def _restore_landed(self, target: str | None) -> bool:
         """True when the thermostat reads the mode the restore asked for (Issue #1308).
 
         The newest mode Climate Advisor commanded (``_last_commanded_hvac_mode``: a selector write after the blind
@@ -13887,15 +13807,8 @@ class AutomationEngine:
         """
         state = self.hass.states.get(self.climate_entity)
         live = getattr(state, "state", None) if state is not None else None
-        want = target if exact else (getattr(self, "_last_commanded_hvac_mode", None) or target)
+        want = getattr(self, "_last_commanded_hvac_mode", None) or target
         return isinstance(live, str) and want is not None and live == want
-
-    def _pending_restore_want(self, pending: PendingRestore) -> str | None:
-        """The mode a pending restore is waiting for: the occupant's own mode for "occupant_mode" (Issue #1313), else
-        the newest mode Climate Advisor commanded (Issue #1308)."""
-        if pending.kind == "occupant_mode":
-            return pending.target
-        return getattr(self, "_last_commanded_hvac_mode", None) or pending.target
 
     def _hold_restore_until_landed(
         self,
@@ -13915,23 +13828,11 @@ class AutomationEngine:
         it lands. ``UNCONFIRMED`` that already landed is a landed restore. Returns True when the restore is held (the
         caller starts no grace now), False when it landed or needs no re-send.
 
-        ``kind`` (``PendingRestore.kind``): Issue #1312 holds the dashboard Resume's MANUAL grace the same way; Issue
-        #1313 re-sends the occupant's own protected mode (``target``) with no grace.
+        ``kind`` (``PendingRestore.kind``): Issue #1312 holds the dashboard Resume's MANUAL grace the same way.
         """
-        exact = kind == "occupant_mode"
-        if result not in (HvacCommandResult.FAILED, HvacCommandResult.UNCONFIRMED) or self._restore_landed(
-            target, exact=exact
-        ):
+        if result not in (HvacCommandResult.FAILED, HvacCommandResult.UNCONFIRMED) or self._restore_landed(target):
             return False
-        state = self.hass.states.get(self.climate_entity)
-        self._pending_restore = PendingRestore(
-            target=target,
-            trigger=trigger,
-            reason=reason,
-            kind=kind,
-            occupant_mark=self._override_confirm_time if exact else None,
-            from_mode=getattr(state, "state", None) if state is not None else None,
-        )
+        self._pending_restore = PendingRestore(target=target, trigger=trigger, reason=reason, kind=kind)
         if self._schedule_hvac_resend(
             slot="_restore_resend_cancel",
             what="Restore",
@@ -13954,7 +13855,7 @@ class AutomationEngine:
         return pending
 
     def _restore_resend_stop_reason(self, pending: PendingRestore) -> str | None:
-        """Why a pending restore must not be re-sent now (Issues #1308/#1312/#1313), or None.
+        """Why a pending restore must not be re-sent now (Issues #1308/#1312), or None.
 
         The occupant's recognised change wins (G3); a window open again belongs to the pause (rule 3); a fan session
         that took over owns the HVAC. Per kind:
@@ -13962,21 +13863,8 @@ class AutomationEngine:
         * ``automation``: any protected occupant change stops it; so does a window settled open.
         * ``dashboard_resume`` (#1312): the occupant resumed WITH the window open (their override of rule 3), so an open
           window does not stop it; a pause recorded again, or a protected (newer) occupant change, does.
-        * ``occupant_mode`` (#1313): the re-sent mode IS the occupant's protected choice, so protection does not stop
-          it. A NEWER occupant change does (a new confirmation window, or the thermostat moved to anything but the
-          target or the state the failed restore left), and so does the protection ending (the plan owns it again).
         """
-        if pending.kind == "occupant_mode":
-            if not self._manual_change_protected():
-                return "the occupant's change has ended"
-            confirm_time = self._override_confirm_time
-            if confirm_time is not None and confirm_time != pending.occupant_mark:
-                return "the occupant made a newer change"
-            state = self.hass.states.get(self.climate_entity)
-            live = getattr(state, "state", None) if state is not None else None
-            if live not in (None, "unavailable", "unknown", pending.target, pending.from_mode):
-                return f"the thermostat was changed to {live}"
-        elif self._manual_change_protected():
+        if self._manual_change_protected():
             return "the occupant owns the thermostat"
         if self._paused_by_door:
             return "the door/window pause is recorded again"
@@ -14033,13 +13921,12 @@ class AutomationEngine:
                     self._end_pending_restore()
                     _LOGGER.info("Restore re-send stopped (%s): %s -- no grace started", pending.reason, stop)
                     return
-                exact = pending.kind == "occupant_mode"
-                if self._restore_landed(pending.target, exact=exact):
+                if self._restore_landed(pending.target):
                     self._finish_pending_restore()
                     return
                 state = self.hass.states.get(self.climate_entity)
                 live = getattr(state, "state", None) if state is not None else None
-                want = self._pending_restore_want(pending)
+                want = getattr(self, "_last_commanded_hvac_mode", None) or pending.target
                 _LOGGER.warning(
                     "Thermostat still %s after the restore to %s (%s) -- re-sending the restore (attempt %d/%d)",
                     live,
@@ -14062,14 +13949,13 @@ class AutomationEngine:
                 _why = f"re-send: restore after {pending.reason}, thermostat still {live} (attempt {attempt + 1})"
                 _result: HvacCommandResult | None = None
                 with self._mode_change_context("restore"):
-                    if pending.kind != "occupant_mode" and self._current_classification is not None:
+                    if self._current_classification is not None:
                         _result = await self._set_temperature_for_mode(self._current_classification, reason=_why)
                     elif want:
-                        # Issue #1313: the occupant's own mode only -- their setpoint is kept, nothing of ours added.
                         _result = await self._set_hvac_mode(want, reason=_why)
                 if self._pending_restore is not pending:
                     return  # a newer restore replaced this one while the write was in flight
-                if _result is HvacCommandResult.EXECUTED or self._restore_landed(pending.target, exact=exact):
+                if _result is HvacCommandResult.EXECUTED or self._restore_landed(pending.target):
                     self._finish_pending_restore()
                     return
                 if not self._schedule_hvac_resend(

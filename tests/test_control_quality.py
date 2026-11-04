@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from custom_components.climate_advisor.control_quality import (
     CONTROL_QUALITY_SCHEMA,
     build_control_quality,
@@ -154,6 +156,10 @@ class TestMisarmedAccuracy:
         m = w24(build([change(1600, "cool", 75)], rows))["misarmed"]
         assert m["minutes"] == 0.0
 
+    @pytest.mark.skip(
+        reason="Issue #1331: timing-based linearity is unreliable under suite load; replace with a deterministic "
+        "work count once the snapshot build moves off the event loop"
+    )
     def test_five_thousand_samples_is_fast_and_linear(self):
         # Issue #1083: an absolute 0.1 s wall-clock limit flaked on loaded CI runners. What matters is that the
         # build stays linear. The sizes differ 4x, so linear code is ~4x slower and quadratic code ~16x; the 8x limit

@@ -8,7 +8,7 @@ restore is re-sent on the bounded 15/60/300 s chain, and the manual grace starts
 
 #1313 (retired by Issue #1325): the occupant raising the setpoint on a door-paused (Off) thermostat is no override at
 all (a thermostat that is Off takes no setpoint), so there is no occupant mode to restore and re-send; see
-tests_ha/test_setpoint_while_off_ignored_1325.py.
+tests_ha/test_second_change_p4_1325.py.
 
 The failure is made at the device: the simulated thermostat raises for a while (a cloud blip).
 """

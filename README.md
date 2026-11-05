@@ -6,6 +6,13 @@ A Home Assistant integration that runs your thermostat from the weather forecast
 [![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=gunkl&repository=ClimateAdvisor&category=integration)
 
+[![Test coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Fcoverage.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
+[![Unit tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Funit.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
+[![Real Home Assistant tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Freal-ha.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
+[![Golden scenarios](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Fgoldens.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
+[![Golden scenarios on real Home Assistant](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Freal-ha-goldens.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
+[![Nightly generated days](https://img.shields.io/github/actions/workflow/status/gunkl/ClimateAdvisor/nightly.yml?branch=main&label=nightly&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/nightly.yml)
+
 **Requires Home Assistant 2026.3 or newer.** Available in the [HACS](https://hacs.xyz) default store.
 
 | Temperature Forecast | Current Status |

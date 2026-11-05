@@ -107,7 +107,7 @@ A log line is for whoever reads the HA log and never reaches the dashboard. Anyt
 - **An incident**, for a detected problem: an `incident_detected` event built by `build_incident_payload()` (coordinator.py:11577, automation.py:5564). See [Incident Payload Brief](incident-payload-brief.md) and [Incident Classes](incident-classes.md).
 
 **Outages of a source Climate Advisor depends on**, such as the weather source or a configured entity (Issue #1322):
-- **Log the start of each outage once.** The hourly forecast logs one ERROR per outage, worded for what is happening (for example "using the cosine model until it returns"), then stays at DEBUG while the outage lasts, and logs INFO when the source returns. Never phrase it as permanent ("for the rest of this session") when the source is retried every cycle.
+- **Log the start of each outage once.** The hourly forecast logs one ERROR per outage, worded for what is happening (for example "using the last forecast until it returns, the cosine model past its end"), then stays at DEBUG while the outage lasts, and logs INFO when the source returns. Never phrase it as permanent ("for the rest of this session") when the source is retried every cycle.
 - **Give each outage and recovery an event.** An entity outage and its recovery each also get an event (`entity_unavailable` / `entity_recovered`), so the Activity log shows when the outage started and how long it lasted.
 
 ## Reading the Logs

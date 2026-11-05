@@ -122,6 +122,9 @@ def test_reload_during_fan_off_grace_keeps_grace_and_saves_once():
         assert grace_end
 
         scheduler.advance_by(60)
+        # Issue #1337: the refresh the fan-off requests now saves too while the weather service is down (the harness
+        # has none), as it always did with a forecast. The claim here is about the unload, so count only its saves.
+        saved_grace_end.clear()
         run_coro(async_unload_entry_like_ha(fake_hass, entry))
         assert saved_grace_end == [grace_end], f"expected exactly one save carrying the grace: {saved_grace_end}"
 

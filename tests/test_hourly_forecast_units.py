@@ -304,8 +304,17 @@ class TestAllRefreshSitesUseHelper:
     def test_no_other_package_assignment_outside_helper_and_init(self):
         src = inspect.getsource(_get_coordinator_module())
         lines = [ln.strip() for ln in src.splitlines() if "self._hourly_forecast_temps =" in ln]
-        assert "self._hourly_forecast_temps = await self._get_hourly_forecast_data()" in lines
-        assert len(lines) == 1, lines
+        # Issue #1337: the helper assigns in two branches (a fresh fetch, or the kept forecast during an
+        # outage); every refresh assignment must still be inside it. The one other site is restoring the kept
+        # forecast from saved state at start-up, which mirrors to the engine itself.
+        cls = _get_coordinator_class()
+        helper_src = inspect.getsource(cls._refresh_hourly_forecast)
+        helper_lines = [ln.strip() for ln in helper_src.splitlines() if "self._hourly_forecast_temps =" in ln]
+        restore_line = "self._hourly_forecast_temps = _unexpired_hourly_forecast("
+        assert sorted(lines) == sorted([*helper_lines, restore_line]), lines
+        assert "self._hourly_forecast_temps = fetched" in helper_lines
+        restore_src = inspect.getsource(cls.async_restore_state)
+        assert "self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps" in restore_src
 
 
 # ---------------------------------------------------------------------------

@@ -1478,9 +1478,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Issue #1102 (F1): keep the handle so unload cancels it. Discarding it let a
         # reload inside this 300 s window revive the dead instance when it fired.
-        self._unsub_listeners.append(
-            async_call_later(self.hass, 300, self._zone_scoped_sync(_on_startup_coalesce_timer))
+        # Issue #1337: also kept by name so the sim harness can cancel it on a simulated restart, as unloading does.
+        self._startup_coalesce_timer_cancel = async_call_later(
+            self.hass, 300, self._zone_scoped_sync(_on_startup_coalesce_timer)
         )
+        self._unsub_listeners.append(self._startup_coalesce_timer_cancel)
         _LOGGER.info(
             "Startup coalescing window started — override detection suppressed for 300s, coalescing at %s",
             dt_util.as_local(_coalesce_expiry).strftime("%H:%M:%S"),
@@ -1747,13 +1749,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
         weather_entity = self.config.get("weather_entity")
         weather_state = self.hass.states.get(weather_entity) if weather_entity else None
+        # Issue #1337: with the weather service down, a weather fallback would be the 65°F placeholder (an unavailable
+        # entity has no temperature). The sensor or the kept forecast is used instead, else the last value stays.
+        weather_down = weather_state is None or is_unavailable_state(weather_state.state)
         if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
             weather_attrs = weather_state.attributes if weather_state else {}
         elif weather_state:
             weather_attrs = weather_state.attributes
         else:
+            weather_attrs = {}
+        value = self._get_outdoor_temp(weather_attrs, weather_down=weather_down)
+        if value is None:
             return
-        value = self._get_outdoor_temp(weather_attrs)
         previous = getattr(self, "_last_outdoor_temp", None)
         if min_delta_f > 0 and previous is not None and abs(value - previous) < min_delta_f:
             return
@@ -1980,6 +1987,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "dropped_classification": _dropped_cls,
                 "dropped_pending_observations": _dropped_pending,
             }
+
+        # Issue #1337: the kept forecast. Not under another unit: the daily list is in the provider's unit.
+        kept = None if unit_changed else state.get("kept_forecast")
+        if isinstance(kept, dict):
+            daily = kept.get("daily")
+            hourly = kept.get("hourly")
+            if isinstance(daily, list):
+                self._daily_forecast_full = [e for e in daily if isinstance(e, dict)]
+            if isinstance(hourly, list):
+                self._hourly_forecast_temps = _unexpired_hourly_forecast(
+                    [e for e in hourly if isinstance(e, dict)], dt_util.now()
+                )
+                if getattr(self, "automation_engine", None) is not None:
+                    self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
 
         # Classification
         cls_data = None if unit_changed else state.get("classification")
@@ -2241,6 +2262,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # under a different unit can discard them instead of misreading them.
             "temp_unit": (getattr(self, "config", None) or {}).get("temp_unit", "fahrenheit"),
             "classification": cls_dict,
+            # Issue #1337: the last good forecast, so a restart in the middle of a weather outage still has it.
+            "kept_forecast": {
+                "daily": list(getattr(self, "_daily_forecast_full", None) or []),
+                "hourly": list(getattr(self, "_hourly_forecast_temps", None) or []),
+            },
             # Issue #1211: seeds the windows hysteresis (see _classify_kwargs); same-day only on restore.
             "classification_fetched_at": (
                 self._classification_fetched_at.isoformat()
@@ -3269,6 +3295,216 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 value,
             )
 
+    def _track_indoor_comfort(self, indoor: float | None) -> None:
+        """Record the indoor sample and the Comfort Score minutes for this cycle (indoor only, no weather; #1337)."""
+        now_str = dt_util.now().isoformat()
+        if indoor is not None:
+            self._indoor_temp_history.append((now_str, indoor))
+
+            # Track comfort violations (elapsed minutes since last check, capped at 30).
+            # Issue #1107: judged against the target range in effect (sleep/away
+            # setbacks included), not the static awake comfort range.
+            if self._today_record:
+                comfort_low, comfort_high = self._comfort_score_band_now()
+                now = dt_util.now()
+                if self._last_violation_check is not None:
+                    elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
+                else:
+                    elapsed_minutes = 30.0
+                self._last_violation_check = now
+                if (indoor < comfort_low or indoor > comfort_high) and not self._is_tolerated_comfort_deviation(
+                    indoor, comfort_low, comfort_high
+                ):
+                    self._today_record.comfort_violations_minutes += elapsed_minutes
+
+    def _check_stuck_grace(self) -> None:
+        """Force-clear an override whose grace ended with no timer left (Issue #321; no weather needed, #1337)."""
+        # Bug 2 (Issue #321): Detect stuck grace — override active but timer callback
+        # never fired. Force-clear so automation resumes on this cycle.
+        _ae = self.automation_engine
+        if _ae._manual_override_active and not _ae._grace_active and _ae._grace_end_time is not None:
+            _stuck_end = dt_util.parse_datetime(_ae._grace_end_time)
+            if _stuck_end is not None and dt_util.now() > _stuck_end:
+                _LOGGER.error(
+                    "Stuck grace detected: manual_override_active=True but grace_end_time"
+                    " %s is in the past and no grace timer is active. Force-clearing"
+                    " override (Issue #321).",
+                    _ae._grace_end_time,
+                )
+                _stale_mode = _ae._manual_override_mode
+                _stale_since = _ae._manual_override_time
+                _ae.clear_manual_override(reason="stuck_grace_recovery")
+                self._emit_event(
+                    "stuck_grace_recovered",
+                    {
+                        "grace_end_time": _ae._grace_end_time,
+                        "stale_mode": _stale_mode,
+                        "stale_since": _stale_since,
+                    },
+                )
+
+    def _refresh_thermal_model_cache(self) -> None:
+        """Refresh the engine's thermal model from the last outdoor reading (30-min cycle; no weather fetch, #1337)."""
+        # Refresh the thermal model on every 30-min cycle, not just at the daily
+        # briefing. get_thermal_model() is a pure computation (no I/O), so calling it
+        # 48×/day is negligible. Refreshing here:
+        #   1. Restores the model after HA restart (daily briefing is the only other
+        #      writer, so _thermal_model is {} for the rest of the day after a restart)
+        #   2. Keeps thermal_equilibrium_f current as outdoor_temp and solar_factor
+        #      change through the day (6 AM conditions are wrong by afternoon)
+        #   3. Applies mid-day observation commits to same-day automation decisions
+        if self.config.get("learning_enabled", True) and self.automation_engine:
+            self.automation_engine._thermal_model = self.learning.get_thermal_model(
+                outdoor_temp_f=self._last_outdoor_temp,
+                solar_factor=_solar_factor(dt_util.now().hour),
+            )
+            self._solar_phase_offset = (
+                self.automation_engine._thermal_model.get("solar_phase_offset_h")
+                or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+            )
+            _LOGGER.debug(
+                "thermal model refreshed (30-min cycle): confidence=%s k_passive=%s solar_phase_offset=%.1f",
+                self.automation_engine._thermal_model.get("confidence", "none"),
+                self.automation_engine._thermal_model.get("k_passive"),
+                self._solar_phase_offset,
+            )
+
+    async def _run_weather_independent_cycle(self) -> None:
+        """The 30-minute cycle's work that needs no forecast, for a cycle with none at all (Issue #1337).
+
+        Runs on the saved day type and the live readings: first-cycle recovery, startup reconciliation (which ends the
+        post-restart window that suppresses override detection), today's record, the thermal model, time-of-use,
+        stuck/orphaned grace clean-up, comfort tracking and, with a real outdoor reading, the window-cooling and
+        nat-vent re-checks. The day type is not recalculated and the plan is only re-applied by the startup
+        reconciliation, since both need forecast data.
+        """
+        c = self._current_classification
+        self._run_first_cycle_recovery()
+        self._check_climate_unit()
+        self._check_unit_sources()
+        if c is not None:
+            self._ensure_today_record(c)
+        # getattr: several tests build the coordinator via object.__new__ (bypassing __init__).
+        if getattr(self, "_startup_timer_fired", False) is True and getattr(self, "_startup_coalesce_active", False):
+            await self._do_startup_coalesce()
+        self._refresh_thermal_model_cache()
+        if c is not None:
+            self._resolve_tou_schedule_state()
+            self._resolve_target_band_schedule()
+            await self._apply_tou_schedule()
+        self._check_stuck_grace()
+        self._check_orphaned_grace()
+        indoor = self._get_indoor_temp()
+        self._track_indoor_comfort(indoor)
+        outdoor = self._outage_outdoor_temp()
+        if c is not None and outdoor is not None:
+            if self._should_run_regular_cycle_window_cooling_check():
+                windows_open = self._today_record.windows_physically_opened and (
+                    self._today_record.window_physical_close_time is None
+                )
+                await self.automation_engine.check_window_cooling_opportunity(
+                    outdoor, indoor, windows_open, current_hour=dt_util.now().hour
+                )
+            if self._should_run_regular_cycle_nat_vent_check():
+                await self.automation_engine.check_natural_vent_conditions()
+        await self._async_save_state()
+
+    def _run_first_cycle_recovery(self) -> None:
+        """First cycle after a restart: recover persisted observations and run the one-time backfills.
+
+        Split out of the cycle so it also runs when no forecast exists during a weather outage (Issue #1337);
+        none of it reads weather data.
+        """
+        # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
+        if self._first_run:
+            self._first_run = False
+            # Recover v3 pending_observations that survived restart
+            _pending_obs = self.learning._state.pending_observations
+            if isinstance(_pending_obs, dict):
+                for _obs_type, _obs in list(_pending_obs.items()):
+                    if not isinstance(_obs, dict):
+                        continue
+                    if _obs.get("_legacy_event"):
+                        # Legacy HVAC event migrated into pending_observations — use HVAC commit path
+                        session_mode = _obs.get("session_mode") or _obs.get("hvac_mode") or "heat"
+                        _obs["session_mode"] = session_mode
+                        self._pending_observations[_obs_type] = _obs
+                    else:
+                        # Bug 2 fix: For HVAC obs, check the right sample list based
+                        # on the current phase.  Pre-fix obs had 'samples': [] which
+                        # shadowed active_samples in the generic fallback, causing all
+                        # HVAC observations to be discarded on every HA restart.
+                        _hvac_types_sr = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
+                        if _obs_type in _hvac_types_sr:
+                            _phase_sr = _obs.get("_phase", "active")
+                            if _phase_sr == "post_heat":
+                                samples = _obs.get("post_heat_samples", [])
+                                min_s = THERMAL_MIN_POST_HEAT_SAMPLES
+                            else:
+                                # Active phase: any sample is worth recovering so
+                                # post-heat observation window can continue after restart.
+                                samples = _obs.get("active_samples", [])
+                                # Fall back to generic 'samples' key for pre-fix persisted obs
+                                if not samples:
+                                    samples = _obs.get("samples", [])
+                                min_s = 1
+                        else:
+                            samples = _obs.get("samples", _obs.get("active_samples", []))
+                            min_s = {
+                                OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
+                                OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
+                                OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
+                                OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
+                            }.get(_obs_type, 10)
+                        if len(samples) >= min_s:
+                            self._pending_observations[_obs_type] = _obs
+                            _LOGGER.info(
+                                "Startup: recovered v3 observation type=%s obs_id=%s samples=%d phase=%s",
+                                _obs_type,
+                                _obs.get("obs_id", "?"),
+                                len(samples),
+                                _obs.get("_phase", "active"),
+                            )
+
+            # Chart_log endpoint estimator backfill (Issue #137): run once on first startup
+            # after the new code is deployed. The chart_log is loaded in __init__ so entries
+            # are already available. Flags survive restart so backfill runs exactly once.
+            if self.config.get("learning_enabled", True):
+                if not self._passive_k_backfilled:
+                    self._run_passive_chart_log_fit(backfill=True)
+                    self._passive_k_backfilled = True
+                    _LOGGER.info("chart_log_endpoint: passive k_passive backfill complete")
+                if not self._vent_window_k_backfilled:
+                    self._run_vent_window_chart_log_fit(backfill=True)
+                    self._vent_window_k_backfilled = True
+                    _LOGGER.info("chart_log_endpoint: vent_window k_vent_window backfill complete")
+                if not self._vent_fan_k_backfilled:
+                    self._run_vent_fan_chart_log_fit(backfill=True)
+                    self._vent_fan_k_backfilled = True
+                    _LOGGER.info("chart_log_endpoint: vent_fan k_vent_fan backfill complete (Issue #587)")
+                if not self._passive_k_backfill_v2:
+                    self._run_passive_chart_log_fit(backfill=True)
+                    self._passive_k_backfill_v2 = True
+                    _LOGGER.info("chart_log_endpoint v2: passive k_passive dual-estimator backfill complete")
+                if not self._vent_window_k_backfill_v2:
+                    self._run_vent_window_chart_log_fit(backfill=True)
+                    self._vent_window_k_backfill_v2 = True
+                    _LOGGER.info("chart_log_endpoint v2: vent_window k_vent_window dual-estimator backfill complete")
+                if not self._vent_fan_k_backfill_v2:
+                    self._run_vent_fan_chart_log_fit(backfill=True)
+                    self._vent_fan_k_backfill_v2 = True
+                    _LOGGER.info(
+                        "chart_log_endpoint v2: vent_fan k_vent_fan dual-estimator backfill complete (Issue #587)"
+                    )
+                if not self._solar_phase_backfill:
+                    self._run_solar_phase_chart_log_fit(backfill=True)
+                    self._solar_phase_backfill = True
+                    self._last_solar_phase_fit_date = dt_util.now().date()
+                    _LOGGER.info("chart_log solar_phase: phase offset backfill complete")
+                if not self._solar_phase_ac_backfill:
+                    self._run_ac_duty_solar_phase_fit()
+                    # Flag is set inside the method after completion
+
     async def _do_startup_coalesce(self) -> bool:
         """Proactively coalesce HVAC and nat-vent state 5 minutes after restart (Issue #321).
 
@@ -3572,15 +3808,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         forecast = await self._get_forecast()
         _LOGGER.debug("[coalesce-diag] _async_update_data: after _get_forecast() — forecast=%s", forecast is not None)
         await self._refresh_hourly_forecast()
-        if forecast:
+        # Issue #1337: a backoff retry exists only to fetch the weather again. If the service is still down, the
+        # retry changes nothing (as before the kept forecast was used): re-running the plan on every 30-240 s retry
+        # re-sent Climate Advisor's commands so often that an occupant's change landing next to one read as its echo.
+        _weather_retry_refresh = getattr(self, "_weather_retry_refresh", False) is True
+        self._weather_retry_refresh = False
+        _outage_retry_only = _weather_retry_refresh and (not forecast or forecast.from_kept_forecast is True)
+        if _outage_retry_only:
+            _LOGGER.debug("Weather retry: the weather service is still down; nothing else runs on this refresh")
+        elif forecast:
             prev_type = self._current_classification.day_type if self._current_classification else None
             self._current_classification = classify_day(
                 forecast, previous_day_type=prev_type, **self._classify_kwargs()
             )
-            self._classification_fetched_at = dt_util.now()
+            if forecast.from_kept_forecast is not True:
+                self._classification_fetched_at = dt_util.now()
             # record_history=True here; the 5-min tick (Issue #511) always passes False
             # so _outdoor_temp_history keeps its existing 30-min cadence.
-            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=True)
+            # Issue #1337: during an outage only a real sensor reading is recorded; a value read off the kept forecast
+            # is not an observation and must not feed the observed high/low or the weather-bias learning.
+            self._apply_outdoor_temp(
+                forecast.current_outdoor_temp,
+                record_history=forecast.from_kept_forecast is not True or self._outage_outdoor_reading()[1] == "sensor",
+            )
             # Issue #602: ensure today's DailyRecord exists on this already-resilient,
             # every-30-min classification path — not only the once-daily briefing_time
             # trigger, which has no retry and previously left setpoint-override detection
@@ -3629,97 +3879,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issues #1020/#1021: validate HA system unit and temperature sensor units (latched).
             self._check_unit_sources()
 
-            # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
-            if self._first_run:
-                self._first_run = False
-                # Recover v3 pending_observations that survived restart
-                _pending_obs = self.learning._state.pending_observations
-                if isinstance(_pending_obs, dict):
-                    for _obs_type, _obs in list(_pending_obs.items()):
-                        if not isinstance(_obs, dict):
-                            continue
-                        if _obs.get("_legacy_event"):
-                            # Legacy HVAC event migrated into pending_observations — use HVAC commit path
-                            session_mode = _obs.get("session_mode") or _obs.get("hvac_mode") or "heat"
-                            _obs["session_mode"] = session_mode
-                            self._pending_observations[_obs_type] = _obs
-                        else:
-                            # Bug 2 fix: For HVAC obs, check the right sample list based
-                            # on the current phase.  Pre-fix obs had 'samples': [] which
-                            # shadowed active_samples in the generic fallback, causing all
-                            # HVAC observations to be discarded on every HA restart.
-                            _hvac_types_sr = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
-                            if _obs_type in _hvac_types_sr:
-                                _phase_sr = _obs.get("_phase", "active")
-                                if _phase_sr == "post_heat":
-                                    samples = _obs.get("post_heat_samples", [])
-                                    min_s = THERMAL_MIN_POST_HEAT_SAMPLES
-                                else:
-                                    # Active phase: any sample is worth recovering so
-                                    # post-heat observation window can continue after restart.
-                                    samples = _obs.get("active_samples", [])
-                                    # Fall back to generic 'samples' key for pre-fix persisted obs
-                                    if not samples:
-                                        samples = _obs.get("samples", [])
-                                    min_s = 1
-                            else:
-                                samples = _obs.get("samples", _obs.get("active_samples", []))
-                                min_s = {
-                                    OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
-                                    OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                    OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                    OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
-                                }.get(_obs_type, 10)
-                            if len(samples) >= min_s:
-                                self._pending_observations[_obs_type] = _obs
-                                _LOGGER.info(
-                                    "Startup: recovered v3 observation type=%s obs_id=%s samples=%d phase=%s",
-                                    _obs_type,
-                                    _obs.get("obs_id", "?"),
-                                    len(samples),
-                                    _obs.get("_phase", "active"),
-                                )
-
-                # Chart_log endpoint estimator backfill (Issue #137): run once on first startup
-                # after the new code is deployed. The chart_log is loaded in __init__ so entries
-                # are already available. Flags survive restart so backfill runs exactly once.
-                if self.config.get("learning_enabled", True):
-                    if not self._passive_k_backfilled:
-                        self._run_passive_chart_log_fit(backfill=True)
-                        self._passive_k_backfilled = True
-                        _LOGGER.info("chart_log_endpoint: passive k_passive backfill complete")
-                    if not self._vent_window_k_backfilled:
-                        self._run_vent_window_chart_log_fit(backfill=True)
-                        self._vent_window_k_backfilled = True
-                        _LOGGER.info("chart_log_endpoint: vent_window k_vent_window backfill complete")
-                    if not self._vent_fan_k_backfilled:
-                        self._run_vent_fan_chart_log_fit(backfill=True)
-                        self._vent_fan_k_backfilled = True
-                        _LOGGER.info("chart_log_endpoint: vent_fan k_vent_fan backfill complete (Issue #587)")
-                    if not self._passive_k_backfill_v2:
-                        self._run_passive_chart_log_fit(backfill=True)
-                        self._passive_k_backfill_v2 = True
-                        _LOGGER.info("chart_log_endpoint v2: passive k_passive dual-estimator backfill complete")
-                    if not self._vent_window_k_backfill_v2:
-                        self._run_vent_window_chart_log_fit(backfill=True)
-                        self._vent_window_k_backfill_v2 = True
-                        _LOGGER.info(
-                            "chart_log_endpoint v2: vent_window k_vent_window dual-estimator backfill complete"
-                        )
-                    if not self._vent_fan_k_backfill_v2:
-                        self._run_vent_fan_chart_log_fit(backfill=True)
-                        self._vent_fan_k_backfill_v2 = True
-                        _LOGGER.info(
-                            "chart_log_endpoint v2: vent_fan k_vent_fan dual-estimator backfill complete (Issue #587)"
-                        )
-                    if not self._solar_phase_backfill:
-                        self._run_solar_phase_chart_log_fit(backfill=True)
-                        self._solar_phase_backfill = True
-                        self._last_solar_phase_fit_date = dt_util.now().date()
-                        _LOGGER.info("chart_log solar_phase: phase offset backfill complete")
-                    if not self._solar_phase_ac_backfill:
-                        self._run_ac_duty_solar_phase_fit()
-                        # Flag is set inside the method after completion
+            self._run_first_cycle_recovery()
 
             # Bug 1 (Issue #321): Startup coalescing — evaluate state at t+5min instead of detecting override at t+30s
             _LOGGER.debug(
@@ -3745,29 +3905,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self.config.get("learning_enabled", True):
                 self._maybe_run_periodic_solar_phase_fit()
 
-            # Refresh the thermal model on every 30-min cycle, not just at the daily
-            # briefing. get_thermal_model() is a pure computation (no I/O), so calling it
-            # 48×/day is negligible. Refreshing here:
-            #   1. Restores the model after HA restart (daily briefing is the only other
-            #      writer, so _thermal_model is {} for the rest of the day after a restart)
-            #   2. Keeps thermal_equilibrium_f current as outdoor_temp and solar_factor
-            #      change through the day (6 AM conditions are wrong by afternoon)
-            #   3. Applies mid-day observation commits to same-day automation decisions
-            if self.config.get("learning_enabled", True) and self.automation_engine:
-                self.automation_engine._thermal_model = self.learning.get_thermal_model(
-                    outdoor_temp_f=self._last_outdoor_temp,
-                    solar_factor=_solar_factor(dt_util.now().hour),
-                )
-                self._solar_phase_offset = (
-                    self.automation_engine._thermal_model.get("solar_phase_offset_h")
-                    or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
-                )
-                _LOGGER.debug(
-                    "thermal model refreshed (30-min cycle): confidence=%s k_passive=%s solar_phase_offset=%.1f",
-                    self.automation_engine._thermal_model.get("confidence", "none"),
-                    self.automation_engine._thermal_model.get("k_passive"),
-                    self._solar_phase_offset,
-                )
+            self._refresh_thermal_model_cache()
 
             # Issue #786: resolve TOU schedule state before the ODE prediction executor
             # call below, which computes its own internal band (see
@@ -3813,29 +3951,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     break
                 self._pred_archive.setdefault(self._pred_archive_key(_ae_dt), _ae["temp"])
 
-            # Bug 2 (Issue #321): Detect stuck grace — override active but timer callback
-            # never fired. Force-clear so automation resumes on this cycle.
-            _ae = self.automation_engine
-            if _ae._manual_override_active and not _ae._grace_active and _ae._grace_end_time is not None:
-                _stuck_end = dt_util.parse_datetime(_ae._grace_end_time)
-                if _stuck_end is not None and dt_util.now() > _stuck_end:
-                    _LOGGER.error(
-                        "Stuck grace detected: manual_override_active=True but grace_end_time"
-                        " %s is in the past and no grace timer is active. Force-clearing"
-                        " override (Issue #321).",
-                        _ae._grace_end_time,
-                    )
-                    _stale_mode = _ae._manual_override_mode
-                    _stale_since = _ae._manual_override_time
-                    _ae.clear_manual_override(reason="stuck_grace_recovery")
-                    self._emit_event(
-                        "stuck_grace_recovered",
-                        {
-                            "grace_end_time": _ae._grace_end_time,
-                            "stale_mode": _stale_mode,
-                            "stale_since": _stale_since,
-                        },
-                    )
+            self._check_stuck_grace()
 
             self._check_orphaned_grace()
 
@@ -3871,8 +3987,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._maybe_regenerate_briefing_for_drift():
                 await self._async_save_state()
 
-            # Reset startup retry state on success
-            if self._startup_retries_remaining < 5:
+            # Reset startup retry state on success (Issue #1337: a real fetch, not the kept forecast)
+            if forecast.from_kept_forecast is not True and self._startup_retries_remaining < 5:
                 _LOGGER.info(
                     "Weather entity now available; classified as %s day",
                     self._current_classification.day_type,
@@ -3883,27 +3999,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             # Outdoor temp history + automation-engine mirror now handled by
             # _apply_outdoor_temp() above (Issue #511 consolidation).
-            now_str = dt_util.now().isoformat()
-            if forecast.current_indoor_temp is not None:
-                self._indoor_temp_history.append((now_str, forecast.current_indoor_temp))
-
-                # Track comfort violations (elapsed minutes since last check, capped at 30).
-                # Issue #1107: judged against the target range in effect (sleep/away
-                # setbacks included), not the static awake comfort range.
-                if self._today_record:
-                    comfort_low, comfort_high = self._comfort_score_band_now()
-                    now = dt_util.now()
-                    if self._last_violation_check is not None:
-                        elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
-                    else:
-                        elapsed_minutes = 30.0
-                    self._last_violation_check = now
-                    if (
-                        forecast.current_indoor_temp < comfort_low or forecast.current_indoor_temp > comfort_high
-                    ) and not self._is_tolerated_comfort_deviation(
-                        forecast.current_indoor_temp, comfort_low, comfort_high
-                    ):
-                        self._today_record.comfort_violations_minutes += elapsed_minutes
+            self._track_indoor_comfort(forecast.current_indoor_temp)
 
             # Check economizer opportunity (window cooling on hot days)
             if self._should_run_regular_cycle_window_cooling_check():
@@ -3927,8 +4023,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[coalesce-diag] before _async_save_state()")
             await self._async_save_state()
             _LOGGER.debug("[coalesce-diag] after _async_save_state() — _async_update_data exiting normally")
-        else:
-            # Weather entity not ready yet (common after HA restart).
+        elif not forecast:
+            # Issue #1337: no forecast data at all (nothing kept covers today, or no real outdoor reading). Everything
+            # that does not need a forecast still runs, on the saved day type and the live readings.
+            await self._run_weather_independent_cycle()
+        if not forecast or forecast.from_kept_forecast is True:
+            # Weather entity not ready yet (common after HA restart), or down and covered by the kept forecast.
             # Retry with gentle backoff: 30s → 60s → 120s → 240s → 480s
             # Total wait ≈ 15 min before falling back to normal 30-min poll.
             if getattr(self, "_weather_retry_pending", False) is True:
@@ -3950,6 +4050,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 @callback
                 def _schedule_retry(_now: Any) -> None:
                     self._weather_retry_pending = False
+                    self._weather_retry_refresh = True  # Issue #1337: this refresh is the retry (see above)
                     self.hass.async_create_task(self.async_request_refresh())
 
                 # Issue #1102 (F2): keep the handle so unload cancels it (at most 5 retries).
@@ -4293,8 +4394,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and _indoor_reading.source_entity == self.config.get("sleep_indoor_temp_entity")
         )
         # Issue #1329: with the weather service down there is no forecast, but a dedicated outdoor sensor still has
-        # a live reading. Show it rather than "unknown"; a weather-service install stays unknown (no honest value).
-        _outdoor_temp = forecast.current_outdoor_temp if forecast else self._live_dedicated_outdoor_temp()
+        # a live reading. Show it rather than "unknown". Issue #1337: a weather-service install shows the kept
+        # forecast's value for now, the same interpolation it uses when the service is up; unknown once that runs out.
+        _outdoor_temp = forecast.current_outdoor_temp if forecast else self._outage_outdoor_temp()
 
         # Schedule overnight pre-cool if a warming trend is active (idempotent — runs once per day)
         self._maybe_schedule_pre_cool()
@@ -4488,6 +4590,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         state = self.hass.states.get(self.config.get("climate_entity", ""))
         return state is None or is_unavailable_state(state.state) or indoor_temp is None
 
+    def _weather_attrs_and_down(self) -> tuple[dict, bool]:
+        """The weather entity's attributes, and whether it is missing or unavailable (Issue #1337)."""
+        weather_entity = self.config.get("weather_entity")
+        state = self.hass.states.get(weather_entity) if weather_entity else None
+        if state is None:
+            return {}, True
+        return state.attributes, is_unavailable_state(state.state)
+
+    def _outage_outdoor_temp(self) -> float | None:
+        """Outdoor °F while the weather service is down, or None (Issues #1329, #1337)."""
+        return self._outage_outdoor_reading()[0]
+
+    def _outage_outdoor_reading(self) -> tuple[float | None, str | None]:
+        """Outdoor °F while the weather service is down and where it came from (Issues #1329, #1337).
+
+        A dedicated sensor / input_number's live reading first (``"sensor"``). Otherwise, as when the service is up,
+        the value interpolated from the hourly forecast, here the kept one (``"kept_forecast"``). ``(None, None)``
+        once neither exists. Never ``_get_weather_outdoor_temp()``'s 65°F placeholder.
+        """
+        if self.config.get("outdoor_temp_source") in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            sensor_value = self._live_dedicated_outdoor_temp()
+            if sensor_value is not None:
+                return sensor_value, "sensor"
+        value, _method = _interpolate_hourly_outdoor_temp(getattr(self, "_hourly_forecast_temps", None), dt_util.now())
+        return (value, "kept_forecast") if value is not None else (None, None)
+
     def _live_dedicated_outdoor_temp(self) -> float | None:
         """The configured dedicated outdoor sensor's live reading in °F, or None (Issue #1329).
 
@@ -4575,11 +4703,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_sensor_fallback_since = step.since
         self._outdoor_sensor_fallback_announced = step.announced
 
-    def _get_outdoor_temp(self, weather_attrs: dict) -> float:
-        """Read outdoor temperature based on configured source type."""
+    def _get_outdoor_temp(self, weather_attrs: dict, *, weather_down: bool = False) -> float | None:
+        """Read outdoor temperature based on configured source type.
+
+        Issue #1337: ``weather_down`` (the weather entity missing or unavailable) never falls back to the weather
+        service, whose only answer would be the 65°F placeholder: a failed or absent sensor uses the kept forecast
+        (``_outage_outdoor_temp()``), and the result is None once that is gone too. Always a float otherwise.
+        """
         source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
 
         if source not in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            if weather_down:
+                return self._outage_outdoor_temp()
             return self._get_weather_outdoor_temp(weather_attrs)[0]
 
         sensor_value, reason = self._read_outdoor_sensor()
@@ -4587,6 +4722,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if reason is None:
             self._note_outdoor_sensor_state(None, entity_id, None, sensor_value)
             return sensor_value
+        if weather_down:
+            kept_value = self._outage_outdoor_temp()
+            self._note_outdoor_sensor_state(
+                reason, entity_id, "kept_forecast" if kept_value is not None else None, kept_value
+            )
+            return kept_value
         value_f, weather_source = self._get_weather_outdoor_temp(weather_attrs)
         self._note_outdoor_sensor_state(reason, entity_id, weather_source, value_f)
         return value_f
@@ -4833,7 +4974,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1322: the outage is over; the next failure starts a new one and is announced again.
                 self._hourly_forecast_confirmed_unsupported = False
                 _LOGGER.info(
-                    "Hourly forecast available again for %s — cosine model no longer used entries=%d",
+                    "Hourly forecast available again for %s — live forecast in use entries=%d",
                     weather_entity,
                     len(normalised),
                 )
@@ -4845,11 +4986,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if getattr(self, "_hourly_forecast_confirmed_unsupported", False) is not True:
                 self._hourly_forecast_confirmed_unsupported = True
                 _LOGGER.error(
-                    "Hourly forecast unavailable for %s — using the cosine model until it returns",
+                    "Hourly forecast unavailable for %s — using the last forecast until it returns, "
+                    "the cosine model past its end",
                     weather_entity,
                 )
             _LOGGER.debug(
-                "Hourly forecast not available for %s; using cosine model",
+                "Hourly forecast not available for %s; keeping the last forecast",
                 weather_entity,
             )
             return []
@@ -4859,9 +5001,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         Single choke point for every refresh site (30-min cycle, briefing, end-of-day)
         so the engine's copy can never lag the coordinator's (Issue #1016).
+
+        Issue #1337: only a fetch that returns entries replaces the forecast. A failed or empty
+        fetch (weather outage) keeps the last good one, minus the hours already past, so every
+        consumer keeps using real forecast hours for as long as they last; the cosine model only
+        takes over once they run out.
         """
-        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
+        fetched = await self._get_hourly_forecast_data()
+        if fetched:
+            self._hourly_forecast_temps = fetched
+            self._hourly_forecast_cache_state = "live"
+        else:
+            kept = _unexpired_hourly_forecast(getattr(self, "_hourly_forecast_temps", None), dt_util.now())
+            self._hourly_forecast_temps = kept
+            self._note_hourly_forecast_cache(kept)
         self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
+
+    def _note_hourly_forecast_cache(self, kept: list[dict]) -> None:
+        """Log, once per change, whether an outage is covered by the kept forecast or has run past it (#1337)."""
+        state = "cached" if kept else "exhausted"
+        previous = getattr(self, "_hourly_forecast_cache_state", "live")
+        if previous == state:
+            return
+        self._hourly_forecast_cache_state = state
+        weather_entity = self.config.get("weather_entity")
+        if state == "cached":
+            _LOGGER.info(
+                "Hourly forecast unavailable for %s — using the last forecast, covering until %s (%d entries)",
+                weather_entity,
+                kept[-1].get("datetime") or kept[-1].get("time"),
+                len(kept),
+            )
+        elif previous == "cached":
+            _LOGGER.warning(
+                "Hourly forecast for %s still unavailable and the last forecast has run out — using the cosine model",
+                weather_entity,
+            )
 
     def _check_climate_unit(self) -> None:
         """Error once if the thermostat's reported unit differs from the configured unit.
@@ -4950,7 +5125,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
 
     async def _get_forecast(self) -> ForecastSnapshot | None:
-        """Pull forecast data from the weather entity."""
+        """Pull forecast data from the weather entity.
+
+        Issue #1337: while the weather entity is missing or unavailable, the snapshot is built from the kept daily
+        forecast and the live readings (``from_kept_forecast=True``), so the cycle keeps running on data CA already
+        has. None only when nothing kept covers today or no real outdoor reading exists.
+        """
         weather_entity = self.config["weather_entity"]
         weather_state = self.hass.states.get(weather_entity)
         if not weather_state:
@@ -4958,7 +5138,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Weather entity %s not found — repair issue should be active",
                 weather_entity,
             )
-            return None
+            return self._kept_forecast_snapshot()
 
         # Entity exists but isn't reporting data yet (common after restart)
         if is_unavailable_state(weather_state.state):
@@ -4967,7 +5147,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 weather_entity,
                 weather_state.state,
             )
-            return None
+            return self._kept_forecast_snapshot()
 
         attrs = weather_state.attributes
 
@@ -4994,6 +5174,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
 
         current_outdoor = self._get_outdoor_temp(attrs)
+        forecast = await self._get_forecast_data()
+        if forecast:
+            self._daily_forecast_full = forecast
+        elif getattr(self, "_daily_forecast_full", None):
+            # Issue #1337: an empty daily response keeps the last good forecast; today/tomorrow are
+            # still matched by date below, so a day the old forecast no longer covers falls back as before.
+            _LOGGER.debug("Daily forecast empty for %s — using the last forecast", weather_entity)
+            forecast = self._daily_forecast_full
+        return self._build_forecast_snapshot(forecast, current_outdoor, attrs, from_kept_forecast=False)
+
+    def _kept_forecast_snapshot(self) -> ForecastSnapshot | None:
+        """A snapshot from the kept daily forecast and live readings while the weather service is down (#1337).
+
+        None when no kept entry is for today (classifying from stand-in highs would be invented data) or when no
+        real outdoor reading exists (``_outage_outdoor_temp()``: a dedicated sensor, else the kept hourly forecast).
+        """
+        kept = getattr(self, "_daily_forecast_full", None) or []
+        today = dt_util.now().date()
+        if not any(_daily_entry_date(e) == today for e in kept):
+            return None
+        current_outdoor = self._outage_outdoor_temp()
+        if current_outdoor is None:
+            return None
+        _LOGGER.debug("Weather service down — building today's snapshot from the kept forecast")
+        return self._build_forecast_snapshot(kept, current_outdoor, {}, from_kept_forecast=True)
+
+    def _build_forecast_snapshot(
+        self, forecast: list, current_outdoor: float, attrs: dict, *, from_kept_forecast: bool
+    ) -> ForecastSnapshot:
+        """Match today/tomorrow in a daily forecast and build the snapshot (split out of ``_get_forecast()``, #1337)."""
         current_indoor = self._get_indoor_temp()
         # Resolved up front (not at the bottom of this method, where it used to live):
         # the fallback values below (current_outdoor / current_outdoor - 15) are already
@@ -5006,8 +5216,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # tomorrow's entry — a real, pre-existing sibling of the Issue #903 crash found
         # while fixing it.
         unit = self.config.get("temp_unit", "fahrenheit")
-        forecast = await self._get_forecast_data()
-        self._daily_forecast_full = forecast
 
         # Extract today and tomorrow from forecast by matching dates.
         # HA daily forecasts vary by provider: some include today, some start
@@ -5203,6 +5411,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             timestamp=dt_util.now(),
             low_is_estimated=low_is_estimated,
             tomorrow_low_is_estimated=tomorrow_low_is_estimated,
+            from_kept_forecast=from_kept_forecast,
         )
 
     def _maybe_regenerate_briefing_for_drift(self) -> bool:
@@ -6416,7 +6625,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
         self._observed_extreme_warned = set()  # Issue #1015: new day, new warning latch
-        self._hourly_forecast_temps.clear()
+        # Issue #1337: the hourly forecast is not cleared here. The refetch below replaces it, and if the
+        # weather service is down it keeps the still-future hours instead of dropping them at midnight.
         # Issue #540: reset the soft-start peak-tracking mirror alongside the buffer it's
         # derived from, so a stale "yesterday's peak" can't leak into the new day before
         # the first post-midnight sample arrives.
@@ -7075,13 +7285,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             with contextlib.suppress(Exception):
                 _indoor = self._get_indoor_temp()
-                _ov_weather_entity = self.config.get("weather_entity")
-                _ov_weather_attrs = (
-                    self.hass.states.get(_ov_weather_entity).attributes
-                    if _ov_weather_entity and self.hass.states.get(_ov_weather_entity)
-                    else {}
-                )
-                _outdoor_val = self._get_outdoor_temp(_ov_weather_attrs)
+                _ov_weather_attrs, _ov_weather_down = self._weather_attrs_and_down()
+                _outdoor_val = self._get_outdoor_temp(_ov_weather_attrs, weather_down=_ov_weather_down)
                 _chart_hvac_ov = self._read_chart_hvac_action()
                 _LOGGER.debug(
                     "chart_log append: event=override hvac=%r fan=%s",
@@ -9201,13 +9406,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         elsewhere in the same cycle. See indoor_temp.py's module docstring.
         """
         indoor = self._get_indoor_temp_with_provenance().primary_value
-        weather_entity = self.config.get("weather_entity")
-        weather_attrs = (
-            self.hass.states.get(weather_entity).attributes
-            if weather_entity and self.hass.states.get(weather_entity)
-            else {}
-        )
-        outdoor = self._get_outdoor_temp(weather_attrs)
+        # Issue #1337: with the weather service down this is the sensor or the kept forecast, never the 65°F
+        # placeholder, which learning would otherwise fit as a real outdoor temperature.
+        weather_attrs, weather_down = self._weather_attrs_and_down()
+        outdoor = self._get_outdoor_temp(weather_attrs, weather_down=weather_down)
         if indoor is None or outdoor is None:
             return None
         return {
@@ -15401,6 +15603,40 @@ def _parse_forecast_entries(hourly_forecast: list[dict] | None) -> list[tuple[da
         except ValueError, TypeError:
             continue
     return result
+
+
+def _daily_entry_date(entry: Any) -> date | None:
+    """The raw calendar date of a daily forecast entry, as ``_build_forecast_snapshot()`` matches it (#190, #1337)."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return datetime.fromisoformat(entry.get("datetime", "")).date()
+    except ValueError, TypeError:
+        return None
+
+
+def _unexpired_hourly_forecast(hourly_forecast: list[dict] | None, now: datetime) -> list[dict]:
+    """The entries of a kept hourly forecast that still cover now or later (Issue #1337).
+
+    One entry up to an hour old is kept so outdoor interpolation still has a point on each
+    side of now. Entries without a parseable time and temperature are dropped. A naive
+    timestamp is read as local time, like the chart's forecast series does.
+    """
+    if not hourly_forecast:
+        return []
+    cutoff = now - timedelta(hours=1)
+    kept: list[dict] = []
+    for entry in hourly_forecast:
+        if not _parse_forecast_entries([entry]):
+            continue
+        dt_obj = datetime.fromisoformat(entry.get("datetime") or entry.get("time"))
+        if dt_obj.tzinfo is None:
+            dt_obj = dt_obj.replace(tzinfo=now.tzinfo)
+        if now.tzinfo is None:
+            dt_obj = dt_obj.replace(tzinfo=None)
+        if dt_obj >= cutoff:
+            kept.append(entry)
+    return kept
 
 
 _DAILY_FORECAST_MIN_SPACING_HOURS: Final = 20

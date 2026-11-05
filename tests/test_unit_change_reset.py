@@ -539,6 +539,8 @@ def _make_forecast_coord(*, unit: str, attrs: dict, outdoor_f: float = 65.0, his
     coord._weather_unit_checked = False
     coord._weather_unit_info = None
     coord._get_forecast = types.MethodType(cls._get_forecast, coord)
+    # Issue #1337: the snapshot is built by a helper split out of _get_forecast().
+    coord._build_forecast_snapshot = types.MethodType(cls._build_forecast_snapshot, coord)
     coord._get_forecast_data = AsyncMock(return_value=forecast or [])
     coord._get_outdoor_temp = MagicMock(return_value=outdoor_f)
     coord._get_indoor_temp = MagicMock(return_value=72.0)

@@ -69,6 +69,22 @@
     "2": "morning_wakeup_skipped",
     "3": "bedtime_setback_skipped"
    }
+  },
+  {
+   "scenario": "issue_764_bedtime_economizer_teardown_gate",
+   "failing_assertions": [
+    1
+   ],
+   "first_difference": "a1@2026-08-23T22:30 expected bedtime_setback_skipped, real hvac_write_blocked_whf_active (nat-vent reactivated at the 20:10 revisit refresh, so _paused_by_door is False at bedtime)",
+   "evidence": "Issue #1337: the real-HA house has no weather entity, and a refresh with no forecast used to run nothing. It now runs the weather-independent cycle, including the regular-cycle check_natural_vent_conditions() while a sensor is open and a real outdoor reading exists (the scenario's 74F). At the 20:10 five-minute revisit refresh that check reactivates nat-vent over the door pause ('Natural vent activated ... while paused'), exactly what the same refresh does in production with a weather entity. FakeHass dispatches no revisit refresh, so Tier A still reaches bedtime paused_by_door. Assertions 2 (economizer still cool-down) and 3 (AC never commanded) pass on real HA. Dump: .pytest_cache/realha/issue_764_bedtime_economizer_teardown_gate.real.json",
+   "occupant_view": "Same outcome for the person: the whole-house fan keeps free-cooling through bedtime and the AC never starts. Only the reason bedtime leaves HVAC alone differs (WHF owns HVAC instead of the door pause).",
+   "issue_or_justification": "Trigger divergence (#1337). The real tier now runs the revisit refresh the way production does; the golden's assertion 1 describes the FakeHass path with no such refresh. Not a production bug; do not edit the golden.",
+   "class": "T",
+   "reviewer": "Craftsman triage 2026-11-04 (awaiting human review)",
+   "date": "2026-11-04",
+   "failing_outcomes": {
+    "1": "hvac_write_blocked_whf_active"
+   }
   }
  ]
 }

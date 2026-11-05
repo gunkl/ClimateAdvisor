@@ -2158,6 +2158,8 @@ OUTDOOR_SENSOR_REASON_LABELS = SENSOR_REASON_LABELS
 _OUTDOOR_SOURCE_IN_USE_LABELS: dict[str, str] = {
     "weather_interpolation": "weather service (hourly forecast)",
     "weather_attribute": "weather service (current conditions)",
+    # Issue #1337: the weather service is down too; the value comes from the last forecast it sent.
+    "kept_forecast": "last weather forecast (weather service down)",
 }
 
 

@@ -270,8 +270,9 @@ def arm_startup_coalesce_end(coordinator: Any, scheduler: FakeScheduler) -> None
     ``_startup_timer_fired and _startup_coalesce_active and _current_classification``, and that
     method clears ``_startup_coalesce_active`` ("Startup coalescing complete"). It also
     re-applies the plan, so a thermostat change made inside the window is overwritten (owner
-    decision #1235). The harness has no weather forecast, and that gate sits inside the
-    refresh's ``if forecast:`` block, so a harness refresh never reaches it. The timer
+    decision #1235). The harness has no weather forecast, and before Issue #1337 that gate sat inside the
+    refresh's ``if forecast:`` block, so a harness refresh never reached it (production's no-forecast
+    refresh now runs it too, so production's own timer is cancelled below and this helper owns the end). The timer
     callback below does what the timer does, then evaluates the same gate and calls the REAL
     ``_do_startup_coalesce()``. If no classification exists yet, production waits for the
     next periodic refresh (every 30 min, ``update_interval``) and so does this: it re-checks
@@ -296,6 +297,14 @@ def arm_startup_coalesce_end(coordinator: Any, scheduler: FakeScheduler) -> None
     previous = getattr(coordinator, "_sim_restart_coalesce_cancel", None)
     if previous is not None:
         previous()
+    # Issue #1337: production's own +300 s timer (async_setup) now coalesces through its refresh even without a
+    # forecast, which the harness never has. This helper owns the window's end, so that timer is cancelled: at a
+    # simulated restart it belongs to the old instance (production cancels it on unload), and at the initial start it
+    # would only repeat the coalesce below.
+    production_timer = getattr(coordinator, "_startup_coalesce_timer_cancel", None)
+    if production_timer is not None:
+        production_timer()
+        coordinator._startup_coalesce_timer_cancel = None
     # Real __init__ defaults for a fresh instance, then async_setup's expiry stamp.
     coordinator._startup_timer_fired = False
     coordinator._sim_startup_coalesce_done_by_timer = False
@@ -471,8 +480,8 @@ def setup_entry_like_ha(fake_hass: FakeHass, scheduler: FakeScheduler, entry: An
         _current_entry.reset(token)
     coordinator = fake_hass.data[DOMAIN][entry.entry_id]
     # Issue #1317: the start-up window this set-up opened must also END at +300 s, as in production
-    # (the multi-zone/reload mirror of #1291/#1297/#1309). The real 300 s timer fires, but its refresh
-    # finds no forecast, so the gate inside ``if forecast:`` was never reached and every later occupant
+    # (the multi-zone/reload mirror of #1291/#1297/#1309). The real 300 s timer fired, but before #1337 its refresh
+    # found no forecast, so the gate inside ``if forecast:`` was never reached and every later occupant
     # thermostat change in this zone was ignored as start-up noise. Its cancel joins the instance's own
     # _unsub_listeners, where production keeps its 300 s timer handle, so shutdown/unload releases both
     # (Issue #1102).

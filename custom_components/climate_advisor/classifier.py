@@ -53,6 +53,9 @@ class ForecastSnapshot:
     # learning record) must not trust it.
     low_is_estimated: bool = False
     tomorrow_low_is_estimated: bool = False
+    # Issue #1337: True when built from the kept daily forecast because the weather service is down.
+    # Everything that only needs the data runs as usual; only "the service is back" bookkeeping waits.
+    from_kept_forecast: bool = False
 
 
 @dataclass
@@ -70,6 +73,9 @@ class DayClassification:
     threshold_margin_f: float | None = None  # today_high - applied_threshold_f
     low_is_estimated: bool = False  # Issue #1211: today_low is a stand-in, not a forecast
     tomorrow_low_is_estimated: bool = False
+    # Issue #1337: True when built from the kept daily forecast because the weather service is down.
+    # Everything that only needs the data runs as usual; only "the service is back" bookkeeping waits.
+    from_kept_forecast: bool = False
     # Issue #1211: the occupant's configured comfort band, used by the shared "would outside air
     # help?" rule when deciding windows_recommended (the old warm rule used the DEFAULT ceiling).
     comfort_heat: float = DEFAULT_COMFORT_HEAT

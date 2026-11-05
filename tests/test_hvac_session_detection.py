@@ -247,6 +247,9 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     # Forecast — return None so the `if forecast:` block is skipped entirely,
     # which lets the method fall straight through to the data dict section.
     coord._get_forecast = AsyncMock(return_value=None)
+    # Issue #1337: with no forecast the cycle now runs its weather-independent work; this fixture only
+    # exercises the data-dict section below, so that step is stubbed as the forecast block is.
+    coord._run_weather_independent_cycle = AsyncMock()
     coord._get_hourly_forecast_data = AsyncMock(return_value=MagicMock())
     coord._hourly_forecast_temps = MagicMock()
     coord._startup_retries_remaining = 0

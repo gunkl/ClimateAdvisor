@@ -54,3 +54,7 @@ test-results/
 # Hypothesis example database and generated promise-probe failures (Issue #1128)
 .hypothesis/
 tools/simulations/generated/
+
+# Test badge reports and endpoint files, built by tools/badges.py (Issue #1343)
+reports/
+/badges/

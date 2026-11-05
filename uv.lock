@@ -802,6 +802,7 @@ test = [
     { name = "voluptuous" },
 ]
 test-ha = [
+    { name = "pytest-cov" },
     { name = "pytest-homeassistant-custom-component" },
     { name = "syrupy" },
 ]
@@ -820,6 +821,7 @@ test = [
     { name = "voluptuous", specifier = ">=0.14" },
 ]
 test-ha = [
+    { name = "pytest-cov", specifier = ">=4.0" },
     { name = "pytest-homeassistant-custom-component", specifier = "==0.13.375" },
     { name = "syrupy", specifier = ">=5" },
 ]

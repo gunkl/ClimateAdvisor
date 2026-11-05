@@ -18,6 +18,7 @@ Home Assistant is covered in [SSH Setup](SSH-SETUP.md).
 | How do I run the real-Home-Assistant tier, build the house fixture, prove a test fails without the fix, or update snapshots? | `python scripts/test.py ha` (WSL on Windows). Use the `make_house` fixture in `tests_ha/house/`. `scripts/revert_proof.py` proves an escaped-bug test fails on the pre-fix commit. | [Real-HA tier](DEVELOPMENT.md#real-ha-tier-the-house-markers-revert-proof-snapshots-step-2-issue-1127) |
 | How do I run the simulator and its goldens? | `python tools/simulate.py` drives the real `AutomationEngine` (single-engine harness, #236). Goldens are locked by `MANIFEST.json`, and only `--sign` after human review changes them. | [§Simulator](DEVELOPMENT.md#simulator) |
 | What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` opens one tracking issue, or comments on it if it is already open. | [§Nightly](DEVELOPMENT.md#nightly) |
+| Where do the README's test badges come from? | `badges.yml` runs both tiers with coverage and JUnit XML on every push to `main`, daily and by hand; `tools/badges.py` turns the reports and the real-HA ledger into shields.io endpoint JSON on the `badges` branch. The nightly badge is GitHub's workflow status. Issue #1343. | [§Test badges](DEVELOPMENT.md#test-badges) |
 | What must a PR carry besides code? | A version bump in `const.py` and `manifest.json`, a `CHANGELOG.md` entry and a `fix_history.jsonl` entry added with `tools/add_fix_entry.py`. `tests/test_version_sync.py` checks that the two versions match. | [§Before Submitting Changes](DEVELOPMENT.md#before-submitting-changes) |
 | What is the correct sequence for adding a new module? | Create the module in `custom_components/climate_advisor/` and a matching `tests/test_<module>.py`. Add any new HA submodule to `_HA_MODULES` in `tools/sim_harness/ha_stubs.py`, then run the full unit tier. | [§Adding a New Module](DEVELOPMENT.md#adding-a-new-module) |
 
@@ -169,6 +170,7 @@ re-staging files are in [claude.md, Pre-commit Hooks](../claude.md#pre-commit-ho
 | `hacs.yml` | `hacs` | HACS validation | no |
 | `nightly.yml` | see [§Nightly](DEVELOPMENT.md#nightly) | Scheduled runs | no |
 | `ha-compare-weekly.yml` | `compare` | Every golden on FakeHass and on real HA, with a diff report | no |
+| `badges.yml` | `unit`, `ha`, `publish` | Both tiers with coverage, then the README badges (see [§Test badges](DEVELOPMENT.md#test-badges)) | no |
 
 If tests pass locally but fail in CI, check that any new test dependency is in the `test` group and that `uv.lock` was
 regenerated, because CI uses `--locked`.
@@ -188,6 +190,35 @@ regenerated, because CI uses `--locked`.
 
 To replay a failure, run `python tools/simulate.py --replay-generated <file>` on the downloaded artifact, or
 `--generate-day <day_seed> --profile <profile>` with the values from the log.
+
+## Test badges
+
+The README's second badge row (Issue #1343) shows every test layer, in the same `flat-square` style as the version
+badges. `badges.yml` builds them on every push to `main`, daily at 07:37 UTC (after the nightly) and by hand. It is
+not a required check and never runs on PRs, so coverage does not slow the PR jobs or their time caps.
+
+| Badge | Source | Example |
+|---|---|---|
+| coverage | Line and branch coverage of `custom_components/climate_advisor`, both tiers combined (`coverage combine`) | `84%` |
+| unit tests | `tests/` JUnit XML and that tier's own coverage | `12,107 passed · 81% cov` |
+| real HA tests | `tests_ha/` JUnit XML and that tier's own coverage | `468 passed · 62% cov` |
+| goldens | `test_golden_passes_production_engine` cases (Tier A: every golden through the real engine) | `93/93 pass` |
+| goldens on real HA | `test_golden_on_real_ha` cases, minus the entries in `tools/sim_harness/realha_ledger.json` | `88 match · 5 triaged` |
+| nightly | GitHub's own status of `nightly.yml` on `main` (shields.io `github/actions/workflow/status`) | `passing` |
+
+- **Flow:** the `unit` and `ha` jobs run `scripts/test.py` with `--cov=custom_components/climate_advisor
+  --cov-branch --junitxml=...` (`COVERAGE_FILE` per tier) and upload `reports/`. `publish` writes a coverage JSON per
+  tier and a combined one, runs `python tools/badges.py --out badges` and force-pushes the files as a single commit
+  to the `badges` branch. The README reads them through `img.shields.io/endpoint`.
+- **Honest by design:** a failing test still publishes, and the badge turns red with the failure count. A missing
+  report says `unknown` in grey; it never keeps an old green number.
+- **Colours:** coverage ≥90 brightgreen, ≥80 green, ≥70 yellowgreen, ≥60 yellow, ≥50 orange, below that red.
+  Tier badges are brightgreen with no failures, otherwise red. The real-HA goldens badge is green while ledgered
+  divergences exist.
+- **Locally:** `COVERAGE_FILE=reports/coverage.unit python scripts/test.py unit --cov=custom_components/climate_advisor
+  --cov-branch --cov-report= --junitxml=reports/unit.xml` (and the same for `ha`), then `coverage json` per data file
+  and `python tools/badges.py --out badges`. `reports/` and `badges/` are git-ignored.
+- shields.io and `raw.githubusercontent.com` cache for a few minutes, so a new run shows up shortly after it finishes.
 
 ## Common Workflows
 

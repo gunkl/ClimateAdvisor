@@ -1,0 +1,136 @@
+name: Test badges
+
+# Issue #1343: the README's per-layer test badges. Both tiers run here with coverage and JUnit XML, apart from the
+# required PR jobs in validate.yml (their time budgets are untouched: coverage slows a run down). tools/badges.py
+# turns the reports and the real-HA ledger into shields.io endpoint JSON, pushed to the `badges` branch (one
+# commit, force-pushed each time). The nightly badge is GitHub's own workflow status, so it is not built here.
+# A failing test still publishes: the badge turns red instead of keeping yesterday's green.
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "37 7 * * *"  # after nightly.yml (06:17), so a day with no push still refreshes
+  workflow_dispatch:
+
+concurrency:
+  group: test-badges
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Unit tier with coverage
+        continue-on-error: true
+        run: >
+          python3 scripts/test.py unit -q
+          --cov=custom_components/climate_advisor --cov-branch --cov-report=
+          --junitxml=reports/unit.xml
+        env:
+          CA_UNIT_WORKERS: "4"
+          COVERAGE_FILE: reports/coverage.unit
+
+      - name: Upload the unit reports
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: badge-reports-unit
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  ha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Real-HA tier with coverage
+        continue-on-error: true
+        run: >
+          python3 scripts/test.py ha -q
+          --cov=custom_components/climate_advisor --cov-branch --cov-report=
+          --junitxml=reports/ha.xml
+        env:
+          CA_HA_WORKERS: "4"
+          COVERAGE_FILE: reports/coverage.ha
+
+      - name: Upload the real-HA reports
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: badge-reports-ha
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    needs: [unit, ha]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # pushes the badges branch only; main is never written
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Install test dependencies (coverage)
+        run: uv sync --locked --only-group test
+
+      - name: Download the reports
+        uses: actions/download-artifact@v4.3.0
+        with:
+          pattern: badge-reports-*
+          path: reports
+          merge-multiple: true
+
+      - name: Coverage per tier and combined
+        continue-on-error: true
+        run: |
+          set -x
+          for tier in unit ha; do
+            if [ -f "reports/coverage.$tier" ]; then
+              uv run --locked --only-group test coverage json --data-file="reports/coverage.$tier" -o "reports/coverage-$tier.json"
+            fi
+          done
+          uv run --locked --only-group test coverage combine --keep --data-file=reports/coverage.all reports/coverage.unit reports/coverage.ha
+          uv run --locked --only-group test coverage json --data-file=reports/coverage.all -o reports/coverage.json
+
+      - name: Build the badge files
+        run: python3 tools/badges.py --out badges
+
+      - name: Push the badges branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd badges
+          git init -q -b badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Test badges for ${GITHUB_SHA::7} (run ${GITHUB_RUN_ID})"
+          git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges:badges

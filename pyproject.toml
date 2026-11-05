@@ -26,6 +26,8 @@ test-ha = [
     # Snapshot tests of occupant-facing text (Issue #945). Also installed transitively by the
     # plugin; named here so a plugin upgrade that drops it cannot silently remove it.
     "syrupy>=5",
+    # Coverage for the README badges (Issue #1343, .github/workflows/badges.yml); not used by the PR jobs.
+    "pytest-cov>=4.0",
 ]
 
 [tool.uv]
@@ -58,6 +60,10 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "T20", "ASYNC"]
 # Assistant's shared event loop — the ASYNC240 hazard (stalling a live production
 # loop) doesn't apply to a one-off local CLI script.
 "tools/take_screenshots.py" = ["ASYNC240"]
+
+[tool.coverage.run]
+# Issue #1343 (badges.yml): relative paths so the unit and real-HA tiers' data combine into one report.
+relative_files = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

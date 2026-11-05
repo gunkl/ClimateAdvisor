@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.62] — 2026-11-05
+
+- Feat #1343: the README now shows a badge for every test layer, in the same style as the version badges: combined coverage, unit tests, real Home Assistant tests, golden scenarios, golden scenarios on real Home Assistant, and the nightly run. A `badges` workflow rebuilds them after every change to `main` and once a day. No change to the integration itself.
+
 ## [0.8.61] — 2026-11-04
 
 - Fix #1337: when the weather service goes down, Climate Advisor keeps using the forecast it already has instead of throwing it away.

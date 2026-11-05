@@ -3145,8 +3145,11 @@ Pinned by `tests/test_sim_harness_restart_coalesce_1291.py`. The harness's own s
 event), through the same helper `build_coordinator.arm_startup_coalesce_end()` (Issue #1297). Coalescing runs at most
 once per window: an explicit `startup_coalesce` event that comes first ends the window and the timer's gate is false;
 one that comes at or after the timer's instant is a no-op. Pinned by `tests/test_sim_harness_initial_coalesce_1297.py`.
-The real-HA tier (`tests_ha/realha_session.py`) has the same gap for the same reason: its house has no weather
-entity, so the refresh the real 300 s timer requests never reaches the gate inside `if forecast:`. The adapter
+Issue #1337: production's own refresh now coalesces with no forecast too (`_run_weather_independent_cycle()`, so a
+restart during a weather outage ends its window at +300 s). The Tier A helper still owns the window's end and cancels
+production's own 300 s timer (`_startup_coalesce_timer_cancel`): at a simulated restart that timer belongs to the old
+instance, which production cancels on unload. The real-HA tier (`tests_ha/realha_session.py`) had the same gap: its
+house has no weather entity, so before #1337 the refresh the real 300 s timer requests never reached the gate. The adapter
 completes that gate after every real refresh (and re-checks every 30 min with no classification, as the periodic
 refresh is cancelled there), so the initial start and every `simulate_restart` end their window at +300 s; an explicit
 `startup_coalesce` event after the timer's coalesce is a no-op (Issue #1309). Pinned by

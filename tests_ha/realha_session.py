@@ -33,8 +33,9 @@ Deliberate environment choices (reported, never hidden):
   premise.  ``coordinator_refresh`` events still run a real refresh.
 * No weather entity exists (as in FakeHass), so Climate Advisor finds no forecast and never classifies the day
   on its own; scenarios hand-feed the classification.
-* Because there is no forecast, a refresh never reaches production's start-up coalescing gate (it sits inside the
-  refresh's ``if forecast:`` block).  The adapter completes that gate after every real refresh (Issue #1309, the
+* Because there is no forecast, a refresh never reached production's start-up coalescing gate before Issue #1337 (it
+  sat inside the refresh's ``if forecast:`` block; the no-forecast refresh now runs it too, and the adapter is then a
+  no-op).  The adapter completes that gate after every real refresh (Issue #1309, the
   real-HA mirror of Tier A's #1291/#1297): the real 300 s timer fires and requests a real refresh, and the
   refresh then runs the real ``_do_startup_coalesce()`` when ``_startup_timer_fired and _startup_coalesce_active
   and _current_classification``.  So a start-up window (initial start, every ``simulate_restart``) ENDS at +300 s.
@@ -321,8 +322,9 @@ class RealHASession:
         ``_startup_timer_fired and _startup_coalesce_active and _current_classification``.  That method clears
         ``_startup_coalesce_active`` and re-applies the plan, so a thermostat change made inside the window is
         overwritten (owner decision #1235).  Here the real timer fires and the real refresh runs, but with no
-        weather entity the refresh finds no forecast and the gate, inside its ``if forecast:`` block, is never
-        reached: the window never ended and every later occupant change was ignored as start-up noise.
+        weather entity the refresh finds no forecast and, before Issue #1337, the gate inside its ``if forecast:`` block
+        was never reached: the window never ended and every later occupant change was ignored as start-up noise.
+        Production's no-forecast refresh now runs the gate itself, and this adapter finds it already clear.
 
         So after every real refresh of this coordinator instance the adapter evaluates the same gate and awaits the
         REAL ``_do_startup_coalesce()``.  It is a no-op whenever production's own gate could already have run (the
@@ -339,7 +341,12 @@ class RealHASession:
         original = coordinator._async_update_data_impl
 
         async def _refresh_then_gate() -> Any:
+            was_active = coordinator._startup_coalesce_active
             result = await original()
+            if was_active and coordinator._startup_timer_fired and not coordinator._startup_coalesce_active:
+                # Issue #1337: production's own no-forecast refresh coalesced this window (the timer's refresh), so a
+                # later explicit startup_coalesce event is that same refresh and does nothing, as production would.
+                self._coalesced_by_timer = True
             await self._startup_coalesce_gate(coordinator)
             return result
 

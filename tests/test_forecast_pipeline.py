@@ -98,6 +98,8 @@ def _make_coordinator_stub(forecast_data: list, *, temp_unit: str = "fahrenheit"
 
     # Bind the real _get_forecast method so we test the actual code
     coord._get_forecast = types.MethodType(ClimateAdvisorCoordinator._get_forecast, coord)
+    # Issue #1337: the snapshot is built by a helper split out of _get_forecast().
+    coord._build_forecast_snapshot = types.MethodType(ClimateAdvisorCoordinator._build_forecast_snapshot, coord)
     coord._get_forecast_data = AsyncMock(return_value=forecast_data)
 
     # Stub helpers that _get_forecast delegates to

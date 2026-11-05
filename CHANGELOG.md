@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.61] — 2026-11-04
+
+- Fix #1337: when the weather service goes down, Climate Advisor keeps using the forecast it already has instead of throwing it away.
+  - **Forecast kept:** the last hourly and daily forecast stays in use, including across a restart, and only hours already past are dropped. The chart, indoor prediction, ventilation plan and outdoor reading use real forecast hours; the made-up cosine day appears only once the kept forecast runs out.
+  - **Automation keeps running:** the day type, plan, comfort tracking and ventilation checks keep working through the outage, and a restart during one still ends the 5-minute start-up window, so your thermostat changes are noticed again. Before, all of this waited for the weather to return.
+  - **No fake outdoor temperature:** with the weather service down, outdoor comes from your outdoor sensor or the kept forecast. Before, the engine and thermal learning could read a made-up 65°F.
+  - **Comfort Score:** time spent too hot or too cold during an outage now counts.
+  - **Weather-service installs:** the dashboard shows the outdoor temperature from the kept forecast instead of "unknown".
+
 ## [0.8.60] — 2026-11-04
 
 - Fix #1329: when the weather service goes down, Climate Advisor no longer loses readings that don't come from it.

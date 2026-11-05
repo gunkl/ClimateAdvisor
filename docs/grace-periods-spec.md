@@ -595,7 +595,7 @@ judgment call to get wrong or forget. `_cancel_grace_timers()` resets `_grace_pr
 to `False` alongside `_grace_active` so a stale `True` can never leak into whatever starts next.
 
 **Implementation:** `coordinator._check_orphaned_grace()` (`coordinator.py:1629`), called once per
-coordinator update (`_async_update_data_impl`, under `if forecast:`) -- the 30-minute `update_interval` plus on-demand refreshes (5-minute revisit, sensor and fan events), not every ~30 s. The decision is `override_orphaned_grace.decide_orphaned_grace()`. Condition: `ae._grace_active and
+coordinator update (`_async_update_data_impl`; with no forecast at all, from `_run_weather_independent_cycle()`, Issue #1337) -- the 30-minute `update_interval` plus on-demand refreshes (5-minute revisit, sensor and fan events), not every ~30 s. The decision is `override_orphaned_grace.decide_orphaned_grace()`. Condition: `ae._grace_active and
 ae._grace_protects_override and not ae._manual_override_active and not ae._fan_override_active and not ae._override_confirm_pending` (Issue #1216: a change still pending in its confirmation window keeps the grace; before this, Cool then Off inside Cool's grace lost the Off because the next update reaped the superseded Cool grace and the pending change went with it).
 On match: logs an ERROR, calls `ae._cancel_grace_timers()`, and emits `"stuck_grace_recovered"`
 with `{"grace_end_time": ..., "reason": "grace_without_override"}`.

@@ -205,6 +205,9 @@ def _make_update_data_coord(
     # When forecast_returns_none=True, skip the whole if-forecast block.
     if forecast_returns_none:
         coord._get_forecast = AsyncMock(return_value=None)
+        # Issue #1337: with no forecast the cycle now runs its weather-independent work; this fixture only
+        # exercises the data-dict section below, so that step is stubbed as the forecast block is.
+        coord._run_weather_independent_cycle = AsyncMock()
     else:
         coord._get_forecast = AsyncMock(
             return_value=_make_forecast_snapshot(

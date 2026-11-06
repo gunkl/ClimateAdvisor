@@ -122,7 +122,7 @@ See [multi-zone-spec](docs/multi-zone-spec.md).
 
 ## Entities
 
-Each zone creates **19 sensors** and **1 switch**, grouped under a device named after the zone. Entity IDs come from the zone name, for example `sensor.living_room_day_type`. Existing entities keep the IDs they were created with.
+Each zone creates **21 sensors** and **1 switch**, grouped under a device named after the zone. Entity IDs come from the zone name, for example `sensor.living_room_day_type`. Existing entities keep the IDs they were created with.
 
 | Entity | What it shows |
 |---|---|
@@ -131,7 +131,8 @@ Each zone creates **19 sensors** and **1 switch**, grouped under a device named 
 | Your Next Action | What you can do next, such as opening or closing windows |
 | Next Automation Action, Next Automation Time | What Climate Advisor does next, and when |
 | Status | Active, grace, override or paused |
-| Target Temperature | The temperature the house is aiming for right now |
+| Target Temperature | The temperature the house is aiming for right now. While the thermostat is not Off this is the thermostat's own setpoint, so with Automation off (observe-only) it shows the setpoint your own controller set, not Climate Advisor's |
+| Heat Threshold, Cool Threshold | The band Climate Advisor holds the house to right now: it heats below Heat Threshold and cools above Cool Threshold. They follow your comfort, sleep, away and vacation settings, Prefer Savings and time-of-use widening; the `context` attribute names which band is in force. Diagnostic sensors with history, in your unit. Same numbers as `ca_target_heat` / `ca_target_cool` in the [REST API](docs/rest-api.md) |
 | Comfort Score | How much of the time the house stayed in range |
 | Occupancy Mode | Home, away, vacation or guest |
 | Last Action Time, Last Action Reason | The last thermostat change and why |

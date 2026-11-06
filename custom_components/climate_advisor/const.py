@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.62"
+VERSION = "0.8.63"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -637,6 +637,11 @@ ATTR_CONTACT_STATUS = "contact_status"
 # with nothing running) is responsible — never None during normal operation. See
 # coordinator._compute_effective_target_now() for the 3-tier priority.
 ATTR_EFFECTIVE_TARGET_TEMP = "effective_target_temp"
+# Issue #1345: the heat / cool thresholds in force (band floor / ceiling of resolve_active_band(),
+# the same numbers as the status API's ca_target_heat / ca_target_cool). Sensor keys only: the
+# values are read live through automation.active_thresholds_for(), not from coordinator.data.
+ATTR_HEAT_THRESHOLD = "heat_threshold"
+ATTR_COOL_THRESHOLD = "cool_threshold"
 
 # Revisit delay — follow-up check after any HVAC action (seconds)
 # Issue #787: independently duplicated with NAT_VENT_REACTIVATION_LOCKOUT_S/FAN_MIN_TOGGLE_INTERVAL_S

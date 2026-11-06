@@ -284,31 +284,17 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             # inline branch had: it ignored occupancy mode entirely, so away/vacation setback
             # was never reflected here even though the thermostat was really being held at the
             # setback band — exactly the kind of divergence this field exists to catch.
-            from homeassistant.util import dt as dt_util  # noqa: PLC0415
-
-            from .automation import fallback_edges_without_classification, resolve_active_band  # noqa: PLC0415
+            #
+            # Issue #1345: the assembly lives in automation.active_thresholds_for(), which the Heat /
+            # Cool Threshold sensors also read, so these fields and the sensors cannot drift
+            # (#402/#1080 sibling-formulation class). Before the first classification it returns
+            # the shared fallback_edges_without_classification() placeholder.
+            from .automation import active_thresholds_for  # noqa: PLC0415
 
             classification = coordinator.current_classification
-            if classification is not None:
-                # Issue #1080: same assembly as the engine's resolver, including the TOU
-                # away/vacation expansion the thermostat is actually armed with.
-                _ae = coordinator.automation_engine
-                _band = resolve_active_band(
-                    classification,
-                    coordinator.config,
-                    occupancy_mode=coordinator._occupancy_mode,
-                    now=dt_util.now(),
-                    tou_expansion_f=(_ae._tou_av_expansion_f if _ae is not None else 0.0),
-                )
-                _ca_target_heat = _band.floor
-                _ca_target_cool = _band.ceiling
-            else:
-                # No classification yet (e.g., right after HA restart, before the first
-                # classification cycle completes) — shared sleep/day-only heuristic so the
-                # field is never simply absent.
-                _ca_target_heat, _ca_target_cool = fallback_edges_without_classification(
-                    dt_util.now(), coordinator.config
-                )
+            _thresholds = active_thresholds_for(coordinator)
+            _ca_target_heat = _thresholds["heat"]
+            _ca_target_cool = _thresholds["cool"]
 
             if classification is not None:
                 trend_direction_display = classification.trend_direction

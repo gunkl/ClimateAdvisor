@@ -111,7 +111,7 @@ custom_components/climate_advisor/
 │
 │                         # --- Multi-zone support (Issue #796, v0.7.0) ---
 ├── zone_registry.py       # get_coordinator()/iter_coordinators()/get_default_coordinator()/list_zones() — resolves/enumerates zone coordinators by entry_id. See Multi-Zone Spec.
-├── storage_paths.py       # resolve_entry_scoped_path()/migrate_legacy_storage_file() — entry-scoped persistence filenames for learning.py/state.py/chart_log.py/forecast_archive.py; ENTRY_SCOPED_FILES + remove_entry_scoped_files() delete a removed zone's files (0.9.1, State Persistence spec). See Multi-Zone Spec.
+├── storage_paths.py       # resolve_entry_scoped_path()/migrate_legacy_storage_file() — entry-scoped persistence filenames for learning.py/state.py/chart_log.py/forecast_archive.py; remove_entry_scoped_files() deletes (with const.ENTRY_SCOPED_FILES) a removed zone's files (0.9.1, State Persistence spec). See Multi-Zone Spec.
 ├── diagnostics.py         # Native HA diagnostics download hook (async_get_diagnostics_payload()).
 ├── diagnostic_snapshot.py # Shared redacted diagnostic snapshot: build_diagnostic_snapshot() (thermostat live attributes + parsed capabilities + last_command block), recent_hvac_events(), redact_sensitive(). Consumed by diagnostics.py, the api.py log downloads and the AI investigator (Issue #1049).
 ├── incident_payload.py    # Shared `incident_detected` payload builder (build_incident_payload) and climate-error classifier (is_climate_validation_error) used by both the coordinator and the engine emitters (Issue #1049). Tier 2: incident-payload-brief.md.

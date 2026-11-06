@@ -96,6 +96,7 @@ from .const import (
     DEFAULT_TOU_LEAD_MINUTES,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
+    ENTRY_SCOPED_FILES,
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
     PANEL_FRONTEND_PATH,
@@ -814,7 +815,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     for issue_id in (f"weather_entity_not_found_{entry.entry_id}", f"reload_needed_{entry.entry_id}"):
         ir.async_delete_issue(hass, DOMAIN, issue_id)
     try:
-        await hass.async_add_executor_job(remove_entry_scoped_files, Path(hass.config.config_dir), entry.entry_id)
+        await hass.async_add_executor_job(
+            remove_entry_scoped_files, Path(hass.config.config_dir), entry.entry_id, ENTRY_SCOPED_FILES
+        )
     except Exception:  # noqa: BLE001 - removal of a zone must never fail on cleanup
         _LOGGER.exception("Climate Advisor: could not clean up files of removed zone %s", entry.entry_id)
 

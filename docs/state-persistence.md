@@ -70,7 +70,7 @@ card offering to "fix" a zone that no longer exists. Before 0.9.1 every one of t
 - **When:** only `async_remove_entry` (`__init__.py`), which HA calls on deletion, after `async_unload_entry` has
   run the final save. A reload or settings save (unload + setup) never deletes anything.
 - **Files:** `storage_paths.remove_entry_scoped_files(config_dir, entry_id)`, run in the executor, deletes the
-  entry-scoped name of each base in `storage_paths.ENTRY_SCOPED_FILES` (`STATE_FILE`, `CHART_LOG_FILE`,
+  entry-scoped name of each base in `const.ENTRY_SCOPED_FILES` (`STATE_FILE`, `CHART_LOG_FILE`,
   `LEARNING_DB_FILE`, `FORECAST_ARCHIVE_FILE`). Never another zone's file, never a legacy unscoped file (it may still
   belong to an entry that has not migrated), and nothing for a falsy `entry_id` (that would resolve to the shared
   unscoped names). Leftover `.tmp` files are not removed: their `mkstemp` names cannot be tied to one zone. A missing

@@ -13,8 +13,8 @@ from pathlib import Path
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
-from custom_components.climate_advisor.const import DOMAIN
-from custom_components.climate_advisor.storage_paths import ENTRY_SCOPED_FILES, resolve_entry_scoped_path
+from custom_components.climate_advisor.const import DOMAIN, ENTRY_SCOPED_FILES
+from custom_components.climate_advisor.storage_paths import resolve_entry_scoped_path
 from tests_ha.test_unload_cleanup import _setup_zone
 
 

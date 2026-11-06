@@ -17,6 +17,7 @@ import pytest
 from custom_components.climate_advisor.chart_log import ChartStateLog
 from custom_components.climate_advisor.const import (
     CHART_LOG_FILE,
+    ENTRY_SCOPED_FILES,
     FORECAST_ARCHIVE_FILE,
     LEARNING_DB_FILE,
     STATE_FILE,
@@ -25,7 +26,6 @@ from custom_components.climate_advisor.forecast_archive import ForecastArchive
 from custom_components.climate_advisor.learning import LearningEngine
 from custom_components.climate_advisor.state import StatePersistence
 from custom_components.climate_advisor.storage_paths import (
-    ENTRY_SCOPED_FILES,
     remove_entry_scoped_files,
     resolve_entry_scoped_path,
 )
@@ -43,7 +43,7 @@ def _write_zone(config_dir: Path, entry_id: str) -> list[Path]:
 
 def test_removes_every_file_of_the_removed_zone(tmp_path: Path) -> None:
     paths = _write_zone(tmp_path, "zoneA")
-    removed = remove_entry_scoped_files(tmp_path, "zoneA")
+    removed = remove_entry_scoped_files(tmp_path, "zoneA", ENTRY_SCOPED_FILES)
     assert sorted(removed) == sorted(p.name for p in paths)
     assert not any(p.exists() for p in paths)
 
@@ -59,7 +59,7 @@ def test_other_zone_and_legacy_files_are_kept(tmp_path: Path) -> None:
     tmp_leftover = tmp_path / "climate_advisor_state_zoneA_x1.tmp"
     tmp_leftover.write_text("", encoding="utf-8")
 
-    remove_entry_scoped_files(tmp_path, "zoneA")
+    remove_entry_scoped_files(tmp_path, "zoneA", ENTRY_SCOPED_FILES)
 
     assert all(p.exists() for p in kept)
     assert all(p.exists() for p in legacy)
@@ -70,8 +70,8 @@ def test_other_zone_and_legacy_files_are_kept(tmp_path: Path) -> None:
 def test_missing_files_are_skipped(tmp_path: Path) -> None:
     only = resolve_entry_scoped_path(tmp_path, CHART_LOG_FILE, "zoneA")
     only.write_text("{}", encoding="utf-8")
-    assert remove_entry_scoped_files(tmp_path, "zoneA") == [only.name]
-    assert remove_entry_scoped_files(tmp_path, "zoneA") == []
+    assert remove_entry_scoped_files(tmp_path, "zoneA", ENTRY_SCOPED_FILES) == [only.name]
+    assert remove_entry_scoped_files(tmp_path, "zoneA", ENTRY_SCOPED_FILES) == []
 
 
 @pytest.mark.parametrize("entry_id", ["", None])
@@ -80,7 +80,7 @@ def test_no_entry_id_deletes_nothing(tmp_path: Path, entry_id) -> None:
     legacy = [tmp_path / base for base in _ALL_BASES]
     for p in legacy:
         p.write_text("{}", encoding="utf-8")
-    assert remove_entry_scoped_files(tmp_path, entry_id) == []
+    assert remove_entry_scoped_files(tmp_path, entry_id, ENTRY_SCOPED_FILES) == []
     assert all(p.exists() for p in legacy)
 
 
@@ -95,7 +95,7 @@ def test_one_failed_delete_does_not_stop_the_rest(tmp_path: Path, monkeypatch) -
         return real_unlink(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", _unlink)
-    removed = remove_entry_scoped_files(tmp_path, "zoneA")
+    removed = remove_entry_scoped_files(tmp_path, "zoneA", ENTRY_SCOPED_FILES)
     assert blocked.exists()
     assert sorted(removed) == sorted(p.name for p in paths[1:])
 
@@ -111,7 +111,7 @@ def test_targets_the_paths_the_real_storage_classes_write(tmp_path: Path) -> Non
     ]
     for p in written:
         p.write_text("{}", encoding="utf-8")
-    remove_entry_scoped_files(tmp_path, entry_id)
+    remove_entry_scoped_files(tmp_path, entry_id, ENTRY_SCOPED_FILES)
     assert not any(p.exists() for p in written)
 
 

@@ -553,6 +553,12 @@ PRED_ARCHIVE_HORIZON_HOURS = 4  # only archive ODE entries within this lookahead
 
 # Learning system
 LEARNING_DB_FILE = "climate_advisor_learning.json"
+# Every per-zone file Climate Advisor writes in the HA config dir, by its unscoped base name (Issue #1375).
+# async_remove_entry deletes each one's entry-scoped copy when a zone is deleted. A new entry-scoped file must be
+# listed here, or a removed zone leaves it on disk forever: tests/test_zone_removal_cleanup.py fails if any
+# resolve_entry_scoped_path() caller in the package uses a base name missing from this tuple.
+# chart_log.py's own _CHART_LOG_FILE equals CHART_LOG_FILE (guarded by the same test).
+ENTRY_SCOPED_FILES: tuple[str, ...] = (STATE_FILE, CHART_LOG_FILE, LEARNING_DB_FILE, FORECAST_ARCHIVE_FILE)
 SUGGESTION_COOLDOWN_DAYS = 7  # Don't repeat the same suggestion within a week
 MIN_DATA_POINTS_FOR_SUGGESTION = 14  # Need 2 weeks of data before suggesting changes
 COMPLIANCE_THRESHOLD_LOW = 0.3  # Below 30% compliance triggers a suggestion

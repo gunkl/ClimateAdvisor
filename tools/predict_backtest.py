@@ -20,8 +20,9 @@ HOW (walk-forward, no future leakage)
 MODELS COMPARED ON THE SAME INPUTS (same anchors, forecast, setpoints, windows plan)
   * v4   - ``predictor_v4.fit`` / ``predict``  (lane A, pure Python)
   * v3   - the PRODUCTION ``coordinator._build_predicted_indoor_future`` imported headless (HA stubs
-           from tools/sim_harness/ha_stubs.py), fed the thermal model rebuilt from the learning DB
-           observations dated before the week (``--v3-model asof``) or the current cache (``current``)
+           from tools/sim_harness/ha_stubs.py), fed the learning DB's thermal model: the current cache
+           (``--v3-model current``, the default) or one rebuilt with production's own
+           ``LearningEngine`` EWMA from observations dated before the week (``asof``, see below)
   * flat - persistence: the reading at A
   * logged ``pred_indoor`` - the real ~4 h archive, a sanity row for the v3 replay (``_ca`` only)
 
@@ -38,8 +39,24 @@ INPUT CHOICES (documented because they decide how honest the numbers are)
     classification's window times). Fan is never planned. A "v4 with actual inputs" variant (actual
     outdoor, windows, fan) is reported apart as a diagnostic, never in the gate.
 
+SEASONS are by what the HVAC did that local day (owner decision, reversible), not by calendar month:
+a day with any heating is "heating"; else a day with cooling, or the whole-house fan running
+(fan_running with nat_vent_active, or an hvac "fan" action), is "summer" (the cooling/fan season);
+else "shoulder" (reported, not gated). The label only groups scores; no model sees it.
+
+v3 THERMAL MODEL: ``current`` is the honest default. The learning DB keeps only the newest ~200
+observations (about 2 weeks) while its EWMA cache carries the whole history, so an as-of rebuild
+cannot recreate the model v3 had in April..October (it would show an immature model and the
+fallback ramp, which v3 never showed then). ``current`` gives v3 hindsight (parameters learned
+after the week), which can only flatter v3: conservative for the claim "v4 beats v3". ``asof`` is
+kept for DBs with long observation history.
+
+COOLING SETPOINT: pre-September rows can have ``setpoint`` null while cooling; the cooling setpoint
+is then taken from the band ceiling ``upper`` (heating: ``lower``) so the model can learn from and
+predict summer cycles.
+
 SCORING: error = predicted - actual (positive bias = too warm). Gate (DP-8) on the ``_ca`` line, per
-season (heating Nov-Mar, summer Jun-Sep; shoulder Apr/May/Oct reported apart), at 1/4/12 h:
+season (heating / summer as defined above; shoulder reported apart), at 1/4/12 h:
 v4 MAE < v3 MAE and < flat MAE, |v4 bias| <= 0.5 F, n >= --min-n, v4 coverage >= --min-coverage.
 All MAEs of a row are taken over the SAME anchors (v4, v3 and flat all present).
 
@@ -55,6 +72,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import contextlib
+import copy
 import importlib
 import importlib.util
 import json
@@ -84,8 +102,6 @@ GATE_LEADS_H = (1, 4, 12)
 GATE_SEASONS = ("heating", "summer")
 SEASONS = ("heating", "summer", "shoulder", "all")
 BIAS_LIMIT_F = 0.5
-HEATING_MONTHS = frozenset({11, 12, 1, 2, 3})
-SUMMER_MONTHS = frozenset({6, 7, 8, 9})
 HORIZON_H = max(LEADS_H)
 STEP_S = 900  # v4 grid: V4_STEP_MINUTES
 CA = "_ca"
@@ -104,12 +120,44 @@ class LeakageError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def season_of(dt: datetime) -> str:
-    if dt.month in HEATING_MONTHS:
+def season_of_day(heating: bool, cooling_or_fan: bool) -> str:
+    if heating:
         return "heating"
-    if dt.month in SUMMER_MONTHS:
-        return "summer"
-    return "shoulder"
+    return "summer" if cooling_or_fan else "shoulder"
+
+
+def day_seasons(rows: list[dict], tz: tzinfo) -> dict:
+    """{local date: season} from what the HVAC did that day (see module docstring)."""
+    heat: set = set()
+    cool: set = set()
+    for r in rows:
+        try:
+            d = parse_ts(r.get("ts"), tz).astimezone(tz).date()
+        except TypeError, ValueError:
+            continue
+        hv = str(r.get("hvac") or "").lower()
+        fan_season = r.get("fan_running", r.get("fan")) is True and (
+            r.get("nat_vent_active") is True or hv.startswith("fan")
+        )
+        if hv == "heating":
+            heat.add(d)
+        elif hv == "cooling" or fan_season:
+            cool.add(d)
+    return {d: season_of_day(d in heat, d in cool) for d in heat | cool}
+
+
+def prepare_rows(rows: list[dict]) -> list[dict]:
+    """Copy-on-change: an active heating/cooling row with a null ``setpoint`` gets the band edge
+    (``lower`` when heating, ``upper`` when cooling), so pre-September cooling has a setpoint."""
+    out = []
+    for r in rows:
+        if isinstance(r, dict) and _num(r.get("setpoint")) is None:
+            hv = str(r.get("hvac") or "").lower()
+            edge = _num(r.get("upper")) if hv == "cooling" else _num(r.get("lower")) if hv == "heating" else None
+            if edge is not None:
+                r = {**r, "setpoint": edge}
+        out.append(r)
+    return out
 
 
 def at(anchor: datetime, seconds: float) -> datetime:
@@ -162,7 +210,7 @@ def resolve_tz(name: str | None, fallback_row_ts: str | None = None) -> tzinfo:
 
 def assert_no_leak(items: list, cutoff: datetime, what: str, key=lambda x: x) -> None:
     """Raise ``LeakageError`` when any item is at or after ``cutoff`` (the test-week start)."""
-    bad = [i for i in items if key(i) >= cutoff]
+    bad = [i for i in items if key(i).timestamp() >= cutoff.timestamp()]  # epoch: wall-clock compare breaks on DST
     if bad:
         raise LeakageError(f"{what}: {len(bad)} item(s) at/after the test-week start {cutoff.isoformat()}")
 
@@ -265,11 +313,24 @@ class ChartIndex:
             return None
         return vs[i - 1] + (vs[i] - vs[i - 1]) * (t - x0) / (x1 - x0)
 
-    def band_at(self, t: float) -> tuple[float | None, float | None]:
+    def set_commanded(self, seasons: dict) -> None:
+        """Alternative band for ``--setpoint-source commanded``: the logged thermostat ``setpoint`` replaces
+        the band edge of the day's mode (heating day: lower; cooling/fan day: upper)."""
+        self.band_cmd = []
+        for (lo, hi), dt, r in zip(self.band, self.dts, self.rows, strict=True):
+            sp = _num(r.get("setpoint"))
+            season = seasons.get(dt.astimezone(self.tz).date())
+            if sp is not None and season == "heating":
+                lo = sp
+            elif sp is not None and season == "summer":
+                hi = sp
+            self.band_cmd.append((lo, hi))
+
+    def band_at(self, t: float, commanded: bool = False) -> tuple[float | None, float | None]:
         i = self._idx_at_or_before(t)
         if i < 0 or t - self.t[i] > 2 * 3600:
             return (None, None)
-        return self.band[i]
+        return (self.band_cmd if commanded and hasattr(self, "band_cmd") else self.band)[i]
 
     def row_at(self, t: float, max_age_s: float = 3600.0) -> dict | None:
         i = self._idx_at_or_before(t)
@@ -297,6 +358,8 @@ def select_sensors(rows: list[dict], primary_arg: str | None, min_cov: float = 0
             if ind is not None and abs(fv - ind) < 0.05:
                 match[k] = match.get(k, 0) + 1
     good = sorted(k for k, c in counts.items() if n_rows and c / n_rows >= min_cov)
+    if min_cov <= 0:
+        good = sorted(counts)
     if primary_arg:
         primary = primary_arg
     elif good:
@@ -444,43 +507,34 @@ def _set_ha_timezone(tz: tzinfo) -> None:
         dt_mod.DEFAULT_TIME_ZONE = tz
 
 
-def _thermal_replay() -> Any:
-    import thermal_replay  # noqa: PLC0415
-
-    return thermal_replay
-
-
-# ---------------------------------------------------------------------------
-# v3 replay with production code
-# ---------------------------------------------------------------------------
+def _learning_module() -> Any:
+    _install_ha_stubs()
+    return importlib.import_module("custom_components.climate_advisor.learning")
 
 
-def v3_model_from_cache(cache: dict, phase_h: float | None) -> dict:
-    """The ``thermal_model`` dict ``LearningEngine.get_thermal_model`` hands the engine, from a cache."""
-    conf = _thermal_replay()._confidence
-    return {
-        "confidence": conf.grade_hvac_confidence(cache),
-        "confidence_k_passive": conf.grade_passive_confidence(cache),
-        "k_passive": cache.get("k_passive"),
-        "k_active_heat": cache.get("k_active_heat"),
-        "k_active_cool": cache.get("k_active_cool"),
-        "k_solar": cache.get("k_solar"),
-        "k_vent_window": cache.get("k_vent_window"),
-        "k_vent_fan": cache.get("k_vent_fan"),
-        "solar_phase_offset_h": phase_h if phase_h is not None else 2.0,
-    }
+def prod_model_from_cache(cache: dict) -> dict:
+    """The ``thermal_model`` dict production hands the engine: ``LearningEngine.get_thermal_model`` itself."""
+    stub = SimpleNamespace(_state=SimpleNamespace(thermal_model_cache=copy.deepcopy(cache)))
+    return _learning_module().LearningEngine.get_thermal_model(stub)
+
+
+def prod_rebuild_cache(observations: list[dict]) -> dict | None:
+    """Fold observations (oldest first) through production's own ``_update_thermal_model_cache``."""
+    engine = _learning_module().LearningEngine
+    stub = SimpleNamespace(_state=SimpleNamespace(thermal_model_cache=None))
+    for o in sorted(observations, key=lambda o: str(o.get("timestamp") or o.get("date"))):
+        engine._update_thermal_model_cache(stub, o)
+    return stub._state.thermal_model_cache
 
 
 class V3Models:
-    """The v3 thermal model per test week: rebuilt from observations dated before the week (as-of)."""
+    """The v3 thermal model per test week: the DB's current cache, or rebuilt as-of the week."""
 
     def __init__(self, db: dict | None, mode: str) -> None:
         self.db = db or {}
         self.mode = mode
-        cache = self.db.get("thermal_model_cache") or {}
-        phase = cache.get("solar_phase_offset_h")
-        self.phase = float(phase) if isinstance(phase, int | float) else None
-        self.current = v3_model_from_cache(cache, self.phase) if cache else None
+        self.cache = self.db.get("thermal_model_cache") or {}
+        self.current = prod_model_from_cache(self.cache) if self.cache else None
         self.obs = [o for o in self.db.get("thermal_observations") or [] if isinstance(o, dict) and o.get("date")]
         self.used: dict[str, int] = {}
 
@@ -493,22 +547,25 @@ class V3Models:
             cutoff = week_start.date().isoformat()
             prior = [o for o in self.obs if str(o["date"])[:10] < cutoff]
             if prior:
-                cache = _thermal_replay().rebuild_model_cache(prior)
                 self.used["asof"] = self.used.get("asof", 0) + 1
-                return v3_model_from_cache(cache, self.phase), f"asof({len(prior)} obs)"
+                return prod_model_from_cache(prod_rebuild_cache(prior) or {}), f"asof({len(prior)} obs)"
         self.used["current"] = self.used.get("current", 0) + 1
         return (self.current or {}), "current" if self.current else "none"
 
     def drift_note(self) -> str | None:
-        """Sanity: the as-of rebuild at 'now' vs the DB's own current cache (k_passive)."""
-        if not (self.obs and self.current):
+        """Sanity: the production-EWMA rebuild from every retained observation vs the DB's own cache."""
+        if not (self.obs and self.cache):
             return None
-        rebuilt = _thermal_replay().rebuild_model_cache(self.obs).get("k_passive")
-        cur = self.current.get("k_passive")
+        rebuilt = (prod_rebuild_cache(self.obs) or {}).get("k_passive")
+        cur = self.cache.get("k_passive")
         if rebuilt is None or cur is None or cur == 0:
             return None
         rel = abs(rebuilt - cur) / abs(cur)
-        return f"as-of rebuild k_passive={rebuilt:.4f} vs cache {cur:.4f} ({rel:.0%} apart)"
+        dates = sorted(str(o["date"])[:10] for o in self.obs)
+        return (
+            f"obs rebuild k_passive={rebuilt:.4f} vs cache {cur:.4f} ({rel:.0%} apart; "
+            f"{len(self.obs)} obs only cover {dates[0]}..{dates[-1]})"
+        )
 
 
 def windows_plan(idx: ChartIndex, anchor: datetime, plan_hours: float) -> bool:
@@ -610,6 +667,29 @@ def plan_weeks(first: datetime, last: datetime, args: argparse.Namespace) -> lis
     return weeks
 
 
+def week_nodes(train_rows: list[dict], cand_primary: str, cand_nodes: list[str], forced: bool) -> tuple[str, list[str]]:
+    """Primary + extra nodes usable for a fit on ``train_rows``: judged on the TRAINING rows only.
+
+    Rows before 0.9.1 have no ``indoor_sensors``; the entity primary is used only when it reads on
+    at least 80 % of the training rows, else the model is a single ``_ca`` node (the reading CA
+    used). Extra entities need 50 % coverage.
+    """
+    n = len(train_rows) or 1
+
+    def cov(key: str) -> float:
+        return sum(1 for r in train_rows if ChartIndex._raw(key, r) is not None) / n
+
+    primary = cand_primary if (forced or cov(cand_primary) >= 0.8) else CA
+    extras = [k for k in cand_nodes if k not in (primary, CA) and cov(k) >= 0.5]
+    return primary, [primary, *extras]
+
+
+def grid_steps(anchor: datetime, count: int) -> list[datetime]:
+    """The predictor's own DST-safe UTC-stepped grid when it has one, else the same by epoch."""
+    fn = getattr(_PREDICTOR, "grid_steps", None)
+    return fn(anchor, count) if fn else [at(anchor, STEP_S * k) for k in range(1, count + 1)]
+
+
 def run_backtest(
     rows: list[dict],
     args: argparse.Namespace,
@@ -623,8 +703,14 @@ def run_backtest(
     """Walk-forward one zone. Returns the zone report (stats, gate, points, weeks, run info)."""
     t_start = time.monotonic()
     pred = load_predictor()
-    primary, nodes = select_sensors(rows, getattr(args, "primary", None))
-    idx = ChartIndex(rows, tz, nodes)
+    rows = prepare_rows(rows)
+    cand_primary, cand_nodes = select_sensors(rows, getattr(args, "primary", None), min_cov=0.0)
+    idx = ChartIndex(rows, tz, cand_nodes)
+    seasons_by_day = day_seasons(rows, tz)
+    idx.set_commanded(seasons_by_day)
+    commanded = getattr(args, "setpoint_source", "band") == "commanded"
+    primary, nodes = cand_primary, cand_nodes
+    seen_nodes: dict[str, None] = {}
     if not idx.t:
         raise SystemExit(f"ERROR: zone {zone!r}: chart_log has no usable rows")
     ca_xs = idx.series[CA][0]
@@ -660,11 +746,14 @@ def run_backtest(
         if model is None or (wi - last_fit_week) >= args.refit_every_weeks:
             lo_ep = W_ep - args.train_days * 86400 if args.train_days else -1e18
             train_rows = [r for t, r in zip(idx.t, idx.rows, strict=True) if lo_ep <= t < W_ep]
-            snaps = [s for s in snaps_sorted if parse_ts(s["issued"], tz) < W]
+            snaps = [s for s in snaps_sorted if parse_ts(s["issued"], tz).timestamp() < W_ep]
             assert_no_leak(train_rows, W, "fit rows", key=lambda r: parse_ts(r["ts"], tz))
             assert_no_leak(snaps, W, "fit forecast snapshots", key=lambda s: parse_ts(s["issued"], tz))
+            primary, nodes = week_nodes(train_rows, cand_primary, cand_nodes, bool(getattr(args, "primary", None)))
+            info["primary"], info["nodes"] = primary, list(nodes)
+            seen_nodes.update(dict.fromkeys(nodes))
             samples = pred.samples_from_chart_log(train_rows, tz=tz, archive_snapshots=snaps or None)
-            kept = [s for s in samples if s.ts < W]
+            kept = [s for s in samples if s.ts.timestamp() < W_ep]
             info["dropped_future_samples"] = len(samples) - len(kept)
             assert_no_leak(kept, W, "fit samples", key=lambda s: s.ts)
             info["n_samples"] = len(kept)
@@ -713,11 +802,13 @@ def run_backtest(
             A = datetime.fromtimestamp(a_ep, tz)
             a_ep += args.anchor_step_hours * 3600
             anchors_total += 1
-            # mass state from samples strictly before the anchor (live: carried between cycles)
-            while si < len(test_samples) and test_samples[si].ts.timestamp() < A.timestamp():
+            # hidden-mass filter: one step_mass() per 15-min grid step up to and including the anchor's
+            # own sample (the fit's anchor state includes the anchor reading); a non-contiguous step
+            # restarts the filter at the reading
+            while si < len(test_samples) and test_samples[si].ts.timestamp() <= A.timestamp():
                 s = test_samples[si]
                 s_ep = s.ts.timestamp()
-                if prev_ep is not None and s_ep - prev_ep > 7200:
+                if prev_ep is not None and s_ep - prev_ep != STEP_S:
                     mass = None
                 try:
                     mass = pred.step_mass(model, mass_f=mass, readings=s.readings, sample=s)
@@ -738,13 +829,13 @@ def run_backtest(
             plan_win = windows_plan(idx, A, args.window_plan_hours)
 
             def band_fn(anchor_ep: float, t_ep: float) -> tuple[float | None, float | None]:
-                return idx.band_at(anchor_ep if args.setpoints == "hold" else t_ep)
+                return idx.band_at(anchor_ep if args.setpoints == "hold" else t_ep, commanded)
 
             def build_inputs(actual: bool, A=A, hourly=hourly, plan_win=plan_win):
                 out = []
                 last_lo = last_hi = None
-                for k in range(1, HORIZON_H * 3600 // STEP_S + 1):
-                    t = at(A, STEP_S * k)
+                steps = grid_steps(A, HORIZON_H * 3600 // STEP_S)
+                for k, t in enumerate(steps, start=1):
                     lo, hi = band_fn(A.timestamp(), t.timestamp())
                     lo = lo if lo is not None else last_lo
                     hi = hi if hi is not None else last_hi
@@ -766,11 +857,20 @@ def run_backtest(
                     )
                 return out
 
-            def run_v4(inputs, A=A, readings=readings, mass=mass, model=model):
+            def run_v4(inputs, A=A, readings=readings, mass=mass, model=model, hourly=hourly):
                 for inp in inputs:
-                    if inp.ts <= A:
+                    if inp.ts.timestamp() <= A.timestamp():
                         raise LeakageError("a predict() input is not in the future")
-                res = pred.predict(model, now=A, readings=readings, mass_f=mass, inputs=inputs, tz=tz)
+                res = pred.predict(
+                    model,
+                    now=A,
+                    readings=readings,
+                    mass_f=mass,
+                    inputs=inputs,
+                    tz=tz,
+                    outdoor_now_f=idx.last_at("outdoor", A.timestamp()),
+                    forecast_now_f=hourly[0],
+                )
                 if res is None:
                     return None
                 return {s: {int(round(ts.timestamp())): float(v) for ts, v in pts} for s, pts in res.items()}
@@ -819,7 +919,7 @@ def run_backtest(
                             "lead": lead,
                             "anchor": A,
                             "target": T,
-                            "season": season_of(A),
+                            "season": seasons_by_day.get(A.astimezone(tz).date(), "shoulder"),
                             "actual": actual,
                             "flat": base,
                             "v4": v4.get(src_key, {}).get(t_ep) if v4 else None,
@@ -854,7 +954,7 @@ def run_backtest(
             {"id": CA, "name": "Indoor (as used by Climate Advisor)", "role": "line v3 predicts"},
             *[
                 {"id": s, "name": s, "role": "thermostat's room reading" if i == 0 else "indoor sensor"}
-                for i, s in enumerate(nodes)
+                for i, s in enumerate(seen_nodes or nodes)
                 if s != CA
             ],
         ],
@@ -889,6 +989,7 @@ def run_backtest(
             },
             "inputs": {
                 "setpoints": args.setpoints,
+                "setpoint_source": getattr(args, "setpoint_source", "band"),
                 "window_plan_hours": args.window_plan_hours,
                 "train_days": args.train_days,
                 "refit_every_weeks": args.refit_every_weeks,
@@ -974,7 +1075,10 @@ def gate_row(
     scored = n >= min_n and v4 is not None and flat is not None and (not require_v3 or v3 is not None)
     reasons: list[str] = []
     if not scored:
-        reasons.append(f"not scored (n={n}, need {min_n}{', v3 missing' if require_v3 and v3 is None else ''})")
+        if not (st.get("base_n") or 0):
+            reasons.append("no anchors in this season (HVAC never ran that way in the recorded history)")
+        else:
+            reasons.append(f"not scored (n={n}, need {min_n}{', v3 missing' if require_v3 and v3 is None else ''})")
     else:
         if require_v3 and not v4 < v3:
             reasons.append("v4 not better than v3")
@@ -1062,6 +1166,8 @@ def format_report(report: dict) -> str:
         + (f"  [{run['v3']['drift_check']}]" if run["v3"].get("drift_check") else ""),
         f"skipped anchors: {run['skipped']}",
         "error = predicted - actual (F); bias>0 = too warm. MAEs share the same anchors.",
+        "seasons by the day's HVAC activity: heating = any heating, summer = cooling or whole-house fan, "
+        "shoulder = neither",
         "",
         f"{'sensor':<34}{'season':<9}{'lead':>5}{'n':>6}{'flat':>7}{'v3':>7}{'v4':>7}{'v4bias':>8}"
         f"{'v4+act':>8}{'logged':>8}  gate",
@@ -1176,6 +1282,11 @@ def publish_remote(config: dict, entry_id: str, payload: dict) -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--chart-log", help="local chart_log JSON ({'entries': [...]}); omit to read over SSH")
+    p.add_argument(
+        "--local-dir",
+        help="directory of copied files: every climate_advisor_chart_log_<entry>.json (+ the matching learning DB "
+        "and forecast archive) is one zone",
+    )
     p.add_argument("--zone", help="config entry id (SSH mode: which zone; local mode: label)")
     p.add_argument("--all-zones", action="store_true", help="SSH: every entry-scoped chart log on the host")
     p.add_argument("--learning-db", help="local learning DB JSON (v3 thermal model); SSH mode fetches it")
@@ -1192,8 +1303,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--refit-every-weeks", type=int, default=1)
     p.add_argument("--anchor-step-hours", type=float, default=1.0)
     p.add_argument("--setpoints", choices=("scheduled", "hold"), default="scheduled")
+    p.add_argument(
+        "--setpoint-source",
+        choices=("band", "commanded"),
+        default="band",
+        help="band: the plan's lower/upper (what the live shadow knows); commanded: the logged thermostat "
+        "setpoint of the day's mode (diagnostic - the commanded value is typically 1-2 F above the band floor)",
+    )
     p.add_argument("--window-plan-hours", type=float, default=4.0)
-    p.add_argument("--v3-model", choices=("asof", "current"), default="asof")
+    p.add_argument("--v3-model", choices=("asof", "current"), default="current")
     p.add_argument("--no-v3", action="store_true")
     p.add_argument("--no-diagnostic", action="store_true", help="skip the v4-with-actual-inputs variant")
     p.add_argument("--min-n", type=int, default=72, help="anchors needed before a gate row is scored")
@@ -1216,7 +1334,18 @@ def main(argv: list[str] | None = None) -> int:
     config: dict | None = None
     jobs: list[tuple[str, list[dict], dict | None, list[dict] | None, str | None]] = []
 
-    if args.chart_log:
+    if args.local_dir:
+        for path in sorted(Path(args.local_dir).glob("climate_advisor_chart_log_*.json")):
+            entry = path.stem.removeprefix("climate_advisor_chart_log_")
+            if args.zone and entry != args.zone:
+                continue
+            ldb = path.with_name(f"climate_advisor_learning_{entry}.json")
+            arch = path.with_name(f"climate_advisor_forecast_archive_{entry}.json")
+            data = _load_local_json(str(path))
+            snaps = decode_archive(_load_local_json(str(arch))) if arch.exists() and not args.no_archive else None
+            db = _load_local_json(str(ldb)) if ldb.exists() and not args.no_v3 else None
+            jobs.append((entry, data.get("entries", []), db, snaps, None))
+    elif args.chart_log:
         data = _load_local_json(args.chart_log)
         rows = data.get("entries", []) if isinstance(data, dict) else data
         db = _load_local_json(args.learning_db) if args.learning_db else None

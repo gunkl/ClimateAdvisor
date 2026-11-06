@@ -49,8 +49,10 @@ class FakePredictor:
 
     V4Input = FakeInput
 
-    def __init__(self, confidence: str = "ok"):
+    def __init__(self, confidence: str = "ok", grid15: bool = False):
         self.confidence = confidence
+        self.grid15 = grid15
+        self.mass_steps: list[datetime] = []
         self.resample_calls: list[tuple[datetime, datetime, object]] = []
         self.fit_calls: list[dict] = []
         self.predict_calls: list[dict] = []
@@ -62,6 +64,16 @@ class FakePredictor:
             readings = dict(e.get("indoor_sensors") or {})
             readings["_ca"] = e.get("indoor")
             out.append(SimpleNamespace(ts=ts, readings=readings))
+        if self.grid15 and out:  # the real resampler: forward-filled 15-min grid
+            dense, j = [], 0
+            g = out[0].ts.timestamp()
+            while g <= out[-1].ts.timestamp():
+                while j + 1 < len(out) and out[j + 1].ts.timestamp() <= g:
+                    j += 1
+                if g - out[j].ts.timestamp() <= 7200:  # a hole over 2 h breaks continuity: no sample
+                    dense.append(SimpleNamespace(ts=datetime.fromtimestamp(g, tz), readings=out[j].readings))
+                g += 900
+            out = dense
         if out:
             self.resample_calls.append((out[0].ts, out[-1].ts, archive_snapshots))
         return out
@@ -85,10 +97,24 @@ class FakePredictor:
         )
 
     def step_mass(self, model, *, mass_f, readings, sample):
+        self.mass_steps.append(sample.ts)
         return (mass_f or 0.0) + 1.0
 
-    def predict(self, model, *, now, readings, mass_f, inputs, tz):
-        self.predict_calls.append({"now": now, "readings": dict(readings), "inputs": list(inputs), "mass": mass_f})
+    def grid_steps(self, start, count):
+        base = start.astimezone(UTC)
+        return [(base + timedelta(minutes=15 * (k + 1))).astimezone(start.tzinfo) for k in range(count)]
+
+    def predict(self, model, *, now, readings, mass_f, inputs, tz, outdoor_now_f=None, forecast_now_f=None):
+        self.predict_calls.append(
+            {
+                "now": now,
+                "readings": dict(readings),
+                "inputs": list(inputs),
+                "mass": mass_f,
+                "outdoor_now": outdoor_now_f,
+                "forecast_now": forecast_now_f,
+            }
+        )
         if model.confidence == "none":
             return None
         return {
@@ -108,10 +134,20 @@ def fake():
     pb._PREDICTOR = old
 
 
-def make_rows(days: int, *, start: datetime = START, sensors: bool = False, ramp: bool = False, step=None):
+def make_rows(
+    days: int,
+    *,
+    start: datetime = START,
+    sensors: bool | int = False,
+    ramp: bool = False,
+    step=None,
+    day_hvac=lambda d: "heating",
+):
+    """30-min rows; ``day_hvac(day_index)`` is the HVAC action logged at 06:00 that day (seasons come from it);
+    ``sensors`` True = entity readings on every row, an int = only from that row index on (a pre-0.9.1 log)."""
     rows = []
     for i in range(days * 48):
-        ts = start + timedelta(minutes=30 * i)
+        ts = datetime.fromtimestamp(start.timestamp() + 1800 * i, start.tzinfo)  # real elapsed time (DST-safe)
         h = ts.hour + ts.minute / 60
         indoor = 60 + 0.01 * i if ramp else 70 + 2 * math.sin(2 * math.pi * (h - 15) / 24)
         if step and ts >= step[0]:
@@ -119,7 +155,7 @@ def make_rows(days: int, *, start: datetime = START, sensors: bool = False, ramp
         outdoor = 55 + 10 * math.sin(2 * math.pi * (h - 15) / 24)
         row = {
             "ts": ts.isoformat(),
-            "hvac": "off",
+            "hvac": "idle",
             "fan": False,
             "fan_running": False,
             "indoor": indoor,
@@ -132,7 +168,12 @@ def make_rows(days: int, *, start: datetime = START, sensors: bool = False, ramp
             "upper": 75.0,
             "setpoint": 68.0,
         }
-        if sensors:
+        if i % 48 == 12:  # 06:00 UTC-ish: the day's HVAC activity
+            act = day_hvac(i // 48)
+            row["hvac"] = act or "idle"
+            if act == "fan":
+                row["fan"] = row["fan_running"] = row["nat_vent_active"] = True
+        if sensors is True or (sensors and i >= sensors):
             row["indoor_sensors"] = {"climate.t": indoor, "sensor.bed": indoor - 1.0}
         rows.append(row)
     return rows
@@ -227,18 +268,57 @@ def test_persistence_baseline_is_exact(fake):
         assert st["n"] > 100
 
 
-def test_season_split_heating_shoulder_summer(fake):
-    rows = make_rows(120)  # Mar 2 .. Jun 29
+def _phased(d: int):
+    """days 0-34 heating, 35-69 nothing, 70-104 cooling, 105+ whole-house fan"""
+    return "heating" if d < 35 else None if d < 70 else "cooling" if d < 105 else "fan"
+
+
+def test_seasons_follow_hvac_activity_not_the_calendar(fake):
+    rows = make_rows(120, day_hvac=_phased)  # calendar says Mar..Jun; the HVAC says otherwise
     rep = run(rows, "--no-diagnostic", "--anchor-step-hours", "3")
     per = rep["stats"]["_ca"]["4h"]
     assert {"heating", "shoulder", "summer", "all"} <= set(per)
     assert per["all"]["n"] == sum(per[s]["n"] for s in ("heating", "shoulder", "summer"))
-    assert pb.season_of(datetime(2026, 11, 1)) == pb.season_of(datetime(2026, 3, 31)) == "heating"
-    assert pb.season_of(datetime(2026, 6, 1)) == pb.season_of(datetime(2026, 9, 30)) == "summer"
-    assert {pb.season_of(datetime(2026, m, 1)) for m in (4, 5, 10)} == {"shoulder"}
-    # the season is the ANCHOR's: a 24 h prediction made on Mar 31 evening is heating
-    heat = [p for p in rep["points"]["_ca"]["24h"] if p["t"].startswith("2026-04-01")]
-    assert heat  # scored target on Apr 1 (from a Mar 31 anchor) exists; counted under heating
+    days = pb.day_seasons(rows, UTC)
+    assert days[(START + timedelta(days=10)).date()] == "heating"
+    assert (START + timedelta(days=50)).date() not in days  # no activity -> shoulder by default
+    assert days[(START + timedelta(days=80)).date()] == "summer"  # cooling
+    assert days[(START + timedelta(days=110)).date()] == "summer"  # whole-house fan with nat-vent armed
+    # an anchor is labelled by ITS day: points on a "heating" day's evening are heating
+    first = per["heating"]
+    assert first["n"] > 100 and per["summer"]["n"] > 100 and per["shoulder"]["n"] > 100
+
+
+def test_day_season_precedence_and_fan_rules():
+    def row(day, **kw):
+        return {"ts": f"2026-07-{day:02d}T06:00:00+00:00", "hvac": "idle", **kw}
+
+    rows = [
+        row(1, hvac="heating"),
+        row(1, hvac="cooling"),  # heating wins on a mixed day
+        row(2, hvac="cooling"),
+        row(3, fan_running=True),  # blower only: not the cooling/fan season
+        row(4, fan_running=True, nat_vent_active=True),  # whole-house fan
+        row(5),
+    ]
+    days = pb.day_seasons(rows, UTC)
+    assert days[datetime(2026, 7, 1).date()] == "heating"
+    assert days[datetime(2026, 7, 2).date()] == "summer"
+    assert datetime(2026, 7, 3).date() not in days
+    assert days[datetime(2026, 7, 4).date()] == "summer"
+    assert datetime(2026, 7, 5).date() not in days
+
+
+def test_cooling_setpoint_filled_from_the_band_ceiling():
+    rows = [
+        {"ts": "2026-07-01T10:00:00+00:00", "hvac": "cooling", "setpoint": None, "lower": 68.0, "upper": 74.0},
+        {"ts": "2026-07-01T10:30:00+00:00", "hvac": "heating", "setpoint": None, "lower": 68.0, "upper": 74.0},
+        {"ts": "2026-07-01T11:00:00+00:00", "hvac": "idle", "setpoint": None, "lower": 68.0, "upper": 74.0},
+        {"ts": "2026-07-01T11:30:00+00:00", "hvac": "cooling", "setpoint": 73.0, "lower": 68.0, "upper": 74.0},
+    ]
+    out = pb.prepare_rows(rows)
+    assert [r["setpoint"] for r in out] == [74.0, 68.0, None, 73.0]
+    assert rows[0]["setpoint"] is None  # the input is never mutated
 
 
 def test_v4_beats_flat_on_a_periodic_house(fake):
@@ -696,3 +776,91 @@ def test_v3_off_without_learning_db(fake):
     rep = pb.run_backtest(make_rows(28), args, tz=UTC, zone="z", learning_db=None)
     assert rep["run"]["v3"]["enabled"] is False
     assert rep["gate_summary"]["ready"] is False
+
+
+# ---------------------------------------------------------------------------
+# Integration with the real module's contract (readings keys, mass, nowcast, DST)
+# ---------------------------------------------------------------------------
+
+
+def test_nodes_are_judged_on_the_training_rows_not_the_whole_log(fake):
+    """A log whose entity sensors only start late (pre-0.9.1 history): early weeks fit a single _ca node."""
+    rows = make_rows(56, sensors=25 * 48)  # entity readings from day 25 on
+    rep = run(rows, "--no-diagnostic", "--train-days", "20")
+    by_week = {w["week_start"][:10]: w for w in rep["weeks"] if w.get("primary")}
+    assert by_week["2026-03-09"]["primary"] == "_ca" and by_week["2026-03-09"]["nodes"] == ["_ca"]
+    last = rep["weeks"][-1]
+    assert last["primary"] == "climate.t" and "sensor.bed" in last["nodes"]
+    assert rep["run"]["skipped"]["no_reading"] == 0
+    # every sensor the model had is reported
+    assert {s["id"] for s in rep["sensors"]} >= {"_ca", "climate.t", "sensor.bed"}
+
+
+def test_step_mass_once_per_grid_step_up_to_and_including_the_anchor(fake):
+    fake.grid15 = True
+    run(make_rows(28), "--max-weeks", "1", "--no-diagnostic")
+    week = datetime(2026, 3, 23, tzinfo=UTC)
+    first = week - timedelta(hours=12)
+    for c in fake.predict_calls[:5] + fake.predict_calls[-3:]:
+        steps = int((c["now"] - first).total_seconds() // 900) + 1  # samples first..anchor inclusive
+        assert c["mass"] == pytest.approx(steps)
+    # one call per 15-min step, none repeated, none past the last anchor
+    assert len(fake.mass_steps) == len(set(fake.mass_steps))
+    assert max(fake.mass_steps) <= fake.predict_calls[-1]["now"]
+
+
+def test_mass_restarts_after_a_gap(fake):
+    fake.grid15 = True
+    rows = [
+        r
+        for r in make_rows(28)
+        if not (
+            datetime(2026, 3, 24, 2, tzinfo=UTC)
+            <= datetime.fromisoformat(r["ts"])
+            < datetime(2026, 3, 24, 5, tzinfo=UTC)
+        )
+    ]
+    run(rows, "--max-weeks", "1", "--no-diagnostic")
+    after = [c for c in fake.predict_calls if c["now"] >= datetime(2026, 3, 24, 6, tzinfo=UTC)][0]
+    # the filter restarted at the first sample after the 3 h hole (06:00 anchor: 5:00 + ... 06:00)
+    assert after["mass"] <= 14
+
+
+def test_nowcast_arguments_are_the_observed_outdoor_and_the_raw_forecast_now(fake):
+    rows = make_rows(28)
+    run(rows, "--max-weeks", "1", "--no-diagnostic")
+    for c in fake.predict_calls[:20]:
+        row = next(r for r in rows if r["ts"] == c["now"].isoformat())
+        assert c["outdoor_now"] == pytest.approx(row["outdoor"])
+        assert c["forecast_now"] == pytest.approx(row["pred_outdoor"])
+
+
+def test_dst_week_runs_clean_and_inputs_step_15_min_of_real_time(fake):
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    la = ZoneInfo("America/Los_Angeles")
+    rows = make_rows(40, start=datetime(2026, 10, 12, tzinfo=la))
+    args = args_for("--no-diagnostic")
+    rep = pb.run_backtest(rows, args, tz=la, zone="dst")
+    assert any(w["week_start"].startswith("2026-11-02") for w in rep["weeks"])
+    for c in fake.predict_calls:
+        eps = [c["now"].timestamp(), *[i.ts.timestamp() for i in c["inputs"]]]
+        assert all(b - a == 900 for a, b in zip(eps, eps[1:], strict=False)), "grid must be 15 min of real time"
+    assert rep["run"]["skipped"]["v4_error"] == 0
+
+
+def test_low_confidence_still_predicts_and_is_scored(fake):
+    fake.confidence = "low"
+    rep = run(make_rows(28), "--max-weeks", "1", "--no-diagnostic")
+    assert rep["stats"]["_ca"]["4h"]["heating"]["n"] > 100
+    assert rep["weeks"][-1]["confidence"] == "low"
+
+
+def test_v3_model_default_is_current_and_drift_is_reported():
+    assert pb.build_parser().parse_args([]).v3_model == "current"
+    models = pb.V3Models(_db(), "current")
+    assert models.for_week(datetime(2026, 3, 9, tzinfo=UTC))[1] == "current"
+    note = models.drift_note()
+    assert note and "apart" in note and "only cover" in note
+    # production's own get_thermal_model supplies the model dict
+    assert {"confidence", "confidence_k_passive", "k_passive", "solar_phase_offset_h"} <= set(models.current)

@@ -53,6 +53,18 @@ def _consume_coroutine(coro):
     coro.close()
 
 
+@pytest.fixture(autouse=True)
+def _night_clock(monkeypatch):
+    """Issue #1371: handle_pre_cool() runs only in the sleep window (it skips during awake hours), so these
+    tests of the overnight handler run at 02:30, inside the default 22:30-06:30 window and where the real
+    overnight trigger lands. Tests of the awake-hours skip set their own clock."""
+    from datetime import UTC, datetime
+
+    from custom_components.climate_advisor import automation as _automation
+
+    monkeypatch.setattr(_automation.dt_util, "now", lambda *a, **k: datetime(2026, 7, 2, 2, 30, tzinfo=UTC))
+
+
 def _make_engine(config_overrides: dict | None = None) -> AutomationEngine:
     """Construct an AutomationEngine for pre-cool unit tests."""
     hass = MagicMock()

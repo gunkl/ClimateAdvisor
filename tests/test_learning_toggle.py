@@ -21,7 +21,6 @@ from custom_components.climate_advisor.automation import (
 )
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
-    DEFAULT_PREHEAT_MINUTES,
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
     MAX_WEATHER_BIAS_APPLY_F,
@@ -141,7 +140,6 @@ class TestLearningEnabledToggle:
 
     def test_thermal_observation_skipped_when_disabled(self, tmp_path: Path):
         """_start_hvac_observation() returns early when learning_enabled=False."""
-        import asyncio
 
         from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
 
@@ -183,35 +181,6 @@ class TestLearningEnabledToggle:
         # target = comfort_cool(75) + DEFAULT_SETBACK_DEPTH_COOL_F(3.0) = 78.0
         expected = config["comfort_cool"] + DEFAULT_SETBACK_DEPTH_COOL_F
         assert result == pytest.approx(expected)
-
-    def test_schedule_pre_condition_uses_default_when_learning_disabled(self):
-        """_schedule_pre_condition() uses DEFAULT_PREHEAT_MINUTES when learning_enabled=False."""
-        config = dict(_BASE_CONFIG, learning_enabled=False)
-        engine = _make_engine(config)
-
-        # Inject a high-confidence thermal model — must be ignored due to toggle
-        engine._thermal_model = _HIGH_CONFIDENCE_THERMAL_MODEL
-
-        c = _make_classification(
-            trend_direction="cooling",
-            pre_condition=True,
-            pre_condition_target=2.0,
-        )
-        asyncio.run(engine._schedule_pre_condition(c))
-
-        preheat = engine.config.get("_pending_preheat")
-        assert preheat is not None
-
-        # With DEFAULT_PREHEAT_MINUTES=120, sleep=22:00 → start at 20:00
-        sleep_str = config["sleep_time"]
-        sleep_parts = sleep_str.split(":")
-        sleep_total = int(sleep_parts[0]) * 60 + int(sleep_parts[1])
-        expected_start = sleep_total - DEFAULT_PREHEAT_MINUTES
-        expected_hour = expected_start // 60
-        expected_minute = expected_start % 60
-        expected_time = f"{expected_hour:02d}:{expected_minute:02d}"
-
-        assert preheat["time"] == expected_time
 
     def test_weather_bias_skipped_when_learning_disabled(self, tmp_path: Path):
         """When learning_enabled=False, weather bias correction is not applied."""

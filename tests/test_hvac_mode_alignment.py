@@ -350,7 +350,9 @@ class TestHonestWriteOutcomes:
         ).items():
             setattr(c, k, v)
         engine._current_classification = c
-        with patch.object(automation_module.dt_util, "now", return_value=NOW):
+        # Issue #1371: pre-cool runs only in the sleep window, so this fires at 02:30 (NOW is 07:00, awake).
+        _night = NOW.replace(hour=2, minute=30)
+        with patch.object(automation_module.dt_util, "now", return_value=_night):
             result = asyncio.run(engine.handle_pre_cool(indoor_temp=76.5, nat_vent_just_closed=False))
         assert result.startswith("not applied"), result
         ev = [d for n, d in engine._events if n == "pre_cool_applied"]

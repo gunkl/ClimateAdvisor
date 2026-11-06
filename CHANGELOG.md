@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.68] — 2026-11-06
+
+- Fix #1371: the overnight pre-cool now runs only at night and actually holds. Before, on a warm or mild day before a hotter one it fired at 10:30 AM or 5:30 PM, flipping the thermostat cool, then heat, then cool while the house was comfortable; and on hot-trend nights the regular 30-minute check put the normal sleep temperature back the same second, so the house never banked any extra cooling. Now pre-cool is scheduled inside your sleep hours, keeps its lower cooling temperature until wake-up, and counts as a deliberate cool so the heat does not switch on right after it. A pre-heat placeholder that never did anything (but logged that it was scheduling a pre-heat) is removed.
+- Fix #1376: a bedtime after midnight (for example 01:00, waking at 07:00) no longer makes Climate Advisor treat the whole day as sleep hours, so the daytime comfort temperatures apply during the day.
+
 ## [0.8.67] — 2026-11-06
 
 - Fix #1370: Climate Advisor no longer turns a fan on while it can't read the indoor temperature. Before, if the indoor sensor dropped out with a window open, it could still switch the whole-house fan (or the thermostat's blower) on: the half-hourly "keep the fan on" re-send for fans that don't report their state, the hourly minimum-runtime cycle and the economizer never checked for a reading. Now no fan is started until the reading comes back. A fan that is already running is still stopped after about 30 minutes without a reading, as before. The minimum-runtime cycle tries again the next hour. Found by the nightly test run.

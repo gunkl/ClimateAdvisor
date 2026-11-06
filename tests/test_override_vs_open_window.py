@@ -45,6 +45,7 @@ _OGF_CONFIRM_EXPIRED = OverrideGraceFsmEventKind.OVERRIDE_CONFIRM_EXPIRED
 
 _AUTOMATION = "custom_components.climate_advisor.automation"
 _DAY = datetime(2026, 10, 28, 14, 0, 0, tzinfo=UTC)
+_NIGHT = datetime(2026, 10, 29, 2, 30, 0, tzinfo=UTC)  # Issue #1371: inside the default sleep window
 _MODES = ["heat", "cool"]
 # Each family's band edge on a flat 68/74 day band, and an indoor reading that makes the
 # comfort-edge selector arm that same family (so pre-fix adoption "agrees").
@@ -95,7 +96,10 @@ async def _bedtime(engine: AutomationEngine) -> None:
 
 async def _pre_cool(engine: AutomationEngine) -> None:
     engine._current_classification.tomorrow_high = 105.0  # hot tomorrow -> pre-cool eligible
-    await engine.handle_pre_cool(indoor_temp=_INDOOR["cool"], nat_vent_just_closed=False)
+    # Issue #1371: pre-cool runs only in the sleep window (it skips during awake hours), so it fires at night here,
+    # where the real trigger lands; the routine under test is unchanged.
+    with patch(f"{_AUTOMATION}.dt_util.now", return_value=_NIGHT):
+        await engine.handle_pre_cool(indoor_temp=_INDOOR["cool"], nat_vent_just_closed=False)
 
 
 async def _tou(engine: AutomationEngine) -> None:

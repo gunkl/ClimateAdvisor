@@ -32,6 +32,9 @@ class HouseWeather(WeatherEntity):
         self._temp_f = 70.0
         self._high_f = 78.0
         self._low_f = 58.0
+        # Issue #1371: an optional different high for tomorrow onwards (None = same as today), so a test can
+        # build a warm day before a hot one (a warming trend). Default keeps every existing forecast unchanged.
+        self._tomorrow_high_f: float | None = None
         self._days = 5
 
     @property
@@ -45,6 +48,7 @@ class HouseWeather(WeatherEntity):
         high_f: float | None = None,
         low_f: float | None = None,
         condition: str | None = None,
+        tomorrow_high_f: float | None = None,
     ) -> None:
         """Change outdoor conditions and the forecast envelope (state is written by the caller)."""
         if temp_f is not None:
@@ -55,13 +59,15 @@ class HouseWeather(WeatherEntity):
             self._low_f = float(low_f)
         if condition is not None:
             self._attr_condition = condition
+        if tomorrow_high_f is not None:
+            self._tomorrow_high_f = float(tomorrow_high_f)
 
     async def async_forecast_daily(self) -> list[Forecast] | None:
         today = dt_util.start_of_local_day()
         return [
             Forecast(
                 datetime=(today + timedelta(days=d)).isoformat(),
-                native_temperature=self._high_f,
+                native_temperature=self._high_f if d == 0 or self._tomorrow_high_f is None else self._tomorrow_high_f,
                 native_templow=self._low_f,
                 condition=self._attr_condition,
             )

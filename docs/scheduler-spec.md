@@ -29,7 +29,7 @@
 What this spec does NOT cover:
 - The overnight weather-trend-driven pre-cool mechanism (`compute_pre_cool_target()`, `resolve_pre_cool_modifier()`, `automation.py`) — a structurally distinct, older mechanism kept architecturally separate from TOU banking (two different reasons to pre-cool, not one).
 - A `comfort_zone` schedule type (user-defined arbitrary comfort-band windows) — part of the original feature request but explicitly deferred to a future issue; this spec's `Schedule` shape supports only `cost_period`.
-- The ODE ceiling guard (`ode_ceiling_guard.py`) and adaptive pre-heat (`automation.py::_schedule_pre_condition()`) beyond their shared use of `thermal_lead_time.compute_lead_minutes_from_rate()`.
+- The ODE ceiling guard (`ode_ceiling_guard.py`) beyond its use of `thermal_lead_time.compute_lead_minutes_from_rate()`.
 
 ## Origin
 
@@ -185,7 +185,7 @@ widening since Issue #1080: they all resolve the band through `automation.resolv
 | Caller | `min`/`max` | `safety_multiplier` | `fallback_minutes` |
 |---|---|---|---|
 | `scheduler.py::resolve_tou_phase()` | 30 / 240 | 1.3 | configurable, default 45 (`default_tou_lead_minutes` config key, Issue #797; falls back to `_TOU_LEAD_MIN_FALLBACK`=45.0 if the key is absent from an older config entry) |
-| `automation.py::_schedule_pre_condition()` (adaptive pre-heat) | config `CONF_MIN_PREHEAT_MINUTES`/`CONF_MAX_PREHEAT_MINUTES` | config `CONF_PREHEAT_SAFETY_MARGIN` | clamped `default_preheat_minutes` |
+| ~~`automation.py::_schedule_pre_condition()` (adaptive pre-heat)~~ removed in Issue #1371 (a stub nothing read; its options-page settings are #1377) | config `CONF_MIN_PREHEAT_MINUTES`/`CONF_MAX_PREHEAT_MINUTES` | config `CONF_PREHEAT_SAFETY_MARGIN` | clamped `default_preheat_minutes` |
 | `ode_ceiling_guard.py` (ceiling-guard escalation) | `_LEAD_MIN_FLOOR`/`_LEAD_MIN_CEIL` (30/240) | `_LEAD_MIN_LOOKAHEAD_MULTIPLIER` (1.3) | `_CEILING_PRECOOL_FALLBACK_MIN` (120) |
 | `briefing.py::_derive_warm_day_events()` (warm-day pre-cool lead) | 30 / 240 | 1.3 | `const.CEILING_PRECOOL_FALLBACK_MIN` (120) — previously a locally-redefined duplicate constant, now imported directly |
 

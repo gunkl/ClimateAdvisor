@@ -25,6 +25,7 @@ if "homeassistant" not in sys.modules:
 
 from custom_components.climate_advisor.automation import (  # noqa: E402
     HOT_DAY_PRE_COOL_MODIFIER,
+    PreCoolDecision,
     pre_cool_waking_date,
     resolve_pre_cool_modifier_for_night,
 )
@@ -33,15 +34,17 @@ from custom_components.climate_advisor.coordinator import _compute_pre_cool_trig
 _CFG = {"comfort_cool": 74.0, "sleep_cool": 78.0, "sleep_time": "22:30", "wake_time": "06:30", "threshold_hot": 85}
 _D = date(2026, 7, 15)  # warm day
 _HOT = date(2026, 7, 16)  # the hot day the pre-cool banks for
+_DEC = PreCoolDecision(_HOT, -3.0, 70.0, 55.0)  # decided on Jul 15 (forecast 70/55) for the night ending Jul 16
 
 
 def _at(d: date, h: int, m: int = 0) -> datetime:
     return datetime.combine(d, time(h, m), tzinfo=UTC)
 
 
-def _c(today_high: float, tomorrow_high: float, setback_modifier: float = 0.0, window_close=None):
+def _c(today_high: float, tomorrow_high: float, setback_modifier: float = 0.0, window_close=None, today_low=60.0):
     return SimpleNamespace(
         today_high=today_high,
+        today_low=today_low,
         tomorrow_high=tomorrow_high,
         setback_modifier=setback_modifier,
         window_close_time=window_close,
@@ -94,10 +97,33 @@ def test_pre_cool_waking_date_malformed_wake_uses_0630():
         ("after midnight, today mild, tomorrow hot", _c(75, 95), _at(_HOT, 2, 30), _at(_HOT, 0), None, None),
         # The warming trend in today's classification is into TOMORROW: it does not qualify tonight.
         ("after midnight, trend into tomorrow", _c(75, 85, -3.0), _at(_HOT, 2, 30), _at(_HOT, 0), None, None),
-        # A decision made the day before for this night stands (with its trend modifier).
-        ("after midnight, latched", _c(75, 70), _at(_HOT, 2, 30), _at(_HOT, 0), (_HOT, -3.0), -3.0),
+        # A decision made the day before is RE-CHECKED on the fresh forecast for today (owner decision): the
+        # warming trend is measured from the deciding day's high/low (70/55) to today's, with the classifier's
+        # thresholds (avg >= 10 -> -3, >= 5 -> -2).
+        ("latched, still a big warm-up", _c(82, 70, today_low=65), _at(_HOT, 2, 30), _at(_HOT, 0), _DEC, -3.0),
+        ("latched, warm-up shrank to moderate", _c(77, 70, today_low=60), _at(_HOT, 2, 30), _at(_HOT, 0), _DEC, -2.0),
+        # The forecast was revised overnight: no warm-up any more and not hot -> the night's pre-cool is dropped.
+        ("latched, forecast revised away", _c(72, 70, today_low=56), _at(_HOT, 2, 30), _at(_HOT, 0), _DEC, None),
+        # No warm-up but today hot -> the hot-day gate still holds.
+        ("latched, no warm-up but hot", _c(88, 70, today_low=50), _at(_HOT, 2, 30), _at(_HOT, 0), _DEC, -2.0),
+        # A decision without a base (made after midnight) can only use the hot gate.
+        (
+            "latched, no base",
+            _c(82, 70, today_low=65),
+            _at(_HOT, 2, 30),
+            _at(_HOT, 0),
+            PreCoolDecision(_HOT, -3.0),
+            None,
+        ),
         # A decision for another night is ignored.
-        ("after midnight, stale latch", _c(75, 70), _at(_HOT, 2, 30), _at(_HOT, 0), (_D, -3.0), None),
+        (
+            "stale latch",
+            _c(82, 70, today_low=65),
+            _at(_HOT, 2, 30),
+            _at(_HOT, 0),
+            PreCoolDecision(_D, -3.0, 70, 55),
+            None,
+        ),
         # After midnight, a trigger for the NEXT night (scheduled before wake) is judged on tomorrow as before.
         ("05:00, next night, tomorrow hot", _c(75, 95), _at(date(2026, 7, 17), 2, 30), _at(_HOT, 5), None, -2.0),
     ],
@@ -126,9 +152,10 @@ def test_after_midnight_a_mild_today_before_a_hot_tomorrow_schedules_nothing_ton
     assert _compute_pre_cool_trigger_time_pure(_c(75, 95), _CFG, _at(_HOT, 0, 0)) is None
 
 
-def test_after_midnight_the_latched_decision_keeps_tonight():
-    got = _compute_pre_cool_trigger_time_pure(_c(75, 70), _CFG, _at(_HOT, 0, 0), decided=(_HOT, -3.0))
+def test_after_midnight_the_latched_decision_keeps_tonight_while_the_forecast_still_supports_it():
+    got = _compute_pre_cool_trigger_time_pure(_c(82, 70, today_low=65), _CFG, _at(_HOT, 0, 0), decided=_DEC)
     assert got == _at(_HOT, 2, 30)
+    assert _compute_pre_cool_trigger_time_pure(_c(72, 70, today_low=56), _CFG, _at(_HOT, 0, 0), decided=_DEC) is None
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +192,7 @@ def test_evening_decision_is_recorded_for_the_night_it_banks_for():
     track = _schedule(coord, _at(_D, 14))
     assert track.call_count == 1
     assert coord._pre_cool_trigger_dt == _at(_HOT, 2, 30)
-    assert coord._pre_cool_decided == (_HOT, HOT_DAY_PRE_COOL_MODIFIER)
+    assert coord._pre_cool_decided == PreCoolDecision(_HOT, HOT_DAY_PRE_COOL_MODIFIER, 80, 60)
 
 
 async def _end_of_day(coord, now):
@@ -190,7 +217,7 @@ def test_day_reset_keeps_a_pre_cool_decided_for_the_coming_night():
     cancel.assert_not_called()
     assert coord._pre_cool_trigger_dt == _at(_HOT, 2, 30)
     assert coord._pre_cool_trigger_scheduled is True
-    assert coord._pre_cool_decided == (_HOT, HOT_DAY_PRE_COOL_MODIFIER)
+    assert coord._pre_cool_decided == PreCoolDecision(_HOT, HOT_DAY_PRE_COOL_MODIFIER, 80, 60)
 
     # 00:00 cycle on the hot day: its classification looks at a mild day after. No second schedule, no cancel.
     coord._current_classification = _c(95, 75)
@@ -202,7 +229,7 @@ def test_day_reset_keeps_a_pre_cool_decided_for_the_coming_night():
 def test_day_reset_still_clears_a_night_that_is_over():
     coord = _coord(_c(80, 95), now=_at(_D, 14))
     coord._pre_cool_trigger_scheduled = True
-    coord._pre_cool_decided = (_D, -2.0)  # fired at 02:30 this morning
+    coord._pre_cool_decided = PreCoolDecision(_D, -2.0)  # fired at 02:30 this morning
     coord._pre_cool_status = "pre-cool active (76°F ceiling)"
     asyncio.run(_end_of_day(coord, _at(_D, 23, 59)))
     assert coord._pre_cool_trigger_scheduled is False
@@ -221,14 +248,14 @@ def test_next_night_is_decided_after_this_nights_trigger_fired():
     tomorrow IS that night's day, warming trend included) instead of waiting for the 23:59 reset."""
     coord = _coord(_c(80, 92, -3.0), now=_at(_HOT, 3))
     coord._pre_cool_trigger_scheduled = True
-    coord._pre_cool_decided = (_HOT, -2.0)
+    coord._pre_cool_decided = PreCoolDecision(_HOT, -2.0)
 
     # 03:00, same night: nothing new.
     assert _schedule(coord, _at(_HOT, 3)).call_count == 0
     # 09:00: the night ending Jul 17 is decided now, with the warming trend.
     assert _schedule(coord, _at(_HOT, 9)).call_count == 1
     assert coord._pre_cool_trigger_dt == _at(date(2026, 7, 17), 2, 30)
-    assert coord._pre_cool_decided == (date(2026, 7, 17), -3.0)
+    assert coord._pre_cool_decided == PreCoolDecision(date(2026, 7, 17), -3.0, 80, 60)
 
 
 def test_a_flag_set_without_a_decision_still_blocks_scheduling():
@@ -255,12 +282,22 @@ def _fire(coord, now):
 
 
 def test_trigger_after_midnight_applies_the_evening_decision():
-    """02:30 on the hot day: today's classification sees a mild tomorrow, the evening's decision still applies."""
-    coord = _coord(_c(95, 75), now=_at(_HOT, 2, 30))
-    coord._pre_cool_decided = (_HOT, -3.0)
+    """02:30 on the hot day: today's classification sees a mild tomorrow; the warm-up the evening decided on (70/55
+    -> 95/70) still holds on the fresh forecast, so the pre-cool runs with the trend modifier."""
+    coord = _coord(_c(95, 75, today_low=70), now=_at(_HOT, 2, 30))
+    coord._pre_cool_decided = _DEC
     handle = _fire(coord, _at(_HOT, 2, 30))
     handle.assert_awaited_once()
     assert handle.await_args.kwargs["modifier"] == -3.0
+
+
+def test_trigger_after_midnight_skips_when_the_forecast_was_revised_away():
+    """Re-checked at fire time: overnight the hot day was revised to 72/56 (barely warmer than the deciding day's
+    70/55, and not hot), so the AC does not run at 02:30."""
+    coord = _coord(_c(72, 70, today_low=56), now=_at(_HOT, 2, 30))
+    coord._pre_cool_decided = _DEC
+    handle = _fire(coord, _at(_HOT, 2, 30))
+    handle.assert_not_awaited()
 
 
 def test_trigger_after_midnight_before_a_mild_day_is_skipped():

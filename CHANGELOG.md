@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.70] — 2026-11-06
+
+- Fix #1378 (follow-up): the overnight pre-cool planned in the evening is now checked again against the latest forecast when it is due (around 2:30 AM). If the hot day it was planned for has been revised down overnight, so it is no longer hot and no longer much warmer than the day before, the AC does not run. Before, the evening's plan ran regardless.
+
 ## [0.8.69] — 2026-11-06
 
 - Fix #1378: on a warm day before a hot one, the overnight pre-cool Climate Advisor plans in the evening now actually runs before the hot day. Before, the midnight reset cancelled it, and after midnight it was re-decided by looking one day too far ahead (at the day after the hot one), so the house usually went into the hot day without any extra cooling banked. Now the plan for a night is kept through midnight, and a night is always judged on the day you wake up into. The reverse case is fixed too: after midnight, Climate Advisor no longer runs the AC at 2:30 AM before a mild day just because the day after it is hot.

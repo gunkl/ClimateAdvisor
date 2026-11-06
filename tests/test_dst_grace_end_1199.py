@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from custom_components.climate_advisor.automation import PreCoolDecision
 from custom_components.climate_advisor.const import CONF_MANUAL_GRACE_PERIOD
 from custom_components.climate_advisor.time_utils import instant_after
 from tests.test_restore_resolved_band import _make_engine
@@ -373,7 +374,9 @@ def _pre_cool_trigger(monkeypatch, now_local: datetime, *, window_close=None, wa
     from custom_components.climate_advisor.coordinator import _compute_pre_cool_trigger_time_pure
 
     _make_clock(monkeypatch, now_local)
-    classification = SimpleNamespace(setback_modifier=-3.0, tomorrow_high=70.0, window_close_time=window_close)
+    classification = SimpleNamespace(
+        setback_modifier=-3.0, today_high=80.0, today_low=65.0, tomorrow_high=70.0, window_close_time=window_close
+    )
     config = {"wake_time": wake, "comfort_cool": 74.0, "sleep_cool": 78.0}
     return _compute_pre_cool_trigger_time_pure(classification, config, now_local.astimezone(_LA), decided=decided)
 
@@ -408,12 +411,13 @@ def test_pre_cool_window_close_trigger_is_thirty_real_minutes_after_close(monkey
 
     # Window closes 01:45 PDT on fall-back night; +30 min is 01:15 PST (09:15Z), not the wall-clock 02:15 PST (10:15Z)
     # Issue #1378: at 00:30 this night wakes into Nov 1, the classification's TODAY, so its warming trend (into Nov 2)
-    # does not make it eligible; the pre-cool decided the evening before for the night ending Nov 1 does.
+    # does not make it eligible; the pre-cool decided the evening before (Oct 31 forecast 65/50 -> Nov 1 80/65, a
+    # warm-up that still holds at fire time) does.
     trigger = _pre_cool_trigger(
         monkeypatch,
         datetime(2026, 11, 1, 0, 30, tzinfo=_LA),
         window_close=time(1, 45),
-        decided=(datetime(2026, 11, 1).date(), -3.0),
+        decided=PreCoolDecision(datetime(2026, 11, 1).date(), -3.0, 65.0, 50.0),
     )
     assert trigger == datetime(2026, 11, 1, 9, 15, tzinfo=UTC)
     assert trigger.utcoffset() == timedelta(0)

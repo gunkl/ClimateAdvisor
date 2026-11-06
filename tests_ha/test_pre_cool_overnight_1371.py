@@ -76,3 +76,33 @@ async def test_pre_cool_decided_in_the_evening_survives_midnight(make_house) -> 
 
     applied = [e for e in coordinator._event_log if e.get("type") == "pre_cool_applied"]
     assert len(applied) == 1, [e.get("type") for e in coordinator._event_log][-30:]
+
+
+async def test_pre_cool_is_re_checked_at_fire_time_when_the_forecast_is_revised(make_house) -> None:
+    """Issue #1378 (owner decision): the evening's plan is re-checked on the fresh forecast at 02:30.
+
+    Overnight the "hot" day was revised down to 82 F, cooler than the warm day the plan was made on and not hot.
+    The AC does not run at 02:30 for heat that is no longer coming.
+    """
+    house = await make_house(
+        units="us",
+        profile="scripted",
+        start=datetime(2026, 7, 15, 7, 0, tzinfo=UTC),
+        initial_indoor_f=80.0,
+        high_f=84.0,
+        low_f=62.0,
+        before_ca_setup=_hot_tomorrow,
+    )
+    await house.advance(minutes=10)
+    coordinator = house.coordinator
+    assert coordinator._pre_cool_trigger_dt == datetime(2026, 7, 16, 2, 30, tzinfo=UTC)
+
+    await house.advance_to(datetime(2026, 7, 15, 23, 59, 30, tzinfo=UTC))
+    house.weather.set_conditions(high_f=82.0, low_f=62.0, tomorrow_high_f=75.0)
+    house.weather.async_write_ha_state()
+    await house.advance_to(datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+
+    applied = [
+        e for e in coordinator._event_log if e.get("type") in ("pre_cool_applied", "pre_cool_suppressed_nat_vent")
+    ]
+    assert applied == [], applied

@@ -52,6 +52,9 @@ def _make_engine() -> AutomationEngine:
         notify_service=config["notify_service"],
         config=config,
     )
+    # Issue #1370: these tests are about fan commands, not indoor handling; Climate Advisor refuses every fan start
+    # while indoor is unreadable (promise P5, tests/test_blind_fan_start_refusal_1370.py), so lift that one check.
+    engine._fan_start_blind = lambda: False
     return engine
 
 

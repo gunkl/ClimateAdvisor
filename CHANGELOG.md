@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.66] — 2026-11-06
+
+- Fix #1370: Climate Advisor no longer turns a fan on while it can't read the indoor temperature. Before, if the indoor sensor dropped out with a window open, it could still switch the whole-house fan (or the thermostat's blower) on: the half-hourly "keep the fan on" re-send for fans that don't report their state, the hourly minimum-runtime cycle and the economizer never checked for a reading. Now no fan is started until the reading comes back. A fan that is already running is still stopped after about 30 minutes without a reading, as before. The minimum-runtime cycle tries again the next hour. Found by the nightly test run.
+
 ## [0.8.65] — 2026-11-06
 
 - Fix #1363: while the house is Away or on Vacation, Climate Advisor no longer sends the same setpoint to your thermostat every 5 minutes (about 12 identical writes an hour). The setback is now re-confirmed every 30 minutes, the same as at home, which cuts traffic to cloud thermostats and repeated Activity entries. The setback itself is unchanged and still applies as soon as you leave.

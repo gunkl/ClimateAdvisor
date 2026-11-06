@@ -239,6 +239,7 @@ def _refusal_cases():
 
     def _activate(c, ae):
         ae._fan_active = False  # so activation would be a real transition
+        ae._fan_start_blind = lambda: False  # Issue #1370: reach the shut-down refusal, not the blind-start one
         return ae._activate_fan(reason="t")
 
     climate_data = {"entity_id": _THERMOSTAT, "hvac_mode": "cool"}

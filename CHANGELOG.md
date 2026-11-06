@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.66] — 2026-11-06
+
+- Feat #1347: the Temperature Setpoints page no longer limits each temperature to a narrow range. Away heat can now be up to 95°F (35°C), so a mini-split can hold the house warm while you are out, and away can equal home. Instead, when a combination would make the heat and AC take turns (heat at or above cool, or less than 4°F apart, in any band), settle somewhere odd (away warmer than home, sleep beyond away, vacation milder than away), sit outside what your thermostat accepts, or put vacation heat below 45°F, a warning appears next to the field. Press Submit again to keep it. Vacation can now have its own heating and cooling temperatures in Options; left blank it stays 3°F beyond away.
+- Fix #1366: the morning briefing and chart now show your actual sleep temperature overnight, even when it is cooler than your away heat setting or warmer than your away cool setting. Before, they showed the away temperature while the thermostat held the sleep one.
+- Fix #1367: a temperature outside what your thermostat accepts (for example away heat 42°F on a thermostat whose minimum is 45°F) is now sent as the thermostat's own limit. Before, Home Assistant refused it and the empty house stayed at your comfort temperature for the whole absence.
+- Fix #1368: a new household check (P10) logs when Climate Advisor switches the thermostat between heat and cool more than twice in 3 hours, so the heat and AC taking turns all day no longer goes unnoticed.
+- Fix #1369: the vacation briefing says "deeper setback" only when your vacation temperatures really are deeper than away; otherwise it quotes your vacation temperatures, and the HVAC row shows the separate vacation setpoint.
+
 ## [0.8.65] — 2026-11-06
 
 - Fix #1363: while the house is Away or on Vacation, Climate Advisor no longer sends the same setpoint to your thermostat every 5 minutes (about 12 identical writes an hour). The setback is now re-confirmed every 30 minutes, the same as at home, which cuts traffic to cloud thermostats and repeated Activity entries. The setback itself is unchanged and still applies as soon as you leave.

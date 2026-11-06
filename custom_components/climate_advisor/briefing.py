@@ -29,6 +29,8 @@ from .automation import (
 )
 from .classifier import DayClassification
 from .const import (
+    CONF_VACATION_COOL,
+    CONF_VACATION_HEAT,
     DAY_TYPE_COLD,
     DAY_TYPE_COOL,
     DAY_TYPE_HOT,
@@ -107,6 +109,9 @@ class _BriefingFacts:
     pre_cool_target: float | None  # warm-day "tonight I'll cool the home" target (None when unoccupied)
     hot_pre_cool_target: float | None  # hot-day overnight pre-cool target (None when unoccupied / not expected)
     economizer_threshold: float  # comfort_cool + ECONOMIZER_TEMP_DELTA: the outdoor temperature windows close at
+    # Issue #1369: vacation band deeper than away on the edge that matters (heat day: floor, cool day: ceiling,
+    # otherwise both edges). False when not on vacation. Separate vacation setpoints (#1347) may be equal/milder.
+    vacation_deeper: bool = False
 
 
 def _local(moment: datetime, now: datetime) -> datetime:
@@ -156,6 +161,21 @@ def _is_mild_near_miss(c: DayClassification, comfort_heat: float, *, unoccupied:
     )
 
 
+def _vacation_band_is_deeper(c: DayClassification, band: ComfortBand, config: dict) -> bool:
+    """Issue #1369: whether the vacation band is deeper than away on the edge that matters today.
+
+    A heat day arms only the floor and a cool day only the ceiling, so that edge decides; any other day arms both
+    edges, so both must be deeper. Equal is not deeper.
+    """
+    floor_deeper = band.floor < float(config["setback_heat"])
+    ceiling_deeper = band.ceiling > float(config["setback_cool"])
+    if c.hvac_mode == "heat":
+        return floor_deeper
+    if c.hvac_mode == "cool":
+        return ceiling_deeper
+    return floor_deeper and ceiling_deeper
+
+
 def _gather_briefing_facts(
     c: DayClassification,
     config: dict,
@@ -178,12 +198,15 @@ def _gather_briefing_facts(
     # The engine's band selector reads sleep_heat/sleep_cool from its config; carry them from the runtime config
     # when we have it (else it falls back to its own documented defaults, exactly as the engine would).
     band_cfg = dict(config)
-    for key in ("sleep_heat", "sleep_cool"):
+    # Issue #1369: also the optional separate vacation setpoints (#1347), so the vacation band is the one
+    # vacation_edges() resolves for the engine rather than always away -/+ 3.
+    for key in ("sleep_heat", "sleep_cool", CONF_VACATION_HEAT, CONF_VACATION_COOL):
         if runtime_config and key in runtime_config:
             band_cfg[key] = runtime_config[key]
     band = select_comfort_band(
         c, band_cfg, occupancy_mode=occupancy_mode, in_sleep_window=False, aggressive_savings=savings
     )
+    vacation_deeper = occupancy_mode == "vacation" and _vacation_band_is_deeper(c, band, config)
     awake_heat, awake_cool = (
         awake_edges if awake_edges is not None else awake_comfort_edges(config, aggressive_savings=savings)
     )
@@ -269,6 +292,7 @@ def _gather_briefing_facts(
         pre_cool_target=pre_cool_target,
         hot_pre_cool_target=hot_pre_cool_target,
         economizer_threshold=config["comfort_cool"] + ECONOMIZER_TEMP_DELTA,
+        vacation_deeper=vacation_deeper,
     )
 
 
@@ -553,6 +577,7 @@ def generate_briefing(
             occupancy_mode=occupancy_mode,
             temp_unit=temp_unit,
             automation_overridden=automation_overridden,
+            facts=facts,
         )
     )
     lines.append("")
@@ -752,7 +777,11 @@ def _generate_tldr_table(
     if occupancy_mode == "away":
         rows.append("  Occupancy: Away — setback active")
     elif occupancy_mode == "vacation":
-        rows.append("  Occupancy: Vacation — deep setback active")
+        # Issue #1369: "deep" only when the vacation band is deeper than away on the edge that matters.
+        if facts.vacation_deeper:
+            rows.append("  Occupancy: Vacation — deep setback active")
+        else:
+            rows.append("  Occupancy: Vacation — vacation temperatures active")
     elif occupancy_mode == "guest":
         rows.append("  Occupancy: Guest — comfort maintained")
     rows.extend(
@@ -1271,6 +1300,7 @@ def _leaving_home_section(
     occupancy_mode: str = "home",
     temp_unit: str = FAHRENHEIT,
     automation_overridden: bool = False,
+    facts: _BriefingFacts | None = None,
 ) -> list[str]:
     """Conversational section about what happens when they leave.
 
@@ -1290,8 +1320,18 @@ def _leaving_home_section(
             instead that doesn't claim the setback was actually applied.
             Default False preserves prior behavior for callers that don't
             pass the signal.
+        facts: Issue #1369 -- the briefing facts. On vacation, "deeper" is said only when
+            ``facts.vacation_deeper``; otherwise the vacation band from ``facts.band`` is quoted
+            neutrally (a separate vacation setpoint may be equal to or milder than away). None keeps
+            the pre-#1347 wording (vacation was always away -/+ 3, i.e. deeper).
     """
     if occupancy_mode == "vacation":
+        if facts is not None and not facts.vacation_deeper:
+            return [
+                "While you're on vacation, I'm keeping the house at your vacation temperatures"
+                f" ({_band_text(facts.band.floor, facts.band.ceiling, temp_unit)})."
+                " Comfort temperatures will be restored when you return.",
+            ]
         return [
             "While you're on vacation, I'm keeping the house at a deeper"
             " energy-saving setback to save energy. Comfort temperatures will be"

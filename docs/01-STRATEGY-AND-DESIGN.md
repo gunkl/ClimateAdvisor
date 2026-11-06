@@ -91,7 +91,7 @@ Occupancy comes from optional toggle entities (`home_toggle_entity`, `vacation_t
 
 ```
 Guest     →  treated as home (comfort); overrides away and vacation
-Vacation  →  setback plus VACATION_SETBACK_EXTRA (3°F), applied immediately
+Vacation  →  the optional vacation setpoints, else setback plus VACATION_SETBACK_EXTRA (3°F), applied immediately (Issue #1347)
 Away      →  standard setback, after a fixed 15 min delay
 Default   →  home (when no toggle is configured)
 ```

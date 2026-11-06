@@ -190,7 +190,7 @@ class TestHandleOccupancyVacationActualMode:
         #249 P3: the vacation band always arms the ceiling on cool-capable devices regardless
         of classification hvac_mode — the old mode-dispatch is replaced by band selection.
         """
-        from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
+        from custom_components.climate_advisor.const import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="heat")
@@ -208,7 +208,7 @@ class TestHandleOccupancyVacationActualMode:
         #249 P3: thermostat current state is no longer the dispatch axis — cool capability
         is what matters, and the vacation band always defends the ceiling.
         """
-        from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
+        from custom_components.climate_advisor.const import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
@@ -225,7 +225,7 @@ class TestHandleOccupancyVacationActualMode:
 
     def test_thermostat_cool_classification_cool_applies_cool_setback(self):
         """Normal path: cool thermostat, cool classification → vacation ceiling = setback_cool + EXTRA."""
-        from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
+        from custom_components.climate_advisor.const import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
@@ -340,7 +340,7 @@ class TestOccupancyVacationEmitsEvent:
         #249 P3: event payload changed from {mode: 'cool', target_f} to {mode: 'vacation',
         floor, ceiling} — the band covers both edges using the deeper vacation offsets.
         """
-        from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
+        from custom_components.climate_advisor.const import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
@@ -367,7 +367,7 @@ class TestOccupancyVacationEmitsEvent:
 
         #249 P3: mode key in the event indicates occupancy context not HVAC mode.
         """
-        from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
+        from custom_components.climate_advisor.const import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="heat")

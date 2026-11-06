@@ -326,7 +326,7 @@ class TestComputeBedtimeSetbackIntegration:
         """With thermal_model + classification, sleep lower = raw configured sleep_heat (Fix #333).
 
         Config has explicit sleep_heat=66. compute_bedtime_setback now ignores setback_modifier,
-        returning max(sleep_heat, setback_heat) = max(66, 60) = 66.0.
+        returning the raw sleep_heat = 66.0 (unclamped since Issue #1366).
         The modifier is applied by handle_pre_cool() as a separate mid-night event.
         """
         ts_sleep = _ts(2)  # 02:00 — deep sleep window
@@ -358,7 +358,7 @@ class TestComputeBedtimeSetbackIntegration:
         """With thermal_model + cool classification, sleep upper = raw configured sleep_cool (Fix #333).
 
         Warming trend (modifier=-2.0) is no longer applied in compute_bedtime_setback().
-        Result = min(sleep_cool, setback_cool) = min(78, 80) = 78.0.
+        Result = the raw sleep_cool = 78.0 (unclamped since Issue #1366).
         The pre-cool mid-night event (handle_pre_cool) applies the modifier separately.
         """
         ts_sleep = _ts(2)  # 02:00 — deep sleep window
@@ -384,6 +384,32 @@ class TestComputeBedtimeSetbackIntegration:
         assert entry["upper"] == 78.0, (
             f"With cool thermal_model+classification: expected upper=78.0 "
             f"(raw sleep_cool, no modifier), got {entry['upper']}"
+        )
+
+    @pytest.mark.parametrize(
+        ("hvac_mode", "overrides", "edge"),
+        [
+            ("heat", {"setback_heat": 60.0, "sleep_heat": 58.0}, "lower"),  # sleep heat below away heat
+            ("cool", {"setback_cool": 80.0, "sleep_cool": 82.0}, "upper"),  # sleep cool above away cool
+        ],
+    )
+    def test_sleep_band_outside_away_limits_matches_engine(self, hvac_mode, overrides, edge):
+        """Issue #1366: the chart's overnight edge equals select_comfort_band()'s sleep edge (what the
+        thermostat holds) even when the sleep temp is beyond the away setback -- no clamp to away."""
+        from custom_components.climate_advisor.automation import select_comfort_band
+
+        config = {**_BASE_CONFIG, **overrides}
+        classification = SimpleNamespace(hvac_mode=hvac_mode, setback_modifier=0.0, day_type="cold")
+        result = _compute_target_band_schedule(
+            [_ts(2)], config, "home", _NOW, thermal_model={}, classification=classification
+        )
+        engine_band = select_comfort_band(
+            classification, config, occupancy_mode="home", in_sleep_window=True, aggressive_savings=False
+        )
+        engine_edge = engine_band.floor if edge == "lower" else engine_band.ceiling
+        assert engine_edge == overrides[f"sleep_{hvac_mode}"]
+        assert result[0][edge] == engine_edge, (
+            f"Chart shows {result[0][edge]}°F overnight but the thermostat holds {engine_edge}°F"
         )
 
     # ---------------------------------------------------------------------------

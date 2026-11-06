@@ -292,7 +292,7 @@ from .hvac_action import (
     thermostat_reports_running,
 )
 from .incident_payload import build_incident_payload
-from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
+from .indoor_temp import IndoorTempReading, read_indoor_sensors_f, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import (
     LEVEL_ALERT,
     PROMISES,
@@ -470,6 +470,11 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "upper",
     "indoor_primary",
 )
+# Issue #1230 R0: chart-log keys that get_chart_data() deliberately REMOVES from ``state_log``. ``indoor_sensors`` is a
+# nested {entity_id: degrees F} mapping for the v4 thermal model (read from the raw file); no frontend or
+# post-conversion reader uses it, so stripping (not converting) guarantees a Celsius state_log can never carry a stray F
+# value and keeps the 24h/3d raw payload small. tests/test_chart_celsius.py requires every dict kwarg here.
+_CHART_LOG_STATE_LOG_STRIPPED_KEYS: Final[tuple[str, ...]] = ("indoor_sensors",)
 
 
 @dataclass
@@ -3872,6 +3877,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         lower=_band_lower_cc,
                         upper=_band_upper_cc,
                         nat_vent_target=self._nat_vent_target_now(),
+                        indoor_sensors=self._read_chart_indoor_sensors(),
                     )
 
             # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
@@ -4548,6 +4554,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_poll,
                     upper=_band_upper_poll,
                     nat_vent_target=self._nat_vent_target_now(),
+                    indoor_sensors=self._read_chart_indoor_sensors(),
                 )
                 await self._executor_job(self._chart_log.save)
                 _LOGGER.debug(
@@ -4873,6 +4880,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
             else self.config.get("climate_entity")
         )
+
+    def _read_chart_indoor_sensors(self) -> dict[str, float | None]:
+        """Every configured indoor sensor's reading for chart_log's ``indoor_sensors`` (Issue #1230 R0).
+
+        ``{entity_id: internal degrees F (2 dp) or None}`` for the climate entity, ``indoor_temp_entity`` and
+        ``sleep_indoor_temp_entity`` (when configured), read on every row regardless of the sleep window or which source
+        is in use, under the resolver's own parse/plausibility/stale rules (``indoor_temp.read_indoor_sensors_f``).
+        Pure read: no events, nothing above DEBUG; never raises (an unreadable config yields ``{}``).
+        """
+        try:
+            return read_indoor_sensors_f(
+                hass=self.hass,
+                unit=self.config.get("temp_unit", "fahrenheit"),
+                climate_entity=self.config.get("climate_entity"),
+                indoor_temp_entity=self.config.get("indoor_temp_entity"),
+                sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
+            )
+        except Exception:  # noqa: BLE001 - a chart row must never fail on the sensor snapshot
+            _LOGGER.debug("chart_log: indoor sensor snapshot failed", exc_info=True)
+            return {}
 
     def _zone_log_id(self) -> str:
         """Zone identifier for log lines: the config entry id, else the climate entity (Issue #1233)."""
@@ -7315,6 +7342,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_ov,
                     upper=_band_upper_ov,
                     nat_vent_target=self._nat_vent_target_now(),
+                    indoor_sensors=self._read_chart_indoor_sensors(),
                 )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -7455,6 +7483,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_hac,
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
+                    indoor_sensors=self._read_chart_indoor_sensors(),
                 )
                 await self._executor_job(self._chart_log.save)
 
@@ -13639,6 +13668,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         def _conv_log_entry(e: dict) -> dict:
             e = dict(e)
+            for k in _CHART_LOG_STATE_LOG_STRIPPED_KEYS:
+                e.pop(k, None)
             for k in _CHART_LOG_CONVERTED_TEMP_KEYS:
                 if e.get(k) is not None:
                     e[k] = _conv(e[k])

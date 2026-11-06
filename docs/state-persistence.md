@@ -1,4 +1,4 @@
-<!-- Nav: ← [02-ARCHITECTURE-REFERENCE.md](02-ARCHITECTURE-REFERENCE.md) | → [state.py](../custom_components/climate_advisor/state.py) -->
+<!-- Nav: ← [02-ARCHITECTURE-REFERENCE.md](02-ARCHITECTURE-REFERENCE.md) | → [state.py](../custom_components/climate_advisor/state.py) | ↔ [v4 Shadow](v4-shadow-spec.md) -->
 
 # State Persistence — Architecture Brief (Tier 2)
 
@@ -6,6 +6,7 @@
 
 | Question | Short answer | → Full answer |
 |---|---|---|
+| Where do the prediction-engine-v4 shadow files live, are they in the learning file, and what happens on rollback? | Three entry-scoped files (`climate_advisor_v4_archive_<id>.json`, `..._v4_model_<id>.json`, `..._v4_backtest_<id>.json`), all in `ENTRY_SCOPED_FILES` and deleted with the zone; the model is NOT in `LearningState`, and learning load ignores unknown keys, so a rollback cannot reset learning. | [v4 Shadow Spec](v4-shadow-spec.md#rollback-safety) |
 | What file does operational state persist to, and where is the path defined? | `climate_advisor_state.json` in the HA config root; path assembled from `STATE_FILE` constant in `const.py`. | [JSON Serialization](#json-serialization) |
 | How does state survive HA restarts without corruption from a mid-write crash? | Atomic write: serialize to a uniquely-named `.tmp` file in the same directory, then `os.replace()` to rename it over the target. The original is never modified until the new file is complete. | [Atomic Write Pattern](#atomic-write-pattern) |
 | What happens to a zone's files when the zone is deleted, reloaded or unloaded? | Deleted: `async_remove_entry` (`__init__.py`) deletes the zone's state, learning, chart log and forecast archive files and its `weather_entity_not_found_<id>` / `reload_needed_<id>` Repairs issues. Reloaded or unloaded: nothing is deleted. | [Zone removal cleanup](#zone-removal-cleanup) |

@@ -7,18 +7,20 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does api.py own and what does it explicitly not own? | It owns the HTTP view layer — routing, auth enforcement, input validation, and response serialisation. It does NOT own business logic; every action delegates to the coordinator or automation engine. | [Scope](#scope) |
-| How does authentication work and are there any unauthenticated endpoints? | All 21 views set `requires_auth = True`. A HA long-lived access token is required for every endpoint; no unauthenticated endpoints exist. | [Authentication](#authentication) |
+| How does authentication work and are there any unauthenticated endpoints? | All 22 views set `requires_auth = True`. A HA long-lived access token is required for every endpoint; no unauthenticated endpoints exist. | [Authentication](#authentication) |
 | Which config values are ever redacted and why? | Two fields are redacted: `ai_api_key` (via `"sensitive": True` in CONFIG_METADATA) and `notify_service` (hard-coded name check). Both return `"configured"` or `"not set"` — never the raw value. (`github_token` is not in `CONFIG_METADATA`, so it never appears in this view at all; diagnostics redacts it separately, Issue #1062.) | [Sensitive Field Redaction](#sensitive-field-redaction) |
 | What HTTP status codes does the API return and when? | 400 bad input, 403 feature disabled, 429 rate limit, 500 investigation failure, 503 coordinator/AI unavailable. Out-of-range numerics are silently clamped, not rejected. | [Error Handling](#error-handling) |
 | How does api.py read coordinator state and why does it sometimes bypass the coordinator cache? | Primary reads use `coordinator.data.get(...)` with safe defaults. Live HVAC state is read via `hass.states.get(climate_entity_id)` to guarantee freshness past the 30-minute update cycle. | [Coordinator Access Pattern](#coordinator-access-pattern) |
 | What security guardrails prevent sensitive data from leaking through the config or AI status endpoints? | `ClimateAdvisorConfigView` applies the two-case redaction rule. `ClimateAdvisorAIStatusView` calls `status.pop("api_key", None)` before serialising. Unknown suggestion-accept keys are applied in-memory only and never persisted to the HA config entry. | [Security Notes](#security-notes) |
 | How does a caller know an `event_log`/`activity_record` response doesn't cover the full requested window? | Both endpoints return `is_truncated` (bool) and `oldest_available` (ISO timestamp or null) alongside their normal payload, computed by comparing the oldest stored event against the requested window's cutoff. | [Event Log Truncation Signal](#event-log-truncation-signal) |
 | What is `hvac_control_issues` in the status response? | A list of `{issue, detail}` entries (same shape as `invariant_violations`) present only while the thermostat is not following Climate Advisor: `mode_not_obeyed` (requested mode vs live mode, minutes), `command_failing` (last attempted mode, minutes; since Issue #1121 shown only once the failure episode is at least `HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN` = 5 min old, and hidden — like `mode_not_obeyed` — while the user owns the thermostat (manual override or its pending confirmation) or the thermostat already reports the failed mode) or, since Issue #1050, `output_stall` (house outside the comfort band for hours with no heating/cooling running; diagnostic text in the user's unit; hidden while a `mode_not_obeyed` entry is open). Empty list when fine; Status-tab only (Issues #1049, #1050). | [Endpoints](#endpoints) |
+| What does `GET /api/climate_advisor/prediction_accuracy` return and where does its data come from? | Prediction engine v4's archived predictions scored against what the room then read, beside v3 and a "no change" baseline, for the "Prediction accuracy (preview)" page. Live v4 archive first, the published backtest file for older history; read-only, no decision reads it. | [Prediction accuracy endpoint](#get-apiclimate_advisorprediction_accuracy-issue-1230-r1) |
+| Where does the v4 shadow model show up for debugging? | `GET /api/climate_advisor/engines` carries a `v4` key and `get_debug_state()` (`automation_state` endpoint) a `v4_model` key: confidence, fit time, span, training MAE, last fit/cycle, archive slot counts. | [Engines and debug keys](#engines-and-debug-keys-for-v4) |
 
 ## Scope
 
 **Owns:**
-- HTTP view registration for all 21 Climate Advisor REST endpoints
+- HTTP view registration for all 22 Climate Advisor REST endpoints
 - Auth enforcement (`requires_auth = True` on every view)
 - Input validation and HTTP error responses (400, 403, 429, 500, 503)
 - Response serialisation: field selection, display transforms, sensitive-field redaction
@@ -33,7 +35,7 @@
 
 ## Authentication
 
-All 21 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
+All 22 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
 
 ## Endpoints
 
@@ -50,9 +52,71 @@ All 21 view classes set `requires_auth = True`. HA handles token validation befo
 | `/api/climate_advisor/ai_status` | AI client health and budget | `status` (api_key removed), `recent_requests` (last 10) |
 | `/api/climate_advisor/investigation_reports` | AI investigator report history | Direct return from `coordinator.get_investigation_report_history()` |
 | `/api/climate_advisor/event_log` | Internal event log | `events`, `total`, `hours` — `hours` param silently clamped if out of range. `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
+| `/api/climate_advisor/engines` | Prediction engine status | `get_engine_status()` of the learning engine plus `unit` and (Issue #1230 R1) `v4` - see [Engines and debug keys](#engines-and-debug-keys-for-v4) |
+| `/api/climate_advisor/prediction_accuracy` | v4 vs v3 vs "no change" prediction scoring (Issue #1230 R1, read-only) | `points`, `heat_runs`, `stats`, `model`, `gate`, `gate_summary` - see [below](#get-apiclimate_advisorprediction_accuracy-issue-1230-r1) |
 | `/api/climate_advisor/activity_record` | Deterministic event timeline table (no AI required) | `table` (from `build_event_timeline_table()`), `hours`, `generated_at`, `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
 
 **Chart Data Query Parameters:** `range` (string, default `24h`) and `before_ts` (Unix ms, optional). When `before_ts` is absent, the window ends at now (live mode); when present, the window is anchored at that point for historical navigation.
+
+### GET /api/climate_advisor/prediction_accuracy (Issue #1230 R1)
+
+Occupant view: a read-only page that shows how well the new prediction engine (v4, running in shadow) guessed the room temperature hours ahead, next to today's line (v3) and "the temperature just stays put". Reading it changes nothing in the house. Implementation: `ClimateAdvisorPredictionAccuracyView` (`api.py#L1375`) -> `prediction_accuracy.build_prediction_accuracy` (`prediction_accuracy.py#L181`); data and files: [v4 Shadow Spec](v4-shadow-spec.md).
+
+**Query parameters** (every bad value is clamped to its default, never a 400, like `chart_data`):
+
+| Param | Values | Default | Notes |
+|---|---|---|---|
+| `zone` | config entry id (`entry_id` accepted too) | the only zone; with several zones and no `zone`, `resolve_zone(..., allow_guess=True)` uses the default zone (read-only, so a guess is allowed; `get_default_coordinator`) | |
+| `sensor` | an indoor entity id, or `_ca` | `_ca` | `_ca` = the reading Climate Advisor itself uses. Unknown ids simply return no points |
+| `lead` | `1h`, `4h`, `12h`, `24h` | `4h` | How far ahead the prediction was made. Invalid -> `4h` |
+| `range` | `6h`, `12h`, `24h`, `3d`, `7d`, `30d`, `1y` | `24h` | Window length. Invalid -> `24h` |
+| `before` | ISO timestamp | now | The window ends here (scrolling back). Unparseable -> ignored; a naive time is read in the HA local zone |
+
+**Downsampling** (same thresholds as `ChartStateLog.get_entries`): window up to 3 days -> `"raw"` (one point per 30-minute slot); up to 30 days (`7d`, `30d`) -> `"hourly"` (mean of `actual`/`v4`/`v3` per local hour, `t` = hour start); longer (`1y`) -> `"daily"` (per local day). `stats` are always computed from the undownsampled slots. `heat_runs` is `[]` in `daily` mode.
+
+**Units.** Internally everything is degrees F. At this boundary absolute temperatures (`actual`, `v4`, `v3`) go through `display_temp(..., 1 dp)` and errors (`*_mae`, `*_bias`, and the `v4`/`v3`/`flat`/`bias` of `gate` rows) through `display_delta(..., 2 dp)` (no 32 offset). `unit` is the symbol (`"°F"` / `"°C"`). The page appends it and does no conversion of its own.
+
+**How a point is built.** The v4 value of a 30-minute slot is what v4 said `lead` before that slot (first write wins). `actual` is the chart-log reading of the chosen sensor nearest that slot (within 20 minutes; `indoor` for `_ca`, `indoor_sensors[entity]` otherwise). `v3` exists only for `sensor=_ca` and `lead=4h` (v3's archive is 4 h ahead, stored as chart-log `pred_indoor`). The "no change" baseline for the stats is the sensor reading `lead` before the slot.
+
+**Merge rule (live archive + backtest file).** Live archive slots (`climate_advisor_v4_archive_<id>.json`) win. A point from the published backtest file (`climate_advisor_v4_backtest_<id>.json`, `points[sensor][lead]`) is used only for a 30-minute slot the live archive does not cover; its `actual`/`v3`/`flat` fill in only where the chart log no longer has a row. v4's live history exists only from the first release with the shadow (0.9.4); older ranges come from the backtest. `gate` and `gate_summary` come only from the backtest file.
+
+**Response**
+
+| Field | Meaning |
+|---|---|
+| `zone`, `sensor`, `lead`, `range`, `unit` | Echo of the resolved request |
+| `sensors` | `[{id, name, role}]`: first `{id:"_ca", name:"Climate Advisor reading"}`, then the model's and chart-log sensors with a friendly name and a role (`thermostat's finer sensor`, `thermostat`, `bedroom sensor`, `room sensor`); entity ids found only in the archive/backtest are appended with an empty role |
+| `start`, `end`, `downsample` | Window (ISO, local offset) and `raw`/`hourly`/`daily` |
+| `points` | `[{t, actual?, v4, v3?}]` ascending; fields absent when unknown |
+| `heat_runs` | `[[start, end], ...]` spans of consecutive chart rows with `hvac == "heating"` (page shades them) |
+| `stats` | `{n, v4_mae, v3_mae, flat_mae, v4_bias, v3_bias}` over the window; bias = mean(predicted - actual), positive = ran warm; `null` where there is nothing to score |
+| `model` | `{confidence: "none"|"low"|"ok", fitted_at, span_days}`; `confidence: "none"` with nulls when no model is stored |
+| `gate` | Rows from the backtest file: `{zone, season: "heating"|"summer", lead, v4, v3, flat, bias, pass, scored, ...}`, passed through (errors converted). `[]` without a backtest |
+| `gate_summary` | The backtest file's summary object (e.g. `ready`) or `null` |
+
+Sample (trimmed; full fixture `tests/fixtures/prediction_accuracy_sample.json`):
+
+```json
+{"zone": "9a0c...", "unit": "°F",
+ "sensors": [{"id": "_ca", "name": "Climate Advisor reading", "role": "the reading Climate Advisor uses"},
+             {"id": "sensor.hallway_temp", "name": "Hallway", "role": "thermostat's finer sensor"}],
+ "sensor": "_ca", "lead": "4h", "range": "3d",
+ "start": "2026-10-31T04:00-07:00", "end": "2026-11-02T19:00-08:00", "downsample": "raw",
+ "points": [{"t": "2026-10-31T04:00-07:00", "actual": 65.7, "v4": 64.6, "v3": 66.0}],
+ "heat_runs": [["2026-10-31T06:30-07:00", "2026-10-31T06:45-07:00"]],
+ "stats": {"n": 65, "v4_mae": 0.76, "v3_mae": 1.6, "flat_mae": 1.51, "v4_bias": 0.07, "v3_bias": 1.36},
+ "model": {"confidence": "ok", "fitted_at": "2026-11-02T03:15:00-07:00", "span_days": 30},
+ "gate": [{"zone": "Zone 1", "season": "heating", "lead": "4h", "v4": 0.76, "v3": 1.6, "flat": 1.51, "bias": 0.07, "pass": true, "scored": true}],
+ "gate_summary": null}
+```
+
+Errors: 503 Climate Advisor not loaded. The view's 400 ambiguous-zone branch never fires because it resolves with `allow_guess=True`. The payload is built in the executor (it reads the backtest file and walks the chart log); the view itself only calls `coordinator.v4_accuracy_inputs()` on the loop.
+
+### Engines and debug keys for v4
+
+- `GET /api/climate_advisor/engines` -> existing engine status plus `v4` = `coordinator.v4_model_summary()` (`api.py#L1370`).
+- `GET /api/climate_advisor/automation_state` (debug state) -> `v4_model` = the same dict (`coordinator.py#L14872`).
+- Keys (temperatures/errors in the user's unit; `unit` carries the symbol): `has_model`, `confidence`, `fitted_at`, `span_days`, `n_anchors`, `mae_by_lead` (`{"1h","4h","12h"}` training MAE), `primary`, `sensors`, `schema_version`, `unit`, `engine_available`, `mass` (hidden thermal-mass estimate), `fit_running`, `last_fit` (`{at, reason: nightly|first, seconds, ok}`), `last_cycle` (`{at, ms, predicted, archived, inputs}`), `archive_slots` (slots per sensor line). Failure yields `{has_model: false, confidence: "none", error: true}`. Debug visibility only; nothing consumes it for a decision.
 
 ### POST Endpoints
 
@@ -119,6 +183,7 @@ Before returning config values, `ClimateAdvisorConfigView` applies these transfo
 
 ## Coordinator Access Pattern
 
+- **Prediction accuracy (Issue #1230 R1)**: the view calls the public `coordinator.v4_accuracy_inputs()` once on the event loop (shallow copies plus the archive object) and builds the payload in the executor, so no coordinator attribute is read off the loop.
 - **Primary**: `coordinator.data.get(key, default)` — reads from the last 30-minute update cycle snapshot.
 - **Freshness bypass**: `hass.states.get(climate_entity_id)` is called directly for live HVAC state to avoid serving stale data between update cycles.
 - **Private attribute access**: `api.py` reads these coordinator attributes directly by name: `coordinator._last_briefing`, `coordinator._briefing_sent_today`, `coordinator._occupancy_mode`, `coordinator._event_log`, `coordinator._current_classification`, `coordinator._last_outdoor_temp`, `coordinator.automation_engine` (and the engine's private fields).

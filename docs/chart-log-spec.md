@@ -1,4 +1,4 @@
-<!-- Nav: ← [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) | → [chart_log.py](../custom_components/climate_advisor/chart_log.py) | ↔ [State Persistence](state-persistence.md) [Thermal Model v3](thermal-model-v3-spec.md) -->
+<!-- Nav: ← [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) | → [chart_log.py](../custom_components/climate_advisor/chart_log.py) | ↔ [State Persistence](state-persistence.md) [Thermal Model v3](thermal-model-v3-spec.md) [Predictor v4](predictor-v4-spec.md) [v4 Shadow](v4-shadow-spec.md) -->
 
 # Chart State Log — Territory Spec (Tier 3)
 
@@ -194,6 +194,15 @@ Example raw row fragment: `"indoor_sensors": {"climate.living_room": 71.5, "sens
 **Native resolution audit (0.9.2):** a raw row stores the value CA read, never coarser than the sensor's own precision. `indoor` / `indoor_primary` come from `IndoorTempReading` (`read_attribute_temp_f` / `read_sensor_state_f` -> `to_fahrenheit`, no rounding) through `ForecastSnapshot.current_indoor_temp` (`float(...)`) into `ChartStateLog.append()`, which stores them as given; `setpoint` and `comfort_target` are likewise unrounded `to_fahrenheit` values; `indoor_sensors` is rounded to 2 dp in `read_indoor_sensors_f`. The only roundings on the way to a raw row are that 2 dp (finer than a 0.18 F step or a C->F conversion needs). The hourly/daily buckets round to 1 dp (`indoor`, `indoor_avg`, ...) or 2 dp (`indoor_sensors`) for display; the forecast archive stores only outdoor temperatures (1 dp) and no indoor value. Whole-degree indoor values in a row therefore mean the climate entity itself reported whole degrees (hence the companion sensor), not that CA rounded them.
 
 **Tests:** `tests/test_chart_indoor_sensors.py` (reader rules, companion discovery and reading, discovery cache and refresh, append-site coverage, round trip, bucketing), `tests_ha/test_companion_temp_sensor_1230.py` (real HA device and entity registries), `tests/test_chart_celsius.py` (strip guard).
+
+## Prediction Engine v4 Consumers (Issue #1230 R1)
+
+v4 trains on this log and nothing else changes in it. v3 remains the decision model and still writes `pred_indoor`; the chart and Status keep drawing v3.
+
+- **Fit:** `v4_shadow.run_fit` passes `ChartStateLog.raw_entries()` (a shallow copy of every retained row, undownsampled; rows are never mutated after append, so the copy is safe on an executor thread) to `predictor_v4.samples_from_chart_log`, which resamples to a 15-minute grid. Fields read: `ts`, `hvac` (the action string), `fan_running`/`fan`, `indoor`, `indoor_sensors`, `outdoor`, `windows_open`, `pred_outdoor`, `setpoint`. Gaps over 2 h break continuity. `setpoint` is null in older Zone 1 history, so a house with only such rows keeps the learned-thermostat defaults ([Predictor v4: thermostat](predictor-v4-spec.md#thermostat-learning-and-emulation)).
+- **Per cycle:** the coordinator reads `ChartStateLog.last_entry()` (the newest row appended, any kind; `chart_log.py`) right after it wrote this cycle's row and skips v4 for that cycle unless it is a non-event row less than 120 s old, so the live readings equal the training fields ([v4 Shadow: per-cycle inputs](v4-shadow-spec.md#per-cycle-inputs)).
+- **Scoring:** the prediction-accuracy endpoint reads `raw_entries()` for the "actual" reading (`indoor` / `indoor_sensors[entity]`), v3's `pred_indoor` and heat runs ([REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1)).
+- **Retention interaction:** the 365-day chart log bounds what a fit and the "no change" baseline can see; the v4 archive keeps its own 400 days.
 
 ## Vent Bar Fields (Issue #331)
 
@@ -434,6 +443,7 @@ In all error paths `load()` returns `None` and does not raise. The coordinator r
 - [`ChartStateLog.append`](../custom_components/climate_advisor/chart_log.py#L162) — entry construction and in-memory append
 - [`ChartStateLog._maybe_prune`](../custom_components/climate_advisor/chart_log.py#L252) — time-gated retention enforcement
 - [`ChartStateLog.get_entries`](../custom_components/climate_advisor/chart_log.py#L274) — filtered, downsampled retrieval
+- [`ChartStateLog.last_entry`](../custom_components/climate_advisor/chart_log.py#L308) / [`raw_entries`](../custom_components/climate_advisor/chart_log.py#L312) — newest row / shallow copy of all rows for the v4 shadow (Issue #1230 R1)
 - [`ChartStateLog._bucket_hourly`](../custom_components/climate_advisor/chart_log.py#L345) — 1-hour average bucketing
 - [`ChartStateLog._bucket_daily`](../custom_components/climate_advisor/chart_log.py#L403) — daily summary bucketing
 - [`_bucket_indoor_sensors`](../custom_components/climate_advisor/chart_log.py#L62) - per-entity mean for hourly/daily buckets (Issue #1230 R0)

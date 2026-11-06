@@ -29,7 +29,7 @@
         Tomorrow: Stable (84°F)
     ''',
     'fan': 'disabled',
-    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_automation': 'Bedtime check @ 10:30 PM',
     'next_user_action': "You're away — the house says it's fine, promise.",
     'notifications': list([
       dict({

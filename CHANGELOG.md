@@ -3,6 +3,20 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.64] — 2026-11-06
+
+A Home Assistant restart that comes back on a later day (an overnight outage, or a restart between 23:59 and the first save after midnight) no longer makes Climate Advisor forget things. Only today's plan starts fresh: the day type, today's temperature history and record, and the briefing.
+
+- Fix #1349: observe-only mode (the Automation switch off) now survives such a restart. Before, the switch came back on with no notice and, about five minutes after start-up, Climate Advisor started controlling your thermostat (an Off thermostat could be switched to heat). The log says `Observe-only mode restored (automation off)`.
+- Fix #1354: Vacation and Away now take effect when Climate Advisor starts (the setback lands with the first plan, about five minutes after start-up), on a fresh install too. Before, if the toggle was already on when Climate Advisor started (after an overnight restart, on first setup, or if the toggle changed while Home Assistant was down), the empty house was heated or cooled to your comfort setting until the toggle was flipped again.
+- Fix #1358: if you turn the whole-house fan off (or on) shortly before midnight and Home Assistant restarts after midnight, Climate Advisor still respects that and does not turn it back on (or off) five minutes later. Recent heating/cooling and mode-change history (used to protect a wet coil and to avoid quick heat/cool switching) is kept too.
+- Fix #1355: such a restart no longer replays 30 days of history into thermal learning a second time, which skewed pre-heat, pre-cool and ventilation timing. Observations already duplicated are left to age out.
+- Fix #1357: the Activity log keeps its history (up to 7 days) and shows the "Home Assistant restarted" row after such a restart, and after a restart with no saved state. The next crash is no longer mislabelled as a user restart.
+- Fix #1356: AI Investigation History is no longer emptied by such a restart and then overwritten by the next report.
+- Fix #1359: a restart after midnight during a weather outage still has the kept forecast, and the chart's past "predicted" line is kept.
+- Fix #1360: after a temperature-unit change, such a restart still discards readings taken under the old unit.
+- Fix #1362: after any restart, the Activity log now shows that a whole-house-fan hold you started was re-armed. Before, the row was dropped although the fan behaved correctly.
+
 ## [0.8.63] — 2026-11-06
 
 - Feat #1345: each zone now has two diagnostic sensors, Heat Threshold and Cool Threshold, showing the band Climate Advisor holds the house to right now (it heats below Heat Threshold and cools above Cool Threshold). They follow your comfort, sleep, away and vacation settings, Prefer Savings and time-of-use widening; a context attribute names which band is in force. They keep history for graphs, show in your unit, and carry the same numbers as ca_target_heat / ca_target_cool in the REST API. They work with Automation off too, so you can compare what Climate Advisor would hold against your own controller. Note: Target Temperature shows the thermostat's own setpoint whenever it is not Off, so with Automation off it reflects your controller.
